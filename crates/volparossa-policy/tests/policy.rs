@@ -70,6 +70,12 @@ fn three_of_five_manifest_enforces_domains_ip_protocol_and_port() {
             .authorize_domain(2_000, "a.services.example", TransportProtocol::Udp, 443)
             .is_ok()
     );
+    assert_eq!(
+        manifest
+            .authorize_dns_name(2_000, "A.Services.Example.")
+            .unwrap(),
+        "a.services.example"
+    );
     assert!(
         manifest
             .authorize_domain(
@@ -86,6 +92,10 @@ fn three_of_five_manifest_enforces_domains_ip_protocol_and_port() {
     ));
     assert!(matches!(
         manifest.authorize_domain(2_000, "badservices.example", TransportProtocol::Tcp, 443),
+        Err(PolicyError::Denied)
+    ));
+    assert!(matches!(
+        manifest.authorize_dns_name(2_000, "badservices.example"),
         Err(PolicyError::Denied)
     ));
     assert!(matches!(

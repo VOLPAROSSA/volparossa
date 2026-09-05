@@ -41,6 +41,7 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_START = 23;
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_EXIT_RESULT = 24;
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_RELAY_RESULT = 25;
+  CONTROL_MESSAGE_TYPE_NATIVE_ROUTE_CREDENTIAL_DELIVERY = 26;
 }
 
 enum Transport {
@@ -66,6 +67,17 @@ enum ObservationAddressFamily {
   OBSERVATION_ADDRESS_FAMILY_UNSPECIFIED = 0;
   OBSERVATION_ADDRESS_FAMILY_IPV4 = 1;
   OBSERVATION_ADDRESS_FAMILY_IPV6 = 2;
+}
+
+// Zero preserves the existing public-only wire representation. Local scope is not adjacency proof.
+enum UnderlayScope {
+  UNDERLAY_SCOPE_PUBLIC_INTERNET = 0;
+  UNDERLAY_SCOPE_DIRECT_LOCAL_LAN = 1;
+}
+
+enum AdvertisementUplink {
+  ADVERTISEMENT_UPLINK_INDEPENDENT_INTERNET = 0;
+  ADVERTISEMENT_UPLINK_LOCAL_ONLY = 1;
 }
 
 message SignedEnvelope {
@@ -168,6 +180,7 @@ message PreselectionObservationReceipt {
 message ObservationNetworkPrefix {
   ObservationAddressFamily address_family = 1;
   bytes network_prefix = 2;
+  UnderlayScope scope = 3;
 }
 
 // Forwarded attestation envelopes are at most 8192 bytes and their exact nested
@@ -222,10 +235,16 @@ message NativeProbePathScope {
   uint64 policy_expires_at_ms = 14;
   bytes challenge_hash = 15;
   uint64 attempt_expires_at_ms = 16;
+  uint32 required_path_count = 17;
+  // Client-requested upload capacity reserved for this exact path.
+  uint64 reserved_up_mbps = 18;
+  // Client-requested download capacity reserved for this exact path.
+  uint64 reserved_down_mbps = 19;
 }
 
-// Permit exchange is endpoint-free and binds one exact attempt, candidate set,
-// ordinal, data Relay, forwarded Exit, policy, family, transport and expiry.
+// Permit exchange is dataplane-endpoint-free and binds one exact attempt, candidate set,
+// ordinal, data Relay, forwarded Exit, policy, family, transport and expiry. The Exit control
+// address is identity-bound and is consumed only by the selected data Relay for the Ready RPC.
 message NativeProbePermitRequest {
   NativeProbePathScope scope = 1;
   uint64 created_at_ms = 2;
@@ -239,6 +258,7 @@ message NativeProbePermit {
   uint64 issued_at_ms = 3;
   uint64 expires_at_ms = 4;
   bytes nonce = 5;
+  string exit_control_address = 6;
 }
 
 // prepared_lease_commitment contains a secret random 256-bit helper lease
@@ -253,6 +273,7 @@ message NativeProbeEndpointBinding {
   bytes route_context_id = 2;
   WireguardEndpoint endpoint = 3;
   bytes prepared_lease_commitment = 4;
+  uint32 path_id = 5;
 }
 
 // Delivered only to the exact data Relay. Neither the client nor control Relay
@@ -265,6 +286,7 @@ message NativeProbeExitReady {
   uint64 ready_at_ms = 5;
   uint64 expires_at_ms = 6;
   bytes nonce = 7;
+  bytes exit_boot_id = 8;
 }
 
 // Client-visible readiness contains only the RelayClient endpoint and a
@@ -289,6 +311,16 @@ message NativeProbeStart {
   uint64 started_at_ms = 5;
   uint64 expires_at_ms = 6;
   bytes nonce = 7;
+}
+
+// Canonical signed phase chain forwarded by the exact data Relay to the
+// selected Exit. The bundle adds no authority of its own.
+message NativeProbeAuthorizationChain {
+  bytes signed_permit_request = 1;
+  bytes signed_permit = 2;
+  bytes signed_exit_ready = 3;
+  bytes signed_relay_ready = 4;
+  bytes signed_start = 5;
 }
 
 // route_context_id must exactly equal NativeProbePathScope.probe_id.
@@ -379,6 +411,7 @@ message AdvertisementNetwork {
   string ipv4_prefix_hint = 4;
   string ipv6_prefix_hint = 5;
   string operator_id = 6;
+  AdvertisementUplink uplink = 7;
 }
 
 message AdvertisementQuality {
@@ -396,6 +429,7 @@ message WireguardEndpoint {
   bytes public_key = 1;
   bytes underlay_ip = 2;
   uint32 listen_port = 3;
+  UnderlayScope underlay_scope = 4;
 }
 
 message NodeAdvertisement {
@@ -623,6 +657,35 @@ message NativeRouteIdentity {
   uint64 masque_context_id = 5;
   bytes client_native_instance_id = 6;
   bytes exit_native_instance_id = 7;
+  // Route-scoped RFC 9180 DHKEM(X25519, HKDF-SHA256) recipient key.
+  bytes credential_hpke_public_key = 8;
+}
+
+// Public authenticated associated data for the route bearer HPKE ciphertext.
+message NativeRouteCredentialScope {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  bytes finalize_id = 3;
+  bytes exit_node_id = 4;
+  bytes client_session_id = 5;
+  bytes client_session_public_key = 6;
+  bytes auth_commitment = 7;
+  bytes certificate_sha256 = 8;
+  bytes spki_sha256 = 9;
+  uint64 masque_context_id = 10;
+  bytes client_native_instance_id = 11;
+  bytes exit_native_instance_id = 12;
+  bytes credential_hpke_public_key = 13;
+  uint64 created_at_ms = 14;
+  uint64 expires_at_ms = 15;
+  bytes nonce = 16;
+}
+
+// Client-session-signed opaque RFC 9180 delivery of the 43-byte native bearer.
+message NativeRouteCredentialDelivery {
+  NativeRouteCredentialScope scope = 1;
+  bytes encapsulated_key = 2;
+  bytes ciphertext = 3;
 }
 
 message ExitReservation {
@@ -775,6 +838,10 @@ message OpenTcp {
   uint64 timestamp_ms = 7;
   uint64 expires_at_ms = 8;
   bytes nonce = 9;
+  // Hostname is required for a DNS policy flow. destination_ip may additionally pin that flow
+  // to the address observed by transparent ingress; the Exit re-resolves and requires an exact
+  // match. A raw-IP flow populates only destination_ip and never inherits domain authority.
+  bytes destination_ip = 10;
 }
 
 message UdpFlowAuthorization {

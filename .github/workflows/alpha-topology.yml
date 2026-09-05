@@ -1,0 +1,740 @@
+name: Alpha production-helper topology
+run-name: ${{ inputs.scenario || 'datapath' }} — production-helper proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Functional overlay/sharing or wifi-mesh backend proof; alpha also verifies packaging
+        required: true
+        default: datapath
+        type: choice
+        options:
+          - datapath
+          - alpha
+          - reciprocity
+          - local-link
+          - mixed-link
+          - sharing
+          - wifi-mesh
+          - wifi-link
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpha-production-helper-topology-${{ github.ref }}-${{ inputs.scenario || 'datapath' }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VOLPAROSSA_ALPHA_SCENARIO: ${{ inputs.scenario || 'datapath' }}
+
+jobs:
+  alpha-topology:
+    name: Debian 13 KVM twelve-node smoke
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'feature/alpha-vertical-runtime')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Bind exact source revision
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'HEAD^{commit}')" = "$GITHUB_SHA"
+          test -z "$(git status --short --untracked-files=all)"
+          test -x tests/integration/kvm-alpha-topology.sh
+          test -x tests/integration/run-alpha-topology-vm.sh
+          sh -n tests/integration/kvm-alpha-topology.sh
+          sh -n tests/integration/run-alpha-topology-vm.sh
+          python3 tests/integration/test-wifi-mesh-smoke.py
+          python3 tests/integration/test-wifi-link-smoke.py
+
+      - name: Install official Ubuntu VM tools
+        run: |
+          set -euo pipefail
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+            --yes --no-install-recommends \
+            build-essential cmake git libevent-dev pkg-config \
+            qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
+            curl jq util-linux
+          qemu-system-x86_64 --version
+          qemu-img --version
+          ssh -V
+          output="$RUNNER_TEMP/alpha-topology"
+          install -d -m 0700 "$output"
+          printf 'VOLPAROSSA_ALPHA_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
+
+      - name: Build exact pinned mqvpn/xquic runtime
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh'
+        run: |
+          set -euo pipefail
+          native_binary="$(pwd -P)/native/volparossa-mpquic/build/volparossa-mpquic"
+          native/volparossa-mpquic/scripts/fetch-upstream.sh --yes
+          VMP_BUILD_JOBS=2 VMP_RUN_TESTS=no \
+            native/volparossa-mpquic/scripts/build-upstream.sh
+          test -f "$native_binary"
+          test -x "$native_binary"
+          test "$("$native_binary" --api-version)" = 6
+          native_size=$(stat -Lc '%s' "$native_binary")
+          test "$native_size" -gt 0
+          test "$native_size" -le 67108864
+          sha256sum "$native_binary"
+          printf 'VOLPAROSSA_ALPHA_MPQUIC=%s\n' "$native_binary" >>"$GITHUB_ENV"
+
+      - name: Build twice and verify exact candidate Debian package
+        if: env.VOLPAROSSA_ALPHA_SCENARIO == 'alpha'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/volparossa-package-target
+          VMP_BUILD_JOBS: 2
+          VMP_RUN_TESTS: no
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          source_date_epoch=$(git log -1 --format=%ct)
+          SOURCE_DATE_EPOCH="$source_date_epoch" \
+            ./packaging/build-deb.sh --build
+          mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
+            -name 'volparossa_*_amd64.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test ! -L "$package"
+          test "$(dpkg-deb -f "$package" Package)" = volparossa
+          test "$(dpkg-deb -f "$package" Architecture)" = amd64
+          first_package="$RUNNER_TEMP/volparossa-reproducibility-first.deb"
+          install -m 0600 "$package" "$first_package"
+          first_sha256=$(sha256sum "$first_package" | awk '{print $1}')
+          rm -f -- "$package"
+
+          CARGO_TARGET_DIR="$RUNNER_TEMP/volparossa-package-target-rebuild" \
+            SOURCE_DATE_EPOCH="$source_date_epoch" \
+            ./packaging/build-deb.sh --build
+          mapfile -t packages < <(find "$(pwd -P)/dist" -maxdepth 1 -type f \
+            -name 'volparossa_*_amd64.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package=${packages[0]}
+          test -f "$package"
+          test ! -L "$package"
+          test "$(dpkg-deb -f "$package" Package)" = volparossa
+          test "$(dpkg-deb -f "$package" Architecture)" = amd64
+          second_sha256=$(sha256sum "$package" | awk '{print $1}')
+          test "$first_sha256" = "$second_sha256"
+          cmp -- "$first_package" "$package"
+          printf 'Reproducible package SHA-256: %s\n' "$second_sha256"
+          printf 'VOLPAROSSA_ALPHA_PACKAGE=%s\n' "$package" >>"$GITHUB_ENV"
+
+      - name: Require KVM and create output directory
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          test "$(stat -Lc '%u' /dev/kvm)" = 0
+          kvm_gid=$(stat -Lc '%g' /dev/kvm)
+          case "$kvm_gid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          test "$(getent group "$kvm_gid" | awk -F: -v gid="$kvm_gid" \
+            '$1 == "kvm" && $3 == gid { print $1 ":" $3 }')" = "kvm:$kvm_gid"
+          qemu-system-x86_64 -accel help | grep -Fx kvm
+          printf 'VOLPAROSSA_KVM_GID=%s\n' "$kvm_gid" >>"$GITHUB_ENV"
+
+      - name: Download and verify pinned Debian 13 image
+        run: |
+          set -euo pipefail
+          manifest=tests/helper/debian13-amd64-image-v1.json
+          image_sha512=184761b0dad0f9ace02f9298050ca96ce3caa39a461a47706d47ff9698b59933918b91b40177fbd4d392f6446af8b4d18ecb94caca988169b19641606bf34003
+          image_filename=debian-13-genericcloud-amd64-20260826-2582.qcow2
+          image_url=$(jq -er '.url | select(type == "string" and length > 0)' "$manifest")
+          image="$RUNNER_TEMP/$image_filename"
+          curl --fail --show-error --silent --location \
+            --connect-timeout 30 --max-time 1200 --max-filesize 2147483648 \
+            --max-redirs 3 --proto '=https' --proto-redir '=https' \
+            --output "$image" "$image_url"
+          chmod 0600 "$image"
+          printf '%s  %s\n' "$image_sha512" "$image" \
+            | sha512sum --check --strict -
+          printf 'VOLPAROSSA_ALPHA_IMAGE=%s\n' "$image" >>"$GITHUB_ENV"
+
+      - name: Run disposable production-helper topology
+        id: topology
+        run: |
+          set -euo pipefail
+          runner_uid=$(id -u)
+          case "$runner_uid" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+          package_args=()
+          native_args=()
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != wifi-mesh; then
+            native_args=(--mpquic "$VOLPAROSSA_ALPHA_MPQUIC")
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = alpha; then
+            package_args=(--package "$VOLPAROSSA_ALPHA_PACKAGE")
+          fi
+          set +e
+          sudo -n -- /usr/bin/setpriv \
+            --reuid "$runner_uid" \
+            --regid "$VOLPAROSSA_KVM_GID" \
+            --clear-groups \
+            --inh-caps=-all \
+            --ambient-caps=-all \
+            --bounding-set=-all \
+            --no-new-privs \
+            --reset-env \
+            -- \
+            "$(pwd -P)/tests/integration/run-alpha-topology-vm.sh" \
+            --execute --yes \
+            --image "$VOLPAROSSA_ALPHA_IMAGE" \
+            "${native_args[@]}" \
+            "${package_args[@]}" \
+            --scenario "$VOLPAROSSA_ALPHA_SCENARIO" \
+            --output "$VOLPAROSSA_ALPHA_OUTPUT" \
+            --expected-commit "$GITHUB_SHA"
+          topology_status=$?
+          set -e
+          printf 'exit_code=%s\n' "$topology_status" >>"$GITHUB_OUTPUT"
+
+      - name: Summarise exact reached point
+        if: always()
+        run: |
+          set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = wifi-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/wifi-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '"agent-created Wi-Fi/LocalOnly runtime succeeded: \(.success)",
+                "source revision: \(.source_revision)", "blocker: \(.observed_blocker // "none")",
+                "scope: simulated mesh plus Ethernet, not physical radio or aggregate capacity"' \
+                "$report" >>"$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish Wi-Fi overlay runtime evidence.' >>"$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = wifi-mesh; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "hwsim MeshOwner backend succeeded: \(.success)",
+                "actual joined/peered radios: \(.nodes | length)/2",
+                "socket-loss cleanup: \(.socket_loss_cleanup)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "physical radio and full agent overlay remain unproven"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish mesh backend evidence.' | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = mixed-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "mixed LAN/public MPQUIC succeeded: \(.success)",
+                "payload-carrying Relay paths: \(.paths | length)/2",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish mixed-link runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = sharing; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "owner-priority upload runtime succeeded: \(.success)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "qdisc baseline restored: \(.cleanup.baseline_restored)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish upload-sharing runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = local-link; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/local-link-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "local-link runtime succeeded: \(.success)",
+                "completed consuming/contributing UDP flows: \([.flows[] | select(.success)] | length)/2",
+                "local-only relay contribution: \(.contribution_witness.node // "not proven")",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish local-link runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = reciprocity; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/reciprocity-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "reciprocal runtime succeeded: \(.success)",
+                "completed flows: \([.flows[] | select(.success)] | length)/4",
+                "nodes observed: \(.nodes | length)",
+                "simultaneous consuming/relaying/egress witnesses: \(.reciprocal_witnesses | length)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish reciprocal runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+          report="$VOLPAROSSA_ALPHA_OUTPUT/report.json"
+          if test -f "$report"; then
+            jq -r '
+              "last phase: \(.last_phase)",
+              "helpers ready: \(.production_helpers.ready)",
+              "native MPQUIC ready: \(.native_mpquic.ready)",
+              "agents ready: \(.agents_ready)",
+              "A01 bootstrap resilience succeeded: \(.a01_bootstrap_resilience.succeeded)",
+              "A02 transparent TCP succeeded: \(.a02_transparent_tcp.succeeded)",
+              "A03 MPTCP aggregation succeeded: \(.a03_mptcp_aggregation.succeeded)",
+              "A04 MPTCP relay failover succeeded: \(.a04_mptcp_relay_failover.succeeded)",
+              "Connect succeeded: \(.client_connect.succeeded)",
+              "A05 UDP echo succeeded: \(.a05_udp_echo.succeeded)",
+              "A06 HTTP/3 MPQUIC succeeded: \(.a06_http3_mpquic.succeeded)",
+              "A07 HTTP/3 Relay failover succeeded: \(.a07_http3_relay_failover.succeeded)",
+              "A08 allowed TLS domain succeeded: \(.a08_allowed_destination.succeeded)",
+              "A09 forbidden destinations denied: \(.a09_forbidden_destinations.succeeded)",
+              "A10 ECH and unverifiable TLS denied: \(.a10_unverifiable_ech.succeeded)",
+              "A11 Relay outer privacy succeeded: \(.a11_relay_outer_privacy.succeeded)",
+              "A12 Exit source privacy succeeded: \(.a12_exit_source_privacy.succeeded)",
+              "A13 No direct Client-Exit succeeded: \(.a13_no_direct_client_exit.succeeded)",
+              "A14 Forced-crash cleanup succeeded: \(.a14_forced_crash_cleanup.succeeded)",
+              "A15 Host state unchanged: \(.a15_host_state_unchanged.succeeded)",
+              "observed blocker: \(.client_connect.observed_blocker)",
+              "cleanup complete: \(.cleanup.complete)"
+            ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' 'The VM did not publish a topology report.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != alpha; then
+            printf '%s\n' 'Functional-only run: package/release checks were not executed.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          package_report="$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json"
+          if test -f "$package_report"; then
+            jq -r '
+              "package lifecycle: \(.overall)",
+              "package version: \(.package.version)",
+              "installed services started: \(.service_start.helper and .service_start.native_mpquic and .service_start.agent)",
+              "upgrade restarted active processes: \(.upgrade.active_processes_restarted)",
+              "uninstall preserved identity: \(.uninstall.identity_preserved)",
+              "package test networking unchanged: \(.network_state_unchanged)"
+            ' "$package_report" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' 'The VM did not publish package lifecycle evidence.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Validate normative acceptance report before upload
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/acceptance-report.json"
+          test -f "$report"
+          test ! -L "$report"
+          tests/integration/validate-report.sh "$report"
+          locked_native_revisions=$(jq -ce '
+            [.components[] | select(.commit? != null) |
+              {key:.name,value:.commit}] | from_entries
+          ' third_party/upstream.lock.json)
+          jq -e --arg revision "$GITHUB_SHA" \
+            --argjson native_revisions "$locked_native_revisions" '
+            .source_revision == $revision and
+            .suite == "all" and
+            .overall == "PASS" and
+            .execution == {
+              "attempted":true,
+              "blockers":[],
+              "completed":true,
+              "requested_mode":"EXECUTE",
+              "topology_created":true
+            } and
+            .environment.debian_version == "13" and
+            .environment.architecture == "amd64" and
+            .environment.native_revisions == $native_revisions and
+            .host_state.captured == true and
+            .host_state.unchanged == true and
+            .cleanup == {
+              "attempted":true,
+              "complete":true,
+              "remaining_owned_objects":0
+            } and
+            ([.cases[].id] == [
+              "A01","A02","A03","A04","A05","A06","A07","A08",
+              "A09","A10","A11","A12","A13","A14","A15"
+            ]) and
+            all(.cases[]; .selected == true and .result == "PASS")
+          ' "$report" >/dev/null
+
+      - name: Require real reciprocal runtime evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/reciprocity-smoke.json"
+          test -f "$report"
+          test ! -L "$report"
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-reciprocal-node-runtime" and
+            .source_revision == $revision and .success == true and
+            (.flows | length) == 4 and
+            all(.flows[]; .success == true and
+              (.route_context_id | type == "string" and length > 0) and
+              (.relay_peer_id | type == "string" and length > 0) and
+              (.exit_peer_id | type == "string" and length > 0) and
+              .relay_peer_id != .exit_peer_id and
+              (.path_evidence | type == "object" and length > 0)) and
+            (.nodes | length) == 4 and
+            all(.nodes[]; .roles == {"client":true,"relay":true,"exit":true} and
+              .same_agent_pid == true and .agent_pid_before > 0 and
+              .agent_pid_before == .agent_pid_after) and
+            (.reciprocal_witnesses | length) >= 1 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$report" >/dev/null
+
+      - name: Require real local-link runtime evidence
+        if: always() && (env.VOLPAROSSA_ALPHA_SCENARIO == 'local-link' || env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-link')
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/local-link-smoke.json"
+          test -f "$report"
+          test ! -L "$report"
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-local-link-runtime" and
+            .source_revision == $revision and .success == true and
+            (.flows | length) == 2 and
+            all(.flows[]; .success == true and .state == 3 and
+              (.route_context_id | type == "string" and length == 32) and
+              .relay_peer_id != .exit_peer_id and
+              .path_evidence.client_relay_scope == "DirectLocalLan" and
+              (if .client_node == "client" then .exit_node == "exit" and
+                .path_evidence.relay_exit_scope == "PublicInternet"
+               else .client_node == "relay0" and .relay_node == "client" and
+                .exit_node == "relay2" and .path_evidence.relay_exit_scope == "DirectLocalLan" end) and
+              all(.path_evidence.wireguard_both_legs[]; . > 0)) and
+            ([.flows[].client_node] | sort) == ["client","relay0"] and
+            .contribution_witness.node == "client" and
+            .contribution_witness.same_agent_pid == true and
+            .contribution_witness.independent_internet == false and
+            .contribution_witness.exit_enabled == false and
+            .contribution_witness.consuming_context != .contribution_witness.relaying_context and
+            .concurrent_echo_overlap_ns >= 2000000000 and
+            (.nodes | length) == 4 and
+            all(.nodes[]; .roles.client == true and .roles.relay == true and
+              .roles.exit == (.node != "client") and .same_agent_pid == true and
+              .agent_pid_before > 0 and .agent_pid_before == .agent_pid_after) and
+            .local_only.before.independent_internet == false and
+            .local_only.after.independent_internet == false and
+            .local_only.before.main_table_default_routes == 0 and
+            .local_only.after.main_table_default_routes == 0 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$report" >/dev/null
+
+      - name: Require real mixed LAN/public MPQUIC evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mixed-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-mixed-link-runtime" and
+            .source_revision == $revision and .success == true and
+            .transfer.success == true and
+            .transfer.application.request_bytes == 4194304 and
+            .transfer.application.response_bytes == 8388608 and
+            .transfer.application.request_sha256 == .transfer.destination.request_sha256 and
+            .transfer.application.response_sha256 == .transfer.destination.response_sha256 and
+            .transfer.destination.source.ip == "47.163.4.1" and
+            .transfer.native_mpquic.required_path_count == 2 and
+            (.transfer.native_mpquic.paths | length) == 2 and
+            ([.transfer.native_mpquic.paths[].exit_peer_id] | unique | length) == 1 and
+            all(.transfer.native_mpquic.paths[]; .state == 3) and
+            all(.transfer.path_evidence[];
+              .relay1_wireguard_data_bytes > 1048576 and .relay2_wireguard_data_bytes > 1048576) and
+            (.paths | length) == 2 and
+            ([.paths[].client_relay_scope] | sort) == ["DirectLocalLan","PublicInternet"] and
+            all(.paths[]; .client_relay_scope == .relay_exit_scope and
+              all(.wireguard_both_legs[]; . > 0)) and
+            .local_only_relay.independent_internet == false and
+            .local_only_relay.exit_enabled == false and .local_only_relay.asn == null and
+            .local_only_relay.public_prefix == null and .local_only_relay.physical_default_routes == 0 and
+            .privacy.client.direct_client_exit_packets == 0 and
+            .privacy.client.internet_destination_outer_packets == 0 and
+            .privacy.exit.client_public_packets == 0 and
+            .privacy.local_relay.internet_destination_outer_packets == 0 and
+            .privacy.public_relay.internet_destination_outer_packets == 0 and
+            all(.privacy[]; .truncated == false and .unexpected_outer_packets == 0) and
+            .ordinary_quic_fallback_allowed == false and .bandwidth_aggregation_claimed == false and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json" >/dev/null
+
+      - name: Require real shared-uplink owner-priority evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'sharing'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-owner-priority-uplink" and
+            .source_revision == $revision and .success == true and
+            .scheduler.interface == "sharing0" and
+            .scheduler.total_upload_mbps == 12 and
+            .scheduler.contribution_upload_ceiling_mbps == 10 and
+            .scheduler.survived_route_context_cleanup == true and
+            .windows.idle.queue_mbps.contribution >= 4 and
+            .windows.owner.queue_mbps.owner >= 8 and
+            .windows.owner.queue_mbps.contribution < .windows.idle.queue_mbps.contribution * 0.5 and
+            .windows.recovery.queue_mbps.contribution >= 4 and
+            .flow.client_node == "client" and .flow.exit_node == "exit" and
+            .flow.relay_peer_id != .flow.exit_peer_id and
+            all(.flow.wireguard_both_legs[]; . > 0) and
+            .flow.selected_exit_source_ip == "10.241.36.1" and
+            (.nodes | length) == 4 and all(.nodes[]; .same_agent_pid and .roles.client and .roles.relay and .roles.exit) and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .cleanup.baseline_restored == true and .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json" >/dev/null
+
+      - name: Require real simulated-radio mesh backend evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-mesh'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-wifi-mesh-kernel-backend" and
+            .source_revision == $revision and .success == true and
+            .simulation == "mac80211_hwsim" and .kernel == "6.12.107+deb13-amd64" and
+            .frequency_mhz == 2412 and .open_layer2 == true and .sae_claimed == false and
+            .physical_radio_proven == false and .bandwidth_claimed == false and
+            .full_agent_overlay_proven == false and
+            (.nodes | length) == 2 and ([.nodes[].wiphy] | unique | length) == 2 and
+            all(.nodes[]; .joined == true and .established == true and
+              .sent_bytes == 131072 and .received_bytes == 131072 and
+              .rx_bytes_delta > 0 and .tx_bytes_delta > 0 and
+              .rx_packets_delta > 0 and .tx_packets_delta > 0) and
+            .nodes[0].sent_sha256 == .nodes[1].received_sha256 and
+            .nodes[1].sent_sha256 == .nodes[0].received_sha256 and
+            .socket_loss_cleanup == true and .cleanup.namespace_baseline_restored == true and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-mesh-smoke.json" >/dev/null
+
+      - name: Require actual agent-created simulated mesh overlay evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-wifi-local-link-runtime" and
+            .source_revision == $revision and .success == true and .agent_created_mesh == true and
+            .open_l2_underlay == true and .retained_ethernet_contact == "10.241.12.0/30" and
+            .physical_radio_proven == false and .wifi_only_proven == false and
+            .independent_bandwidth_aggregation_proven == false and
+            .discovery.success == true and .discovery.other_agents_not_started == true and
+            .discovery.mutual_mesh_bootstrap_contacts == 0 and
+            .discovery.authenticated_signed_peers == 2 and .discovery.mdns_remote_peer_records > 0 and
+            (.mesh_nodes | length) == 2 and ([.mesh_nodes[].wiphy] | unique | length) == 2 and
+            all(.mesh_nodes[]; .peer_established == true and .frequency_mhz == 2412 and
+              .same_mesh_after_route_disconnect == true and
+              all(.application_phase_counter_delta[]; . > 0) and
+              all(.wireguard_transport_packets[]; . > 0)) and
+            .mesh_shutdown.remaining_mesh_interfaces == 0 and
+            .mesh_shutdown.agents_stopped_before_helpers == true and
+            .radio_cleanup.hwsim_module_unloaded == true and .radio_cleanup.remaining_radios == 0 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/wifi-link-smoke.json" >/dev/null
+
+      - name: Upload bounded topology diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alpha-production-helper-topology-${{ github.run_id }}
+          path: ${{ env.VOLPAROSSA_ALPHA_OUTPUT }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Require successful A01-A15 evidence
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e '
+            .a01_bootstrap_resilience.succeeded == true and
+            .a01_bootstrap_resilience.evidence.success == true and
+            .a01_bootstrap_resilience.evidence.topology.independently_removed == true and
+            .a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertisement.sequence_after >
+              .a01_bootstrap_resilience.evidence.bootstrap1_removed.fresh_advertisement.sequence_before and
+            .a01_bootstrap_resilience.evidence.bootstrap2_removed.fresh_advertisement.sequence_after >
+              .a01_bootstrap_resilience.evidence.bootstrap2_removed.fresh_advertisement.sequence_before and
+            .a01_bootstrap_resilience.evidence.bootstrap1_removed.remaining_contact_link_bytes_delta > 0 and
+            .a01_bootstrap_resilience.evidence.bootstrap2_removed.remaining_contact_link_bytes_delta > 0 and
+            (.a01_bootstrap_resilience.evidence.bootstrap1_removed.selection.paths | length) == 2 and
+            (.a01_bootstrap_resilience.evidence.bootstrap2_removed.selection.paths | length) == 2 and
+            .a02_transparent_tcp.succeeded == true and
+            .a02_transparent_tcp.evidence.success == true and
+            .a02_transparent_tcp.evidence.no_direct_client_exit.observed_packets == 0 and
+            .a03_mptcp_aggregation.succeeded == true and
+            .a03_mptcp_aggregation.evidence.success == true and
+            .a03_mptcp_aggregation.evidence.measured_throughput_gain_ratio > 1.25 and
+            .a04_mptcp_relay_failover.succeeded == true and
+            .a04_mptcp_relay_failover.evidence.success == true and
+            .a04_mptcp_relay_failover.evidence.application_flow_completed == true and
+            .a05_udp_echo.succeeded == true and
+            .a05_udp_echo.evidence.success == true and
+            .a06_http3_mpquic.succeeded == true and
+            .a06_http3_mpquic.evidence.success == true and
+            .a06_http3_mpquic.evidence.application.protocol == "HTTP/3" and
+            .a06_http3_mpquic.evidence.hostname_policy.hostname == "destination.volparossa.test" and
+            .a06_http3_mpquic.evidence.hostname_policy.kernel_original_destination.ip == "47.163.4.2" and
+            .a06_http3_mpquic.evidence.hostname_policy.exit_dns_pin.exact_original_destination_match == true and
+            .a06_http3_mpquic.evidence.hostname_policy.client_initial_inspected_before_route == true and
+            .a06_http3_mpquic.evidence.hostname_policy.exit_initial_reverified_before_egress == true and
+            .a06_http3_mpquic.evidence.native_mpquic.required_path_count == 2 and
+            (.a06_http3_mpquic.evidence.native_mpquic.paths | length) == 2 and
+            .a06_http3_mpquic.evidence.path_evidence.client_capture.relay1_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.client_capture.relay2_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.exit_capture.relay1_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.path_evidence.exit_capture.relay2_wireguard_data_bytes > 1048576 and
+            .a06_http3_mpquic.evidence.no_direct_client_exit.observed_packets == 0 and
+            .a07_http3_relay_failover.succeeded == true and
+            .a07_http3_relay_failover.evidence.success == true and
+            .a07_http3_relay_failover.evidence.application_flow_completed == true and
+            .a07_http3_relay_failover.evidence.ordinary_quic_fallback_allowed == false and
+            .a07_http3_relay_failover.evidence.direct_client_exit_packets == 0 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.before_marker.relay1_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.before_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.client_capture.after_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay1_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.before_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a07_http3_relay_failover.evidence.path_evidence.exit_capture.after_marker.relay2_wireguard_data_bytes > 1048576 and
+            .a08_allowed_destination.succeeded == true and
+            .a08_allowed_destination.evidence.success == true and
+            .a08_allowed_destination.evidence.protected_flow.transparent_client_hello_forwarded_unchanged == true and
+            .a08_allowed_destination.evidence.protected_flow.tls_handshake_and_payload_completed == true and
+            .a08_allowed_destination.evidence.destination.accepted_connections == 1 and
+            .a08_allowed_destination.evidence.dns.udp.mode == "udp" and
+            .a08_allowed_destination.evidence.dns.tcp.mode == "tcp" and
+            .a08_allowed_destination.evidence.dns.udp.response_source == {"ip":"9.9.9.9","port":53} and
+            .a08_allowed_destination.evidence.dns.tcp.response_source == {"ip":"9.9.9.9","port":53} and
+            .a08_allowed_destination.evidence.dns.answer_addresses == ["47.163.4.2"] and
+            .a08_allowed_destination.evidence.dns.udp_completion_events_after > .a08_allowed_destination.evidence.dns.udp_completion_events_before and
+            .a08_allowed_destination.evidence.dns.tcp_completion_events_after > .a08_allowed_destination.evidence.dns.tcp_completion_events_before and
+            .a09_forbidden_destinations.succeeded == true and
+            .a09_forbidden_destinations.evidence.success == true and
+            (.a09_forbidden_destinations.evidence.denied_cases | length) == 5 and
+            .a09_forbidden_destinations.evidence.destination_egress_connections_for_denials == 0 and
+            .a10_unverifiable_ech.succeeded == true and
+            .a10_unverifiable_ech.evidence.success == true and
+            (.a10_unverifiable_ech.evidence.denied_cases | length) == 2 and
+            .a10_unverifiable_ech.evidence.destination_egress_connections_for_denials == 0 and
+            .a11_relay_outer_privacy.succeeded == true and
+            .a11_relay_outer_privacy.evidence.success == true and
+            .a11_relay_outer_privacy.evidence.relay1.internet_destination_outer_packets == 0 and
+            .a11_relay_outer_privacy.evidence.relay2.internet_destination_outer_packets == 0 and
+            .a12_exit_source_privacy.succeeded == true and
+            .a12_exit_source_privacy.evidence.success == true and
+            .a12_exit_source_privacy.evidence.capture.client_public_packets == 0 and
+            .a13_no_direct_client_exit.succeeded == true and
+            .a13_no_direct_client_exit.evidence.success == true and
+            .a13_no_direct_client_exit.evidence.client_capture.direct_client_exit_packets == 0 and
+            (.a13_no_direct_client_exit.evidence.direct_physical_routes | length) == 0 and
+            .a14_forced_crash_cleanup.succeeded == true and
+            .a14_forced_crash_cleanup.evidence.success == true and
+            .a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody.worker_network_namespace_count >= 4 and
+            (.a14_forced_crash_cleanup.evidence.owned_before.helper_worker_custody |
+              .durable_route_namespace_count >= 4 and .live_ingress_namespace_count == 1 and
+              .worker_network_namespace_count == .durable_route_namespace_count + .live_ingress_namespace_count and
+              .helper_fdstore_descriptors >= (.durable_route_namespace_count * 2) and
+              all(.helper_custody_coverage[]; .fdstore_descriptors >= (.durable_route_namespace_count * 2))) and
+            .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.referenced_namespace_count == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.worker_custody_after.remaining_reference_count == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_worker_network_namespaces == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_worker_namespace_references == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_helper_fdstore_descriptors == 0 and
+            .a14_forced_crash_cleanup.evidence.cleanup.remaining_owned_objects == 0 and
+            .a15_host_state_unchanged.succeeded == true and
+            .a15_host_state_unchanged.evidence.success == true and
+            .a15_host_state_unchanged.evidence.before_sha256 == .a15_host_state_unchanged.evidence.after_sha256 and
+            .cleanup.complete == true and
+            .cleanup.remaining_namespaces == 0 and
+            .cleanup.remaining_units == 0 and
+            .cleanup.remaining_owned_objects == 0
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/report.json" >/dev/null
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" != alpha; then exit 0; fi
+          test "$(cat "$VOLPAROSSA_ALPHA_OUTPUT/package/guest-exit-status")" = 0
+          jq -e '
+            .schema_version == 1 and
+            .environment == {
+              "debian_version":"13",
+              "architecture":"amd64",
+              "virtualization":"kvm"
+            } and
+            .fresh_install.services_enabled == false and
+            .fresh_install.filesystem_contract == true and
+            .doctor_before_upgrade == true and
+            .service_start.helper == true and
+            .service_start.native_mpquic == true and
+            .service_start.agent == true and
+            .service_start.live_status == true and
+            .upgrade.maintainer_path_exercised == true and
+            .upgrade.active_processes_restarted == true and
+            .upgrade.identity_preserved == true and
+            .doctor_after_upgrade == true and
+            .uninstall.active_services_stopped == true and
+            .uninstall.package_files_absent == true and
+            .uninstall.identity_preserved == true and
+            .uninstall.config_preserved == true and
+            .network_state_unchanged == true and
+            .overall == "PASS"
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/package/package-lifecycle.json" >/dev/null
+          jq -e 'all(.checks[]; .status != "fail")' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-before-upgrade.json" >/dev/null
+          jq -e 'all(.checks[]; .status != "fail")' \
+            "$VOLPAROSSA_ALPHA_OUTPUT/package/doctor-after-upgrade.json" >/dev/null

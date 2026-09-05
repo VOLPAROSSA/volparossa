@@ -502,6 +502,7 @@ impl FunctionalCyclePlan {
             leases: leases.clone(),
             setup_expires_at_unix,
             hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         let prepare_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -616,6 +617,7 @@ impl FunctionalRelayPairPlan {
             leases: leases.clone(),
             setup_expires_at_unix,
             hard_expires_at_unix,
+            traversal_hints: Vec::new(),
         };
         let prepare_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -1373,12 +1375,14 @@ fn functional_signed_relay_reservation(
     let relay_nonce = generate_nonce();
     let exit_endpoint = if plan.role == FunctionalLeaseRole::Exit {
         WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: prepared.public_key.to_vec(),
             underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
             listen_port: u32::from(prepared.listen_port),
         }
     } else {
         WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: FUNCTIONAL_EXIT_PUBLIC_KEY.to_vec(),
             underlay_ip: FUNCTIONAL_EXIT_IPV4.to_vec(),
             listen_port: u32::from(FUNCTIONAL_EXIT_PORT),
@@ -1425,12 +1429,14 @@ fn functional_signed_relay_reservation(
     .map_err(|_| ProbeError::Protocol)?;
     let client_endpoint = if plan.role == FunctionalLeaseRole::Client {
         WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: prepared.public_key.to_vec(),
             underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
             listen_port: u32::from(prepared.listen_port),
         }
     } else {
         WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec(),
             underlay_ip: FUNCTIONAL_RELAY_EXIT_IPV4.to_vec(),
             listen_port: u32::from(FUNCTIONAL_RELAY_EXIT_PORT),
@@ -1497,6 +1503,7 @@ fn functional_signed_relay_reservation(
             masque_context_id: 1,
             client_native_instance_id: random_nonzero_32()?.to_vec(),
             exit_native_instance_id: random_nonzero_32()?.to_vec(),
+            credential_hpke_public_key: random_nonzero_32()?.to_vec(),
         }),
     };
     let signed_exit_reservation = sign_control_message(
@@ -1547,18 +1554,21 @@ fn functional_signed_relay_reservation(
             FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec()
         },
         relay_client_wireguard_endpoint: Some(WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
             underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
             listen_port: u32::from(FUNCTIONAL_PEER_PORT),
         }),
         relay_exit_wireguard_endpoint: Some(if plan.role == FunctionalLeaseRole::Exit {
             WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
                 underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
                 listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
             }
         } else {
             WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: FUNCTIONAL_RELAY_EXIT_PUBLIC_KEY.to_vec(),
                 underlay_ip: FUNCTIONAL_RELAY_EXIT_IPV4.to_vec(),
                 listen_port: u32::from(FUNCTIONAL_RELAY_EXIT_PORT),
@@ -1639,6 +1649,7 @@ fn functional_signed_relay_pair_authority(
     let policy_hash = random_nonzero_32()?;
     let allowed_transports = vec![Transport::TcpMptcp as i32];
     let exit_endpoint = WireguardEndpoint {
+        underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
         public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
         underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
         listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
@@ -1706,6 +1717,7 @@ fn functional_signed_relay_pair_authority(
             masque_context_id: 1,
             client_native_instance_id: random_nonzero_32()?.to_vec(),
             exit_native_instance_id: random_nonzero_32()?.to_vec(),
+            credential_hpke_public_key: random_nonzero_32()?.to_vec(),
         }),
     };
     let signed_exit_reservation = sign_control_message(
@@ -1763,6 +1775,7 @@ fn functional_signed_relay_pair_authority(
         expires_at_ms: request_expires_at_ms,
         nonce: request_nonce.to_vec(),
         client_wireguard_endpoint: Some(WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
             underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
             listen_port: u32::from(FUNCTIONAL_PEER_PORT),
@@ -1796,11 +1809,13 @@ fn functional_signed_relay_pair_authority(
         maximum_down_mbps: FUNCTIONAL_SIGNED_RATE_MBPS,
         client_wireguard_public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
         relay_client_wireguard_endpoint: Some(WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: prepared.relay_client.public_key.to_vec(),
             underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
             listen_port: u32::from(prepared.relay_client.listen_port),
         }),
         relay_exit_wireguard_endpoint: Some(WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: prepared.relay_exit.public_key.to_vec(),
             underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
             listen_port: u32::from(prepared.relay_exit.listen_port),
@@ -3204,11 +3219,13 @@ mod tests {
         )
         .expect("cryptographically valid Exit relay grant");
         let expected_exit_endpoint = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: prepared.public_key.to_vec(),
             underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
             listen_port: u32::from(prepared.listen_port),
         };
         let expected_relay_exit_endpoint = WireguardEndpoint {
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
             public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
             underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
             listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),
@@ -3390,6 +3407,7 @@ mod tests {
         assert_eq!(
             request.message().client_wireguard_endpoint,
             Some(WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: FUNCTIONAL_PEER_PUBLIC_KEY.to_vec(),
                 underlay_ip: FUNCTIONAL_PEER_IPV4.to_vec(),
                 listen_port: u32::from(FUNCTIONAL_PEER_PORT),
@@ -3398,6 +3416,7 @@ mod tests {
         assert_eq!(
             relay.message().relay_client_wireguard_endpoint,
             Some(WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: prepared.relay_client.public_key.to_vec(),
                 underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
                 listen_port: u32::from(prepared.relay_client.listen_port),
@@ -3406,6 +3425,7 @@ mod tests {
         assert_eq!(
             relay.message().relay_exit_wireguard_endpoint,
             Some(WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: prepared.relay_exit.public_key.to_vec(),
                 underlay_ip: FUNCTIONAL_PUBLIC_IPV4.to_vec(),
                 listen_port: u32::from(prepared.relay_exit.listen_port),
@@ -3414,6 +3434,7 @@ mod tests {
         assert_eq!(
             exit.message().exit_wireguard_endpoint,
             Some(WireguardEndpoint {
+                underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 public_key: FUNCTIONAL_EXIT_PEER_PUBLIC_KEY.to_vec(),
                 underlay_ip: FUNCTIONAL_EXIT_PEER_IPV4.to_vec(),
                 listen_port: u32::from(FUNCTIONAL_EXIT_PEER_PORT),

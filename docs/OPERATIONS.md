@@ -38,16 +38,17 @@ cargo test --workspace --all-features
 ./packaging/build-deb.sh --build
 ```
 
-The dependency gate is offline and requires `cargo-audit >= 0.22.1` plus an
-existing local RustSec advisory checkout. It reconstructs and verifies the two
+The dependency gate is offline and requires `cargo-deny >= 0.18.6`,
+`cargo-audit >= 0.22.1`, and an existing local RustSec advisory checkout. It
+reconstructs and verifies the two
 Debian-Rust-compatible source backports plus the reviewed single-backend Yamux
 override before applying the documented scanner exemptions; see
 `third_party/rust/README.md`.
 
 `just package-deb` and `./packaging/build-deb.sh` are non-writing previews. Building requires the
 explicit `./packaging/build-deb.sh --build` form and refuses to run as root or overwrite an existing
-candidate. In the current tree, build mode exits 77 before compilation because the reviewed native
-launcher is absent; preview mode names this blocker explicitly.
+candidate. A combined client/exit node runs two immutable-role native workers under one service;
+its Client socket is `VOLPAROSSA_MPQUIC_SOCKET`, and its Exit socket appends `.exit` to that path.
 
 The candidate package build uses `Cargo.lock`, a caller-supplied or repository source timestamp,
 root-owned archive metadata, deterministic file ordering from `dpkg-deb`, and a clean temporary
@@ -96,15 +97,31 @@ sudo chmod 0600 /etc/credstore.encrypted/identity-passphrase
 
 `volparossa-agent.service` imports only the named `identity-passphrase` credential. systemd exposes
 the decrypted bytes in its protected per-service credential directory; the agent opens that one
-fixed regular file with `O_NOFOLLOW`, enforces owner-only mode and a strict length bound, and
-zeroizes the temporary bytes. Missing or unsafe credentials make startup fail closed. Protect the
+fixed regular file with `O_NOFOLLOW`, accepts either owner-only mode or systemd's exact
+root-owned `0440` named-user ACL projection, enforces a strict length bound, and zeroizes the
+temporary bytes. Missing or unsafe credentials make startup fail closed. Protect the
 encrypted credential and identity file together when backing up or rotating the permanent
 identity. This provisioning flow still requires a Debian 13 systemd integration test before a
 package is declared releasable.
 
-The packaged example keeps client on, relay and exit off, the kill switch on, direct-exit debug off,
+The packaged example keeps all roles off, the kill switch on, direct-exit debug off,
 plain-TCP fallback off, required MPQUIC paths at two or more, and policy fail-closed. An empty policy
 path means connections fail closed; it is not an allow-all policy.
+
+Production client participation always requires `roles.relay` and positive relay capacity. With
+`network.uplink: independent_internet` (the default), consumers must also explicitly enable
+`roles.exit`, with positive exit capacity and a valid policy. With `network.uplink: local_only`,
+consumers configure client + relay and must keep exit disabled in production and development:
+Internet access obtained through the overlay must never be offered back as an independent exit.
+The uplink setting is an operator declaration of available capability, not runtime connectivity
+proof, an uptime measurement, or automatic outage detection. Offline/local-mesh discovery and
+private-endpoint routing are not implemented yet; validation of a local-only configuration proves
+intent, not a working offline datapath.
+
+Installing or initializing the package does not consent to Internet egress. Configure those
+responsibilities in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
+restart them after changing an existing configuration. Role-isolated development fixtures are
+not a client-only production participation option.
 
 Privacy-v4 is a hard-incompatible migration: set `network.protocol_version: 4`. Signed peer
 control and `/volparossa/advertisement/4` accept exactly v4; v1, v2, v3, zero, and future values are
@@ -112,14 +129,18 @@ rejected without negotiation or fallback. The retired direct exit/relay/confirma
 IDs are never registered. This does not retire the independently versioned threshold policy
 manifest v2 or libp2p Circuit Relay v2, which remains control-plane connectivity only.
 
-The default client-only configuration may leave `network.operator_id: null`. Enabling relay or exit
+The default dormant configuration may leave `network.operator_id: null`. Enabling relay or exit
 instead requires an explicit operator ID of 1..=128 ASCII letters, digits, `-`, `_`, `.`, or
-`:`; `unknown` is not synthesized. Unknown configuration fields remain rejected.
+`:`. An independent-Internet service node also needs a non-zero `advertised_asn` and at least one
+canonical `advertised_ipv4_prefix` (`/24`) or `advertised_ipv6_prefix` (`/48`). Local-only nodes may
+leave ASN at zero and prefixes unset; do not fabricate public origin information. Any supplied
+prefix must still be canonical. Region and two-letter country claims are explicit untrusted
+diversity hints. Unknown configuration fields remain rejected.
 
-Relay and exit advertisement/provider publication currently stays fail closed even after the role
-is configured, because no helper-backed live service preparation/admission handle is connected yet.
-The agent never substitutes a static or placeholder WireGuard key, listen port, probe, or activation
-receipt.
+Relay and exit runtimes publish those short-lived signed service claims and provider indexes while
+capacity and policy remain active. Publication does not claim helper preparation, Fresh evidence or
+route usability. The agent never substitutes a static or placeholder WireGuard key, listen port,
+probe, or activation receipt.
 
 The intended client chooses a directly verified control relay before any exit. Direct
 `/volparossa/advertisement/4` retrieval may establish relay/control-relay provenance only. A
@@ -139,25 +160,27 @@ Candidate units are installed as:
 - `volparossa-helper.service`: root, only the bounded networking capabilities/address families and
   `/run/volparossa`; creates a root-owned `helper.sock` with group `volparossa` and mode 0660. Its
   main process is the only accepted systemd notifier, and PID 1 accepts at most 128 preserved
-  descriptors for at most 64 future pidfd/network-namespace custody pairs. Production currently seals,
-  duplicates and structurally validates inherited activation groups before Tokio, then refuses
-  startup because typed journal-bound adoption and the restart reaper are not installed; no
-  FD-store publication path is enabled yet. A future publisher must use `FDPOLL=0`, a manager
-  barrier and a complete post-barrier store-inventory attestation before arming;
+  descriptors for at most 64 pidfd/network-namespace custody pairs. Production seals, duplicates
+  and structurally validates inherited activation groups before Tokio. Durable Prepare publication
+  uses `FDPOLL=0`, a manager barrier and complete post-barrier store-inventory attestation before
+  arming. Startup normally retires already durable `CleanupConfirmed` custody; it also supports the
+  one exact-singleton single-path `MayOwnCustody` or active `MayOwnPrepare` reaper case documented
+  below. Every other
+  inherited `MayOwn` shape refuses before socket bind;
 - `volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
   control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
   credential;
-- `volparossa-mpquic.service`: candidate unprivileged isolation only. It is not runnable yet.
+- `volparossa-mpquic.service`: unprivileged Client and Exit role workers, not a release-security claim.
   API v6 preflights one client or exit role/process lifetime, targets that instance thereafter, and
   correlates every response to the exact canonical request. It accepts exact 43-character
   base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
   native commitment check proves bearer equality, not generator entropy or binary attestation.
   `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
-  path socket, but the agent does not yet call this API and production helper acquisition does not
-  provide independently authenticated descriptor provenance. The package also has only one
-  same-UID native unit/socket; separate client/exit service identities and role sockets remain
-  required before an untrusted agent can use this as an authenticated boundary.
+  path socket. The agent calls the role-specific native socket, but production helper acquisition
+  does not provide independently authenticated descriptor provenance. Combined roles have
+  separate native workers and sockets under one same-UID service; separate service identities
+  remain required before an untrusted agent can use this as an authenticated boundary.
   `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
   one caller-supplied, pre-bound IPv6 UDP descriptor whose current tuple and flags are checked by
   Rust and native. Those descriptor checks do not prove assigned-address or network-namespace
@@ -193,21 +216,32 @@ volparossa disconnect           volparossa peers
 volparossa paths                volparossa sessions
 volparossa policy status        volparossa policy verify <file>
 volparossa role show            volparossa role enable|disable relay
-volparossa role enable|disable exit
+volparossa role enable|disable client|exit
 volparossa config validate      volparossa logs
 volparossa cleanup              volparossa demo
 ```
 
-`role enable exit` must require explicit valid policy and non-zero configured exit capacity;
-installation never enables it. Relay enablement similarly requires explicit capacity, and either
-service role requires the explicit `network.operator_id` described above. `status`,
+Role commands validate the proposed change but effective changes require editing configuration
+and restarting the service: the current agent returns `ROLE_RESTART_REQUIRED`, without silently
+changing its active protocols or persisted roles. `role enable client` alone on a dormant
+production node returns `ROLE_PREREQUISITES`; it never silently enables relay or exit service.
+Exit enablement requires an independent uplink, explicit valid policy, and nonzero configured
+capacity. Relay enablement requires explicit capacity, and both service roles require the operator
+identity described above.
+`status`,
 `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.
 
-At present, a production `connect` cannot complete: real two-leg probe production, helper
-`Prepare`, complete agent orchestration, and client ingress all return or remain
-`Unavailable`/blocked. Operators must not interpret successful configuration, v4 peer-codec tests, or
-service role state as an active route.
+At present, a production `connect` cannot complete. It now starts an operator-profile-bound A1
+preselection attempt and can dispatch the first endpoint-free native Permit only through the exact
+selected control Relay, then dispatches the endpoint-free Permit pair only to its selected data
+Relay and verifies exact signed readiness. It returns `Unavailable` before helper `Prepare`.
+The helper endpoint/result state seam exists and refuses activation without an exact standard
+Exit/Relay-signed reservation for the prepared Client key. The Relay-side Ready/Start provider,
+post-Prepare reservation exchange, client dataplane challenge injection, complete native probe
+orchestration, route admission, and client ingress remain unavailable or blocked. Operators must
+not interpret a prepared Permit, successful
+configuration, v4 peer-codec tests, or service role state as an active route.
 
 ## Crash and cleanup
 
@@ -227,14 +261,51 @@ each descriptorless removal must prove a stable complete inventory equal to its 
 only that pair. Mixed already-absent/present state resumes after a crash. A final revalidated fresh
 manager barrier plus two stable snapshots must prove the complete descriptor store remains exactly
 empty before any journal transition. A
-`MayOwnCustody` or `MayOwnPrepare` remains byte-identical and blocks startup because production has
-no worker/kernel absence-proving recovery executor. Never remove a journal object
-merely to bypass this interlock: stop and inspect until a supported reaper exists.
+Absent/no-store `MayOwn`, multiple targets and multiple paths remain byte-identical and block
+startup because production has no exact recovery proof for them. Never remove a journal object
+merely to bypass this interlock: unsupported shapes require operator inspection.
+
+One `MayOwnCustody + ExactPresent` target may proceed only when its durable plan is exactly one
+Client lease, one Exit lease, or the same-path RelayClient/RelayExit pair; its boot ID and helper
+executable inode must still match. After proving the old process pidfd exited and the shared service
+cgroup is quiescent, the parent runs only
+`/proc/self/exe --internal-restart-reaper-v1`. A credential-authenticated bounded
+`SOCK_SEQPACKET` transcript transfers exactly one matching network-namespace FD. The child joins it
+once, installs the fixed worker sandbox, drops to the worker account with only `CAP_NET_ADMIN` and
+`CAP_NET_BIND_SERVICE`, and is independently attested before cleanup. Client/Exit accept only
+derived-link absence, down
+loopback, empty nftables and disabled IPv6 forwarding. Relay additionally requires IPv6 forwarding
+to remain enabled and removes only its exact restricted DROP fence, accepting exact-empty solely as
+the committed-deletion retry successor. It never deletes WireGuard links or changes forwarding.
+Only an authenticated terminal reply, exact pidfd reap and a second cgroup sample authorize the
+single journal CAS; the existing exact FD-store removal/absence chain finishes before socket bind.
+Before spawning this child the helper reserves one descriptor and requires waitable default
+`SIGCHLD` plus default `SIGHUP`, `SIGINT` and `SIGTERM`. It retries interrupted pidfd acquisition
+and can spend that reserve on one
+`EMFILE`/`ENFILE` retry. If pidfd acquisition still fails, no cleanup request is sent: the channel
+is closed and the direct child receives only a fixed interval to exit and be reaped. A stopped or
+stuck child invokes fixed non-coredumping `exit_group(70)` instead of continuing with an unpinned
+privileged process. This branch runs no cleanup handlers, publishes no socket and authorizes no
+journal transition or cleanup claim. The startup bookends must already have observed exact
+`Type=simple`, `RemainAfterExit=false`, `ExitType=main`, `KillMode=control-group`,
+no additional success statuses, `Restart=on-failure`, `RestartMode=normal`,
+`RestartUSec=3s`, no forced-restart statuses, exact status-only
+`RestartPreventExitStatus={70,71}`, `SendSIGKILL=true`, `FinalKillSignal=SIGKILL`,
+`TimeoutStopUSec=45s` and
+`TimeoutStopFailureMode=terminate`; the packaged unit pins the same values. Systemd therefore
+enters bounded complete-service-cgroup retirement when the main helper fail-stops and does not
+automatically restart either fixed fail-stop status. Operators should treat status 70 as a terminal
+startup failure and inspect the journal and service logs; do not remove the journal or restart in a
+loop to bypass it. Status 71 is reserved for a diagnostic live-proof setup ambiguity and is likewise
+excluded from automatic restart.
 
 The boot-scoped v3 module has a canonical, bounded, secret-free codec/CAS store with
 file-sync/rename/directory-sync ordering and failpoint tests. Production owns its startup/shutdown
-actor but exposes no complete absence-proving recovery backend, restart reaper, or cross-runtime
-tag-28 proof. A restart removal error is terminal for that process and permits no blind retry;
+actor but exposes no complete general recovery backend or cross-runtime tag-28 proof. The narrow
+singleton reaper still has no retained live forced-crash/KVM recovery evidence. The acceptance
+runner now contains a separate real-image transient-unit test of the pre-handshake stopped-child
+fail-stop and systemd retirement composition, but that is not a successful recovery datapath. A
+restart removal error is terminal for that process and permits no blind retry;
 journal absence is not cleanup evidence, and the bounded manager proof applies only after durable
 `CleanupConfirmed`. The current `doctor`
 also has no helper-v3 crash-ownership readiness check, so other passing checks do not make cleanup

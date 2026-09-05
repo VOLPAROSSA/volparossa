@@ -1,10 +1,19 @@
 //! Typed client for the privileged helper-v3 lease protocol.
 
+#[path = "helper_v3/uplink_sharing.rs"]
+mod uplink_sharing;
+pub(crate) use uplink_sharing::RuntimeBoundUplinkSharing;
+
+#[path = "helper_v3/wifi_mesh.rs"]
+mod wifi_mesh;
+pub(crate) use wifi_mesh::RuntimeBoundWifiMesh;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Read,
-    os::fd::{AsFd, BorrowedFd, OwnedFd},
+    net::{SocketAddr, SocketAddrV4},
+    os::fd::{AsFd, AsRawFd as _, BorrowedFd, OwnedFd},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::Duration,
@@ -20,25 +29,25 @@ use tokio::{
 };
 use volparossa_linux_uapi::{
     IngressSocketFamily as KernelIngressSocketFamily, IngressSocketKind as KernelIngressSocketKind,
-    receive_fd_with_binding, validate_ingress_socket,
+    receive_fd_with_binding, validate_ingress_socket, validate_ingress_udp_reply_socket,
 };
 use volparossa_routing::{
-    AcquireIngressSocket, AcquireTransportSocket,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
     ActivateClientIngress as ActivateClientIngressRequest, ActivateLeaseBatch, ActivatedLeaseBatch,
-    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, ClosedPreparePlan, CommitLeaseBatch,
-    CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest, DestroyContext,
-    DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult,
-    HelperRuntime, IngressAddressFamily as WireIngressSocketFamily, IngressSocketAddress,
-    IngressSocketKind as WireIngressSocketKind, IngressSocketReady, IngressSocketReceipt,
-    PrepareClientIngress as PrepareClientIngressRequest, PrepareIntent, PrepareLeaseBatch,
-    PreparedClientIngress as PreparedClientIngressResponse, PreparedIngressSocket,
-    PreparedLeaseBatch, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare,
+    AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CleanupScope, ClosedPreparePlan,
+    CommitLeaseBatch, CommittedLeaseBatch, DestroyClientIngress as DestroyClientIngressRequest,
+    DestroyContext, DestroyedContext, Empty, HELPER_PROTOCOL_VERSION, HelperRequest,
+    HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily as WireIngressSocketFamily,
+    IngressReplySocketReady, IngressSocketAddress, IngressSocketKind as WireIngressSocketKind,
+    IngressSocketReady, IngressSocketReceipt, PrepareClientIngress as PrepareClientIngressRequest,
+    PrepareIntent, PrepareLeaseBatch, PreparedClientIngress as PreparedClientIngressResponse,
+    PreparedIngressSocket, PreparedLeaseBatch, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare,
     ReconciledExpiredPrepare, RemoveMptcpEndpoint, TransportSocketReady, descriptor_fd_binding,
     encode_request, helper_request, helper_response, operation_digest, read_response,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEANUP_TOKEN_BYTES: usize = 32;
 
 /// One route-namespace descriptor plus the exact validated helper metadata that binds it.
@@ -128,7 +137,7 @@ struct IngressAuthority {
 struct PreparedIngressSocketAuthority {
     socket_handle: [u8; 32],
     wire_local: IngressSocketAddress,
-    local: std::net::SocketAddr,
+    local: SocketAddr,
     acquisition_started: bool,
 }
 
@@ -159,10 +168,7 @@ impl PreparedClientIngress {
 
     /// Return the helper-selected wildcard bind tuple for one identity.
     #[must_use]
-    pub fn local_address(
-        &self,
-        identity: ClientIngressSocketIdentity,
-    ) -> Option<std::net::SocketAddr> {
+    pub fn local_address(&self, identity: ClientIngressSocketIdentity) -> Option<SocketAddr> {
         self.sockets.get(&identity).map(|socket| socket.local)
     }
 }
@@ -177,7 +183,42 @@ pub struct AcquiredIngressSocket {
     socket_handle: [u8; 32],
     receipt_handle: [u8; 32],
     identity: ClientIngressSocketIdentity,
-    local: std::net::SocketAddr,
+    local: SocketAddr,
+}
+
+/// One source-bound transparent UDP socket for an exact intercepted flow reply.
+pub(crate) struct AcquiredIngressReplySocket {
+    descriptor: OwnedFd,
+    remote: SocketAddr,
+    application: SocketAddr,
+}
+
+impl AcquiredIngressReplySocket {
+    pub(crate) fn send(&self, payload: &[u8]) -> Result<(), std::io::Error> {
+        let destination = nix::sys::socket::SockaddrStorage::from(self.application);
+        let written = nix::sys::socket::sendto(
+            self.descriptor.as_raw_fd(),
+            payload,
+            &destination,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error as i32))?;
+        if written != payload.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "kernel did not send the complete ingress UDP reply",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn remote(&self) -> SocketAddr {
+        self.remote
+    }
+
+    pub(crate) const fn application(&self) -> SocketAddr {
+        self.application
+    }
 }
 
 impl AcquiredIngressSocket {
@@ -195,7 +236,7 @@ impl AcquiredIngressSocket {
 
     /// Return the kernel-revalidated wildcard bind tuple.
     #[must_use]
-    pub const fn local_address(&self) -> std::net::SocketAddr {
+    pub const fn local_address(&self) -> SocketAddr {
         self.local
     }
 }
@@ -292,6 +333,7 @@ enum DescriptorExpectation {
     None,
     Transport,
     Ingress,
+    IngressReply,
 }
 
 struct ClientExecution {
@@ -410,6 +452,218 @@ enum PrepareDispatchState {
     Dispatched(PrepareReconciliationAuthority),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RuntimeLeasePhase {
+    Prepared,
+    ActivationDispatched,
+    Activated,
+    CommitDispatched,
+    Committed,
+}
+
+/// Affine owner of one exact helper-runtime Prepare result.
+///
+/// This value deliberately implements neither `Copy`, `Clone`, `Debug` nor serialization. It
+/// retains the exact helper process identity, canonical Prepare plan, context capability and lease
+/// capabilities needed to bind every later mutating lifecycle phase. A timeout or cancellation
+/// must retain this owner and route it to explicit same-runtime destruction; dropping the value
+/// alone does not claim helper-side cleanup.
+pub(crate) struct RuntimeBoundPreparedLeaseBatch {
+    helper_runtime_id: [u8; 32],
+    prepare: PrepareLeaseBatch,
+    prepared: PreparedLeaseBatch,
+    phase: RuntimeLeasePhase,
+}
+
+/// Destruction-only authority for one context, retained across consuming protocol joins.
+///
+/// This contains no lease handles or phase state and cannot activate or commit a route. In
+/// particular, it grants no authority over other contexts served by the same combined-role node.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct RuntimeBoundContextCleanup {
+    helper_runtime_id: [u8; 32],
+    route_context_id: Vec<u8>,
+    context_handle: Vec<u8>,
+}
+
+impl RuntimeBoundPreparedLeaseBatch {
+    fn new(
+        helper_runtime_id: [u8; 32],
+        prepare: PrepareLeaseBatch,
+        prepared: PreparedLeaseBatch,
+    ) -> Result<Self, HelperClientError> {
+        let route_context: [u8; 16] = prepare
+            .route_context_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| HelperClientError::Correlation)?;
+        if helper_runtime_id.ct_eq(&[0; 32]).unwrap_u8() == 1
+            || route_context.iter().all(|byte| *byte == 0)
+            || prepared.context_handle.len() != 32
+            || prepared.context_handle.iter().all(|byte| *byte == 0)
+        {
+            return Err(HelperClientError::Correlation);
+        }
+        Ok(Self {
+            helper_runtime_id,
+            prepare,
+            prepared,
+            phase: RuntimeLeasePhase::Prepared,
+        })
+    }
+
+    /// Borrow the exact canonical Prepare plan used to create this owner.
+    #[must_use]
+    pub(crate) const fn prepare(&self) -> &PrepareLeaseBatch {
+        &self.prepare
+    }
+
+    /// Borrow the helper response while retaining its affine lifecycle owner.
+    #[must_use]
+    pub(crate) const fn prepared(&self) -> &PreparedLeaseBatch {
+        &self.prepared
+    }
+
+    /// Return the exact helper process identity retained by this affine owner.
+    #[must_use]
+    pub(crate) const fn helper_runtime_id(&self) -> [u8; 32] {
+        self.helper_runtime_id
+    }
+
+    pub(crate) fn destroy_request(&self) -> DestroyContext {
+        DestroyContext {
+            route_context_id: self.prepare.route_context_id.clone(),
+            context_handle: self.prepared.context_handle.clone(),
+        }
+    }
+
+    pub(crate) fn retain_cleanup_authority(&self) -> RuntimeBoundContextCleanup {
+        RuntimeBoundContextCleanup {
+            helper_runtime_id: self.helper_runtime_id,
+            route_context_id: self.prepare.route_context_id.clone(),
+            context_handle: self.prepared.context_handle.clone(),
+        }
+    }
+
+    pub(crate) fn begin_activation(
+        &mut self,
+        value: &ActivateLeaseBatch,
+    ) -> Result<(), HelperClientError> {
+        if self.phase != RuntimeLeasePhase::Prepared || !self.matches_activation(value) {
+            return Err(HelperClientError::Correlation);
+        }
+        self.phase = RuntimeLeasePhase::ActivationDispatched;
+        Ok(())
+    }
+
+    pub(crate) fn finish_activation(
+        &mut self,
+        value: &ActivatedLeaseBatch,
+    ) -> Result<(), HelperClientError> {
+        if self.phase != RuntimeLeasePhase::ActivationDispatched
+            || value.context_handle != self.prepared.context_handle
+            || value.lease_handles.len() != self.prepared.leases.len()
+            || !self.prepared.leases.iter().all(|prepared| {
+                value
+                    .lease_handles
+                    .iter()
+                    .filter(|handle| *handle == &prepared.lease_handle)
+                    .count()
+                    == 1
+            })
+        {
+            return Err(HelperClientError::Correlation);
+        }
+        self.phase = RuntimeLeasePhase::Activated;
+        Ok(())
+    }
+
+    pub(crate) fn begin_commit(
+        &mut self,
+        value: &CommitLeaseBatch,
+    ) -> Result<(), HelperClientError> {
+        if self.phase != RuntimeLeasePhase::Activated || !self.matches_commit(value) {
+            return Err(HelperClientError::Correlation);
+        }
+        self.phase = RuntimeLeasePhase::CommitDispatched;
+        Ok(())
+    }
+
+    pub(crate) fn finish_commit(
+        &mut self,
+        value: &CommittedLeaseBatch,
+    ) -> Result<(), HelperClientError> {
+        if self.phase != RuntimeLeasePhase::CommitDispatched
+            || value.context_handle != self.prepared.context_handle
+            || value.leases.len() != self.prepared.leases.len()
+            || !self.prepared.leases.iter().all(|prepared| {
+                value
+                    .leases
+                    .iter()
+                    .filter(|lease| lease.lease_handle == prepared.lease_handle)
+                    .count()
+                    == 1
+            })
+        {
+            return Err(HelperClientError::Correlation);
+        }
+        self.phase = RuntimeLeasePhase::Committed;
+        Ok(())
+    }
+
+    fn matches_activation(&self, value: &ActivateLeaseBatch) -> bool {
+        value.route_context_id == self.prepare.route_context_id
+            && value.context_handle == self.prepared.context_handle
+            && value.leases.len() == self.prepared.leases.len()
+            && self.prepared.leases.iter().all(|prepared| {
+                value
+                    .leases
+                    .iter()
+                    .filter(|lease| {
+                        lease.lease_handle == prepared.lease_handle
+                            && lease.path_id == prepared.path_id
+                            && lease.role == prepared.role
+                    })
+                    .count()
+                    == 1
+            })
+    }
+
+    fn matches_commit(&self, value: &CommitLeaseBatch) -> bool {
+        value.route_context_id == self.prepare.route_context_id
+            && value.context_handle == self.prepared.context_handle
+            && value.leases.len() == self.prepared.leases.len()
+            && self.prepared.leases.iter().all(|prepared| {
+                value
+                    .leases
+                    .iter()
+                    .filter(|lease| {
+                        lease.lease_handle == prepared.lease_handle
+                            && lease.path_id == prepared.path_id
+                            && lease.role == prepared.role
+                    })
+                    .count()
+                    == 1
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(prepare: PrepareLeaseBatch, prepared: PreparedLeaseBatch) -> Self {
+        Self::new([0xa5; 32], prepare, prepared).expect("valid test runtime-bound Prepare")
+    }
+}
+
+impl Drop for RuntimeBoundPreparedLeaseBatch {
+    fn drop(&mut self) {
+        self.helper_runtime_id.zeroize();
+        self.prepare.route_context_id.zeroize();
+        self.prepared.context_handle.zeroize();
+        for lease in &mut self.prepared.leases {
+            lease.lease_handle.zeroize();
+        }
+    }
+}
+
 fn closed_plan_from_prepare(value: &PrepareLeaseBatch) -> ClosedPreparePlan {
     ClosedPreparePlan {
         context_role: value.role,
@@ -453,7 +707,7 @@ impl HelperClient {
     pub(crate) async fn prepare_lease_batch(
         &self,
         value: PrepareLeaseBatch,
-    ) -> Result<PreparedLeaseBatch, PrepareLeaseBatchFailure> {
+    ) -> Result<RuntimeBoundPreparedLeaseBatch, PrepareLeaseBatchFailure> {
         self.prepare_lease_batch_bound(value).await
     }
 
@@ -464,7 +718,7 @@ impl HelperClient {
     async fn prepare_lease_batch_bound(
         &self,
         value: PrepareLeaseBatch,
-    ) -> Result<PreparedLeaseBatch, PrepareLeaseBatchFailure> {
+    ) -> Result<RuntimeBoundPreparedLeaseBatch, PrepareLeaseBatchFailure> {
         let prepare_request_id = random_request_id(&[]);
         let prepare_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -570,12 +824,15 @@ impl HelperClient {
             let helper_response::Outcome::PreparedLeaseBatch(prepared) = prepare_outcome else {
                 return Err(HelperClientError::Correlation);
             };
-            Ok(prepared)
+            Ok((helper_runtime_id, prepared))
         })
         .await;
 
         match result {
-            Ok(Ok(prepared)) => Ok(prepared),
+            Ok(Ok((helper_runtime_id, prepared))) => {
+                RuntimeBoundPreparedLeaseBatch::new(helper_runtime_id, value, prepared)
+                    .map_err(|error| classify_prepare_failure(error, dispatch_state))
+            }
             Ok(Err(error)) => Err(classify_prepare_failure(error, dispatch_state)),
             Err(_) => Err(classify_prepare_failure(
                 HelperClientError::Timeout,
@@ -668,15 +925,19 @@ impl HelperClient {
     /// # Errors
     ///
     /// Returns an error on framing, credentials, correlation, timeout or helper rejection.
-    pub async fn activate_lease_batch(
+    pub(crate) async fn activate_lease_batch(
         &self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         value: ActivateLeaseBatch,
     ) -> Result<ActivatedLeaseBatch, HelperClientError> {
-        match self
-            .execute(helper_request::Operation::ActivateLeaseBatch(value))
-            .await?
-        {
-            helper_response::Outcome::ActivatedLeaseBatch(value) => Ok(value),
+        let outcome = self
+            .execute_runtime_bound(owner, helper_request::Operation::ActivateLeaseBatch(value))
+            .await?;
+        match outcome {
+            helper_response::Outcome::ActivatedLeaseBatch(value) => {
+                owner.finish_activation(&value)?;
+                Ok(value)
+            }
             _ => Err(HelperClientError::Correlation),
         }
     }
@@ -686,15 +947,19 @@ impl HelperClient {
     /// # Errors
     ///
     /// Returns an error on framing, credentials, correlation, timeout or helper rejection.
-    pub async fn commit_lease_batch(
+    pub(crate) async fn commit_lease_batch(
         &self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         value: CommitLeaseBatch,
     ) -> Result<CommittedLeaseBatch, HelperClientError> {
-        match self
-            .execute(helper_request::Operation::CommitLeaseBatch(value))
-            .await?
-        {
-            helper_response::Outcome::CommittedLeaseBatch(value) => Ok(value),
+        let outcome = self
+            .execute_runtime_bound(owner, helper_request::Operation::CommitLeaseBatch(value))
+            .await?;
+        match outcome {
+            helper_response::Outcome::CommittedLeaseBatch(value) => {
+                owner.finish_commit(&value)?;
+                Ok(value)
+            }
             _ => Err(HelperClientError::Correlation),
         }
     }
@@ -704,12 +969,34 @@ impl HelperClient {
     /// # Errors
     ///
     /// Returns an error on framing, credentials, correlation, timeout or helper rejection.
-    pub async fn destroy_context(
+    pub(crate) async fn destroy_context(
         &self,
-        value: DestroyContext,
+        owner: &RuntimeBoundPreparedLeaseBatch,
     ) -> Result<DestroyedContext, HelperClientError> {
+        let value = owner.destroy_request();
         match self
-            .execute(helper_request::Operation::DestroyContext(value))
+            .execute_runtime_bound_readonly(owner, helper_request::Operation::DestroyContext(value))
+            .await?
+        {
+            helper_response::Outcome::DestroyedContext(value) => Ok(value),
+            _ => Err(HelperClientError::Correlation),
+        }
+    }
+
+    /// Destroy only the context retained before an affine join consumed its lifecycle owner.
+    pub(crate) async fn destroy_context_after_join(
+        &self,
+        cleanup: &RuntimeBoundContextCleanup,
+    ) -> Result<DestroyedContext, HelperClientError> {
+        let value = DestroyContext {
+            route_context_id: cleanup.route_context_id.clone(),
+            context_handle: cleanup.context_handle.clone(),
+        };
+        match self
+            .execute_expected_runtime(
+                &cleanup.helper_runtime_id,
+                helper_request::Operation::DestroyContext(value),
+            )
             .await?
         {
             helper_response::Outcome::DestroyedContext(value) => Ok(value),
@@ -908,6 +1195,42 @@ impl HelperClient {
         })
     }
 
+    /// Acquire one exact source-bound transparent IPv4 or IPv6 UDP reply descriptor for active ingress.
+    pub(crate) async fn acquire_ingress_reply_socket(
+        &self,
+        ingress: &ActiveClientIngress,
+        remote: SocketAddr,
+        application: SocketAddr,
+    ) -> Result<AcquiredIngressReplySocket, HelperClientError> {
+        let authority = ingress.authority;
+        let operation = AcquireIngressReplySocket {
+            client_runtime_id: authority.client_runtime_id.to_vec(),
+            ingress_handle: authority.ingress_handle.to_vec(),
+            remote: Some(ingress_address(remote)),
+            application: Some(ingress_address(application)),
+        };
+        let execution = self
+            .execute_operation(
+                helper_request::Operation::AcquireIngressReplySocket(operation),
+                DescriptorExpectation::IngressReply,
+            )
+            .await?;
+        let helper_response::Outcome::IngressReplySocketReady(ready) = execution.outcome else {
+            return Err(HelperClientError::Correlation);
+        };
+        if !ingress_reply_ready_matches(&ready, authority, remote, application) {
+            return Err(HelperClientError::Correlation);
+        }
+        let descriptor = execution.descriptor.ok_or(HelperClientError::Correlation)?;
+        validate_ingress_udp_reply_socket(&descriptor, remote, application)
+            .map_err(HelperClientError::DescriptorValidation)?;
+        Ok(AcquiredIngressReplySocket {
+            descriptor,
+            remote,
+            application,
+        })
+    }
+
     /// Idempotently destroy one prepared ingress capability.
     ///
     /// # Errors
@@ -1021,11 +1344,25 @@ impl HelperClient {
     ///
     /// Returns an error for an unsafe token or helper transport/rejection failure.
     pub async fn cleanup_owned(&self) -> Result<(), HelperClientError> {
+        self.cleanup(CleanupScope::AllOwnedResources).await
+    }
+
+    /// Destroy every route context while retaining the runtime-long Client ingress capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe token or helper transport/rejection failure.
+    pub async fn cleanup_route_contexts(&self) -> Result<(), HelperClientError> {
+        self.cleanup(CleanupScope::RouteContextsOnly).await
+    }
+
+    async fn cleanup(&self, scope: CleanupScope) -> Result<(), HelperClientError> {
         let mut token = read_cleanup_token(&self.cleanup_token)?;
         // Ownership moves directly from one zeroizing container into another. `CleanupOwned`
         // zeroizes on Drop, including when the nested async call is never polled or is cancelled.
         let operation = helper_request::Operation::CleanupOwned(CleanupOwned {
             cleanup_token: std::mem::take(&mut *token),
+            scope: scope as i32,
         });
         self.execute_empty(operation).await
     }
@@ -1051,6 +1388,140 @@ impl HelperClient {
             return Err(HelperClientError::Correlation);
         }
         Ok(execution.outcome)
+    }
+
+    async fn execute_runtime_bound(
+        &self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
+        operation: helper_request::Operation,
+    ) -> Result<helper_response::Outcome, HelperClientError> {
+        self.execute_runtime_bound_inner(owner, operation).await
+    }
+
+    async fn execute_runtime_bound_readonly(
+        &self,
+        owner: &RuntimeBoundPreparedLeaseBatch,
+        operation: helper_request::Operation,
+    ) -> Result<helper_response::Outcome, HelperClientError> {
+        self.execute_expected_runtime(&owner.helper_runtime_id, operation)
+            .await
+    }
+
+    async fn execute_expected_runtime(
+        &self,
+        expected_runtime: &[u8; 32],
+        operation: helper_request::Operation,
+    ) -> Result<helper_response::Outcome, HelperClientError> {
+        let bind_request_id = random_request_id(&[]);
+        let operation_request_id = random_request_id(&[bind_request_id]);
+        let (bind_frame, bind_digest) = runtime_bind_frame(bind_request_id)?;
+        let operation_request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: operation_request_id.to_vec(),
+            operation: Some(operation),
+        };
+        let operation_digest =
+            operation_digest(&operation_request).map_err(HelperClientError::Protocol)?;
+        let operation_frame = Zeroizing::new(
+            encode_request(&operation_request).map_err(HelperClientError::Protocol)?,
+        );
+        timeout_at(Instant::now() + HELPER_TIMEOUT, async {
+            let mut stream = self.connect_authenticated().await?;
+            self.bind_expected_runtime(
+                &mut stream,
+                expected_runtime,
+                bind_frame.as_slice(),
+                &bind_request_id,
+                &bind_digest,
+            )
+            .await?;
+            exchange_request(
+                &mut stream,
+                operation_frame.as_slice(),
+                &operation_request_id,
+                &operation_digest,
+            )
+            .await
+        })
+        .await
+        .map_err(|_| HelperClientError::Timeout)?
+    }
+
+    async fn execute_runtime_bound_inner(
+        &self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
+        operation: helper_request::Operation,
+    ) -> Result<helper_response::Outcome, HelperClientError> {
+        let bind_request_id = random_request_id(&[]);
+        let operation_request_id = random_request_id(&[bind_request_id]);
+        let (bind_frame, bind_digest) = runtime_bind_frame(bind_request_id)?;
+        let operation_request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: operation_request_id.to_vec(),
+            operation: Some(operation),
+        };
+        let operation_digest =
+            operation_digest(&operation_request).map_err(HelperClientError::Protocol)?;
+        let operation_frame = Zeroizing::new(
+            encode_request(&operation_request).map_err(HelperClientError::Protocol)?,
+        );
+        timeout_at(Instant::now() + HELPER_TIMEOUT, async {
+            let mut stream = self.connect_authenticated().await?;
+            self.bind_expected_runtime(
+                &mut stream,
+                &owner.helper_runtime_id,
+                bind_frame.as_slice(),
+                &bind_request_id,
+                &bind_digest,
+            )
+            .await?;
+            match operation_request.operation.as_ref() {
+                Some(helper_request::Operation::ActivateLeaseBatch(value)) => {
+                    owner.begin_activation(value)?;
+                }
+                Some(helper_request::Operation::CommitLeaseBatch(value)) => {
+                    owner.begin_commit(value)?;
+                }
+                _ => return Err(HelperClientError::Correlation),
+            }
+            exchange_request(
+                &mut stream,
+                operation_frame.as_slice(),
+                &operation_request_id,
+                &operation_digest,
+            )
+            .await
+        })
+        .await
+        .map_err(|_| HelperClientError::Timeout)?
+    }
+
+    async fn connect_authenticated(&self) -> Result<UnixStream, HelperClientError> {
+        let stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(HelperClientError::Io)?;
+        let credentials = stream.peer_cred().map_err(HelperClientError::Io)?;
+        validate_server_uid(credentials.uid(), self.expected_server_uid)?;
+        Ok(stream)
+    }
+
+    async fn bind_expected_runtime(
+        &self,
+        stream: &mut UnixStream,
+        expected_runtime: &[u8; 32],
+        bind_frame: &[u8],
+        bind_request_id: &[u8; 16],
+        bind_digest: &[u8; 32],
+    ) -> Result<(), HelperClientError> {
+        let outcome = exchange_request(stream, bind_frame, bind_request_id, bind_digest).await?;
+        let helper_response::Outcome::HelperRuntime(HelperRuntime { helper_runtime_id }) = outcome
+        else {
+            return Err(HelperClientError::Correlation);
+        };
+        if expected_runtime.ct_eq(&helper_runtime_id).unwrap_u8() != 1 {
+            return Err(HelperClientError::RuntimeChanged);
+        }
+        Ok(())
     }
 
     async fn execute_operation(
@@ -1099,6 +1570,9 @@ impl HelperClient {
                 Some(helper_response::Outcome::IngressSocketReady(_)) => {
                     DescriptorExpectation::Ingress
                 }
+                Some(helper_response::Outcome::IngressReplySocketReady(_)) => {
+                    DescriptorExpectation::IngressReply
+                }
                 _ => DescriptorExpectation::None,
             };
             if actual_descriptor != descriptor_expectation {
@@ -1127,6 +1601,23 @@ impl HelperClient {
         frame.zeroize();
         Ok(execution)
     }
+}
+
+fn runtime_bind_frame(
+    request_id: [u8; 16],
+) -> Result<(Zeroizing<Vec<u8>>, [u8; 32]), HelperClientError> {
+    let request = HelperRequest {
+        protocol_version: HELPER_PROTOCOL_VERSION,
+        request_id: request_id.to_vec(),
+        operation: Some(helper_request::Operation::BindHelperRuntime(
+            BindHelperRuntime {
+                prepare_intent: None,
+            },
+        )),
+    };
+    let digest = operation_digest(&request).map_err(HelperClientError::Protocol)?;
+    let frame = Zeroizing::new(encode_request(&request).map_err(HelperClientError::Protocol)?);
+    Ok((frame, digest))
 }
 
 fn random_request_id(excluded: &[[u8; 16]]) -> [u8; 16] {
@@ -1268,7 +1759,7 @@ fn client_ingress_identity(
 fn client_ingress_local(
     value: &IngressSocketAddress,
     family: ClientIngressSocketFamily,
-) -> Result<std::net::SocketAddr, HelperClientError> {
+) -> Result<SocketAddr, HelperClientError> {
     let port = u16::try_from(value.port).map_err(|_| HelperClientError::Correlation)?;
     if port == 0 {
         return Err(HelperClientError::Correlation);
@@ -1284,9 +1775,7 @@ fn client_ingress_local(
             if !address.is_unspecified() {
                 return Err(HelperClientError::Correlation);
             }
-            Ok(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                address, port,
-            )))
+            Ok(SocketAddr::V4(SocketAddrV4::new(address, port)))
         }
         ClientIngressSocketFamily::Ipv6 => {
             let address: [u8; 16] = value
@@ -1298,7 +1787,7 @@ fn client_ingress_local(
             if !address.is_unspecified() {
                 return Err(HelperClientError::Correlation);
             }
-            Ok(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
                 address, port, 0, 0,
             )))
         }
@@ -1318,6 +1807,28 @@ fn ingress_ready_matches(
         && ready.descriptor_kind == wire_ingress_kind(identity.kind) as i32
         && ready.address_family == wire_ingress_family(identity.family) as i32
         && ready.local.as_ref() == Some(expected_local)
+}
+
+fn ingress_address(value: SocketAddr) -> IngressSocketAddress {
+    IngressSocketAddress {
+        address: match value.ip() {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        },
+        port: u32::from(value.port()),
+    }
+}
+
+fn ingress_reply_ready_matches(
+    ready: &IngressReplySocketReady,
+    authority: IngressAuthority,
+    remote: SocketAddr,
+    application: SocketAddr,
+) -> bool {
+    ready.client_runtime_id.as_slice() == authority.client_runtime_id
+        && ready.ingress_handle.as_slice() == authority.ingress_handle
+        && ready.remote.as_ref() == Some(&ingress_address(remote))
+        && ready.application.as_ref() == Some(&ingress_address(application))
 }
 
 fn ingress_receipts(
@@ -1513,10 +2024,10 @@ mod tests {
     use tokio::{io::AsyncReadExt, net::UnixListener};
     use volparossa_linux_uapi::send_fd_with_binding;
     use volparossa_routing::{
-        AcquireTransportSocket, ContextRole, HelperResponse, LeasePlan, PreparedLease,
-        PublicUdpEndpoint, TransportSocketAddress, TransportSocketKind, TransportSocketReady,
-        UnderlayEvidence, WireguardRole, encode_response, ingress_fd_binding, read_request,
-        transport_fd_binding,
+        AcquireTransportSocket, CommittedLease, ContextRole, HelperResponse, LeaseActivation,
+        LeaseCommit, LeasePlan, PreparedLease, PublicUdpEndpoint, TransportSocketAddress,
+        TransportSocketKind, TransportSocketReady, UnderlayEvidence, WireguardRole,
+        encode_response, ingress_fd_binding, read_request, transport_fd_binding,
     };
 
     use super::*;
@@ -1613,6 +2124,7 @@ mod tests {
             }],
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
+            traversal_hints: Vec::new(),
         }
     }
 
@@ -1643,6 +2155,7 @@ mod tests {
             ],
             setup_expires_at_unix: 120,
             hard_expires_at_unix: 900,
+            traversal_hints: Vec::new(),
         };
         let prepare = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
@@ -1999,7 +2512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_uses_correlated_v3_empty_outcome() {
+    async fn route_cleanup_uses_correlated_route_only_scope() {
         let directory = tempfile::tempdir().expect("tempdir");
         let socket = directory.path().join("helper.sock");
         let token_path = directory.path().join("helper.cleanup-token");
@@ -2008,11 +2521,18 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("bind");
         let server = tokio::spawn(serve_once(
             listener,
-            |operation| matches!(operation, helper_request::Operation::CleanupOwned(_)),
+            |operation| {
+                matches!(
+                    operation,
+                    helper_request::Operation::CleanupOwned(cleanup)
+                        if CleanupScope::try_from(cleanup.scope).ok()
+                            == Some(CleanupScope::RouteContextsOnly)
+                )
+            },
             helper_response::Outcome::Empty(Empty {}),
         ));
         HelperClient::new_for_test(socket, token_path, geteuid().as_raw())
-            .cleanup_owned()
+            .cleanup_route_contexts()
             .await
             .expect("cleanup");
         server.await.expect("server");
@@ -2030,12 +2550,14 @@ mod tests {
         let unpolled =
             client.execute_empty(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0x51; CLEANUP_TOKEN_BYTES],
+                scope: CleanupScope::AllOwnedResources as i32,
             }));
         drop(unpolled);
 
         let error = client
             .execute_empty(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0x52; CLEANUP_TOKEN_BYTES - 1],
+                scope: CleanupScope::AllOwnedResources as i32,
             }))
             .await
             .expect_err("invalid token must fail before socket I/O");
@@ -2080,10 +2602,331 @@ mod tests {
                     }],
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
+                    traversal_hints: Vec::new(),
                 })
                 .await
                 .expect("prepared");
-        assert_eq!(response, prepared);
+        assert_eq!(response.prepared(), &prepared);
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one smoke test keeps the exact Prepare, Activate, Commit and Destroy stream order visible"
+    )]
+    async fn prepared_owner_binds_same_runtime_before_activate_commit_and_destroy() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let prepared = PreparedLeaseBatch {
+            context_handle: vec![3; 32],
+            leases: vec![PreparedLease {
+                lease_handle: vec![4; 32],
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                public_key: vec![5; 32],
+                public_endpoint: Some(PublicUdpEndpoint {
+                    address: vec![8, 8, 8, 8],
+                    port: 51_820,
+                }),
+                underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
+            }],
+        };
+        let prepare_response = prepared.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Prepare stream");
+            let bind = read_bind_some(&mut stream).await;
+            write_runtime(&mut stream, &bind, [0xa5; 32]).await;
+            let prepare = read_request(&mut stream).await.expect("Prepare request");
+            assert!(matches!(
+                prepare.operation,
+                Some(helper_request::Operation::PrepareLeaseBatch(_))
+            ));
+            write_test_response(
+                &mut stream,
+                &prepare,
+                HelperResult::Ok,
+                Some(helper_response::Outcome::PreparedLeaseBatch(
+                    prepare_response,
+                )),
+            )
+            .await;
+
+            for phase in ["activate", "commit", "destroy"] {
+                let (mut stream, _) = listener.accept().await.expect("accept phase stream");
+                let bind = read_request(&mut stream).await.expect("Bind(None)");
+                assert!(matches!(
+                    bind.operation,
+                    Some(helper_request::Operation::BindHelperRuntime(
+                        BindHelperRuntime {
+                            prepare_intent: None
+                        }
+                    ))
+                ));
+                write_runtime(&mut stream, &bind, [0xa5; 32]).await;
+                let request = read_request(&mut stream).await.expect("phase request");
+                let outcome = match (phase, request.operation.as_ref()) {
+                    ("activate", Some(helper_request::Operation::ActivateLeaseBatch(value))) => {
+                        helper_response::Outcome::ActivatedLeaseBatch(ActivatedLeaseBatch {
+                            context_handle: value.context_handle.clone(),
+                            lease_handles: value
+                                .leases
+                                .iter()
+                                .map(|lease| lease.lease_handle.clone())
+                                .collect(),
+                        })
+                    }
+                    ("commit", Some(helper_request::Operation::CommitLeaseBatch(value))) => {
+                        helper_response::Outcome::CommittedLeaseBatch(CommittedLeaseBatch {
+                            context_handle: value.context_handle.clone(),
+                            leases: value
+                                .leases
+                                .iter()
+                                .map(|lease| CommittedLease {
+                                    lease_handle: lease.lease_handle.clone(),
+                                    latest_handshake_unix: 1,
+                                    received_bytes: 1,
+                                    transmitted_bytes: 1,
+                                })
+                                .collect(),
+                        })
+                    }
+                    ("destroy", Some(helper_request::Operation::DestroyContext(value))) => {
+                        assert_eq!(value.route_context_id, vec![7; 16]);
+                        assert_eq!(value.context_handle, vec![3; 32]);
+                        helper_response::Outcome::DestroyedContext(DestroyedContext {
+                            existed: true,
+                        })
+                    }
+                    _ => panic!("unexpected lifecycle phase"),
+                };
+                write_test_response(&mut stream, &request, HelperResult::Ok, Some(outcome)).await;
+            }
+        });
+
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        let prepare = prepare_sequence_value();
+        let mut owner = client
+            .prepare_lease_batch(prepare.clone())
+            .await
+            .expect("runtime-bound Prepare");
+        let activation = ActivateLeaseBatch {
+            route_context_id: prepare.route_context_id.clone(),
+            context_handle: prepared.context_handle.clone(),
+            leases: vec![LeaseActivation {
+                lease_handle: vec![4; 32],
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                peer_public_key: vec![6; 32],
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: vec![1, 1, 1, 1],
+                    port: 51_821,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: vec![7],
+                signed_client_relay_request: Vec::new(),
+            }],
+        };
+        client
+            .activate_lease_batch(&mut owner, activation.clone())
+            .await
+            .expect("same-runtime Activate");
+        client
+            .commit_lease_batch(
+                &mut owner,
+                CommitLeaseBatch {
+                    route_context_id: activation.route_context_id,
+                    context_handle: activation.context_handle,
+                    leases: vec![LeaseCommit {
+                        lease_handle: vec![4; 32],
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                    }],
+                },
+            )
+            .await
+            .expect("same-runtime Commit");
+        client
+            .destroy_context(&owner)
+            .await
+            .expect("same-runtime Destroy");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_consumed_client_owner_preserves_other_role_contexts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            prepare_sequence_value(),
+            PreparedLeaseBatch {
+                context_handle: vec![3; 32],
+                leases: Vec::new(),
+            },
+        );
+        let cleanup = owner.retain_cleanup_authority();
+        // Model a consuming protocol join returning an error: lifecycle authority is gone.
+        drop(owner);
+        let server = tokio::spawn(async move {
+            let mut contexts = BTreeMap::from([
+                (vec![7; 16], vec![3; 32]), // Failing local Client context.
+                (vec![8; 16], vec![4; 32]), // Another participant's Relay context.
+                (vec![9; 16], vec![5; 32]), // Another participant's Exit context.
+            ]);
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let bind = read_request(&mut stream).await.expect("runtime Bind");
+            assert!(matches!(
+                bind.operation,
+                Some(helper_request::Operation::BindHelperRuntime(
+                    BindHelperRuntime {
+                        prepare_intent: None
+                    }
+                ))
+            ));
+            write_runtime(&mut stream, &bind, [0xa5; 32]).await;
+            let request = read_request(&mut stream).await.expect("exact destruction");
+            let Some(helper_request::Operation::DestroyContext(value)) = request.operation.as_ref()
+            else {
+                panic!("cleanup after a Client failure must never dispatch CleanupOwned");
+            };
+            assert_eq!(value.route_context_id, vec![7; 16]);
+            assert_eq!(
+                contexts.get(&value.route_context_id),
+                Some(&value.context_handle)
+            );
+            contexts.remove(&value.route_context_id);
+            write_test_response(
+                &mut stream,
+                &request,
+                HelperResult::Ok,
+                Some(helper_response::Outcome::DestroyedContext(
+                    DestroyedContext { existed: true },
+                )),
+            )
+            .await;
+            contexts
+        });
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        assert!(
+            client
+                .destroy_context_after_join(&cleanup)
+                .await
+                .expect("exact cleanup")
+                .existed
+        );
+        assert_eq!(
+            server.await.expect("server"),
+            BTreeMap::from([(vec![8; 16], vec![4; 32]), (vec![9; 16], vec![5; 32])])
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_consumed_owner_never_dispatches_to_changed_runtime() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            prepare_sequence_value(),
+            PreparedLeaseBatch {
+                context_handle: vec![3; 32],
+                leases: Vec::new(),
+            },
+        );
+        let cleanup = owner.retain_cleanup_authority();
+        drop(owner);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let bind = read_request(&mut stream).await.expect("runtime Bind");
+            write_runtime(&mut stream, &bind, [0xb6; 32]).await;
+            assert_no_followup_frame(&mut stream).await;
+        });
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        assert!(matches!(
+            client.destroy_context_after_join(&cleanup).await,
+            Err(HelperClientError::RuntimeChanged)
+        ));
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn changed_runtime_sends_no_activation_and_retains_prepared_owner() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let prepared = PreparedLeaseBatch {
+            context_handle: vec![3; 32],
+            leases: vec![PreparedLease {
+                lease_handle: vec![4; 32],
+                path_id: 1,
+                role: WireguardRole::Client as i32,
+                public_key: vec![5; 32],
+                public_endpoint: Some(PublicUdpEndpoint {
+                    address: vec![8, 8, 8, 8],
+                    port: 51_820,
+                }),
+                underlay_evidence: UnderlayEvidence::DirectAssigned as i32,
+            }],
+        };
+        let server_prepared = prepared.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept Prepare stream");
+            let bind = read_bind_some(&mut stream).await;
+            write_runtime(&mut stream, &bind, [0xa5; 32]).await;
+            let prepare = read_request(&mut stream).await.expect("Prepare request");
+            write_test_response(
+                &mut stream,
+                &prepare,
+                HelperResult::Ok,
+                Some(helper_response::Outcome::PreparedLeaseBatch(
+                    server_prepared,
+                )),
+            )
+            .await;
+
+            let (mut stream, _) = listener.accept().await.expect("accept Activate stream");
+            let bind = read_request(&mut stream).await.expect("Bind(None)");
+            write_runtime(&mut stream, &bind, [0xb6; 32]).await;
+            assert_no_followup_frame(&mut stream).await;
+        });
+        let client =
+            HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
+        let prepare = prepare_sequence_value();
+        let mut owner = client
+            .prepare_lease_batch(prepare.clone())
+            .await
+            .expect("runtime-bound Prepare");
+        let error = client
+            .activate_lease_batch(
+                &mut owner,
+                ActivateLeaseBatch {
+                    route_context_id: prepare.route_context_id,
+                    context_handle: prepared.context_handle,
+                    leases: vec![LeaseActivation {
+                        lease_handle: vec![4; 32],
+                        path_id: 1,
+                        role: WireguardRole::Client as i32,
+                        peer_public_key: vec![6; 32],
+                        peer_endpoint: Some(PublicUdpEndpoint {
+                            address: vec![1, 1, 1, 1],
+                            port: 51_821,
+                        }),
+                        maximum_up_mbps: 0,
+                        maximum_down_mbps: 0,
+                        signed_relay_reservation: vec![7],
+                        signed_client_relay_request: Vec::new(),
+                    }],
+                },
+            )
+            .await
+            .expect_err("changed runtime");
+        assert!(matches!(error, HelperClientError::RuntimeChanged));
+        assert!(matches!(owner.phase, RuntimeLeasePhase::Prepared));
         server.await.expect("server");
     }
 
@@ -2121,10 +2964,9 @@ mod tests {
                 directory.path().join("unused"),
                 geteuid().as_raw(),
             );
-            let failure = client
-                .prepare_lease_batch(prepare_sequence_value())
-                .await
-                .expect_err("Bind must fail before Prepare dispatch");
+            let Err(failure) = client.prepare_lease_batch(prepare_sequence_value()).await else {
+                panic!("Bind must fail before Prepare dispatch");
+            };
             if wrong_correlation {
                 assert!(matches!(
                     failure,
@@ -2155,10 +2997,9 @@ mod tests {
         });
         let client =
             HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
-        let failure = client
-            .prepare_lease_batch(prepare_sequence_value())
-            .await
-            .expect_err("Bind timeout");
+        let Err(failure) = client.prepare_lease_batch(prepare_sequence_value()).await else {
+            panic!("Bind timeout");
+        };
         assert!(matches!(
             failure,
             PrepareLeaseBatchFailure::Definitive(HelperClientError::Timeout)
@@ -2184,10 +3025,9 @@ mod tests {
         });
         let client =
             HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
-        let failure = client
-            .prepare_lease_batch(prepare_sequence_value())
-            .await
-            .expect_err("truncated Prepare response");
+        let Err(failure) = client.prepare_lease_batch(prepare_sequence_value()).await else {
+            panic!("truncated Prepare response");
+        };
         let rendered = format!("{failure:?}");
         assert!(rendered.contains("Ambiguous"));
         assert!(!rendered.contains("helper_runtime_id"));
@@ -2203,25 +3043,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_and_prepare_share_one_absolute_five_second_deadline() {
+    async fn bind_and_prepare_share_one_absolute_ten_second_deadline() {
         let directory = tempfile::tempdir().expect("tempdir");
         let socket = directory.path().join("helper.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let bind = read_bind_some(&mut stream).await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
             write_runtime(&mut stream, &bind, [0xa5; 32]).await;
             let _prepare = read_request(&mut stream).await.expect("Prepare request");
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
         });
         let client =
             HelperClient::new_for_test(socket, directory.path().join("unused"), geteuid().as_raw());
         let started = StdInstant::now();
-        let failure = client
-            .prepare_lease_batch(prepare_sequence_value())
-            .await
-            .expect_err("3s + 3s must exceed one 5s sequence budget");
+        let Err(failure) = client.prepare_lease_batch(prepare_sequence_value()).await else {
+            panic!("6s + 6s must exceed one 10s sequence budget");
+        };
         let elapsed = started.elapsed();
         assert!(matches!(
             failure,
@@ -2230,8 +3069,8 @@ mod tests {
                 ..
             }
         ));
-        assert!(elapsed >= Duration::from_millis(4_500));
-        assert!(elapsed < Duration::from_secs(6));
+        assert!(elapsed >= Duration::from_millis(9_500));
+        assert!(elapsed < Duration::from_secs(11));
         server.abort();
         let _ = server.await;
     }

@@ -1,19 +1,29 @@
 //! Strict version-3 protocol for VOLPAROSSA's minimal privileged network helper.
 //!
 //! The unprivileged agent can describe a route context, peer public endpoints and bounded policy
-//! limits. It cannot provide private keys, interface names, local overlay addresses, allowed
-//! prefixes, listen ports, filesystem paths or free-form privileged input.
+//! limits. It cannot provide private keys, local overlay addresses, allowed prefixes, listen
+//! ports, filesystem paths or free-form privileged input. The independent upload-sharing owner
+//! accepts one bounded physical interface name, resolved and revalidated by the helper.
+//! The separate, explicitly enabled direct-mesh owner accepts an existing radio name, a bounded
+//! mesh ID/channel and a private connected subnet only for its newly created interface. It cannot
+//! replace an existing interface or install an Internet route.
+
+mod wifi_mesh;
+pub use wifi_mesh::{
+    DestroyWifiMesh, DestroyedWifiMesh, InspectWifiMesh, InstallWifiMesh, InstalledWifiMesh,
+    WifiMeshPeer, WifiMeshSnapshot, validate_wifi_mesh_response,
+};
 
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
-pub use volparossa_core::is_public_routable_ip;
+pub use volparossa_core::{is_local_lan_ip, is_public_routable_ip};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Exact agent/helper protocol version.
@@ -33,6 +43,9 @@ pub const MAX_HELPER_SIGNED_RELAY_RESERVATION_BYTES: usize = MAX_HELPER_FRAME;
 pub const MAX_HELPER_SIGNED_CLIENT_RELAY_REQUEST_BYTES: usize = MAX_HELPER_FRAME;
 /// Maximum distinct paths in one route context.
 pub const MAX_HELPER_PATHS: u32 = 8;
+/// At most one IPv6 and one IPv4 observation may be attached to each lease; a Relay owns two
+/// endpoint roles per path.
+pub const MAX_HELPER_TRAVERSAL_HINTS: usize = MAX_HELPER_PATHS as usize * 4;
 /// Fixed upper bound shared with signed reservation rate fields.
 pub const MAX_HELPER_RATE_MBPS: u32 = 1_000_000;
 /// Opaque helper handle length.
@@ -52,7 +65,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -62,9 +75,11 @@ pub mod helper_request {
     use prost::Oneof;
 
     use super::{
-        AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress, ActivateLeaseBatch,
-        AddMptcpEndpoint, BindHelperRuntime, CleanupOwned, CommitLeaseBatch, DestroyClientIngress,
-        DestroyContext, PrepareClientIngress, PrepareLeaseBatch, ReconcileExpiredPrepare,
+        AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket,
+        ActivateClientIngress, ActivateLeaseBatch, AddMptcpEndpoint, BindHelperRuntime,
+        CleanupOwned, CommitLeaseBatch, DestroyClientIngress, DestroyContext, DestroyUplinkSharing,
+        DestroyWifiMesh, InspectUplinkSharing, InspectWifiMesh, InstallUplinkSharing,
+        InstallWifiMesh, PrepareClientIngress, PrepareLeaseBatch, ReconcileExpiredPrepare,
         RemoveMptcpEndpoint,
     };
 
@@ -95,7 +110,7 @@ pub mod helper_request {
         /// Prove that one exact, expired, ambiguously dispatched Prepare left no context.
         #[prost(message, tag = "28")]
         ReconcileExpiredPrepare(ReconcileExpiredPrepare),
-        /// Destroy every resource owned by this helper runtime.
+        /// Destroy the closed resource scope owned by this helper runtime.
         #[prost(message, tag = "29")]
         CleanupOwned(CleanupOwned),
         /// Prepare a helper-owned client ingress runtime, independent of route contexts.
@@ -113,6 +128,27 @@ pub mod helper_request {
         /// Read this helper process's non-secret per-start identity.
         #[prost(message, tag = "35")]
         BindHelperRuntime(BindHelperRuntime),
+        /// Acquire one exact connected family-matched reply socket for an active ingress flow.
+        #[prost(message, tag = "36")]
+        AcquireIngressReplySocket(AcquireIngressReplySocket),
+        /// Install one independent runtime-long upload-sharing owner.
+        #[prost(message, tag = "37")]
+        InstallUplinkSharing(InstallUplinkSharing),
+        /// Read the exact owner's aggregate kernel queue counters.
+        #[prost(message, tag = "38")]
+        InspectUplinkSharing(InspectUplinkSharing),
+        /// Retire only the exact owned upload-sharing tree.
+        #[prost(message, tag = "39")]
+        DestroyUplinkSharing(DestroyUplinkSharing),
+        /// Create one explicit, runtime-owned direct Wi-Fi mesh underlay.
+        #[prost(message, tag = "40")]
+        InstallWifiMesh(InstallWifiMesh),
+        /// Inspect actual mesh peering on the exact owned interface.
+        #[prost(message, tag = "41")]
+        InspectWifiMesh(InspectWifiMesh),
+        /// Leave and remove only the exact owned mesh interface.
+        #[prost(message, tag = "42")]
+        DestroyWifiMesh(DestroyWifiMesh),
     }
 }
 
@@ -128,6 +164,21 @@ pub enum ContextRole {
     Relay = 2,
     /// Policy-limited exit context.
     Exit = 3,
+}
+
+/// Exact resource class selected by an authenticated cleanup request.
+///
+/// Route-only cleanup deliberately preserves the independently owned, runtime-long Client ingress
+/// and upload-sharing capabilities so disconnecting a route does not stop node participation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum CleanupScope {
+    /// Invalid protobuf default.
+    Unspecified = 0,
+    /// Every resource owned by this helper runtime, including Client ingress and upload sharing.
+    AllOwnedResources = 1,
+    /// Route contexts and their transport state, preserving Client ingress and upload sharing.
+    RouteContextsOnly = 2,
 }
 
 /// Endpoint purpose. Zero is deliberately invalid on the wire.
@@ -154,6 +205,10 @@ pub enum UnderlayEvidence {
     Unspecified = 0,
     /// Public unicast address assigned directly to the unique selected default-route interface.
     DirectAssigned = 1,
+    /// Public address observed by the exact authenticated peer for coordinated UDP punching.
+    ObservedUdpPunch = 2,
+    /// Private LAN address assigned to a kernel-verified on-link route to the exact lease peer.
+    DirectOnLink = 3,
 }
 
 /// Closed set of Linux MPTCP endpoint behaviours.
@@ -182,7 +237,16 @@ pub enum TransportSocketKind {
     MptcpListener = 2,
     /// Bound, explicitly unconnected UDP socket for Quinn.
     QuicUdpUnconnected = 3,
+    /// Probe-only connected UDP socket available only while the exact context is Activated.
+    NativeProbeUdpConnected = 4,
 }
+
+/// Fixed Client-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_CLIENT_PORT: u16 = 41_910;
+/// Fixed Exit-side port for one helper-scoped native challenge datagram.
+pub const NATIVE_PROBE_EXIT_PORT: u16 = 41_911;
+/// Exact native challenge/response payload size.
+pub const NATIVE_PROBE_DATAGRAM_BYTES: usize = 32;
 
 /// Concrete transport address; wildcard addresses, zero ports and names are unrepresentable.
 #[derive(Clone, PartialEq, Message)]
@@ -334,6 +398,23 @@ pub struct DestroyClientIngress {
     #[prost(bytes = "vec", tag = "2")]
     pub ingress_handle: Vec<u8>,
 }
+
+/// Acquire one non-retargetable transparent UDP reply socket for an active ingress flow.
+#[derive(Clone, PartialEq, Message)]
+pub struct AcquireIngressReplySocket {
+    /// Exact client runtime returned by prepare.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Opaque helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Original Internet tuple which must become the reply socket's local tuple.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-observed application tuple which must become the connected peer.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
+}
 /// Public UDP endpoint. The helper never accepts a local listen address from the agent.
 #[derive(Clone, PartialEq, Message)]
 pub struct PublicUdpEndpoint {
@@ -354,6 +435,44 @@ pub struct LeasePlan {
     /// Endpoint role allowed by the surrounding context role.
     #[prost(enumeration = "WireguardRole", tag = "2")]
     pub role: i32,
+}
+
+/// Exact local and remote LAN address candidates; the helper verifies their kernel route.
+#[derive(Clone, PartialEq, Message)]
+pub struct OnLinkUnderlayHint {
+    /// Four RFC1918 or sixteen ULA address bytes assigned to the local interface.
+    #[prost(bytes = "vec", tag = "1")]
+    pub local_address: Vec<u8>,
+    /// Same-family private address of the authenticated adjacent control peer.
+    #[prost(bytes = "vec", tag = "2")]
+    pub peer_address: Vec<u8>,
+}
+
+/// One bounded underlay observation tied to an exact route/path/role and control peer.
+///
+/// The helper treats this only as a candidate for the already fixed `WireGuard` listen port. The
+/// final endpoint is subsequently signed into the reservation protocol before peer activation.
+#[derive(Clone, PartialEq, Message)]
+pub struct TraversalEndpointHint {
+    /// Existing path 1..=8.
+    #[prost(uint32, tag = "1")]
+    pub path_id: u32,
+    /// Exact endpoint role from the containing prepare plan.
+    #[prost(enumeration = "WireguardRole", tag = "2")]
+    pub role: i32,
+    /// Non-zero route actor identity (node ID, or ephemeral client-session ID).
+    #[prost(bytes = "vec", tag = "3")]
+    pub observer_id: Vec<u8>,
+    /// Authenticated transport peer supplying the observation; kept helper-local. For clients,
+    /// its association with the separately signed ephemeral actor is checked by the agent.
+    #[prost(bytes = "vec", tag = "4")]
+    pub observer_peer_id: Vec<u8>,
+    /// Four or sixteen public-unicast address bytes, without a peer-controlled port.
+    #[prost(bytes = "vec", tag = "5")]
+    pub observed_address: Vec<u8>,
+    /// Explicit local-LAN candidate; mutually exclusive with the public Identify observation.
+    #[prost(message, optional, tag = "6")]
+    pub on_link: Option<OnLinkUnderlayHint>,
 }
 
 /// Atomically prepare all local endpoint roles for a route context.
@@ -380,6 +499,9 @@ pub struct PrepareLeaseBatch {
     /// Hard context deadline, at most 15 minutes after helper receipt.
     #[prost(uint64, tag = "7")]
     pub hard_expires_at_unix: u64,
+    /// Optional exact-peer observations used only when no directly assigned public underlay exists.
+    #[prost(message, repeated, tag = "8")]
+    pub traversal_hints: Vec<TraversalEndpointHint>,
 }
 
 /// Minimal canonical topology needed to recover one possibly dispatched Prepare.
@@ -477,9 +599,10 @@ pub struct LeaseActivation {
     /// and enforces resource bounds but does not verify or grant authority from them.
     #[prost(bytes = "vec", tag = "8")]
     pub signed_relay_reservation: Vec<u8>,
-    /// Exact canonical client-session-signed `RelayReservationRequest` accepted by this relay.
+    /// Exact canonical client-session authority accepted for this activation.
     ///
-    /// Only `RelayClient` may carry these bounded opaque bytes. Cryptographic verification and
+    /// `RelayClient` carries its signed `RelayReservationRequest`; a native-probe `Exit` carries
+    /// the complete canonical `NativeProbeAuthorizationChain`. Cryptographic verification and
     /// request-to-reservation commitment checks remain the production backend's responsibility.
     #[prost(bytes = "vec", tag = "9")]
     pub signed_client_relay_request: Vec<u8>,
@@ -556,6 +679,10 @@ pub struct AddMptcpEndpoint {
     /// Backup-only path.
     #[prost(bool, tag = "5")]
     pub backup: bool,
+    /// Optional alternate TCP listener port for an Exit signal; zero uses the initial port and is
+    /// required for every other endpoint.
+    #[prost(uint32, tag = "6")]
+    pub listener_port: u32,
 }
 
 /// Remove one exactly owned MPTCP endpoint.
@@ -572,12 +699,57 @@ pub struct RemoveMptcpEndpoint {
     pub path_id: u32,
 }
 
-/// Global cleanup authenticates with a fixed-width process-start token.
+/// Scoped cleanup authenticates with a fixed-width process-start token.
 #[derive(Clone, PartialEq, Message, Zeroize, ZeroizeOnDrop)]
 pub struct CleanupOwned {
     /// Random 32-byte cleanup token.
     #[prost(bytes = "vec", tag = "1")]
     pub cleanup_token: Vec<u8>,
+    /// Closed resource class; zero is invalid.
+    #[prost(enumeration = "CleanupScope", tag = "2")]
+    pub scope: i32,
+}
+
+/// Request one runtime-long upload scheduler, independent of every route context.
+///
+/// Rates are operator-known decimal Mbps, not NIC speed or discovered spare capacity. The helper
+/// resolves the bounded interface name and checks ownership before any kernel mutation.
+#[derive(Clone, PartialEq, Message)]
+pub struct InstallUplinkSharing {
+    /// Non-zero random 16-byte node-sharing runtime identity, not a route context.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// One 1..=15 byte ASCII netdevice name; paths and free-form input are forbidden.
+    #[prost(string, tag = "2")]
+    pub interface: String,
+    /// Positive bounded operator-known total usable upload in decimal Mbps.
+    #[prost(uint32, tag = "3")]
+    pub total_upload_mbps: u32,
+    /// Positive aggregate Relay+Exit upload ceiling, no greater than total upload.
+    #[prost(uint32, tag = "4")]
+    pub contribution_upload_ceiling_mbps: u32,
+}
+
+/// Inspect one exact sharing owner without changing queue state.
+#[derive(Clone, PartialEq, Message)]
+pub struct InspectUplinkSharing {
+    /// Exact ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Exact opaque helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+}
+
+/// Idempotently retire one exact sharing owner, never unrelated interface state.
+#[derive(Clone, PartialEq, Message)]
+pub struct DestroyUplinkSharing {
+    /// Exact ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Exact opaque helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
 }
 
 /// Stable helper result. Zero is never a valid response.
@@ -629,7 +801,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -640,8 +812,10 @@ pub mod helper_response {
 
     use super::{
         ActivatedClientIngress, ActivatedLeaseBatch, CommittedLeaseBatch, DestroyedClientIngress,
-        DestroyedContext, Empty, HelperRuntime, IngressSocketReady, PreparedClientIngress,
-        PreparedLeaseBatch, ReconciledExpiredPrepare, TransportSocketReady,
+        DestroyedContext, DestroyedSharing, DestroyedWifiMesh, Empty, HelperRuntime,
+        IngressReplySocketReady, IngressSocketReady, InstalledUplinkSharing, InstalledWifiMesh,
+        PreparedClientIngress, PreparedLeaseBatch, ReconciledExpiredPrepare, SharingCounters,
+        TransportSocketReady, WifiMeshSnapshot,
     };
 
     /// Exactly one successful outcome.
@@ -683,6 +857,27 @@ pub mod helper_response {
         /// Non-secret identity of the helper process serving this connection.
         #[prost(message, tag = "35")]
         HelperRuntime(HelperRuntime),
+        /// Exact endpoints of one connected transparent IPv4 reply descriptor.
+        #[prost(message, tag = "36")]
+        IngressReplySocketReady(IngressReplySocketReady),
+        /// Exact runtime-long sharing owner and kernel-resolved physical egress.
+        #[prost(message, tag = "37")]
+        InstalledUplinkSharing(InstalledUplinkSharing),
+        /// Kernel counters for one exact sharing owner.
+        #[prost(message, tag = "38")]
+        SharingCounters(SharingCounters),
+        /// Idempotent sharing retirement result.
+        #[prost(message, tag = "39")]
+        DestroyedSharing(DestroyedSharing),
+        /// Installed direct mesh underlay with exact kernel identity.
+        #[prost(message, tag = "40")]
+        InstalledWifiMesh(InstalledWifiMesh),
+        /// Actual bounded peering/counter snapshot, not estimated bandwidth.
+        #[prost(message, tag = "41")]
+        WifiMeshSnapshot(WifiMeshSnapshot),
+        /// Exact mesh retirement result.
+        #[prost(message, tag = "42")]
+        DestroyedWifiMesh(DestroyedWifiMesh),
     }
 }
 
@@ -798,6 +993,68 @@ pub struct DestroyedContext {
     pub existed: bool,
 }
 
+/// Helper-owned upload scheduler installed before active node participation.
+#[derive(Clone, PartialEq, Message)]
+pub struct InstalledUplinkSharing {
+    /// Echoed ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Opaque non-zero 32-byte helper-issued owner handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+    /// Kernel-resolved non-zero egress ifindex; never an agent-selected index.
+    #[prost(uint32, tag = "3")]
+    pub egress_ifindex: u32,
+}
+
+/// Raw kernel queue counters, without derived rates, sampling time or capacity claims.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub struct SharingQueueCounters {
+    /// Kernel-reported byte counter.
+    #[prost(uint64, tag = "1")]
+    pub bytes: u64,
+    /// Kernel-reported packet counter.
+    #[prost(uint64, tag = "2")]
+    pub packets: u64,
+    /// Kernel-reported drop counter.
+    #[prost(uint64, tag = "3")]
+    pub drops: u64,
+    /// Kernel-reported overlimit counter.
+    #[prost(uint64, tag = "4")]
+    pub overlimits: u64,
+    /// Kernel-reported instantaneous byte backlog, not a monotone counter.
+    #[prost(uint64, tag = "5")]
+    pub backlog_bytes: u64,
+}
+
+/// Complete aggregate/owner/contribution queue snapshot for one exact runtime owner.
+#[derive(Clone, PartialEq, Message)]
+pub struct SharingCounters {
+    /// Echoed ephemeral sharing runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub sharing_runtime_id: Vec<u8>,
+    /// Echoed exact helper-issued sharing handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub sharing_handle: Vec<u8>,
+    /// Mandatory total-underlay queue counters.
+    #[prost(message, optional, tag = "3")]
+    pub total: Option<SharingQueueCounters>,
+    /// Mandatory owner's queue counters.
+    #[prost(message, optional, tag = "4")]
+    pub owner: Option<SharingQueueCounters>,
+    /// Mandatory aggregate Relay+Exit contribution queue counters.
+    #[prost(message, optional, tag = "5")]
+    pub contribution: Option<SharingQueueCounters>,
+}
+
+/// Sharing retirement result, correlated by the full request digest and request ID.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub struct DestroyedSharing {
+    /// True when this owner was removed; false when already absent.
+    #[prost(bool, tag = "1")]
+    pub existed: bool,
+}
+
 /// Canonical metadata for one separately transferred transport descriptor.
 #[derive(Clone, PartialEq, Message)]
 pub struct TransportSocketReady {
@@ -887,6 +1144,23 @@ pub struct ActivatedClientIngress {
     /// Exact helper-issued ingress handle.
     #[prost(bytes = "vec", tag = "2")]
     pub ingress_handle: Vec<u8>,
+}
+
+/// Metadata bound to one separately transferred connected ingress reply descriptor.
+#[derive(Clone, PartialEq, Message)]
+pub struct IngressReplySocketReady {
+    /// Echoed ephemeral client runtime identifier.
+    #[prost(bytes = "vec", tag = "1")]
+    pub client_runtime_id: Vec<u8>,
+    /// Exact helper-issued ingress handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ingress_handle: Vec<u8>,
+    /// Kernel-revalidated local tuple, equal to the original remote.
+    #[prost(message, optional, tag = "3")]
+    pub remote: Option<IngressSocketAddress>,
+    /// Kernel-revalidated connected peer, equal to the intercepted application.
+    #[prost(message, optional, tag = "4")]
+    pub application: Option<IngressSocketAddress>,
 }
 
 /// Idempotent client-ingress destruction result.
@@ -996,6 +1270,60 @@ pub fn operation_digest(value: &HelperRequest) -> Result<[u8; 32], HelperProtoco
     Ok(*blake3::hash(&bytes).as_bytes())
 }
 
+/// Validate a sharing response against the exact canonical request and owner lineage.
+///
+/// This does not replace authenticating and binding the helper process on the same connection.
+/// No sharing operation transfers a file descriptor. A valid failure remains a failure result for
+/// the caller to handle; this function proves correlation, not successful kernel installation.
+///
+/// # Errors
+///
+/// Rejects malformed requests/responses, non-sharing operations, altered correlation fields,
+/// mismatched success variants, or substituted sharing identities/handles.
+pub fn validate_uplink_sharing_response(
+    request: &HelperRequest,
+    response: &HelperResponse,
+) -> Result<(), HelperProtocolError> {
+    use helper_request::Operation;
+    use helper_response::Outcome;
+
+    validate_request(request)?;
+    validate_response(response)?;
+    let operation = request
+        .operation
+        .as_ref()
+        .ok_or(HelperProtocolError::Invalid("missing operation"))?;
+    if !matches!(
+        operation,
+        Operation::InstallUplinkSharing(_)
+            | Operation::InspectUplinkSharing(_)
+            | Operation::DestroyUplinkSharing(_)
+    ) || request.request_id != response.request_id
+        || response.operation_digest.as_slice() != operation_digest(request)?
+    {
+        return Err(HelperProtocolError::Invalid("sharing response correlation"));
+    }
+    if response.result != HelperResult::Ok as i32 {
+        return Ok(());
+    }
+    let matches = match (operation, response.outcome.as_ref()) {
+        (
+            Operation::InstallUplinkSharing(request),
+            Some(Outcome::InstalledUplinkSharing(value)),
+        ) => request.sharing_runtime_id == value.sharing_runtime_id,
+        (Operation::InspectUplinkSharing(request), Some(Outcome::SharingCounters(value))) => {
+            request.sharing_runtime_id == value.sharing_runtime_id
+                && request.sharing_handle == value.sharing_handle
+        }
+        (Operation::DestroyUplinkSharing(_), Some(Outcome::DestroyedSharing(_))) => true,
+        _ => false,
+    };
+    if !matches {
+        return Err(HelperProtocolError::Invalid("sharing response owner"));
+    }
+    Ok(())
+}
+
 /// Derive the exact 32-byte binding sent in the same `SCM_RIGHTS` message as a transport FD.
 ///
 /// The domain-separated BLAKE3 value commits the protocol version, request ID, canonical request
@@ -1055,6 +1383,32 @@ pub fn ingress_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProt
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Derive the exact binding sent atomically with one connected ingress reply descriptor.
+///
+/// # Errors
+///
+/// Returns an error unless value is a valid successful ingress reply-socket response.
+pub fn ingress_reply_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperProtocolError> {
+    validate_response(value)?;
+    let Some(helper_response::Outcome::IngressReplySocketReady(ready)) = value.outcome.as_ref()
+    else {
+        return Err(HelperProtocolError::Invalid("ingress reply FD outcome"));
+    };
+    let canonical = value.encode_to_vec();
+    let canonical_length = u32::try_from(canonical.len())
+        .map_err(|_| HelperProtocolError::Invalid("ingress reply FD response length"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"VOLPAROSSA helper ingress reply descriptor binding v3\0");
+    hasher.update(&value.protocol_version.to_be_bytes());
+    hasher.update(&value.request_id);
+    hasher.update(&value.operation_digest);
+    hasher.update(&ready.client_runtime_id);
+    hasher.update(&ready.ingress_handle);
+    hasher.update(&canonical_length.to_be_bytes());
+    hasher.update(&canonical);
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// Derive the binding for either descriptor-bearing helper success outcome.
 ///
 /// # Errors
@@ -1064,6 +1418,9 @@ pub fn descriptor_fd_binding(value: &HelperResponse) -> Result<[u8; 32], HelperP
     match value.outcome.as_ref() {
         Some(helper_response::Outcome::TransportSocketReady(_)) => transport_fd_binding(value),
         Some(helper_response::Outcome::IngressSocketReady(_)) => ingress_fd_binding(value),
+        Some(helper_response::Outcome::IngressReplySocketReady(_)) => {
+            ingress_reply_fd_binding(value)
+        }
         _ => Err(HelperProtocolError::Invalid("descriptor FD outcome")),
     }
 }
@@ -1132,11 +1489,34 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
             )
         }
         Operation::DestroyClientIngress(_) => "destroy one owned client ingress runtime".to_owned(),
+        Operation::AcquireIngressReplySocket(_) => {
+            "acquire one connected client-ingress UDP reply descriptor".to_owned()
+        }
         Operation::BindHelperRuntime(value) if value.prepare_intent.is_some() => {
             "bind helper runtime and pre-register one Prepare intent".to_owned()
         }
         Operation::BindHelperRuntime(_) => "read helper runtime identity".to_owned(),
-        Operation::CleanupOwned(_) => "destroy all helper-owned resources".to_owned(),
+        Operation::InstallUplinkSharing(_) => "install one owned upload-sharing runtime".to_owned(),
+        Operation::InspectUplinkSharing(_) => "inspect one owned upload-sharing runtime".to_owned(),
+        Operation::DestroyUplinkSharing(_) => "destroy one owned upload-sharing runtime".to_owned(),
+        Operation::InstallWifiMesh(_) => {
+            "create one owned open-L2 Wi-Fi mesh link; no default route or radio retuning"
+                .to_owned()
+        }
+        Operation::InspectWifiMesh(_) => "inspect one owned direct Wi-Fi mesh link".to_owned(),
+        Operation::DestroyWifiMesh(_) => "leave and remove one owned Wi-Fi mesh link".to_owned(),
+        Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
+            .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
+        {
+            CleanupScope::AllOwnedResources => "destroy all helper-owned resources".to_owned(),
+            CleanupScope::RouteContextsOnly => {
+                "destroy helper-owned route contexts; preserve client ingress and upload sharing"
+                    .to_owned()
+            }
+            CleanupScope::Unspecified => {
+                return Err(HelperProtocolError::Invalid("cleanup scope"));
+            }
+        },
     };
     output.push_str("; audit_digest=");
     for byte in &operation_digest(value)?[..8] {
@@ -1164,7 +1544,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 handle(&lease.lease_handle)?;
                 path_role(lease.path_id, lease.role)?;
                 public_key(&lease.peer_public_key)?;
-                endpoint(
+                activation_endpoint(
                     lease
                         .peer_endpoint
                         .as_ref()
@@ -1204,9 +1584,17 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 if role == WireguardRole::RelayClient {
                     if lease.signed_client_relay_request.is_empty() {
                         return Err(HelperProtocolError::Invalid(
-                            "missing signed client relay request",
+                            "missing signed client activation authority",
                         ));
                     }
+                    signed_client_relay_request_bytes = signed_client_relay_request_bytes
+                        .checked_add(lease.signed_client_relay_request.len())
+                        .ok_or(HelperProtocolError::Invalid(
+                            "signed client relay request aggregate size",
+                        ))?;
+                } else if role == WireguardRole::Exit
+                    && !lease.signed_client_relay_request.is_empty()
+                {
                     signed_client_relay_request_bytes = signed_client_relay_request_bytes
                         .checked_add(lease.signed_client_relay_request.len())
                         .ok_or(HelperProtocolError::Invalid(
@@ -1251,6 +1639,9 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 .map_err(|_| HelperProtocolError::Invalid("MPTCP mode"))?;
             if mode == MptcpEndpointMode::Unspecified {
                 return Err(HelperProtocolError::Invalid("MPTCP mode"));
+            }
+            if u16::try_from(operation.listener_port).is_err() {
+                return Err(HelperProtocolError::Invalid("MPTCP listener port"));
             }
             Ok(())
         }
@@ -1332,6 +1723,26 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             runtime(&operation.client_runtime_id)?;
             handle(&operation.ingress_handle)
         }
+        Operation::AcquireIngressReplySocket(operation) => {
+            runtime(&operation.client_runtime_id)?;
+            handle(&operation.ingress_handle)?;
+            let remote = concrete_ingress_address(
+                operation
+                    .remote
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+            )?;
+            let application = concrete_ingress_address(
+                operation
+                    .application
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+            )?;
+            if remote == application || remote.is_ipv4() != application.is_ipv4() {
+                return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+            }
+            Ok(())
+        }
         Operation::BindHelperRuntime(operation) => {
             operation.prepare_intent.as_ref().map_or(Ok(()), |intent| {
                 if value.request_id == intent.prepare_request_id {
@@ -1351,9 +1762,60 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
                 validate_closed_prepare_plan(closed_plan.context_role, &closed_plan.leases)
             })
         }
-        Operation::CleanupOwned(operation) if operation.cleanup_token.len() == 32 => Ok(()),
-        Operation::CleanupOwned(_) => Err(HelperProtocolError::Invalid("cleanup token")),
+        Operation::CleanupOwned(operation) if operation.cleanup_token.len() != 32 => {
+            Err(HelperProtocolError::Invalid("cleanup token"))
+        }
+        Operation::CleanupOwned(operation) => match CleanupScope::try_from(operation.scope).ok() {
+            Some(CleanupScope::AllOwnedResources | CleanupScope::RouteContextsOnly) => Ok(()),
+            Some(CleanupScope::Unspecified) | None => {
+                Err(HelperProtocolError::Invalid("cleanup scope"))
+            }
+        },
+        Operation::InstallUplinkSharing(operation) => validate_install_sharing(operation),
+        Operation::InspectUplinkSharing(operation) => {
+            sharing_runtime(&operation.sharing_runtime_id)?;
+            handle(&operation.sharing_handle)
+        }
+        Operation::DestroyUplinkSharing(operation) => {
+            sharing_runtime(&operation.sharing_runtime_id)?;
+            handle(&operation.sharing_handle)
+        }
+        Operation::InstallWifiMesh(operation) => wifi_mesh::validate_install(operation),
+        Operation::InspectWifiMesh(operation) => {
+            context(&operation.mesh_runtime_id)?;
+            handle(&operation.mesh_handle)
+        }
+        Operation::DestroyWifiMesh(operation) => {
+            context(&operation.mesh_runtime_id)?;
+            handle(&operation.mesh_handle)
+        }
     }
+}
+
+fn validate_install_sharing(value: &InstallUplinkSharing) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    let name = value.interface.as_str();
+    if !(1..=15).contains(&name.len())
+        || matches!(name, "." | "..")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(HelperProtocolError::Invalid("sharing interface"));
+    }
+    if !(1..=MAX_HELPER_RATE_MBPS).contains(&value.total_upload_mbps)
+        || !(1..=value.total_upload_mbps).contains(&value.contribution_upload_ceiling_mbps)
+    {
+        return Err(HelperProtocolError::Invalid("sharing rate bounds"));
+    }
+    Ok(())
+}
+
+fn sharing_runtime(value: &[u8]) -> Result<(), HelperProtocolError> {
+    if value.len() != 16 || value.iter().all(|byte| *byte == 0) {
+        return Err(HelperProtocolError::Invalid("sharing runtime"));
+    }
+    Ok(())
 }
 
 fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError> {
@@ -1366,7 +1828,68 @@ fn validate_prepare(value: &PrepareLeaseBatch) -> Result<(), HelperProtocolError
     {
         return Err(HelperProtocolError::Invalid("prepare bounds"));
     }
-    validate_closed_prepare_plan(value.role, &value.leases)
+    validate_closed_prepare_plan(value.role, &value.leases)?;
+    validate_traversal_hints(&value.leases, &value.traversal_hints)
+}
+
+fn validate_traversal_hints(
+    leases: &[LeasePlan],
+    hints: &[TraversalEndpointHint],
+) -> Result<(), HelperProtocolError> {
+    if hints.len() > MAX_HELPER_TRAVERSAL_HINTS {
+        return Err(HelperProtocolError::Invalid("traversal hint count"));
+    }
+    let lease_identities = leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let mut identities = BTreeSet::new();
+    let mut previous = None;
+    for hint in hints {
+        path_role(hint.path_id, hint.role)?;
+        if !lease_identities.contains(&(hint.path_id, hint.role))
+            || hint.observer_id.len() != 32
+            || hint.observer_id.iter().all(|byte| *byte == 0)
+            || hint.observer_peer_id.is_empty()
+            || hint.observer_peer_id.len() > 64
+            || hint.observer_peer_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(HelperProtocolError::Invalid("traversal hint lineage"));
+        }
+        let (address, address_bytes) = if let Some(on_link) = &hint.on_link {
+            if !hint.observed_address.is_empty() {
+                return Err(HelperProtocolError::Invalid("mixed underlay hints"));
+            }
+            let local = parse_local_lan_address(&on_link.local_address)?;
+            let peer = parse_local_lan_address(&on_link.peer_address)?;
+            if local == peer || local.is_ipv4() != peer.is_ipv4() {
+                return Err(HelperProtocolError::Invalid("on-link address pair"));
+            }
+            (local, on_link.local_address.as_slice())
+        } else {
+            (
+                parse_public_address(&hint.observed_address)?,
+                hint.observed_address.as_slice(),
+            )
+        };
+        let family = u8::from(address.is_ipv4()); // IPv6 sorts before IPv4.
+        let key = (
+            hint.path_id,
+            hint.role,
+            family,
+            address_bytes,
+            hint.observer_peer_id.as_slice(),
+        );
+        if previous.as_ref().is_some_and(|previous| previous >= &key)
+            || !identities.insert((hint.path_id, hint.role, family))
+        {
+            return Err(HelperProtocolError::Invalid(
+                "non-canonical traversal hints",
+            ));
+        }
+        previous = Some(key);
+    }
+    Ok(())
 }
 
 fn validate_closed_prepare_plan(
@@ -1459,16 +1982,21 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
                 handle(&lease.lease_handle)?;
                 path_role(lease.path_id, lease.role)?;
                 public_key(&lease.public_key)?;
-                endpoint(
-                    lease
-                        .public_endpoint
-                        .as_ref()
-                        .ok_or(HelperProtocolError::Invalid("public endpoint"))?,
-                )?;
-                if UnderlayEvidence::try_from(lease.underlay_evidence)
-                    != Ok(UnderlayEvidence::DirectAssigned)
-                {
-                    return Err(HelperProtocolError::Invalid("underlay evidence"));
+                let public_endpoint = lease
+                    .public_endpoint
+                    .as_ref()
+                    .ok_or(HelperProtocolError::Invalid("public endpoint"))?;
+                match UnderlayEvidence::try_from(lease.underlay_evidence) {
+                    Ok(UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch) => {
+                        endpoint(public_endpoint)?;
+                    }
+                    Ok(UnderlayEvidence::DirectOnLink) => {
+                        if !(1..=65_535).contains(&public_endpoint.port) {
+                            return Err(HelperProtocolError::Invalid("UDP port"));
+                        }
+                        let _ = parse_local_lan_address(&public_endpoint.address)?;
+                    }
+                    _ => return Err(HelperProtocolError::Invalid("underlay evidence")),
                 }
                 Ok((lease.path_id, lease.role))
             })
@@ -1513,15 +2041,63 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         ),
         Outcome::PreparedClientIngress(value) => validate_prepared_ingress_outcome(value),
         Outcome::IngressSocketReady(value) => validate_ingress_ready_outcome(value),
+        Outcome::IngressReplySocketReady(value) => validate_ingress_reply_ready(value),
         Outcome::ActivatedClientIngress(value) => {
             runtime(&value.client_runtime_id)?;
             handle(&value.ingress_handle)
         }
-        Outcome::DestroyedClientIngress(_) | Outcome::DestroyedContext(_) | Outcome::Empty(_) => {
-            Ok(())
-        }
+        Outcome::InstalledUplinkSharing(value) => validate_installed_sharing(value),
+        Outcome::SharingCounters(value) => validate_sharing_counters(value),
+        Outcome::InstalledWifiMesh(value) => wifi_mesh::validate_installed(value),
+        Outcome::WifiMeshSnapshot(value) => wifi_mesh::validate_snapshot(value),
+        Outcome::DestroyedClientIngress(_)
+        | Outcome::DestroyedContext(_)
+        | Outcome::DestroyedSharing(_)
+        | Outcome::DestroyedWifiMesh(_)
+        | Outcome::Empty(_) => Ok(()),
         Outcome::HelperRuntime(value) => helper_runtime(&value.helper_runtime_id),
     }
+}
+
+fn validate_ingress_reply_ready(
+    value: &IngressReplySocketReady,
+) -> Result<(), HelperProtocolError> {
+    runtime(&value.client_runtime_id)?;
+    handle(&value.ingress_handle)?;
+    let remote = concrete_ingress_address(
+        value
+            .remote
+            .as_ref()
+            .ok_or(HelperProtocolError::Invalid("ingress reply remote"))?,
+    )?;
+    let application = concrete_ingress_address(
+        value
+            .application
+            .as_ref()
+            .ok_or(HelperProtocolError::Invalid("ingress reply application"))?,
+    )?;
+    if remote == application || remote.is_ipv4() != application.is_ipv4() {
+        return Err(HelperProtocolError::Invalid("ingress reply address pair"));
+    }
+    Ok(())
+}
+
+fn validate_installed_sharing(value: &InstalledUplinkSharing) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    handle(&value.sharing_handle)?;
+    if value.egress_ifindex == 0 {
+        return Err(HelperProtocolError::Invalid("sharing egress ifindex"));
+    }
+    Ok(())
+}
+
+fn validate_sharing_counters(value: &SharingCounters) -> Result<(), HelperProtocolError> {
+    sharing_runtime(&value.sharing_runtime_id)?;
+    handle(&value.sharing_handle)?;
+    if value.total.is_none() || value.owner.is_none() || value.contribution.is_none() {
+        return Err(HelperProtocolError::Invalid("sharing queue counters"));
+    }
+    Ok(())
 }
 
 fn validate_reconcile_scope(
@@ -1726,6 +2302,39 @@ fn ingress_local(
     Ok(())
 }
 
+fn concrete_ingress_address(
+    value: &IngressSocketAddress,
+) -> Result<SocketAddr, HelperProtocolError> {
+    let port = u16::try_from(value.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(HelperProtocolError::Invalid("ingress reply UDP port"))?;
+    match value.address.as_slice() {
+        bytes if bytes.len() == 4 => {
+            let address = Ipv4Addr::from(
+                <[u8; 4]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv4 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() || address == Ipv4Addr::BROADCAST
+            {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv4 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        bytes if bytes.len() == 16 => {
+            let address = Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes)
+                    .map_err(|_| HelperProtocolError::Invalid("ingress reply IPv6 address"))?,
+            );
+            if address.is_unspecified() || address.is_multicast() {
+                return Err(HelperProtocolError::Invalid("ingress reply IPv6 address"));
+            }
+            Ok(SocketAddr::from((address, port)))
+        }
+        _ => Err(HelperProtocolError::Invalid("ingress reply address family")),
+    }
+}
+
 fn bound_context(context_id: &[u8], context_handle: &[u8]) -> Result<(), HelperProtocolError> {
     context(context_id)?;
     handle(context_handle)
@@ -1773,7 +2382,41 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !(1..=65_535).contains(&value.port) {
         return Err(HelperProtocolError::Invalid("UDP port"));
     }
-    let address = match value.address.as_slice() {
+    let _address = parse_public_address(&value.address)?;
+    Ok(())
+}
+
+/// An activation endpoint is only a candidate: its opaque prepared lease and signed authority
+/// must match the helper's stored kernel-verified on-link binding before private UDP is enabled.
+fn activation_endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
+    if endpoint(value).is_ok() {
+        return Ok(());
+    }
+    if !(1..=65_535).contains(&value.port) {
+        return Err(HelperProtocolError::Invalid("UDP port"));
+    }
+    let _ = parse_local_lan_address(&value.address)?;
+    Ok(())
+}
+
+fn parse_local_lan_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
+    let address = match bytes {
+        bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("LAN address"))?,
+        )),
+        bytes if bytes.len() == 16 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("LAN address"))?,
+        )),
+        _ => return Err(HelperProtocolError::Invalid("LAN address")),
+    };
+    if !is_local_lan_ip(address) {
+        return Err(HelperProtocolError::Invalid("LAN address"));
+    }
+    Ok(address)
+}
+
+fn parse_public_address(bytes: &[u8]) -> Result<IpAddr, HelperProtocolError> {
+    let address = match bytes {
         bytes if bytes.len() == 4 => IpAddr::V4(Ipv4Addr::from(
             <[u8; 4]>::try_from(bytes).map_err(|_| HelperProtocolError::Invalid("IPv4"))?,
         )),
@@ -1786,7 +2429,7 @@ fn endpoint(value: &PublicUdpEndpoint) -> Result<(), HelperProtocolError> {
     if !safe {
         return Err(HelperProtocolError::Invalid("public IP address"));
     }
-    Ok(())
+    Ok(address)
 }
 
 fn validate_transport_tuple(
@@ -1802,7 +2445,7 @@ fn validate_transport_tuple(
     let local =
         transport_address(local.ok_or(HelperProtocolError::Invalid("transport local address"))?)?;
     match kind {
-        TransportSocketKind::MptcpConnected => {
+        TransportSocketKind::MptcpConnected | TransportSocketKind::NativeProbeUdpConnected => {
             let remote = transport_address(
                 remote.ok_or(HelperProtocolError::Invalid("transport remote address"))?,
             )?;
@@ -1937,6 +2580,7 @@ mod tests {
                     leases,
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
+                    traversal_hints: Vec::new(),
                 },
             )),
         }
@@ -2032,6 +2676,7 @@ mod tests {
             request_id: vec![0x31; 16],
             operation: Some(helper_request::Operation::CleanupOwned(CleanupOwned {
                 cleanup_token: vec![0xa5; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             })),
         };
         let canonical = Zeroizing::new(request.encode_to_vec());
@@ -2195,6 +2840,114 @@ mod tests {
     }
 
     #[test]
+    fn traversal_hints_are_exact_bounded_and_canonical() {
+        let mut request = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = request.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        let ipv6 = TraversalEndpointHint {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            observer_id: vec![7; 32],
+            observer_peer_id: vec![8; 38],
+            on_link: None,
+            observed_address: "2606:4700:4700::1111"
+                .parse::<Ipv6Addr>()
+                .expect("IPv6")
+                .octets()
+                .to_vec(),
+        };
+        let ipv4 = TraversalEndpointHint {
+            observed_address: vec![8, 8, 8, 8],
+            ..ipv6.clone()
+        };
+        batch.traversal_hints = vec![ipv6.clone(), ipv4.clone()];
+        assert!(encode_request(&request).is_ok());
+
+        let mut noncanonical = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            noncanonical.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints.reverse();
+        assert!(encode_request(&noncanonical).is_err());
+
+        let mut duplicate_family = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            duplicate_family.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![ipv4.clone(), ipv4.clone()];
+        assert!(encode_request(&duplicate_family).is_err());
+
+        let mut foreign_path = request.clone();
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) =
+            foreign_path.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints[0].path_id = 2;
+        assert!(encode_request(&foreign_path).is_err());
+
+        let mut private = request;
+        let Some(helper_request::Operation::PrepareLeaseBatch(batch)) = private.operation.as_mut()
+        else {
+            panic!("prepare");
+        };
+        batch.traversal_hints = vec![TraversalEndpointHint {
+            observed_address: vec![192, 168, 1, 1],
+            ..ipv4
+        }];
+        assert!(encode_request(&private).is_err());
+    }
+
+    #[test]
+    fn on_link_hints_are_scoped_pairs_not_public_observations() {
+        let leases = [plan(1, WireguardRole::Client)];
+        let hint = TraversalEndpointHint {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            observer_id: vec![7; 32],
+            observer_peer_id: vec![8; 38],
+            observed_address: Vec::new(),
+            on_link: Some(OnLinkUnderlayHint {
+                local_address: vec![10, 42, 0, 2],
+                peer_address: vec![10, 42, 0, 1],
+            }),
+        };
+        validate_traversal_hints(&leases, std::slice::from_ref(&hint)).expect("scoped LAN hint");
+        assert_eq!(
+            TraversalEndpointHint::decode(hint.encode_to_vec().as_slice()).unwrap(),
+            hint
+        );
+        let mut mixed = hint.clone();
+        mixed.observed_address = vec![8, 8, 8, 8];
+        assert!(validate_traversal_hints(&leases, &[mixed]).is_err());
+        for peer in [
+            vec![8, 8, 8, 8],
+            vec![127, 0, 0, 1],
+            vec![169, 254, 1, 2],
+            vec![10, 42, 0, 2],
+            vec![0; 16],
+        ] {
+            let mut substituted = hint.clone();
+            substituted.on_link.as_mut().unwrap().peer_address = peer;
+            assert!(validate_traversal_hints(&leases, &[substituted]).is_err());
+        }
+        assert!(validate_traversal_hints(&leases, &[hint.clone(), hint]).is_err());
+        assert!(
+            endpoint(&PublicUdpEndpoint {
+                address: vec![10, 42, 0, 1],
+                port: 51820
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn external_wire_has_no_private_key_or_free_overlay_fields() {
         let value = prepare(ContextRole::Client, vec![plan(1, WireguardRole::Client)]);
         let encoded = encode_request(&value).expect("encode");
@@ -2316,7 +3069,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_endpoint_requires_direct_assigned_evidence_and_nonzero_port() {
+    fn prepared_endpoint_requires_known_underlay_evidence_and_nonzero_port() {
         let response = HelperResponse {
             protocol_version: HELPER_PROTOCOL_VERSION,
             request_id: vec![8; 16],
@@ -2341,6 +3094,26 @@ mod tests {
             )),
         };
         assert!(encode_response(&response).is_ok());
+        let mut punch = response.clone();
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = punch.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].underlay_evidence = UnderlayEvidence::ObservedUdpPunch as i32;
+        assert!(encode_response(&punch).is_ok());
+        let mut local = response.clone();
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = local.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].public_endpoint.as_mut().unwrap().address = vec![10, 42, 0, 2];
+        assert!(encode_response(&local).is_err());
+        let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = local.outcome.as_mut()
+        else {
+            panic!("prepared");
+        };
+        batch.leases[0].underlay_evidence = UnderlayEvidence::DirectOnLink as i32;
+        assert!(encode_response(&local).is_ok());
         let mut wrong = response;
         let Some(helper_response::Outcome::PreparedLeaseBatch(batch)) = wrong.outcome.as_mut()
         else {
@@ -2460,6 +3233,336 @@ mod tests {
         }
     }
 
+    fn sharing_requests() -> [HelperRequest; 3] {
+        use helper_request::Operation;
+        [
+            ingress_request(
+                37,
+                Operation::InstallUplinkSharing(InstallUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    interface: "enp1s0".to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 60,
+                }),
+            ),
+            ingress_request(
+                38,
+                Operation::InspectUplinkSharing(InspectUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    sharing_handle: vec![8; 32],
+                }),
+            ),
+            ingress_request(
+                39,
+                Operation::DestroyUplinkSharing(DestroyUplinkSharing {
+                    sharing_runtime_id: vec![7; 16],
+                    sharing_handle: vec![8; 32],
+                }),
+            ),
+        ]
+    }
+
+    fn sharing_response(request: &HelperRequest) -> HelperResponse {
+        use helper_request::Operation;
+        use helper_response::Outcome;
+        let outcome = match request.operation.as_ref().expect("operation") {
+            Operation::InstallUplinkSharing(value) => {
+                Outcome::InstalledUplinkSharing(InstalledUplinkSharing {
+                    sharing_runtime_id: value.sharing_runtime_id.clone(),
+                    sharing_handle: vec![8; 32],
+                    egress_ifindex: 2,
+                })
+            }
+            Operation::InspectUplinkSharing(value) => Outcome::SharingCounters(SharingCounters {
+                sharing_runtime_id: value.sharing_runtime_id.clone(),
+                sharing_handle: value.sharing_handle.clone(),
+                total: Some(SharingQueueCounters::default()),
+                owner: Some(SharingQueueCounters::default()),
+                contribution: Some(SharingQueueCounters::default()),
+            }),
+            Operation::DestroyUplinkSharing(_) => {
+                Outcome::DestroyedSharing(DestroyedSharing { existed: true })
+            }
+            _ => panic!("sharing operation required"),
+        };
+        HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "SHARING_OK".to_owned(),
+            operation_digest: operation_digest(request).expect("digest").to_vec(),
+            outcome: Some(outcome),
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_exact_tags_round_trip_and_safe_preview() {
+        for (request, tag, preview) in [
+            (sharing_requests()[0].clone(), [0xaa, 0x02], "install"),
+            (sharing_requests()[1].clone(), [0xb2, 0x02], "inspect"),
+            (sharing_requests()[2].clone(), [0xba, 0x02], "destroy"),
+        ] {
+            let framed = encode_request(&request).expect("request");
+            assert_eq!(&framed[24..26], &tag);
+            assert_eq!(decode_request(&framed[4..]).expect("canonical"), request);
+            let response = sharing_response(&request);
+            let framed = encode_response(&response).expect("response");
+            assert!(framed[4..].windows(2).any(|bytes| bytes == tag));
+            assert_eq!(decode_response(&framed[4..]).expect("canonical"), response);
+            validate_uplink_sharing_response(&request, &response).expect("exact correlation");
+            assert!(descriptor_fd_binding(&response).is_err());
+            let safe = safe_preview(&request).expect("preview");
+            assert!(safe.starts_with(&format!(
+                "{preview} one owned upload-sharing runtime; audit_digest="
+            )));
+            assert!(!safe.contains("enp1s0"));
+        }
+        let counters = SharingQueueCounters {
+            bytes: 1,
+            packets: 2,
+            drops: 3,
+            overlimits: 4,
+            backlog_bytes: 5,
+        };
+        assert_eq!(counters.encode_to_vec(), [8, 1, 16, 2, 24, 3, 32, 4, 40, 5]);
+        let destroyed = DestroyedSharing { existed: true };
+        assert_eq!(destroyed.encode_to_vec(), [8, 1]);
+        let mut expected_owner = vec![10, 16];
+        expected_owner.extend_from_slice(&[7; 16]);
+        expected_owner.extend_from_slice(&[18, 32]);
+        expected_owner.extend_from_slice(&[8; 32]);
+        let inspect = InspectUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+        };
+        assert_eq!(inspect.encode_to_vec(), expected_owner);
+        let installed = InstalledUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+            egress_ifindex: 2,
+        };
+        expected_owner.extend_from_slice(&[24, 2]);
+        assert_eq!(installed.encode_to_vec(), expected_owner);
+    }
+
+    #[test]
+    fn uplink_sharing_message_field_tags_are_exact() {
+        let install = InstallUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            interface: "eth0".to_owned(),
+            total_upload_mbps: 100,
+            contribution_upload_ceiling_mbps: 60,
+        };
+        let mut expected = vec![10, 16];
+        expected.extend_from_slice(&[7; 16]);
+        expected.extend_from_slice(&[18, 4]);
+        expected.extend_from_slice(b"eth0");
+        expected.extend_from_slice(&[24, 100, 32, 60]);
+        assert_eq!(install.encode_to_vec(), expected);
+        let destroy = DestroyUplinkSharing {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+        };
+        let mut expected = vec![10, 16];
+        expected.extend_from_slice(&[7; 16]);
+        expected.extend_from_slice(&[18, 32]);
+        expected.extend_from_slice(&[8; 32]);
+        assert_eq!(destroy.encode_to_vec(), expected);
+        let counters = SharingCounters {
+            sharing_runtime_id: vec![7; 16],
+            sharing_handle: vec![8; 32],
+            total: Some(SharingQueueCounters::default()),
+            owner: Some(SharingQueueCounters::default()),
+            contribution: Some(SharingQueueCounters::default()),
+        };
+        expected.extend_from_slice(&[26, 0, 34, 0, 42, 0]);
+        assert_eq!(counters.encode_to_vec(), expected);
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_invalid_names_rates_and_owner_widths() {
+        let Some(helper_request::Operation::InstallUplinkSharing(base)) =
+            sharing_requests()[0].operation.clone()
+        else {
+            panic!("install");
+        };
+        for name in [
+            "",
+            ".",
+            "..",
+            "/sys/class/net",
+            "eth0/../x",
+            "eth 0",
+            "eth:0",
+            "éth0",
+            "abcdefghijklmnop",
+        ] {
+            let mut value = base.clone();
+            value.interface = name.to_owned();
+            assert!(
+                encode_request(&ingress_request(
+                    37,
+                    helper_request::Operation::InstallUplinkSharing(value)
+                ))
+                .is_err()
+            );
+        }
+        for (total, ceiling) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 2),
+            (MAX_HELPER_RATE_MBPS + 1, 1),
+        ] {
+            let mut value = base.clone();
+            value.total_upload_mbps = total;
+            value.contribution_upload_ceiling_mbps = ceiling;
+            assert!(
+                encode_request(&ingress_request(
+                    37,
+                    helper_request::Operation::InstallUplinkSharing(value)
+                ))
+                .is_err()
+            );
+        }
+        for invalid in [vec![], vec![0; 16], vec![1; 15], vec![1; 17]] {
+            for mut request in sharing_requests() {
+                match request.operation.as_mut().expect("operation") {
+                    helper_request::Operation::InstallUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    helper_request::Operation::InspectUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    helper_request::Operation::DestroyUplinkSharing(value) => {
+                        value.sharing_runtime_id.clone_from(&invalid);
+                    }
+                    _ => panic!("sharing"),
+                }
+                assert!(encode_request(&request).is_err());
+            }
+        }
+        for invalid in [vec![], vec![0; 32], vec![1; 31], vec![1; 33]] {
+            for mut request in sharing_requests().into_iter().skip(1) {
+                match request.operation.as_mut().expect("operation") {
+                    helper_request::Operation::InspectUplinkSharing(value) => {
+                        value.sharing_handle.clone_from(&invalid);
+                    }
+                    helper_request::Operation::DestroyUplinkSharing(value) => {
+                        value.sharing_handle.clone_from(&invalid);
+                    }
+                    _ => panic!("owned sharing"),
+                }
+                assert!(encode_request(&request).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_substituted_response_correlation() {
+        for request in sharing_requests() {
+            let response = sharing_response(&request);
+            let mut wrong = response.clone();
+            wrong.request_id[0] ^= 1;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response.clone();
+            wrong.operation_digest[0] ^= 1;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response.clone();
+            wrong.outcome = Some(helper_response::Outcome::Empty(Empty {}));
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong = response;
+            wrong.result = HelperResult::Kernel as i32;
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+            wrong.outcome = None;
+            validate_uplink_sharing_response(&request, &wrong)
+                .expect("correlated failure, not success");
+        }
+        for request in sharing_requests().into_iter().take(2) {
+            let mut wrong = sharing_response(&request);
+            match wrong.outcome.as_mut().expect("outcome") {
+                helper_response::Outcome::InstalledUplinkSharing(value) => {
+                    value.sharing_runtime_id[0] ^= 1;
+                }
+                helper_response::Outcome::SharingCounters(value) => value.sharing_handle[0] ^= 1,
+                _ => panic!("owner"),
+            }
+            assert!(validate_uplink_sharing_response(&request, &wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn uplink_sharing_counters_are_complete_unsigned_kernel_values() {
+        let request = &sharing_requests()[1];
+        let mut response = sharing_response(request);
+        let Some(helper_response::Outcome::SharingCounters(value)) = response.outcome.as_mut()
+        else {
+            panic!("counters");
+        };
+        value.total = Some(SharingQueueCounters {
+            bytes: u64::MAX,
+            packets: u64::MAX,
+            drops: u64::MAX,
+            overlimits: u64::MAX,
+            backlog_bytes: u64::MAX,
+        });
+        let frame = encode_response(&response).expect("full-width raw counters");
+        assert_eq!(
+            decode_response(&frame[4..]).expect("counter round trip"),
+            response
+        );
+        for missing in 0..3 {
+            let mut wrong = response.clone();
+            let Some(helper_response::Outcome::SharingCounters(value)) = wrong.outcome.as_mut()
+            else {
+                panic!("counters");
+            };
+            match missing {
+                0 => value.total = None,
+                1 => value.owner = None,
+                _ => value.contribution = None,
+            }
+            assert!(encode_response(&wrong).is_err());
+        }
+        let mut installed = sharing_response(&sharing_requests()[0]);
+        let Some(helper_response::Outcome::InstalledUplinkSharing(value)) =
+            installed.outcome.as_mut()
+        else {
+            panic!("installed");
+        };
+        value.egress_ifindex = 0;
+        assert!(encode_response(&installed).is_err());
+    }
+
+    #[test]
+    fn uplink_sharing_rejects_unknown_duplicate_and_noncanonical_wire() {
+        for request in sharing_requests() {
+            let bytes = request.encode_to_vec();
+            let mut unknown = bytes.clone();
+            unknown.extend_from_slice(&[0xc2, 0x02, 0]); // Unassigned tag40.
+            assert!(decode_request(&unknown).is_err());
+            let mut duplicate = bytes.clone();
+            duplicate.extend_from_slice(&bytes[20..]);
+            assert!(decode_request(&duplicate).is_err());
+            let response = sharing_response(&request);
+            let mut unknown = response.encode_to_vec();
+            unknown.extend_from_slice(&[0xc2, 0x02, 0]);
+            assert!(decode_response(&unknown).is_err());
+        }
+        let request = &sharing_requests()[0];
+        let mut changed = request.clone();
+        let Some(helper_request::Operation::InstallUplinkSharing(value)) =
+            changed.operation.as_mut()
+        else {
+            panic!("install");
+        };
+        value.total_upload_mbps += 1;
+        assert_ne!(
+            operation_digest(request).expect("digest"),
+            operation_digest(&changed).expect("changed digest")
+        );
+    }
+
     #[test]
     fn client_ingress_tags_are_exact_and_retired_tag_24_is_never_valid() {
         let prepare = ingress_request(
@@ -2495,11 +3598,27 @@ mod tests {
                 ingress_handle: vec![8; 32],
             }),
         );
+        let reply = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(IngressSocketAddress {
+                    address: vec![8, 8, 8, 8],
+                    port: 443,
+                }),
+                application: Some(IngressSocketAddress {
+                    address: vec![192, 0, 2, 20],
+                    port: 50_000,
+                }),
+            }),
+        );
         for (request, tag) in [
             (prepare, [0xfa, 0x01]),
             (acquire, [0x82, 0x02]),
             (activate, [0x8a, 0x02]),
             (destroy, [0x92, 0x02]),
+            (reply, [0xa2, 0x02]),
         ] {
             let bytes = request.encode_to_vec();
             assert!(bytes.windows(2).any(|window| window == tag));
@@ -2828,7 +3947,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_client_relay_request_is_required_only_for_relay_client_and_binds_the_digest() {
+    fn signed_client_activation_authority_is_role_scoped_and_binds_the_digest() {
         let signed_request = vec![0xa5, 0x5a, 0x01, 0x00];
         let lease = relay_client_activation(1, signed_request.clone());
         let lease_wire = lease.encode_to_vec();
@@ -2857,15 +3976,16 @@ mod tests {
         assert!(matches!(
             validate_request(&missing),
             Err(HelperProtocolError::Invalid(
-                "missing signed client relay request"
+                "missing signed client activation authority"
             ))
         ));
 
-        for role in [
-            WireguardRole::Client,
-            WireguardRole::RelayExit,
-            WireguardRole::Exit,
-        ] {
+        let mut native_exit = activation_lease(1, vec![0xa5]);
+        native_exit.role = WireguardRole::Exit as i32;
+        native_exit.signed_client_relay_request = vec![0x5a];
+        assert!(validate_request(&activate(vec![native_exit])).is_ok());
+
+        for role in [WireguardRole::Client, WireguardRole::RelayExit] {
             let mut cross_role = activation_lease(1, vec![0xa5]);
             cross_role.role = role as i32;
             cross_role.maximum_up_mbps = u32::from(role == WireguardRole::RelayExit);
@@ -3587,5 +4707,111 @@ mod tests {
             ingress_fd_binding(&changed_family).expect("changed family binding"),
             binding
         );
+    }
+
+    #[test]
+    fn ingress_reply_descriptor_binding_commits_exact_flow_tuple() {
+        let remote = IngressSocketAddress {
+            address: vec![8, 8, 8, 8],
+            port: 443,
+        };
+        let application = IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_000,
+        };
+        let request = ingress_request(
+            35,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        let binding = ingress_reply_fd_binding(&response).expect("reply binding");
+        assert_eq!(descriptor_fd_binding(&response).expect("generic"), binding);
+
+        let mut changed = response;
+        let Some(helper_response::Outcome::IngressReplySocketReady(ready)) =
+            changed.outcome.as_mut()
+        else {
+            panic!("reply outcome");
+        };
+        ready.application.as_mut().expect("application").port += 1;
+        assert_ne!(
+            ingress_reply_fd_binding(&changed).expect("changed tuple"),
+            binding
+        );
+    }
+
+    #[test]
+    fn ingress_reply_protocol_accepts_exact_ipv6_and_rejects_mixed_families() {
+        let remote = IngressSocketAddress {
+            address: Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)
+                .octets()
+                .to_vec(),
+            port: 53,
+        };
+        let application = IngressSocketAddress {
+            address: Ipv6Addr::new(0xfd76, 0, 0, 0, 0, 0, 0, 7).octets().to_vec(),
+            port: 50_001,
+        };
+        let mut request = ingress_request(
+            36,
+            helper_request::Operation::AcquireIngressReplySocket(AcquireIngressReplySocket {
+                client_runtime_id: vec![7; 16],
+                ingress_handle: vec![8; 32],
+                remote: Some(remote.clone()),
+                application: Some(application.clone()),
+            }),
+        );
+        assert!(encode_request(&request).is_ok());
+
+        let response = HelperResponse {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: HelperResult::Ok as i32,
+            diagnostic_code: "INGRESS_REPLY_SOCKET_READY".to_owned(),
+            operation_digest: operation_digest(&request).expect("IPv6 digest").to_vec(),
+            outcome: Some(helper_response::Outcome::IngressReplySocketReady(
+                IngressReplySocketReady {
+                    client_runtime_id: vec![7; 16],
+                    ingress_handle: vec![8; 32],
+                    remote: Some(remote),
+                    application: Some(application),
+                },
+            )),
+        };
+        assert!(encode_response(&response).is_ok());
+        assert_ne!(
+            ingress_reply_fd_binding(&response).expect("IPv6 binding"),
+            [0; 32]
+        );
+
+        let Some(helper_request::Operation::AcquireIngressReplySocket(reply)) =
+            request.operation.as_mut()
+        else {
+            panic!("reply request");
+        };
+        reply.application = Some(IngressSocketAddress {
+            address: vec![192, 0, 2, 20],
+            port: 50_001,
+        });
+        assert!(encode_request(&request).is_err());
     }
 }

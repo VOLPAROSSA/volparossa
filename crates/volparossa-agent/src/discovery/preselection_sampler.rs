@@ -1,7 +1,7 @@
 //! Affine, discovery-private narrowing for one bounded A1 preselection slate.
 //!
 //! This stage uses only freshly revalidated advertisements, actor capabilities, signed network
-//! hints and bounded local history. In particular, a signed prefix hint is not an observed network
+//! hints, advisory authenticated LAN metadata and bounded local history. A signed prefix hint is not an observed network
 //! origin. The later transport exact-set join must replace every hint with the direct
 //! connection-derived or control-attested prefix before any record can become Fresh evidence.
 //! `DiscoveryRuntime` invokes this native-dataplane-agnostic stage before its affine request
@@ -23,7 +23,8 @@ use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
 
 use super::{
     DirectRelayCandidateSnapshot, ForwardedExitCandidateSnapshot, RouteCandidateAdvertisement,
-    RouteCandidateSnapshot, preselection_observation::PreselectionSubjectSet,
+    RouteCandidateSnapshot, forwarded_control_projection_lineage_matches,
+    preselection_observation::PreselectionSubjectSet,
 };
 
 pub(super) const MAXIMUM_OTHER_RELAYS: usize = 8;
@@ -31,6 +32,12 @@ const MAXIMUM_LOCAL_MEASUREMENTS: usize = 64;
 const HIGH_BAND_PERCENT: u64 = 70;
 const MIDDLE_BAND_PERCENT: u64 = 20;
 const SCORE_SCALE: f64 = 1_000.0;
+const CAPACITY_WEIGHT: u64 = 30;
+const UPTIME_WEIGHT: u64 = 20;
+const DELIVERY_WEIGHT: u64 = 15;
+const REPUTATION_WEIGHT: u64 = 15;
+const BALANCE_WEIGHT: u64 = 10;
+const FREE_SLOTS_WEIGHT: u64 = 10;
 
 #[cfg_attr(
     not(test),
@@ -156,16 +163,23 @@ pub(super) struct PreselectionSamplingFailure {
     pub(super) error: PreselectionSamplingError,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum AdvertisedPrefixHint {
     Ipv4([u8; 3]),
     Ipv6([u8; 6]),
+    AuthenticatedLocal(ObservedNetworkPrefix),
+}
+
+impl std::fmt::Debug for AdvertisedPrefixHint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AdvertisedPrefixHint([REDACTED])")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdvertisedDiversityHint {
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     prefix: AdvertisedPrefixHint,
 }
 
@@ -199,7 +213,8 @@ struct ScoredRelay {
 #[derive(Clone, Default)]
 struct AdvertisedDiversitySet {
     operators: HashSet<OperatorId>,
-    asns: HashSet<u32>,
+    // All absent Internet origins share one conservative occupancy, not distinct ASN keys.
+    asns: HashSet<Option<u32>>,
     prefixes: HashSet<AdvertisedPrefixHint>,
 }
 
@@ -439,7 +454,8 @@ fn forwarded_binding_is_valid(
     let upper_expiry = capability
         .exit_advertisement_expires_at_ms
         .min(capability.policy_expires_at_ms)
-        .min(control_capability.expires_at_ms);
+        .min(control_capability.expires_at_ms)
+        .min(capability.control_relay_advertisement_expires_at_ms);
     advertisement_projection_is_valid(advertisement, sampled_at_ms)
         && body.roles.exit
         && identity_binding_is_valid(
@@ -452,15 +468,11 @@ fn forwarded_binding_is_valid(
         && body.sequence_number == capability.exit_advertisement_sequence
         && body.expires_at.as_secs() == capability.exit_advertisement_expires_at_ms / 1_000
         && advertisement.advertisement_payload_hash() == capability.exit_advertisement_payload_hash
-        && capability.control_relay_node_id == control_capability.node_id
-        && capability.control_relay_peer_id == control_capability.peer_id
-        && capability.control_relay_public_key == control_capability.public_key
-        && capability.control_relay_advertisement_sequence
-            == control_capability.advertisement_sequence
-        && capability.control_relay_advertisement_expires_at_ms
-            == control_capability.advertisement_expires_at_ms
-        && capability.control_relay_advertisement_payload_hash
-            == control_capability.advertisement_payload_hash
+        && forwarded_control_projection_lineage_matches(
+            capability,
+            control_capability,
+            sampled_at_ms.saturating_add(1),
+        )
         && capability.policy_version == snapshot.policy.version()
         && capability.policy_hash == snapshot.policy.hash()
         && capability.policy_expires_at_ms == snapshot.policy.expires_at_ms()
@@ -515,8 +527,12 @@ fn scored_forwarded_exits(
             let exit = snapshot.forwarded_exits.get(exit_index)?;
             let control = snapshot.direct_relays.get(control_index)?;
             let exit_static = static_candidate(exit.advertisement(), ServiceRole::Exit, scope)?;
-            let control_static =
-                static_candidate(control.advertisement(), ServiceRole::Relay, scope)?;
+            let control_static = static_candidate_with_local(
+                control.advertisement(),
+                ServiceRole::Relay,
+                scope,
+                control.authenticated_local_prefix(),
+            )?;
             if !diversity_hints_are_distinct(&exit_static.diversity, &control_static.diversity) {
                 return None;
             }
@@ -554,7 +570,12 @@ fn scored_relays(
         .enumerate()
         .filter(|(index, _)| *index != control_index)
         .filter_map(|(index, relay)| {
-            let candidate = static_candidate(relay.advertisement(), ServiceRole::Relay, scope)?;
+            let candidate = static_candidate_with_local(
+                relay.advertisement(),
+                ServiceRole::Relay,
+                scope,
+                relay.authenticated_local_prefix(),
+            )?;
             Some(ScoredRelay {
                 index,
                 weight: candidate.weight,
@@ -576,6 +597,15 @@ fn static_candidate(
     candidate: &RouteCandidateAdvertisement,
     role: ServiceRole,
     scope: ValidatedSamplingScope,
+) -> Option<StaticCandidate> {
+    static_candidate_with_local(candidate, role, scope, None)
+}
+
+fn static_candidate_with_local(
+    candidate: &RouteCandidateAdvertisement,
+    role: ServiceRole,
+    scope: ValidatedSamplingScope,
+    authenticated_local_prefix: Option<ObservedNetworkPrefix>,
 ) -> Option<StaticCandidate> {
     let advertisement = candidate.advertisement();
     if !advertisement.roles.supports(role)
@@ -605,8 +635,25 @@ fn static_candidate(
     if free_slots == 0 || !advertised_capacity.satisfies(scope.minimum_capacity) {
         return None;
     }
-    let asn = advertisement.network.asn.filter(|asn| *asn != 0)?;
-    let prefix = advertised_prefix_hint(advertisement, scope.family)?;
+    let (asn, prefix) = match advertisement.network.uplink {
+        volparossa_core::NetworkUplink::IndependentInternet => (
+            Some(advertisement.network.asn.filter(|asn| *asn != 0)?),
+            advertised_prefix_hint(advertisement, scope.family)?,
+        ),
+        volparossa_core::NetworkUplink::LocalOnly => {
+            if role != ServiceRole::Relay
+                || advertisement.network.asn.is_some()
+                || advertisement.network.ipv4_prefix_hint.is_some()
+                || advertisement.network.ipv6_prefix_hint.is_some()
+                || advertisement.roles.exit
+            {
+                return None;
+            }
+            let prefix = authenticated_local_prefix
+                .filter(|prefix| prefix.is_local_lan() && prefix.family() == scope.family)?;
+            (None, AdvertisedPrefixHint::AuthenticatedLocal(prefix))
+        }
+    };
     let diversity = AdvertisedDiversityHint {
         operator_id: advertisement.network.operator_id.clone(),
         asn,
@@ -624,12 +671,12 @@ fn static_candidate(
     let balance = 1_000_u64 / u64::from(active_sessions.saturating_add(1));
     let slots = u64::from(free_slots.min(1_000));
     let weight = capacity
-        .saturating_mul(35)
-        .saturating_add(uptime.saturating_mul(20))
-        .saturating_add(delivery.saturating_mul(15))
-        .saturating_add(reputation.saturating_mul(15))
-        .saturating_add(balance.saturating_mul(10))
-        .saturating_add(slots.saturating_mul(5))
+        .saturating_mul(CAPACITY_WEIGHT)
+        .saturating_add(uptime.saturating_mul(UPTIME_WEIGHT))
+        .saturating_add(delivery.saturating_mul(DELIVERY_WEIGHT))
+        .saturating_add(reputation.saturating_mul(REPUTATION_WEIGHT))
+        .saturating_add(balance.saturating_mul(BALANCE_WEIGHT))
+        .saturating_add(slots.saturating_mul(FREE_SLOTS_WEIGHT))
         .max(1);
     Some(StaticCandidate {
         weight,
@@ -991,23 +1038,21 @@ mod tests {
         }
         for document in [discovery, status, protocol] {
             assert!(document.contains("network_address_usable = false"));
-            assert!(document.contains("no downstream route"));
         }
         assert!(discovery.contains("opaque prepared-evidence handoff"));
         assert!(status.contains("opaque `PreparedPreselectionEvidence` handoff"));
-        assert!(discovery.contains("private callerless native-preselection child"));
-        assert!(status.contains("private callerless native attempt owner"));
-        assert!(protocol.contains("crate-private, callerless native-preselection child"));
+        assert!(discovery.contains("local `Connect` route gate now invokes"));
+        assert!(status.contains("Empty local `Connect` now derives"));
+        assert!(protocol.contains("local `Connect` route gate now invokes"));
         for document in [discovery, status, protocol] {
             assert!(document.contains("module-private, non-Clone Exit"));
         }
-        assert!(discovery.contains("It remains dormant because the current local publisher"));
-        assert!(status.contains("The normal runtime cannot currently reach that success path"));
-        assert!(protocol.contains("handler remains dormant in the current product"));
-        assert!(status.contains(
-            "| AV1-08 | Production FreshEvidence, reservations and exact-set join | 5 | Open | — |"
-        ));
-        assert!(status.contains("Current fixed alpha score: **11/100 (11%)**"));
+        assert!(discovery.contains("Relay and Exit runtimes now publish"));
+        assert!(status.contains("Relay and Exit runtimes now publish"));
+        assert!(protocol.contains("Relay and Exit runtimes install"));
+        // Keep the sampler's evidence boundary documented above, but do not freeze a
+        // project-wide percentage or milestone state in a sampler regression test.
+        // Those change when later live integration supplies the missing evidence.
     }
 
     struct SeededRng(u64);
@@ -1418,6 +1463,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_local_lan_sampler_keeps_wan_metadata_without_fabricating_local_only_diversity()
+    {
+        let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
+        let scope = sampling_scope(ObservationAddressFamily::Ipv4, 1, 1)
+            .validated()
+            .expect("scope");
+        let mut candidate = snapshot.direct_relays[0].advertisement.clone();
+        candidate.advertisement.control_endpoints =
+            vec!["/ip4/192.168.1.2/udp/443/quic-v1".to_owned()];
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_some());
+
+        candidate.advertisement.network.asn = None;
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_none());
+        candidate.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+        candidate.advertisement.network.ipv4_prefix_hint = None;
+        candidate.advertisement.network.ipv6_prefix_hint = None;
+        assert!(static_candidate(&candidate, ServiceRole::Relay, scope).is_none());
+        assert!(static_candidate(&candidate, ServiceRole::Exit, scope).is_none());
+        let prefix = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+        let local = DirectRelayCandidateSnapshot::for_test_with_local_prefix(
+            candidate,
+            snapshot.direct_relays[0].capability().clone(),
+            prefix,
+        );
+        let first = static_candidate_with_local(
+            local.advertisement(),
+            ServiceRole::Relay,
+            scope,
+            local.authenticated_local_prefix(),
+        )
+        .expect("authenticated local contributor");
+        assert_eq!(first.diversity.asn, None);
+        assert_eq!(
+            first.diversity.prefix,
+            AdvertisedPrefixHint::AuthenticatedLocal(prefix)
+        );
+        let mut second_advertisement = local.advertisement().clone();
+        second_advertisement.advertisement.network.operator_id =
+            OperatorId::new("another-local-operator").expect("operator");
+        let second = static_candidate_with_local(
+            &second_advertisement,
+            ServiceRole::Relay,
+            scope,
+            Some(ObservedNetworkPrefix::local_ipv4_24([192, 168, 2])),
+        )
+        .expect("separately authenticated local contributor");
+        let mut diversity = AdvertisedDiversitySet::default();
+        assert!(diversity.allows(&first.diversity));
+        diversity.insert(&first.diversity);
+        assert!(!diversity.allows(&second.diversity));
+        assert!(!diversity_hints_are_distinct(
+            &first.diversity,
+            &second.diversity
+        ));
+    }
+
+    #[tokio::test]
     async fn score_factors_have_exact_independent_weight_and_exploration_influence() {
         let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
         let scope = sampling_scope(ObservationAddressFamily::Ipv4, 1, 1)
@@ -1436,7 +1538,7 @@ mod tests {
         let baseline_score = static_candidate(&baseline, ServiceRole::Relay, scope)
             .expect("baseline candidate")
             .weight;
-        assert_eq!(baseline_score, 38_550);
+        assert_eq!(baseline_score, 38_100);
 
         let mut changed = baseline.clone();
         changed.advertisement.capacity.estimated_free = bandwidth(101);
@@ -1444,7 +1546,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("capacity candidate")
                 .weight,
-            baseline_score + 35
+            baseline_score + 30
         );
 
         changed = baseline.clone();
@@ -1489,7 +1591,7 @@ mod tests {
             static_candidate(&changed, ServiceRole::Relay, scope)
                 .expect("slot candidate")
                 .weight,
-            baseline_score + 5
+            baseline_score + 10
         );
 
         changed = baseline.clone();
@@ -1769,6 +1871,21 @@ mod tests {
         synchronize_only_forwarded_control(&mut snapshot, control_index);
 
         let original_exit = snapshot.forwarded_exits[0].clone();
+        snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence = snapshot.forwarded_exits[0]
+            .capability
+            .control_relay_advertisement_sequence
+            .saturating_add(1);
+        snapshot = reject_before_entropy(
+            snapshot,
+            scope,
+            sampled_at_ms,
+            PreselectionSamplingError::InvalidSnapshot,
+            &calls,
+            "forwarded exit bound to stale control advertisement",
+        );
+        snapshot.forwarded_exits[0] = original_exit.clone();
         snapshot.forwarded_exits[0].capability.exit_public_key[0] ^= 1;
         snapshot = reject_before_entropy(
             snapshot,

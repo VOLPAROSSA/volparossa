@@ -139,6 +139,18 @@ check_audit_version() {
     }'
 }
 
+check_deny_version() {
+    deny_version=$1
+    awk -v version="$deny_version" 'BEGIN {
+        count = split(version, part, ".");
+        if (count < 3) exit 1;
+        if (part[1] > 0) exit 0;
+        if (part[1] == 0 && part[2] > 18) exit 0;
+        if (part[1] == 0 && part[2] == 18 && part[3] >= 6) exit 0;
+        exit 1;
+    }'
+}
+
 check_single_path_package() {
     metadata=$1
     package=$2
@@ -324,15 +336,36 @@ if grep -Eq \
 fi
 pass 'locked fuzz graph uses the reviewed Hickory and time patches exclusively and keeps Hickory DNSSEC disabled'
 
-cargo deny --version >/dev/null 2>&1 ||
-    fail 'cargo-deny is required for license, ban, and source checks'
-cargo deny --locked --offline check licenses bans sources
-cargo deny \
+advisory_database=$(find_advisory_database)
+advisory_commit=$(git -C "$advisory_database" rev-parse HEAD)
+printf 'INFO  offline RustSec database commit: %s\n' "$advisory_commit"
+
+# Cargo-deny derives its database path from the canonical RustSec URL and has no
+# arbitrary local database flag. Point an isolated Cargo home at the already
+# selected checkout so cargo-deny and cargo-audit scan the exact same commit.
+source_cargo_home=${CARGO_HOME:-${HOME:?HOME is required to locate Cargo data}/.cargo}
+deny_cargo_home="$audit_tmp/cargo-home"
+mkdir -p "$deny_cargo_home/advisory-dbs"
+ln -s "$advisory_database" \
+    "$deny_cargo_home/advisory-dbs/advisory-db-3157b0e258782691"
+for cargo_entry in registry git config config.toml; do
+    [ ! -e "$source_cargo_home/$cargo_entry" ] ||
+        ln -s "$source_cargo_home/$cargo_entry" "$deny_cargo_home/$cargo_entry"
+done
+
+CARGO_HOME="$deny_cargo_home" cargo deny --version >/dev/null 2>&1 ||
+    fail 'cargo-deny >= 0.18.6 is required for CVSS 4.0-capable dependency checks'
+deny_version=$(CARGO_HOME="$deny_cargo_home" cargo deny --version | awk '{print $2}')
+check_deny_version "$deny_version" ||
+    fail "cargo-deny $deny_version cannot parse the current CVSS 4.0 advisories; require >= 0.18.6"
+
+CARGO_HOME="$deny_cargo_home" cargo deny --locked --offline check
+CARGO_HOME="$deny_cargo_home" cargo deny \
     --manifest-path fuzz/Cargo.toml \
     --locked \
     --offline \
-    check licenses bans sources
-pass 'cargo-deny checked root and fuzz licenses, bans, and sources without fetching'
+    check
+pass 'cargo-deny checked root and fuzz advisories, licenses, bans, and sources without fetching'
 
 audit_command=${CARGO_AUDIT:-cargo-audit}
 case "$audit_command" in
@@ -344,10 +377,6 @@ esac
 audit_version=$("$audit_command" --version | awk '{print $2}')
 check_audit_version "$audit_version" ||
     fail "cargo-audit $audit_version cannot parse the current CVSS 4.0 advisories; require >= 0.22.1"
-
-advisory_database=$(find_advisory_database)
-advisory_commit=$(git -C "$advisory_database" rev-parse HEAD)
-printf 'INFO  offline RustSec database commit: %s\n' "$advisory_commit"
 
 "$audit_command" audit \
     --db "$advisory_database" \

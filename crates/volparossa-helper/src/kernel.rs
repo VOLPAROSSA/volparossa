@@ -16,15 +16,20 @@ use nix::setsockopt_impl;
 use nix::sockopt_impl;
 use nix::sys::socket::setsockopt;
 use thiserror::Error;
+use volparossa_routing::WireguardRole;
 use zeroize::Zeroizing;
 
 use crate::{
     deadline::{HardDeadline, wait_for_fd},
-    ownership_journal::DurableWireguardResource,
+    lease_spec::WireguardLeaseSpec,
+    ownership_journal::{DurableWireguardResource, RestartNetworkPlan},
 };
 
 #[allow(dead_code)] // GET_DEVICE is wired into the v3 lease state machine in phase 2.
 mod wireguard_probe;
+
+pub(crate) mod underlay_sharing;
+pub(crate) mod wifi_mesh;
 
 use wireguard_probe::WireguardDeviceState;
 
@@ -38,6 +43,7 @@ sockopt_impl!(
 );
 
 const NLMSG_HEADER_LEN: usize = 16;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const NLMSG_ERROR_CODE_LEN: usize = 4;
 const GENL_HEADER_LEN: usize = 4;
 const ATTRIBUTE_HEADER_LEN: usize = 4;
@@ -56,13 +62,22 @@ const RTM_GETLINK: u16 = 18;
 const RTM_SETLINK: u16 = 19;
 const RTM_NEWADDR: u16 = 20;
 const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
 const RTM_GETROUTE: u16 = 26;
+const RTM_NEWRULE: u16 = 32;
+const RTM_DELRULE: u16 = 33;
 const IFLA_IFNAME: u16 = 3;
+const IFLA_MTU: u16 = 4;
 const IFLA_LINKINFO: u16 = 18;
 const IFLA_NET_NS_FD: u16 = 28;
 const IFLA_IFALIAS: u16 = 20;
 const IFLA_NEW_IFINDEX: u16 = 49;
+const IFLA_AF_SPEC: u16 = 26;
+const IFLA_INET_CONF: u16 = 1;
+const IPV4_DEVCONF_SRC_VMARK: u16 = 24;
 const IFLA_INFO_KIND: u16 = 1;
+const IFLA_INFO_DATA: u16 = 2;
+const VETH_INFO_PEER: u16 = 1;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
 const RTA_DST: u16 = 1;
@@ -74,11 +89,19 @@ const RTA_MULTIPATH: u16 = 9;
 const RTA_CACHEINFO: u16 = 12;
 const RTA_TABLE: u16 = 15;
 const RTA_PREF: u16 = 20;
+const FRA_PRIORITY: u16 = 6;
+const FRA_FWMARK: u16 = 10;
+const FRA_TABLE: u16 = 15;
+const FRA_FWMASK: u16 = 16;
+const FRA_IIFNAME: u16 = 3;
+const FRA_UID_RANGE: u16 = 20;
 const RT_TABLE_MAIN: u8 = 254;
 const RTPROT_STATIC: u8 = 4;
 const RT_SCOPE_UNIVERSE: u8 = 0;
 const RT_SCOPE_LINK: u8 = 253;
+const RT_SCOPE_HOST: u8 = 254;
 const RTN_UNICAST: u8 = 1;
+const RTN_LOCAL: u8 = 2;
 const RTM_F_FIB_MATCH: u32 = 0x2000;
 const IPV6_ROUTER_PREF_MEDIUM: u8 = 0;
 const IPV6_USER_ROUTE_PRIORITY: u32 = 1024;
@@ -98,14 +121,51 @@ const BIRTH_LINK_RECONCILE_TAIL: Duration = Duration::from_millis(250);
 const BIRTH_LINK_IFINDEX_PREFIX: u32 = 0x4000_0000;
 const BIRTH_LINK_IFINDEX_MASK: u32 = 0x3fff_ffff;
 const RTMSG_LEN: usize = 12;
+const FIB_RULE_HDR_LEN: usize = 12;
+
+pub(crate) const CLIENT_INGRESS_IPV4_MARK: u32 = 0x5650_1001;
+pub(crate) const CONTRIBUTION_WIREGUARD_MARK: u32 =
+    CLIENT_INGRESS_IPV4_MARK | volparossa_core::CONTRIBUTION_MARK_BIT;
+pub(crate) const CLIENT_INGRESS_PARENT_IPV4_MARK: u32 = 0x5650_1002;
+pub(crate) const CLIENT_INGRESS_IPV6_MARK: u32 = 0x5650_1003;
+pub(crate) const CLIENT_INGRESS_PARENT_IPV6_MARK: u32 = 0x5650_1004;
+const CLIENT_INGRESS_ROUTE_TABLE: u8 = 100;
+const CLIENT_INGRESS_RULE_PRIORITY: u32 = 10_000;
+const CLIENT_INGRESS_PARENT_ROUTE_TABLE: u8 = 101;
+const CLIENT_INGRESS_PARENT_RULE_PRIORITY: u32 = 9_999;
+const CLIENT_INGRESS_INITIAL_RULE_PRIORITY: u32 = 9_997;
+const FR_ACT_TO_TBL: u8 = 1;
+const RTNH_F_ONLINK: u32 = 4;
 
 const WG_GENL_NAME: &str = "wireguard";
+const VETH_LINK_KIND: &str = "veth";
+const CLIENT_INGRESS_PARENT_ADDRESS: [u8; 4] = [169, 254, 240, 1];
+const CLIENT_INGRESS_WORKER_ADDRESS: [u8; 4] = [169, 254, 240, 2];
+// Keep application QUIC datagrams within the native CONNECT-IP path's outer-packet budget.
+// The tunnel assignment may negotiate up to 1420 bytes, but that is the inner-IP ceiling: using
+// it on the application-facing link lets QUIC probe a 1392-byte UDP payload whose wrapped packet
+// cannot fit through the IPv6/UDP/MASQUE transport. IPv6's minimum link MTU keeps both families
+// usable while bounding an IPv4 UDP payload to 1252 bytes and its inner packet to 1280 bytes.
+const CLIENT_INGRESS_MTU: u32 = 1_280;
+const CLIENT_INGRESS_PARENT_IPV6_ADDRESS: [u8; 16] = [
+    0xfd, 0x56, 0x4f, 0x4c, 0x50, 0x41, 0x52, 0x4f, 0x53, 0x53, 0x41, 0, 0, 0, 0, 1,
+];
+const CLIENT_INGRESS_WORKER_IPV6_ADDRESS: [u8; 16] = [
+    0xfd, 0x56, 0x4f, 0x4c, 0x50, 0x41, 0x52, 0x4f, 0x53, 0x53, 0x41, 0, 0, 0, 0, 2,
+];
+
+#[derive(Clone, Copy)]
+enum ClientIngressFamily {
+    Ipv4,
+    Ipv6,
+}
 const WG_GENL_VERSION: u8 = 1;
 const WG_CMD_SET_DEVICE: u8 = 1;
 const WGDEVICE_A_IFNAME: u16 = 2;
 const WGDEVICE_A_PRIVATE_KEY: u16 = 3;
 const WGDEVICE_A_FLAGS: u16 = 5;
 const WGDEVICE_A_LISTEN_PORT: u16 = 6;
+const WGDEVICE_A_FWMARK: u16 = 7;
 const WGDEVICE_A_PEERS: u16 = 8;
 const WGDEVICE_F_REPLACE_PEERS: u32 = 1;
 const WGPEER_A_PUBLIC_KEY: u16 = 1;
@@ -307,12 +367,253 @@ pub(crate) struct BirthNamespaceKernel {
     route: NetlinkClient,
 }
 
+/// Exact same-runtime ownership of the app-to-ingress veth pair.
+pub(crate) struct LiveClientIngressVeth {
+    parent_name: String,
+    worker_name: String,
+}
+
+pub(crate) struct ClientIngressParentIpv4Routing {
+    parent_ifindex: u32,
+    loopback_ifindex: u32,
+    initial_rules: Vec<Vec<u8>>,
+}
+
+impl ClientIngressParentIpv4Routing {
+    pub(crate) const fn parent_ifindex(&self) -> u32 {
+        self.parent_ifindex
+    }
+
+    pub(crate) const fn loopback_ifindex(&self) -> u32 {
+        self.loopback_ifindex
+    }
+}
+
+impl LiveClientIngressVeth {
+    pub(crate) fn parent_name(&self) -> &str {
+        &self.parent_name
+    }
+}
+
 impl BirthNamespaceKernel {
     /// Open a route socket in the caller's current physical/underlay namespace.
     pub(crate) fn connect(deadline: HardDeadline) -> Result<Self, KernelError> {
         Ok(Self {
             route: NetlinkClient::connect(NETLINK_ROUTE, deadline)?,
         })
+    }
+
+    /// Create the fixed ingress veth with its peer born directly in the worker namespace.
+    pub(crate) fn create_client_ingress_veth(
+        &mut self,
+        client_runtime_id: [u8; 16],
+        target_namespace: RawFd,
+        deadline: HardDeadline,
+    ) -> Result<LiveClientIngressVeth, KernelError> {
+        let (parent_name, worker_name) = client_ingress_interface_names(client_runtime_id)?;
+        if target_namespace < 0 {
+            return Err(KernelError::Invalid);
+        }
+        match self.route.link_index(&parent_name, deadline) {
+            Err(error) if error.is_errno(libc::ENODEV) => {}
+            Ok(_) => return Err(KernelError::Invalid),
+            Err(error) => return Err(error),
+        }
+        let payload =
+            encode_create_client_ingress_veth(&parent_name, &worker_name, target_namespace)?;
+        self.route
+            .request_ack(RTM_NEWLINK, NLM_F_CREATE | NLM_F_EXCL, &payload, deadline)?;
+        let owner = LiveClientIngressVeth {
+            parent_name,
+            worker_name,
+        };
+        let configured = (|| {
+            let details = self.route.link_details_full(&owner.parent_name, deadline)?;
+            if details.name.as_deref() != Some(owner.parent_name.as_str())
+                || details.kind.as_deref() != Some(VETH_LINK_KIND)
+            {
+                return Err(KernelError::Invalid);
+            }
+            self.route.add_raw_address(
+                details.index,
+                &CLIENT_INGRESS_PARENT_ADDRESS,
+                30,
+                deadline,
+            )?;
+            self.route.add_ipv6_address_without_dad(
+                details.index,
+                &CLIENT_INGRESS_PARENT_IPV6_ADDRESS,
+                126,
+                deadline,
+            )?;
+            // Preserve the host's reverse-path filtering. Only this newly owned veth uses
+            // its exact PREROUTING reply mark for source validation through our route table.
+            self.route.request_ack(
+                RTM_NEWLINK,
+                0,
+                &encode_client_ingress_source_mark(details.index)?,
+                deadline,
+            )?;
+            self.route.set_link_state(details.index, true, deadline)
+        })();
+        if let Err(error) = configured {
+            let _ = self.delete_client_ingress_veth(&owner, deadline);
+            return Err(error);
+        }
+        Ok(owner)
+    }
+
+    /// Delete only the exact parent endpoint; deleting either veth endpoint retires the pair.
+    pub(crate) fn delete_client_ingress_veth(
+        &mut self,
+        owner: &LiveClientIngressVeth,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let details = match self.route.link_details_full(&owner.parent_name, deadline) {
+            Ok(details) => details,
+            Err(error) if error.is_errno(libc::ENODEV) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if details.name.as_deref() != Some(owner.parent_name.as_str())
+            || details.kind.as_deref() != Some(VETH_LINK_KIND)
+        {
+            return Err(KernelError::Invalid);
+        }
+        self.route
+            .delete_owned_link(details.index, &owner.parent_name, deadline)?;
+        self.route.prove_link_absent(&owner.parent_name, deadline)
+    }
+
+    pub(crate) fn install_client_ingress_parent_routing(
+        &mut self,
+        owner: &LiveClientIngressVeth,
+        trusted_agent_uid: u32,
+        deadline: HardDeadline,
+    ) -> Result<ClientIngressParentIpv4Routing, KernelError> {
+        let initial_rules = encode_client_ingress_initial_rules(trusted_agent_uid)?;
+        let mut routing = self.install_client_ingress_parent_marked_routing(owner, deadline)?;
+        for rule in initial_rules {
+            if let Err(error) =
+                self.route
+                    .request_ack(RTM_NEWRULE, NLM_F_CREATE | NLM_F_EXCL, &rule, deadline)
+            {
+                // Only positively installed predecessors belong to this owner. In particular,
+                // an EEXIST rule must never be included in our cleanup prefix.
+                let _ = self.remove_client_ingress_parent_routing(&routing, deadline);
+                return Err(error);
+            }
+            routing.initial_rules.push(rule);
+        }
+        Ok(routing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_client_ingress_root_smoke_routing(
+        &mut self,
+        owner: &LiveClientIngressVeth,
+        deadline: HardDeadline,
+    ) -> Result<ClientIngressParentIpv4Routing, KernelError> {
+        // The disposable smoke maps only UID0, which is intentionally excluded from initial
+        // application steering. It still proves the existing marked root-payload path.
+        self.install_client_ingress_parent_marked_routing(owner, deadline)
+    }
+
+    fn install_client_ingress_parent_marked_routing(
+        &mut self,
+        owner: &LiveClientIngressVeth,
+        deadline: HardDeadline,
+    ) -> Result<ClientIngressParentIpv4Routing, KernelError> {
+        let details = self.route.link_details_full(&owner.parent_name, deadline)?;
+        if details.name.as_deref() != Some(owner.parent_name.as_str())
+            || details.kind.as_deref() != Some(VETH_LINK_KIND)
+        {
+            return Err(KernelError::Invalid);
+        }
+        let loopback_ifindex = self.route.link_index("lo", deadline)?;
+        let ipv4_route =
+            encode_client_ingress_parent_route(details.index, ClientIngressFamily::Ipv4)?;
+        self.route.request_ack(
+            RTM_NEWROUTE,
+            NLM_F_CREATE | NLM_F_EXCL,
+            &ipv4_route,
+            deadline,
+        )?;
+        let ipv6_route =
+            encode_client_ingress_parent_route(details.index, ClientIngressFamily::Ipv6)?;
+        if let Err(error) = self.route.request_ack(
+            RTM_NEWROUTE,
+            NLM_F_CREATE | NLM_F_EXCL,
+            &ipv6_route,
+            deadline,
+        ) {
+            let _ = self
+                .route
+                .request_ack(RTM_DELROUTE, 0, &ipv4_route, deadline);
+            return Err(error);
+        }
+        let ipv4_rule = encode_client_ingress_parent_rule(ClientIngressFamily::Ipv4)?;
+        if let Err(error) =
+            self.route
+                .request_ack(RTM_NEWRULE, NLM_F_CREATE | NLM_F_EXCL, &ipv4_rule, deadline)
+        {
+            let _ = self
+                .route
+                .request_ack(RTM_DELROUTE, 0, &ipv6_route, deadline);
+            let _ = self
+                .route
+                .request_ack(RTM_DELROUTE, 0, &ipv4_route, deadline);
+            return Err(error);
+        }
+        let ipv6_rule = encode_client_ingress_parent_rule(ClientIngressFamily::Ipv6)?;
+        if let Err(error) =
+            self.route
+                .request_ack(RTM_NEWRULE, NLM_F_CREATE | NLM_F_EXCL, &ipv6_rule, deadline)
+        {
+            let _ = self.route.request_ack(RTM_DELRULE, 0, &ipv4_rule, deadline);
+            let _ = self
+                .route
+                .request_ack(RTM_DELROUTE, 0, &ipv6_route, deadline);
+            let _ = self
+                .route
+                .request_ack(RTM_DELROUTE, 0, &ipv4_route, deadline);
+            return Err(error);
+        }
+        Ok(ClientIngressParentIpv4Routing {
+            parent_ifindex: details.index,
+            loopback_ifindex,
+            initial_rules: Vec::with_capacity(4),
+        })
+    }
+
+    pub(crate) fn remove_client_ingress_parent_routing(
+        &mut self,
+        routing: &ClientIngressParentIpv4Routing,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let mut initial_result = Ok(());
+        for rule in routing.initial_rules.iter().rev() {
+            let result = self.route.request_ack(RTM_DELRULE, 0, rule, deadline);
+            initial_result = initial_result.and(result);
+        }
+        let ipv6_rule = encode_client_ingress_parent_rule(ClientIngressFamily::Ipv6)?;
+        let ipv6_rule_result = self.route.request_ack(RTM_DELRULE, 0, &ipv6_rule, deadline);
+        let ipv4_rule = encode_client_ingress_parent_rule(ClientIngressFamily::Ipv4)?;
+        let ipv4_rule_result = self.route.request_ack(RTM_DELRULE, 0, &ipv4_rule, deadline);
+        let ipv6_route =
+            encode_client_ingress_parent_route(routing.parent_ifindex, ClientIngressFamily::Ipv6)?;
+        let ipv6_route_result = self
+            .route
+            .request_ack(RTM_DELROUTE, 0, &ipv6_route, deadline);
+        let ipv4_route =
+            encode_client_ingress_parent_route(routing.parent_ifindex, ClientIngressFamily::Ipv4)?;
+        let ipv4_route_result = self
+            .route
+            .request_ack(RTM_DELROUTE, 0, &ipv4_route, deadline);
+        initial_result
+            .and(ipv6_rule_result)
+            .and(ipv4_rule_result)
+            .and(ipv6_route_result)
+            .and(ipv4_route_result)
     }
 
     /// Create a `WireGuard` device here and then move it by target namespace fd.
@@ -780,6 +1081,25 @@ pub struct NamespaceKernel {
     wireguard: Option<GenericNetlinkClient>,
 }
 
+/// Exact namespace-local policy routing owned by one client-ingress worker.
+pub(crate) struct ClientIngressIpv4Routing {
+    loopback_index: u32,
+    ingress_ifindex: u32,
+}
+
+fn restart_wireguard_roles(
+    context_role: volparossa_routing::ContextRole,
+) -> Result<&'static [WireguardRole], KernelError> {
+    match context_role {
+        volparossa_routing::ContextRole::Client => Ok(&[WireguardRole::Client]),
+        volparossa_routing::ContextRole::Relay => {
+            Ok(&[WireguardRole::RelayClient, WireguardRole::RelayExit])
+        }
+        volparossa_routing::ContextRole::Exit => Ok(&[WireguardRole::Exit]),
+        volparossa_routing::ContextRole::Unspecified => Err(KernelError::Invalid),
+    }
+}
+
 impl NamespaceKernel {
     /// Opens namespace-local route and `WireGuard` netlink sockets.
     pub fn connect(deadline: HardDeadline) -> Result<Self, KernelError> {
@@ -797,6 +1117,175 @@ impl NamespaceKernel {
     pub fn activate_loopback(&mut self, deadline: HardDeadline) -> Result<(), KernelError> {
         let index = self.route.link_index("lo", deadline)?;
         self.route.set_link_state(index, true, deadline)
+    }
+
+    /// Bring up and address only the worker endpoint derived from this client runtime.
+    pub(crate) fn activate_client_ingress_link(
+        &mut self,
+        client_runtime_id: [u8; 16],
+        deadline: HardDeadline,
+    ) -> Result<u32, KernelError> {
+        let (_, worker_name) = client_ingress_interface_names(client_runtime_id)?;
+        let details = self.route.link_details_full(&worker_name, deadline)?;
+        if details.name.as_deref() != Some(worker_name.as_str())
+            || details.kind.as_deref() != Some(VETH_LINK_KIND)
+        {
+            return Err(KernelError::Invalid);
+        }
+        self.route
+            .add_raw_address(details.index, &CLIENT_INGRESS_WORKER_ADDRESS, 30, deadline)?;
+        self.route.add_ipv6_address_without_dad(
+            details.index,
+            &CLIENT_INGRESS_WORKER_IPV6_ADDRESS,
+            126,
+            deadline,
+        )?;
+        self.route.set_link_state(details.index, true, deadline)?;
+        Ok(details.index)
+    }
+
+    /// Install the fixed dual-stack fwmark rules, local routes and return routes for TPROXY.
+    pub(crate) fn install_client_ingress_routing(
+        &mut self,
+        ingress_ifindex: u32,
+        deadline: HardDeadline,
+    ) -> Result<ClientIngressIpv4Routing, KernelError> {
+        if ingress_ifindex == 0 {
+            return Err(KernelError::Invalid);
+        }
+        let loopback_index = self.route.link_index("lo", deadline)?;
+        let routes = [
+            encode_client_ingress_worker_return_route(ingress_ifindex, ClientIngressFamily::Ipv4)?,
+            encode_client_ingress_worker_return_route(ingress_ifindex, ClientIngressFamily::Ipv6)?,
+            encode_client_ingress_local_route(loopback_index, ClientIngressFamily::Ipv4)?,
+            encode_client_ingress_local_route(loopback_index, ClientIngressFamily::Ipv6)?,
+        ];
+        for (installed_routes, route) in routes.iter().enumerate() {
+            if let Err(error) =
+                self.route
+                    .request_ack(RTM_NEWROUTE, NLM_F_CREATE | NLM_F_EXCL, route, deadline)
+            {
+                for installed in routes[..installed_routes].iter().rev() {
+                    let _ = self.route.request_ack(RTM_DELROUTE, 0, installed, deadline);
+                }
+                return Err(error);
+            }
+        }
+        let rules = [
+            encode_client_ingress_rule(ClientIngressFamily::Ipv4)?,
+            encode_client_ingress_rule(ClientIngressFamily::Ipv6)?,
+        ];
+        for (installed_rules, rule) in rules.iter().enumerate() {
+            if let Err(error) =
+                self.route
+                    .request_ack(RTM_NEWRULE, NLM_F_CREATE | NLM_F_EXCL, rule, deadline)
+            {
+                for installed in rules[..installed_rules].iter().rev() {
+                    let _ = self.route.request_ack(RTM_DELRULE, 0, installed, deadline);
+                }
+                for installed in routes.iter().rev() {
+                    let _ = self.route.request_ack(RTM_DELROUTE, 0, installed, deadline);
+                }
+                return Err(error);
+            }
+        }
+        Ok(ClientIngressIpv4Routing {
+            loopback_index,
+            ingress_ifindex,
+        })
+    }
+
+    /// Remove the exact fwmark rule and local route while attempting both cleanup steps.
+    #[allow(clippy::needless_pass_by_value)] // Consuming the token records affine teardown.
+    pub(crate) fn remove_client_ingress_routing(
+        &mut self,
+        routing: ClientIngressIpv4Routing,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let operations = [
+            (
+                RTM_DELRULE,
+                encode_client_ingress_rule(ClientIngressFamily::Ipv6)?,
+            ),
+            (
+                RTM_DELRULE,
+                encode_client_ingress_rule(ClientIngressFamily::Ipv4)?,
+            ),
+            (
+                RTM_DELROUTE,
+                encode_client_ingress_local_route(
+                    routing.loopback_index,
+                    ClientIngressFamily::Ipv6,
+                )?,
+            ),
+            (
+                RTM_DELROUTE,
+                encode_client_ingress_local_route(
+                    routing.loopback_index,
+                    ClientIngressFamily::Ipv4,
+                )?,
+            ),
+            (
+                RTM_DELROUTE,
+                encode_client_ingress_worker_return_route(
+                    routing.ingress_ifindex,
+                    ClientIngressFamily::Ipv6,
+                )?,
+            ),
+            (
+                RTM_DELROUTE,
+                encode_client_ingress_worker_return_route(
+                    routing.ingress_ifindex,
+                    ClientIngressFamily::Ipv4,
+                )?,
+            ),
+        ];
+        let mut result = Ok(());
+        for (operation, payload) in operations {
+            let removed = self.route.request_ack(operation, 0, &payload, deadline);
+            if result.is_ok() {
+                result = removed;
+            }
+        }
+        result
+    }
+
+    /// Prove the exact pre-dispatch link facts committed by one startup journal target.
+    ///
+    /// Custody is durably marked before dispatch can create a birth link or activate loopback.
+    /// This read-only check re-derives every role-specific interface name internally, requires all
+    /// of them absent, and requires the sole bootstrap loopback identity to remain down and
+    /// unlabelled. It accepts no caller-provided interface name.
+    pub(crate) fn prove_restart_pre_dispatch_links_absent(
+        &mut self,
+        plan: RestartNetworkPlan,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let roles = restart_wireguard_roles(plan.context_role())?;
+        if plan.path_id() == 0 {
+            return Err(KernelError::Invalid);
+        }
+        for role in roles {
+            let specification = WireguardLeaseSpec::derive(
+                plan.context_id(),
+                plan.context_role(),
+                u32::from(plan.path_id()),
+                *role as i32,
+            )
+            .map_err(|_| KernelError::Invalid)?;
+            self.route
+                .prove_link_absent(specification.interface(), deadline)?;
+        }
+        let loopback = self.route.link_details_full("lo", deadline)?;
+        let up = u32::try_from(libc::IFF_UP).map_err(|_| KernelError::Invalid)?;
+        if loopback.name.as_deref() != Some("lo")
+            || loopback.alias.is_some()
+            || loopback.flags & up != 0
+        {
+            return Err(KernelError::Invalid);
+        }
+        deadline.ensure_remaining()?;
+        Ok(())
     }
 
     /// Read back one helper-derived `WireGuard` device through a bounded `GET_DEVICE` dump.
@@ -1036,7 +1525,7 @@ impl NamespaceKernel {
             || state.interface_name != interface
             || state.public_key != expected_device_public_key
             || state.listen_port != expected_listen_port
-            || state.firewall_mark != 0
+            || state.firewall_mark != wireguard_underlay_mark(resource)
         {
             return Err(KernelError::Malformed);
         }
@@ -1586,7 +2075,19 @@ impl NetlinkClient {
             (16, 0..=128) => u8::try_from(libc::AF_INET6).map_err(|_| KernelError::Invalid)?,
             _ => return Err(KernelError::Invalid),
         };
-        self.add_raw_address_for_family(index, family, address, prefix_length, deadline)
+        self.add_raw_address_for_family(index, family, address, prefix_length, 0, deadline)
+    }
+
+    fn add_ipv6_address_without_dad(
+        &mut self,
+        index: u32,
+        address: &[u8; 16],
+        prefix_length: u8,
+        deadline: HardDeadline,
+    ) -> Result<(), KernelError> {
+        let family = u8::try_from(libc::AF_INET6).map_err(|_| KernelError::Invalid)?;
+        let flags = u8::try_from(libc::IFA_F_NODAD).map_err(|_| KernelError::Invalid)?;
+        self.add_raw_address_for_family(index, family, address, prefix_length, flags, deadline)
     }
 
     fn add_raw_address_for_family(
@@ -1595,6 +2096,7 @@ impl NetlinkClient {
         family: u8,
         address: &[u8],
         prefix_length: u8,
+        flags: u8,
         deadline: HardDeadline,
     ) -> Result<(), KernelError> {
         if index == 0 {
@@ -1603,7 +2105,7 @@ impl NetlinkClient {
         let mut payload = Vec::with_capacity(64);
         payload.push(family);
         payload.push(prefix_length);
-        payload.push(0);
+        payload.push(flags);
         payload.push(0);
         payload.extend_from_slice(&index.to_ne_bytes());
         push_attribute(&mut payload, IFA_ADDRESS, address)?;
@@ -1686,6 +2188,214 @@ fn encode_exact_main_ipv6_link_route(
         &IPV6_USER_ROUTE_PRIORITY.to_ne_bytes(),
     )?;
     Ok(payload)
+}
+
+fn client_ingress_kernel_family(family: ClientIngressFamily) -> Result<u8, KernelError> {
+    u8::try_from(match family {
+        ClientIngressFamily::Ipv4 => libc::AF_INET,
+        ClientIngressFamily::Ipv6 => libc::AF_INET6,
+    })
+    .map_err(|_| KernelError::Invalid)
+}
+
+const fn client_ingress_mark(family: ClientIngressFamily) -> u32 {
+    match family {
+        ClientIngressFamily::Ipv4 => CLIENT_INGRESS_IPV4_MARK,
+        ClientIngressFamily::Ipv6 => CLIENT_INGRESS_IPV6_MARK,
+    }
+}
+
+const fn client_ingress_parent_mark(family: ClientIngressFamily) -> u32 {
+    match family {
+        ClientIngressFamily::Ipv4 => CLIENT_INGRESS_PARENT_IPV4_MARK,
+        ClientIngressFamily::Ipv6 => CLIENT_INGRESS_PARENT_IPV6_MARK,
+    }
+}
+
+fn encode_client_ingress_local_route(
+    loopback_index: u32,
+    family: ClientIngressFamily,
+) -> Result<Vec<u8>, KernelError> {
+    if loopback_index == 0 {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = Vec::with_capacity(40);
+    payload.push(client_ingress_kernel_family(family)?);
+    payload.extend_from_slice(&[0, 0, 0]);
+    payload.push(CLIENT_INGRESS_ROUTE_TABLE);
+    payload.push(RTPROT_STATIC);
+    payload.push(RT_SCOPE_HOST);
+    payload.push(RTN_LOCAL);
+    payload.extend_from_slice(&0_u32.to_ne_bytes());
+    push_attribute(
+        &mut payload,
+        RTA_TABLE,
+        &u32::from(CLIENT_INGRESS_ROUTE_TABLE).to_ne_bytes(),
+    )?;
+    push_attribute(&mut payload, RTA_OIF, &loopback_index.to_ne_bytes())?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_rule(family: ClientIngressFamily) -> Result<Vec<u8>, KernelError> {
+    let mut payload = Vec::with_capacity(48);
+    payload.push(client_ingress_kernel_family(family)?);
+    payload.extend_from_slice(&[0, 0, 0]);
+    payload.push(CLIENT_INGRESS_ROUTE_TABLE);
+    payload.extend_from_slice(&[0, 0]);
+    payload.push(FR_ACT_TO_TBL);
+    payload.extend_from_slice(&0_u32.to_ne_bytes());
+    if payload.len() != FIB_RULE_HDR_LEN {
+        return Err(KernelError::Invalid);
+    }
+    push_attribute(
+        &mut payload,
+        FRA_PRIORITY,
+        &CLIENT_INGRESS_RULE_PRIORITY.to_ne_bytes(),
+    )?;
+    push_attribute(
+        &mut payload,
+        FRA_FWMARK,
+        &client_ingress_mark(family).to_ne_bytes(),
+    )?;
+    push_attribute(&mut payload, FRA_FWMASK, &u32::MAX.to_ne_bytes())?;
+    push_attribute(
+        &mut payload,
+        FRA_TABLE,
+        &u32::from(CLIENT_INGRESS_ROUTE_TABLE).to_ne_bytes(),
+    )?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_worker_return_route(
+    ingress_ifindex: u32,
+    family: ClientIngressFamily,
+) -> Result<Vec<u8>, KernelError> {
+    if ingress_ifindex == 0 {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = Vec::with_capacity(40);
+    payload.push(client_ingress_kernel_family(family)?);
+    payload.extend_from_slice(&[0, 0, 0]);
+    payload.push(RT_TABLE_MAIN);
+    payload.push(RTPROT_STATIC);
+    payload.push(RT_SCOPE_UNIVERSE);
+    payload.push(RTN_UNICAST);
+    payload.extend_from_slice(&RTNH_F_ONLINK.to_ne_bytes());
+    push_attribute(&mut payload, RTA_OIF, &ingress_ifindex.to_ne_bytes())?;
+    let gateway: &[u8] = match family {
+        ClientIngressFamily::Ipv4 => &CLIENT_INGRESS_PARENT_ADDRESS,
+        ClientIngressFamily::Ipv6 => &CLIENT_INGRESS_PARENT_IPV6_ADDRESS,
+    };
+    push_attribute(&mut payload, RTA_GATEWAY, gateway)?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_parent_route(
+    parent_ifindex: u32,
+    family: ClientIngressFamily,
+) -> Result<Vec<u8>, KernelError> {
+    if parent_ifindex == 0 {
+        return Err(KernelError::Invalid);
+    }
+    let mut payload = Vec::with_capacity(48);
+    payload.push(client_ingress_kernel_family(family)?);
+    payload.extend_from_slice(&[0, 0, 0]);
+    payload.push(CLIENT_INGRESS_PARENT_ROUTE_TABLE);
+    payload.push(RTPROT_STATIC);
+    payload.push(RT_SCOPE_UNIVERSE);
+    payload.push(RTN_UNICAST);
+    payload.extend_from_slice(&RTNH_F_ONLINK.to_ne_bytes());
+    push_attribute(
+        &mut payload,
+        RTA_TABLE,
+        &u32::from(CLIENT_INGRESS_PARENT_ROUTE_TABLE).to_ne_bytes(),
+    )?;
+    push_attribute(&mut payload, RTA_OIF, &parent_ifindex.to_ne_bytes())?;
+    let gateway: &[u8] = match family {
+        ClientIngressFamily::Ipv4 => &CLIENT_INGRESS_WORKER_ADDRESS,
+        ClientIngressFamily::Ipv6 => &CLIENT_INGRESS_WORKER_IPV6_ADDRESS,
+    };
+    push_attribute(&mut payload, RTA_GATEWAY, gateway)?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_parent_rule(family: ClientIngressFamily) -> Result<Vec<u8>, KernelError> {
+    let mut payload = Vec::with_capacity(48);
+    payload.push(client_ingress_kernel_family(family)?);
+    payload.extend_from_slice(&[0, 0, 0]);
+    payload.push(CLIENT_INGRESS_PARENT_ROUTE_TABLE);
+    payload.extend_from_slice(&[0, 0]);
+    payload.push(FR_ACT_TO_TBL);
+    payload.extend_from_slice(&0_u32.to_ne_bytes());
+    if payload.len() != FIB_RULE_HDR_LEN {
+        return Err(KernelError::Invalid);
+    }
+    push_attribute(
+        &mut payload,
+        FRA_PRIORITY,
+        &CLIENT_INGRESS_PARENT_RULE_PRIORITY.to_ne_bytes(),
+    )?;
+    push_attribute(
+        &mut payload,
+        FRA_FWMARK,
+        &client_ingress_parent_mark(family).to_ne_bytes(),
+    )?;
+    push_attribute(&mut payload, FRA_FWMASK, &u32::MAX.to_ne_bytes())?;
+    push_attribute(
+        &mut payload,
+        FRA_TABLE,
+        &u32::from(CLIENT_INGRESS_PARENT_ROUTE_TABLE).to_ne_bytes(),
+    )?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_initial_rules(
+    trusted_agent_uid: u32,
+) -> Result<Vec<Vec<u8>>, KernelError> {
+    if trusted_agent_uid == 0 || trusted_agent_uid == u32::MAX {
+        return Err(KernelError::Invalid);
+    }
+    let mut rules = Vec::with_capacity(4);
+    // Root/helper route observations stay physical. The permanent agent UID owns discovery
+    // and Exit payload sockets. INVALID_UID is not a valid kernel uid-range endpoint.
+    for (offset, start, end) in [
+        (0, 1, trusted_agent_uid - 1),
+        (1, trusted_agent_uid + 1, u32::MAX - 1),
+    ] {
+        if start > end {
+            continue;
+        }
+        for family in [ClientIngressFamily::Ipv4, ClientIngressFamily::Ipv6] {
+            let mut payload = Vec::with_capacity(80);
+            payload.push(client_ingress_kernel_family(family)?);
+            payload.extend_from_slice(&[0, 0, 0]);
+            payload.push(CLIENT_INGRESS_PARENT_ROUTE_TABLE);
+            payload.extend_from_slice(&[0, 0]);
+            payload.push(FR_ACT_TO_TBL);
+            payload.extend_from_slice(&0_u32.to_ne_bytes());
+            push_attribute(
+                &mut payload,
+                FRA_PRIORITY,
+                &(CLIENT_INGRESS_INITIAL_RULE_PRIORITY + offset).to_ne_bytes(),
+            )?;
+            // Only locally generated, initially unmarked application traffic may use this
+            // route. Forwarded traffic and every WireGuard bypass mark retain their lookup.
+            push_attribute(&mut payload, FRA_IIFNAME, b"lo\0")?;
+            push_attribute(&mut payload, FRA_FWMARK, &0_u32.to_ne_bytes())?;
+            push_attribute(&mut payload, FRA_FWMASK, &u32::MAX.to_ne_bytes())?;
+            let mut range = [0_u8; 8];
+            range[..4].copy_from_slice(&start.to_ne_bytes());
+            range[4..].copy_from_slice(&end.to_ne_bytes());
+            push_attribute(&mut payload, FRA_UID_RANGE, &range)?;
+            push_attribute(
+                &mut payload,
+                FRA_TABLE,
+                &u32::from(CLIENT_INGRESS_PARENT_ROUTE_TABLE).to_ne_bytes(),
+            )?;
+            rules.push(payload);
+        }
+    }
+    Ok(rules)
 }
 
 fn encode_exact_main_ipv6_link_route_query(
@@ -1830,6 +2540,79 @@ fn encode_create_wireguard_link(
     Ok((RTM_NEWLINK, NLM_F_CREATE | NLM_F_EXCL, payload))
 }
 
+pub(crate) fn client_ingress_interface_names(
+    client_runtime_id: [u8; 16],
+) -> Result<(String, String), KernelError> {
+    if client_runtime_id.iter().all(|byte| *byte == 0) {
+        return Err(KernelError::Invalid);
+    }
+    let mut suffix = String::with_capacity(8);
+    for byte in &client_runtime_id[..4] {
+        suffix.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        suffix.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    let parent = format!("vpih{suffix}");
+    let worker = format!("vpiw{suffix}");
+    if !valid_string_field(&parent, MAX_IFNAME_BYTES)
+        || !valid_string_field(&worker, MAX_IFNAME_BYTES)
+        || parent == worker
+    {
+        return Err(KernelError::Invalid);
+    }
+    Ok((parent, worker))
+}
+
+fn encode_create_client_ingress_veth(
+    parent_name: &str,
+    worker_name: &str,
+    target_namespace: RawFd,
+) -> Result<Vec<u8>, KernelError> {
+    if target_namespace < 0
+        || !valid_string_field(parent_name, MAX_IFNAME_BYTES)
+        || !valid_string_field(worker_name, MAX_IFNAME_BYTES)
+        || parent_name == worker_name
+    {
+        return Err(KernelError::Invalid);
+    }
+    let mut peer = interface_info(0, 0, 0)?;
+    push_bounded_string_attribute(&mut peer, IFLA_IFNAME, worker_name, MAX_IFNAME_BYTES)?;
+    push_attribute(&mut peer, IFLA_MTU, &CLIENT_INGRESS_MTU.to_ne_bytes())?;
+    push_attribute(&mut peer, IFLA_NET_NS_FD, &target_namespace.to_ne_bytes())?;
+    let mut data = Vec::with_capacity(peer.len() + 8);
+    push_attribute(&mut data, VETH_INFO_PEER | NLA_F_NESTED, &peer)?;
+    let mut link_info = Vec::with_capacity(data.len() + 32);
+    push_bounded_string_attribute(
+        &mut link_info,
+        IFLA_INFO_KIND,
+        VETH_LINK_KIND,
+        MAX_LINK_KIND_BYTES,
+    )?;
+    push_attribute(&mut link_info, IFLA_INFO_DATA | NLA_F_NESTED, &data)?;
+    let mut payload = interface_info(0, 0, 0)?;
+    push_bounded_string_attribute(&mut payload, IFLA_IFNAME, parent_name, MAX_IFNAME_BYTES)?;
+    push_attribute(&mut payload, IFLA_MTU, &CLIENT_INGRESS_MTU.to_ne_bytes())?;
+    push_attribute(&mut payload, IFLA_LINKINFO | NLA_F_NESTED, &link_info)?;
+    Ok(payload)
+}
+
+fn encode_client_ingress_source_mark(index: u32) -> Result<Vec<u8>, KernelError> {
+    if index == 0 {
+        return Err(KernelError::Invalid);
+    }
+    // Linux inet_set_link_af accepts individual nested configuration IDs on SET (GET uses
+    // a packed array). Do not replace other interface settings or touch all/default values.
+    let mut conf = Vec::new();
+    push_attribute(&mut conf, IPV4_DEVCONF_SRC_VMARK, &1_u32.to_ne_bytes())?;
+    let mut inet = Vec::new();
+    push_attribute(&mut inet, IFLA_INET_CONF | NLA_F_NESTED, &conf)?;
+    let mut families = Vec::new();
+    let family = u16::try_from(libc::AF_INET).map_err(|_| KernelError::Invalid)?;
+    push_attribute(&mut families, family | NLA_F_NESTED, &inet)?;
+    let mut payload = interface_info(index, 0, 0)?;
+    push_attribute(&mut payload, IFLA_AF_SPEC | NLA_F_NESTED, &families)?;
+    Ok(payload)
+}
+
 fn encode_set_link_alias(index: u32, alias: &str) -> Result<(u16, u16, Vec<u8>), KernelError> {
     if index == 0 || index > i32::MAX as u32 || !valid_string_field(alias, MAX_IFALIAS_BYTES) {
         return Err(KernelError::Invalid);
@@ -1971,6 +2754,11 @@ fn encode_activate_device_v3(
     push_string_attribute(&mut device, WGDEVICE_A_IFNAME, resource.interface())?;
     push_attribute(
         &mut device,
+        WGDEVICE_A_FWMARK,
+        &wireguard_underlay_mark(resource).to_ne_bytes(),
+    )?;
+    push_attribute(
+        &mut device,
         WGDEVICE_A_FLAGS,
         &WGDEVICE_F_REPLACE_PEERS.to_ne_bytes(),
     )?;
@@ -1981,6 +2769,20 @@ fn encode_activate_device_v3(
     payload.extend_from_slice(&0_u16.to_ne_bytes());
     payload.extend_from_slice(&device);
     Ok(payload)
+}
+
+/// All `WireGuard` outer packets originate in the kernel and therefore have no trusted agent
+/// socket UID. The existing ingress mark bypasses parent output steering without selecting the
+/// parent-to-ingress policy table. Relay/Exit packets need the same exemption when this node also
+/// consumes the network; otherwise its own Client ingress recursively captures contribution.
+fn wireguard_underlay_mark(resource: &DurableWireguardResource) -> u32 {
+    match WireguardRole::try_from(resource.key().1) {
+        Ok(WireguardRole::Client) => CLIENT_INGRESS_IPV4_MARK,
+        Ok(WireguardRole::RelayClient | WireguardRole::RelayExit | WireguardRole::Exit) => {
+            CONTRIBUTION_WIREGUARD_MARK
+        }
+        Ok(WireguardRole::Unspecified) | Err(_) => 0,
+    }
 }
 
 fn encode_prepare_key_no_peers_v3(
@@ -2380,6 +3182,13 @@ mod tests {
     const TEST_FAMILY_ID: u16 = 0x43;
     const TEST_PORT_ID: u32 = 4_242;
 
+    fn attribute<'a>(encoded: &'a [(u16, &'a [u8])], kind: u16) -> &'a [u8] {
+        encoded
+            .iter()
+            .find_map(|(candidate, value)| ((*candidate & NLA_TYPE_MASK) == kind).then_some(*value))
+            .expect("required attribute")
+    }
+
     fn durable_resource(route_context_seed: u8, ownership_seed: u8) -> DurableWireguardResource {
         durable_wireguard_resource_for_test(
             [route_context_seed; 16],
@@ -2389,6 +3198,177 @@ mod tests {
             ownership_seed,
         )
         .expect("durable WireGuard resource fixture")
+    }
+
+    #[test]
+    fn client_ingress_source_mark_changes_only_exact_interface_ipv4_setting() {
+        assert!(encode_client_ingress_source_mark(0).is_err());
+        let payload = encode_client_ingress_source_mark(7).expect("source-mark setting");
+        assert_eq!(read_u32(&payload, 4), Some(7));
+        assert_eq!(read_u32(&payload, 8), Some(0));
+        assert_eq!(read_u32(&payload, 12), Some(0));
+        let link = attributes(&payload[16..]).expect("link attributes");
+        assert_eq!(link.len(), 1);
+        let families = attributes(attribute(&link, IFLA_AF_SPEC)).expect("families");
+        assert_eq!(families.len(), 1);
+        let inet = attributes(attribute(&families, 2)).expect("IPv4 only");
+        assert_eq!(inet.len(), 1);
+        let conf = attributes(attribute(&inet, IFLA_INET_CONF)).expect("configuration");
+        assert_eq!(
+            conf,
+            vec![(IPV4_DEVCONF_SRC_VMARK, 1_u32.to_ne_bytes().as_slice())]
+        );
+    }
+
+    #[test]
+    fn client_ingress_initial_rules_cover_only_unmarked_local_unprivileged_applications() {
+        let agent_uid = 987;
+        let rules = encode_client_ingress_initial_rules(agent_uid).expect("initial rules");
+        assert_eq!(rules.len(), 4);
+        for family in [ClientIngressFamily::Ipv4, ClientIngressFamily::Ipv6] {
+            let family = client_ingress_kernel_family(family).expect("kernel family");
+            let family_rules = rules
+                .iter()
+                .filter(|rule| rule[0] == family)
+                .collect::<Vec<_>>();
+            assert_eq!(family_rules.len(), 2);
+            for (offset, rule) in family_rules.iter().enumerate() {
+                assert_eq!(rule[4], CLIENT_INGRESS_PARENT_ROUTE_TABLE);
+                assert_eq!(rule[7], FR_ACT_TO_TBL);
+                assert_eq!(&rule[8..12], &0_u32.to_ne_bytes());
+                let attributes = attributes(&rule[FIB_RULE_HDR_LEN..]).expect("rule attributes");
+                assert_eq!(attributes.len(), 6);
+                assert_eq!(attribute(&attributes, FRA_IIFNAME), b"lo\0");
+                assert_eq!(attribute(&attributes, FRA_FWMARK), 0_u32.to_ne_bytes());
+                assert_eq!(attribute(&attributes, FRA_FWMASK), u32::MAX.to_ne_bytes());
+                assert_eq!(
+                    attribute(&attributes, FRA_PRIORITY),
+                    (CLIENT_INGRESS_INITIAL_RULE_PRIORITY + u32::try_from(offset).unwrap())
+                        .to_ne_bytes()
+                );
+                let priority =
+                    u32::from_ne_bytes(attribute(&attributes, FRA_PRIORITY).try_into().unwrap());
+                assert!(priority > 0 && priority < CLIENT_INGRESS_PARENT_RULE_PRIORITY);
+                assert!(priority < 32_766);
+                assert_eq!(
+                    attribute(&attributes, FRA_TABLE),
+                    u32::from(CLIENT_INGRESS_PARENT_ROUTE_TABLE).to_ne_bytes()
+                );
+                let range = attribute(&attributes, FRA_UID_RANGE);
+                assert_eq!(range.len(), 8);
+                let start = u32::from_ne_bytes(range[..4].try_into().unwrap());
+                let end = u32::from_ne_bytes(range[4..].try_into().unwrap());
+                assert_eq!(
+                    (start, end),
+                    if offset == 0 {
+                        (1, agent_uid - 1)
+                    } else {
+                        (agent_uid + 1, u32::MAX - 1)
+                    }
+                );
+                assert!(start > 0 && end < u32::MAX);
+                assert!(!(start..=end).contains(&agent_uid));
+            }
+        }
+    }
+
+    #[test]
+    fn client_ingress_initial_rules_reject_invalid_uids_and_skip_empty_ranges() {
+        assert!(encode_client_ingress_initial_rules(0).is_err());
+        assert!(encode_client_ingress_initial_rules(u32::MAX).is_err());
+        assert_eq!(encode_client_ingress_initial_rules(1).unwrap().len(), 2);
+        assert_eq!(
+            encode_client_ingress_initial_rules(u32::MAX - 1)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn client_ingress_ipv6_routes_bind_exact_family_gateways_and_marks() {
+        let local = encode_client_ingress_local_route(7, ClientIngressFamily::Ipv6)
+            .expect("IPv6 local route");
+        assert_eq!(local[0], u8::try_from(libc::AF_INET6).expect("AF_INET6"));
+        assert_eq!(local[4], CLIENT_INGRESS_ROUTE_TABLE);
+        assert_eq!(local[7], RTN_LOCAL);
+        assert!(
+            attributes(&local[RTMSG_LEN..])
+                .expect("local route attributes")
+                .iter()
+                .any(|(kind, value)| *kind == RTA_OIF && *value == 7_u32.to_ne_bytes())
+        );
+
+        let worker_return = encode_client_ingress_worker_return_route(9, ClientIngressFamily::Ipv6)
+            .expect("IPv6 worker return route");
+        assert!(
+            attributes(&worker_return[RTMSG_LEN..])
+                .expect("worker return attributes")
+                .iter()
+                .any(|(kind, value)| {
+                    *kind == RTA_GATEWAY && *value == CLIENT_INGRESS_PARENT_IPV6_ADDRESS
+                })
+        );
+
+        let parent = encode_client_ingress_parent_route(11, ClientIngressFamily::Ipv6)
+            .expect("IPv6 parent route");
+        assert!(
+            attributes(&parent[RTMSG_LEN..])
+                .expect("parent route attributes")
+                .iter()
+                .any(|(kind, value)| {
+                    *kind == RTA_GATEWAY && *value == CLIENT_INGRESS_WORKER_IPV6_ADDRESS
+                })
+        );
+
+        let worker_rule =
+            encode_client_ingress_rule(ClientIngressFamily::Ipv6).expect("IPv6 TPROXY rule");
+        assert_eq!(
+            worker_rule[0],
+            u8::try_from(libc::AF_INET6).expect("AF_INET6")
+        );
+        assert!(
+            attributes(&worker_rule[FIB_RULE_HDR_LEN..])
+                .expect("worker rule attributes")
+                .iter()
+                .any(|(kind, value)| {
+                    *kind == FRA_FWMARK && *value == CLIENT_INGRESS_IPV6_MARK.to_ne_bytes()
+                })
+        );
+
+        let parent_rule =
+            encode_client_ingress_parent_rule(ClientIngressFamily::Ipv6).expect("IPv6 parent rule");
+        assert!(
+            attributes(&parent_rule[FIB_RULE_HDR_LEN..])
+                .expect("parent rule attributes")
+                .iter()
+                .any(|(kind, value)| {
+                    *kind == FRA_FWMARK && *value == CLIENT_INGRESS_PARENT_IPV6_MARK.to_ne_bytes()
+                })
+        );
+    }
+
+    #[test]
+    fn client_ingress_veth_caps_both_endpoints_at_ipv6_minimum_mtu() {
+        let payload = encode_create_client_ingress_veth("vpih01020304", "vpiw01020304", 17)
+            .expect("client ingress veth");
+        let outer = attributes(&payload[16..]).expect("outer link attributes");
+        assert_eq!(
+            attribute(&outer, IFLA_MTU),
+            CLIENT_INGRESS_MTU.to_ne_bytes()
+        );
+
+        let link_info =
+            attributes(attribute(&outer, IFLA_LINKINFO)).expect("nested link-info attributes");
+        let veth_data =
+            attributes(attribute(&link_info, IFLA_INFO_DATA)).expect("nested veth attributes");
+        let peer = attribute(&veth_data, VETH_INFO_PEER);
+        let peer_attributes = attributes(&peer[16..]).expect("peer link attributes");
+        assert_eq!(
+            attribute(&peer_attributes, IFLA_MTU),
+            CLIENT_INGRESS_MTU.to_ne_bytes()
+        );
+        assert_eq!(CLIENT_INGRESS_MTU, 1_280);
     }
 
     fn acknowledgement(errno: i32) -> NetlinkReply {
@@ -2554,6 +3534,39 @@ mod tests {
     }
 
     #[test]
+    fn v3_activation_marks_every_role_to_bypass_combined_node_client_ingress() {
+        for (context_role, role) in [
+            (ContextRole::Client, WireguardRole::Client),
+            (ContextRole::Relay, WireguardRole::RelayClient),
+            (ContextRole::Relay, WireguardRole::RelayExit),
+            (ContextRole::Exit, WireguardRole::Exit),
+        ] {
+            let resource = durable_wireguard_resource_for_test([7; 16], context_role, 1, role, 11)
+                .expect("exact role resource");
+            let peer = WireguardV3PeerConfiguration {
+                public_key: [0x33; 32],
+                endpoint: "198.51.100.4:51820".parse().expect("endpoint"),
+                allowed_address: resource.peer_address(),
+                allowed_prefix_length: 128,
+                persistent_keepalive_seconds: 5,
+            };
+            let payload = encode_activate_device_v3(&resource, &peer).expect("activation encoding");
+            let device = attributes(&payload[GENL_HEADER_LEN..]).expect("device attributes");
+            let expected_mark = if role == WireguardRole::Client {
+                CLIENT_INGRESS_IPV4_MARK
+            } else {
+                CONTRIBUTION_WIREGUARD_MARK
+            };
+            assert!(
+                device.iter().any(|(kind, value)| {
+                    *kind == WGDEVICE_A_FWMARK && *value == expected_mark.to_ne_bytes()
+                }),
+                "kernel WireGuard outer packets must bypass Client ingress in role {role:?}"
+            );
+        }
+    }
+
+    #[test]
     fn v3_activation_encoder_contains_one_exact_public_peer_and_no_secret() {
         let resource = durable_resource(7, 11);
         let peer = WireguardV3PeerConfiguration {
@@ -2575,6 +3588,9 @@ mod tests {
                 .iter()
                 .all(|(kind, _)| kind & NLA_TYPE_MASK != WGDEVICE_A_LISTEN_PORT)
         );
+        assert!(device.iter().any(|(kind, value)| {
+            *kind == WGDEVICE_A_FWMARK && *value == CLIENT_INGRESS_IPV4_MARK.to_ne_bytes()
+        }));
         let peers = device
             .iter()
             .find_map(|(kind, value)| (*kind == WGDEVICE_A_PEERS | NLA_F_NESTED).then_some(*value))
@@ -3512,6 +4528,49 @@ mod tests {
             classify_mutation_acknowledgement(Err(KernelError::Malformed), true),
             ObservedMutationAcknowledgement::Ambiguous(KernelError::Malformed)
         ));
+    }
+
+    #[test]
+    fn restart_pre_dispatch_role_shape_is_exact_and_never_broader_than_one_path() {
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Client).expect("client roles"),
+            &[WireguardRole::Client]
+        );
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Relay).expect("relay roles"),
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit,]
+        );
+        assert_eq!(
+            restart_wireguard_roles(ContextRole::Exit).expect("exit roles"),
+            &[WireguardRole::Exit]
+        );
+        assert!(restart_wireguard_roles(ContextRole::Unspecified).is_err());
+
+        let source = include_str!("kernel.rs");
+        let start = source
+            .find("pub(crate) fn prove_restart_pre_dispatch_links_absent")
+            .expect("restart absence proof");
+        let end = source[start..]
+            .find("/// Read back one helper-derived")
+            .map(|offset| start + offset)
+            .expect("restart absence proof end");
+        let proof = &source[start..end];
+        assert!(proof.contains("WireguardLeaseSpec::derive("));
+        assert!(proof.contains("prove_link_absent"));
+        assert!(proof.contains("link_details_full(\"lo\""));
+        assert!(proof.contains("loopback.flags & up != 0"));
+        for forbidden in [
+            "delete",
+            "remove",
+            "set_link_up",
+            "set_link_down",
+            "Command::",
+        ] {
+            assert!(
+                !proof.contains(forbidden),
+                "unexpected mutation: {forbidden}"
+            );
+        }
     }
 
     #[test]

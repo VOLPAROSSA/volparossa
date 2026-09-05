@@ -244,11 +244,13 @@ single-writer actor owns the store and both executor interfaces on one named thr
 verified parent-directory descriptor and acquires a process-global one-shot store latch before
 opening the lock. Its generic settlement path processes every custody-bearing phase before retiring
 even one `Intent`, rechecks the complete durable boundary, and only then reports ready. The
-production lock-held startup join admits a non-empty set only when every target is already durable
-`CleanupConfirmed` and both inherited and manager custody are exactly empty. It then revalidates the
-journal, sends a fresh manager barrier, requires two new identical complete empty snapshots, and
-passes one-shot exact-target manager-absence evidence into this path. The installed cleanup executor
-still refuses every worker/kernel proof. Its non-blocking admission accepts at most four
+production lock-held startup join admits a non-empty set only through one of two bounded cases: an
+all-`CleanupConfirmed` removal/absence settlement, or the exact-singleton pre-dispatch reaper
+described below. The former revalidates the journal, sends a fresh manager barrier, requires two new
+identical complete empty snapshots, and passes one-shot exact-target manager-absence evidence into
+the ordinary sweep. The installed general cleanup executor still refuses every worker/kernel proof;
+the reaper uses a distinct startup-only affine control which can CAS only one unchanged
+`MayOwnCustody -> CleanupConfirmed` record. Its non-blocking admission accepts at most four
 operations while reserving channel capacity for shutdown; opaque non-`Clone` keys expose neither
 the journal revision nor raw ownership coordinates. Each validated wire intent locally receives a
 fresh random 256-bit `OwnershipId` inside a non-`Clone` registration owner. Registration consumes
@@ -268,12 +270,13 @@ same-runtime handoff reaches durable `MayOwnPrepare`; the marker alone authorize
 Production retains the sole start/shutdown owner and issues one cloneable typed Prepare handle.
 That handle can register a validated wire intent, bind exact worker custody, arm it, and consume the
 resulting affine token through the two ordered same-runtime settlement phases. It exposes no raw
-revision, coordinates, startup recovery, or lifecycle authority. The installed restart cleanup
-executor still refuses every `MayOwnCustody`/`MayOwnPrepare` proof request, so those phases remain
-byte-identical and block startup. An all-`CleanupConfirmed` set may retire when custody is already
+revision, coordinates, startup recovery, or lifecycle authority. The installed general restart
+cleanup executor still refuses every `MayOwnCustody`/`MayOwnPrepare` proof request. The private
+startup-only reaper proof is the sole exception for exactly one unchanged `MayOwnCustody` target;
+`MayOwnPrepare` remains refused. An all-`CleanupConfirmed` set may retire when custody is already
 absent, or after every exact-present pair is removed and the resulting manager inventory is freshly
-proved stably empty. There is no inherited-custody adoption, restart reaper, supported on-disk
-migration, or live-root proof. Every non-test actor
+proved stably empty. There is no general inherited-custody adoption, supported on-disk migration,
+or live-root forced-crash proof. Every non-test actor
 entry point requires one caller-supplied absolute hard deadline. That same value is carried through
 admission, the queued command, actor-thread execution, reply handling and thread settlement. Each
 settlement operation additionally receives its exact supplied deadline and rechecks it before
@@ -376,9 +379,73 @@ solely of `CleanupConfirmed` records proceeds. Already-absent targets need the f
 join. Exact-present targets are first removed in canonical name order through distinct affine
 restart proofs, each preserving every unrelated entry; mixed present/already-absent state is valid
 for crash resumption. A final fresh barrier plus two new exact-empty manager snapshots then mints
-one-shot exact-set manager-absence evidence. Every `MayOwn`, partial, one-sided, wrong-name,
-wrong-binding, changed or unstable case remains unresolved and reaches no journal transition or
-socket publication.
+one-shot exact-set manager-absence evidence. Apart from the exact singleton case below, every
+`MayOwn`, partial, one-sided, wrong-name, wrong-binding, changed or unstable case remains unresolved
+and reaches no journal transition or socket publication.
+
+### Exact-singleton pre-dispatch restart reaper
+
+Production has one deliberately narrow positive restart path. The complete classification must be
+exactly one `MayOwnCustody + ExactPresent` target. Its validated durable plan must be one logical
+path: Client has exactly one Client lease, Exit exactly one Exit lease, and Relay exactly the
+RelayClient plus RelayExit leases with the same path ID. The durable recovery anchor must name the
+current boot and the same executable device/inode as `/proc/self/exe`; the inherited namespace FD
+must match the anchor. `MayOwnPrepare`, `ExactNoStoredCustody`, multiple records, multiple paths and
+every mixed set remain fail-closed.
+
+The parent keeps the journal startup owner, process-wide spawn-admission owner, old process pidfd,
+network-namespace owner and manager inventory. It first reuses the exact pidfd-exit and strict
+shared-service-cgroup quiescence composition. It then starts only
+`/proc/self/exe --internal-restart-reaper-v1`, with an empty environment, `/` as the working
+directory, closed inherited descriptors and a private bounded `SOCK_SEQPACKET` channel. `SO_PASSCRED`
+authenticates every record. One challenge- and plan-bound `SCM_RIGHTS` record carries exactly one
+typed `CLONE_NEWNET` descriptor; there is no command, path, interface name, nftables name or numeric
+PID supplied by the journal or agent.
+
+The child is single-threaded. It validates and joins the exact namespace once, closes the namespace
+FD, remeasures the joined identity, sets no-new-privileges and installs the existing monotone filter
+which denies later `setns`, `unshare`, `exec` and process-tree creation. It then assumes the pinned
+worker UID/GID with only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`, rebinds `PDEATHSIG=SIGKILL`,
+rechecks the parent and emits a
+challenge-bound sandbox record. The parent independently pins the child pidfd, executable, cgroup,
+namespace, descriptor set, credentials, capabilities and seccomp state before sending the cleanup
+release record. Before spawn it opens one close-on-exec reserve descriptor and requires the default
+waitable `SIGCHLD` disposition plus default `SIGHUP`, `SIGINT` and `SIGTERM` dispositions.
+`pidfd_open` retries `EINTR`; one `EMFILE` or `ENFILE` may consume the reserve and retry once. After
+a pidfd is pinned, failure uses pidfd signaling and completion is accepted only after
+`waitid(P_PIDFD)` exactly reaps that child. If pidfd acquisition remains impossible, the parent
+sends no record, closes the only channel endpoint and retains the direct waitable `Child` while
+bounded `try_wait` polling observes normal EOF exit. A stopped or stuck child, changed signal
+disposition, competing reap, or expired bound invokes fixed `exit_group(70)` instead of returning
+with an unpinned privileged child. This non-coredumping fail-stop runs no cleanup/atexit handlers,
+mints no cleanup proof and makes no exact-reap claim. It is available only after the same startup
+bookends have attested exact `Type=simple`, `RemainAfterExit=false`, `ExitType=main`,
+no additional success statuses, `Restart=on-failure`, `RestartMode=normal`,
+`RestartUSec=3s`, no forced-restart statuses, `RestartPreventExitStatus={70,71}` with no signal
+members,
+`KillMode=control-group`, `SendSIGKILL=true`, `FinalKillSignal=SIGKILL`,
+`TimeoutStopUSec=45s` and `TimeoutStopFailureMode=terminate`. The packaged unit sets that complete
+contract, so PID 1 enters a bounded whole-service-cgroup retirement after the main helper fails and
+that helper instance cannot publish a socket. No numeric-PID signal is used.
+
+The cleanup baseline is role-specific and intentionally not a claim about every possible kernel
+object. For every role, all journal-derived WireGuard interface names must be absent and `lo` must
+remain unaliased and down, before and after the permitted work. Client and Exit additionally require
+the namespace-local nftables ruleset to be exactly empty and IPv6 forwarding `all` plus `default` to
+be disabled. Relay requires both forwarding selectors to remain enabled and accepts only the exact
+restricted DROP fence derived from the context/path, or the exact-empty successor of an earlier
+committed deletion whose reply was lost. It reconstructs the observed generation and handles and
+retires that fence; active, foreign, partial, extra or unstable policy fails closed. The reaper never
+deletes a WireGuard link and never writes IPv6 forwarding.
+
+After the challenge-bound terminal reply and exact reap, the parent repeats the old-worker/cgroup
+observation, then gives one affine target proof to a startup-only actor control. That control can
+durably CAS only the unchanged singleton `MayOwnCustody -> CleanupConfirmed` while the actor remains
+`Starting` and lock-held. The existing exact-name `FDSTOREREMOVE`, fresh exact-empty manager proof and
+`CleanupConfirmed -> Absent` chain then run under the same spawn-admission guard before the helper
+socket may be bound. A crash after the phase CAS restarts at durable `CleanupConfirmed`; a committed
+fence deletion with a lost child reply remains retryable only as exact-empty. Broader crash recovery
+and live forced-crash/KVM proof are still absent, so AV1-10 and the 11/100 alpha score do not change.
 
 A refusal-only observation seam can consume the complete affine classification and wait for exact
 inherited process-pidfd exit. Before its first wait, every pending `MayOwnCustody` or
@@ -444,11 +511,19 @@ different PIDs fail closed.
 Each isolation bookend additionally requires one stable nonzero 16-byte `InvocationID`, current
 `MainPID`, zero `ControlPID`, a canonical non-root `ControlGroup`, nonzero matching
 `ControlGroupId`, `Delegate=false`, empty delegate controllers/subgroup,
-`ProtectControlGroups=true`, `ProtectControlGroupsEx=strict`, `PrivatePIDs=no`,
-`KillMode=control-group`, and `SendSIGKILL=true`. The packaged unit enforces those values and removes
-the broad `@mount` syscall group both from its positive allowlist and through an explicit
-`SystemCallFilter=~@mount` subtraction while preserving the network-namespace syscalls required by
-the typed worker bootstrap.
+`ProtectControlGroups=true`, `ProtectControlGroupsEx=strict`, `PrivatePIDs=no`, `Type=simple`,
+`RemainAfterExit=false`, `ExitType=main`, no additional success statuses,
+`Restart=on-failure`, `RestartMode=normal`, `RestartUSec=3s`, no forced-restart statuses, exact
+status-only `RestartPreventExitStatus={70,71}`, `KillMode=control-group`, `SendSIGKILL=true`,
+`FinalKillSignal=SIGKILL`, exact finite `TimeoutStopUSec=45s`, and
+`TimeoutStopFailureMode=terminate`. `Type=simple` plus main-process exit tracking makes the fixed
+fail-stop a service failure; `RemainAfterExit=false` forbids a falsely active exited service, and
+the restart-prevention set makes both production status 70 and diagnostic setup status 71 terminal
+without a three-second automatic restart. `terminate` keeps timeout handling off the
+`TimeoutAbortSec`/abort path. The packaged unit enforces
+those values and removes the broad `@mount` syscall group both from its positive allowlist and
+through an explicit `SystemCallFilter=~@mount` subtraction while preserving the network-namespace
+syscalls required by the typed worker bootstrap.
 
 The result is still only bounded read-only quiescence sample/correlation evidence. `cgroup.type`,
 `cgroup.stat`, and `cgroup.procs` are separate, non-atomic reads. The process-wide spawn guard closes
@@ -464,14 +539,15 @@ inherited before startup. This refusal sampler therefore proves no network-names
 kernel-resource cleanup, manager removal or authority for a `MayOwn` journal transition. It leaves
 AV1-10 Open and the fixed alpha score at 11/100 (11%).
 
-This remains the refusal boundary for every `MayOwn` set and every set not consisting entirely of
-exactly classified `CleanupConfirmed` targets. Such a set blocks startup after read-only classification and drops its exact source-slot owners without
+This remains the refusal boundary for every `MayOwn` set except the exact singleton reaper shape,
+and every set not consisting entirely of exactly classified `CleanupConfirmed` targets. Such a set
+blocks startup after read-only classification and drops its exact source-slot owners without
 publishing a cleanup token or helper socket. The takeover creates no additional process-local
 source alias; dropping the refused set closes every captured source slot while PID 1 retains any
 manager copies. This classification invokes no descriptor-store removal, journal transition,
-worker adoption, reaper or cleanup. The sole exception is the separately revalidated all-
-`CleanupConfirmed` absence/removal settlement described above; it grants no broader restart
-authority.
+worker adoption, reaper or cleanup. The sole exceptions are the separately revalidated all-
+`CleanupConfirmed` absence/removal settlement and exact singleton reaper described above; neither
+grants broader restart authority.
 
 ### Production systemd descriptor-store mutation boundary
 
@@ -595,12 +671,14 @@ produced recorded evidence inside the required disposable Debian 13 transient se
 therefore leaves AV1-10 Open, keeps the fixed alpha score at 11/100 (11%), and closes no production,
 crash-cleanup, datapath or acceptance milestone.
 
-The unprivileged side may retain only a v3 `PreparedLeaseBatch`: its opaque non-secret context
-handle and `PreparedLease` values containing an opaque lease handle, path, role, helper-generated
-public key, kernel-proven public UDP endpoint, and `DirectAssigned` evidence. Later operations may
-echo those handles and signed public peer tuples. A WireGuard private key, raw private-key bytes, or
-an endpoint secret must never cross into routing, agent, reservation, discovery, or any other
-unprivileged state.
+The unprivileged route owner retains a non-cloneable `RuntimeBoundPreparedLeaseBatch`: the exact
+helper runtime ID, canonical Prepare plan, opaque context handle and complete `PreparedLease` set.
+Every fresh-stream Activate, Commit and retirement Destroy first performs
+`BindHelperRuntime(None)` on that stream and compares the retained runtime ID before sending the
+mutating phase. Timeout and cancellation keep the same owner in the bounded route-retirement
+mechanism; they do not authorize a phase on a replacement helper process. This is lifecycle
+correlation only, not a live-datapath or crash-recovery claim. A WireGuard private key, raw
+private-key bytes, or endpoint secret must never cross into unprivileged state.
 
 The target worker transaction is intentionally stricter than the old worker:
 
@@ -679,12 +757,13 @@ stdin. Its bounded self-audit then requires exactly descriptors `{1, 2, 3}`. Bef
 stdout and stderr must resolve to `/dev/null`, while descriptor 3 must remain the exact connected,
 CLOEXEC Unix seqpacket channel. The production-only applicator then captures the parent
 network-namespace identity, validates its
-bootstrap `CAP_KILL`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`
-authority,
+bootstrap `CAP_KILL`, `CAP_SETGID`, `CAP_SETUID`, `CAP_SETPCAP`, `CAP_NET_BIND_SERVICE`,
+`CAP_NET_ADMIN` and `CAP_SYS_ADMIN` authority,
 and enters a new network namespace. It immediately clears ambient capabilities, reduces the
-bounding set to `CAP_NET_ADMIN | CAP_SETPCAP`, and reduces permitted/effective capabilities to
-exactly `CAP_SETGID | CAP_SETUID | CAP_SETPCAP | CAP_NET_ADMIN`; `CAP_KILL`, `CAP_SYS_ADMIN`,
-`CAP_NET_RAW` and all other surplus authority are therefore gone before any handshake record is
+bounding set to `CAP_NET_BIND_SERVICE | CAP_NET_ADMIN | CAP_SETPCAP`, and reduces
+permitted/effective capabilities to exactly
+`CAP_SETGID | CAP_SETUID | CAP_SETPCAP | CAP_NET_BIND_SERVICE | CAP_NET_ADMIN`; `CAP_KILL`,
+`CAP_SYS_ADMIN` and all other surplus authority are therefore gone before any handshake record is
 processed. It then
 sets `NoNewPrivs` and installs one fixed amd64 classic-BPF program with
 `SECCOMP_FILTER_FLAG_TSYNC`. A kernel error or positive unsynchronised-thread ID aborts bootstrap.
@@ -699,9 +778,9 @@ Only after that acknowledgement does the child require ambient capabilities to r
 all supplementary groups, reduce its bounding set, enable keep-caps, and set all
 real/effective/saved GIDs and UIDs to
 the startup-pinned `volparossa-worker` identity. It immediately reduces permitted/effective
-capabilities to `CAP_NET_ADMIN | CAP_SETPCAP`, disables and verifies keep-caps, removes
+capabilities to `CAP_NET_BIND_SERVICE | CAP_NET_ADMIN | CAP_SETPCAP`, disables and verifies keep-caps, removes
 `CAP_SETPCAP` from the bounding set last, and reduces permitted/effective capabilities to exactly
-`CAP_NET_ADMIN`. The pre-barrier seccomp restrictions are monotonic, remain across the identity
+`CAP_NET_BIND_SERVICE | CAP_NET_ADMIN`. The pre-barrier seccomp restrictions are monotonic, remain across the identity
 transition and exec, and make the pinned network-namespace membership immutable. Final inheritable
 and ambient sets are empty; exact PID, PPID, four-way UID/GID, empty groups, capability and
 `NoNewPrivs` readback, seccomp filter mode with exactly the inherited count plus one, and the
@@ -779,10 +858,12 @@ attested as explicitly absent, is rejected fail closed. The read buffer cannot r
 pre-existing-account collision that idempotent `systemd-sysusers` cannot repair. The shipped helper
 unit and doctor contract now grant and require the reviewed seven-capability bootstrap set. Its
 `CAP_KILL` authority is retained by the root parent so it can retire the dedicated-UID worker, but
-the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN`-only state.
+the child drops it before the namespace-pin barrier and proves a final `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` state. The latter is needed only to preserve privileged source ports on
+transparent replies, including HTTPS and QUIC port 443.
 The contract rejects `CAP_SYS_PTRACE` and adds only the individual `seccomp` syscall to the existing systemd syscall
 groups so the fixed child filter can be installed without allowing all of `@sandbox`. After the drop, the worker's
-distinct UID/GID plus exact `CAP_NET_ADMIN` set excludes same-UID signalling of the root parent and
+distinct UID/GID plus exact two-capability set excludes same-UID signalling of the root parent and
 access through the root:`volparossa` runtime-directory mode. The functional-alpha backend now calls
 the launcher. The committed disposable driver now exercises the account transition, pre-filter task
 state, path access denials and parent-signal denial first through its diagnostic selector and then
@@ -809,8 +890,8 @@ operations and their fail-closed resolution. Its compensating boundaries
 are the fixed typed protocol with no caller-selected filesystem paths, `NoNewPrivileges=yes`,
 `ProtectSystem=strict`, fixed host-visible writable runtime paths, private temporary directories,
 `UMask=0077`, and a capability set without `CAP_CHOWN`, `CAP_FSETID` or `CAP_SETFCAP`. The dedicated
-worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN`-only state before accepting any
-operation.
+worker then drops to its distinct UID/GID and final `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` state before accepting any operation.
 
 ### Sequential live worker and production IPC proof driver
 
@@ -1191,7 +1272,8 @@ directory must be `/proc/<child>`, and all parent-held foreign network-namespace
 identify the same distinct namespace. The hook duplicates one parent process-directory pin to FD 8
 and one namespace pin to FD 7. Descriptor-relative `stat` and `status` observations bind the child
 PID, PPID, namespace PID, single thread, starttime, dedicated credentials, empty groups,
-no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` masks
+no-new-privileges, one additional seccomp filter and the exact worker-only `CAP_NET_ADMIN` plus
+`CAP_NET_BIND_SERVICE` masks
 before and after the namespace readback. After Destroy, FD 8 must expose no process records, the
 helper must retain no pidfd, proc-directory or foreign-netns worker custody, and FD 7 must show no
 WireGuard object before both observer pins close. The root-owned setgid mode-2700 proof directory
@@ -1292,7 +1374,8 @@ shutdown waiter is bounded independently from its caller-independent cleanup tas
 retry owner may remain in memory for the helper lifetime when the operating system never confirms
 reap. Neither that state nor the reaper permits are durable across a helper crash. The
 production-started v3 actor now journals functional Prepare and same-runtime clean settlement, but
-no restart reaper or inherited-custody adoption is connected.
+only the exact-singleton pre-dispatch restart reaper is connected; general inherited-custody
+adoption is not.
 
 Exact cache hits use a registry-lock-free point-in-time process probe followed by registry-locked
 checks of the atomic hint, expiry, generation and shutdown state. There is deliberately no watcher
@@ -1473,8 +1556,8 @@ owner may prove that complete absence under the registry lock and settle idempot
 `ConfirmedWorkerGenerationAbsent`. That settlement neither signals nor waits for the process a
 second time. Any remaining record, reservation, cache entry, tombstone or ordering-index entry, or
 an elapsed hard deadline, fails closed while retaining the affine owner for exact retry. This seam
-remains private and is used only by the durable functional backend. It adds no restart reaper and
-is not by itself datapath or acceptance evidence.
+remains private and is used only by the durable functional backend. It grants no restart-reaper
+authority and is not by itself datapath or acceptance evidence.
 
 The corresponding recovery source is available only for the exact same coordinator and generation
 while the registered record is live, unquarantined, idle and still in `Starting`. Bootstrap retains
@@ -1580,14 +1663,16 @@ recovery descriptors are released. Cancellation, mismatch, deadline or ambiguous
 preserves the complete affine terminal under its exact selector for a fresh-deadline retry.
 
 Production startup still performs the separate complete-set classification described above before
-retiring any `Intent`. Every non-empty classification blocks except an all-`CleanupConfirmed` set.
+retiring any `Intent`. Every non-empty classification blocks except an all-`CleanupConfirmed` set
+or an exact-singleton, single-path `ExactPresent + MayOwn` reaper shape.
 For exact-present pairs, one descriptorless removal plus barrier and exact baseline-minus-pair proof
 is chained per canonical name; already-absent members are skipped. The final successor and one new
 barrier/two-snapshot observation must both be exactly empty before the existing actor sweep receives
 full-set evidence. A crash after any removal resumes from present+no-store state; a crash after one
 per-record CAS leaves exact `Absent` tombstones plus remaining `CleanupConfirmed` records for the
-no-store path. Inherited custody is never adopted, the installed restart cleanup executor still
-refuses both `MayOwn` phases, and no restart reaper exists.
+no-store path. Inherited custody is never adopted as a live worker. The installed general restart
+cleanup executor still refuses uncorrelated `MayOwn` proofs; only the fixed singleton reaper proof
+can cross one exact `MayOwnCustody` or `MayOwnPrepare` record.
 
 Remaining durable/runtime blockers are explicit:
 
@@ -1600,7 +1685,8 @@ Remaining durable/runtime blockers are explicit:
   remain disconnected from the functional-alpha path.
 - Retryable shutdown ownership and the escalation reaper are still process-memory-only. The
   journal now has a production request-path issuance/arming writer and same-runtime settlement, but
-  no inherited-custody adoption or restart reaper, so helper-crash reconciliation is not complete.
+  no general inherited-custody adoption or recovery beyond the exact singleton pre-dispatch reaper,
+  so helper-crash reconciliation is not complete.
 - Add/Remove MPTCP endpoint operations are intentionally outside `AsyncLeaseBackend`; their typed
   asynchronous seam and dispatch are a separate bounded extension.
 
@@ -1646,9 +1732,9 @@ the fixed 1024-record bound makes retention finite and capacity exhaustion fails
 itself retries exact Pending/Owned cleanup. Tag 29 `CleanupOwned` is an independent process-wide
 cleanup operation, neither part of per-route reconciliation nor that ACK, and leaves `Absent` proof
 retained. A helper restart loses this in-memory ledger and changes the runtime ID, so the agent
-quarantines rather than releasing. The production journal now has request-path issuance/arming and
-exact same-runtime clean settlement, but the restart reaper, inherited worker/kernel-cleanup
-executor, and cross-runtime proof needed to settle that case do not exist.
+quarantines rather than releasing. The production journal now has request-path issuance/arming,
+exact same-runtime clean settlement and the narrow singleton restart reaper, but no cross-runtime
+tag-28 proof or broad inherited worker/kernel-cleanup executor exists to settle that case.
 
 This same-runtime reconciliation path remains containment rather than crash recovery. The
 functional-alpha production adapter can Prepare, Activate, Probe/Commit and Destroy one Client/Exit
@@ -1816,7 +1902,7 @@ transport or ingress, and does not change the alpha score.
   Debian package under the same acceptance environment, including the generated local
   passwd/group/shadow records and canonical files/systemd NSS binding; `CAP_SYS_PTRACE` must remain
   absent, `LimitCORE=0` must be effective, process dumpability must remain disabled after Ready, and
-  the final worker must retain only `CAP_NET_ADMIN`;
+  the final worker must retain only `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE`;
 - extend the asynchronous `HelperEngine` backend beyond the current
   Client/Exit-singleton-or-Relay-pair Prepare/Activate/Probe-Commit/Destroy path and narrow committed
   Client/Exit unconnected-QUIC-UDP acquisition: connected/listening MPTCP for the exact Client/Exit

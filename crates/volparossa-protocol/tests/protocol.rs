@@ -14,7 +14,7 @@ use volparossa_protocol::{
     PROTOCOL_VERSION, PreselectionActorBinding, PreselectionObservationReceipt,
     PreselectionObservationRequest, PreselectionObservationRole, PreselectionObservationScope,
     ProtocolError, RelayAuthorization, RelayReservation, RelayReservationRequest, ReplayCache,
-    SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, WireguardEndpoint,
+    SignedEnvelope, TimePolicy, Transport, UdpFlowAuthorization, UnderlayScope, WireguardEndpoint,
     consume_bound_direct_preselection_transcript_for_freshness,
     consume_bound_forwarded_preselection_transcript_for_freshness,
     consume_direct_preselection_transcript, consume_forwarded_preselection_transcript,
@@ -92,6 +92,7 @@ fn preselection_schema_tags_and_callerless_surface_are_exact() {
     );
     assert_eq!(ControlMessageType::NativeProbePermitRequest as i32, 19);
     assert_eq!(ControlMessageType::NativeProbeRelayResult as i32, 25);
+    assert_eq!(ControlMessageType::NativeRouteCredentialDelivery as i32, 26);
 
     let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
     let messages = include_str!("../src/messages.rs");
@@ -108,8 +109,13 @@ fn preselection_request_is_v4_role_exact_short_and_bounded() {
     let mut request =
         preselection_request(PreselectionObservationRole::Relay, actor.clone(), None, 93);
     request.validate().unwrap();
-    request.expires_at_ms = NOW + 5_000;
-    request.validate().expect("exact five-second challenge");
+    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 180_000;
+    request.actor.as_mut().unwrap().advertisement_expires_at_ms = NOW + 180_000;
+    request.actor.as_mut().unwrap().capability_expires_at_ms = NOW + 180_000;
+    request.expires_at_ms = NOW + 120_000;
+    request
+        .validate()
+        .expect("exact two-minute challenge ceiling");
     request.expires_at_ms += 1;
     assert!(matches!(
         request.validate(),
@@ -771,10 +777,17 @@ fn forwarded_success_commits_both_and_replays_outer() {
 #[test]
 fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
     let relay_key = key(116);
-    let actor = preselection_actor(&relay_key, 117, NOW + 120_000, NOW + 120_000);
+    let actor = preselection_actor(&relay_key, 117, NOW + 180_000, NOW + 180_000);
     let mut request = preselection_request(PreselectionObservationRole::Relay, actor, None, 118);
-    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 120_000;
+    request.scope.as_mut().unwrap().policy_expires_at_ms = NOW + 180_000;
+    request.expires_at_ms = NOW + 120_000;
     request.validate().unwrap();
+    let mut overlong_request = request.clone();
+    overlong_request.expires_at_ms += 1;
+    assert!(matches!(
+        overlong_request.validate(),
+        Err(ProtocolError::InvalidLifetime)
+    ));
     let receipt = PreselectionObservationReceipt {
         request_hash: preselection_observation_request_hash(&encode_preselection_request(&request))
             .unwrap()
@@ -782,8 +795,8 @@ fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
         challenge: request.challenge.clone(),
         actor: request.actor.clone(),
         scope: request.scope.clone(),
-        observed_at_ms: NOW + 10_000,
-        valid_until_ms: NOW + 70_000,
+        observed_at_ms: NOW,
+        valid_until_ms: NOW + 120_000,
         nonce: vec![119; 32],
     };
     let signed = sign_control_message(
@@ -822,11 +835,7 @@ fn preselection_receipt_and_wrapper_lifetimes_are_exact() {
 
     let (request, _, signed_outer, control_key, _) = forwarded_preselection_fixture();
     let (mut outer, mut attestation) = decode_forwarded_attestation(&signed_outer);
-    assert_eq!(
-        attestation.valid_until_ms - attestation.observed_at_ms,
-        60_000
-    );
-    attestation.valid_until_ms += 1;
+    attestation.valid_until_ms = attestation.observed_at_ms + 120_001;
     outer.expires_at_ms = attestation.valid_until_ms;
     let overlong = resign_attestation(outer, &attestation, &control_key);
     let mut cache = ReplayCache::new(8).unwrap();
@@ -1171,6 +1180,7 @@ fn forwarded_prefix_is_public_family_exact_ipv4_24_or_ipv6_48() {
     let (_, _, signed, _, _) = forwarded_preselection_fixture();
     let (_, mut attestation) = decode_forwarded_attestation(&signed);
     attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+        scope: 0,
         address_family: ObservationAddressFamily::Ipv6 as i32,
         network_prefix: vec![0x20, 0x01, 0x48, 0x60, 0, 0],
     });
@@ -1208,11 +1218,68 @@ fn forwarded_prefix_is_public_family_exact_ipv4_24_or_ipv6_48() {
     let (request, _, signed, control_key, _) = forwarded_preselection_fixture();
     let (outer, mut attestation) = decode_forwarded_attestation(&signed);
     attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+        scope: 0,
         address_family: ObservationAddressFamily::Ipv6 as i32,
         network_prefix: vec![0x20, 0x01, 0x48, 0x60, 0, 0],
     });
     let signed = resign_attestation(outer, &attestation, &control_key);
     assert_forwarded_rejected_without_replay(&signed, &encode_preselection_request(&request));
+}
+
+#[test]
+fn forwarded_local_upstream_prefix_requires_exact_signed_scope() {
+    for (family, local_prefix, public_prefix) in [
+        (
+            ObservationAddressFamily::Ipv4,
+            vec![192, 168, 20],
+            vec![8, 8, 4],
+        ),
+        (
+            ObservationAddressFamily::Ipv6,
+            vec![0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a],
+            vec![0x20, 0x01, 0x48, 0x60, 0, 0],
+        ),
+    ] {
+        let (request, _, signed, control_key, _) =
+            forwarded_preselection_fixture_with_prefix(family, public_prefix.clone());
+        let (outer, mut attestation) = decode_forwarded_attestation(&signed);
+        attestation.upstream_network_prefix = Some(ObservationNetworkPrefix {
+            scope: UnderlayScope::DirectLocalLan as i32,
+            address_family: family as i32,
+            network_prefix: local_prefix,
+        });
+        let encoded_request = encode_preselection_request(&request);
+        let signed = resign_attestation(outer.clone(), &attestation, &control_key);
+        let mut replay = ReplayCache::new(8).unwrap();
+        let verified = verify_forwarded_preselection_transcript(
+            &signed,
+            &encoded_request,
+            NOW + 1,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("signed local Relay-to-Exit observation");
+        let bound = consume_forwarded_preselection_transcript(verified, &encoded_request)
+            .expect("exact request");
+        let fresh = consume_bound_forwarded_preselection_transcript_for_freshness(bound)
+            .expect("scope-preserving freshness projection");
+        assert!(fresh.upstream_network_prefix().is_local_lan());
+        assert!(!fresh.upstream_network_prefix().is_public_routable());
+        assert_eq!(replay.len(), 2);
+        for scope in [UnderlayScope::PublicInternet as i32, 42] {
+            let mut invalid = attestation.clone();
+            invalid.upstream_network_prefix.as_mut().unwrap().scope = scope;
+            let signed = resign_attestation(outer.clone(), &invalid, &control_key);
+            assert_forwarded_rejected_without_replay(&signed, &encoded_request);
+        }
+        attestation
+            .upstream_network_prefix
+            .as_mut()
+            .unwrap()
+            .network_prefix = public_prefix;
+        let signed = resign_attestation(outer, &attestation, &control_key);
+        assert_forwarded_rejected_without_replay(&signed, &encoded_request);
+    }
 }
 
 fn assert_forwarded_prefix_invalid(family: ObservationAddressFamily, network_prefix: Vec<u8>) {
@@ -1415,6 +1482,7 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NATIVE_PROBE_START",
         "NATIVE_PROBE_EXIT_RESULT",
         "NATIVE_PROBE_RELAY_RESULT",
+        "NATIVE_ROUTE_CREDENTIAL_DELIVERY",
     ];
     let rust_names = [
         "Unspecified",
@@ -1443,6 +1511,7 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NativeProbeStart",
         "NativeProbeExitResult",
         "NativeProbeRelayResult",
+        "NativeRouteCredentialDelivery",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
@@ -1549,6 +1618,9 @@ fn assert_native_probe_core_schema(rust: &str, schema: &str) {
                 ("policy_expires_at_ms", 14),
                 ("challenge_hash", 15),
                 ("attempt_expires_at_ms", 16),
+                ("required_path_count", 17),
+                ("reserved_up_mbps", 18),
+                ("reserved_down_mbps", 19),
             ],
         ),
         (
@@ -1568,6 +1640,7 @@ fn assert_native_probe_core_schema(rust: &str, schema: &str) {
                 ("issued_at_ms", 3),
                 ("expires_at_ms", 4),
                 ("nonce", 5),
+                ("exit_control_address", 6),
             ],
         ),
     ];
@@ -1583,6 +1656,7 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("route_context_id", 2),
                 ("endpoint", 3),
                 ("prepared_lease_commitment", 4),
+                ("path_id", 5),
             ],
         ),
         (
@@ -1595,6 +1669,7 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("ready_at_ms", 5),
                 ("expires_at_ms", 6),
                 ("nonce", 7),
+                ("exit_boot_id", 8),
             ],
         ),
         (
@@ -1619,6 +1694,16 @@ fn assert_native_probe_readiness_schema(rust: &str, schema: &str) {
                 ("started_at_ms", 5),
                 ("expires_at_ms", 6),
                 ("nonce", 7),
+            ],
+        ),
+        (
+            "NativeProbeAuthorizationChain",
+            &[
+                ("signed_permit_request", 1),
+                ("signed_permit", 2),
+                ("signed_exit_ready", 3),
+                ("signed_relay_ready", 4),
+                ("signed_start", 5),
             ],
         ),
     ];
@@ -1689,8 +1774,16 @@ fn assert_native_probe_messages(rust: &str, schema: &str, messages: &[(&str, &[(
     for (message, fields) in messages {
         let rust_body = item_body(rust, &format!("pub struct {message} {{"));
         let schema_body = item_body(schema, &format!("message {message} {{"));
-        assert_eq!(rust_body.matches("#[prost(").count(), fields.len());
-        assert_eq!(schema_body.matches(';').count(), fields.len());
+        assert_eq!(
+            rust_body.matches("#[prost(").count(),
+            fields.len(),
+            "Rust field count drift for {message}"
+        );
+        assert_eq!(
+            schema_body.matches(';').count(),
+            fields.len(),
+            "checked-in schema field count drift for {message}"
+        );
         for (field, tag) in *fields {
             assert!(rust_body.contains(&format!("tag = \"{tag}\"")));
             assert!(rust_body.contains(&format!("pub {field}:")));
@@ -1883,6 +1976,11 @@ fn assert_preselection_prefix_attestation_schema(rust: &str, schema: &str) {
                 "#[prost(bytes = \"vec\", tag = \"2\")]",
                 "pub network_prefix: Vec<u8>,",
                 "bytes network_prefix = 2;",
+            ),
+            (
+                "#[prost(enumeration = \"UnderlayScope\", tag = \"3\")]",
+                "pub scope: i32,",
+                "UnderlayScope scope = 3;",
             ),
         ],
     );
@@ -2668,6 +2766,7 @@ fn forwarded_preselection_fixture_with_prefix(
         exit: Some(exit),
         scope: request.scope.clone(),
         upstream_network_prefix: Some(ObservationNetworkPrefix {
+            scope: 0,
             address_family: family as i32,
             network_prefix,
         }),
@@ -2704,6 +2803,7 @@ fn open_tcp(signing_key: &SigningKey, nonce: [u8; 32]) -> OpenTcp {
         timestamp_ms: NOW,
         expires_at_ms: EXPIRY,
         nonce: nonce.to_vec(),
+        destination_ip: Vec::new(),
     }
 }
 
@@ -3045,6 +3145,7 @@ fn checked_in_v4_schema_has_exact_native_route_tags() {
         ("masque_context_id", "uint64", 5),
         ("client_native_instance_id", "bytes", 6),
         ("exit_native_instance_id", "bytes", 7),
+        ("credential_hpke_public_key", "bytes", 8),
     ] {
         assert!(
             identity.contains(&format!("{kind} {field} = {tag};")),
@@ -3056,8 +3157,8 @@ fn checked_in_v4_schema_has_exact_native_route_tags() {
             .lines()
             .filter(|line| line.trim_end().ends_with(';'))
             .count(),
-        7,
-        "NativeRouteIdentity must expose only its seven committed fields"
+        8,
+        "NativeRouteIdentity must expose only its eight committed fields"
     );
 
     let reservation = schema
@@ -3149,6 +3250,102 @@ fn canonical_decode_rejects_unknown_and_duplicate_representations() {
     assert!(matches!(
         decode_canonical::<OpenTcp>(&encoded, MAX_CONTROL_PAYLOAD_SIZE),
         Err(ProtocolError::NonCanonical)
+    ));
+}
+
+#[test]
+fn open_tcp_accepts_dns_raw_ip_or_dns_pinned_to_transparent_ip() {
+    let signing_key = key(7);
+    let mut ip_message = open_tcp(&signing_key, [81; 32]);
+    ip_message.hostname.clear();
+    ip_message.destination_ip = vec![93, 184, 216, 34];
+    sign_control_message(
+        &ip_message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [81; 32],
+        TimePolicy::default(),
+    )
+    .expect("raw-IP OPEN_TCP");
+
+    ip_message.hostname = "www.example.com".to_owned();
+    sign_control_message(
+        &ip_message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [81; 32],
+        TimePolicy::default(),
+    )
+    .expect("hostname OPEN_TCP pinned to transparent IP");
+
+    ip_message.hostname.clear();
+    ip_message.destination_ip.clear();
+    assert!(matches!(
+        sign_control_message(
+            &ip_message,
+            &signing_key,
+            NOW,
+            EXPIRY,
+            [81; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField("open_tcp destination"))
+    ));
+}
+
+#[test]
+fn udp_authorization_accepts_dns_raw_ip_or_dns_pinned_to_transparent_ip() {
+    let signing_key = key(7);
+    let mut message = UdpFlowAuthorization {
+        route_context_id: vec![1; 16],
+        flow_id: vec![2; 16],
+        client_ephemeral_id: node_id(&signing_key),
+        hostname: "www.example.com".to_owned(),
+        destination_ip: Vec::new(),
+        port: 443,
+        policy_hash: vec![3; 32],
+        idle_timeout_ms: 30_000,
+        timestamp_ms: NOW,
+        expires_at_ms: EXPIRY,
+        nonce: vec![82; 32],
+    };
+    message.hostname.clear();
+    message.destination_ip = vec![93, 184, 216, 34];
+    sign_control_message(
+        &message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [82; 32],
+        TimePolicy::default(),
+    )
+    .expect("raw-IP UDP authorization");
+
+    message.hostname = "www.example.com".to_owned();
+    sign_control_message(
+        &message,
+        &signing_key,
+        NOW,
+        EXPIRY,
+        [82; 32],
+        TimePolicy::default(),
+    )
+    .expect("hostname UDP authorization pinned to transparent IP");
+
+    message.hostname.clear();
+    message.destination_ip.clear();
+    assert!(matches!(
+        sign_control_message(
+            &message,
+            &signing_key,
+            NOW,
+            EXPIRY,
+            [82; 32],
+            TimePolicy::default(),
+        ),
+        Err(ProtocolError::InvalidField("udp_authorization destination"))
     ));
 }
 #[test]
@@ -3381,6 +3578,7 @@ fn relay_advertisement(signing_key: &SigningKey) -> NodeAdvertisement {
             sample_window_seconds: 15,
         }),
         network: Some(AdvertisementNetwork {
+            uplink: 0,
             region: "eu-west".to_owned(),
             country_code: "NL".to_owned(),
             asn: 64_496,
@@ -3530,6 +3728,7 @@ fn native_route_identity() -> NativeRouteIdentity {
         masque_context_id: 23,
         client_native_instance_id: vec![24; 32],
         exit_native_instance_id: vec![25; 32],
+        credential_hpke_public_key: vec![26; 32],
     }
 }
 
@@ -3843,10 +4042,138 @@ fn relay_request_commitment_hashes_the_complete_canonical_signed_envelope() {
 
 fn endpoint(key: u8, port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: vec![key; 32],
         underlay_ip: vec![8, 8, 4, key],
         listen_port: u32::from(port),
     }
+}
+
+#[test]
+fn local_lan_endpoint_scope_is_explicit_and_public_encoding_stays_compatible() {
+    use volparossa_protocol::UnderlayScope;
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyEndpoint {
+        #[prost(bytes = "vec", tag = "1")]
+        public_key: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        underlay_ip: Vec<u8>,
+        #[prost(uint32, tag = "3")]
+        listen_port: u32,
+    }
+    let public = endpoint(5, 51820);
+    let legacy = LegacyEndpoint {
+        public_key: public.public_key.clone(),
+        underlay_ip: public.underlay_ip.clone(),
+        listen_port: public.listen_port,
+    };
+    assert_eq!(public.encode_to_vec(), legacy.encode_to_vec());
+    for ip in [
+        "10.20.30.4",
+        "172.16.4.5",
+        "192.168.4.5",
+        "fd12:3456:789a::5",
+    ] {
+        let mut local = public.clone();
+        local.underlay_ip = match ip.parse::<std::net::IpAddr>().expect("fixture address") {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        assert!(
+            local.validate("fixture endpoint").is_err(),
+            "private address without scope: {ip}"
+        );
+        local.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+        local
+            .validate("fixture endpoint")
+            .expect("explicitly scoped local endpoint");
+        let encoded = encode_canonical(&local, 256).expect("canonical local endpoint");
+        assert_eq!(
+            decode_canonical::<WireguardEndpoint>(&encoded, 256).expect("decoded"),
+            local
+        );
+        local.underlay_scope = 42;
+        assert!(local.validate("fixture endpoint").is_err());
+    }
+    for ip in [
+        "8.8.8.8",
+        "169.254.1.1",
+        "100.64.1.1",
+        "127.0.0.1",
+        "192.0.2.1",
+        "fe80::1",
+        "::1",
+        "2001:db8::1",
+        "ff02::1",
+    ] {
+        let mut invalid = public.clone();
+        invalid.underlay_scope = UnderlayScope::DirectLocalLan as i32;
+        invalid.underlay_ip = match ip.parse::<std::net::IpAddr>().expect("fixture address") {
+            std::net::IpAddr::V4(address) => address.octets().to_vec(),
+            std::net::IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        assert!(
+            invalid.validate("fixture endpoint").is_err(),
+            "prohibited local endpoint: {ip}"
+        );
+    }
+}
+
+#[test]
+fn local_only_signed_advertisement_cannot_invent_exit_or_public_origin() {
+    let key = SigningKey::from_bytes(&[77; 32]);
+    let mut advertisement = relay_advertisement(&key);
+    let network = advertisement.network.as_mut().expect("network");
+    network.uplink = volparossa_protocol::AdvertisementUplink::LocalOnly as i32;
+    network.asn = 0;
+    network.ipv4_prefix_hint.clear();
+    network.ipv6_prefix_hint.clear();
+    advertisement.control_addresses = vec!["/ip4/192.168.4.5/udp/41000/quic-v1".to_owned()];
+    advertisement
+        .validate()
+        .expect("truthful local advertisement");
+    let signed = sign_control_message(
+        &advertisement,
+        &key,
+        NOW,
+        EXPIRY,
+        [76; 32],
+        TimePolicy::default(),
+    )
+    .expect("signed local advertisement");
+    let verified = verify_control_message::<NodeAdvertisement>(
+        &signed,
+        NOW,
+        TimePolicy::default(),
+        &mut ReplayCache::new(1).expect("replay cache"),
+    )
+    .expect("verified local advertisement");
+    assert_eq!(verified.into_message().network.expect("network").uplink, 1);
+    for mutation in 0..5 {
+        let mut invalid = advertisement.clone();
+        let network = invalid.network.as_mut().expect("network");
+        match mutation {
+            0 => invalid.roles.as_mut().expect("roles").exit = true,
+            1 => network.asn = 64500,
+            2 => network.ipv4_prefix_hint = "8.8.8.0/24".to_owned(),
+            3 => network.ipv6_prefix_hint = "2606:4700:4700::/48".to_owned(),
+            _ => network.uplink = 42,
+        }
+        assert!(invalid.validate().is_err());
+    }
+    let mut tampered: SignedEnvelope = decode_canonical(&signed, 16384).expect("envelope");
+    let mut substituted = advertisement;
+    substituted.network.as_mut().expect("network").uplink = 0;
+    tampered.payload = substituted.encode_to_vec();
+    assert!(
+        verify_control_message::<NodeAdvertisement>(
+            &tampered.encode_to_vec(),
+            NOW,
+            TimePolicy::default(),
+            &mut ReplayCache::new(1).expect("replay")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -4040,7 +4367,7 @@ fn signed_native_route_identity_is_required_canonical_and_tamper_evident() {
 }
 
 #[test]
-fn udp_authorization_pins_exactly_one_destination() {
+fn udp_authorization_accepts_hostname_pinned_to_one_destination() {
     let client_key = key(40);
     let mut authorization = UdpFlowAuthorization {
         route_context_id: vec![1; 16],
@@ -4074,7 +4401,7 @@ fn udp_authorization_pins_exactly_one_destination() {
     .unwrap();
 
     authorization.destination_ip = vec![192, 0, 2, 53];
-    assert!(authorization.validate().is_err());
+    assert!(authorization.validate().is_ok());
     authorization.hostname.clear();
     assert!(authorization.validate().is_ok());
 }

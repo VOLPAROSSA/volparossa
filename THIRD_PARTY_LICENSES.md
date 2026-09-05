@@ -333,7 +333,7 @@ The following required contracts and evidence remain unresolved:
    independent signed-reservation verification, preverified affine replay
    handoff, and cryptographic certificate/key/name/SPKI consistency over the
    in-message TLS material;
-5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
+5. disposable-topology proof of the patched EDT scheduler over real relay paths;
 6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
 7. end-to-end dynamic path removal and failover across real relay paths; and
@@ -379,8 +379,8 @@ The complete sources, patch review notes, resulting tree hashes, test
 contract, and removal condition are in `third_party/rust/README.md`.
 `scripts/check-rust-dependencies.sh` reconstructs all three trees from the exact
 archives, applies the locked patches, byte-compares the result, verifies
-unchanged licenses and the feature graph, runs cargo-deny
-license/ban/source checks, and performs a no-fetch cargo-audit scan against a
+unchanged licenses and the feature graph, runs CVSS 4.0-capable cargo-deny
+advisory/license/ban/source checks, and performs an independent no-fetch cargo-audit scan against a
 local RustSec checkout. It prints that checkout's exact commit.
 
 The GPL-3.0-only harness under `third_party/rust/backport-regressions` has a
@@ -401,9 +401,9 @@ matches, not accepted vulnerable upstream artifacts. The production feature
 graph also keeps both Hickory DNSSEC features disabled; the NSEC3 fix is
 nevertheless present and tested.
 
-The dependency gate requires a CVSS 4.0-capable `cargo-audit >= 0.22.1`.
-Debian cargo-deny 0.18.3 remains authoritative for licenses, bans, and sources
-but cannot parse the current CVSS 4.0 advisory database.
+The dependency gate requires CVSS 4.0-capable `cargo-deny >= 0.18.6` and
+`cargo-audit >= 0.22.1`; the former runs all four checks while the latter
+provides an independent advisory scan.
 
 Candidate packaging excludes workspace members and admits path dependencies
 only at the three exact verified vendor paths above.
@@ -424,6 +424,7 @@ is rejected.
 | serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
+| `hpke` 0.14.0 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
 | rusqlite and SQLite bundle | bounded local peer/session state | MIT for wrapper; SQLite is public domain |
 | rtnetlink, netlink-sys, wireguard-uapi, nix, libc | Linux networking and OS boundary | mixed permissive licenses; inspect every resolved crate |
 

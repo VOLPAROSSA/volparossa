@@ -46,11 +46,25 @@ who sees both ends may correlate this low-latency traffic.
 - `volparossa` is the user-facing CLI.
 - `volparossa-agent` is the unprivileged control-plane and session service.
 - `volparossa-helper` is the narrowly allowlisted privileged networking service.
-- The client role defaults on. Relay and exit roles default off and are independent.
+- Every node runs the same software. Production consumers contribute relay service with nonzero
+  capacity and, when they have independent Internet access, exit service as well. Nodes with only
+  local links contribute their available links/relay capability without pretending to be exits.
+  Installation defaults to all roles off; enable participation explicitly after configuring the
+  shared policy and contribution limits. Development fixtures can isolate roles for boundary tests.
 - A relay forwards only a signed, expiring route ID between two dedicated WireGuard links. It must
   not offer host access or Internet egress.
 - An exit is the only egress role. It resolves, pins, and enforces the same verified policy manifest
   before opening any destination flow.
+
+The capability-based reciprocal participation requirement replaces optional client-only use as of
+2026-09-05. `network.uplink` defaults to `independent_internet`; `local_only` permits client + relay
+configuration without a fabricated ASN or public origin, and forbids exit mode. This is an operator
+declaration, not runtime connectivity proof or automatic outage detection. Offline/local-mesh
+discovery and private-endpoint datapaths are not implemented yet; accepting the configuration does
+not make those paths work.
+Combined-role native workers and privacy-preserving discovery are being integrated; a configuration
+switch alone is not evidence that the all-combined-role topology already works.
+Bootstrap contacts are replaceable user peers, not mandatory central infrastructure or authorities.
 
 The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md); wire formats are in
 [PROTOCOL.md](docs/PROTOCOL.md).

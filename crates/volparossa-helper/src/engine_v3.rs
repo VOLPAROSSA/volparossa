@@ -1,7 +1,7 @@
 //! Fail-closed helper-v3 lease state machine.
 //!
 //! The production server can prepare, activate, probe-commit and destroy one process-owned
-//! functional-alpha Client or Exit singleton lease through the authenticated namespace worker. A
+//! functional-alpha Client or Exit bounded lease batch through the authenticated namespace worker. A
 //! committed response proves only the exact `WireGuard` identity, signed peer, `/128` route, recent
 //! handshake and strict bidirectional counter growth; it does not claim a usable VPN datapath or
 //! crash/restart recovery.
@@ -21,18 +21,38 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use volparossa_routing::{
-    AcquireTransportSocket, ActivateLeaseBatch, BindHelperRuntime, ClosedPreparePlan,
-    CommittedLease, CommittedLeaseBatch, ContextRole, DestroyedContext, Empty, HELPER_HANDLE_BYTES,
-    HELPER_PROTOCOL_VERSION, HelperRequest, HelperResponse, HelperResult, HelperRuntime,
-    LeaseActivation, LeasePlan, PrepareLeaseBatch, PreparedLease, PreparedLeaseBatch,
-    PublicUdpEndpoint, ReconcileExpiredPrepare, ReconciledExpiredPrepare, TransportSocketReady,
+    AcquireIngressReplySocket, AcquireIngressSocket, AcquireTransportSocket, ActivateClientIngress,
+    ActivateLeaseBatch, ActivatedClientIngress, AddMptcpEndpoint, BindHelperRuntime, CleanupScope,
+    ClosedPreparePlan, CommittedLease, CommittedLeaseBatch, ContextRole, DestroyClientIngress,
+    DestroyedClientIngress, DestroyedContext, Empty, HELPER_HANDLE_BYTES, HELPER_PROTOCOL_VERSION,
+    HelperRequest, HelperResponse, HelperResult, HelperRuntime, IngressAddressFamily,
+    IngressReplySocketReady, IngressSocketAddress, IngressSocketKind, IngressSocketReady,
+    LeaseActivation, LeasePlan, MptcpEndpointMode, PrepareClientIngress, PrepareLeaseBatch,
+    PreparedClientIngress, PreparedIngressSocket, PreparedLease, PreparedLeaseBatch,
+    PublicUdpEndpoint, REQUIRED_INGRESS_SOCKETS, ReconcileExpiredPrepare, ReconciledExpiredPrepare,
+    RemoveMptcpEndpoint, TransportSocketKind as RoutingTransportSocketKind, TransportSocketReady,
     UnderlayEvidence, WireguardRole, helper_request, helper_response, operation_digest,
 };
 use zeroize::Zeroizing;
 
+#[path = "engine_v3/uplink_sharing.rs"]
+mod uplink_sharing;
+use uplink_sharing::SharingRecord;
+pub(crate) use uplink_sharing::{
+    SharingBackendAction, SharingBackendBinding, SharingBackendCompletion, SharingBackendRequest,
+};
+#[path = "engine_v3/wifi_mesh.rs"]
+mod wifi_mesh;
+use wifi_mesh::MeshRecord;
+pub(crate) use wifi_mesh::{
+    MeshBackendAction, MeshBackendBinding, MeshBackendCompletion, MeshBackendRequest,
+    MeshInterfaceIdentity,
+};
+
 const MAX_CONTEXTS: usize = 64;
 const MAX_CACHED_REQUESTS: usize = 1_024;
 const MAX_TRANSPORT_ACQUIRE_REQUEST_IDS: usize = 1_024;
+const MAX_INGRESS_REPLY_SOCKETS: u16 = 64;
 const MAX_PREPARE_RECONCILIATIONS: usize = 1_024;
 const MAX_RECONCILIATION_REQUEST_IDS: usize = 1_024;
 const MAX_CLOSED_PREPARE_IDENTITIES: usize = 16;
@@ -40,7 +60,7 @@ const SETUP_TTL_SECONDS: u64 = 30;
 const HARD_TTL_SECONDS: u64 = 15 * 60;
 const RESPONSE_CACHE_SECONDS: u64 = 30;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const BACKEND_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAINTENANCE_REAP_DOMAIN: &[u8] = b"VOLPAROSSA helper-v3 maintenance reap v1";
 
 /// Stateful authenticated helper-v3 dispatcher.
@@ -73,6 +93,44 @@ struct EngineState {
     prepare_reconciliations: HashMap<[u8; 16], PrepareReconciliationRecord>,
     reconciliation_request_ids: HashMap<[u8; 16], ReconciliationRequestRecord>,
     transport_acquire_request_ids: HashMap<[u8; 16], TransportAcquireRequestRecord>,
+    ingress: Option<ClientIngressRecord>,
+    ingress_acquire_request_ids: HashMap<[u8; 16], IngressAcquireRequestRecord>,
+    next_ingress_generation: u64,
+    sharing: Option<SharingRecord>,
+    mesh: Option<MeshRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientIngressPhase {
+    Prepared,
+    Active,
+}
+
+struct ClientIngressRecord {
+    client_runtime_id: [u8; 16],
+    generation: u64,
+    ingress_handle: [u8; HELPER_HANDLE_BYTES],
+    setup_expires_at_unix: u64,
+    hard_expires_at_unix: u64,
+    setup_expires_at_boottime_ns: u64,
+    hard_expires_at_boottime_ns: u64,
+    phase: ClientIngressPhase,
+    sockets: BTreeMap<(i32, i32), ClientIngressSocketRecord>,
+    reply_sockets_issued: u16,
+}
+
+struct ClientIngressSocketRecord {
+    socket_handle: [u8; HELPER_HANDLE_BYTES],
+    local: IngressSocketAddress,
+    acquisition_started: bool,
+    receipt_handle: Option<[u8; HELPER_HANDLE_BYTES]>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct IngressAcquireRequestRecord {
+    digest: [u8; 32],
+    client_runtime_id: [u8; 16],
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +278,7 @@ pub(crate) enum OperationKind {
     Probe,
     Destroy,
     Acquire,
+    MptcpEndpoint,
     Cleanup,
     Reap,
     Reconcile,
@@ -309,6 +368,8 @@ pub(crate) enum BackendAction {
     Probe,
     Destroy,
     AcquireTransportSocket,
+    AddMptcpEndpoint,
+    RemoveMptcpEndpoint,
 }
 
 /// Non-authoritative copyable identity used only to correlate a backend completion.
@@ -359,6 +420,11 @@ pub(crate) struct BackendDestroy {
 pub(crate) struct BackendProbe {
     pub(crate) commit: volparossa_routing::CommitLeaseBatch,
     pub(crate) activated_at_unix: u64,
+}
+
+enum MptcpEndpointMutation {
+    Add(AddMptcpEndpoint),
+    Remove(RemoveMptcpEndpoint),
 }
 
 /// One non-cloneable backend input. Engine rollback authority remains in `OperationOwner`.
@@ -449,6 +515,54 @@ pub(crate) struct BackendRuntimeCompletion<T> {
     pub(crate) result: Result<T, BackendError>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IngressBackendAction {
+    Prepare,
+    Acquire,
+    AcquireReply,
+    Activate,
+    Destroy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IngressBackendBinding {
+    pub(crate) helper_runtime_id: [u8; 32],
+    pub(crate) client_runtime_id: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) request_id: [u8; 16],
+    pub(crate) request_digest: [u8; 32],
+    pub(crate) action: IngressBackendAction,
+    pub(crate) call_deadline: Instant,
+}
+
+#[must_use = "an ingress backend request must produce one correlated completion"]
+pub(crate) struct IngressBackendRequest<T> {
+    binding: IngressBackendBinding,
+    value: T,
+}
+
+impl<T> IngressBackendRequest<T> {
+    pub(crate) const fn new(binding: IngressBackendBinding, value: T) -> Self {
+        Self { binding, value }
+    }
+
+    pub(crate) fn into_parts(self) -> (IngressBackendBinding, T) {
+        (self.binding, self.value)
+    }
+}
+
+pub(crate) struct IngressBackendCompletion<T> {
+    pub(crate) binding: IngressBackendBinding,
+    pub(crate) result: Result<T, BackendError>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PreparedKernelIngressSocket {
+    pub(crate) descriptor_kind: i32,
+    pub(crate) address_family: i32,
+    pub(crate) local: IngressSocketAddress,
+}
+
 pub(crate) struct BackendCompletion<T> {
     pub(crate) binding: BackendBinding,
     pub(crate) result: Result<T, BackendError>,
@@ -477,6 +591,14 @@ struct LeaseRecord {
     public_key: [u8; 32],
     public_endpoint: PublicUdpEndpoint,
     baseline: Option<KernelCounters>,
+}
+
+fn context_owns_mptcp_path(context: &ContextRecord, path_id: u32) -> bool {
+    [WireguardRole::Client, WireguardRole::Exit]
+        .into_iter()
+        .filter(|role| context.leases.contains_key(&(path_id, *role as i32)))
+        .count()
+        == 1
 }
 
 #[derive(Clone)]
@@ -534,6 +656,49 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn install_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
+    ) -> BackendFuture<MeshBackendCompletion<MeshInterfaceIdentity>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn inspect_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn destroy_wifi_mesh(
+        self: Arc<Self>,
+        request: MeshBackendRequest<()>,
+    ) -> BackendFuture<MeshBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn install_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
+    ) -> BackendFuture<SharingBackendCompletion<u32>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn inspect_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<crate::kernel::underlay_sharing::SharingCounters>>
+    {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn destroy_uplink_sharing(
+        self: Arc<Self>,
+        request: SharingBackendRequest<()>,
+    ) -> BackendFuture<SharingBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
     fn prepare(
         self: Arc<Self>,
         request: BackendRequest<PrepareLeaseBatch>,
@@ -559,6 +724,41 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
         request: BackendRequest<AcquireTransportSocket>,
     ) -> BackendFuture<BackendCompletion<OwnedFd>>;
 
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>>;
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>>;
+
+    fn prepare_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<PrepareClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<Vec<PreparedKernelIngressSocket>>>;
+
+    fn acquire_client_ingress_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressSocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>>;
+
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>>;
+
+    fn activate_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<ActivateClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<()>>;
+
+    fn destroy_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<DestroyClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<ConfirmedAbsent>>;
+
     fn transport_socket_supported(
         self: Arc<Self>,
         request: BackendRuntimeRequest,
@@ -579,6 +779,19 @@ impl AsyncLeaseBackend for UnavailableLeaseBackend {
     ) -> BackendFuture<BackendCompletion<Vec<PreparedKernelLease>>> {
         let (completion, _) = request.into_parts();
         Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn acquire_client_ingress_reply_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressReplySocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Err(BackendError::Unavailable),
+            }
+        })
     }
 
     fn activate(
@@ -611,6 +824,74 @@ impl AsyncLeaseBackend for UnavailableLeaseBackend {
     ) -> BackendFuture<BackendCompletion<OwnedFd>> {
         let (completion, _) = request.into_parts();
         Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn add_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<AddMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn remove_mptcp_endpoint(
+        self: Arc<Self>,
+        request: BackendRequest<RemoveMptcpEndpoint>,
+    ) -> BackendFuture<BackendCompletion<()>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+
+    fn prepare_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<PrepareClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<Vec<PreparedKernelIngressSocket>>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Err(BackendError::Unavailable),
+            }
+        })
+    }
+
+    fn acquire_client_ingress_socket(
+        self: Arc<Self>,
+        request: IngressBackendRequest<AcquireIngressSocket>,
+    ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Err(BackendError::Unavailable),
+            }
+        })
+    }
+
+    fn activate_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<ActivateClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<()>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Err(BackendError::Unavailable),
+            }
+        })
+    }
+
+    fn destroy_client_ingress(
+        self: Arc<Self>,
+        request: IngressBackendRequest<DestroyClientIngress>,
+    ) -> BackendFuture<IngressBackendCompletion<ConfirmedAbsent>> {
+        let (binding, _) = request.into_parts();
+        Box::pin(async move {
+            IngressBackendCompletion {
+                binding,
+                result: Ok(ConfirmedAbsent),
+            }
+        })
     }
 
     fn transport_socket_supported(
@@ -896,26 +1177,6 @@ impl HelperEngine {
         if fixed::<16>(&request.request_id).is_none() {
             return execution(invalid_response(&request), None);
         }
-        if matches!(
-            request.operation.as_ref(),
-            Some(
-                helper_request::Operation::PrepareClientIngress(_)
-                    | helper_request::Operation::AcquireIngressSocket(_)
-                    | helper_request::Operation::ActivateClientIngress(_)
-                    | helper_request::Operation::DestroyClientIngress(_)
-            )
-        ) {
-            return execution(
-                response(
-                    &request,
-                    HelperResult::Unavailable,
-                    "CLIENT_INGRESS_UNAVAILABLE",
-                    None,
-                ),
-                None,
-            );
-        }
-
         let fallback = execution(
             response(
                 &request,
@@ -965,6 +1226,13 @@ impl HelperEngine {
             request.operation.as_ref(),
             Some(helper_request::Operation::AcquireTransportSocket(_))
         );
+        let is_ingress_acquire = matches!(
+            request.operation.as_ref(),
+            Some(
+                helper_request::Operation::AcquireIngressSocket(_)
+                    | helper_request::Operation::AcquireIngressReplySocket(_)
+            )
+        );
 
         // Tag 28 and committed Acquire success both retain dedicated non-evictable request-ID
         // bindings. Check them before Bind, global reap, target transition or any backend call.
@@ -980,6 +1248,31 @@ impl HelperEngine {
                                 request,
                                 HelperResult::AlreadyExists,
                                 "TRANSPORT_SOCKET_ALREADY_ACQUIRED",
+                                None,
+                            ),
+                            None,
+                        )
+                    } else {
+                        execution(
+                            response(
+                                request,
+                                HelperResult::InvalidRequest,
+                                "REQUEST_ID_CONFLICT",
+                                None,
+                            ),
+                            None,
+                        )
+                    },
+                );
+            }
+            if let Some(record) = state.ingress_acquire_request_ids.get(&request_id) {
+                return Some(
+                    if is_ingress_acquire && record.digest.ct_eq(&digest).unwrap_u8() == 1 {
+                        execution(
+                            response(
+                                request,
+                                HelperResult::AlreadyExists,
+                                "INGRESS_SOCKET_ALREADY_ACQUIRED",
                                 None,
                             ),
                             None,
@@ -1183,8 +1476,27 @@ impl HelperEngine {
                 self.acquire_async(request, request_id, digest, value, sender)
                     .await
             }
+            Some(helper_request::Operation::AddMptcpEndpoint(value)) => {
+                self.add_mptcp_endpoint_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::RemoveMptcpEndpoint(value)) => {
+                self.remove_mptcp_endpoint_async(request, request_id, digest, value, sender)
+                    .await
+            }
             Some(helper_request::Operation::CleanupOwned(value)) => {
-                if value.cleanup_token.len() != self.inner.cleanup_token.len()
+                let scope = CleanupScope::try_from(value.scope).ok();
+                if scope.is_none() || scope == Some(CleanupScope::Unspecified) {
+                    Some(execution(
+                        response(
+                            request,
+                            HelperResult::InvalidRequest,
+                            "CLEANUP_SCOPE_INVALID",
+                            None,
+                        ),
+                        None,
+                    ))
+                } else if value.cleanup_token.len() != self.inner.cleanup_token.len()
                     || value
                         .cleanup_token
                         .ct_eq(self.inner.cleanup_token.as_slice())
@@ -1201,36 +1513,46 @@ impl HelperEngine {
                         None,
                     ))
                 } else {
-                    self.cleanup_async(request, request_id, digest, sender)
-                        .await
+                    self.cleanup_async(
+                        request,
+                        request_id,
+                        digest,
+                        scope.expect("validated cleanup scope"),
+                        sender,
+                    )
+                    .await
                 }
             }
+            Some(helper_request::Operation::PrepareClientIngress(value)) => {
+                self.prepare_client_ingress_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::AcquireIngressSocket(value)) => {
+                self.acquire_client_ingress_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::AcquireIngressReplySocket(value)) => {
+                self.acquire_client_ingress_reply_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::ActivateClientIngress(value)) => {
+                self.activate_client_ingress_async(request, request_id, digest, value, sender)
+                    .await
+            }
+            Some(helper_request::Operation::DestroyClientIngress(value)) => {
+                self.destroy_client_ingress_async(request, request_id, digest, value, sender)
+                    .await
+            }
             Some(
-                helper_request::Operation::AddMptcpEndpoint(_)
-                | helper_request::Operation::RemoveMptcpEndpoint(_),
-            ) => Some(execution(
-                response(
-                    request,
-                    HelperResult::Unavailable,
-                    "TRANSPORT_HANDOFF_UNAVAILABLE",
-                    None,
-                ),
-                None,
-            )),
+                helper_request::Operation::InstallUplinkSharing(_)
+                | helper_request::Operation::InspectUplinkSharing(_)
+                | helper_request::Operation::DestroyUplinkSharing(_),
+            ) => Some(self.execute_sharing(request, sender).await),
             Some(
-                helper_request::Operation::PrepareClientIngress(_)
-                | helper_request::Operation::AcquireIngressSocket(_)
-                | helper_request::Operation::ActivateClientIngress(_)
-                | helper_request::Operation::DestroyClientIngress(_),
-            ) => Some(execution(
-                response(
-                    request,
-                    HelperResult::Unavailable,
-                    "CLIENT_INGRESS_UNAVAILABLE",
-                    None,
-                ),
-                None,
-            )),
+                helper_request::Operation::InstallWifiMesh(_)
+                | helper_request::Operation::InspectWifiMesh(_)
+                | helper_request::Operation::DestroyWifiMesh(_),
+            ) => Some(self.execute_mesh(request, sender).await),
             Some(
                 helper_request::Operation::ReconcileExpiredPrepare(_)
                 | helper_request::Operation::BindHelperRuntime(_),
@@ -1268,7 +1590,11 @@ impl HelperEngine {
         };
         let descriptor_success_was_committed = matches!(
             request.operation.as_ref(),
-            Some(helper_request::Operation::AcquireTransportSocket(_))
+            Some(
+                helper_request::Operation::AcquireTransportSocket(_)
+                    | helper_request::Operation::AcquireIngressSocket(_)
+                    | helper_request::Operation::AcquireIngressReplySocket(_)
+            )
         ) && result.response.result
             == HelperResult::Ok as i32
             && result.descriptor.is_some();
@@ -2863,6 +3189,11 @@ impl HelperEngine {
             ));
         }
 
+        // Native-probe descriptors are acquired while this context still owns its Activated
+        // generation. A successful Commit rotates that generation, so its generation-lifetime
+        // replay bindings must rotate out with it; otherwise a later exact Destroy cannot purge
+        // them and RouteContextsOnly cleanup remains falsely incomplete forever.
+        purge_transport_acquire_generation(&mut state, context_id, operation.generation);
         let context = state
             .contexts
             .get_mut(&context_id)
@@ -2905,6 +3236,795 @@ impl HelperEngine {
         ))
     }
 
+    #[allow(clippy::too_many_lines)] // One affine prepare transaction with exact rollback.
+    async fn prepare_client_ingress_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &PrepareClientIngress,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let Some(client_runtime_id) = fixed::<16>(&value.client_runtime_id) else {
+            return Some(execution(invalid_response(request), None));
+        };
+        let Some(deadlines) = freeze_deadlines(
+            self.inner.clock.as_ref(),
+            value.setup_expires_at_unix,
+            value.hard_expires_at_unix,
+        ) else {
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::Expired,
+                    "INGRESS_EXPIRY_INVALID",
+                    None,
+                ),
+                None,
+            ));
+        };
+        let generation = {
+            let mut state = self.inner.state.lock().await;
+            if state.ingress.is_some() {
+                return Some(execution(
+                    response(request, HelperResult::AlreadyExists, "INGRESS_EXISTS", None),
+                    None,
+                ));
+            }
+            state.next_ingress_generation = state.next_ingress_generation.saturating_add(1).max(1);
+            state.next_ingress_generation
+        };
+        let binding = IngressBackendBinding {
+            helper_runtime_id: self.inner.runtime_id,
+            client_runtime_id,
+            generation,
+            request_id,
+            request_digest: digest,
+            action: IngressBackendAction::Prepare,
+            call_deadline: Instant::now() + self.inner.backend_timeout,
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.prepare_client_ingress(backend_request)
+            })
+            .await;
+        let sockets = match call {
+            BackendCall::Complete(completion) if completion.binding == binding => {
+                match completion.result {
+                    Ok(sockets) => sockets,
+                    Err(error) => {
+                        return Some(execution(
+                            backend_response(request, error, "CLIENT_INGRESS_PREPARE_FAILED"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                if let Ok(completion) = task.await {
+                    drop(completion);
+                }
+                self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                    .await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
+                self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                    .await;
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_BACKEND_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let Some(sockets) = canonical_ingress_backend_sockets(sockets) else {
+            self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                .await;
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "INGRESS_BACKEND_INVALID",
+                    None,
+                ),
+                None,
+            ));
+        };
+        let (ingress_handle, records, response_sockets) = {
+            let state = self.inner.state.lock().await;
+            let mut reserved = BTreeSet::new();
+            let Some(ingress_handle) = self.unique_handle(&state, &reserved) else {
+                drop(state);
+                self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                    .await;
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Capacity,
+                        "INGRESS_HANDLE_CAPACITY",
+                        None,
+                    ),
+                    None,
+                ));
+            };
+            reserved.insert(ingress_handle);
+            let mut records = BTreeMap::new();
+            let mut response_sockets = Vec::with_capacity(REQUIRED_INGRESS_SOCKETS);
+            for socket in sockets {
+                let Some(socket_handle) = self.unique_handle(&state, &reserved) else {
+                    drop(state);
+                    self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                        .await;
+                    return Some(execution(
+                        response(
+                            request,
+                            HelperResult::Capacity,
+                            "INGRESS_HANDLE_CAPACITY",
+                            None,
+                        ),
+                        None,
+                    ));
+                };
+                reserved.insert(socket_handle);
+                response_sockets.push(PreparedIngressSocket {
+                    socket_handle: socket_handle.to_vec(),
+                    descriptor_kind: socket.descriptor_kind,
+                    address_family: socket.address_family,
+                    local: Some(socket.local.clone()),
+                });
+                records.insert(
+                    (socket.descriptor_kind, socket.address_family),
+                    ClientIngressSocketRecord {
+                        socket_handle,
+                        local: socket.local,
+                        acquisition_started: false,
+                        receipt_handle: None,
+                    },
+                );
+            }
+            (ingress_handle, records, response_sockets)
+        };
+        let mut state = self.inner.state.lock().await;
+        if state.ingress.is_some() {
+            drop(state);
+            self.destroy_ingress_backend_quiet(client_runtime_id, generation)
+                .await;
+            return Some(execution(
+                response(request, HelperResult::AlreadyExists, "INGRESS_EXISTS", None),
+                None,
+            ));
+        }
+        state.ingress = Some(ClientIngressRecord {
+            client_runtime_id,
+            generation,
+            ingress_handle,
+            setup_expires_at_unix: value.setup_expires_at_unix,
+            hard_expires_at_unix: value.hard_expires_at_unix,
+            setup_expires_at_boottime_ns: deadlines.setup_boottime_ns,
+            hard_expires_at_boottime_ns: deadlines.hard_boottime_ns,
+            phase: ClientIngressPhase::Prepared,
+            sockets: records,
+            reply_sockets_issued: 0,
+        });
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "CLIENT_INGRESS_PREPARED",
+                Some(helper_response::Outcome::PreparedClientIngress(
+                    PreparedClientIngress {
+                        client_runtime_id: client_runtime_id.to_vec(),
+                        ingress_handle: ingress_handle.to_vec(),
+                        sockets: response_sockets,
+                        hard_expires_at_unix: value.hard_expires_at_unix,
+                    },
+                )),
+            ),
+            None,
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)] // Descriptor adoption and replay handling form one audit unit.
+    async fn acquire_client_ingress_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &AcquireIngressSocket,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let now = expiry_now(self.inner.clock.as_ref());
+        let (binding, local) = {
+            let mut state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_mut() else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "INGRESS_ABSENT", None),
+                    None,
+                ));
+            };
+            if !deadline_live(
+                now,
+                ingress.setup_expires_at_unix,
+                ingress.setup_expires_at_boottime_ns,
+            ) || !deadline_live(
+                now,
+                ingress.hard_expires_at_unix,
+                ingress.hard_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(request, HelperResult::Expired, "INGRESS_EXPIRED", None),
+                    None,
+                ));
+            }
+            if value.client_runtime_id.as_slice() != ingress.client_runtime_id
+                || !matches_handle(&ingress.ingress_handle, &value.ingress_handle)
+                || ingress.phase != ClientIngressPhase::Prepared
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            let Some(socket) = ingress
+                .sockets
+                .get_mut(&(value.descriptor_kind, value.address_family))
+            else {
+                return Some(execution(invalid_response(request), None));
+            };
+            if !matches_handle(&socket.socket_handle, &value.socket_handle)
+                || socket.acquisition_started
+            {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::AlreadyExists,
+                        "INGRESS_SOCKET_ALREADY_ACQUIRED",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+            socket.acquisition_started = true;
+            let binding = IngressBackendBinding {
+                helper_runtime_id: self.inner.runtime_id,
+                client_runtime_id: ingress.client_runtime_id,
+                generation: ingress.generation,
+                request_id,
+                request_digest: digest,
+                action: IngressBackendAction::Acquire,
+                call_deadline: Instant::now() + self.inner.backend_timeout,
+            };
+            (binding, socket.local.clone())
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.acquire_client_ingress_socket(backend_request)
+            })
+            .await;
+        let descriptor = match call {
+            BackendCall::Complete(completion) if completion.binding == binding => {
+                match completion.result {
+                    Ok(descriptor) => descriptor,
+                    Err(error) => {
+                        return Some(execution(
+                            backend_response(request, error, "INGRESS_SOCKET_ACQUIRE_FAILED"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                if let Ok(completion) = task.await {
+                    drop(completion);
+                }
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_BACKEND_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let receipt_handle = {
+            let mut state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_ref().filter(|ingress| {
+                ingress.client_runtime_id == binding.client_runtime_id
+                    && ingress.generation == binding.generation
+            }) else {
+                drop(descriptor);
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_STALE",
+                        None,
+                    ),
+                    None,
+                ));
+            };
+            let mut reserved = BTreeSet::from([ingress.ingress_handle]);
+            for socket in ingress.sockets.values() {
+                reserved.insert(socket.socket_handle);
+                if let Some(receipt) = socket.receipt_handle {
+                    reserved.insert(receipt);
+                }
+            }
+            let Some(receipt_handle) = self.unique_handle(&state, &reserved) else {
+                drop(state);
+                drop(descriptor);
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Capacity,
+                        "INGRESS_HANDLE_CAPACITY",
+                        None,
+                    ),
+                    None,
+                ));
+            };
+            let ingress = state.ingress.as_mut().expect("validated ingress");
+            let socket = ingress
+                .sockets
+                .get_mut(&(value.descriptor_kind, value.address_family))
+                .expect("validated ingress identity");
+            socket.receipt_handle = Some(receipt_handle);
+            state.ingress_acquire_request_ids.insert(
+                request_id,
+                IngressAcquireRequestRecord {
+                    digest,
+                    client_runtime_id: binding.client_runtime_id,
+                    generation: binding.generation,
+                },
+            );
+            receipt_handle
+        };
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "INGRESS_SOCKET_READY",
+                Some(helper_response::Outcome::IngressSocketReady(
+                    IngressSocketReady {
+                        client_runtime_id: binding.client_runtime_id.to_vec(),
+                        ingress_handle: value.ingress_handle.clone(),
+                        socket_handle: value.socket_handle.clone(),
+                        receipt_handle: receipt_handle.to_vec(),
+                        descriptor_kind: value.descriptor_kind,
+                        address_family: value.address_family,
+                        local: Some(local),
+                    },
+                )),
+            ),
+            Some(Arc::new(descriptor)),
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)] // Descriptor adoption, ambiguity cleanup, and commit stay atomic.
+    async fn acquire_client_ingress_reply_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &AcquireIngressReplySocket,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let now = expiry_now(self.inner.clock.as_ref());
+        let binding = {
+            let state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_ref() else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "INGRESS_ABSENT", None),
+                    None,
+                ));
+            };
+            if !deadline_live(
+                now,
+                ingress.hard_expires_at_unix,
+                ingress.hard_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(request, HelperResult::Expired, "INGRESS_EXPIRED", None),
+                    None,
+                ));
+            }
+            if value.client_runtime_id.as_slice() != ingress.client_runtime_id
+                || !matches_handle(&ingress.ingress_handle, &value.ingress_handle)
+                || ingress.phase != ClientIngressPhase::Active
+                || ingress.reply_sockets_issued >= MAX_INGRESS_REPLY_SOCKETS
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            IngressBackendBinding {
+                helper_runtime_id: self.inner.runtime_id,
+                client_runtime_id: ingress.client_runtime_id,
+                generation: ingress.generation,
+                request_id,
+                request_digest: digest,
+                action: IngressBackendAction::AcquireReply,
+                call_deadline: Instant::now() + self.inner.backend_timeout,
+            }
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.acquire_client_ingress_reply_socket(backend_request)
+            })
+            .await;
+        let descriptor = match call {
+            BackendCall::Complete(completion) if completion.binding == binding => {
+                match completion.result {
+                    Ok(descriptor) => descriptor,
+                    Err(error) => {
+                        return Some(execution(
+                            backend_response(request, error, "INGRESS_REPLY_ACQUIRE_FAILED"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                if let Ok(completion) = task.await {
+                    drop(completion);
+                }
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_BACKEND_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let ingress_handle = {
+            let mut state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_mut().filter(|ingress| {
+                ingress.client_runtime_id == binding.client_runtime_id
+                    && ingress.generation == binding.generation
+                    && ingress.phase == ClientIngressPhase::Active
+                    && ingress.reply_sockets_issued < MAX_INGRESS_REPLY_SOCKETS
+            }) else {
+                drop(descriptor);
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_STALE",
+                        None,
+                    ),
+                    None,
+                ));
+            };
+            ingress.reply_sockets_issued = ingress.reply_sockets_issued.saturating_add(1);
+            let ingress_handle = ingress.ingress_handle;
+            state.ingress_acquire_request_ids.insert(
+                request_id,
+                IngressAcquireRequestRecord {
+                    digest,
+                    client_runtime_id: binding.client_runtime_id,
+                    generation: binding.generation,
+                },
+            );
+            ingress_handle
+        };
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "INGRESS_REPLY_SOCKET_READY",
+                Some(helper_response::Outcome::IngressReplySocketReady(
+                    IngressReplySocketReady {
+                        client_runtime_id: binding.client_runtime_id.to_vec(),
+                        ingress_handle: ingress_handle.to_vec(),
+                        remote: value.remote.clone(),
+                        application: value.application.clone(),
+                    },
+                )),
+            ),
+            Some(Arc::new(descriptor)),
+        ))
+    }
+
+    #[allow(clippy::too_many_lines)] // Activation, ambiguity handling, and rollback stay adjacent.
+    async fn activate_client_ingress_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &ActivateClientIngress,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let now = expiry_now(self.inner.clock.as_ref());
+        let binding = {
+            let state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_ref() else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "INGRESS_ABSENT", None),
+                    None,
+                ));
+            };
+            if !deadline_live(
+                now,
+                ingress.setup_expires_at_unix,
+                ingress.setup_expires_at_boottime_ns,
+            ) || !deadline_live(
+                now,
+                ingress.hard_expires_at_unix,
+                ingress.hard_expires_at_boottime_ns,
+            ) {
+                return Some(execution(
+                    response(request, HelperResult::Expired, "INGRESS_EXPIRED", None),
+                    None,
+                ));
+            }
+            if !activate_ingress_matches(ingress, value) {
+                return Some(execution(invalid_response(request), None));
+            }
+            IngressBackendBinding {
+                helper_runtime_id: self.inner.runtime_id,
+                client_runtime_id: ingress.client_runtime_id,
+                generation: ingress.generation,
+                request_id,
+                request_digest: digest,
+                action: IngressBackendAction::Activate,
+                call_deadline: Instant::now() + self.inner.backend_timeout,
+            }
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.activate_client_ingress(backend_request)
+            })
+            .await;
+        match call {
+            BackendCall::Complete(IngressBackendCompletion {
+                binding: completed,
+                result: Ok(()),
+            }) if completed == binding => {}
+            BackendCall::Complete(IngressBackendCompletion {
+                binding: completed,
+                result: Err(error),
+            }) if completed == binding => {
+                return Some(execution(
+                    backend_response(request, error, "CLIENT_INGRESS_ACTIVATE_FAILED"),
+                    None,
+                ));
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                let _ = task.await;
+                self.destroy_ingress_backend_quiet(binding.client_runtime_id, binding.generation)
+                    .await;
+                self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+                    .await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "INGRESS_BACKEND_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        }
+        let mut state = self.inner.state.lock().await;
+        let Some(ingress) = state.ingress.as_mut().filter(|ingress| {
+            ingress.client_runtime_id == binding.client_runtime_id
+                && ingress.generation == binding.generation
+        }) else {
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "INGRESS_STALE",
+                    None,
+                ),
+                None,
+            ));
+        };
+        ingress.phase = ClientIngressPhase::Active;
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "CLIENT_INGRESS_ACTIVATED",
+                Some(helper_response::Outcome::ActivatedClientIngress(
+                    ActivatedClientIngress {
+                        client_runtime_id: binding.client_runtime_id.to_vec(),
+                        ingress_handle: value.ingress_handle.clone(),
+                    },
+                )),
+            ),
+            None,
+        ))
+    }
+
+    async fn destroy_client_ingress_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &DestroyClientIngress,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let binding = {
+            let state = self.inner.state.lock().await;
+            let Some(ingress) = state.ingress.as_ref() else {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::Ok,
+                        "CLIENT_INGRESS_ALREADY_ABSENT",
+                        Some(helper_response::Outcome::DestroyedClientIngress(
+                            DestroyedClientIngress { existed: false },
+                        )),
+                    ),
+                    None,
+                ));
+            };
+            if value.client_runtime_id.as_slice() != ingress.client_runtime_id
+                || !matches_handle(&ingress.ingress_handle, &value.ingress_handle)
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            IngressBackendBinding {
+                helper_runtime_id: self.inner.runtime_id,
+                client_runtime_id: ingress.client_runtime_id,
+                generation: ingress.generation,
+                request_id,
+                request_digest: digest,
+                action: IngressBackendAction::Destroy,
+                call_deadline: Instant::now() + self.inner.backend_timeout,
+            }
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value.clone());
+        let call = self
+            .call_backend(binding.call_deadline, move || {
+                backend.destroy_client_ingress(backend_request)
+            })
+            .await;
+        let confirmed = match call {
+            BackendCall::Complete(IngressBackendCompletion {
+                binding: completed,
+                result: Ok(ConfirmedAbsent),
+            }) if completed == binding => true,
+            BackendCall::Complete(IngressBackendCompletion {
+                binding: completed,
+                result: Err(error),
+            }) if completed == binding => {
+                return Some(execution(
+                    backend_response(request, error, "CLIENT_INGRESS_DESTROY_FAILED"),
+                    None,
+                ));
+            }
+            BackendCall::TimedOut(task) => {
+                self.send_ambiguous(request, sender).await;
+                let _ = task.await;
+                return None;
+            }
+            BackendCall::Complete(_) | BackendCall::Ambiguous => false,
+        };
+        if !confirmed {
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "CLIENT_INGRESS_DESTROY_AMBIGUOUS",
+                    None,
+                ),
+                None,
+            ));
+        }
+        self.clear_ingress_generation(binding.client_runtime_id, binding.generation)
+            .await;
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "CLIENT_INGRESS_DESTROYED",
+                Some(helper_response::Outcome::DestroyedClientIngress(
+                    DestroyedClientIngress { existed: true },
+                )),
+            ),
+            None,
+        ))
+    }
+
+    async fn destroy_ingress_backend_quiet(
+        &self,
+        client_runtime_id: [u8; 16],
+        generation: u64,
+    ) -> bool {
+        let binding = IngressBackendBinding {
+            helper_runtime_id: self.inner.runtime_id,
+            client_runtime_id,
+            generation,
+            request_id: client_runtime_id,
+            request_digest: [0xd1; 32],
+            action: IngressBackendAction::Destroy,
+            call_deadline: Instant::now() + self.inner.backend_timeout,
+        };
+        let value = DestroyClientIngress {
+            client_runtime_id: client_runtime_id.to_vec(),
+            ingress_handle: vec![1; HELPER_HANDLE_BYTES],
+        };
+        let backend = Arc::clone(&self.inner.backend);
+        let backend_request = IngressBackendRequest::new(binding, value);
+        match self
+            .call_backend(binding.call_deadline, move || {
+                backend.destroy_client_ingress(backend_request)
+            })
+            .await
+        {
+            BackendCall::Complete(IngressBackendCompletion {
+                binding: completed,
+                result: Ok(ConfirmedAbsent),
+            }) => completed == binding,
+            BackendCall::TimedOut(task) => matches!(
+                task.await,
+                Ok(IngressBackendCompletion {
+                    binding: completed,
+                    result: Ok(ConfirmedAbsent),
+                }) if completed == binding
+            ),
+            BackendCall::Complete(_) | BackendCall::Ambiguous => false,
+        }
+    }
+
+    async fn clear_ingress_generation(&self, client_runtime_id: [u8; 16], generation: u64) {
+        let mut state = self.inner.state.lock().await;
+        if state.ingress.as_ref().is_some_and(|ingress| {
+            ingress.client_runtime_id == client_runtime_id && ingress.generation == generation
+        }) {
+            state.ingress = None;
+        }
+        state.ingress_acquire_request_ids.retain(|_, record| {
+            record.client_runtime_id != client_runtime_id || record.generation != generation
+        });
+    }
+
     #[allow(clippy::too_many_lines)] // PLAN, descriptor ownership, rollback, and COMMIT form one audit unit.
     async fn acquire_async(
         &self,
@@ -2914,6 +4034,16 @@ impl HelperEngine {
         value: &AcquireTransportSocket,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
+        let Ok(descriptor_kind) = RoutingTransportSocketKind::try_from(value.descriptor_kind)
+        else {
+            return Some(execution(invalid_response(request), None));
+        };
+        let (required_context_phase, backend_phase) =
+            if descriptor_kind == RoutingTransportSocketKind::NativeProbeUdpConnected {
+                (ContextPhase::Activated, BackendPhase::Activated)
+            } else {
+                (ContextPhase::Committed, BackendPhase::Committed)
+            };
         let backend = Arc::clone(&self.inner.backend);
         let query_binding = BackendRuntimeBinding {
             helper_runtime_id: self.inner.runtime_id,
@@ -2992,7 +4122,7 @@ impl HelperEngine {
                     None,
                 ));
             }
-            if context.phase != ContextPhase::Committed {
+            if context.phase != required_context_phase {
                 return Some(execution(
                     response(request, phase_result(context.phase), "INVALID_STATE", None),
                     None,
@@ -3031,7 +4161,7 @@ impl HelperEngine {
                 digest,
                 context_id,
                 generation,
-                Some(ContextPhase::Committed),
+                Some(required_context_phase),
                 OperationKind::Acquire,
                 lineage,
                 Instant::now() + self.inner.backend_timeout,
@@ -3048,7 +4178,7 @@ impl HelperEngine {
         let backend = Arc::clone(&self.inner.backend);
         let binding = BackendBinding::for_owner(
             &token,
-            BackendPhase::Committed,
+            backend_phase,
             BackendAction::AcquireTransportSocket,
             token.call_deadline(),
         );
@@ -3122,7 +4252,7 @@ impl HelperEngine {
             && state.contexts.get(&context_id).is_some_and(|context| {
                 context.generation == operation.generation
                     && context_backend_lineage(context_id, context) == token.lineage()
-                    && context.phase == ContextPhase::Committed
+                    && context.phase == required_context_phase
                     && matches_handle(&context.handle, &value.context_handle)
                     && context.leases.contains_key(&(value.path_id, value.role))
                     && deadline_live(
@@ -3201,6 +4331,237 @@ impl HelperEngine {
                 Some(helper_response::Outcome::TransportSocketReady(ready)),
             ),
             Some(Arc::new(descriptor)),
+        ))
+    }
+
+    async fn add_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &AddMptcpEndpoint,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        if MptcpEndpointMode::try_from(value.mode)
+            .ok()
+            .is_none_or(|mode| mode == MptcpEndpointMode::Unspecified)
+        {
+            return Some(execution(invalid_response(request), None));
+        }
+        self.mutate_mptcp_endpoint_async(
+            request,
+            request_id,
+            digest,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::AddMptcpEndpoint,
+            MptcpEndpointMutation::Add(value.clone()),
+            sender,
+        )
+        .await
+    }
+
+    async fn remove_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        value: &RemoveMptcpEndpoint,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        self.mutate_mptcp_endpoint_async(
+            request,
+            request_id,
+            digest,
+            &value.route_context_id,
+            &value.context_handle,
+            value.path_id,
+            BackendAction::RemoveMptcpEndpoint,
+            MptcpEndpointMutation::Remove(value.clone()),
+            sender,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the mutation keeps reservation, backend ambiguity, and stale-result cleanup adjacent"
+    )]
+    async fn mutate_mptcp_endpoint_async(
+        &self,
+        request: &HelperRequest,
+        request_id: [u8; 16],
+        digest: [u8; 32],
+        route_context_id: &[u8],
+        context_handle: &[u8],
+        path_id: u32,
+        action: BackendAction,
+        mutation: MptcpEndpointMutation,
+        sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
+    ) -> Option<HelperExecution> {
+        let Some(context_id) = fixed::<16>(route_context_id) else {
+            return Some(execution(invalid_response(request), None));
+        };
+        let token = {
+            let mut state = self.inner.state.lock().await;
+            let Some(context) = state.contexts.get(&context_id) else {
+                return Some(execution(
+                    response(request, HelperResult::NotFound, "CONTEXT_ABSENT", None),
+                    None,
+                ));
+            };
+            let live = deadline_live(
+                expiry_now(self.inner.clock.as_ref()),
+                context.hard_expires_at_unix,
+                context.hard_expires_at_boottime_ns,
+            );
+            if context.phase != ContextPhase::Committed
+                || !live
+                || !matches_handle(&context.handle, context_handle)
+                || !context_owns_mptcp_path(context, path_id)
+            {
+                return Some(execution(invalid_response(request), None));
+            }
+            let generation = context.generation;
+            let lineage = context_backend_lineage(context_id, context);
+            let Some(token) = begin_operation(
+                &mut state,
+                request_id,
+                digest,
+                context_id,
+                generation,
+                Some(ContextPhase::Committed),
+                OperationKind::MptcpEndpoint,
+                lineage,
+                Instant::now() + self.inner.backend_timeout,
+            ) else {
+                return Some(execution(
+                    response(request, HelperResult::Capacity, "OPERATION_CAPACITY", None),
+                    None,
+                ));
+            };
+            state.cleanup_pending.insert((context_id, generation));
+            token
+        };
+
+        let backend = Arc::clone(&self.inner.backend);
+        let binding = BackendBinding::for_owner(
+            &token,
+            BackendPhase::Committed,
+            action,
+            token.call_deadline(),
+        );
+        let call = match mutation {
+            MptcpEndpointMutation::Add(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.add_mptcp_endpoint(request)
+                })
+                .await
+            }
+            MptcpEndpointMutation::Remove(value) => {
+                let request = BackendRequest::new(binding, value);
+                self.call_backend(binding.call_deadline, move || {
+                    backend.remove_mptcp_endpoint(request)
+                })
+                .await
+            }
+        };
+        let resolved = self
+            .resolve_mutating_call(call, token, binding, request, sender)
+            .await?;
+        let token = match resolved {
+            ResolvedCall::Definite {
+                owner,
+                result: Ok(()),
+            } => *owner,
+            ResolvedCall::Definite {
+                owner,
+                result: Err(BackendError::CleanupIncomplete),
+            } => {
+                let cleanup = self.rollback_context(*owner, request, sender).await;
+                if cleanup.response_sent {
+                    return None;
+                }
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "MPTCP_ENDPOINT_CLEANUP_INCOMPLETE",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+            ResolvedCall::Definite {
+                owner,
+                result: Err(error),
+            } => {
+                self.clear_operation(*owner).await;
+                return Some(execution(
+                    backend_response(request, error, "MPTCP_ENDPOINT_UNAVAILABLE"),
+                    None,
+                ));
+            }
+            ResolvedCall::Ambiguous => {
+                return Some(execution(
+                    response(
+                        request,
+                        HelperResult::CleanupIncomplete,
+                        "BACKEND_RESULT_AMBIGUOUS",
+                        None,
+                    ),
+                    None,
+                ));
+            }
+        };
+        let operation = token.token();
+        let mut state = self.inner.state.lock().await;
+        let exact = state.in_flight == Some(operation)
+            && state.contexts.get(&context_id).is_some_and(|context| {
+                context.generation == operation.generation
+                    && context.phase == ContextPhase::Committed
+                    && context_backend_lineage(context_id, context) == token.lineage()
+                    && matches_handle(&context.handle, context_handle)
+                    && context_owns_mptcp_path(context, path_id)
+                    && deadline_live(
+                        expiry_now(self.inner.clock.as_ref()),
+                        context.hard_expires_at_unix,
+                        context.hard_expires_at_boottime_ns,
+                    )
+            });
+        if !exact {
+            drop(state);
+            let cleanup = self.rollback_context(token, request, sender).await;
+            if cleanup.response_sent {
+                return None;
+            }
+            return Some(execution(
+                response(
+                    request,
+                    HelperResult::CleanupIncomplete,
+                    "STALE_BACKEND_RESULT",
+                    None,
+                ),
+                None,
+            ));
+        }
+        state
+            .cleanup_pending
+            .remove(&(context_id, operation.generation));
+        state.in_flight = None;
+        drop(state);
+        let _ = token.settle();
+        Some(execution(
+            response(
+                request,
+                HelperResult::Ok,
+                "MPTCP_ENDPOINT_UPDATED",
+                Some(helper_response::Outcome::Empty(Empty {})),
+            ),
+            None,
         ))
     }
 
@@ -3303,6 +4664,7 @@ impl HelperEngine {
         request: &HelperRequest,
         request_id: [u8; 16],
         digest: [u8; 32],
+        scope: CleanupScope,
         sender: &mut Option<tokio::sync::oneshot::Sender<HelperExecution>>,
     ) -> Option<HelperExecution> {
         let identities = {
@@ -3403,12 +4765,20 @@ impl HelperEngine {
             complete &= outcome.confirmed;
             response_sent |= outcome.response_sent;
         }
+        if scope == CleanupScope::AllOwnedResources {
+            complete &= self.cleanup_sharing().await;
+            complete &= self.cleanup_mesh().await;
+        }
         if response_sent {
             return None;
         }
         let empty = {
             let state = self.inner.state.lock().await;
-            cleanup_state_complete(&state)
+            match scope {
+                CleanupScope::AllOwnedResources => cleanup_state_complete(&state),
+                CleanupScope::RouteContextsOnly => route_cleanup_state_complete(&state),
+                CleanupScope::Unspecified => false,
+            }
         };
         Some(execution(
             if complete && empty {
@@ -3852,6 +5222,25 @@ impl HelperEngine {
             self.finish_cleanup(token, confirmed).await;
             complete &= confirmed;
         }
+        let ingress = {
+            let state = self.inner.state.lock().await;
+            state
+                .ingress
+                .as_ref()
+                .map(|ingress| (ingress.client_runtime_id, ingress.generation))
+        };
+        if let Some((client_runtime_id, generation)) = ingress {
+            let confirmed = self
+                .destroy_ingress_backend_quiet(client_runtime_id, generation)
+                .await;
+            if confirmed {
+                self.clear_ingress_generation(client_runtime_id, generation)
+                    .await;
+            }
+            complete &= confirmed;
+        }
+        complete &= self.cleanup_sharing().await;
+        complete &= self.cleanup_mesh().await;
         let engine_cleanup_complete = {
             let state = self.inner.state.lock().await;
             cleanup_state_complete(&state)
@@ -3901,7 +5290,18 @@ impl HelperEngine {
                 && state.contexts.values().all(|context| {
                     context.handle != handle
                         && context.leases.values().all(|lease| lease.handle != handle)
-                });
+                })
+                && state.ingress.as_ref().is_none_or(|ingress| {
+                    ingress.ingress_handle != handle
+                        && ingress.sockets.values().all(|socket| {
+                            socket.socket_handle != handle && socket.receipt_handle != Some(handle)
+                        })
+                })
+                && state
+                    .sharing
+                    .as_ref()
+                    .is_none_or(|sharing| sharing.handle != handle)
+                && state.mesh.as_ref().is_none_or(|mesh| mesh.handle != handle);
             if unused {
                 return Some(handle);
             }
@@ -4093,8 +5493,22 @@ fn prepared_matches(request: &PrepareLeaseBatch, prepared: &[PreparedKernelLease
     let mut public_keys = BTreeSet::new();
     let mut public_endpoints = BTreeSet::new();
     for (requested, lease) in request.leases.iter().zip(prepared) {
+        let on_link = request.traversal_hints.iter().find_map(|hint| {
+            ((hint.path_id, hint.role) == (lease.path_id, lease.role))
+                .then_some(hint.on_link.as_ref())
+                .flatten()
+        });
+        let evidence_matches = match lease.evidence {
+            UnderlayEvidence::DirectAssigned | UnderlayEvidence::ObservedUdpPunch => {
+                on_link.is_none()
+            }
+            UnderlayEvidence::DirectOnLink => {
+                on_link.is_some_and(|hint| hint.local_address == lease.public_endpoint.address)
+            }
+            UnderlayEvidence::Unspecified => false,
+        };
         if lease.public_key.iter().all(|byte| *byte == 0)
-            || lease.evidence != UnderlayEvidence::DirectAssigned
+            || !evidence_matches
             || (requested.path_id, requested.role) != (lease.path_id, lease.role)
             || !public_keys.insert(lease.public_key)
             || !public_endpoints.insert((
@@ -4181,6 +5595,67 @@ fn proofs_commit(context: &ContextRecord, proofs: &[KernelCounters], activated_a
 
 fn matches_handle(expected: &[u8; HELPER_HANDLE_BYTES], actual: &[u8]) -> bool {
     actual.len() == HELPER_HANDLE_BYTES && expected.ct_eq(actual).unwrap_u8() == 1
+}
+
+fn canonical_ingress_backend_sockets(
+    sockets: Vec<PreparedKernelIngressSocket>,
+) -> Option<Vec<PreparedKernelIngressSocket>> {
+    if sockets.len() != REQUIRED_INGRESS_SOCKETS {
+        return None;
+    }
+    let mut by_identity = BTreeMap::new();
+    for socket in sockets {
+        let kind = IngressSocketKind::try_from(socket.descriptor_kind).ok()?;
+        let family = IngressAddressFamily::try_from(socket.address_family).ok()?;
+        if kind == IngressSocketKind::Unspecified
+            || family == IngressAddressFamily::Unspecified
+            || !ingress_local_matches_family(&socket.local, family)
+            || by_identity
+                .insert((socket.descriptor_kind, socket.address_family), socket)
+                .is_some()
+        {
+            return None;
+        }
+    }
+    (by_identity.len() == REQUIRED_INGRESS_SOCKETS).then(|| by_identity.into_values().collect())
+}
+
+fn ingress_local_matches_family(
+    local: &IngressSocketAddress,
+    family: IngressAddressFamily,
+) -> bool {
+    (1..=u32::from(u16::MAX)).contains(&local.port)
+        && match family {
+            IngressAddressFamily::Ipv4 => local.address.as_slice() == [0; 4],
+            IngressAddressFamily::Ipv6 => local.address.as_slice() == [0; 16],
+            IngressAddressFamily::Unspecified => false,
+        }
+}
+
+fn activate_ingress_matches(ingress: &ClientIngressRecord, value: &ActivateClientIngress) -> bool {
+    if ingress.phase != ClientIngressPhase::Prepared
+        || value.client_runtime_id.as_slice() != ingress.client_runtime_id
+        || !matches_handle(&ingress.ingress_handle, &value.ingress_handle)
+        || value.receipts.len() != REQUIRED_INGRESS_SOCKETS
+    {
+        return false;
+    }
+    let mut identities = BTreeSet::new();
+    for receipt in &value.receipts {
+        let key = (receipt.descriptor_kind, receipt.address_family);
+        let Some(socket) = ingress.sockets.get(&key) else {
+            return false;
+        };
+        if !matches_handle(&socket.socket_handle, &receipt.socket_handle)
+            || socket
+                .receipt_handle
+                .is_none_or(|expected| !matches_handle(&expected, &receipt.receipt_handle))
+            || !identities.insert(key)
+        {
+            return false;
+        }
+    }
+    identities.len() == ingress.sockets.len()
 }
 
 fn fixed<const N: usize>(value: &[u8]) -> Option<[u8; N]> {
@@ -4349,6 +5824,14 @@ fn orphan_pending_identities(state: &EngineState) -> Vec<([u8; 16], u64)> {
 }
 
 fn cleanup_state_complete(state: &EngineState) -> bool {
+    route_cleanup_state_complete(state)
+        && state.ingress.is_none()
+        && state.ingress_acquire_request_ids.is_empty()
+        && state.sharing.is_none()
+        && state.mesh.is_none()
+}
+
+fn route_cleanup_state_complete(state: &EngineState) -> bool {
     state.contexts.is_empty()
         && state.cleanup_pending.is_empty()
         && state.in_flight.is_none()
@@ -4408,8 +5891,15 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         }
         helper_request::Operation::PrepareClientIngress(_)
         | helper_request::Operation::AcquireIngressSocket(_)
+        | helper_request::Operation::AcquireIngressReplySocket(_)
         | helper_request::Operation::ActivateClientIngress(_)
         | helper_request::Operation::DestroyClientIngress(_)
+        | helper_request::Operation::InstallUplinkSharing(_)
+        | helper_request::Operation::InspectUplinkSharing(_)
+        | helper_request::Operation::DestroyUplinkSharing(_)
+        | helper_request::Operation::InstallWifiMesh(_)
+        | helper_request::Operation::InspectWifiMesh(_)
+        | helper_request::Operation::DestroyWifiMesh(_)
         | helper_request::Operation::CleanupOwned(_) => return None,
     };
     fixed(value)
@@ -4616,6 +6106,7 @@ mod tests {
         fail_prepare_capacity: AtomicBool,
         fail_probe_cleanup: AtomicBool,
         fail_acquire_cleanup: AtomicBool,
+        fail_next_acquire_kernel: AtomicBool,
         panic_prepare_factory: AtomicBool,
         panic_prepare_poll: AtomicBool,
         substitute_prepare_generation: AtomicBool,
@@ -4628,6 +6119,13 @@ mod tests {
         probe_requests: StdMutex<Vec<(BackendBinding, BackendProbe)>>,
         destroy_calls: StdMutex<Vec<(BackendBinding, BackendDestroy)>>,
         runtime_bindings: StdMutex<Vec<BackendRuntimeBinding>>,
+        sharing_bindings: StdMutex<Vec<SharingBackendBinding>>,
+        fail_sharing_install: AtomicBool,
+        fail_sharing_destroy: AtomicBool,
+        mesh_bindings: StdMutex<Vec<MeshBackendBinding>>,
+        fail_mesh_install: AtomicBool,
+        fail_mesh_destroy: AtomicBool,
+        substitute_mesh_binding: AtomicBool,
     }
 
     impl FakeBackend {
@@ -4648,6 +6146,154 @@ mod tests {
     }
 
     impl AsyncLeaseBackend for FakeBackend {
+        fn install_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
+        ) -> BackendFuture<MeshBackendCompletion<MeshInterfaceIdentity>> {
+            let (mut binding, _) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                if self.substitute_mesh_binding.load(Ordering::Acquire) {
+                    binding.request_digest[0] ^= 1;
+                }
+                MeshBackendCompletion {
+                    binding,
+                    result: if self.fail_mesh_install.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(MeshInterfaceIdentity {
+                            interface: "vw050505050505".to_owned(),
+                            ifindex: 2,
+                            wiphy: 0,
+                        })
+                    },
+                }
+            })
+        }
+
+        fn inspect_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<()>,
+        ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+            let (binding, ()) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                MeshBackendCompletion {
+                    binding,
+                    result: Ok(crate::kernel::wifi_mesh::MeshSnapshot {
+                        ifindex: 2,
+                        wiphy: 0,
+                        frequency_mhz: 2412,
+                        joined: true,
+                        peers: vec![crate::kernel::wifi_mesh::MeshPeer {
+                            mac: [2, 1, 2, 3, 4, 5],
+                            established: true,
+                            rx_bytes: 10,
+                            tx_bytes: 20,
+                            rx_packets: 1,
+                            tx_packets: 2,
+                        }],
+                    }),
+                }
+            })
+        }
+
+        fn destroy_wifi_mesh(
+            self: Arc<Self>,
+            request: MeshBackendRequest<()>,
+        ) -> BackendFuture<MeshBackendCompletion<ConfirmedAbsent>> {
+            let (binding, ()) = request.into_parts();
+            self.mesh_bindings
+                .lock()
+                .expect("mesh bindings")
+                .push(binding);
+            Box::pin(async move {
+                MeshBackendCompletion {
+                    binding,
+                    result: if self.fail_mesh_destroy.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(ConfirmedAbsent)
+                    },
+                }
+            })
+        }
+
+        fn install_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
+        ) -> BackendFuture<SharingBackendCompletion<u32>> {
+            let (binding, _) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                SharingBackendCompletion {
+                    binding,
+                    result: if self.fail_sharing_install.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(2)
+                    },
+                }
+            })
+        }
+
+        fn inspect_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<()>,
+        ) -> BackendFuture<SharingBackendCompletion<crate::kernel::underlay_sharing::SharingCounters>>
+        {
+            let (binding, ()) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                let value = crate::kernel::underlay_sharing::QueueCounters {
+                    bytes: 10,
+                    packets: 1,
+                    ..Default::default()
+                };
+                SharingBackendCompletion {
+                    binding,
+                    result: Ok(crate::kernel::underlay_sharing::SharingCounters {
+                        total: value,
+                        owner: value,
+                        contribution: value,
+                    }),
+                }
+            })
+        }
+
+        fn destroy_uplink_sharing(
+            self: Arc<Self>,
+            request: SharingBackendRequest<()>,
+        ) -> BackendFuture<SharingBackendCompletion<ConfirmedAbsent>> {
+            let (binding, ()) = request.into_parts();
+            self.sharing_bindings
+                .lock()
+                .expect("sharing bindings")
+                .push(binding);
+            Box::pin(async move {
+                SharingBackendCompletion {
+                    binding,
+                    result: if self.fail_sharing_destroy.load(Ordering::Acquire) {
+                        Err(BackendError::CleanupIncomplete)
+                    } else {
+                        Ok(ConfirmedAbsent)
+                    },
+                }
+            })
+        }
+
         fn prepare(
             self: Arc<Self>,
             request: BackendRequest<PrepareLeaseBatch>,
@@ -4840,6 +6486,8 @@ mod tests {
                     Err(error)
                 } else if self.fail_acquire_cleanup.load(Ordering::Acquire) {
                     Err(BackendError::CleanupIncomplete)
+                } else if self.fail_next_acquire_kernel.swap(false, Ordering::AcqRel) {
+                    Err(BackendError::Kernel)
                 } else {
                     StdUnixStream::pair()
                         .map_err(|_| BackendError::Kernel)
@@ -4868,6 +6516,87 @@ mod tests {
                         completion.binding.operation_generation.saturating_add(1);
                 }
                 completion
+            })
+        }
+
+        fn add_mptcp_endpoint(
+            self: Arc<Self>,
+            request: BackendRequest<AddMptcpEndpoint>,
+        ) -> BackendFuture<BackendCompletion<()>> {
+            let (completion, _) = request.into_parts();
+            Box::pin(async move { completion.complete(Ok(())) })
+        }
+
+        fn remove_mptcp_endpoint(
+            self: Arc<Self>,
+            request: BackendRequest<RemoveMptcpEndpoint>,
+        ) -> BackendFuture<BackendCompletion<()>> {
+            let (completion, _) = request.into_parts();
+            Box::pin(async move { completion.complete(Ok(())) })
+        }
+
+        fn prepare_client_ingress(
+            self: Arc<Self>,
+            request: IngressBackendRequest<PrepareClientIngress>,
+        ) -> BackendFuture<IngressBackendCompletion<Vec<PreparedKernelIngressSocket>>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Err(BackendError::Unavailable),
+                }
+            })
+        }
+
+        fn acquire_client_ingress_socket(
+            self: Arc<Self>,
+            request: IngressBackendRequest<AcquireIngressSocket>,
+        ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Err(BackendError::Unavailable),
+                }
+            })
+        }
+
+        fn acquire_client_ingress_reply_socket(
+            self: Arc<Self>,
+            request: IngressBackendRequest<AcquireIngressReplySocket>,
+        ) -> BackendFuture<IngressBackendCompletion<OwnedFd>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Err(BackendError::Unavailable),
+                }
+            })
+        }
+
+        fn activate_client_ingress(
+            self: Arc<Self>,
+            request: IngressBackendRequest<ActivateClientIngress>,
+        ) -> BackendFuture<IngressBackendCompletion<()>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Err(BackendError::Unavailable),
+                }
+            })
+        }
+
+        fn destroy_client_ingress(
+            self: Arc<Self>,
+            request: IngressBackendRequest<DestroyClientIngress>,
+        ) -> BackendFuture<IngressBackendCompletion<ConfirmedAbsent>> {
+            let (binding, _) = request.into_parts();
+            Box::pin(async move {
+                IngressBackendCompletion {
+                    binding,
+                    result: Ok(ConfirmedAbsent),
+                }
             })
         }
 
@@ -4916,6 +6645,7 @@ mod tests {
                 }],
                 setup_expires_at_unix: 120,
                 hard_expires_at_unix: 900,
+                traversal_hints: Vec::new(),
             }),
         )
     }
@@ -5154,19 +6884,16 @@ mod tests {
 
     fn client_ingress_receipts() -> Vec<volparossa_routing::IngressSocketReceipt> {
         [
-            volparossa_routing::IngressSocketKind::TransparentTcpListener,
-            volparossa_routing::IngressSocketKind::TransparentUdp,
-            volparossa_routing::IngressSocketKind::DnsTcpListener,
-            volparossa_routing::IngressSocketKind::DnsUdp,
+            IngressSocketKind::TransparentTcpListener,
+            IngressSocketKind::TransparentUdp,
+            IngressSocketKind::DnsTcpListener,
+            IngressSocketKind::DnsUdp,
         ]
         .into_iter()
         .flat_map(|kind| {
-            [
-                volparossa_routing::IngressAddressFamily::Ipv4,
-                volparossa_routing::IngressAddressFamily::Ipv6,
-            ]
-            .into_iter()
-            .map(move |family| (kind, family))
+            [IngressAddressFamily::Ipv4, IngressAddressFamily::Ipv6]
+                .into_iter()
+                .map(move |family| (kind, family))
         })
         .enumerate()
         .map(
@@ -5182,56 +6909,74 @@ mod tests {
 
     #[tokio::test]
     async fn client_ingress_lifecycle_is_unavailable_before_backend_state_or_network() {
-        let engine = HelperEngine::new([9; 32], 1_000);
+        let engine = HelperEngine::with_components(
+            [9; 32],
+            1_000,
+            Arc::new(UnavailableLeaseBackend),
+            Arc::new(FixedHandles(AtomicU64::new(0))),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
         let operations = [
-            helper_request::Operation::PrepareClientIngress(
-                volparossa_routing::PrepareClientIngress {
+            (
+                helper_request::Operation::PrepareClientIngress(PrepareClientIngress {
                     client_runtime_id: vec![7; 16],
                     setup_expires_at_unix: 120,
                     hard_expires_at_unix: 900,
-                },
+                }),
+                HelperResult::Unavailable,
+                "CLIENT_INGRESS_PREPARE_FAILED",
+                false,
             ),
-            helper_request::Operation::AcquireIngressSocket(
-                volparossa_routing::AcquireIngressSocket {
+            (
+                helper_request::Operation::AcquireIngressSocket(AcquireIngressSocket {
                     client_runtime_id: vec![7; 16],
                     ingress_handle: vec![8; 32],
                     socket_handle: vec![9; 32],
-                    descriptor_kind: volparossa_routing::IngressSocketKind::TransparentUdp as i32,
-                    address_family: volparossa_routing::IngressAddressFamily::Ipv4 as i32,
-                },
+                    descriptor_kind: IngressSocketKind::TransparentUdp as i32,
+                    address_family: IngressAddressFamily::Ipv4 as i32,
+                }),
+                HelperResult::NotFound,
+                "INGRESS_ABSENT",
+                false,
             ),
-            helper_request::Operation::ActivateClientIngress(
-                volparossa_routing::ActivateClientIngress {
+            (
+                helper_request::Operation::ActivateClientIngress(ActivateClientIngress {
                     client_runtime_id: vec![7; 16],
                     ingress_handle: vec![8; 32],
                     receipts: client_ingress_receipts(),
-                },
+                }),
+                HelperResult::NotFound,
+                "INGRESS_ABSENT",
+                false,
             ),
-            helper_request::Operation::DestroyClientIngress(
-                volparossa_routing::DestroyClientIngress {
+            (
+                helper_request::Operation::DestroyClientIngress(DestroyClientIngress {
                     client_runtime_id: vec![7; 16],
                     ingress_handle: vec![8; 32],
-                },
+                }),
+                HelperResult::Ok,
+                "CLIENT_INGRESS_ALREADY_ABSENT",
+                true,
             ),
         ];
-        for (index, operation) in operations.into_iter().enumerate() {
+        for (index, (operation, expected_result, expected_diagnostic, expected_outcome)) in
+            operations.into_iter().enumerate()
+        {
             let execution = engine
                 .execute_with_descriptor(request(
                     u8::try_from(index + 40).expect("bounded request ID"),
                     operation,
                 ))
                 .await;
-            assert_eq!(execution.response.result, HelperResult::Unavailable as i32);
-            assert_eq!(
-                execution.response.diagnostic_code,
-                "CLIENT_INGRESS_UNAVAILABLE"
-            );
-            assert!(execution.response.outcome.is_none());
+            assert_eq!(execution.response.result, expected_result as i32);
+            assert_eq!(execution.response.diagnostic_code, expected_diagnostic);
+            assert_eq!(execution.response.outcome.is_some(), expected_outcome);
             assert!(execution.descriptor.is_none());
         }
         let state = engine.inner.state.lock().await;
         assert!(state.contexts.is_empty());
-        assert!(state.cache.is_empty());
+        assert!(state.ingress.is_none());
+        assert!(state.ingress_acquire_request_ids.is_empty());
     }
 
     #[tokio::test]
@@ -5307,6 +7052,7 @@ mod tests {
                 leases: leases.clone(),
                 setup_expires_at_unix: 120,
                 hard_expires_at_unix: 900,
+                traversal_hints: Vec::new(),
             };
             let closed_plan = ClosedPreparePlan {
                 context_role: context_role as i32,
@@ -5596,6 +7342,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activated_native_probe_replay_binding_rotates_out_at_commit() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = activate_client_context(&engine).await;
+
+        let acquired = engine
+            .execute_with_descriptor(request(
+                70,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind:
+                        volparossa_routing::TransportSocketKind::NativeProbeUdpConnected as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: Some(transport_address([10, 77, 0, 3], 443)),
+                }),
+            ))
+            .await;
+        assert_eq!(acquired.response.result, HelperResult::Ok as i32);
+        assert!(acquired.descriptor.is_some());
+        drop(acquired);
+        assert_eq!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .len(),
+            1
+        );
+
+        backend.proof_increment.store(1, Ordering::Relaxed);
+        let committed = engine.execute(commit_request_for(&prepared, 71)).await;
+        assert_eq!(committed.result, HelperResult::Ok as i32);
+        assert!(
+            engine
+                .inner
+                .state
+                .lock()
+                .await
+                .transport_acquire_request_ids
+                .is_empty(),
+            "Commit must retire replay authority from the prior Activated generation"
+        );
+
+        let destroyed = engine
+            .execute(request(
+                72,
+                helper_request::Operation::DestroyContext(volparossa_routing::DestroyContext {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                }),
+            ))
+            .await;
+        assert_eq!(destroyed.result, HelperResult::Ok as i32);
+        let cleanup = engine
+            .execute(request(
+                73,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert_eq!(cleanup.diagnostic_code, "CLEANUP_COMPLETE");
+    }
+
+    #[tokio::test]
     async fn fake_backend_handoffs_are_typed_and_same_request_id_is_at_most_once() {
         let backend = Arc::new(FakeBackend::default());
         let clock = Arc::new(FixedClock(AtomicU64::new(100)));
@@ -5699,6 +7518,90 @@ mod tests {
                 .is_empty(),
             "confirmed Destroy must purge every descriptorless Acquire replay binding"
         );
+    }
+
+    #[tokio::test]
+    async fn only_exact_committed_client_or_exit_lease_can_mutate_mptcp_endpoint() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+
+        let add = engine
+            .execute(request(
+                40,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    mode: MptcpEndpointMode::Subflow as i32,
+                    backup: false,
+                    listener_port: 0,
+                }),
+            ))
+            .await;
+        assert_eq!(add.result, HelperResult::Ok as i32);
+        assert!(matches!(
+            add.outcome,
+            Some(helper_response::Outcome::Empty(_))
+        ));
+
+        let wrong_path = engine
+            .execute(request(
+                41,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 2,
+                    mode: MptcpEndpointMode::Subflow as i32,
+                    backup: false,
+                    listener_port: 0,
+                }),
+            ))
+            .await;
+        assert_eq!(wrong_path.result, HelperResult::InvalidRequest as i32);
+
+        {
+            let mut state = engine.inner.state.lock().await;
+            let context = state.contexts.get_mut(&[7; 16]).expect("route context");
+            let lease = context
+                .leases
+                .remove(&(1, WireguardRole::Client as i32))
+                .expect("committed client lease");
+            assert!(
+                context
+                    .leases
+                    .insert((1, WireguardRole::Exit as i32), lease)
+                    .is_none()
+            );
+        }
+
+        let exit_add = engine
+            .execute(request(
+                42,
+                helper_request::Operation::AddMptcpEndpoint(AddMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    mode: MptcpEndpointMode::Signal as i32,
+                    backup: false,
+                    listener_port: 44_443,
+                }),
+            ))
+            .await;
+        assert_eq!(exit_add.result, HelperResult::Ok as i32);
+
+        let remove = engine
+            .execute(request(
+                43,
+                helper_request::Operation::RemoveMptcpEndpoint(RemoveMptcpEndpoint {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle,
+                    path_id: 1,
+                }),
+            ))
+            .await;
+        assert_eq!(remove.result, HelperResult::Ok as i32);
     }
 
     #[tokio::test]
@@ -5956,6 +7859,389 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wifi_mesh_survives_route_cleanup_and_rejects_other_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let install = mesh_install_request(80);
+        let installed = engine.execute(install.clone()).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(owner)) = installed.outcome else {
+            panic!("installed mesh");
+        };
+        let _ = commit_client_context(&engine, &backend).await;
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(engine.inner.state.lock().await.mesh.is_some());
+        assert!(
+            backend
+                .mesh_bindings
+                .lock()
+                .expect("bindings")
+                .iter()
+                .all(|binding| binding.action == MeshBackendAction::Install)
+        );
+        for (id, runtime, handle) in [
+            (82, vec![3; 16], owner.mesh_handle.clone()),
+            (83, owner.mesh_runtime_id.clone(), vec![3; 32]),
+        ] {
+            let denied = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyWifiMesh(
+                        volparossa_routing::DestroyWifiMesh {
+                            mesh_runtime_id: runtime,
+                            mesh_handle: handle,
+                        },
+                    ),
+                ))
+                .await;
+            assert_eq!(denied.result, HelperResult::UnauthorisedPeer as i32);
+        }
+        let inspected = engine
+            .execute(request(
+                84,
+                helper_request::Operation::InspectWifiMesh(volparossa_routing::InspectWifiMesh {
+                    mesh_runtime_id: owner.mesh_runtime_id.clone(),
+                    mesh_handle: owner.mesh_handle.clone(),
+                }),
+            ))
+            .await;
+        let Some(helper_response::Outcome::WifiMeshSnapshot(counters)) = inspected.outcome else {
+            panic!("real counter projection");
+        };
+        assert!(counters.joined);
+        assert_eq!(counters.wiphy, 0);
+        assert_eq!(counters.peers.len(), 1);
+        assert_eq!(counters.peers[0].address, [2, 1, 2, 3, 4, 5]);
+        assert_eq!(counters.peers[0].received_bytes, 10);
+        assert_eq!(counters.peers[0].transmitted_bytes, 20);
+        assert_eq!(counters.peers[0].received_packets, 1);
+        assert_eq!(counters.peers[0].transmitted_packets, 2);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let replacement = engine.execute(install).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(replacement)) = replacement.outcome
+        else {
+            panic!("fresh mesh install after cleanup");
+        };
+        assert_ne!(
+            replacement.mesh_handle, owner.mesh_handle,
+            "cleanup purges stale cached Install"
+        );
+        assert!(engine.shutdown_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_partial_install_retains_owner_until_all_owned_cleanup() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_mesh_install.store(true, Ordering::Release);
+        backend.fail_mesh_destroy.store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(mesh_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        let state = engine.inner.state.lock().await;
+        assert!(state.mesh.is_some());
+        assert!(!cleanup_state_complete(&state));
+        assert!(route_cleanup_state_complete(&state));
+        drop(state);
+        backend.fail_mesh_destroy.store(false, Ordering::Release);
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::AllOwnedResources as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let bindings = backend.mesh_bindings.lock().expect("bindings");
+        assert_eq!(bindings.len(), 3);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.helper_runtime_id == [0xa5; 32]
+                    && binding.mesh_runtime_id == [5; 16]
+                    && binding.mesh_handle == bindings[0].mesh_handle)
+        );
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_exact_destroy_preserves_independent_sharing_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let mesh = engine.execute(mesh_install_request(80)).await;
+        let sharing = engine.execute(sharing_install_request(81)).await;
+        let Some(helper_response::Outcome::InstalledWifiMesh(mesh)) = mesh.outcome else {
+            panic!("mesh owner");
+        };
+        let Some(helper_response::Outcome::InstalledUplinkSharing(sharing)) = sharing.outcome
+        else {
+            panic!("sharing owner");
+        };
+        assert_ne!(mesh.mesh_handle, sharing.sharing_handle);
+        let destroy = volparossa_routing::DestroyWifiMesh {
+            mesh_runtime_id: mesh.mesh_runtime_id,
+            mesh_handle: mesh.mesh_handle,
+        };
+        for (id, existed) in [(82, true), (83, false)] {
+            let destroyed = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyWifiMesh(destroy.clone()),
+                ))
+                .await;
+            assert_eq!(destroyed.result, HelperResult::Ok as i32);
+            assert!(matches!(destroyed.outcome,
+                Some(helper_response::Outcome::DestroyedWifiMesh(value)) if value.existed == existed));
+        }
+        let state = engine.inner.state.lock().await;
+        assert!(state.mesh.is_none());
+        assert!(state.sharing.is_some());
+        assert!(!cleanup_state_complete(&state));
+        drop(state);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+    }
+
+    fn mesh_install_request(id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::InstallWifiMesh(volparossa_routing::InstallWifiMesh {
+                mesh_runtime_id: vec![5; 16],
+                parent_interface: "wlan0".to_owned(),
+                mesh_id: b"volparossa-test".to_vec(),
+                frequency_mhz: 2412,
+                local_address: vec![10, 81, 0, 1],
+                prefix_len: 24,
+                maximum_peers: 4,
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn wifi_mesh_substituted_completion_retires_only_exact_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        backend
+            .substitute_mesh_binding
+            .store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(mesh_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let calls = backend.mesh_bindings.lock().expect("mesh bindings");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].action, MeshBackendAction::Install);
+        assert_eq!(calls[1].action, MeshBackendAction::Destroy);
+        assert_eq!(calls[0].mesh_handle, calls[1].mesh_handle);
+        assert_eq!(calls[0].mesh_runtime_id, calls[1].mesh_runtime_id);
+        assert_eq!(calls[0].helper_runtime_id, calls[1].helper_runtime_id);
+    }
+
+    #[tokio::test]
+    async fn uplink_sharing_survives_route_cleanup_and_rejects_other_owner() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        let install = sharing_install_request(80);
+        let installed = engine.execute(install.clone()).await;
+        let Some(helper_response::Outcome::InstalledUplinkSharing(owner)) = installed.outcome
+        else {
+            panic!("installed sharing");
+        };
+        let _ = commit_client_context(&engine, &backend).await;
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(engine.inner.state.lock().await.sharing.is_some());
+        assert!(
+            backend
+                .sharing_bindings
+                .lock()
+                .expect("bindings")
+                .iter()
+                .all(|binding| binding.action == SharingBackendAction::Install)
+        );
+        for (id, runtime, handle) in [
+            (82, vec![3; 16], owner.sharing_handle.clone()),
+            (83, owner.sharing_runtime_id.clone(), vec![3; 32]),
+        ] {
+            let denied = engine
+                .execute(request(
+                    id,
+                    helper_request::Operation::DestroyUplinkSharing(
+                        volparossa_routing::DestroyUplinkSharing {
+                            sharing_runtime_id: runtime,
+                            sharing_handle: handle,
+                        },
+                    ),
+                ))
+                .await;
+            assert_eq!(denied.result, HelperResult::UnauthorisedPeer as i32);
+        }
+        let inspected = engine
+            .execute(request(
+                84,
+                helper_request::Operation::InspectUplinkSharing(
+                    volparossa_routing::InspectUplinkSharing {
+                        sharing_runtime_id: owner.sharing_runtime_id.clone(),
+                        sharing_handle: owner.sharing_handle.clone(),
+                    },
+                ),
+            ))
+            .await;
+        let Some(helper_response::Outcome::SharingCounters(counters)) = inspected.outcome else {
+            panic!("real counter projection");
+        };
+        assert_eq!(counters.total.expect("total").bytes, 10);
+        assert_eq!(counters.owner.expect("owner").bytes, 10);
+        assert_eq!(counters.contribution.expect("contribution").bytes, 10);
+        assert!(engine.shutdown_cleanup().await);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let replacement = engine.execute(install).await;
+        let Some(helper_response::Outcome::InstalledUplinkSharing(replacement)) =
+            replacement.outcome
+        else {
+            panic!("fresh sharing install after cleanup");
+        };
+        assert_ne!(
+            replacement.sharing_handle, owner.sharing_handle,
+            "cleanup purges stale cached Install"
+        );
+        assert!(engine.shutdown_cleanup().await);
+    }
+
+    #[tokio::test]
+    async fn uplink_sharing_partial_install_retains_owner_until_all_owned_cleanup() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_sharing_install.store(true, Ordering::Release);
+        backend.fail_sharing_destroy.store(true, Ordering::Release);
+        let engine = fake_engine(
+            Arc::clone(&backend),
+            Arc::new(FixedClock(AtomicU64::new(100))),
+        );
+        assert_eq!(
+            engine.execute(sharing_install_request(80)).await.result,
+            HelperResult::CleanupIncomplete as i32
+        );
+        let state = engine.inner.state.lock().await;
+        assert!(state.sharing.is_some());
+        assert!(!cleanup_state_complete(&state));
+        assert!(route_cleanup_state_complete(&state));
+        drop(state);
+        backend.fail_sharing_destroy.store(false, Ordering::Release);
+        let cleanup = engine
+            .execute(request(
+                81,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::AllOwnedResources as i32,
+                }),
+            ))
+            .await;
+        assert_eq!(cleanup.result, HelperResult::Ok as i32);
+        assert!(cleanup_state_complete(&*engine.inner.state.lock().await));
+        let bindings = backend.sharing_bindings.lock().expect("bindings");
+        assert_eq!(bindings.len(), 3);
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| binding.helper_runtime_id == [0xa5; 32]
+                    && binding.sharing_runtime_id == [5; 16]
+                    && binding.sharing_handle == bindings[0].sharing_handle)
+        );
+    }
+
+    fn sharing_install_request(id: u8) -> HelperRequest {
+        request(
+            id,
+            helper_request::Operation::InstallUplinkSharing(
+                volparossa_routing::InstallUplinkSharing {
+                    sharing_runtime_id: vec![5; 16],
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: 20,
+                    contribution_upload_ceiling_mbps: 10,
+                },
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn route_cleanup_preserves_active_client_ingress() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let _ = commit_client_context(&engine, &backend).await;
+        {
+            let mut state = engine.inner.state.lock().await;
+            state.ingress = Some(ClientIngressRecord {
+                client_runtime_id: [6; 16],
+                generation: 1,
+                ingress_handle: [7; HELPER_HANDLE_BYTES],
+                setup_expires_at_unix: 120,
+                hard_expires_at_unix: 900,
+                setup_expires_at_boottime_ns: 120 * NANOSECONDS_PER_SECOND,
+                hard_expires_at_boottime_ns: 900 * NANOSECONDS_PER_SECOND,
+                phase: ClientIngressPhase::Active,
+                sockets: BTreeMap::new(),
+                reply_sockets_issued: 0,
+            });
+        }
+
+        let response = engine
+            .execute(request(
+                42,
+                helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
+                    cleanup_token: vec![9; 32],
+                    scope: CleanupScope::RouteContextsOnly as i32,
+                }),
+            ))
+            .await;
+
+        assert_eq!(response.result, HelperResult::Ok as i32);
+        assert_eq!(response.diagnostic_code, "CLEANUP_COMPLETE");
+        let state = engine.inner.state.lock().await;
+        assert!(route_cleanup_state_complete(&state));
+        assert!(!cleanup_state_complete(&state));
+        let ingress = state.ingress.as_ref().expect("preserved Client ingress");
+        assert_eq!(ingress.client_runtime_id, [6; 16]);
+        assert_eq!(ingress.phase, ClientIngressPhase::Active);
+    }
+
+    #[tokio::test]
     async fn cleanup_supervisor_panic_keeps_exact_sanitized_fallback() {
         let engine = HelperEngine::with_components(
             [9; 32],
@@ -5968,6 +8254,7 @@ mod tests {
             41,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         let expected_digest = operation_digest(&cleanup).expect("digest").to_vec();
@@ -6007,6 +8294,54 @@ mod tests {
         assert!(execution.response.outcome.is_none());
         assert!(execution.descriptor.is_none());
         assert!(engine.inner.state.lock().await.contexts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn definite_acquire_kernel_failure_preserves_committed_context_for_next_flow() {
+        let backend = Arc::new(FakeBackend::default());
+        let clock = Arc::new(FixedClock(AtomicU64::new(100)));
+        let engine = fake_engine(Arc::clone(&backend), clock);
+        let prepared = commit_client_context(&engine, &backend).await;
+        let acquire = |request_byte| {
+            request(
+                request_byte,
+                helper_request::Operation::AcquireTransportSocket(AcquireTransportSocket {
+                    route_context_id: vec![7; 16],
+                    context_handle: prepared.context_handle.clone(),
+                    path_id: 1,
+                    role: WireguardRole::Client as i32,
+                    descriptor_kind: volparossa_routing::TransportSocketKind::MptcpListener as i32,
+                    expected_local: Some(transport_address([10, 77, 0, 2], 42_000)),
+                    expected_remote: None,
+                }),
+            )
+        };
+
+        backend
+            .fail_next_acquire_kernel
+            .store(true, Ordering::Release);
+        let first = engine.execute_with_descriptor(acquire(31)).await;
+        assert_eq!(first.response.result, HelperResult::Kernel as i32);
+        assert!(first.descriptor.is_none());
+        {
+            let state = engine.inner.state.lock().await;
+            assert_eq!(
+                state.contexts.get(&[7; 16]).map(|context| context.phase),
+                Some(ContextPhase::Committed)
+            );
+            assert!(state.in_flight.is_none());
+            assert!(state.cleanup_pending.is_empty());
+        }
+
+        let second = engine.execute_with_descriptor(acquire(32)).await;
+        assert_eq!(second.response.result, HelperResult::Ok as i32);
+        assert!(second.descriptor.is_some());
+        assert_eq!(backend.transport_calls.load(Ordering::Acquire), 1);
+        let state = engine.inner.state.lock().await;
+        assert_eq!(
+            state.contexts.get(&[7; 16]).map(|context| context.phase),
+            Some(ContextPhase::Committed)
+        );
     }
 
     #[tokio::test]
@@ -6103,6 +8438,7 @@ mod tests {
             106,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(engine.execute(prune).await.result, HelperResult::Ok as i32);
@@ -6351,6 +8687,7 @@ mod tests {
             7,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(
@@ -6642,6 +8979,46 @@ mod tests {
     }
 
     #[test]
+    fn on_link_prepare_evidence_requires_the_exact_requested_local_source() {
+        let prepare = prepare_request(43);
+        let Some(helper_request::Operation::PrepareLeaseBatch(mut request)) = prepare.operation
+        else {
+            panic!("Prepare request");
+        };
+        let lease = PreparedKernelLease {
+            path_id: 1,
+            role: WireguardRole::Client as i32,
+            public_key: [1; 32],
+            public_endpoint: PublicUdpEndpoint {
+                address: vec![10, 42, 0, 2],
+                port: 51820,
+            },
+            evidence: UnderlayEvidence::DirectOnLink,
+        };
+        assert!(!prepared_matches(&request, std::slice::from_ref(&lease)));
+        request
+            .traversal_hints
+            .push(volparossa_routing::TraversalEndpointHint {
+                path_id: lease.path_id,
+                role: lease.role,
+                observer_id: vec![7; 32],
+                observer_peer_id: vec![8; 38],
+                observed_address: Vec::new(),
+                on_link: Some(volparossa_routing::OnLinkUnderlayHint {
+                    local_address: lease.public_endpoint.address.clone(),
+                    peer_address: vec![10, 42, 0, 1],
+                }),
+            });
+        assert!(prepared_matches(&request, std::slice::from_ref(&lease)));
+        let mut wrong = lease.clone();
+        wrong.public_endpoint.address[3] = 3;
+        assert!(!prepared_matches(&request, &[wrong]));
+        let mut fallback = lease;
+        fallback.evidence = UnderlayEvidence::DirectAssigned;
+        assert!(!prepared_matches(&request, &[fallback]));
+    }
+
+    #[test]
     fn prepare_proof_order_keys_and_public_endpoints_are_affinely_unique() {
         let prepare = prepare_request(43);
         let Some(helper_request::Operation::PrepareLeaseBatch(mut request)) = prepare.operation
@@ -6663,6 +9040,11 @@ mod tests {
         };
         let valid = [lease(1, 1, 51_821), lease(2, 2, 51_822)];
         assert!(prepared_matches(&request, &valid));
+        let mut punched = valid.clone();
+        punched
+            .iter_mut()
+            .for_each(|lease| lease.evidence = UnderlayEvidence::ObservedUdpPunch);
+        assert!(prepared_matches(&request, &punched));
 
         let reordered = [valid[1].clone(), valid[0].clone()];
         assert!(!prepared_matches(&request, &reordered));
@@ -7707,6 +10089,7 @@ mod tests {
             66,
             helper_request::Operation::CleanupOwned(volparossa_routing::CleanupOwned {
                 cleanup_token: vec![9; 32],
+                scope: CleanupScope::AllOwnedResources as i32,
             }),
         );
         assert_eq!(

@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use prost::Message;
 use sha2::{Digest, Sha256};
-use volparossa_core::{OperatorId, is_public_routable_ip};
+use volparossa_core::{OperatorId, is_local_lan_ip, is_public_routable_ip};
 
 use crate::envelope::fixed_array;
 use crate::{
@@ -74,6 +74,8 @@ pub enum ControlMessageType {
     NativeProbeExitResult = 24,
     /// Relay-signed endpoint-free result containing the exact nested Exit result.
     NativeProbeRelayResult = 25,
+    /// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+    NativeRouteCredentialDelivery = 26,
 }
 
 /// Data transport authorized by a reservation.
@@ -123,6 +125,24 @@ pub struct AdvertisementCapabilities {
 
 /// Signed route-specific `WireGuard` underlay endpoint.
 #[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum UnderlayScope {
+    PublicInternet = 0,
+    DirectLocalLan = 1,
+}
+
+/// Declared available uplink; never a runtime proof of Internet access.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum AdvertisementUplink {
+    IndependentInternet = 0,
+    LocalOnly = 1,
+}
+
+/// Signed route-specific `WireGuard` underlay endpoint.
+#[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct WireguardEndpoint {
     #[prost(bytes = "vec", tag = "1")]
@@ -131,20 +151,29 @@ pub struct WireguardEndpoint {
     pub underlay_ip: Vec<u8>,
     #[prost(uint32, tag = "3")]
     pub listen_port: u32,
+    /// Local scope requires separate helper-owned on-link proof for the exact peer and lease.
+    #[prost(enumeration = "UnderlayScope", tag = "4")]
+    pub underlay_scope: i32,
 }
 
 impl WireguardEndpoint {
-    /// Validate the fixed key, publicly routable address and explicit non-zero port.
+    /// Validate the key, explicitly scoped address classification and non-zero port.
     ///
     /// # Errors
     ///
     /// Returns an invalid-field error for a zero/incorrect key, non-canonical
-    /// IP bytes, an IANA special-purpose/non-public address, or invalid port.
+    /// IP bytes, an unknown/mismatched scope, prohibited address, or invalid port. A successful
+    /// local classification does not authorize a network operation or prove on-link adjacency.
     pub fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
         require_nonzero_length::<KEY_LENGTH>(&self.public_key, field)?;
         let address =
             parse_ip_bytes(&self.underlay_ip).ok_or(ProtocolError::InvalidField(field))?;
-        if !is_public_routable_ip(address) {
+        let allowed = match UnderlayScope::try_from(self.underlay_scope) {
+            Ok(UnderlayScope::PublicInternet) => is_public_routable_ip(address),
+            Ok(UnderlayScope::DirectLocalLan) => is_local_lan_ip(address),
+            Err(_) => false,
+        };
+        if !allowed {
             return Err(ProtocolError::InvalidField(field));
         }
         validate_port(self.listen_port, field)
@@ -199,6 +228,8 @@ pub struct AdvertisementNetwork {
     pub ipv6_prefix_hint: String,
     #[prost(string, tag = "6")]
     pub operator_id: String,
+    #[prost(enumeration = "AdvertisementUplink", tag = "7")]
+    pub uplink: i32,
 }
 
 /// Locally observed quality claims represented in integer parts per million.
@@ -320,6 +351,58 @@ pub struct NativeRouteIdentity {
     pub client_native_instance_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub credential_hpke_public_key: Vec<u8>,
+}
+
+/// Public authenticated associated data for one route bearer HPKE ciphertext.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialScope {
+    #[prost(bytes = "vec", tag = "1")]
+    pub reservation_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub route_context_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub finalize_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub client_session_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub client_session_public_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub auth_commitment: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub certificate_sha256: Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    pub spki_sha256: Vec<u8>,
+    #[prost(uint64, tag = "10")]
+    pub masque_context_id: u64,
+    #[prost(bytes = "vec", tag = "11")]
+    pub client_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "13")]
+    pub credential_hpke_public_key: Vec<u8>,
+    #[prost(uint64, tag = "14")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "15")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "16")]
+    pub nonce: Vec<u8>,
+}
+
+/// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialDelivery {
+    #[prost(message, optional, tag = "1")]
+    pub scope: Option<NativeRouteCredentialScope>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub encapsulated_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub ciphertext: Vec<u8>,
 }
 
 /// Exit-signed authorization for one relay path.
@@ -549,6 +632,8 @@ pub struct OpenTcp {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "9")]
     pub nonce: Vec<u8>,
+    #[prost(bytes = "vec", tag = "10")]
+    pub destination_ip: Vec<u8>,
 }
 
 /// Client-signed authorization pinning one UDP flow to one destination tuple.
@@ -616,6 +701,7 @@ impl ControlPayload for NodeAdvertisement {
             self.network
                 .as_ref()
                 .ok_or(ProtocolError::InvalidField("advertisement.network"))?,
+            roles,
         )?;
         validate_quality(
             self.quality
@@ -746,7 +832,96 @@ impl NativeRouteIdentity {
             &self.exit_native_instance_id,
             "native_route_identity.exit_native_instance_id",
         )?;
+        require_nonzero_length::<KEY_LENGTH>(
+            &self.credential_hpke_public_key,
+            "native_route_identity.credential_hpke_public_key",
+        )?;
         Ok(())
+    }
+}
+
+impl NativeRouteCredentialScope {
+    pub(crate) fn validate_fields(&self) -> Result<(), ProtocolError> {
+        validate_reservation_ids(
+            &self.reservation_id,
+            &self.route_context_id,
+            &self.client_session_id,
+        )?;
+        require_nonzero_length::<ID_LENGTH>(&self.finalize_id, "native credential finalize_id")?;
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.exit_node_id,
+            "native credential exit_node_id",
+        )?;
+        validate_session_binding(&self.client_session_id, &self.client_session_public_key)?;
+        for (value, field) in [
+            (&self.auth_commitment, "native credential auth_commitment"),
+            (
+                &self.certificate_sha256,
+                "native credential certificate_sha256",
+            ),
+            (&self.spki_sha256, "native credential spki_sha256"),
+            (
+                &self.client_native_instance_id,
+                "native credential client instance",
+            ),
+            (
+                &self.exit_native_instance_id,
+                "native credential exit instance",
+            ),
+            (
+                &self.credential_hpke_public_key,
+                "native credential HPKE public key",
+            ),
+        ] {
+            require_nonzero_length::<HASH_LENGTH>(value, field)?;
+        }
+        if self.masque_context_id == 0 || self.masque_context_id > crate::MAX_MASQUE_CONTEXT_ID {
+            return Err(ProtocolError::InvalidField(
+                "native credential MASQUE context",
+            ));
+        }
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "native credential nonce")?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_RESERVATION_LIFETIME_MS,
+            "native credential lifetime",
+        )
+    }
+}
+
+impl ControlPayload for NativeRouteCredentialDelivery {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::NativeRouteCredentialDelivery;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        scope.validate_fields()?;
+        require_nonzero_length::<{ crate::NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH }>(
+            &self.encapsulated_key,
+            "native credential encapsulated key",
+        )?;
+        if self.ciphertext.len() != crate::NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH {
+            return Err(ProtocolError::InvalidField("native credential ciphertext"));
+        }
+        Ok(())
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        validate_signed_fields(
+            &scope.client_session_id,
+            scope.created_at_ms,
+            scope.expires_at_ms,
+            &scope.nonce,
+            envelope,
+            "native credential envelope binding",
+        )
     }
 }
 
@@ -997,7 +1172,16 @@ impl ControlPayload for OpenTcp {
             &self.client_ephemeral_id,
             "open_tcp.client_ephemeral_id",
         )?;
-        validate_canonical_hostname(&self.hostname)?;
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("open_tcp destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip)
+                .ok_or(ProtocolError::InvalidField("open_tcp.destination_ip"))?;
+        }
         validate_port(self.port, "open_tcp.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "open_tcp.policy_hash")?;
         require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "open_tcp.nonce")?;
@@ -1034,16 +1218,16 @@ impl ControlPayload for UdpFlowAuthorization {
             &self.client_ephemeral_id,
             "udp_authorization.client_ephemeral_id",
         )?;
-        match (self.hostname.is_empty(), self.destination_ip.is_empty()) {
-            (false, true) => validate_canonical_hostname(&self.hostname)?,
-            (true, false) => {
-                parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
-                    "udp_authorization.destination_ip",
-                ))?;
-            }
-            _ => {
-                return Err(ProtocolError::InvalidField("udp_authorization destination"));
-            }
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("udp_authorization destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
+                "udp_authorization.destination_ip",
+            ))?;
         }
         validate_port(self.port, "udp_authorization.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "udp_authorization.policy_hash")?;
@@ -1515,7 +1699,22 @@ fn validate_capacity(
     Ok(())
 }
 
-fn validate_network(network: &AdvertisementNetwork) -> Result<(), ProtocolError> {
+fn validate_network(
+    network: &AdvertisementNetwork,
+    roles: &AdvertisementRoles,
+) -> Result<(), ProtocolError> {
+    let uplink = AdvertisementUplink::try_from(network.uplink)
+        .map_err(|_| ProtocolError::InvalidField("advertisement.network.uplink"))?;
+    if uplink == AdvertisementUplink::LocalOnly
+        && (roles.exit
+            || network.asn != 0
+            || !network.ipv4_prefix_hint.is_empty()
+            || !network.ipv6_prefix_hint.is_empty())
+    {
+        return Err(ProtocolError::InvalidField(
+            "advertisement.network.local_only",
+        ));
+    }
     validate_ascii_text(&network.region, 32, "advertisement.network.region")?;
     OperatorId::new(network.operator_id.clone())
         .map_err(|_| ProtocolError::InvalidField("advertisement.network.operator_id"))?;
@@ -1645,7 +1844,7 @@ fn validate_ascii_text(
     Ok(())
 }
 
-fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
     if rate == 0 || rate > MAX_RATE_MBPS {
         return Err(ProtocolError::InvalidField(field));
     }

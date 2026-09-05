@@ -4,6 +4,11 @@
 
 #include <string.h>
 
+_Static_assert(
+    sizeof(((vmp_mqvpn_exit_backend_state_t *)0)->queue) <=
+        VMP_MQVPN_EXIT_MAX_BYTES,
+    "Exit FIFO storage exceeds its hard byte bound");
+
 static const uint8_t VMP_EXIT_POOL_IPV4[4] = {10U, 76U, 0U, 0U};
 static const uint8_t VMP_EXIT_SERVER_IPV4[4] = {10U, 76U, 0U, 1U};
 static const uint8_t VMP_EXIT_SERVER_IPV6[16] = {

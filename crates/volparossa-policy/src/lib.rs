@@ -565,6 +565,29 @@ impl VerifiedManifest {
         self.authorize_normalized(&request)
     }
 
+    /// Authorize resolution of a name covered by any exact or wildcard domain rule.
+    ///
+    /// This grants only a short-lived DNS address binding. The eventual flow must still pass the
+    /// rule's exact protocol and port permission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an input-validation or time error, or [`PolicyError::Denied`] when no domain rule
+    /// covers the name.
+    pub fn authorize_dns_name(&self, now_ms: u64, domain: &str) -> Result<String, PolicyError> {
+        self.ensure_active_at(now_ms)?;
+        let normalized = normalize_domain(domain)?;
+        if self
+            .rules
+            .iter()
+            .any(|rule| rule.matches_dns_name(&normalized))
+        {
+            Ok(normalized)
+        } else {
+            Err(PolicyError::Denied)
+        }
+    }
+
     /// Authorize one exact raw IP and protocol/port tuple.
     ///
     /// Domain and wildcard rules can never authorize this request.

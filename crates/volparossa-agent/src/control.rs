@@ -18,13 +18,15 @@ use tokio::{
 };
 use volparossa_config::{Config, RolesConfig};
 use volparossa_local_control::{
-    CONTROL_PROTOCOL_VERSION, ControlRequest, ControlResponse, ControlResult, Empty, LogLevel,
-    NodeRole, control_request, control_response, read_request, write_response,
+    CONTROL_PROTOCOL_VERSION, ConnectRequest, ControlRequest, ControlResponse, ControlResult,
+    Empty, LogLevel, NodeRole, SessionTransport, control_request, control_response, read_request,
+    write_response,
 };
 
 use crate::{
     discovery::{DiscoveryControlError, DiscoveryControlHandle, RoleApplyError},
     helper::HelperClient,
+    route_setup::{ClientRouteConnectError, ClientRouteControl, ClientRouteProgress},
     state::AgentState,
     unix_millis,
 };
@@ -43,6 +45,8 @@ pub struct ControlContext {
     pub discovery: DiscoveryControlHandle,
     /// Narrow helper client.
     pub helper: HelperClient,
+    /// Affine owner of the current client route bootstrap, if any.
+    pub routes: ClientRouteControl,
 }
 
 /// Listener plus an inode-bound cleanup guard.
@@ -132,7 +136,7 @@ pub async fn serve_control(
                 let request_context = context.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
-                    process_connection(stream, request_context).await
+                    Box::pin(process_connection(stream, request_context)).await
                 });
             }
             Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
@@ -155,7 +159,7 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
-    let response = handle_request(request, &context).await;
+    let response = Box::pin(handle_request(request, &context)).await;
     timeout(CONTROL_TIMEOUT, write_response(&mut stream, &response))
         .await
         .map_err(|_| ControlServerError::Timeout)?
@@ -182,8 +186,12 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                 control_response::Payload::Status(status),
             )
         }
-        control_request::Operation::Connect(_) => connect_response(request_id, context).await,
-        control_request::Operation::Disconnect(_) => disconnect_response(request_id, context).await,
+        control_request::Operation::Connect(connect) => {
+            Box::pin(connect_response(request_id, connect, context)).await
+        }
+        control_request::Operation::Disconnect(_) => {
+            Box::pin(disconnect_response(request_id, context)).await
+        }
         control_request::Operation::Peers(_) => {
             let peers = context.state.read().await.peer_list();
             response(
@@ -248,33 +256,222 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
     }
 }
 
-async fn connect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
-    let mut state = context.state.write().await;
-    if !state.policy_active(unix_millis()) {
-        state.record_policy_rejection();
-        state.log(LogLevel::Warn, "CONNECT_POLICY_UNAVAILABLE", unix_millis());
+#[allow(
+    clippy::too_many_lines,
+    reason = "the control boundary maps every fail-closed route phase to one stable diagnostic"
+)]
+async fn connect_response(
+    request_id: Vec<u8>,
+    request: ConnectRequest,
+    context: &ControlContext,
+) -> ControlResponse {
+    {
+        let mut state = context.state.write().await;
+        if !state.roles().client {
+            return response(
+                request_id,
+                ControlResult::InvalidState,
+                "CLIENT_ROLE_DISABLED",
+                control_response::Payload::Ack(Empty {}),
+            );
+        }
+        if !state.policy_active(unix_millis()) {
+            state.record_policy_rejection();
+            state.log(LogLevel::Warn, "CONNECT_POLICY_UNAVAILABLE", unix_millis());
+            return response(
+                request_id,
+                ControlResult::Policy,
+                "POLICY_UNAVAILABLE",
+                control_response::Payload::Ack(Empty {}),
+            );
+        }
+    }
+    let Some(profile) = requested_connect_profile(&context.config, request.transport) else {
+        context
+            .state
+            .write()
+            .await
+            .log(LogLevel::Warn, "CONNECT_PROFILE_INVALID", unix_millis());
         return response(
             request_id,
-            ControlResult::Policy,
-            "POLICY_UNAVAILABLE",
+            ControlResult::InvalidRequest,
+            "CLIENT_ROUTE_PROFILE_INVALID",
             control_response::Payload::Ack(Empty {}),
         );
-    }
-    state.log(
-        LogLevel::Warn,
-        "CONNECT_DATAPLANE_UNAVAILABLE",
-        unix_millis(),
-    );
+    };
+    let (result, diagnostic, log_code, log_level) = match Box::pin(context.routes.connect(
+        &profile,
+        &context.discovery,
+        &context.helper,
+    ))
+    .await
+    {
+        Ok(ClientRouteProgress::TransportActive) => (
+            ControlResult::Ok,
+            "OK",
+            "CONNECT_ROUTE_ESTABLISHED",
+            LogLevel::Info,
+        ),
+        Ok(ClientRouteProgress::UdpRouteReady) => (
+            ControlResult::Ok,
+            "UDP_ROUTE_READY",
+            "CONNECT_UDP_ROUTE_READY",
+            LogLevel::Info,
+        ),
+        Err(ClientRouteConnectError::Busy) => (
+            ControlResult::InvalidState,
+            "CONNECT_ALREADY_IN_PROGRESS",
+            "CONNECT_ALREADY_IN_PROGRESS",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::InvalidProfile) => (
+            ControlResult::InvalidRequest,
+            "CLIENT_ROUTE_PROFILE_INVALID",
+            "CONNECT_PROFILE_INVALID",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::PreselectionUnavailable) => (
+            ControlResult::Unavailable,
+            "PRESELECTION_UNAVAILABLE",
+            "CONNECT_PRESELECTION_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativePermitUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PERMIT_UNAVAILABLE",
+            "CONNECT_NATIVE_PERMIT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeRelayUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_RELAY_READY_UNAVAILABLE",
+            "CONNECT_NATIVE_RELAY_READY_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeHelperPrepareUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_PREPARE_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_PREPARE_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeAuthorizationUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_AUTHORIZE_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeHelperActivateUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_ACTIVATE_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeStartUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_START_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_START_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeHelperCommitUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_HELPER_COMMIT_UNAVAILABLE",
+            "CONNECT_NATIVE_HELPER_COMMIT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeProofUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_PROBE_PROOF_UNAVAILABLE",
+            "CONNECT_NATIVE_PROBE_PROOF_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeSamplerRetirementUnavailable) => (
+            ControlResult::Helper,
+            "NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE",
+            "CONNECT_NATIVE_SAMPLER_RETIREMENT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_REMOTE_RETIREMENT_UNAVAILABLE",
+            "CONNECT_NATIVE_REMOTE_RETIREMENT_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::NativeTransportIdentityUnavailable) => (
+            ControlResult::Unavailable,
+            "NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE",
+            "CONNECT_NATIVE_TRANSPORT_IDENTITY_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::RouteAdmissionUnavailable) => (
+            ControlResult::Unavailable,
+            "ROUTE_ADMISSION_UNAVAILABLE",
+            "CONNECT_ROUTE_ADMISSION_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable) => (
+            ControlResult::Unavailable,
+            "MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE",
+            "CONNECT_MPTCP_EXIT_LISTENER_SIGNAL_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::TransportRuntimeUnavailable) => (
+            ControlResult::Unavailable,
+            "TRANSPORT_RUNTIME_UNAVAILABLE",
+            "CONNECT_TRANSPORT_RUNTIME_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable) => (
+            ControlResult::Unavailable,
+            "UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE",
+            "CONNECT_UDP_EXIT_SESSION_SIGNAL_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+        Err(ClientRouteConnectError::UdpIngressUnavailable) => (
+            ControlResult::Unavailable,
+            "UDP_INGRESS_UNAVAILABLE",
+            "CONNECT_UDP_INGRESS_UNAVAILABLE",
+            LogLevel::Warn,
+        ),
+    };
+    context
+        .state
+        .write()
+        .await
+        .log(log_level, log_code, unix_millis());
     response(
         request_id,
-        ControlResult::Unavailable,
-        "DATAPLANE_UNAVAILABLE",
+        result,
+        diagnostic,
         control_response::Payload::Ack(Empty {}),
     )
 }
 
+fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<Config> {
+    if !config.roles.client || config.validate().is_err() {
+        return None;
+    }
+    let Some(transport) = transport else {
+        return Some(config.clone());
+    };
+    let transport = SessionTransport::try_from(transport).ok()?;
+    let enabled = match transport {
+        SessionTransport::Mptcp => config.tcp.enabled,
+        SessionTransport::SinglePathUdp => config.udp.enabled,
+        SessionTransport::MultipathQuic => config.quic.enabled,
+    };
+    if !enabled {
+        return None;
+    }
+    let mut profile = config.clone();
+    profile.tcp.enabled = transport == SessionTransport::Mptcp;
+    profile.udp.enabled = transport == SessionTransport::SinglePathUdp;
+    profile.quic.enabled = transport == SessionTransport::MultipathQuic;
+    Some(profile)
+}
+
 async fn disconnect_response(request_id: Vec<u8>, context: &ControlContext) -> ControlResponse {
-    if context.helper.cleanup_owned().await.is_ok() {
+    Box::pin(context.routes.disconnect()).await;
+    if context.helper.cleanup_route_contexts().await.is_ok() {
         let mut state = context.state.write().await;
         if state.clear_after_helper_cleanup(&context.config).is_err() {
             state.log(LogLevel::Error, "STATE_RESET_FAILED", unix_millis());
@@ -416,7 +613,7 @@ async fn set_role_response(
 const fn changed_roles(current: RolesConfig, role: NodeRole, enabled: bool) -> RolesConfig {
     match role {
         NodeRole::Client => RolesConfig {
-            client: true,
+            client: enabled,
             ..current
         },
         NodeRole::Relay => RolesConfig {
@@ -509,12 +706,85 @@ mod tests {
     }
 
     #[test]
-    fn configured_client_cannot_be_disabled() {
+    fn client_role_change_preserves_service_consent_and_honors_disable() {
         let roles = RolesConfig {
             client: true,
-            relay: false,
-            exit: false,
+            relay: true,
+            exit: true,
         };
-        assert!(changed_roles(roles, NodeRole::Client, false).client);
+        assert_eq!(
+            changed_roles(roles, NodeRole::Client, false),
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: true,
+            }
+        );
+
+        let dormant = RolesConfig::default();
+        assert_eq!(changed_roles(dormant, NodeRole::Client, false), dormant);
+        assert_eq!(
+            changed_roles(dormant, NodeRole::Client, true),
+            RolesConfig {
+                client: true,
+                relay: false,
+                exit: false,
+            }
+        );
+        let candidate = Config {
+            roles: changed_roles(dormant, NodeRole::Client, true),
+            ..Config::default()
+        };
+        assert!(candidate.validate().is_err());
+        assert!(requested_connect_profile(&candidate, None).is_none());
+    }
+
+    #[test]
+    fn dormant_node_cannot_request_a_client_transport_profile() {
+        let config = Config::default();
+        for transport in [
+            None,
+            Some(SessionTransport::Mptcp as i32),
+            Some(SessionTransport::SinglePathUdp as i32),
+            Some(SessionTransport::MultipathQuic as i32),
+        ] {
+            assert!(requested_connect_profile(&config, transport).is_none());
+        }
+    }
+
+    #[test]
+    fn explicit_connect_transport_selects_only_that_enabled_product_path() {
+        let config = Config {
+            runtime_mode: volparossa_config::RuntimeMode::Development,
+            roles: RolesConfig {
+                client: true,
+                relay: false,
+                exit: false,
+            },
+            ..Config::default()
+        };
+        for (transport, expected) in [
+            (SessionTransport::Mptcp, (true, false, false)),
+            (SessionTransport::SinglePathUdp, (false, true, false)),
+            (SessionTransport::MultipathQuic, (false, false, true)),
+        ] {
+            let profile = requested_connect_profile(&config, Some(transport as i32))
+                .expect("enabled transport profile");
+            assert_eq!(
+                (
+                    profile.tcp.enabled,
+                    profile.udp.enabled,
+                    profile.quic.enabled
+                ),
+                expected
+            );
+        }
+
+        let mut disabled = config;
+        disabled.quic.enabled = false;
+        assert!(
+            requested_connect_profile(&disabled, Some(SessionTransport::MultipathQuic as i32))
+                .is_none()
+        );
     }
 }

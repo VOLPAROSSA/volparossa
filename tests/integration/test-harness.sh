@@ -74,6 +74,12 @@ for script_path in \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
+    tests/integration/generate-alpha-acceptance-report.sh \
+    tests/integration/kvm-alpha-topology.sh \
+    tests/integration/run-alpha-topology-vm.sh \
+    tests/integration/test-alpha-acceptance-report.sh \
+    tests/integration/test-kvm-alpha-topology-contract.sh \
+    tests/integration/vertical-topology.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-topology.sh \
     tests/netns/run-benchmarks.sh \
@@ -85,6 +91,8 @@ for script_path in \
     packaging/debian/postinst \
     packaging/debian/prerm \
     packaging/debian/postrm \
+    tests/packaging/debian13-package-lifecycle.sh \
+    tests/packaging/test-package-lifecycle-contract.sh \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
@@ -105,6 +113,10 @@ jq -e . "$REPOSITORY_DIRECTORY/tests/helper/helper-restart-vm-environment-v1.sch
 "$REPOSITORY_DIRECTORY/tests/helper/test-live-worker-identity-contract.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-production-ipc-busctl-parser.sh"
 "$REPOSITORY_DIRECTORY/tests/helper/test-qemu-pidfd-supervisor.sh"
+"$REPOSITORY_DIRECTORY/tests/packaging/test-package-lifecycle-contract.sh"
+sh "$REPOSITORY_DIRECTORY/tests/packaging/test-native-launcher.sh"
+"$REPOSITORY_DIRECTORY/tests/integration/test-alpha-acceptance-report.sh"
+"$REPOSITORY_DIRECTORY/tests/integration/test-kvm-alpha-topology-contract.sh"
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/bin"
 MUTATION_MARKER=$TEMPORARY_DIRECTORY/mutation-attempt
@@ -147,8 +159,20 @@ mpquic_report=$LAST_OUTPUT
 assert_selected_ids "$mpquic_report" 'A06,A07,A14,A15'
 
 expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all
-expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-topology.sh" --execute --only all --yes
-jq -e '.overall == "BLOCKED" and .execution.requested_mode == "EXECUTE"' "$LAST_OUTPUT" >/dev/null
+
+# Execution is deliberately not faked through a command override: the real fixed worker verifies
+# anonymous user/mount/PID/network isolation before it accepts any mutation authority.
+grep -F 'unshare --user --map-root-user --mount --net --pid --fork --mount-proc' \
+    "$REPOSITORY_DIRECTORY/tests/integration/run.sh" >/dev/null
+# The pattern intentionally verifies literal shell variables in the isolated worker.
+# shellcheck disable=SC2016
+grep -F '[ "$(readlink /proc/self/ns/net)" != "$HOST_NET" ] || exit 70' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
+grep -F 'direct_client_exit_adjacency:false' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
+# shellcheck disable=SC2016
+grep -F 'remaining_owned_objects:$remaining' \
+    "$REPOSITORY_DIRECTORY/tests/integration/vertical-topology.sh" >/dev/null
 
 expect_status 77 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview
 jq -e '
@@ -171,7 +195,13 @@ expect_status 64 "$REPOSITORY_DIRECTORY/tests/netns/run-benchmarks.sh" --preview
 
 expect_status 0 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --preview
 grep -F 'PREVIEW ONLY: no build or package output was written.' "$LAST_OUTPUT" >/dev/null
-expect_status 77 "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" --build
+blocked_package_root=$TEMPORARY_DIRECTORY/blocked-package
+/bin/mkdir "$blocked_package_root" "$blocked_package_root/packaging"
+/bin/cp "$REPOSITORY_DIRECTORY/Cargo.toml" "$blocked_package_root/Cargo.toml"
+/bin/cp "$REPOSITORY_DIRECTORY/packaging/build-deb.sh" \
+    "$blocked_package_root/packaging/build-deb.sh"
+expect_status 77 "$blocked_package_root/packaging/build-deb.sh" --build
+grep -F 'BLOCKED: reviewed native launcher is absent:' "$LAST_ERROR" >/dev/null
 
 /bin/mkdir "$TEMPORARY_DIRECTORY/evidence"
 printf '%s\n' 'synthetic acceptance evidence' >"$TEMPORARY_DIRECTORY/evidence/proof.txt"

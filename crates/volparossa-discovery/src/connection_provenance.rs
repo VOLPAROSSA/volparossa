@@ -17,9 +17,11 @@ use libp2p::{
     },
 };
 use volparossa_core::{IpFamily, ObservedNetworkPrefix};
-use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix};
+use volparossa_protocol::{ObservationAddressFamily, ObservationNetworkPrefix, UnderlayScope};
 
-use crate::{MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER};
+use crate::{
+    MAX_ESTABLISHED_CONNECTIONS, MAX_ESTABLISHED_CONNECTIONS_PER_PEER, PreselectionProvenanceReject,
+};
 
 /// Impossible output of the passive connection-provenance behaviour.
 pub enum ConnectionProvenanceEvent {}
@@ -27,6 +29,8 @@ pub enum ConnectionProvenanceEvent {}
 enum NativePrefixBytes {
     Ipv4([u8; 3]),
     Ipv6([u8; 6]),
+    LocalIpv4([u8; 3]),
+    LocalIpv6([u8; 6]),
 }
 
 struct NativeNetworkPrefix {
@@ -49,6 +53,20 @@ impl NativeNetworkPrefix {
         }
     }
 
+    fn local_ipv4(bytes: [u8; 3]) -> Self {
+        Self {
+            normalized: ObservedNetworkPrefix::local_ipv4_24(bytes),
+            bytes: NativePrefixBytes::LocalIpv4(bytes),
+        }
+    }
+
+    fn local_ipv6(bytes: [u8; 6]) -> Self {
+        Self {
+            normalized: ObservedNetworkPrefix::local_ipv6_48(bytes),
+            bytes: NativePrefixBytes::LocalIpv6(bytes),
+        }
+    }
+
     fn is_consistent(&self) -> bool {
         match &self.bytes {
             NativePrefixBytes::Ipv4(bytes) => {
@@ -56,6 +74,12 @@ impl NativeNetworkPrefix {
             }
             NativePrefixBytes::Ipv6(bytes) => {
                 self.normalized == ObservedNetworkPrefix::ipv6_48(*bytes)
+            }
+            NativePrefixBytes::LocalIpv4(bytes) => {
+                self.normalized == ObservedNetworkPrefix::local_ipv4_24(*bytes)
+            }
+            NativePrefixBytes::LocalIpv6(bytes) => {
+                self.normalized == ObservedNetworkPrefix::local_ipv6_48(*bytes)
             }
         }
     }
@@ -65,8 +89,13 @@ impl NativeNetworkPrefix {
             && match (&self.bytes, &other.bytes) {
                 (NativePrefixBytes::Ipv4(left), NativePrefixBytes::Ipv4(right)) => left == right,
                 (NativePrefixBytes::Ipv6(left), NativePrefixBytes::Ipv6(right)) => left == right,
-                (NativePrefixBytes::Ipv4(_), NativePrefixBytes::Ipv6(_))
-                | (NativePrefixBytes::Ipv6(_), NativePrefixBytes::Ipv4(_)) => false,
+                (NativePrefixBytes::LocalIpv4(left), NativePrefixBytes::LocalIpv4(right)) => {
+                    left == right
+                }
+                (NativePrefixBytes::LocalIpv6(left), NativePrefixBytes::LocalIpv6(right)) => {
+                    left == right
+                }
+                _ => false,
             }
     }
 
@@ -74,6 +103,8 @@ impl NativeNetworkPrefix {
         match &self.bytes {
             NativePrefixBytes::Ipv4(bytes) => Self::ipv4(*bytes),
             NativePrefixBytes::Ipv6(bytes) => Self::ipv6(*bytes),
+            NativePrefixBytes::LocalIpv4(bytes) => Self::local_ipv4(*bytes),
+            NativePrefixBytes::LocalIpv6(bytes) => Self::local_ipv6(*bytes),
         }
     }
 }
@@ -93,9 +124,10 @@ struct ConnectionRecord {
     peer_id: PeerId,
     generation: NonZeroU64,
     prefix: Option<NativeNetworkPrefix>,
+    relayed: bool,
 }
 
-/// Affine proof that exactly one connection to one peer had the requested native family.
+/// Affine proof that one exact authenticated connection had the requested native family.
 #[must_use = "a connection witness must be consumed by its registry"]
 pub(super) struct ConnectionWitness {
     peer_id: PeerId,
@@ -133,14 +165,30 @@ pub struct BoundNativeProbeControlConnection {
     generation: NonZeroU64,
 }
 
+/// Affine proof that one native authorization chain arrived over an exact authenticated
+/// data-Relay connection.
+///
+/// This token is deliberately distinct from [`BoundNativeProbeControlConnection`]: a control
+/// Relay may request an endpoint-free Permit, while only the selected data Relay may request the
+/// standard endpoint-bearing reservation authorization. It can be consumed only while sending
+/// the corresponding response through the originating discovery service.
+#[must_use = "a bound native-probe data-Relay connection must gate one response or be dropped"]
+pub struct BoundNativeProbeDataRelayConnection {
+    instance: Arc<ConnectionProvenanceInstance>,
+    peer_id: PeerId,
+    connection_id: ConnectionId,
+    generation: NonZeroU64,
+}
+
 struct ConnectionProvenanceInstance;
 
 impl BoundConnectionObservation {
-    /// Consume one exact client connection proof into its freshness-safe public prefix.
+    /// Consume one exact client connection proof into its freshness-safe scope-tagged prefix.
     ///
     /// The expected family comes from the caller-owned canonical preselection request. This
     /// terminal projection drops peer, connection and generation authority and emits only the
-    /// normalized public /24 or /48 needed by the later private freshness owner.
+    /// normalized /24 or /48 needed by the later private freshness owner. Local observations
+    /// remain explicitly local; they are not public diversity or kernel adjacency evidence.
     pub(super) fn consume_into_client_preselection_prefix(
         self,
         expected_family: IpFamily,
@@ -152,7 +200,7 @@ impl BoundConnectionObservation {
             prefix,
         } = self;
         if !prefix.is_consistent()
-            || !prefix.normalized.is_public_routable()
+            || !(prefix.normalized.is_public_routable() || prefix.normalized.is_local_lan())
             || prefix.normalized.family() != expected_family
         {
             return None;
@@ -164,7 +212,8 @@ impl BoundConnectionObservation {
     ///
     /// This is deliberately not a generic prefix accessor: it consumes the complete affine proof,
     /// emits only the endpoint-free protocol /24 or /48, and is used solely by the forwarded
-    /// preselection attestation owner.
+    /// preselection attestation owner. A local prefix describes only this authenticated
+    /// Relay-to-Exit connection, not the Exit's Internet uplink or a client's address.
     pub(super) fn consume_into_forwarded_preselection_prefix(
         self,
     ) -> Option<ObservationNetworkPrefix> {
@@ -174,15 +223,29 @@ impl BoundConnectionObservation {
             generation: _,
             prefix,
         } = self;
-        if !prefix.is_consistent() || !prefix.normalized.is_public_routable() {
+        if !prefix.is_consistent()
+            || !(prefix.normalized.is_public_routable() || prefix.normalized.is_local_lan())
+        {
             return None;
         }
         match prefix.bytes {
             NativePrefixBytes::Ipv4(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::PublicInternet as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: bytes.to_vec(),
             }),
             NativePrefixBytes::Ipv6(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::PublicInternet as i32,
+                address_family: ObservationAddressFamily::Ipv6 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
+            NativePrefixBytes::LocalIpv4(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::DirectLocalLan as i32,
+                address_family: ObservationAddressFamily::Ipv4 as i32,
+                network_prefix: bytes.to_vec(),
+            }),
+            NativePrefixBytes::LocalIpv6(bytes) => Some(ObservationNetworkPrefix {
+                scope: UnderlayScope::DirectLocalLan as i32,
                 address_family: ObservationAddressFamily::Ipv6 as i32,
                 network_prefix: bytes.to_vec(),
             }),
@@ -237,7 +300,8 @@ impl ConnectionRegistry {
             return;
         }
 
-        let prefix = direct_public_prefix(peer_id, endpoint);
+        let prefix = direct_scoped_prefix(peer_id, endpoint);
+        let relayed = endpoint.is_relayed();
         if self
             .records
             .insert(
@@ -248,6 +312,7 @@ impl ConnectionRegistry {
                     // generation therefore advances only inside this connection's own lineage.
                     generation: NonZeroU64::MIN,
                     prefix,
+                    relayed,
                 },
             )
             .is_some()
@@ -287,13 +352,16 @@ impl ConnectionRegistry {
             return;
         };
         record.generation = generation;
-        let old_prefix = direct_public_prefix(peer_id, old);
-        let new_prefix = direct_public_prefix(peer_id, new);
-        if !same_optional_prefix(record.prefix.as_ref(), old_prefix.as_ref()) {
+        let old_prefix = direct_scoped_prefix(peer_id, old);
+        let new_prefix = direct_scoped_prefix(peer_id, new);
+        if record.relayed != old.is_relayed()
+            || !same_optional_prefix(record.prefix.as_ref(), old_prefix.as_ref())
+        {
             self.poison();
             return;
         }
         record.prefix = new_prefix;
+        record.relayed = new.is_relayed();
     }
 
     fn closed(
@@ -315,8 +383,9 @@ impl ConnectionRegistry {
             .values()
             .filter(|record| record.peer_id == peer_id)
             .count();
-        let closed_prefix = direct_public_prefix(peer_id, endpoint);
+        let closed_prefix = direct_scoped_prefix(peer_id, endpoint);
         if record.peer_id != peer_id
+            || record.relayed != endpoint.is_relayed()
             || !same_optional_prefix(record.prefix.as_ref(), closed_prefix.as_ref())
             || peer_connections.checked_sub(1) != Some(remaining_established)
         {
@@ -326,6 +395,14 @@ impl ConnectionRegistry {
         if self.records.remove(&connection_id).is_none() {
             self.poison();
         }
+    }
+
+    fn allows_identify_address_import(&self, peer_id: PeerId, connection_id: ConnectionId) -> bool {
+        !self.poisoned
+            && self
+                .records
+                .get(&connection_id)
+                .is_some_and(|record| record.peer_id == peer_id && !record.relayed)
     }
 
     fn unique_witness(&self, peer_id: PeerId, family: IpFamily) -> Option<ConnectionWitness> {
@@ -352,6 +429,56 @@ impl ConnectionRegistry {
         })
     }
 
+    fn advisory_local_prefix(&self, peer_id: PeerId) -> Option<ObservedNetworkPrefix> {
+        if self.poisoned {
+            return None;
+        }
+        let mut records = self
+            .records
+            .values()
+            .filter(|record| record.peer_id == peer_id);
+        let record = records.next()?;
+        if record.relayed {
+            return None;
+        }
+        let prefix = record.prefix.as_ref()?;
+        (prefix.is_consistent()
+            && prefix.normalized.is_local_lan()
+            && records.all(|record| {
+                !record.relayed
+                    && record
+                        .prefix
+                        .as_ref()
+                        .is_some_and(|other| other.is_consistent() && other.same_as(prefix))
+            }))
+        .then_some(prefix.normalized)
+    }
+
+    fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        if self.poisoned {
+            return None;
+        }
+        let record = self.records.get(&connection_id)?;
+        let prefix = record.prefix.as_ref()?;
+        if record.peer_id != peer_id
+            || prefix.normalized.family() != family
+            || !prefix.is_consistent()
+        {
+            return None;
+        }
+        Some(ConnectionWitness {
+            peer_id,
+            connection_id,
+            generation: record.generation,
+            prefix: prefix.for_witness(),
+        })
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "the affine witness must be consumed exactly once at the binding boundary"
@@ -368,13 +495,7 @@ impl ConnectionRegistry {
             generation: witness_generation,
             prefix: witness_prefix,
         } = witness;
-        let peer_connections = self
-            .records
-            .values()
-            .filter(|record| record.peer_id == expected_peer_id)
-            .count();
         if self.poisoned
-            || peer_connections != 1
             || witness_peer_id != expected_peer_id
             || witness_connection_id != expected_connection_id
         {
@@ -398,6 +519,30 @@ impl ConnectionRegistry {
         })
     }
 
+    fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        if self.poisoned {
+            return PreselectionProvenanceReject::RegistryPoisoned;
+        }
+        let Some(record) = self.records.get(&expected_connection_id) else {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        };
+        if record.peer_id != peer_id {
+            return PreselectionProvenanceReject::ExactConnectionMissing;
+        }
+        let Some(prefix) = record.prefix.as_ref() else {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        };
+        if !prefix.is_consistent() || prefix.normalized.family() != family {
+            return PreselectionProvenanceReject::FamilyPrefix;
+        }
+        PreselectionProvenanceReject::BindGeneration
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "ownership is the affine one-response authority; borrowing would permit reuse"
@@ -408,6 +553,29 @@ impl ConnectionRegistry {
         expected_peer_id: PeerId,
     ) -> bool {
         let BoundNativeProbeControlConnection {
+            instance: _,
+            peer_id,
+            connection_id,
+            generation,
+        } = bound;
+        if self.poisoned || peer_id != expected_peer_id {
+            return false;
+        }
+        self.records.get(&connection_id).is_some_and(|record| {
+            record.peer_id == expected_peer_id && record.generation == generation
+        })
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "ownership is the affine one-response authority; borrowing would permit reuse"
+    )]
+    fn consume_bound_native_probe_data_relay(
+        &self,
+        bound: BoundNativeProbeDataRelayConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        let BoundNativeProbeDataRelayConnection {
             instance: _,
             peer_id,
             connection_id,
@@ -457,6 +625,28 @@ impl ConnectionProvenanceBehaviour {
         self.registry.unique_witness(peer_id, family)
     }
 
+    pub(super) fn advisory_local_prefix(&self, peer_id: PeerId) -> Option<ObservedNetworkPrefix> {
+        self.registry.advisory_local_prefix(peer_id)
+    }
+
+    pub(super) fn allows_identify_address_import(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        self.registry
+            .allows_identify_address_import(peer_id, connection_id)
+    }
+
+    pub(super) fn exact_witness(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        family: IpFamily,
+    ) -> Option<ConnectionWitness> {
+        self.registry.exact_witness(peer_id, connection_id, family)
+    }
+
     pub(super) fn bind(
         &self,
         witness: ConnectionWitness,
@@ -465,6 +655,16 @@ impl ConnectionProvenanceBehaviour {
     ) -> Option<BoundConnectionObservation> {
         self.registry
             .bind(witness, expected_peer_id, expected_connection_id)
+    }
+
+    pub(super) fn diagnose_preselection_reject(
+        &self,
+        peer_id: PeerId,
+        family: IpFamily,
+        expected_connection_id: ConnectionId,
+    ) -> PreselectionProvenanceReject {
+        self.registry
+            .diagnose_preselection_reject(peer_id, family, expected_connection_id)
     }
 
     pub(super) fn bind_native_probe_control(
@@ -497,6 +697,38 @@ impl ConnectionProvenanceBehaviour {
         }
         self.registry
             .consume_bound_native_probe_control(bound, expected_peer_id)
+    }
+
+    pub(super) fn bind_native_probe_data_relay(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> Option<BoundNativeProbeDataRelayConnection> {
+        if self.registry.poisoned {
+            return None;
+        }
+        let record = self.registry.records.get(&connection_id)?;
+        if record.peer_id != peer_id {
+            return None;
+        }
+        Some(BoundNativeProbeDataRelayConnection {
+            instance: Arc::clone(&self.instance),
+            peer_id,
+            connection_id,
+            generation: record.generation,
+        })
+    }
+
+    pub(super) fn consume_bound_native_probe_data_relay(
+        &self,
+        bound: BoundNativeProbeDataRelayConnection,
+        expected_peer_id: PeerId,
+    ) -> bool {
+        if !Arc::ptr_eq(&bound.instance, &self.instance) {
+            return false;
+        }
+        self.registry
+            .consume_bound_native_probe_data_relay(bound, expected_peer_id)
     }
 }
 
@@ -566,17 +798,17 @@ impl NetworkBehaviour for ConnectionProvenanceBehaviour {
     }
 }
 
-fn direct_public_prefix(
+fn direct_scoped_prefix(
     expected_peer_id: PeerId,
     endpoint: &ConnectedPoint,
 ) -> Option<NativeNetworkPrefix> {
     if endpoint.is_relayed() {
         return None;
     }
-    direct_public_multiaddr_prefix(expected_peer_id, endpoint.get_remote_address())
+    direct_scoped_multiaddr_prefix(expected_peer_id, endpoint.get_remote_address())
 }
 
-fn direct_public_multiaddr_prefix(
+fn direct_scoped_multiaddr_prefix(
     expected_peer_id: PeerId,
     address: &Multiaddr,
 ) -> Option<NativeNetworkPrefix> {
@@ -585,18 +817,28 @@ fn direct_public_multiaddr_prefix(
         Protocol::Ip4(address) => {
             let [first, second, third, _] = address.octets();
             let bytes = [first, second, third];
-            NativeNetworkPrefix::ipv4(bytes)
+            if volparossa_core::is_local_lan_ip(address.into()) {
+                NativeNetworkPrefix::local_ipv4(bytes)
+            } else {
+                NativeNetworkPrefix::ipv4(bytes)
+            }
         }
         Protocol::Ip6(address) => {
             let octets = address.octets();
             let bytes = [
                 octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
             ];
-            NativeNetworkPrefix::ipv6(bytes)
+            if volparossa_core::is_local_lan_ip(address.into()) {
+                NativeNetworkPrefix::local_ipv6(bytes)
+            } else {
+                NativeNetworkPrefix::ipv6(bytes)
+            }
         }
         _ => return None,
     };
-    if !prefix.normalized.is_public_routable() || !prefix.is_consistent() {
+    if !(prefix.normalized.is_public_routable() || prefix.normalized.is_local_lan())
+        || !prefix.is_consistent()
+    {
         return None;
     }
 
@@ -723,7 +965,7 @@ mod tests {
         ];
         for value in cases {
             assert!(
-                direct_public_multiaddr_prefix(peer, &address(&value)).is_some(),
+                direct_scoped_multiaddr_prefix(peer, &address(&value)).is_some(),
                 "expected accepted address {value}"
             );
         }
@@ -738,7 +980,7 @@ mod tests {
             "/dns/example.com/tcp/443".to_owned(),
             "/dns6/example.com/tcp/443".to_owned(),
             "/memory/7".to_owned(),
-            "/ip4/10.0.0.1/tcp/443".to_owned(),
+            "/ip4/169.254.0.1/tcp/443".to_owned(),
             "/ip4/192.0.2.1/tcp/443".to_owned(),
             "/ip6/2001:db8::1/tcp/443".to_owned(),
             "/ip4/1.1.1.1/tcp/0".to_owned(),
@@ -753,7 +995,7 @@ mod tests {
         ];
         for value in cases {
             assert!(
-                direct_public_multiaddr_prefix(peer, &address(&value)).is_none(),
+                direct_scoped_multiaddr_prefix(peer, &address(&value)).is_none(),
                 "expected rejected address {value}"
             );
         }
@@ -761,8 +1003,35 @@ mod tests {
             &format!("/ip4/8.8.8.8/tcp/443/p2p/{other}/p2p-circuit"),
             "/ip4/1.1.1.1/tcp/443",
         );
-        assert!(direct_public_multiaddr_prefix(peer, relayed.get_remote_address()).is_some());
-        assert!(direct_public_prefix(peer, &relayed).is_none());
+        assert!(direct_scoped_multiaddr_prefix(peer, relayed.get_remote_address()).is_some());
+        assert!(direct_scoped_prefix(peer, &relayed).is_none());
+    }
+
+    #[test]
+    fn identify_address_import_requires_exact_non_relayed_connection() {
+        let peer = PeerId::random();
+        let relay = PeerId::random();
+        let direct = dialer("/ip4/1.1.1.8/udp/41000/quic-v1");
+        let relayed = listener(
+            &format!("/ip4/8.8.8.8/tcp/443/p2p/{relay}/p2p-circuit"),
+            "/ip4/1.1.1.8/udp/41000/quic-v1",
+        );
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+
+        established(&mut behaviour, peer, 1, &direct, 0);
+        established(&mut behaviour, peer, 2, &relayed, 1);
+        assert!(behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(2)));
+        assert!(
+            !behaviour
+                .allows_identify_address_import(PeerId::random(), ConnectionId::new_unchecked(1))
+        );
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(3)));
+
+        change(&mut behaviour, peer, 1, &direct, &relayed);
+        assert!(!behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
+        change(&mut behaviour, peer, 1, &relayed, &direct);
+        assert!(behaviour.allows_identify_address_import(peer, ConnectionId::new_unchecked(1)));
     }
 
     #[test]
@@ -842,6 +1111,33 @@ mod tests {
     }
 
     #[test]
+    fn native_authorization_data_relay_binding_is_affine_and_service_local() {
+        let peer = PeerId::random();
+        let endpoint = dialer("/ip4/1.1.1.8/tcp/443");
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        established(&mut behaviour, peer, 1, &endpoint, 0);
+
+        let bound = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("exact authenticated data Relay");
+        assert!(behaviour.consume_bound_native_probe_data_relay(bound, peer));
+
+        let cross_service = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("originating service binding");
+        let mut other_service = ConnectionProvenanceBehaviour::new();
+        established(&mut other_service, peer, 1, &endpoint, 0);
+        assert!(!other_service.consume_bound_native_probe_data_relay(cross_service, peer));
+
+        let stale = behaviour
+            .bind_native_probe_data_relay(peer, ConnectionId::new_unchecked(1))
+            .expect("pre-change binding");
+        let changed = dialer("/ip4/1.1.1.9/tcp/443");
+        change(&mut behaviour, peer, 1, &endpoint, &changed);
+        assert!(!behaviour.consume_bound_native_probe_data_relay(stale, peer));
+    }
+
+    #[test]
     fn purpose_specific_forwarded_projection_consumes_exact_native_ipv4_and_ipv6_prefixes() {
         for (endpoint, family, expected_family, expected_prefix) in [
             (
@@ -871,6 +1167,163 @@ mod tests {
                 .expect("public purpose-specific projection");
             assert_eq!(projected.address_family, expected_family as i32);
             assert_eq!(projected.network_prefix, expected_prefix);
+        }
+    }
+
+    #[test]
+    fn local_lan_connection_proof_preserves_scope_for_forwarded_upstream_origin() {
+        for (remote, family, expected, expected_bytes) in [
+            (
+                "/ip4/192.168.20.2/udp/443/quic-v1",
+                IpFamily::Ipv4,
+                ObservedNetworkPrefix::local_ipv4_24([192, 168, 20]),
+                vec![192, 168, 20],
+            ),
+            (
+                "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
+                IpFamily::Ipv6,
+                ObservedNetworkPrefix::local_ipv6_48([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a]),
+                vec![0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a],
+            ),
+        ] {
+            let peer = PeerId::random();
+            let endpoint = dialer(remote);
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &endpoint, 0);
+            let witness = behaviour
+                .unique_witness(peer, family)
+                .expect("authenticated local witness");
+            let bound = behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .expect("bound local lineage");
+            let prefix = bound
+                .consume_into_client_preselection_prefix(family)
+                .expect("local client prefix");
+            assert!(prefix == expected);
+            assert!(prefix.is_local_lan());
+            assert!(!prefix.is_public_routable());
+            let witness = behaviour
+                .unique_witness(peer, family)
+                .expect("new local witness");
+            let bound = behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .expect("new local lineage");
+            let forwarded = bound
+                .consume_into_forwarded_preselection_prefix()
+                .expect("authenticated local upstream prefix");
+            assert_eq!(forwarded.scope, UnderlayScope::DirectLocalLan as i32);
+            assert_eq!(forwarded.network_prefix, expected_bytes);
+            let stale = behaviour
+                .unique_witness(peer, family)
+                .expect("old local witness");
+            change(&mut behaviour, peer, 1, &endpoint, &endpoint);
+            assert!(
+                behaviour
+                    .bind(stale, peer, ConnectionId::new_unchecked(1))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_local_prefix_requires_consistent_current_direct_unpoisoned_connections() {
+        let peer = PeerId::random();
+        let local = dialer("/ip4/192.168.20.2/udp/443/quic-v1");
+        let public = dialer("/ip4/8.8.4.4/udp/443/quic-v1");
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        established(&mut behaviour, peer, 1, &local, 0);
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
+        assert!(behaviour.advisory_local_prefix(PeerId::random()).is_none());
+        established(&mut behaviour, peer, 2, &local, 1);
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
+        closed(&mut behaviour, peer, 2, &local, 1);
+        assert!(
+            behaviour
+                .advisory_local_prefix(peer)
+                .unwrap()
+                .is_local_lan()
+        );
+        change(&mut behaviour, peer, 1, &local, &public);
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+        change(&mut behaviour, peer, 1, &public, &local);
+        behaviour.registry.poison();
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+
+        let circuit = dialer(&format!(
+            "/ip4/192.168.20.2/udp/443/quic-v1/p2p/{}/p2p-circuit/p2p/{peer}",
+            PeerId::random()
+        ));
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        established(&mut behaviour, peer, 1, &circuit, 0);
+        assert!(behaviour.advisory_local_prefix(peer).is_none());
+    }
+
+    #[test]
+    fn advisory_local_prefix_agreement_does_not_merge_exact_connection_authority() {
+        for (outbound, inbound, family, expected) in [
+            (
+                "/ip4/192.168.20.2/udp/443/quic-v1",
+                "/ip4/192.168.20.3/udp/444/quic-v1",
+                IpFamily::Ipv4,
+                ObservedNetworkPrefix::local_ipv4_24([192, 168, 20]),
+            ),
+            (
+                "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
+                "/ip6/fd12:3456:789a::3/udp/444/quic-v1",
+                IpFamily::Ipv6,
+                ObservedNetworkPrefix::local_ipv6_48([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a]),
+            ),
+        ] {
+            let peer = PeerId::random();
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &dialer(outbound), 0);
+            established(&mut behaviour, peer, 2, &listener(outbound, inbound), 1);
+            assert!(behaviour.advisory_local_prefix(peer) == Some(expected));
+            assert!(behaviour.unique_witness(peer, family).is_none());
+            for connection in [1, 2] {
+                let connection = ConnectionId::new_unchecked(connection);
+                let witness = behaviour.exact_witness(peer, connection, family).unwrap();
+                let observation = behaviour.bind(witness, peer, connection).unwrap();
+                assert!(
+                    observation.consume_into_client_preselection_prefix(family) == Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_local_prefix_rejects_conflicting_or_relayed_sibling_connections() {
+        let peer = PeerId::random();
+        let local = dialer("/ip4/192.168.20.2/udp/443/quic-v1");
+        let circuit = format!(
+            "/ip4/192.168.20.3/udp/443/quic-v1/p2p/{}/p2p-circuit/p2p/{peer}",
+            PeerId::random()
+        );
+        for other in [
+            "/ip4/192.168.21.2/udp/443/quic-v1",
+            "/ip6/fd12:3456:789a::2/udp/443/quic-v1",
+            "/ip4/8.8.4.4/udp/443/quic-v1",
+            "/memory/1234",
+            circuit.as_str(),
+        ] {
+            let mut behaviour = ConnectionProvenanceBehaviour::new();
+            established(&mut behaviour, peer, 1, &local, 0);
+            let other = dialer(other);
+            established(&mut behaviour, peer, 2, &other, 1);
+            assert!(behaviour.advisory_local_prefix(peer).is_none());
+            closed(&mut behaviour, peer, 2, &other, 1);
+            assert!(behaviour.advisory_local_prefix(peer).is_some());
         }
     }
 
@@ -925,7 +1378,7 @@ mod tests {
     fn invalid_sibling_still_blocks_unique_witness() {
         let peer = PeerId::random();
         let public = dialer("/ip4/1.1.1.8/tcp/443");
-        let invalid = dialer("/ip4/10.0.0.8/tcp/443");
+        let invalid = dialer("/ip4/169.254.0.8/tcp/443");
         let mut behaviour = ConnectionProvenanceBehaviour::new();
         established(&mut behaviour, peer, 1, &public, 0);
         established(&mut behaviour, peer, 2, &invalid, 1);
@@ -955,10 +1408,10 @@ mod tests {
     }
 
     #[test]
-    fn bind_rechecks_current_native_prefix_and_total_connection_count() {
+    fn bind_rechecks_current_native_prefix_but_retains_exact_connection_with_sibling() {
         let peer = PeerId::random();
         let public = dialer("/ip4/1.1.1.8/tcp/443");
-        let invalid = dialer("/ip4/10.0.0.8/tcp/443");
+        let invalid = dialer("/ip4/169.254.0.8/tcp/443");
 
         let mut changed_prefix = ConnectionProvenanceBehaviour::new();
         established(&mut changed_prefix, peer, 1, &public, 0);
@@ -970,7 +1423,7 @@ mod tests {
             .records
             .get_mut(&ConnectionId::new_unchecked(1))
             .expect("record")
-            .prefix = direct_public_prefix(peer, &dialer("/ip4/8.8.8.8/tcp/443"));
+            .prefix = direct_scoped_prefix(peer, &dialer("/ip4/8.8.8.8/tcp/443"));
         assert!(
             changed_prefix
                 .bind(stale_prefix, peer, ConnectionId::new_unchecked(1))
@@ -986,7 +1439,7 @@ mod tests {
         assert!(
             added_sibling
                 .bind(stale_unique, peer, ConnectionId::new_unchecked(1))
-                .is_none()
+                .is_some()
         );
     }
 
@@ -1224,7 +1677,7 @@ mod tests {
 
         assert_eq!(
             compact_source(source_item_body(source, native_bytes_declaration)),
-            "Ipv4([u8;3]),Ipv6([u8;6]),"
+            "Ipv4([u8;3]),Ipv6([u8;6]),LocalIpv4([u8;3]),LocalIpv6([u8;6]),"
         );
         assert_eq!(
             compact_source(source_item_body(source, native_declaration)),
@@ -1232,7 +1685,7 @@ mod tests {
         );
         assert_eq!(
             compact_source(source_item_body(source, record_declaration)),
-            "peer_id:PeerId,generation:NonZeroU64,prefix:Option<NativeNetworkPrefix>,"
+            "peer_id:PeerId,generation:NonZeroU64,prefix:Option<NativeNetworkPrefix>,relayed:bool,"
         );
         for declaration in [witness_declaration, bound_declaration] {
             assert_eq!(
@@ -1308,7 +1761,7 @@ mod tests {
             1
         );
         assert_eq!(production.matches(concat!("checked_", "add(1)")).count(), 1);
-        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 2);
+        assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 3);
         assert_eq!(production.matches(concat!("pub ", "enum ")).count(), 1);
         assert!(production.contains(concat!("pub struct ConnectionProvenance", "Behaviour {")));
         assert!(production.contains(concat!("pub enum ConnectionProvenance", "Event {}")));
@@ -1316,17 +1769,25 @@ mod tests {
             "pub struct BoundNativeProbeControl",
             "Connection {"
         )));
-        let token = production
-            .split(concat!(
-                "pub struct BoundNativeProbeControl",
-                "Connection {"
-            ))
-            .nth(1)
-            .expect("native Permit connection token")
-            .split('}')
-            .next()
-            .expect("native Permit token body");
-        assert!(!token.contains("pub "));
+        for (declaration, description) in [
+            (
+                concat!("pub struct BoundNativeProbeControl", "Connection {"),
+                "native Permit connection token",
+            ),
+            (
+                concat!("pub struct BoundNativeProbeDataRelay", "Connection {"),
+                "native authorization connection token",
+            ),
+        ] {
+            let token = production
+                .split(declaration)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{description}"))
+                .split('}')
+                .next()
+                .expect("native connection token body");
+            assert!(!token.contains("pub "));
+        }
         assert!(production.contains("Swarm guarantees ConnectionIds are unique and never reused"));
         let defaults = production
             .split("impl Default for ConnectionRegistry")
@@ -1355,15 +1816,8 @@ mod tests {
         assert_eq!(crate_source.matches(event_from).count(), 1);
         assert!(!crate_source.contains(concat!("pub mod connection_", "provenance")));
         assert!(!crate_source.contains(concat!("pub ", "fn connection_", "provenance")));
-        assert_eq!(
-            crate_source
-                .matches(concat!(
-                    "pub use connection_provenance::BoundNativeProbeControl",
-                    "Connection;"
-                ))
-                .count(),
-            1
-        );
+        assert!(crate_source.contains("BoundNativeProbeControlConnection"));
+        assert!(crate_source.contains("BoundNativeProbeDataRelayConnection"));
         assert!(!crate_source.contains(concat!(
             "ConnectionProvenance(ConnectionProvenance",
             "Event)"

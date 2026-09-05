@@ -986,15 +986,6 @@ pub(crate) fn validate_start_exit(value: &StartExitSession) -> Result<(), Contro
         value.masque_context_id,
         value.transport_mode,
     )?;
-    if !matches!(
-        TransportMode::try_from(value.transport_mode),
-        Ok(TransportMode::SinglePathGeneralUdp)
-    ) || value.minimum_paths != 1
-    {
-        return Err(ControlError::Invalid(
-            "v6 exit listener supports exactly one general-UDP path",
-        ));
-    }
     validate_auth_secret(&value.auth_secret)?;
     validate_expiry(value.expires_at_ms)?;
     if value.exit_spki_sha256.len() != 32 || value.exit_spki_sha256.iter().all(|byte| *byte == 0) {

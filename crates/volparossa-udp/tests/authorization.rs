@@ -167,6 +167,36 @@ fn policy() -> VerifiedManifest {
     .unwrap()
 }
 
+fn domain_policy() -> VerifiedManifest {
+    let maintainer = key(91);
+    let trust = TrustStore::new(
+        PolicyMode::Production,
+        vec![TrustedMaintainer::production(maintainer.verifying_key())],
+    )
+    .unwrap();
+    let mut specification = ManifestSpec::new(1, 1, NOW - 2_000, NOW - 1_000, NOW + 120_000)
+        .unwrap()
+        .with_required_signatures(1)
+        .unwrap();
+    specification
+        .add_rule(
+            DestinationRule::exact_domain(
+                "destination.volparossa.test",
+                [ProtocolPort::new(TransportProtocol::Udp, 443).unwrap()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let encoded = sign_manifest(&specification, &trust, &[&maintainer]).unwrap();
+    verify_manifest(
+        &encoded,
+        NOW,
+        &trust,
+        VerificationPolicy::new(1, 1, 300_000, 60_000).unwrap(),
+    )
+    .unwrap()
+}
+
 fn signed_exit(exit: &SigningKey, scope: &V4GrantScope) -> Vec<u8> {
     signed_exit_with(exit, scope, |_| {})
 }
@@ -204,6 +234,7 @@ where
             masque_context_id: 1,
             client_native_instance_id: vec![14; 32],
             exit_native_instance_id: vec![15; 32],
+            credential_hpke_public_key: vec![16; 32],
         }),
     };
     mutate(&mut message);
@@ -312,6 +343,7 @@ where
 
 fn endpoint(key: u8, port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: vec![key; 32],
         underlay_ip: vec![8, 8, 4, key],
         listen_port: u32::from(port),
@@ -405,6 +437,62 @@ async fn signed_udp_flow_is_single_relay_policy_bound_and_immutable() {
         ),
         Err(UdpError::Protocol(ProtocolError::Replay))
     ));
+}
+
+#[test]
+fn signed_hostname_flow_retains_exact_transparent_destination_pin() {
+    let control_relay = key(53);
+    let exit = key(54);
+    let relay = key(55);
+    let client = key(56);
+    let grant = v4_grant_scope(&exit, &client, &control_relay);
+    let mut replay_cache = ReplayCache::new(12).unwrap();
+    let path = VerifiedSingleRelayPath::verify(
+        &signed_exit(&exit, &grant),
+        &signed_relay(&exit, &relay, &grant),
+        NOW + 1,
+        TimePolicy::default(),
+        &mut replay_cache,
+    )
+    .unwrap();
+    let policy = domain_policy();
+    let nonce = [57; 32];
+    let signed = sign_control_message(
+        &UdpFlowAuthorization {
+            route_context_id: path.route_context_id().to_vec(),
+            flow_id: vec![58; 16],
+            client_ephemeral_id: node_id(&client),
+            hostname: "destination.volparossa.test".to_owned(),
+            destination_ip: ALLOWED_IP.octets().to_vec(),
+            port: 443,
+            policy_hash: policy.policy_hash().to_vec(),
+            idle_timeout_ms: 30_000,
+            timestamp_ms: NOW,
+            expires_at_ms: EXPIRY,
+            nonce: nonce.to_vec(),
+        },
+        &client,
+        NOW,
+        EXPIRY,
+        nonce,
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let authorization = UdpAuthorizationScope::new(&path, &policy)
+        .verify(&signed, NOW + 2, TimePolicy::default(), &mut replay_cache)
+        .unwrap();
+
+    assert_eq!(
+        authorization.hostname(),
+        Some("destination.volparossa.test")
+    );
+    assert!(
+        authorization.matches_exact_ip_destination(SocketAddr::new(IpAddr::V4(ALLOWED_IP), 443))
+    );
+    assert!(!authorization.matches_exact_ip_destination(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)),
+        443
+    )));
 }
 
 #[test]

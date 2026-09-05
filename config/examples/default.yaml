@@ -3,14 +3,30 @@ runtime_mode: production
 network:
   name: VOLPAROSSA
   protocol_version: 4
+  # Operator declaration, not an automatic connectivity or uptime measurement.
+  uplink: independent_internet
+  # Optional selected Exit uplink; observes link/default-route availability and pins
+  # destination sockets. Does not enable roles or prove Internet/DNS reachability.
+  independent_egress_interface: null
   operator_id: null
   listen_addresses: []
   bootstrap_peers: []
   candidate_pool_size: 200
   advertisement_ttl_seconds: 300
+  advertised_region: unknown
+  advertised_country_code: ZZ
+  advertised_asn: 0
+  advertised_ipv4_prefix: null
+  advertised_ipv6_prefix: null
 
+# Installation does not start network participation or Internet egress.
+# With an independent Internet uplink, consuming nodes must enable all three roles
+# and configure operator identity, service origin, positive capacity, and policy.
+# With uplink: local_only, consumers must enable client + relay and keep exit off;
+# do not invent an ASN or public prefix. Offline routing still needs reachable
+# contributing peers with independent Internet access.
 roles:
-  client: true
+  client: false
   relay: false
   exit: false
 
@@ -30,11 +46,40 @@ capacity:
   maximum_relay_sessions: 0
   maximum_exit_sessions: 0
 
+# Optional upload sharing, inert until enabled and participation starts. Set an exact
+# physical interface and operator-known usable upload, not NIC speed or an inferred rate.
+sharing:
+  enabled: false
+  interface: ""
+  total_upload_mbps: 0
+  contribution_upload_ceiling_mbps: 0
+
+# Explicit direct 802.11s underlay; never enable or reconfigure a radio automatically.
+# This first mode is open L2, not SAE; existing LAN-exposed host services remain exposed.
+# On supported hardware set a common mesh ID/channel and a distinct private host address
+# per neighbor. Existing active interfaces must already use a compatible channel.
+wifi_mesh:
+  enabled: false
+  acknowledge_open_underlay: false
+  parent_interface: ""
+  mesh_id: ""
+  frequency_mhz: 0
+  local_address: ""
+  prefix_len: 0
+  maximum_peers: 8
+
 routing:
   context_ttl_seconds: 600
   maximum_active_contexts: 64
   kill_switch: true
   direct_exit_debug: false
+  client_address_family: ipv4
+  client_minimum_upload_mbps: 10
+  client_minimum_download_mbps: 10
+  client_local_upload_mbps: 100
+  client_local_download_mbps: 100
+  client_capacity_ceiling_upload_mbps: 80
+  client_capacity_ceiling_download_mbps: 80
 
 tcp:
   enabled: true

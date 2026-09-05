@@ -240,7 +240,8 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. The client-side attempt
-owner is production code, but no downstream route orchestrator invokes its crate-private handle.
+owner is production code. The local `Connect` route gate now invokes its crate-private handle from
+an explicit validated client route profile; this control step alone still grants no route.
 
 The completed A1a owner advances through one actor-owned affine A1c join. It accepts exactly one
 `BoundClientPreselectionTransport` in canonical request order for each retained transcript and
@@ -261,18 +262,18 @@ zero proximity and egress-quality scores, and `network_address_usable = false`. 
 `locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
 proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
 adds dataplane evidence. The actor calls this join/mint and returns only opaque
-`PreparedPreselectionEvidence`. A crate-private, callerless native-preselection child can consume
-that value through its test seam while the five-second receipts are still live, but no production
-runtime invokes it. Neither the Prepared handoff nor the child grants admission, reservation,
-route, usability or datapath authority. The server-side responders and forwarding wrapper operate
-independently of this client value.
+`PreparedPreselectionEvidence`. A crate-private native-preselection child now consumes that value
+from the production `Connect` gate while the five-second receipts are still live. It mints an
+independent bounded owner and dispatches the first endpoint-free native Permit request only through
+the selected control Relay; neither the Prepared handoff nor this Permit stage grants admission,
+reservation, route, usability or datapath authority.
 
 ### Native-preselection contract and server-side Permit provider
 
 Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
 states. The private client owner consumes the exact Prepared handoff before its signed five-second
 receipt window closes, discards the control-plane reachability observations and mints a distinct
-attempt bounded to at most 30 seconds by policy and actor expiry. This does not extend or reinterpret
+attempt bounded to at most five minutes by policy and actor expiry. This does not extend or reinterpret
 the original receipt lifetime. One candidate set contains the control Relay plus one to eight other
 data Relays, for two to nine preselection candidates total; later route selection still admits at
 most eight paths.
@@ -297,14 +298,14 @@ and affine states, never by ordering wall clocks owned by different nodes; each 
 enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
 and cross-binding substitutions roll back only the newly admitted entries and fail closed.
 
-The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
-foundations. The Exit now composes one production server-side Permit handler on the existing
-forwarded control protocol. That handler remains dormant in the current product: the local
-publisher intentionally serves no Exit advertisement or usable Exit capability yet, so a normal
-runtime cannot satisfy its exact-local-advertisement gate. An agent unit fixture injects a valid
-signed local Exit advertisement to prove the exact gate validators; a separate discovery transport
-integration proves connection-bound response handoff. No test claims the whole handler succeeds
-end to end. Once a truthful producer exists, the handler accepts
+The client-side native attempt now has one production Permit dispatcher; ExitReady and ExitResult
+remain callerless contract/test foundations. The Exit composes one production server-side Permit
+handler on the existing forwarded control protocol. Relay and Exit runtimes install their exact
+signed local service advertisement and bounded provider indexes from explicit configuration and
+current capacity. This opens the handler's local-advertisement gate, but the advertisement remains
+an untrusted claim and not usable datapath evidence. A separate discovery transport integration
+proves connection-bound response handoff; no test yet completes the whole handler exchange end to
+end. The handler accepts
 only the exact signed native Permit request received from an authenticated control Relay, rechecks
 the current full Relay capability and exact locally served Exit advertisement, and consumes a
 purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.
@@ -319,8 +320,8 @@ The module-private, non-Clone Exit readiness/result owner
 still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
 `ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
 provenance or cleanup authority, and the private helper/datapath observation has no constructor.
-There is no production client Permit dispatcher, Ready/Result caller, helper lifecycle/cleanup
-owner, challenge delivery, live WireGuard probe, measured readiness/capacity, terminal
+There is no production Ready/Result caller, helper lifecycle/cleanup owner, challenge delivery,
+live WireGuard probe, measured readiness/capacity, terminal
 helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
 each cap their own lifetime at the lower of the parent expiry and local production time plus 30
 seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
@@ -566,9 +567,16 @@ attempt with real evidence and capacity is not reserved twice. Tests use an expl
 matches exact expected permit/result bytes after normal cryptographic and scope verification;
 there is no accept-all production or test provider.
 
-The `/volparossa/datapath-relay/4` ExecuteProbe wrapper is framing only and does not change this
-boundary. Likewise, signed route binding is not helper/kernel tunnel evidence and does not mark the
-capacity ledger tunnel-established. Real helper-owned endpoint preparation, readiness,
+The `/volparossa/datapath-relay/4` `ExecuteProbe` wrapper is framing only and does not change this
+boundary. The same v4 wrapper now also gives native preselection two exact operations:
+`NativeProbeReady` carries only a client-signed endpoint-free request plus its Exit-signed Permit and
+accepts only `NativeProbeRelayReady`; `NativeProbeStart` carries only the client-signed Start and
+accepts only `NativeProbeRelayResult`. Both target the selected data Relay identity and retain
+separate 16-byte correlation IDs. These wrappers are still not helper/kernel tunnel evidence and do
+not mark the capacity ledger tunnel-established. The strict helper additionally refuses Client
+activation until a standard nested Exit/Relay-signed `RelayReservation` binds the helper-prepared
+Client key, selected Relay endpoint, exact route context and hard expiry. Neither native wrapper
+currently obtains that post-Prepare authority. Real helper-owned endpoint preparation, readiness,
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 
@@ -622,12 +630,12 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one to eight ordered Client/Exit path leases or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
 | `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; Relay additionally requires growth of both exact forwarding counters and commits only when every proof passes |
 | `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
-| `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
-| `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
-| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts only unconnected QUIC UDP for an exact committed Client/Exit singleton, while MPTCP and Relay remain unavailable |
+| `AddMptcpEndpoint` | add one kernel endpoint derived inside the worker namespace from an exact live committed Client MPTCP lease; arbitrary addresses/interfaces and Exit/Relay leases are rejected |
+| `RemoveMptcpEndpoint` | remove one exact worker-owned Client MPTCP endpoint; missing, stale, wrong-generation or non-Client ownership fails closed |
+| `AcquireTransportSocket` | tag 27: bind one exact path in a committed context to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit lease, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
 | `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |
@@ -690,6 +698,14 @@ deadline covers connect, credential validation, both writes, and both responses;
 between frames. Intent registration is runtime-global helper state, not a server-enforced binding to
 that connection. Same-stream use is the HelperClient invariant that prevents a pathname/socket swap
 between registration and dispatch.
+
+A successful Prepare is retained by the agent as one affine runtime-bound lifecycle owner rather
+than returned as freely cloneable phase authority. On every new Unix stream used for Activate,
+Commit or exact retirement Destroy, the agent first sends `BindHelperRuntime(None)`, requires the
+same retained 32-byte runtime ID, and only then sends the canonical phase request on that stream.
+Runtime change sends no phase request. The bounded route supervisor retains this owner while a
+phase call settles and transfers it to its existing retirement/retry worker on failure, timeout or
+cancellation. This does not add Ready/Result, restart adoption or a usable route datapath.
 
 This pre-alpha protocol-v3 refinement is deployed lockstep with the packaged agent and helper. It
 does not provide a mixed-version rolling-upgrade path: an old agent omits required tag 6, a new agent
@@ -890,15 +906,19 @@ affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and cle
 settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
 it after expiry-driver and engine cleanup. Startup may durably settle never-dispatched `Intent` and
-one bounded restart state: a full set of already durable `CleanupConfirmed` targets. Each
+two bounded restart states. The first is a full set of already durable `CleanupConfirmed` targets. Each
 exact-present pair is removed once in canonical name order and must produce a stable complete
 predecessor-minus-pair successor; already-absent members are skipped. Journal revalidation plus a
 fresh final manager barrier and two stable exact-empty snapshots precede one-shot full-set evidence
 for `CleanupConfirmed -> Absent`. Restart removal errors erase retry authority and stop that
-process. The deliberately refusing cleanup executor leaves every inherited `MayOwnCustody` or
-`MayOwnPrepare` byte-identical and blocks
-the internal socket-publication boundary. No inherited-custody recovery backend, restart reaper, or
-cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+process. The second is exactly one same-boot, same-helper-image, single-path
+`MayOwnCustody + ExactPresent` pre-dispatch namespace. A fixed `/proc/self/exe` reaper receives one
+challenge-bound namespace FD over authenticated bounded `SOCK_SEQPACKET`, proves the role baseline,
+retires only an exact Relay restricted fence when present, and is sandbox-attested and exactly
+pidfd-reaped before a startup-only actor CAS. The existing `CleanupConfirmed` removal/absence chain
+then completes before socket publication. The general cleanup executor still leaves
+`MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical. No broad
+inherited-custody recovery backend or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
 
@@ -1054,10 +1074,12 @@ address, and wipes retained state on fatal transport failure. This does not prov
 exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
 exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
 ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
-delivery rate, and validation/real-carriage state. The pinned backend currently exposes ACKed
-transport bytes rather than unique payload bytes, so the runtime returns
-`unique_delivery_metric_unsupported` instead of claiming that evidence. These fields are necessary
-to prevent a native process from falsely reporting mere path configuration as multipath operation.
+delivery rate, and validation/real-carriage state. The runtime now publishes an exact current path
+set only when the pinned backend supplies every required metric and a valid normalized path state.
+It uses ACKed transport bytes only for the real-carriage boolean and keeps unique delivered payload
+bytes at zero, because transport framing and retransmissions make the former unsuitable for the
+latter. These fields are necessary to prevent a native process from falsely reporting mere path
+configuration as multipath operation.
 
 ## Policy manifest encoding
 

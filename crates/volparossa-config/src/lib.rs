@@ -1,10 +1,18 @@
 //! Strict, fail-closed configuration for all VOLPAROSSA processes.
 
-use std::{collections::HashSet, fmt, fs, path::Path};
+mod wifi_mesh;
+pub use wifi_mesh::WifiMeshConfig;
+
+use std::{
+    collections::HashSet,
+    fmt, fs,
+    net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use volparossa_core::OperatorId;
+use volparossa_core::{MAX_BANDWIDTH_MBPS, OperatorId};
 
 /// Wire protocol version implemented by this release.
 pub const PROTOCOL_VERSION: u16 = 4;
@@ -68,12 +76,16 @@ pub struct Config {
     pub runtime_mode: RuntimeMode,
     /// Overlay identity and discovery settings.
     pub network: NetworkConfig,
-    /// Independently enabled node roles.
+    /// Explicit node roles; consumers contribute relay service and any independent uplink.
     pub roles: RolesConfig,
     /// Exit and relay selection parameters.
     pub selection: SelectionConfig,
     /// Operator capacity limits.
     pub capacity: CapacityConfig,
+    /// Optional node-wide upload sharing; configuring it never starts participation.
+    pub sharing: SharingConfig,
+    /// Explicit direct Wi-Fi underlay; disabled until its open-L2 scope is acknowledged.
+    pub wifi_mesh: WifiMeshConfig,
     /// Route-context and interception safety settings.
     pub routing: RoutingConfig,
     /// TCP/MPTCP settings.
@@ -96,6 +108,8 @@ impl Default for Config {
             roles: RolesConfig::default(),
             selection: SelectionConfig::default(),
             capacity: CapacityConfig::default(),
+            sharing: SharingConfig::default(),
+            wifi_mesh: WifiMeshConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
             udp: UdpConfig::default(),
@@ -149,6 +163,7 @@ impl Config {
     /// Returns an error when a field or cross-field safety invariant is violated.
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_exact_version(self.network.protocol_version)?;
+        validate_roles(self.runtime_mode, self.network.uplink, self.roles)?;
         if let Some(operator_id) = self.network.operator_id.as_deref() {
             OperatorId::new(operator_id).map_err(|_| {
                 validation(
@@ -175,8 +190,11 @@ impl Config {
             3_600,
         )?;
         validate_network_addresses(&self.network)?;
+        validate_advertisement_origin(self.roles, &self.network)?;
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
+        validate_sharing(&self.sharing)?;
+        self.wifi_mesh.validate()?;
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
         validate_udp(&self.udp)?;
@@ -193,6 +211,17 @@ impl Config {
     }
 }
 
+/// Operator-declared connectivity capability, not a runtime reachability or uptime proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkUplink {
+    /// Internet access independent of the overlay; consuming nodes must offer exit service.
+    #[default]
+    IndependentInternet,
+    /// Only local links are available; offering overlay-derived Internet egress is forbidden.
+    LocalOnly,
+}
+
 /// Overlay discovery configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -201,6 +230,11 @@ pub struct NetworkConfig {
     pub name: String,
     /// Strict wire protocol version.
     pub protocol_version: u16,
+    /// Declared uplink capability; local-only routes use authenticated direct-link underlays.
+    pub uplink: NetworkUplink,
+    /// Optional explicit independent Exit uplink. Availability is observed at runtime; this
+    /// setting neither enables Exit consent nor proves end-to-end Internet reachability.
+    pub independent_egress_interface: Option<String>,
     /// Canonical operator identity; required only when relay or exit service is enabled.
     pub operator_id: Option<String>,
     /// libp2p listen multiaddresses; empty delegates to safe agent defaults.
@@ -211,6 +245,16 @@ pub struct NetworkConfig {
     pub candidate_pool_size: usize,
     /// Maximum advertisement lifetime.
     pub advertisement_ttl_seconds: u64,
+    /// Self-declared coarse service region used only as an untrusted diversity hint.
+    pub advertised_region: String,
+    /// Self-declared ISO-like country code used only as an untrusted diversity hint.
+    pub advertised_country_code: String,
+    /// Self-declared origin ASN hint; zero means unspecified for dormant or local-only nodes.
+    pub advertised_asn: u32,
+    /// Canonical IPv4 /24 origin hint for service-role selection.
+    pub advertised_ipv4_prefix: Option<String>,
+    /// Canonical IPv6 /48 origin hint for service-role selection.
+    pub advertised_ipv6_prefix: Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -218,20 +262,31 @@ impl Default for NetworkConfig {
         Self {
             name: "VOLPAROSSA".into(),
             protocol_version: PROTOCOL_VERSION,
+            uplink: NetworkUplink::default(),
+            independent_egress_interface: None,
             operator_id: None,
             listen_addresses: Vec::new(),
             bootstrap_peers: Vec::new(),
             candidate_pool_size: 200,
             advertisement_ttl_seconds: 300,
+            advertised_region: "unknown".into(),
+            advertised_country_code: "ZZ".into(),
+            advertised_asn: 0,
+            advertised_ipv4_prefix: None,
+            advertised_ipv6_prefix: None,
         }
     }
 }
 
-/// Independently enabled roles. Exit is deliberately off by default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Explicit network participation roles. Installation is dormant by default.
+///
+/// A production client must offer relay service and, with an independent uplink, exit service.
+/// Local-only nodes cannot enable exits. Service-only nodes are permitted.
+/// Development mode may isolate roles for disposable integration fixtures.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RolesConfig {
-    /// Permit local client sessions.
+    /// Permit local client sessions; production requires contribution matching uplink capability.
     pub client: bool,
     /// Permit authorised relay forwarding.
     pub relay: bool,
@@ -239,14 +294,27 @@ pub struct RolesConfig {
     pub exit: bool,
 }
 
-impl Default for RolesConfig {
-    fn default() -> Self {
-        Self {
-            client: true,
-            relay: false,
-            exit: false,
-        }
+fn validate_roles(
+    mode: RuntimeMode,
+    uplink: NetworkUplink,
+    roles: RolesConfig,
+) -> Result<(), ConfigError> {
+    if uplink == NetworkUplink::LocalOnly && roles.exit {
+        return Err(validation(
+            "roles.exit",
+            "local-only nodes cannot offer exit service; egress requires independent Internet access",
+        ));
     }
+    if mode == RuntimeMode::Production
+        && roles.client
+        && (!roles.relay || (uplink == NetworkUplink::IndependentInternet && !roles.exit))
+    {
+        return Err(validation(
+            "roles.client",
+            "client participation requires relay service and, with independent Internet access, exit service; configure their capacity and policy explicitly",
+        ));
+    }
+    Ok(())
 }
 
 /// Path selection settings.
@@ -298,6 +366,23 @@ pub struct CapacityConfig {
     pub maximum_exit_sessions: u32,
 }
 
+/// Explicit operator-known upload bottleneck and aggregate contribution ceiling.
+///
+/// This is neither a NIC line-speed measurement nor automatic spare-capacity discovery. The
+/// disabled default is inert; runtime participation separately owns scheduler installation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SharingConfig {
+    /// Enable scheduler installation only when the node explicitly starts participating.
+    pub enabled: bool,
+    /// One physical underlay interface name, resolved and verified by the helper.
+    pub interface: String,
+    /// Operator-known total usable upload in decimal Mbps, not the NIC's reported link speed.
+    pub total_upload_mbps: u32,
+    /// Combined relay and exit upload ceiling on that one underlay, in decimal Mbps.
+    pub contribution_upload_ceiling_mbps: u32,
+}
+
 /// Route context and interception configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -310,6 +395,20 @@ pub struct RoutingConfig {
     pub kill_switch: bool,
     /// Explicitly unsafe development-only client-to-exit bypass.
     pub direct_exit_debug: bool,
+    /// Address family used by the first client route attempt.
+    pub client_address_family: ClientAddressFamily,
+    /// Minimum client-route upload capacity in decimal Mbps.
+    pub client_minimum_upload_mbps: u32,
+    /// Minimum client-route download capacity in decimal Mbps.
+    pub client_minimum_download_mbps: u32,
+    /// Locally available upload capacity used to bound preselection in decimal Mbps.
+    pub client_local_upload_mbps: u32,
+    /// Locally available download capacity used to bound preselection in decimal Mbps.
+    pub client_local_download_mbps: u32,
+    /// Conservative upload ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_upload_mbps: u32,
+    /// Conservative download ceiling for one preselection attempt in decimal Mbps.
+    pub client_capacity_ceiling_download_mbps: u32,
 }
 
 impl Default for RoutingConfig {
@@ -319,8 +418,26 @@ impl Default for RoutingConfig {
             maximum_active_contexts: 64,
             kill_switch: true,
             direct_exit_debug: false,
+            client_address_family: ClientAddressFamily::Ipv4,
+            client_minimum_upload_mbps: 10,
+            client_minimum_download_mbps: 10,
+            client_local_upload_mbps: 100,
+            client_local_download_mbps: 100,
+            client_capacity_ceiling_upload_mbps: 80,
+            client_capacity_ceiling_download_mbps: 80,
         }
     }
+}
+
+/// Explicit address family for the first client route attempt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAddressFamily {
+    /// Use IPv4 advertisements and native path evidence.
+    #[default]
+    Ipv4,
+    /// Use IPv6 advertisements and native path evidence.
+    Ipv6,
 }
 
 /// Supported TCP tunnel type.
@@ -516,6 +633,21 @@ fn validate_exact_version(version: u16) -> Result<(), ConfigError> {
 }
 
 fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError> {
+    if let Some(interface) = &network.independent_egress_interface {
+        if network.uplink == NetworkUplink::LocalOnly
+            || interface.is_empty()
+            || interface.len() > 15
+            || matches!(interface.as_str(), "." | ".." | "lo")
+            || !interface
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        {
+            return Err(validation(
+                "network.independent_egress_interface",
+                "requires independent_internet and one non-loopback interface name of 1..=15 ASCII letters, digits, '_', '.' or '-'",
+            ));
+        }
+    }
     validate_address_list(
         "network.listen_addresses",
         &network.listen_addresses,
@@ -526,6 +658,87 @@ fn validate_network_addresses(network: &NetworkConfig) -> Result<(), ConfigError
         &network.bootstrap_peers,
         MAX_BOOTSTRAP_PEERS,
     )
+}
+
+fn validate_advertisement_origin(
+    roles: RolesConfig,
+    network: &NetworkConfig,
+) -> Result<(), ConfigError> {
+    if network.advertised_region.is_empty()
+        || network.advertised_region.len() > 32
+        || !network.advertised_region.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(validation(
+            "network.advertised_region",
+            "must be 1..=32 lowercase ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    if network.advertised_country_code.len() != 2
+        || !network
+            .advertised_country_code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(validation(
+            "network.advertised_country_code",
+            "must contain exactly two uppercase ASCII letters",
+        ));
+    }
+    if let Some(prefix) = network.advertised_ipv4_prefix.as_deref() {
+        if !canonical_ipv4_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "must be a canonical IPv4 /24 network",
+            ));
+        }
+    }
+    if let Some(prefix) = network.advertised_ipv6_prefix.as_deref() {
+        if !canonical_ipv6_prefix(prefix) {
+            return Err(validation(
+                "network.advertised_ipv6_prefix",
+                "must be a canonical IPv6 /48 network",
+            ));
+        }
+    }
+    if network.uplink == NetworkUplink::IndependentInternet && (roles.relay || roles.exit) {
+        if network.advertised_asn == 0 {
+            return Err(validation(
+                "network.advertised_asn",
+                "an enabled relay or exit requires a non-zero origin ASN hint",
+            ));
+        }
+        if network.advertised_ipv4_prefix.is_none() && network.advertised_ipv6_prefix.is_none() {
+            return Err(validation(
+                "network.advertised_ipv4_prefix",
+                "an enabled relay or exit requires an IPv4 /24 or IPv6 /48 origin hint",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_ipv4_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    prefix == "24" && address.octets()[3] == 0 && format!("{address}/24") == value
+}
+
+fn canonical_ipv6_prefix(value: &str) -> bool {
+    let Some((address, prefix)) = value.rsplit_once('/') else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    prefix == "48"
+        && address.octets()[6..].iter().all(|byte| *byte == 0)
+        && format!("{address}/48") == value
 }
 
 fn validate_address_list(
@@ -646,6 +859,42 @@ fn validate_capacity(roles: RolesConfig, capacity: &CapacityConfig) -> Result<()
     Ok(())
 }
 
+fn validate_sharing(sharing: &SharingConfig) -> Result<(), ConfigError> {
+    let name = sharing.interface.as_str();
+    if (sharing.enabled || !name.is_empty())
+        && (!(1..=15).contains(&name.len())
+            || matches!(name, "." | "..")
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+    {
+        return Err(validation(
+            "sharing.interface",
+            "must be a 1..=15 byte ASCII interface name using letters, digits, '_', '-' or '.', not a path or '.'/'..'",
+        ));
+    }
+    let minimum = u32::from(sharing.enabled);
+    validate_range(
+        "sharing.total_upload_mbps",
+        sharing.total_upload_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    validate_range(
+        "sharing.contribution_upload_ceiling_mbps",
+        sharing.contribution_upload_ceiling_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    if sharing.enabled && sharing.contribution_upload_ceiling_mbps > sharing.total_upload_mbps {
+        return Err(validation(
+            "sharing.contribution_upload_ceiling_mbps",
+            "must not exceed the operator-known total upload",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), ConfigError> {
     validate_range(
         "routing.context_ttl_seconds",
@@ -669,6 +918,50 @@ fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), Co
         return Err(validation(
             "routing.direct_exit_debug",
             "direct client-exit connections are development-only and disclose the client address",
+        ));
+    }
+    for (field, value) in [
+        (
+            "routing.client_minimum_upload_mbps",
+            routing.client_minimum_upload_mbps,
+        ),
+        (
+            "routing.client_minimum_download_mbps",
+            routing.client_minimum_download_mbps,
+        ),
+        (
+            "routing.client_local_upload_mbps",
+            routing.client_local_upload_mbps,
+        ),
+        (
+            "routing.client_local_download_mbps",
+            routing.client_local_download_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_upload_mbps",
+            routing.client_capacity_ceiling_upload_mbps,
+        ),
+        (
+            "routing.client_capacity_ceiling_download_mbps",
+            routing.client_capacity_ceiling_download_mbps,
+        ),
+    ] {
+        validate_range(field, value, 1, MAX_BANDWIDTH_MBPS)?;
+    }
+    if routing.client_capacity_ceiling_upload_mbps < routing.client_minimum_upload_mbps
+        || routing.client_capacity_ceiling_download_mbps < routing.client_minimum_download_mbps
+    {
+        return Err(validation(
+            "routing.client_capacity_ceiling_upload_mbps",
+            "client capacity ceiling must satisfy the minimum in both directions",
+        ));
+    }
+    if routing.client_local_upload_mbps < routing.client_capacity_ceiling_upload_mbps
+        || routing.client_local_download_mbps < routing.client_capacity_ceiling_download_mbps
+    {
+        return Err(validation(
+            "routing.client_local_upload_mbps",
+            "local client capacity must satisfy the conservative ceiling in both directions",
         ));
     }
     Ok(())
@@ -781,12 +1074,27 @@ mod tests {
         let config = Config::default();
         config.validate().expect("defaults must validate");
         assert_eq!(config.network.protocol_version, 4);
+        assert_eq!(config.network.uplink, NetworkUplink::IndependentInternet);
         assert_eq!(config.network.operator_id, None);
-        assert!(config.roles.client);
+        assert_eq!(config.sharing, SharingConfig::default());
+        assert!(!config.sharing.enabled);
+        assert!(!config.roles.client);
         assert!(!config.roles.relay);
         assert!(!config.roles.exit);
         assert!(config.routing.kill_switch);
         assert!(!config.routing.direct_exit_debug);
+        assert_eq!(
+            config.routing.client_address_family,
+            ClientAddressFamily::Ipv4
+        );
+        assert!(
+            config.routing.client_local_upload_mbps
+                >= config.routing.client_capacity_ceiling_upload_mbps
+        );
+        assert!(
+            config.routing.client_capacity_ceiling_upload_mbps
+                >= config.routing.client_minimum_upload_mbps
+        );
         assert!(config.quic.require_multipath);
         assert_eq!(config.quic.minimum_paths, 2);
         assert!(!config.quic.allow_degraded_single_path);
@@ -799,6 +1107,344 @@ mod tests {
         let shipped = include_str!("../../../config/examples/default.yaml");
         let actual = Config::from_yaml(shipped).expect("shipped default YAML must validate");
         assert_eq!(actual, Config::default());
+    }
+
+    #[test]
+    fn sharing_is_optional_disabled_and_does_not_activate_roles() {
+        fn assert_copy<T: Copy>() {}
+
+        let absent = Config::from_yaml("{}").expect("optional sharing");
+        assert_eq!(absent.sharing, SharingConfig::default());
+        let configured = Config::from_yaml("sharing:\n  enabled: true\n  interface: enp1s0\n  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 60\n")
+            .expect("explicit operator-known upload settings");
+        assert!(configured.sharing.enabled);
+        assert_eq!(configured.roles, RolesConfig::default());
+        assert_eq!(
+            Config::from_yaml(&configured.to_yaml().expect("YAML")).expect("round trip"),
+            configured
+        );
+        assert_copy::<CapacityConfig>();
+    }
+
+    #[test]
+    fn sharing_rejects_unknown_fields_and_non_interface_names() {
+        assert!(Config::from_yaml("sharing:\n  download_mbps: 50\n").is_err());
+        for name in [
+            "",
+            ".",
+            "..",
+            "eth0/../eth1",
+            "/sys/class/net",
+            "veth0@if1",
+            "eth:0",
+            "eth 0",
+            "eth\n0",
+            "éth0",
+            "abcdefghijklmnop",
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: name.to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 50,
+                },
+                ..Config::default()
+            };
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigError::Validation {
+                        field: "sharing.interface",
+                        ..
+                    })
+                ),
+                "invalid name must fail: {name:?}"
+            );
+        }
+        for name in [
+            "e",
+            "enp1s0",
+            "lan_1",
+            "uplink-1",
+            "enp1s0.100",
+            "abcdefghijklmno",
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: name.to_owned(),
+                    total_upload_mbps: 100,
+                    contribution_upload_ceiling_mbps: 100,
+                },
+                ..Config::default()
+            };
+            config
+                .validate()
+                .expect("bounded interface name, no filesystem lookup");
+        }
+    }
+
+    #[test]
+    fn sharing_requires_positive_bounded_ordered_enabled_rates() {
+        for (total, contribution) in [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (100, 101),
+            (MAX_BANDWIDTH_MBPS + 1, 1),
+            (MAX_BANDWIDTH_MBPS, MAX_BANDWIDTH_MBPS + 1),
+        ] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: total,
+                    contribution_upload_ceiling_mbps: contribution,
+                },
+                ..Config::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "unsafe enabled rates: {total}/{contribution}"
+            );
+        }
+        for (total, contribution) in [(1, 1), (100, 50), (MAX_BANDWIDTH_MBPS, MAX_BANDWIDTH_MBPS)] {
+            let config = Config {
+                sharing: SharingConfig {
+                    enabled: true,
+                    interface: "eth0".to_owned(),
+                    total_upload_mbps: total,
+                    contribution_upload_ceiling_mbps: contribution,
+                },
+                ..Config::default()
+            };
+            config.validate().expect("bounded ordered upload ceilings");
+        }
+    }
+
+    fn explicit_participant_config() -> Config {
+        let mut config = Config {
+            roles: RolesConfig {
+                client: true,
+                relay: true,
+                exit: true,
+            },
+            ..Config::default()
+        };
+        config.network.operator_id = Some("participant-a".to_owned());
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
+        config.capacity = CapacityConfig {
+            relay_upload_limit_mbps: 100,
+            relay_download_limit_mbps: 100,
+            exit_upload_limit_mbps: 100,
+            exit_download_limit_mbps: 100,
+            maximum_relay_sessions: 10,
+            maximum_exit_sessions: 10,
+        };
+        config.policy.manifest_path = "/etc/volparossa/policy.cbor".into();
+        config
+    }
+
+    #[test]
+    fn uplink_capability_determines_reciprocity_and_forbids_local_only_exits() {
+        for uplink in [NetworkUplink::IndependentInternet, NetworkUplink::LocalOnly] {
+            for runtime_mode in [RuntimeMode::Production, RuntimeMode::Development] {
+                for bits in 0_u8..8 {
+                    let mut config = explicit_participant_config();
+                    config.network.uplink = uplink;
+                    config.runtime_mode = runtime_mode;
+                    config.roles = RolesConfig {
+                        client: bits & 1 != 0,
+                        relay: bits & 2 != 0,
+                        exit: bits & 4 != 0,
+                    };
+                    let forbidden_field = if uplink == NetworkUplink::LocalOnly && config.roles.exit
+                    {
+                        Some("roles.exit")
+                    } else if runtime_mode == RuntimeMode::Production
+                        && config.roles.client
+                        && (!config.roles.relay
+                            || (uplink == NetworkUplink::IndependentInternet && !config.roles.exit))
+                    {
+                        Some("roles.client")
+                    } else {
+                        None
+                    };
+                    if let Some(expected_field) = forbidden_field {
+                        assert!(
+                            matches!(
+                                config.validate(),
+                                Err(ConfigError::Validation { field, .. }) if field == expected_field
+                            ),
+                            "uplink={uplink:?}, mode={runtime_mode:?}, roles={bits}"
+                        );
+                    } else {
+                        config
+                            .validate()
+                            .expect("dormant, contributing, or isolated development node");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_only_uplink_needs_no_fabricated_origin_or_exit_capacity() {
+        let mut config = explicit_participant_config();
+        config.network.uplink = NetworkUplink::LocalOnly;
+        config.roles.exit = false;
+        config.network.advertised_asn = 0;
+        config.network.advertised_ipv4_prefix = None;
+        config.capacity.exit_upload_limit_mbps = 0;
+        config.capacity.exit_download_limit_mbps = 0;
+        config.capacity.maximum_exit_sessions = 0;
+        config.policy.manifest_path.clear();
+        config
+            .validate()
+            .expect("local contribution without a fake exit or origin");
+        assert_eq!(
+            Config::from_yaml(&config.to_yaml().expect("serialize")).expect("parse"),
+            config
+        );
+
+        for missing in 0..4 {
+            let mut missing_contribution = config.clone();
+            match missing {
+                0 => missing_contribution.capacity.relay_upload_limit_mbps = 0,
+                1 => missing_contribution.capacity.relay_download_limit_mbps = 0,
+                2 => missing_contribution.capacity.maximum_relay_sessions = 0,
+                _ => missing_contribution.network.operator_id = None,
+            }
+            assert!(missing_contribution.validate().is_err());
+        }
+
+        config.network.advertised_ipv4_prefix = Some("10.20.30.1/24".into());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation {
+                field: "network.advertised_ipv4_prefix",
+                ..
+            })
+        ));
+        config.network.advertised_ipv4_prefix = Some("10.20.30.0/24".into());
+        config.network.advertised_ipv6_prefix = Some("fd00:1234:5678::1/48".into());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation {
+                field: "network.advertised_ipv6_prefix",
+                ..
+            })
+        ));
+        config.network.advertised_ipv6_prefix = Some("fd00:1234:5678::/48".into());
+        config.network.advertised_asn = 64_512;
+        config
+            .validate()
+            .expect("optional supplied origins remain canonical");
+    }
+
+    #[test]
+    fn uplink_yaml_defaults_round_trips_and_rejects_unknown_capabilities() {
+        assert_eq!(
+            Config::from_yaml("{}")
+                .expect("legacy config")
+                .network
+                .uplink,
+            NetworkUplink::IndependentInternet
+        );
+        for (value, expected) in [
+            ("independent_internet", NetworkUplink::IndependentInternet),
+            ("local_only", NetworkUplink::LocalOnly),
+        ] {
+            let config =
+                Config::from_yaml(&format!("network:\n  uplink: {value}\n")).expect("known uplink");
+            assert_eq!(config.network.uplink, expected);
+            let serialized = config.to_yaml().expect("serialize");
+            assert!(serialized.contains(&format!("uplink: {value}\n")));
+            assert_eq!(Config::from_yaml(&serialized).expect("round trip"), config);
+        }
+        assert!(matches!(
+            Config::from_yaml("network:\n  uplink: automatic\n"),
+            Err(ConfigError::Yaml(_))
+        ));
+    }
+
+    #[test]
+    fn independent_egress_interface_is_optional_and_never_enables_roles() {
+        assert_eq!(Config::default().network.independent_egress_interface, None);
+        let configured = Config::from_yaml("network:\n  independent_egress_interface: enp3s0.10\n")
+            .expect("operator-selected interface does not activate participation");
+        assert_eq!(configured.roles, RolesConfig::default());
+        assert_eq!(
+            configured.network.independent_egress_interface.as_deref(),
+            Some("enp3s0.10")
+        );
+        assert_eq!(
+            Config::from_yaml(&configured.to_yaml().expect("serialize")).expect("round trip"),
+            configured
+        );
+        for invalid in ["", ".", "..", "lo", "../wan", "wan 1", "1234567890123456"] {
+            let mut config = configured.clone();
+            config.network.independent_egress_interface = Some(invalid.into());
+            assert!(config.validate().is_err());
+        }
+        let mut local = configured;
+        local.network.uplink = NetworkUplink::LocalOnly;
+        assert!(matches!(
+            local.validate(),
+            Err(ConfigError::Validation {
+                field: "network.independent_egress_interface",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn enabling_client_does_not_implicitly_enable_internet_egress() {
+        let error = Config::from_yaml("roles:\n  client: true\n")
+            .expect_err("client participation requires explicit service consent");
+        assert!(matches!(
+            error,
+            ConfigError::Validation {
+                field: "roles.client",
+                ..
+            }
+        ));
+        assert_eq!(
+            Config::from_yaml("{}").expect("dormant config"),
+            Config::default()
+        );
+    }
+
+    #[test]
+    fn reciprocal_participation_keeps_all_capacity_and_policy_prerequisites() {
+        let config = explicit_participant_config();
+        config
+            .validate()
+            .expect("explicit reciprocal participation");
+        for missing in 0_u8..6 {
+            let mut missing_capacity = config.clone();
+            match missing {
+                0 => missing_capacity.capacity.relay_upload_limit_mbps = 0,
+                1 => missing_capacity.capacity.relay_download_limit_mbps = 0,
+                2 => missing_capacity.capacity.maximum_relay_sessions = 0,
+                3 => missing_capacity.capacity.exit_upload_limit_mbps = 0,
+                4 => missing_capacity.capacity.exit_download_limit_mbps = 0,
+                5 => missing_capacity.capacity.maximum_exit_sessions = 0,
+                _ => unreachable!(),
+            }
+            assert!(missing_capacity.validate().is_err());
+        }
+        let mut missing_manifest = config.clone();
+        missing_manifest.policy.manifest_path.clear();
+        assert!(missing_manifest.validate().is_err());
+        let mut missing_operator = config.clone();
+        missing_operator.network.operator_id = None;
+        assert!(missing_operator.validate().is_err());
+        let mut missing_origin = config;
+        missing_origin.network.advertised_ipv4_prefix = None;
+        assert!(missing_origin.validate().is_err());
     }
 
     #[test]
@@ -874,7 +1520,26 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.network.operator_id = Some("operator-a".to_owned());
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
         config.validate().expect("fully explicit exit is valid");
+    }
+
+    #[test]
+    fn service_origin_hints_are_explicit_and_canonical() {
+        let mut config = Config::default();
+        config.roles.relay = true;
+        config.network.operator_id = Some("operator-relay".to_owned());
+        config.capacity.maximum_relay_sessions = 4;
+        config.capacity.relay_upload_limit_mbps = 100;
+        config.capacity.relay_download_limit_mbps = 100;
+        assert!(config.validate().is_err());
+
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.12.34.1/24".to_owned());
+        assert!(config.validate().is_err());
+        config.network.advertised_ipv4_prefix = Some("44.12.34.0/24".to_owned());
+        config.validate().expect("canonical service origin hints");
     }
 
     #[test]
@@ -886,6 +1551,31 @@ mod tests {
         config.routing.direct_exit_debug = false;
         config.privacy.persist_domain_logs = true;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn client_route_profile_is_positive_bounded_and_monotone() {
+        let mut config = Config::default();
+        config.routing.client_minimum_upload_mbps = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_capacity_ceiling_download_mbps =
+            config.routing.client_minimum_download_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_upload_mbps =
+            config.routing.client_capacity_ceiling_upload_mbps - 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_local_download_mbps = MAX_BANDWIDTH_MBPS + 1;
+        assert!(config.validate().is_err());
+
+        let mut config = Config::default();
+        config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        config.validate().expect("IPv6 client profile validates");
     }
 
     #[test]

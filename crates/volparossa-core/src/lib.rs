@@ -12,21 +12,34 @@ mod time;
 
 pub use advertisement::{
     AdvertisementError, MAX_ADVERTISEMENT_ENDPOINTS, MAX_ADVERTISEMENT_TTL_SECONDS,
-    NetworkMetadata, NodeAdvertisement, NodeCapabilities, NodeQuality, NodeRoles,
+    NetworkMetadata, NetworkUplink, NodeAdvertisement, NodeCapabilities, NodeQuality, NodeRoles,
     ObservedNetworkOrigin,
 };
-pub use capacity::{Bandwidth, CapacityError, CapacitySnapshot, ConservativeCapacity};
+pub use capacity::{
+    Bandwidth, CapacityError, CapacitySnapshot, ConservativeCapacity, MAX_BANDWIDTH_MBPS,
+};
 pub use id::{
     ClientEphemeralId, FlowId, IdentifierError, LocalProfileId, NodeId, OperatorId, OriginKey,
     PathId, PeerId, ReservationId, RouteContextId,
 };
-pub use network::{ObservedNetworkPrefix, is_public_routable_ip};
+pub use network::{ObservedNetworkPrefix, is_local_lan_ip, is_public_routable_ip};
 pub use time::{TimeError, UnixTime};
 
 use serde::{Deserialize, Serialize};
 
 /// The incompatible control and advertisement protocol version implemented by this release.
 pub const PROTOCOL_VERSION: u16 = 4;
+
+/// Linux `TC_PRIO_FILLER` socket priority for contributed Exit Internet payload traffic.
+///
+/// This unprivileged quality-of-service hint selects the helper-owned scheduler's contribution band;
+/// it is not security authority or proof of a socket's role.
+pub const CONTRIBUTION_SOCKET_PRIORITY: u32 = 1;
+
+/// Helper-owned `WireGuard` contribution classifier bit, independent of ingress bypass marks.
+///
+/// This identifies contributed traffic to the local scheduler, not standalone authorization.
+pub const CONTRIBUTION_MARK_BIT: u32 = 0x0000_2000;
 
 /// A transport advertised by a node or requested for a route.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]

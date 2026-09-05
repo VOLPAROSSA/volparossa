@@ -2,8 +2,9 @@
 //!
 //! Stored advertisements may nominate identities for selection, but they never authorize an RPC.
 //! Every control relay, forwarded exit, and prospective datapath relay is resolved again through
-//! the discovery actor immediately before setup. Production currently stops on the typed
-//! `ExecuteProbe` Unavailable response before helper preparation.
+//! the discovery actor immediately before setup. The local Connect boundary now owns one affine
+//! A1/native-preselection attempt through a helper-backed native path proof. The resulting affine
+//! proof owner remains local until the later full-route admission stage consumes it.
 
 #![allow(
     dead_code,
@@ -13,63 +14,109 @@
 mod retirement;
 mod selection_bridge;
 
-pub(crate) use selection_bridge::{PreparedPreselectionEvidence, prepare_preselection_evidence};
+pub(crate) use selection_bridge::{
+    PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
+};
 
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 
 use libp2p::PeerId as Libp2pPeerId;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::{
-    sync::{oneshot, watch},
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{Mutex, oneshot, watch},
     time::{Instant, timeout},
 };
+use volparossa_config::{ClientAddressFamily, Config, TcpTransport};
 use volparossa_core::{
-    Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, ServiceRole,
+    Bandwidth, IpFamily, NodeId, ObservedNetworkPrefix, OperatorId, PathId, ServiceRole,
     Transport as SelectionTransport, UnixTime,
 };
 use volparossa_discovery::{
-    DatapathRelayOperation, DatapathRelayRequest, DatapathRelayResponse, ExitForwardOperation,
-    ExitForwardRequest, ExitForwardResponse, ForwardStatus,
+    DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
+    DatapathRelayResponse, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
+    ExitMpquicSessionSignal, ExitMptcpSessionSignal as DiscoveryExitMptcpSessionSignal,
+    ForwardStatus, MpquicSessionPathProof, MpquicSessionStartRequest, MptcpSessionPathProof,
+    MptcpSessionStartRequest, UdpExitSessionSignal as DiscoveryUdpExitSessionSignal,
+    UdpSessionStartRequest,
 };
+use volparossa_local_control::{PathState, PathSummary};
+use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
-    MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, SignedEnvelope, Transport,
-    decode_canonical,
+    MAX_CONTROL_MESSAGE_SIZE, ProbeAddressFamily, ProbeLegEvidence, ReplayCache, SignedEnvelope,
+    TimePolicy, Transport, decode_canonical, encode_canonical,
 };
+use volparossa_quic::{NativeClient, NativePathStatus};
 use volparossa_reservation::{
-    ExitReservationIntent, RelayPathIntent, ReservationCoordinator, SignedExitFinalizeRequest,
-    SignedProbePermitRequest, VerifiedExitCapacityHold, VerifiedFinalizedExitBundle,
-    VerifiedProbePermit, VerifiedRelayGrant, VerifiedRelayProbe,
+    ClientNativeRouteAuthorization, ExitReservationIntent, RelayPathIntent, ReservationCoordinator,
+    SignedExitFinalizeRequest, SignedProbePermitRequest, VerifiedExitCapacityHold,
+    VerifiedFinalizedExitBundle, VerifiedProbePermit, VerifiedRelayGrant, VerifiedRelayProbe,
 };
 use volparossa_routing::{
-    ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
-    DestroyContext, DestroyedContext, LeaseActivation, LeaseCommit, LeasePlan, MAX_HELPER_PATHS,
-    MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PreparedLeaseBatch, PublicUdpEndpoint,
+    AcquireTransportSocket, ActivateLeaseBatch, ActivatedLeaseBatch, CommitLeaseBatch,
+    CommittedLeaseBatch, ContextRole, DestroyedContext, HelperResult, LeaseActivation, LeaseCommit,
+    LeasePlan, MAX_HELPER_PATHS, MAX_HELPER_RATE_MBPS, PrepareLeaseBatch, PublicUdpEndpoint,
     ReconciledExpiredPrepare, WireguardRole,
 };
 #[cfg(test)]
+use volparossa_routing::{PreparedLeaseBatch, TransportSocketAddress, TransportSocketKind};
+#[cfg(test)]
 use volparossa_selection::Candidate;
 use volparossa_selection::{
-    FilterRequirements, ProjectedRelayPath, RelaySelectionPolicy, select_projected_relay_paths,
+    FilterRequirements, HysteresisPolicy, PathMetrics, PathState as SelectionPathState, PathStatus,
+    ProjectedRelayPath, RelaySelectionPolicy, ReplacementDecision, ReplacementHysteresis,
+    SelectionMix, select_projected_relay_paths,
 };
-use volparossa_wireguard::{HelperContextHandle, PublicWireGuardEndpoint};
+use volparossa_tcp_proxy::VerifiedMptcpRoute;
+use volparossa_udp::{
+    AuthorizedUdpFlow, CommittedQuicUdpTransport, CommittedUdpRole, ProtectedExitUdpTarget,
+    SINGLE_RELAY_UDP_EXIT_PORT, SingleRelayUdpClient, VerifiedSingleRelayPath,
+    committed_quic_udp_socket_request,
+};
+#[cfg(test)]
+use volparossa_wireguard::overlay_addresses;
+use volparossa_wireguard::{HELPER_HANDLE_BYTES, HelperContextHandle, PublicWireGuardEndpoint};
 
 use crate::{
+    client_ingress::{
+        BrowserQuicFlowBinding, PolicyAuthorizedDnsIngress, PolicyAuthorizedTcpIngress,
+        PolicyAuthorizedUdpIngress, RouteAuthorizedUdpIngress,
+    },
     discovery::{
-        AdvertisementPayloadHash, DirectRelayCapability, DiscoveryControlHandle,
+        AdvertisementPayloadHash, ClientPreselectionError, ClientPreselectionParameters,
+        DirectRelayCapability, DiscoveryControlHandle, EndpointTraversalBinding,
         ForwardedExitCapability, OutboundReservationError,
     },
     endpoint_leases::{LocalEndpointLeaseBatch, bind_prepared_endpoint_leases},
     helper::{
         HelperClient, HelperClientError, PrepareLeaseBatchFailure, PrepareReconciliationAuthority,
+        RuntimeBoundPreparedLeaseBatch,
     },
+    mpquic_runtime::{
+        MAXIMUM_MPQUIC_TUNNEL_MTU, MINIMUM_MPQUIC_TUNNEL_MTU, ProductionMpquicPreflight,
+        ProductionMpquicSession,
+    },
+    mptcp_flow_runtime::{ActiveProductionMptcpClientFlow, activate_production_mptcp_client_flow},
+    mptcp_transport::{
+        ClientMptcpTransport, ExitMptcpListenerSignal, MptcpTransportError,
+        PRODUCTION_MPTCP_EXIT_PORT,
+    },
+    paths::DEFAULT_MPQUIC_SOCKET,
+    state::AgentState,
 };
 use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
 
@@ -80,7 +127,2918 @@ const MAXIMUM_RESERVATION_LIFETIME_MS: u64 = 15 * 60 * 1_000;
 const MAXIMUM_PHASE_LIFETIME_MS: u64 = 30 * 1_000;
 const MAXIMUM_REPLAY_CAPACITY: usize = 65_536;
 const MAXIMUM_RETIREMENT_OWNERS: usize = 64;
+const MAXIMUM_CLIENT_BROWSER_QUIC_FLOWS: usize = 256;
 const ID_BYTES: usize = 16;
+const CLIENT_SINGLE_RELAY_UDP_PORT: u16 = 40_001;
+const MAXIMUM_TCP_STREAM_CHUNK_BYTES: usize = 64 * 1_024;
+const OPEN_TCP_LIFETIME_MS: u64 = 60_000;
+const MPQUIC_READY_WAIT: Duration = Duration::from_secs(10);
+const TCP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+// The discovery attempt owner cools for 30 seconds after a successful route bootstrap. Keep a
+// small bounded recovery window beyond it without extending any individual setup deadline.
+const TCP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
+const SINGLE_UDP_CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const SINGLE_UDP_CONNECT_RECOVERY_HORIZON: Duration = Duration::from_secs(35);
+
+/// Cloneable single-owner gate for the local Connect route bootstrap.
+#[derive(Clone)]
+pub(crate) struct ClientRouteControl {
+    state: Arc<Mutex<ClientRouteControlState>>,
+    tcp_connect: Arc<Mutex<()>>,
+    single_udp_connect: Arc<Mutex<()>>,
+    mpquic_socket: Arc<PathBuf>,
+    agent_state: Option<Arc<tokio::sync::RwLock<AgentState>>>,
+}
+
+impl Default for ClientRouteControl {
+    fn default() -> Self {
+        Self::new(PathBuf::from(DEFAULT_MPQUIC_SOCKET))
+    }
+}
+
+#[derive(Default)]
+enum ClientRouteControlState {
+    #[default]
+    Idle,
+    Connecting,
+    Established(Box<EstablishedClientRoute>),
+}
+
+struct EstablishedClientRoute {
+    expiry: ClientRouteExpiry,
+    transport: ClientTransportState,
+    tcp_flow: Option<ActiveProductionMptcpClientFlow>,
+    route: Option<ProductionRoute>,
+    orchestrator: ProductionRouteOrchestrator,
+    helper: HelperClient,
+}
+
+/// Immutable hard lifetime retained independently of transport-specific route ownership.
+///
+/// The wall deadline preserves the signed/helper authority boundary. Its monotonic projection
+/// additionally prevents a backward wall-clock adjustment from resurrecting an established route.
+#[derive(Clone, Copy, Debug)]
+struct ClientRouteExpiry {
+    hard_expires_at_ms: u64,
+    monotonic_deadline: Instant,
+}
+
+enum ClientTransportState {
+    TcpMptcp(ClientMptcpTransport),
+    UdpReady(CertificateBoundProductionUdpRoute),
+    UdpActive(ActiveProductionUdpRoute),
+    NativeUdp(Box<ActiveProductionNativeUdpRoute>),
+    Mpquic(Box<ActiveProductionMpquicRoute>),
+}
+
+enum ClientPathProjection {
+    None,
+    Mptcp(Vec<PathSummary>),
+    Mpquic(Vec<PathSummary>),
+    SingleUdp(PathSummary),
+}
+
+struct ActiveProductionNativeUdpRoute {
+    session: ProductionMpquicSession,
+    path: VerifiedSingleRelayPath,
+    identity: CommittedSingleUdpRouteIdentity,
+    binding: Option<RouteAuthorizedUdpIngress>,
+    lifetime: Option<GeneralUdpSessionLifetime>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GeneralUdpSessionLifetime {
+    expires_at_ms: u64,
+    absolute_deadline: Instant,
+    idle_timeout: Duration,
+    idle_deadline: Instant,
+}
+
+struct ActiveProductionMpquicRoute {
+    session: ProductionMpquicSession,
+    identity: CommittedRelayRouteIdentity,
+    health: ProductionMpquicPathHealth,
+    browser_flows: Vec<BrowserQuicFlowBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct NativePathCounters {
+    delivered_bytes: u64,
+    packets_lost: u64,
+    last_progress_at: UnixTime,
+}
+
+struct ProductionMpquicPathHealth {
+    statuses: BTreeMap<u32, PathStatus>,
+    counters: BTreeMap<u32, NativePathCounters>,
+    hysteresis: ReplacementHysteresis,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientPathMaintenance {
+    Unchanged,
+    Reconfigured,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedRelayPathIdentity {
+    path_id: u32,
+    relay_peer_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedRelayRouteIdentity {
+    route_context_id: [u8; ID_BYTES],
+    exit_peer_id: String,
+    paths: Vec<CommittedRelayPathIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommittedSingleUdpRouteIdentity {
+    route_context_id: [u8; ID_BYTES],
+    native_path: u32,
+    relay_peer_id: String,
+    exit_peer_id: String,
+}
+
+impl EstablishedClientRoute {
+    fn is_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        self.expiry.is_expired(wall_now_ms, monotonic_now)
+            || matches!(
+                &self.transport,
+                ClientTransportState::NativeUdp(active)
+                    if active.flow_expired(wall_now_ms, monotonic_now)
+            )
+    }
+
+    const fn progress(&self) -> ClientRouteProgress {
+        match &self.transport {
+            ClientTransportState::UdpReady(_) => ClientRouteProgress::UdpRouteReady,
+            ClientTransportState::TcpMptcp(_)
+            | ClientTransportState::UdpActive(_)
+            | ClientTransportState::NativeUdp(_)
+            | ClientTransportState::Mpquic(_) => ClientRouteProgress::TransportActive,
+        }
+    }
+
+    const fn matches_transport(&self, transport: Transport, native_single_udp: bool) -> bool {
+        matches!(
+            (&self.transport, transport, native_single_udp),
+            (ClientTransportState::TcpMptcp(_), Transport::TcpMptcp, _)
+                | (
+                    ClientTransportState::UdpReady(_) | ClientTransportState::UdpActive(_),
+                    Transport::UdpSinglePath,
+                    false
+                )
+                | (
+                    ClientTransportState::NativeUdp(_),
+                    Transport::UdpSinglePath,
+                    true
+                )
+                | (ClientTransportState::Mpquic(_), Transport::MultipathQuic, _)
+        )
+    }
+
+    async fn path_projection(&self) -> Result<ClientPathProjection, ClientRouteConnectError> {
+        match &self.transport {
+            ClientTransportState::TcpMptcp(_) => self
+                .route
+                .as_ref()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+                .committed_mptcp_paths()
+                .map(ClientPathProjection::Mptcp),
+            ClientTransportState::Mpquic(active) => active
+                .path_summaries()
+                .await
+                .map(ClientPathProjection::Mpquic),
+            ClientTransportState::NativeUdp(active) => active
+                .path_summary()
+                .await
+                .map(ClientPathProjection::SingleUdp),
+            ClientTransportState::UdpReady(_) | ClientTransportState::UdpActive(_) => {
+                Ok(ClientPathProjection::None)
+            }
+        }
+    }
+
+    async fn shutdown(self, agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>) {
+        // Capture the retired context before consuming its affine owner. A newer context's
+        // display must survive any delayed completion of this teardown.
+        let retired_context_id = self
+            .route
+            .as_ref()
+            .map(|route| route.established.request.parameters.route_context_id);
+        if let Some(flow) = self.tcp_flow {
+            flow.shutdown();
+        }
+        match self.transport {
+            ClientTransportState::TcpMptcp(transport) => {
+                let _ = transport.shutdown(&self.helper).await;
+            }
+            ClientTransportState::UdpReady(route) => {
+                let _ = Box::pin(route.disconnect()).await;
+            }
+            ClientTransportState::UdpActive(route) => {
+                let _ = route.shutdown().await;
+            }
+            ClientTransportState::NativeUdp(active) => {
+                let _ = active.session.shutdown().await;
+            }
+            ClientTransportState::Mpquic(active) => {
+                let _ = active.session.shutdown().await;
+            }
+        }
+        if let Some(route) = self.route {
+            let _ = Box::pin(route.disconnect()).await;
+        }
+        let _ = self.orchestrator.shutdown().await;
+        if let (Some(state), Some(context_id)) = (agent_state, retired_context_id) {
+            state
+                .write()
+                .await
+                .clear_committed_path_context(&context_id);
+        }
+    }
+}
+
+impl ActiveProductionNativeUdpRoute {
+    async fn path_summary(&self) -> Result<PathSummary, ClientRouteConnectError> {
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.identity.project(&statuses)
+    }
+
+    fn flow_expired(&self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        match (&self.binding, self.lifetime) {
+            (None, None) => false,
+            (Some(_), Some(lifetime)) => lifetime.is_expired(wall_now_ms, monotonic_now),
+            (None, Some(_)) | (Some(_), None) => true,
+        }
+    }
+
+    fn retirement_deadline(&self) -> Option<Instant> {
+        self.lifetime.map(GeneralUdpSessionLifetime::deadline)
+    }
+}
+
+impl CommittedSingleUdpRouteIdentity {
+    fn project(
+        &self,
+        statuses: &[NativePathStatus],
+    ) -> Result<PathSummary, ClientRouteConnectError> {
+        let [status] = statuses else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        if status.path_id != self.native_path {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(PathSummary {
+            route_context_id: self.route_context_id.to_vec(),
+            path_id: self.native_path,
+            relay_peer_id: self.relay_peer_id.clone(),
+            exit_peer_id: self.exit_peer_id.clone(),
+            state: if status.data_carrying {
+                PathState::Active
+            } else {
+                PathState::Reachable
+            } as i32,
+            smoothed_rtt_micros: status.smoothed_rtt_us,
+            user_bytes: status.delivered_bytes,
+        })
+    }
+}
+
+impl GeneralUdpSessionLifetime {
+    fn start(
+        idle_timeout: Duration,
+        expires_at_ms: u64,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Result<Self, ClientRouteConnectError> {
+        if idle_timeout.is_zero() || expires_at_ms <= wall_now_ms {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        let remaining_ms = expires_at_ms.saturating_sub(wall_now_ms);
+        let absolute_deadline = monotonic_now
+            .checked_add(Duration::from_millis(remaining_ms))
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        let idle_deadline = monotonic_now
+            .checked_add(idle_timeout)
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        Ok(Self {
+            expires_at_ms,
+            absolute_deadline,
+            idle_timeout,
+            idle_deadline,
+        })
+    }
+
+    fn record_activity(
+        &mut self,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Result<(), ClientRouteConnectError> {
+        if self.is_expired(wall_now_ms, monotonic_now) {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        self.idle_deadline = monotonic_now
+            .checked_add(self.idle_timeout)
+            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+        Ok(())
+    }
+
+    fn deadline(self) -> Instant {
+        self.absolute_deadline.min(self.idle_deadline)
+    }
+
+    fn is_expired(self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        wall_now_ms >= self.expires_at_ms || monotonic_now >= self.deadline()
+    }
+}
+
+impl ClientRouteExpiry {
+    fn from_hard_expiry(
+        hard_expires_at_unix: u64,
+        wall_now_ms: u64,
+        monotonic_now: Instant,
+    ) -> Self {
+        let hard_expires_at_ms = hard_expires_at_unix.saturating_mul(1_000);
+        let remaining = hard_expires_at_ms.saturating_sub(wall_now_ms);
+        let monotonic_deadline = monotonic_now
+            .checked_add(Duration::from_millis(remaining))
+            .unwrap_or(monotonic_now);
+        Self {
+            hard_expires_at_ms,
+            monotonic_deadline,
+        }
+    }
+
+    fn is_expired(self, wall_now_ms: u64, monotonic_now: Instant) -> bool {
+        wall_now_ms >= self.hard_expires_at_ms || monotonic_now >= self.monotonic_deadline
+    }
+}
+
+impl ActiveProductionMpquicRoute {
+    async fn path_summaries(&self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.identity
+            .project(&statuses, self.session.warm_path_ids())
+    }
+
+    async fn maintain(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
+        let now = UnixTime::from_secs(now_ms / 1_000);
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let unhealthy = self
+            .health
+            .observe(&statuses, now)
+            .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some(unhealthy_path_id) = unhealthy.first().copied() else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+
+        let warm_path_id = self.session.warm_path_ids().next();
+        if let Some(warm_path_id) = warm_path_id {
+            if !self
+                .health
+                .authorizes_replacement(unhealthy_path_id, warm_path_id, now)
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            self.session
+                .replace_active_path(unhealthy_path_id, warm_path_id, now_ms, MPQUIC_READY_WAIT)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            self.health
+                .record_replacement(unhealthy_path_id, warm_path_id, now)
+                .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        } else {
+            // A live browser flow may finish over the surviving native path during its bounded
+            // failover grace. Do not turn physical degradation into an explicit RemovePath while
+            // that would cross the route's immutable minimum: native and signed flow expiry still
+            // close the degraded association, and no new route can start below its full minimum.
+            if retain_degraded_path_for_active_browser_flow(
+                self.session.active_path_ids().len(),
+                self.session.minimum_paths(),
+                self.browser_flows.len(),
+            ) {
+                return Ok(ClientPathMaintenance::Unchanged);
+            }
+            self.session
+                .remove_active_path(unhealthy_path_id, now_ms, MPQUIC_READY_WAIT)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            self.health.retire(unhealthy_path_id);
+        }
+
+        let statuses = self
+            .session
+            .path_statuses()
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        self.health
+            .observe(&statuses, now)
+            .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if self.session.active_path_ids().len() < self.session.minimum_paths() {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(ClientPathMaintenance::Reconfigured)
+    }
+}
+
+const fn retain_degraded_path_for_active_browser_flow(
+    active_paths: usize,
+    minimum_paths: usize,
+    browser_flows: usize,
+) -> bool {
+    browser_flows != 0 && active_paths.saturating_sub(1) < minimum_paths
+}
+
+impl CommittedRelayRouteIdentity {
+    fn selected_mptcp_paths(
+        &self,
+        active_path_ids: &[u32],
+    ) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        let selected = active_path_ids.iter().copied().collect::<BTreeSet<_>>();
+        if !(2..=8).contains(&selected.len())
+            || selected.len() != active_path_ids.len()
+            || selected.iter().any(|path_id| {
+                self.paths
+                    .iter()
+                    .filter(|path| path.path_id == *path_id)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut paths = self
+            .paths
+            .iter()
+            .filter(|path| selected.contains(&path.path_id))
+            .map(|path| PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: path.path_id,
+                relay_peer_id: path.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: PathState::Reachable as i32,
+                smoothed_rtt_micros: 0,
+                user_bytes: 0,
+            })
+            .collect::<Vec<_>>();
+        paths.sort_unstable_by_key(|path| path.path_id);
+        Ok(paths)
+    }
+
+    fn project<I>(
+        &self,
+        statuses: &[NativePathStatus],
+        warm_path_ids: I,
+    ) -> Result<Vec<PathSummary>, ClientRouteConnectError>
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        if !(2..=8).contains(&statuses.len()) || statuses.len() > self.paths.len() {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let status_count = statuses.len();
+        let statuses = statuses
+            .iter()
+            .map(|status| (status.path_id, status))
+            .collect::<BTreeMap<_, _>>();
+        let identities = self
+            .paths
+            .iter()
+            .map(|identity| (identity.path_id, identity))
+            .collect::<BTreeMap<_, _>>();
+        if identities.len() != self.paths.len()
+            || statuses.len() != status_count
+            || statuses
+                .keys()
+                .any(|path_id| !identities.contains_key(path_id))
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let warm_path_ids = warm_path_ids.into_iter().collect::<Vec<_>>();
+        let warm_path_count = warm_path_ids.len();
+        let warm_path_ids = warm_path_ids.into_iter().collect::<BTreeSet<_>>();
+        if warm_path_ids.len() != warm_path_count
+            || warm_path_ids
+                .iter()
+                .any(|path_id| statuses.contains_key(path_id) || !identities.contains_key(path_id))
+            || statuses.len().saturating_add(warm_path_ids.len()) > self.paths.len()
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let mut summaries = Vec::with_capacity(statuses.len() + warm_path_ids.len());
+        for (path_id, status) in statuses {
+            let identity = identities
+                .get(&path_id)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            summaries.push(PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id: status.path_id,
+                relay_peer_id: identity.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: if status.data_carrying {
+                    PathState::Active as i32
+                } else {
+                    PathState::Reachable as i32
+                },
+                smoothed_rtt_micros: status.smoothed_rtt_us,
+                user_bytes: status.delivered_bytes,
+            });
+        }
+        for path_id in warm_path_ids {
+            let identity = identities
+                .get(&path_id)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            summaries.push(PathSummary {
+                route_context_id: self.route_context_id.to_vec(),
+                path_id,
+                relay_peer_id: identity.relay_peer_id.clone(),
+                exit_peer_id: self.exit_peer_id.clone(),
+                state: PathState::Backup as i32,
+                smoothed_rtt_micros: 0,
+                user_bytes: 0,
+            });
+        }
+        summaries.sort_unstable_by_key(|path| path.path_id);
+        Ok(summaries)
+    }
+}
+
+impl ProductionMpquicPathHealth {
+    fn new(
+        active_path_ids: &[u32],
+        warm_path_ids: impl IntoIterator<Item = u32>,
+        now: UnixTime,
+    ) -> Result<Self, ClientRouteConnectError> {
+        let mut statuses = BTreeMap::new();
+        for path_id in active_path_ids {
+            insert_health_status(&mut statuses, *path_id, SelectionPathState::Active, now)?;
+        }
+        for path_id in warm_path_ids {
+            insert_health_status(&mut statuses, path_id, SelectionPathState::Backup, now)?;
+        }
+        if active_path_ids.len() < 2 || statuses.len() > 8 {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let hysteresis = ReplacementHysteresis::new(HysteresisPolicy::default())
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(Self {
+            statuses,
+            counters: BTreeMap::new(),
+            hysteresis,
+        })
+    }
+
+    fn observe(&mut self, native: &[NativePathStatus], now: UnixTime) -> Result<Vec<u32>, ()> {
+        let native_ids = native
+            .iter()
+            .map(|status| status.path_id)
+            .collect::<BTreeSet<_>>();
+        let expected_ids = self
+            .statuses
+            .iter()
+            .filter_map(|(path_id, status)| {
+                matches!(
+                    status.state,
+                    SelectionPathState::Active
+                        | SelectionPathState::Degraded
+                        | SelectionPathState::Dead
+                )
+                .then_some(*path_id)
+            })
+            .collect::<BTreeSet<_>>();
+        if native_ids.len() != native.len() || native_ids != expected_ids {
+            return Err(());
+        }
+        for status in native {
+            if let Some(previous) = self.counters.get(&status.path_id) {
+                if status.delivered_bytes < previous.delivered_bytes
+                    || status.packets_lost < previous.packets_lost
+                {
+                    return Err(());
+                }
+            }
+        }
+        let route_progressed = native.iter().any(|status| {
+            self.counters
+                .get(&status.path_id)
+                .is_some_and(|previous| status.delivered_bytes > previous.delivered_bytes)
+        });
+        for status in native {
+            let previous = self.counters.get(&status.path_id).copied();
+            let delivered_delta =
+                previous.map_or(0, |value| status.delivered_bytes - value.delivered_bytes);
+            let lost_delta = previous.map_or(0, |value| status.packets_lost - value.packets_lost);
+            let last_progress_at = previous.map_or(now, |value| {
+                if delivered_delta != 0 || !route_progressed {
+                    now
+                } else {
+                    value.last_progress_at
+                }
+            });
+            let delivered_packets = delivered_delta.saturating_add(1_199) / 1_200;
+            let observed_packets = delivered_packets.saturating_add(lost_delta);
+            #[allow(clippy::cast_precision_loss)]
+            let packet_loss_ratio = if observed_packets == 0 {
+                0.0
+            } else {
+                lost_delta as f64 / observed_packets as f64
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let metrics = PathMetrics {
+                smoothed_rtt_ms: status.smoothed_rtt_us as f64 / 1_000.0,
+                rtt_variance_ms: 0.0,
+                packet_loss_ratio,
+                delivery_rate_mbps: status.delivery_rate_bps as f64 / 1_000_000.0,
+                loaded_rtt_ms: status.smoothed_rtt_us as f64 / 1_000.0,
+                bytes_in_flight: status.bytes_in_flight,
+                last_progress_at,
+                relay_reported_free: Bandwidth::default(),
+                locally_estimated_free: Bandwidth::default(),
+            };
+            self.statuses
+                .get_mut(&status.path_id)
+                .ok_or(())?
+                .observe(metrics, now, HysteresisPolicy::default())
+                .map_err(|_| ())?;
+            self.counters.insert(
+                status.path_id,
+                NativePathCounters {
+                    delivered_bytes: status.delivered_bytes,
+                    packets_lost: status.packets_lost,
+                    last_progress_at,
+                },
+            );
+        }
+        let mut unhealthy = self
+            .statuses
+            .iter()
+            .filter_map(|(path_id, status)| {
+                matches!(
+                    status.state,
+                    SelectionPathState::Degraded | SelectionPathState::Dead
+                )
+                .then_some((*path_id, status.state))
+            })
+            .collect::<Vec<_>>();
+        unhealthy.sort_unstable_by_key(|(path_id, state)| {
+            (u8::from(*state != SelectionPathState::Dead), *path_id)
+        });
+        Ok(unhealthy.into_iter().map(|(path_id, _)| path_id).collect())
+    }
+
+    fn authorizes_replacement(
+        &mut self,
+        unhealthy_path_id: u32,
+        warm_path_id: u32,
+        now: UnixTime,
+    ) -> bool {
+        let Some(unhealthy) = self.statuses.get(&unhealthy_path_id).cloned() else {
+            return false;
+        };
+        let Some(warm) = self.statuses.get(&warm_path_id).cloned() else {
+            return false;
+        };
+        matches!(
+            self.hysteresis.consider(&unhealthy, &warm, now),
+            Ok(ReplacementDecision::Replace { .. })
+        )
+    }
+
+    fn record_replacement(
+        &mut self,
+        unhealthy_path_id: u32,
+        warm_path_id: u32,
+        now: UnixTime,
+    ) -> Result<(), ()> {
+        self.retire(unhealthy_path_id);
+        let warm = self.statuses.get_mut(&warm_path_id).ok_or(())?;
+        warm.transition(SelectionPathState::Active, now)
+            .map_err(|_| ())?;
+        self.counters.remove(&warm_path_id);
+        Ok(())
+    }
+
+    fn retire(&mut self, path_id: u32) {
+        self.statuses.remove(&path_id);
+        self.counters.remove(&path_id);
+    }
+}
+
+fn insert_health_status(
+    statuses: &mut BTreeMap<u32, PathStatus>,
+    path_id: u32,
+    state: SelectionPathState,
+    now: UnixTime,
+) -> Result<(), ClientRouteConnectError> {
+    let path_id_value = u16::try_from(path_id)
+        .ok()
+        .and_then(|path_id| PathId::new(path_id).ok())
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let status = PathStatus::new(
+        path_id_value,
+        state,
+        PathMetrics {
+            smoothed_rtt_ms: 0.0,
+            rtt_variance_ms: 0.0,
+            packet_loss_ratio: 0.0,
+            delivery_rate_mbps: 0.0,
+            loaded_rtt_ms: 0.0,
+            bytes_in_flight: 0,
+            last_progress_at: now,
+            relay_reported_free: Bandwidth::default(),
+            locally_estimated_free: Bandwidth::default(),
+        },
+        now,
+    )
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    if statuses.insert(path_id, status).is_some() {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok(())
+}
+
+/// Detail-free current production boundary reached by a successful native-path bootstrap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientRouteProgress {
+    TransportActive,
+    UdpRouteReady,
+}
+
+/// One response datagram plus the exact transparent local return tuple.
+pub(crate) struct ClientUdpResponse {
+    application: SocketAddr,
+    remote: SocketAddr,
+    payload: Vec<u8>,
+}
+
+impl ClientUdpResponse {
+    pub(crate) const fn application(&self) -> SocketAddr {
+        self.application
+    }
+
+    pub(crate) const fn remote(&self) -> SocketAddr {
+        self.remote
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Stable local classification for a failed client-route bootstrap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClientRouteConnectError {
+    Busy,
+    InvalidProfile,
+    PreselectionUnavailable,
+    NativePermitUnavailable,
+    NativeRelayUnavailable,
+    NativeHelperPrepareUnavailable,
+    NativeAuthorizationUnavailable,
+    NativeHelperActivateUnavailable,
+    NativeStartUnavailable,
+    NativeHelperCommitUnavailable,
+    NativeProofUnavailable,
+    NativeSamplerRetirementUnavailable,
+    NativeRemoteRetirementUnavailable,
+    NativeTransportIdentityUnavailable,
+    RouteAdmissionUnavailable,
+    MptcpExitListenerSignalUnavailable,
+    TransportRuntimeUnavailable,
+    UdpExitSessionSignalUnavailable,
+    UdpIngressUnavailable,
+}
+
+impl ClientRouteControl {
+    pub(crate) fn new(mpquic_socket: PathBuf) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            tcp_connect: Arc::new(Mutex::new(())),
+            single_udp_connect: Arc::new(Mutex::new(())),
+            mpquic_socket: Arc::new(mpquic_socket),
+            agent_state: None,
+        }
+    }
+
+    pub(crate) fn new_with_agent_state(
+        mpquic_socket: PathBuf,
+        agent_state: Arc<tokio::sync::RwLock<AgentState>>,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
+            tcp_connect: Arc::new(Mutex::new(())),
+            single_udp_connect: Arc::new(Mutex::new(())),
+            mpquic_socket: Arc::new(mpquic_socket),
+            agent_state: Some(agent_state),
+        }
+    }
+
+    /// Retire an established route as soon as either projection of its signed hard deadline has
+    /// elapsed. Cleanup runs outside the state lock behind `Connecting`; callers therefore never
+    /// observe either an expired reusable owner or Idle until its shutdown has completed.
+    async fn retire_expired_route(&self, wall_now_ms: u64, monotonic_now: Instant) {
+        let expired = {
+            let mut state = self.state.lock().await;
+            let should_retire = matches!(
+                &*state,
+                ClientRouteControlState::Established(established)
+                    if established.is_expired(wall_now_ms, monotonic_now)
+            );
+            should_retire
+                .then(|| std::mem::replace(&mut *state, ClientRouteControlState::Connecting))
+        };
+        if let Some(ClientRouteControlState::Established(established)) = expired {
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+            let mut state = self.state.lock().await;
+            if matches!(*state, ClientRouteControlState::Connecting) {
+                *state = ClientRouteControlState::Idle;
+            }
+        }
+    }
+
+    /// Return the current general-UDP flow's earliest signed or idle deadline.
+    ///
+    /// Expired ownership is retired before the deadline is observed, so the ingress actor never
+    /// arms a stale timer for a route that cleanup has already consumed.
+    pub(crate) async fn general_udp_retirement_deadline(&self) -> Option<Instant> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &*state else {
+            return None;
+        };
+        let ClientTransportState::NativeUdp(active) = &established.transport else {
+            return None;
+        };
+        active.retirement_deadline()
+    }
+
+    /// Retire a route only when its retained signed or monotonic lifetime has elapsed.
+    pub(crate) async fn retire_expired(&self) {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+    }
+
+    /// Select and establish one normal relay-only MPTCP route for transparent TCP ingress.
+    ///
+    /// The transport-specific view prevents an enabled UDP profile from changing this TCP flow
+    /// into a different route type. It does not enable any direct-Exit or ordinary-TCP path.
+    pub(crate) async fn connect_tcp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.tcp.enabled
+            || config.tcp.transport != TcpTransport::Mptcp
+            || config.tcp.allow_plain_tcp_fallback
+        {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        let _connect = self.tcp_connect.lock().await;
+        let retry_deadline = Instant::now() + TCP_CONNECT_RECOVERY_HORIZON;
+        loop {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
+            let route_available = {
+                let state = self.state.lock().await;
+                match &*state {
+                    ClientRouteControlState::Established(established)
+                        if matches!(established.transport, ClientTransportState::TcpMptcp(_))
+                            && !established.is_expired(crate::unix_millis(), Instant::now()) =>
+                    {
+                        return Ok(ClientRouteProgress::TransportActive);
+                    }
+                    ClientRouteControlState::Idle => true,
+                    ClientRouteControlState::Connecting
+                    | ClientRouteControlState::Established(_) => false,
+                }
+            };
+            let result = if route_available {
+                let mut tcp_profile = config.clone();
+                tcp_profile.udp.enabled = false;
+                tcp_profile.quic.enabled = false;
+                Box::pin(self.connect_with_udp_mode(&tcp_profile, discovery, helper, false)).await
+            } else {
+                Err(ClientRouteConnectError::Busy)
+            };
+            match result {
+                Ok(progress) => return Ok(progress),
+                Err(error) => {
+                    let Some(delay) =
+                        tcp_connect_retry_delay(error, Instant::now(), retry_deadline)
+                    else {
+                        return Err(error);
+                    };
+                    tokio::time::sleep(delay).await;
+                    if Instant::now() >= retry_deadline {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure UDP/443 uses one genuine multipath-only route, never general UDP fallback.
+    pub(crate) async fn ensure_browser_quic(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.quic.enabled
+            || !config.quic.require_multipath
+            || config.quic.allow_degraded_single_path
+            || config.quic.minimum_paths < 2
+        {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
+            let state = self.state.lock().await;
+            match &*state {
+                ClientRouteControlState::Established(established)
+                    if matches!(established.transport, ClientTransportState::Mpquic(_))
+                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
+                {
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+                ClientRouteControlState::Idle => {}
+                ClientRouteControlState::Connecting | ClientRouteControlState::Established(_) => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
+        }
+        let mut profile = config.clone();
+        profile.tcp.enabled = false;
+        profile.udp.enabled = false;
+        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
+    }
+
+    /// Ensure one relay-only single-path QUIC route is ready for UDP or protected DNS.
+    pub(crate) async fn ensure_single_udp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.udp.enabled {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        let _connect = self.single_udp_connect.lock().await;
+        let retry_deadline = Instant::now() + SINGLE_UDP_CONNECT_RECOVERY_HORIZON;
+        loop {
+            self.retire_expired_route(crate::unix_millis(), Instant::now())
+                .await;
+            let route_available = {
+                let state = self.state.lock().await;
+                match &*state {
+                    ClientRouteControlState::Established(established)
+                        if matches!(established.transport, ClientTransportState::UdpReady(_))
+                            && !established.is_expired(crate::unix_millis(), Instant::now()) =>
+                    {
+                        return Ok(ClientRouteProgress::UdpRouteReady);
+                    }
+                    ClientRouteControlState::Idle => true,
+                    ClientRouteControlState::Connecting
+                    | ClientRouteControlState::Established(_) => false,
+                }
+            };
+            let result = if route_available {
+                let mut profile = config.clone();
+                profile.tcp.enabled = false;
+                profile.quic.enabled = false;
+                Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, false)).await
+            } else {
+                Err(ClientRouteConnectError::Busy)
+            };
+            match result {
+                Ok(progress) => return Ok(progress),
+                Err(error) => {
+                    let Some(delay) =
+                        single_udp_connect_retry_delay(error, Instant::now(), retry_deadline)
+                    else {
+                        return Err(error);
+                    };
+                    tokio::time::sleep(delay).await;
+                    if Instant::now() >= retry_deadline {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure general UDP uses native single-path MASQUE CONNECT-IP through one Relay.
+    pub(crate) async fn ensure_general_udp(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !config.udp.enabled {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        let mut profile = config.clone();
+        profile.tcp.enabled = false;
+        profile.quic.enabled = false;
+        Box::pin(self.connect_with_udp_mode(&profile, discovery, helper, true)).await
+    }
+
+    /// Starts exactly one config-bound preselection and retains its affine continuation.
+    pub(crate) async fn connect(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        Box::pin(self.connect_with_udp_mode(config, discovery, helper, config.udp.enabled)).await
+    }
+
+    async fn connect_with_udp_mode(
+        &self,
+        config: &Config,
+        discovery: &DiscoveryControlHandle,
+        helper: &HelperClient,
+        native_single_udp: bool,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let (requested_transport, _) = client_native_path_requirement(config)?;
+        let previous = {
+            let mut state = self.state.lock().await;
+            match std::mem::replace(&mut *state, ClientRouteControlState::Connecting) {
+                ClientRouteControlState::Idle => None,
+                ClientRouteControlState::Established(established)
+                    if established.matches_transport(requested_transport, native_single_udp)
+                        && !established.is_expired(crate::unix_millis(), Instant::now()) =>
+                {
+                    let progress = established.progress();
+                    *state = ClientRouteControlState::Established(established);
+                    return Ok(progress);
+                }
+                ClientRouteControlState::Established(previous) => Some(previous),
+                ClientRouteControlState::Connecting => {
+                    return Err(ClientRouteConnectError::Busy);
+                }
+            }
+        };
+        if let Some(previous) = previous {
+            Box::pin(previous.shutdown(self.agent_state.as_ref())).await;
+        }
+
+        let result = Box::pin(begin_client_route(config, discovery)).await;
+        let result = match result {
+            Ok((ready, required_native_paths)) => {
+                match Box::pin(complete_required_client_native_paths(
+                    ready,
+                    required_native_paths,
+                    discovery,
+                    helper,
+                ))
+                .await
+                {
+                    Ok(completed) => {
+                        Box::pin(admit_completed_native_route(
+                            completed,
+                            config,
+                            discovery,
+                            helper,
+                            self.mpquic_socket.as_ref().clone(),
+                            native_single_udp,
+                        ))
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(established) => self.publish_established_route(established).await,
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(error)
+            }
+        }
+    }
+
+    async fn publish_established_route(
+        &self,
+        established: EstablishedClientRoute,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let progress = established.progress();
+        let projection = match established.path_projection().await {
+            Ok(projection) => projection,
+            Err(error) => {
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+                *self.state.lock().await = ClientRouteControlState::Idle;
+                return Err(error);
+            }
+        };
+        let mut state = self.state.lock().await;
+        *state = ClientRouteControlState::Established(Box::new(established));
+        if self
+            .replace_agent_path_projection(projection)
+            .await
+            .is_err()
+        {
+            let previous = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+            drop(state);
+            if let ClientRouteControlState::Established(established) = previous {
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+            }
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(progress)
+    }
+
+    async fn replace_agent_path_projection(
+        &self,
+        projection: ClientPathProjection,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        let mut state = state.write().await;
+        match projection {
+            ClientPathProjection::None => Ok(()),
+            ClientPathProjection::Mptcp(paths) => state.replace_mptcp_paths(paths),
+            ClientPathProjection::Mpquic(paths) => state.replace_mpquic_paths(paths),
+            ClientPathProjection::SingleUdp(path) => state.replace_single_udp_path(path),
+        }
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    async fn replace_agent_mpquic_paths(
+        &self,
+        paths: Vec<PathSummary>,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(agent_state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        agent_state
+            .write()
+            .await
+            .replace_mpquic_paths(paths)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    async fn replace_agent_single_udp_path(
+        &self,
+        path: PathSummary,
+    ) -> Result<(), ClientRouteConnectError> {
+        let Some(agent_state) = self.agent_state.as_ref() else {
+            return Ok(());
+        };
+        agent_state
+            .write()
+            .await
+            .replace_single_udp_path(path)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Consume the connected genuine-MPTCP capability into one pinned TLS 1.3 TCP flow.
+    ///
+    /// This is the functional stream seam used until transparent TCP ingress is connected. The
+    /// caller supplies a hostname/port that must already be allowed by the active signed policy;
+    /// the retained route coordinator signs that exact tuple and the frame is written before this
+    /// method reports success.
+    pub(crate) async fn activate_tcp_flow(
+        &self,
+        policy: &VerifiedManifest,
+        hostname: &str,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if policy
+            .authorize_domain(now_ms, hostname, TransportProtocol::Tcp, port)
+            .is_err()
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        self.activate_tcp_destination(
+            policy,
+            ClientTcpDestination::Hostname(hostname.to_owned()),
+            port,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn activate_tcp_destination(
+        &self,
+        policy: &VerifiedManifest,
+        destination: ClientTcpDestination,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        let (transport, material) = self
+            .acquire_tcp_flow_transport(policy, &destination, port, now_ms)
+            .await?;
+        let flow = activate_production_mptcp_client_flow(
+            transport,
+            &material.route,
+            &material.certificate_sha256,
+            &material.tls_server_name,
+            &material.signed_open_tcp,
+            now_ms,
+        )
+        .await
+        .map_err(|failure| {
+            let _ = failure.cause();
+            ClientRouteConnectError::TransportRuntimeUnavailable
+        })?;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            flow.shutdown();
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if established.tcp_flow.is_some() {
+            flow.shutdown();
+            return Err(ClientRouteConnectError::Busy);
+        }
+        established.tcp_flow = Some(flow);
+        Ok(ClientRouteProgress::TransportActive)
+    }
+
+    async fn acquire_tcp_flow_transport(
+        &self,
+        policy: &VerifiedManifest,
+        destination: &ClientTcpDestination,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<
+        (
+            crate::mptcp_transport::ClientMptcpFlowTransport,
+            ClientOpenTcpMaterial,
+        ),
+        ClientRouteConnectError,
+    > {
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let route = established
+            .route
+            .as_ref()
+            .ok_or(ClientRouteConnectError::Busy)?;
+        let material = client_open_tcp_material(route, policy, destination, port, now_ms)?;
+        let ClientTransportState::TcpMptcp(transport) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let mut helper_route_was_lost = false;
+        for _ in 0..8 {
+            let local_port = random_mptcp_source_port(PRODUCTION_MPTCP_EXIT_PORT)?;
+            match transport
+                .acquire_flow(&established.helper, local_port)
+                .await
+            {
+                Ok(flow) => return Ok((flow, material)),
+                Err(error) if mptcp_acquire_failure_lost_helper_route(&error) => {
+                    helper_route_was_lost = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+        }
+        if helper_route_was_lost {
+            let prior_route = std::mem::replace(&mut *state, ClientRouteControlState::Idle);
+            drop(state);
+            if let ClientRouteControlState::Established(established) = prior_route {
+                Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+            }
+        }
+        Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Bind one accepted kernel-observed TCP stream and proxy it over the selected genuine
+    /// MPTCP/TLS route. TLS/443 signs both visible SNI and the exact kernel destination address;
+    /// non-TLS ingress remains an explicitly authorized raw-IP tuple.
+    pub(crate) async fn run_tcp_ingress(
+        &self,
+        ingress: PolicyAuthorizedTcpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<(), ClientRouteConnectError> {
+        let (application, destination, hostname) = ingress
+            .reauthorize_after_route_ready(policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .into_route_parts(policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let destination_scope =
+            hostname.map_or(ClientTcpDestination::Ip(destination.ip()), |hostname| {
+                ClientTcpDestination::PinnedHostname {
+                    hostname,
+                    address: destination.ip(),
+                }
+            });
+        let (transport, material) = self
+            .acquire_tcp_flow_transport(policy, &destination_scope, destination.port(), now_ms)
+            .await?;
+        let flow = activate_production_mptcp_client_flow(
+            transport,
+            &material.route,
+            &material.certificate_sha256,
+            &material.tls_server_name,
+            &material.signed_open_tcp,
+            now_ms,
+        )
+        .await
+        .map_err(|failure| {
+            let _ = failure.cause();
+            ClientRouteConnectError::TransportRuntimeUnavailable
+        })?;
+        flow.proxy_application(application)
+            .await
+            .map(|_| ())
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Write one bounded payload chunk to the active protected TCP stream.
+    pub(crate) async fn write_tcp_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<(), ClientRouteConnectError> {
+        if payload.is_empty() || payload.len() > MAXIMUM_TCP_STREAM_CHUNK_BYTES {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let Some(flow) = &mut established.tcp_flow else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().write_all(payload))
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().flush())
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Read at most one fixed-size payload chunk from the active protected TCP stream.
+    pub(crate) async fn read_tcp_payload(&self) -> Result<Vec<u8>, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let Some(flow) = &mut established.tcp_flow else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let mut payload = vec![0_u8; MAXIMUM_TCP_STREAM_CHUNK_BYTES];
+        let count = timeout(MAXIMUM_CALL_DURATION, flow.stream_mut().read(&mut payload))
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        payload.truncate(count);
+        Ok(payload)
+    }
+
+    /// Bind one kernel-observed datagram to this route, activate Quinn, and queue its payload.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native and DNS-only UDP owners require distinct affine activation paths"
+    )]
+    pub(crate) async fn activate_udp_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        idle_timeout: Duration,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        {
+            let mut state = self.state.lock().await;
+            if let ClientRouteControlState::Established(established) = &mut *state {
+                if let ClientTransportState::NativeUdp(active) = &mut established.transport {
+                    if let Some(binding) = active.binding.as_ref() {
+                        let lifetime = active
+                            .lifetime
+                            .as_mut()
+                            .ok_or(ClientRouteConnectError::UdpIngressUnavailable)?;
+                        let payload = binding
+                            .bind_next_native_datagram(ingress, policy, now_ms)
+                            .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+                        let (flow, _) = binding.activation();
+                        let SocketAddr::V4(destination) = binding.destination() else {
+                            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                        };
+                        let submitted = active
+                            .session
+                            .try_send_general_udp(
+                                flow,
+                                binding.source().port(),
+                                destination,
+                                &payload,
+                                now_ms,
+                            )
+                            .await
+                            .map_err(|error| {
+                                // This error contains only bounded local/native categories; it
+                                // never contains the datagram, tuple, route ID, or credentials.
+                                eprintln!("native general UDP activation failed: {error}");
+                                ClientRouteConnectError::TransportRuntimeUnavailable
+                            })?;
+                        if !submitted {
+                            // UDP backpressure drops only this already-authorized datagram. It
+                            // is not a route failure or activity/delivery-counter increment.
+                            tracing::debug!("native general UDP continuation backpressured");
+                            return Ok(ClientRouteProgress::TransportActive);
+                        }
+                        lifetime.record_activity(crate::unix_millis(), Instant::now())?;
+                        self.replace_agent_single_udp_path(active.path_summary().await?)
+                            .await?;
+                        return Ok(ClientRouteProgress::TransportActive);
+                    }
+                    if active.lifetime.is_some() {
+                        return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                    }
+                    let route = established
+                        .route
+                        .as_ref()
+                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    let protocol = route
+                        .established
+                        .owner
+                        .as_ref()
+                        .and_then(PreparedContextOwner::protocol)
+                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                    let authorized = ingress
+                        .bind_to_route(
+                            &active.path,
+                            &protocol.coordinator,
+                            policy,
+                            idle_timeout,
+                            now_ms,
+                        )
+                        .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+                    let (flow, signed_authorization) = authorized.activation();
+                    let idle_timeout = flow.idle_timeout();
+                    let expires_at_ms = flow.expires_at_ms();
+                    let SocketAddr::V4(destination) = authorized.destination() else {
+                        return Err(ClientRouteConnectError::UdpIngressUnavailable);
+                    };
+                    active
+                        .session
+                        .send_general_udp(
+                            flow,
+                            Some(signed_authorization),
+                            authorized.source().port(),
+                            destination,
+                            authorized.payload(),
+                            now_ms,
+                        )
+                        .await
+                        .map_err(|error| {
+                            // See the repeated-flow branch above: retain a privacy-safe reason
+                            // so acceptance failures do not require speculative datapath changes.
+                            eprintln!("native general UDP activation failed: {error}");
+                            ClientRouteConnectError::TransportRuntimeUnavailable
+                        })?;
+                    let lifetime = GeneralUdpSessionLifetime::start(
+                        idle_timeout,
+                        expires_at_ms,
+                        crate::unix_millis(),
+                        Instant::now(),
+                    )?;
+                    active.binding = Some(authorized);
+                    active.lifetime = Some(lifetime);
+                    self.replace_agent_single_udp_path(active.path_summary().await?)
+                        .await?;
+                    return Ok(ClientRouteProgress::TransportActive);
+                }
+            }
+        }
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            expiry,
+            transport,
+            tcp_flow,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let ClientTransportState::UdpReady(ready) = transport else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
+                transport,
+                tcp_flow,
+                route,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if route.is_some() {
+            let _ = Box::pin(ready.disconnect()).await;
+            if let Some(route) = route {
+                let _ = route.disconnect().await;
+            }
+            orchestrator.shutdown_detached();
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let Ok(authorized) = ready.bind_ingress(ingress, policy, idle_timeout, now_ms) else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
+                transport: ClientTransportState::UdpReady(ready),
+                tcp_flow: None,
+                route: None,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        };
+        let (flow, signed_authorization) = authorized.activation();
+        match ready
+            .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
+            .await
+        {
+            Ok(mut active) => {
+                active.return_path = Some(ClientUdpReturnPath {
+                    application: authorized.source(),
+                    remote: authorized.destination(),
+                });
+                if active.client.send_payload(authorized.payload()).is_err() {
+                    let _ = active.shutdown().await;
+                    orchestrator.shutdown_detached();
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                }
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    expiry,
+                    transport: ClientTransportState::UdpActive(active),
+                    tcp_flow: None,
+                    route: None,
+                    orchestrator,
+                    helper,
+                }));
+                Ok(ClientRouteProgress::TransportActive)
+            }
+            Err(failure) => {
+                let _ = failure.route.disconnect().await;
+                orchestrator.shutdown_detached();
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+    }
+
+    /// Bind one helper-intercepted DNS request to this single-relay route and queue it to the Exit.
+    pub(crate) async fn activate_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Connecting)
+        };
+        let established = match previous {
+            ClientRouteControlState::Established(established) => established,
+            other => {
+                let mut state = self.state.lock().await;
+                *state = other;
+                return Err(ClientRouteConnectError::Busy);
+            }
+        };
+        let EstablishedClientRoute {
+            expiry,
+            transport,
+            tcp_flow,
+            route,
+            orchestrator,
+            helper,
+        } = *established;
+        let ClientTransportState::UdpReady(ready) = transport else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
+                transport,
+                tcp_flow,
+                route,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if route.is_some() {
+            let _ = Box::pin(ready.disconnect()).await;
+            if let Some(route) = route {
+                let _ = route.disconnect().await;
+            }
+            orchestrator.shutdown_detached();
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Idle;
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let Ok(authorized) = ready.bind_dns_ingress(ingress, policy, now_ms) else {
+            let mut state = self.state.lock().await;
+            *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                expiry,
+                transport: ClientTransportState::UdpReady(ready),
+                tcp_flow,
+                route: None,
+                orchestrator,
+                helper,
+            }));
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        };
+        let (flow, signed_authorization) = authorized.activation();
+        match ready
+            .activate(flow, signed_authorization, MAXIMUM_CALL_DURATION, now_ms)
+            .await
+        {
+            Ok(mut active) => {
+                active.return_path = Some(ClientUdpReturnPath {
+                    application: authorized.source(),
+                    remote: authorized.destination(),
+                });
+                if active.client.send_payload(authorized.payload()).is_err() {
+                    let _ = active.shutdown().await;
+                    orchestrator.shutdown_detached();
+                    let mut state = self.state.lock().await;
+                    *state = ClientRouteControlState::Idle;
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                }
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                    expiry,
+                    transport: ClientTransportState::UdpActive(active),
+                    tcp_flow,
+                    route: None,
+                    orchestrator,
+                    helper,
+                }));
+                Ok(ClientRouteProgress::TransportActive)
+            }
+            Err(failure) => {
+                let _ = failure.route.disconnect().await;
+                orchestrator.shutdown_detached();
+                let mut state = self.state.lock().await;
+                *state = ClientRouteControlState::Idle;
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+    }
+
+    /// Poll one native general-UDP response without waiting for a remote datagram to arrive.
+    ///
+    /// This performs one bounded native IPC receive and retains no pending request or packet
+    /// queue. Empty receive releases the route lock immediately, so another application
+    /// datagram can be submitted independently of destination response latency. DNS's separate
+    /// serialized association is deliberately not consumed by this normal-UDP drain.
+    pub(crate) async fn try_receive_native_udp_response(
+        &self,
+    ) -> Result<Option<ClientUdpResponse>, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(None);
+        };
+        let ClientTransportState::NativeUdp(active) = &mut established.transport else {
+            return Ok(None);
+        };
+        let (Some(binding), Some(lifetime)) = (&active.binding, &mut active.lifetime) else {
+            return Ok(None);
+        };
+        let SocketAddr::V4(destination) = binding.destination() else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        let packet = active
+            .session
+            .receive_general_udp(
+                binding.activation().0,
+                binding.source().port(),
+                destination,
+                crate::unix_millis(),
+            )
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some(packet) = packet else {
+            return Ok(None);
+        };
+        let payload = binding
+            .accept_native_response(&packet)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .to_vec();
+        lifetime.record_activity(crate::unix_millis(), Instant::now())?;
+        let response = ClientUdpResponse {
+            application: binding.source(),
+            remote: binding.destination(),
+            payload,
+        };
+        self.replace_agent_single_udp_path(active.path_summary().await?)
+            .await?;
+        Ok(Some(response))
+    }
+
+    /// Receive one bounded Exit response for the dedicated serialized DNS actor.
+    pub(crate) async fn receive_udp_response(
+        &self,
+    ) -> Result<ClientUdpResponse, ClientRouteConnectError> {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        if let ClientTransportState::NativeUdp(active) = &mut established.transport {
+            let binding = active
+                .binding
+                .as_ref()
+                .ok_or(ClientRouteConnectError::Busy)?;
+            let lifetime = active
+                .lifetime
+                .as_mut()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let SocketAddr::V4(destination) = binding.destination() else {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let response_timeout = lifetime
+                .deadline()
+                .saturating_duration_since(Instant::now())
+                .min(MAXIMUM_CALL_DURATION);
+            if response_timeout.is_zero() {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            let packet = timeout(response_timeout, async {
+                loop {
+                    if let Some(packet) = active
+                        .session
+                        .receive_general_udp(
+                            binding.activation().0,
+                            binding.source().port(),
+                            destination,
+                            crate::unix_millis(),
+                        )
+                        .await?
+                    {
+                        return Ok::<_, crate::mpquic_runtime::ProductionMpquicError>(packet);
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let payload = binding
+                .accept_native_response(&packet)
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+                .to_vec();
+            lifetime.record_activity(crate::unix_millis(), Instant::now())?;
+            let response = ClientUdpResponse {
+                application: binding.source(),
+                remote: binding.destination(),
+                payload,
+            };
+            self.replace_agent_single_udp_path(active.path_summary().await?)
+                .await?;
+            return Ok(response);
+        }
+        let ClientTransportState::UdpActive(active) = &established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let binding = active
+            .return_path
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let payload = timeout(MAXIMUM_CALL_DURATION, active.client.receive_payload())
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(ClientUdpResponse {
+            application: binding.application,
+            remote: binding.remote,
+            payload: payload.to_vec(),
+        })
+    }
+
+    /// Hand one policy-approved UDP/443 datagram to the retained native MPQUIC session.
+    pub(crate) async fn send_browser_quic_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
+        if !ingress.is_browser_quic() {
+            return Err(ClientRouteConnectError::UdpIngressUnavailable);
+        }
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Err(ClientRouteConnectError::Busy);
+        };
+        let route = established
+            .route
+            .as_ref()
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)?;
+
+        active
+            .browser_flows
+            .retain(|binding| binding.is_live(policy, now_ms));
+        let existing = active
+            .browser_flows
+            .iter()
+            .position(|binding| binding.matches_ingress_tuple(&ingress));
+        let (packet, pending_binding) = if let Some(index) = existing {
+            (
+                active.browser_flows[index]
+                    .bind_next(&ingress, policy, maximum_packet_bytes, now_ms)
+                    .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?,
+                None,
+            )
+        } else {
+            if active.browser_flows.len() >= MAXIMUM_CLIENT_BROWSER_QUIC_FLOWS {
+                return Err(ClientRouteConnectError::UdpIngressUnavailable);
+            }
+            let protocol = route
+                .established
+                .owner
+                .as_ref()
+                .and_then(PreparedContextOwner::protocol)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let route_expires_at_ms = route
+                .established
+                .relay_grants
+                .iter()
+                .map(VerifiedRelayGrant::expires_at_ms)
+                .min()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let (binding, packet) = ingress
+                .bind_to_multipath_route(
+                    route.established.request.parameters.route_context_id,
+                    *protocol.coordinator.client_session_id(),
+                    route_expires_at_ms,
+                    &protocol.coordinator,
+                    policy,
+                    tunnel_source,
+                    maximum_packet_bytes,
+                    now_ms,
+                )
+                .map_err(|_| ClientRouteConnectError::UdpIngressUnavailable)?;
+            (packet, Some(binding))
+        };
+
+        if let Some(pending) = pending_binding.as_ref() {
+            active
+                .session
+                .authorize_browser_quic(
+                    pending.flow(),
+                    pending.application().port(),
+                    pending.signed_authorization(),
+                    now_ms,
+                )
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            active
+                .session
+                .send_browser_quic(pending.flow(), packet, now_ms)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        } else {
+            let index = existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            active
+                .session
+                .send_browser_quic(active.browser_flows[index].flow(), packet, now_ms)
+                .await
+                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        }
+        let index = if let Some(binding) = pending_binding {
+            active.browser_flows.push(binding);
+            active.browser_flows.len() - 1
+        } else {
+            existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        };
+        active.browser_flows[index]
+            .record_sent(now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
+        Ok(ClientRouteProgress::TransportActive)
+    }
+
+    /// Poll one native reverse inner-IP packet and recover its transparent application reply.
+    pub(crate) async fn receive_browser_quic_response(
+        &self,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<Option<ClientUdpResponse>, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(None);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Ok(None);
+        };
+        active
+            .browser_flows
+            .retain(|binding| binding.is_live(policy, now_ms));
+        if active.browser_flows.is_empty() {
+            return Ok(None);
+        }
+        let received = active
+            .session
+            .receive_browser_quic(
+                active
+                    .browser_flows
+                    .iter()
+                    .map(BrowserQuicFlowBinding::receive_scope),
+                now_ms,
+            )
+            .await
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let Some((index, packet)) = received else {
+            return Ok(None);
+        };
+        let flow = active
+            .browser_flows
+            .get_mut(index)
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let application = flow.application();
+        let remote = flow.remote();
+        let payload = flow
+            .accept_response(&packet, policy, now_ms)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
+            .to_vec();
+        let response = ClientUdpResponse {
+            application: SocketAddr::V4(application),
+            remote: SocketAddr::V4(remote),
+            payload,
+        };
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
+        Ok(Some(response))
+    }
+
+    /// Whether periodic reverse polling is meaningful for the current route owner.
+    pub(crate) async fn browser_quic_flow_active(&self) -> bool {
+        self.retire_expired_route(crate::unix_millis(), Instant::now())
+            .await;
+        let state = self.state.lock().await;
+        matches!(
+            &*state,
+            ClientRouteControlState::Established(established)
+                if matches!(
+                    &established.transport,
+                    ClientTransportState::Mpquic(active) if !active.browser_flows.is_empty()
+                )
+        )
+    }
+
+    /// Assess and, when necessary, reconfigure the live native multipath route.
+    ///
+    /// Single-relay UDP is deliberately excluded: it owns one immutable Relay association and a
+    /// failed association must be torn down before ingress can create a new one. MPTCP continues
+    /// to rely on the kernel path manager until per-subflow telemetry crosses the helper boundary.
+    pub(crate) async fn maintain_path_health(
+        &self,
+        now_ms: u64,
+    ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
+        self.retire_expired_route(now_ms, Instant::now()).await;
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            return Ok(ClientPathMaintenance::Unchanged);
+        };
+        let outcome = active.maintain(now_ms).await?;
+        let paths = active.path_summaries().await?;
+        drop(state);
+        self.replace_agent_mpquic_paths(paths).await?;
+        Ok(outcome)
+    }
+
+    /// Cancels any pre-route affine ownership; helper cleanup remains a separate fail-closed step.
+    pub(crate) async fn disconnect(&self) {
+        let previous = {
+            let mut state = self.state.lock().await;
+            std::mem::replace(&mut *state, ClientRouteControlState::Idle)
+        };
+        if let ClientRouteControlState::Established(established) = previous {
+            Box::pin(established.shutdown(self.agent_state.as_ref())).await;
+        }
+    }
+}
+
+fn tcp_connect_retry_delay(
+    error: ClientRouteConnectError,
+    now: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    if !matches!(
+        error,
+        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+    ) || now >= deadline
+    {
+        return None;
+    }
+    Some(TCP_CONNECT_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)))
+}
+
+fn single_udp_connect_retry_delay(
+    error: ClientRouteConnectError,
+    now: Instant,
+    deadline: Instant,
+) -> Option<Duration> {
+    if !matches!(
+        error,
+        ClientRouteConnectError::Busy | ClientRouteConnectError::PreselectionUnavailable
+    ) || now >= deadline
+    {
+        return None;
+    }
+    Some(SINGLE_UDP_CONNECT_RETRY_INTERVAL.min(deadline.saturating_duration_since(now)))
+}
+
+struct ClientOpenTcpMaterial {
+    route: VerifiedMptcpRoute,
+    certificate_sha256: [u8; 32],
+    tls_server_name: String,
+    signed_open_tcp: Vec<u8>,
+}
+
+enum ClientTcpDestination {
+    Hostname(String),
+    PinnedHostname { hostname: String, address: IpAddr },
+    Ip(IpAddr),
+}
+
+fn mpquic_tunnel_packet_scope(
+    session: &ProductionMpquicSession,
+) -> Result<(Ipv4Addr, usize), ClientRouteConnectError> {
+    let assigned_ipv4: [u8; 4] = session
+        .assignment()
+        .assigned_ipv4
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let assigned_ipv4 = Ipv4Addr::from(assigned_ipv4);
+    let maximum_packet_bytes = maximum_mpquic_tunnel_packet_bytes(session.assignment().mtu)?;
+    if assigned_ipv4.is_unspecified() || assigned_ipv4.is_multicast() {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok((assigned_ipv4, maximum_packet_bytes))
+}
+
+fn maximum_mpquic_tunnel_packet_bytes(
+    assignment_mtu: u32,
+) -> Result<usize, ClientRouteConnectError> {
+    usize::try_from(assignment_mtu)
+        .ok()
+        .filter(|mtu| (MINIMUM_MPQUIC_TUNNEL_MTU..=MAXIMUM_MPQUIC_TUNNEL_MTU).contains(mtu))
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)
+}
+
+fn client_open_tcp_material(
+    route: &ProductionRoute,
+    policy: &VerifiedManifest,
+    destination: &ClientTcpDestination,
+    port: u16,
+    now_ms: u64,
+) -> Result<ClientOpenTcpMaterial, ClientRouteConnectError> {
+    let established = &route.established;
+    if established.request.parameters.allowed_transports != [Transport::TcpMptcp]
+        || established.request.parameters.policy_hash != *policy.policy_hash()
+    {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    let relay_reservations = established
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::signed_relay_reservation)
+        .collect::<Vec<_>>();
+    let mut replay = ReplayCache::new(MAXIMUM_REPLAY_CAPACITY)
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let verified_route = VerifiedMptcpRoute::verify(
+        &established.signed_exit_reservation,
+        &relay_reservations,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let identity = established
+        .native_authorization
+        .as_ref()
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        .native_route_identity();
+    let certificate_sha256: [u8; 32] = identity
+        .certificate_sha256
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let expires_at_ms = now_ms
+        .checked_add(OPEN_TCP_LIFETIME_MS)
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+        .min(verified_route.expires_at_ms())
+        .min(policy.expires_at_ms());
+    if expires_at_ms <= now_ms {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    let coordinator = established
+        .owner
+        .as_ref()
+        .and_then(PreparedContextOwner::protocol)
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let signed_open_tcp = match destination {
+        ClientTcpDestination::Hostname(hostname) => coordinator.coordinator.sign_open_tcp(
+            *verified_route.route_context_id(),
+            *policy.policy_hash(),
+            hostname,
+            port,
+            now_ms,
+            expires_at_ms,
+        ),
+        ClientTcpDestination::PinnedHostname { hostname, address } => {
+            coordinator.coordinator.sign_open_tcp_pinned(
+                *verified_route.route_context_id(),
+                *policy.policy_hash(),
+                hostname,
+                *address,
+                port,
+                now_ms,
+                expires_at_ms,
+            )
+        }
+        ClientTcpDestination::Ip(address) => coordinator.coordinator.sign_open_tcp_ip(
+            *verified_route.route_context_id(),
+            *policy.policy_hash(),
+            *address,
+            port,
+            now_ms,
+            expires_at_ms,
+        ),
+    }
+    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    Ok(ClientOpenTcpMaterial {
+        route: verified_route,
+        certificate_sha256,
+        tls_server_name: identity.tls_server_name.clone(),
+        signed_open_tcp,
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-closed transport-specific route admission transaction"
+)]
+async fn admit_completed_native_route(
+    completed: selection_bridge::CompletedClientNativeProbe,
+    config: &Config,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+    mpquic_socket: PathBuf,
+    native_single_udp: bool,
+) -> Result<EstablishedClientRoute, ClientRouteConnectError> {
+    let (transport, _) = client_native_path_requirement(config)?;
+    let mpquic_preflight = if transport == Transport::MultipathQuic
+        || (transport == Transport::UdpSinglePath && native_single_udp)
+    {
+        let native = NativeClient::new(mpquic_socket)
+            .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?;
+        Some(
+            ProductionMpquicPreflight::new(native)
+                .await
+                .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?,
+        )
+    } else {
+        None
+    };
+    let client_native_instance_id = mpquic_preflight
+        .as_ref()
+        .map_or_else(random_runtime_instance_id, |preflight| {
+            Ok(*preflight.native_instance_id())
+        })?;
+    let Ok(admission) = completed.into_route_admission(client_native_instance_id) else {
+        // The completed probe already confirmed exact-context destruction. There is no
+        // remaining Client probe authority here, and other roles' contexts must stay live.
+        return Err(ClientRouteConnectError::RouteAdmissionUnavailable);
+    };
+    let (continuation, remote_retirement_confirmed, _exit_helper_runtime_id) =
+        admission.into_parts();
+    if !remote_retirement_confirmed {
+        return Err(ClientRouteConnectError::NativeRemoteRetirementUnavailable);
+    }
+    let orchestrator = ProductionRouteOrchestrator::start(helper.clone())
+        .map_err(|_| ClientRouteConnectError::RouteAdmissionUnavailable)?;
+    let attempt = orchestrator.connect(continuation, discovery.clone());
+    match attempt.wait().await {
+        Ok(mut route)
+            if route.selected_transport() == Some(Transport::UdpSinglePath)
+                && native_single_udp =>
+        {
+            let Some(preflight) = mpquic_preflight else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
+            };
+            let now_ms = crate::unix_millis();
+            let Ok(path) = verified_single_relay_udp_path(&route.established, now_ms) else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Ok(identity) = route.committed_single_udp_identity(&path) else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let signal = start_native_udp_exit_session(&route, &path, discovery, now_ms).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable);
+            };
+            let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
+                route.context_handle().try_into()
+            else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Some(authorization) = route.established.native_authorization.take() else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let [grant] = route.established.relay_grants.as_slice() else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let session = preflight
+                .establish_single_path_udp(
+                    helper,
+                    context_handle,
+                    authorization,
+                    grant,
+                    &signal,
+                    crate::unix_millis(),
+                    MPQUIC_READY_WAIT,
+                )
+                .await;
+            let Ok(session) = session else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            Ok(EstablishedClientRoute {
+                expiry: route.expiry,
+                transport: ClientTransportState::NativeUdp(Box::new(
+                    ActiveProductionNativeUdpRoute {
+                        session,
+                        path,
+                        identity,
+                        binding: None,
+                        lifetime: None,
+                    },
+                )),
+                tcp_flow: None,
+                route: Some(route),
+                orchestrator,
+                helper: helper.clone(),
+            })
+        }
+        Ok(route) if route.selected_transport() == Some(Transport::UdpSinglePath) => {
+            let expiry = route.expiry;
+            let prepared = route
+                .prepare_single_relay_udp(helper, crate::unix_millis())
+                .await;
+            match prepared {
+                Ok(prepared) => match prepared
+                    .start_exit_session(discovery, crate::unix_millis())
+                    .await
+                {
+                    Ok(ready) => Ok(EstablishedClientRoute {
+                        expiry,
+                        transport: ClientTransportState::UdpReady(ready),
+                        tcp_flow: None,
+                        route: None,
+                        orchestrator,
+                        helper: helper.clone(),
+                    }),
+                    Err(failure) => {
+                        let cleanup = failure.prepared.disconnect().await;
+                        orchestrator.shutdown_detached();
+                        if cleanup.is_err() {
+                            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+                        } else {
+                            Err(ClientRouteConnectError::UdpExitSessionSignalUnavailable)
+                        }
+                    }
+                },
+                Err(failure) => {
+                    let ProductionUdpPreparationFailure { route, .. } = failure;
+                    let _ = route
+                        .disconnect()
+                        .await
+                        .map_err(|_| ProductionUdpRouteError::CleanupPending);
+                    orchestrator.shutdown_detached();
+                    Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+                }
+            }
+        }
+        Ok(route) if route.selected_transport() == Some(Transport::TcpMptcp) => {
+            let signal = start_mptcp_exit_session(&route, discovery, crate::unix_millis()).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+            };
+            match activate_committed_transport(&route, helper, Some(signal)).await {
+                Ok(transport) => Ok(EstablishedClientRoute {
+                    expiry: route.expiry,
+                    transport,
+                    tcp_flow: None,
+                    route: Some(route),
+                    orchestrator,
+                    helper: helper.clone(),
+                }),
+                Err(error) => {
+                    let _ = route.disconnect().await;
+                    orchestrator.shutdown_detached();
+                    Err(error)
+                }
+            }
+        }
+        Ok(mut route) if route.selected_transport() == Some(Transport::MultipathQuic) => {
+            let Some(preflight) = mpquic_preflight else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::NativeTransportIdentityUnavailable);
+            };
+            let identity = match route.committed_mpquic_identity() {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let _ = route.disconnect().await;
+                    orchestrator.shutdown_detached();
+                    return Err(error);
+                }
+            };
+            let signal = start_mpquic_exit_session(&route, discovery, crate::unix_millis()).await;
+            let Ok(signal) = signal else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let Ok(context_handle): Result<[u8; HELPER_HANDLE_BYTES], _> =
+                route.context_handle().try_into()
+            else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let active_path_ids = route.established.active_path_ids.clone();
+            let minimum_paths = route
+                .established
+                .request
+                .parameters
+                .post_probe_policy
+                .relay_policy
+                .minimum_paths;
+            let Some(authorization) = route.established.native_authorization.take() else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            };
+            let mut grants = route.established.relay_grants.clone();
+            grants.sort_unstable_by_key(VerifiedRelayGrant::path_id);
+            let session = preflight
+                .establish_committed(
+                    helper,
+                    context_handle,
+                    authorization,
+                    &grants,
+                    &active_path_ids,
+                    minimum_paths,
+                    &signal,
+                    crate::unix_millis(),
+                    MPQUIC_READY_WAIT,
+                )
+                .await;
+            if let Err(error) = &session {
+                // Production MPQUIC errors expose only bounded local/native protocol diagnostics;
+                // they never contain route credentials or traffic.
+                eprintln!("production MPQUIC Client startup failed: {error}");
+            }
+            if let Ok(session) = session {
+                let health = ProductionMpquicPathHealth::new(
+                    session.active_path_ids(),
+                    session.warm_path_ids(),
+                    UnixTime::from_secs(crate::unix_seconds()),
+                );
+                let Ok(health) = health else {
+                    let _ = session.shutdown().await;
+                    let _ = route.disconnect().await;
+                    orchestrator.shutdown_detached();
+                    return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+                };
+                Ok(EstablishedClientRoute {
+                    expiry: route.expiry,
+                    transport: ClientTransportState::Mpquic(Box::new(
+                        ActiveProductionMpquicRoute {
+                            session,
+                            identity,
+                            health,
+                            browser_flows: Vec::new(),
+                        },
+                    )),
+                    tcp_flow: None,
+                    route: Some(route),
+                    orchestrator,
+                    helper: helper.clone(),
+                })
+            } else {
+                let _ = route.disconnect().await;
+                orchestrator.shutdown_detached();
+                Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+            }
+        }
+        Ok(route) => {
+            let _ = route.disconnect().await;
+            orchestrator.shutdown_detached();
+            Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
+        }
+        Err(ProductionRouteError::NativeTransportIdentityUnavailable) => {
+            orchestrator.shutdown_detached();
+            Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
+        }
+        Err(_) => {
+            orchestrator.shutdown_detached();
+            Err(ClientRouteConnectError::RouteAdmissionUnavailable)
+        }
+    }
+}
+
+async fn activate_committed_transport(
+    route: &ProductionRoute,
+    helper: &HelperClient,
+    mptcp_listener: Option<ExitMptcpListenerSignal>,
+) -> Result<ClientTransportState, ClientRouteConnectError> {
+    match route.selected_transport() {
+        Some(Transport::TcpMptcp) => {
+            let signal = mptcp_listener
+                .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+            if !route.accepts_mptcp_listener(&signal) {
+                return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+            }
+            let local_port = random_mptcp_source_port(signal.port())?;
+            ClientMptcpTransport::acquire_and_activate(
+                helper,
+                signal,
+                route.context_handle().to_vec(),
+                local_port,
+            )
+            .await
+            .map(ClientTransportState::TcpMptcp)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+        }
+        Some(Transport::UdpSinglePath | Transport::MultipathQuic | Transport::Unspecified)
+        | None => Err(ClientRouteConnectError::TransportRuntimeUnavailable),
+    }
+}
+
+fn random_mptcp_source_port(exit_listener_port: u16) -> Result<u16, ClientRouteConnectError> {
+    const FIRST_DYNAMIC_PORT: u16 = 49_152;
+    const DYNAMIC_PORT_COUNT: u16 = u16::MAX - FIRST_DYNAMIC_PORT + 1;
+    for _ in 0..8 {
+        let mut bytes = [0_u8; 2];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let port = FIRST_DYNAMIC_PORT + (u16::from_le_bytes(bytes) % DYNAMIC_PORT_COUNT);
+        if port != exit_listener_port {
+            return Ok(port);
+        }
+    }
+    Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+}
+
+fn mptcp_acquire_failure_lost_helper_route(error: &MptcpTransportError) -> bool {
+    matches!(
+        error,
+        MptcpTransportError::Helper(HelperClientError::Rejected(
+            HelperResult::CleanupIncomplete | HelperResult::NotFound
+        ))
+    )
+}
+
+fn random_runtime_instance_id() -> Result<[u8; 32], ClientRouteConnectError> {
+    for _ in 0..8 {
+        let mut instance_id = [0_u8; 32];
+        OsRng
+            .try_fill_bytes(&mut instance_id)
+            .map_err(|_| ClientRouteConnectError::NativeTransportIdentityUnavailable)?;
+        if instance_id != [0; 32] {
+            return Ok(instance_id);
+        }
+    }
+    Err(ClientRouteConnectError::NativeTransportIdentityUnavailable)
+}
+
+/// Repeat an affine Ready-to-proof lifecycle until the selected transport's hard minimum is met.
+async fn drive_required_native_paths<
+    Ready,
+    Completed,
+    Error,
+    Complete,
+    CompleteFuture,
+    Continue,
+    ContinueFuture,
+    Count,
+>(
+    mut ready: Ready,
+    required_paths: usize,
+    mut complete: Complete,
+    mut continue_with: Continue,
+    completed_path_count: Count,
+) -> Result<Completed, Error>
+where
+    Complete: FnMut(Ready) -> CompleteFuture,
+    CompleteFuture: Future<Output = Result<Completed, Error>>,
+    Continue: FnMut(Completed) -> ContinueFuture,
+    ContinueFuture: Future<Output = Result<Ready, Error>>,
+    Count: Fn(&Completed) -> usize,
+{
+    debug_assert!(required_paths != 0);
+    loop {
+        let completed = complete(ready).await?;
+        if completed_path_count(&completed) >= required_paths {
+            return Ok(completed);
+        }
+        ready = continue_with(completed).await?;
+    }
+}
+
+/// Collect every required Ready authority, then establish all paths in one helper context.
+async fn complete_required_client_native_paths(
+    mut ready: selection_bridge::ClientNativeRelayReady,
+    required_paths: usize,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
+    while ready.ready_path_count() < required_paths {
+        let preselection = Box::pin(ready.retain_and_dispatch_next_permit(discovery))
+            .await
+            .map_err(|_| ClientRouteConnectError::NativePermitUnavailable)?;
+        ready = Box::pin(preselection.dispatch_relay_ready(discovery))
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
+    }
+    Box::pin(complete_client_native_probe(ready, discovery, helper)).await
+}
+
+/// Drive the collected path set through one exact helper runtime and every signed native RPC.
+///
+/// Destruction-only authority survives consuming protocol joins without duplicating lifecycle
+/// authority. A failed Client probe must never destroy the node's unrelated Relay/Exit contexts.
+async fn complete_client_native_probe(
+    ready: selection_bridge::ClientNativeRelayReady,
+    discovery: &DiscoveryControlHandle,
+    helper: &HelperClient,
+) -> Result<selection_bridge::CompletedClientNativeProbe, ClientRouteConnectError> {
+    let prepare = ready
+        .prepare_request(discovery)
+        .await
+        .map_err(|_| ClientRouteConnectError::NativeHelperPrepareUnavailable)?;
+    let prepared = match helper.prepare_lease_batch(prepare.clone()).await {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            if let PrepareLeaseBatchFailure::Ambiguous { authority, .. } = failure {
+                // No context handle was received. Retain the exact dispatched Prepare authority
+                // until its setup deadline, then ask only that same helper runtime to reconcile.
+                let remaining = prepare
+                    .setup_expires_at_unix
+                    .saturating_mul(1_000)
+                    .saturating_sub(crate::unix_millis())
+                    .min(MAXIMUM_PHASE_LIFETIME_MS);
+                tokio::time::sleep(Duration::from_millis(remaining)).await;
+                if let Err(error) = helper.reconcile_expired_prepare(&authority).await {
+                    tracing::warn!(error = %error, "native probe Prepare reconciliation unconfirmed");
+                }
+            }
+            return Err(ClientRouteConnectError::NativeHelperPrepareUnavailable);
+        }
+    };
+    let cleanup = prepared.retain_cleanup_authority();
+    let result = Box::pin(async {
+        let prepared = ready
+            .bind_prepared_endpoint(&prepare, prepared)
+            .map_err(|_| ClientRouteConnectError::NativeHelperPrepareUnavailable)?;
+        let mut authorized = prepared
+            .request_activation_authority(discovery)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeAuthorizationUnavailable)?;
+        let activation = authorized.activation_request().clone();
+        let activated = helper
+            .activate_lease_batch(authorized.runtime_owner_mut(), activation)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeHelperActivateUnavailable)?;
+        authorized
+            .exchange_challenges(helper)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeStartUnavailable)?;
+        let mut awaiting = authorized
+            .accept_activation(&activated)
+            .map_err(|_| ClientRouteConnectError::NativeStartUnavailable)?;
+        let commit = awaiting.commit_request();
+        let committed = helper
+            .commit_lease_batch(awaiting.runtime_owner_mut(), commit)
+            .await
+            .map_err(|_| ClientRouteConnectError::NativeHelperCommitUnavailable)?;
+        let completed = Box::pin(awaiting.accept_committed_and_dispatch(committed, discovery))
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "native terminal Start/result exact-set failed");
+                ClientRouteConnectError::NativeProofUnavailable
+            })?;
+        completed
+            .runtime_owner()
+            .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)?;
+        Ok(completed)
+    })
+    .await;
+    // Run on both successful completion and every error, including errors that consumed the
+    // original owner. Nothing here can broaden destruction to another participant's context.
+    let destroyed = helper.destroy_context_after_join(&cleanup).await;
+    if let Err(error) = &destroyed {
+        tracing::warn!(error = %error, "native probe exact context destruction unconfirmed");
+    }
+    let completed = result?;
+    let destroyed =
+        destroyed.map_err(|_| ClientRouteConnectError::NativeHelperCommitUnavailable)?;
+    completed
+        .accept_destroyed(destroyed)
+        .map_err(|_| ClientRouteConnectError::NativeProofUnavailable)
+}
+
+async fn begin_client_route(
+    config: &Config,
+    discovery: &DiscoveryControlHandle,
+) -> Result<(selection_bridge::ClientNativeRelayReady, usize), ClientRouteConnectError> {
+    let (parameters, minimum_native_paths) = client_preselection_plan(config)?;
+    let admission = client_route_admission_profile(config)?;
+    let prepared = discovery
+        .prepare_client_preselection(parameters)
+        .await
+        .map_err(map_preselection_error)?;
+    let preselection =
+        selection_bridge::begin_client_native_preselection(prepared, admission, discovery)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "native preselection failed before the first data-Relay dispatch"
+                );
+                ClientRouteConnectError::NativePermitUnavailable
+            })?;
+    let ready = Box::pin(preselection.dispatch_relay_ready(discovery))
+        .await
+        .map_err(|_| ClientRouteConnectError::NativeRelayUnavailable)?;
+    let required_native_paths = ready.candidate_path_count();
+    if required_native_paths < minimum_native_paths {
+        return Err(ClientRouteConnectError::NativeRelayUnavailable);
+    }
+    Ok((ready, required_native_paths))
+}
+
+fn client_route_admission_profile(
+    config: &Config,
+) -> Result<selection_bridge::ClientRouteAdmissionProfile, ClientRouteConnectError> {
+    let (transport, required_paths) = client_native_path_requirement(config)?;
+    let transport = match transport {
+        Transport::TcpMptcp => SelectionTransport::TcpMptcp,
+        Transport::UdpSinglePath => SelectionTransport::UdpSinglePath,
+        Transport::MultipathQuic => SelectionTransport::MultipathQuic,
+        Transport::Unspecified => return Err(ClientRouteConnectError::InvalidProfile),
+    };
+    let address_family = match config.routing.client_address_family {
+        ClientAddressFamily::Ipv4 => IpFamily::Ipv4,
+        ClientAddressFamily::Ipv6 => IpFamily::Ipv6,
+    };
+    let minimum_capacity = Bandwidth::new(
+        config.routing.client_minimum_upload_mbps,
+        config.routing.client_minimum_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let exploration = config.selection.exploration_ratio;
+    if !exploration.is_finite() || !(0.0..=0.5).contains(&exploration) {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    let mix = SelectionMix {
+        high: 0.8 - exploration,
+        diverse_middle: 0.2,
+        exploration,
+    };
+    let relay_policy = if transport == SelectionTransport::UdpSinglePath {
+        RelaySelectionPolicy {
+            active_paths: 1,
+            minimum_paths: 1,
+            maximum_paths: 1,
+            warm_backup_paths: 0,
+            maximum_rtt_spread_ms: f64::from(config.selection.maximum_rtt_spread_ms),
+            minimum_unique_throughput_gain_ratio: 0.10,
+            mix,
+        }
+    } else {
+        let maximum_paths = usize::from(config.selection.maximum_multipath_paths);
+        let active_paths = usize::from(config.selection.active_multipath_paths).max(required_paths);
+        if active_paths > maximum_paths {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        RelaySelectionPolicy {
+            active_paths,
+            minimum_paths: required_paths,
+            maximum_paths,
+            warm_backup_paths: usize::from(config.selection.warm_backup_paths)
+                .min(maximum_paths.saturating_sub(active_paths)),
+            maximum_rtt_spread_ms: f64::from(config.selection.maximum_rtt_spread_ms),
+            minimum_unique_throughput_gain_ratio: 0.10,
+            mix,
+        }
+    };
+    let hard_lifetime = Duration::from_secs(
+        config
+            .routing
+            .context_ttl_seconds
+            .min(MAXIMUM_RESERVATION_LIFETIME_MS / 1_000),
+    );
+    if hard_lifetime.is_zero() {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    Ok(selection_bridge::ClientRouteAdmissionProfile::new(
+        transport,
+        minimum_capacity,
+        address_family,
+        mix,
+        relay_policy,
+        hard_lifetime,
+    ))
+}
+
+fn client_preselection_parameters(
+    config: &Config,
+) -> Result<ClientPreselectionParameters, ClientRouteConnectError> {
+    client_preselection_plan(config).map(|(parameters, _required_native_paths)| parameters)
+}
+
+fn client_preselection_plan(
+    config: &Config,
+) -> Result<(ClientPreselectionParameters, usize), ClientRouteConnectError> {
+    let (transport, required_native_paths) = client_native_path_requirement(config)?;
+    let address_family = match config.routing.client_address_family {
+        ClientAddressFamily::Ipv4 => volparossa_protocol::ObservationAddressFamily::Ipv4,
+        ClientAddressFamily::Ipv6 => volparossa_protocol::ObservationAddressFamily::Ipv6,
+    };
+    let minimum_capacity = Bandwidth::new(
+        config.routing.client_minimum_upload_mbps,
+        config.routing.client_minimum_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let local_profile_capacity = Bandwidth::new(
+        config.routing.client_local_upload_mbps,
+        config.routing.client_local_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    let conservative_capacity_ceiling = Bandwidth::new(
+        config.routing.client_capacity_ceiling_upload_mbps,
+        config.routing.client_capacity_ceiling_download_mbps,
+    )
+    .map_err(|_| ClientRouteConnectError::InvalidProfile)?;
+    if !conservative_capacity_ceiling.satisfies(minimum_capacity)
+        || !local_profile_capacity.satisfies(conservative_capacity_ceiling)
+    {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    let multipath = transport != Transport::UdpSinglePath;
+    let minimum_other_relays = if multipath { required_native_paths } else { 1 };
+    let maximum_other_relays = if multipath {
+        usize::from(config.selection.maximum_multipath_paths.max(1))
+    } else {
+        1
+    };
+    Ok((
+        ClientPreselectionParameters::new(
+            transport,
+            address_family,
+            minimum_capacity,
+            local_profile_capacity,
+            conservative_capacity_ceiling,
+            minimum_other_relays,
+            maximum_other_relays,
+            config
+                .network
+                .candidate_pool_size
+                .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES),
+        ),
+        required_native_paths,
+    ))
+}
+
+fn client_native_path_requirement(
+    config: &Config,
+) -> Result<(Transport, usize), ClientRouteConnectError> {
+    if config.udp.enabled {
+        return Ok((Transport::UdpSinglePath, 1));
+    }
+    let (transport, required_paths) = if config.tcp.enabled {
+        if config.tcp.allow_plain_tcp_fallback {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        (
+            Transport::TcpMptcp,
+            usize::from(config.selection.minimum_multipath_paths),
+        )
+    } else if config.quic.enabled {
+        if !config.quic.require_multipath || config.quic.allow_degraded_single_path {
+            return Err(ClientRouteConnectError::InvalidProfile);
+        }
+        (
+            Transport::MultipathQuic,
+            usize::from(
+                config
+                    .selection
+                    .minimum_multipath_paths
+                    .max(config.quic.minimum_paths),
+            ),
+        )
+    } else {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    };
+    let maximum_paths = usize::from(config.selection.maximum_multipath_paths);
+    if required_paths < 2
+        || required_paths > maximum_paths
+        || required_paths > usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)
+    {
+        return Err(ClientRouteConnectError::InvalidProfile);
+    }
+    Ok((transport, required_paths))
+}
+
+fn map_preselection_error(_: ClientPreselectionError) -> ClientRouteConnectError {
+    ClientRouteConnectError::PreselectionUnavailable
+}
 
 /// A complete actor snapshot projected into a selection-only identity.
 ///
@@ -121,9 +3079,91 @@ impl ProspectivePeerIdentity {
         }
     }
 
+    fn from_forwarded(capability: &ForwardedExitCapability, expires_at_ms: u64) -> Self {
+        Self {
+            wire_node_id: capability.exit_node_id,
+            peer_id: capability.exit_peer_id,
+            public_key: capability.exit_public_key,
+            advertisement_sequence: capability.exit_advertisement_sequence,
+            advertisement_expires_at_ms: capability.exit_advertisement_expires_at_ms,
+            advertisement_payload_hash: capability.exit_advertisement_payload_hash,
+            policy_version: capability.policy_version,
+            policy_hash: capability.policy_hash,
+            policy_expires_at_ms: capability.policy_expires_at_ms,
+            expires_at_ms,
+        }
+    }
+
     fn direct_matches(&self, capability: &DirectRelayCapability) -> bool {
         self == &Self::from_direct(capability)
     }
+
+    /// Accept the exact selected advertisement or a strictly newer advertisement from the same
+    /// actor and policy. This keeps an already-live route attempt usable across ordinary service
+    /// re-publication without allowing rollback or equal-sequence drift.
+    fn direct_lineage_matches(
+        &self,
+        current: &DirectRelayCapability,
+        required_expiry_ms: u64,
+    ) -> bool {
+        if self.wire_node_id != current.node_id
+            || self.peer_id != current.peer_id
+            || self.public_key != current.public_key
+            || self.policy_version != current.policy_version
+            || self.policy_hash != current.policy_hash
+            || self.policy_expires_at_ms != current.policy_expires_at_ms
+            || self.advertisement_expires_at_ms < required_expiry_ms
+            || self.policy_expires_at_ms < required_expiry_ms
+            || self.expires_at_ms < required_expiry_ms
+            || self.expires_at_ms
+                > self
+                    .advertisement_expires_at_ms
+                    .min(self.policy_expires_at_ms)
+            || current.advertisement_expires_at_ms < required_expiry_ms
+            || current.policy_expires_at_ms < required_expiry_ms
+            || current.expires_at_ms < required_expiry_ms
+            || current.expires_at_ms
+                > current
+                    .advertisement_expires_at_ms
+                    .min(current.policy_expires_at_ms)
+        {
+            return false;
+        }
+        if self.advertisement_sequence == current.advertisement_sequence {
+            return self.direct_matches(current);
+        }
+        self.advertisement_sequence != 0
+            && self.advertisement_sequence < current.advertisement_sequence
+    }
+}
+
+fn forwarded_control_lineage_matches_current(
+    current: &DirectRelayCapability,
+    forwarded: &ForwardedExitCapability,
+    required_expiry_ms: u64,
+) -> bool {
+    if forwarded.control_relay_node_id != current.node_id
+        || forwarded.control_relay_peer_id != current.peer_id
+        || forwarded.control_relay_public_key != current.public_key
+        || forwarded.policy_version != current.policy_version
+        || forwarded.policy_hash != current.policy_hash
+        || forwarded.policy_expires_at_ms != current.policy_expires_at_ms
+        || forwarded.control_relay_advertisement_sequence == 0
+        || forwarded.control_relay_advertisement_expires_at_ms < required_expiry_ms
+        || forwarded.expires_at_ms < required_expiry_ms
+        || current.advertisement_expires_at_ms < required_expiry_ms
+        || current.policy_expires_at_ms < required_expiry_ms
+        || current.expires_at_ms < required_expiry_ms
+    {
+        return false;
+    }
+    if forwarded.control_relay_advertisement_sequence == current.advertisement_sequence {
+        return forwarded.control_relay_advertisement_expires_at_ms
+            == current.advertisement_expires_at_ms
+            && forwarded.control_relay_advertisement_payload_hash
+                == current.advertisement_payload_hash;
+    }
+    forwarded.control_relay_advertisement_sequence < current.advertisement_sequence
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,15 +3194,13 @@ impl ProspectiveForwardedExit {
         control: &DirectRelayCapability,
         exit: &ForwardedExitCapability,
     ) -> Result<Self, RouteSetupError> {
-        if control.node_id != exit.control_relay_node_id
-            || control.peer_id != exit.control_relay_peer_id
-            || control.public_key != exit.control_relay_public_key
-            || control.advertisement_sequence != exit.control_relay_advertisement_sequence
-            || control.advertisement_expires_at_ms != exit.control_relay_advertisement_expires_at_ms
-            || control.advertisement_payload_hash != exit.control_relay_advertisement_payload_hash
-            || control.policy_version != exit.policy_version
-            || control.policy_hash != exit.policy_hash
-            || control.policy_expires_at_ms != exit.policy_expires_at_ms
+        let canonical_exit_expiry_ms = exit
+            .exit_advertisement_expires_at_ms
+            .min(exit.policy_expires_at_ms)
+            .min(control.expires_at_ms);
+        if exit.expires_at_ms == 0
+            || exit.expires_at_ms > canonical_exit_expiry_ms
+            || !forwarded_control_lineage_matches_current(control, exit, exit.expires_at_ms)
             || control.node_id == exit.exit_node_id
             || control.peer_id == exit.exit_peer_id
         {
@@ -170,18 +3208,7 @@ impl ProspectiveForwardedExit {
         }
         Ok(Self {
             control: ProspectiveDirectRelay::from_capability(control),
-            exit: ProspectivePeerIdentity {
-                wire_node_id: exit.exit_node_id,
-                peer_id: exit.exit_peer_id,
-                public_key: exit.exit_public_key,
-                advertisement_sequence: exit.exit_advertisement_sequence,
-                advertisement_expires_at_ms: exit.exit_advertisement_expires_at_ms,
-                advertisement_payload_hash: exit.exit_advertisement_payload_hash,
-                policy_version: exit.policy_version,
-                policy_hash: exit.policy_hash,
-                policy_expires_at_ms: exit.policy_expires_at_ms,
-                expires_at_ms: exit.expires_at_ms,
-            },
+            exit: ProspectivePeerIdentity::from_forwarded(exit, canonical_exit_expiry_ms),
         })
     }
 }
@@ -189,7 +3216,7 @@ impl ProspectiveForwardedExit {
 #[derive(Clone, Eq, PartialEq)]
 struct DiversitySnapshot {
     operator_id: OperatorId,
-    asn: u32,
+    asn: Option<u32>,
     observed_network_prefix: ObservedNetworkPrefix,
 }
 
@@ -226,12 +3253,11 @@ struct PostProbeSelectionPolicy {
     relay_policy: RelaySelectionPolicy,
 }
 
-/// Native-process scope required before any exit finalization may be dispatched.
+/// Locally proven dataplane-runtime scope required before Exit finalization may be dispatched.
 ///
-/// API v6 can obtain this process instance through role-specific preflight, but the production
-/// route bridge is not wired to that client yet and therefore deliberately leaves this absent. A
-/// production caller must copy the channel-correlated native response rather than minting an
-/// identifier in the agent. This process incarnation is not binary attestation.
+/// Kernel-backed UDP/TCP routes bind a fresh in-process route-runtime incarnation after the helper
+/// endpoints prove live. A userspace MPQUIC route must instead bind its role-specific preflight
+/// incarnation before it can establish a native session. Neither identifier is binary attestation.
 #[derive(Clone, Debug)]
 struct ClientNativeRouteScope {
     masque_context_id: u64,
@@ -297,6 +3323,10 @@ impl RouteSetupRequest {
             exit_diversity,
             evidence_batch_id,
         } = forwarded_exit;
+        let setup_expires_at_ms = parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(RouteSetupError::Invalid("setup expiry"))?;
         if control_diversity.conflicts_with(&exit_diversity) {
             return Err(RouteSetupError::Invalid("control exit diversity"));
         }
@@ -309,21 +3339,17 @@ impl RouteSetupRequest {
             || control.identity.policy_hash != parameters.policy_hash
             || exit.policy_hash != parameters.policy_hash
             || control.identity.policy_expires_at_ms != exit.policy_expires_at_ms
-            || control.identity.advertisement_expires_at_ms < parameters.expires_at_ms
-            || exit.advertisement_expires_at_ms < parameters.expires_at_ms
+            || control.identity.advertisement_expires_at_ms < setup_expires_at_ms
+            || exit.advertisement_expires_at_ms < setup_expires_at_ms
             || control.identity.policy_expires_at_ms < parameters.expires_at_ms
             || exit.policy_expires_at_ms < parameters.expires_at_ms
-            || control.identity.expires_at_ms < parameters.expires_at_ms
-            || exit.expires_at_ms < parameters.expires_at_ms
+            || control.identity.expires_at_ms < setup_expires_at_ms
+            || exit.expires_at_ms < setup_expires_at_ms
         {
             return Err(RouteSetupError::Invalid("selected forwarded exit evidence"));
         }
 
         let mut paths = Vec::with_capacity(prospective_relays.len());
-        let setup_expires_at_ms = parameters
-            .setup_expires_at_unix
-            .checked_mul(1_000)
-            .ok_or(RouteSetupError::Invalid("setup expiry"))?;
         for (index, binding) in prospective_relays.into_iter().enumerate() {
             let ProspectiveRouteRelay { path_id, proof } = binding;
             proof.validate_request_binding(
@@ -419,6 +3445,7 @@ impl RouteSetupRequest {
         &self,
         selected: &[SelectedRouteSetupPath],
         active_path_count: usize,
+        traversal_hints: Vec<volparossa_routing::TraversalEndpointHint>,
     ) -> PrepareLeaseBatch {
         let path_count = u32::try_from(active_path_count).unwrap_or(MAX_HELPER_PATHS);
         PrepareLeaseBatch {
@@ -435,6 +3462,7 @@ impl RouteSetupRequest {
                 .collect(),
             setup_expires_at_unix: self.parameters.setup_expires_at_unix,
             hard_expires_at_unix: self.parameters.hard_expires_at_unix,
+            traversal_hints,
         }
     }
 }
@@ -589,21 +3617,37 @@ impl RouteSetupAuthorities {
     fn validate(&self, request: &RouteSetupRequest) -> Result<(), RouteSetupError> {
         let forwarded = ProspectiveForwardedExit::from_capabilities(&self.control, &self.exit)
             .map_err(|_| RouteSetupError::Capability)?;
+        let route_required_expiry = request.parameters.expires_at_ms;
+        let setup_required_expiry = request
+            .parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(RouteSetupError::Capability)?;
+        let selected_exit_expiry = self
+            .exit
+            .exit_advertisement_expires_at_ms
+            .min(self.exit.policy_expires_at_ms)
+            .min(request.control.identity.expires_at_ms);
+        let selected_exit =
+            ProspectivePeerIdentity::from_forwarded(&self.exit, selected_exit_expiry);
         if self.datapath_relays.len() != request.paths.len()
-            || forwarded.control != request.control
-            || forwarded.exit != request.exit
+            || !request
+                .control
+                .identity
+                .direct_lineage_matches(&self.control, setup_required_expiry)
+            || selected_exit != request.exit
+            || forwarded.exit.expires_at_ms < request.exit.expires_at_ms
             || self.control.policy_hash != request.parameters.policy_hash
             || self.exit.policy_hash != request.parameters.policy_hash
         {
             return Err(RouteSetupError::Capability);
         }
-        let required_expiry = request.parameters.expires_at_ms;
-        if self.control.expires_at_ms < required_expiry
-            || self.exit.expires_at_ms < required_expiry
-            || self.control.advertisement_expires_at_ms < required_expiry
-            || self.exit.exit_advertisement_expires_at_ms < required_expiry
-            || self.control.policy_expires_at_ms < required_expiry
-            || self.exit.policy_expires_at_ms < required_expiry
+        if self.control.expires_at_ms < setup_required_expiry
+            || self.exit.expires_at_ms < setup_required_expiry
+            || self.control.advertisement_expires_at_ms < setup_required_expiry
+            || self.exit.exit_advertisement_expires_at_ms < setup_required_expiry
+            || self.control.policy_expires_at_ms < route_required_expiry
+            || self.exit.policy_expires_at_ms < route_required_expiry
         {
             return Err(RouteSetupError::Capability);
         }
@@ -618,7 +3662,8 @@ impl RouteSetupAuthorities {
             if !path.proof.capability_matches(
                 capability,
                 request.parameters.policy_hash,
-                required_expiry,
+                setup_required_expiry,
+                route_required_expiry,
             ) || !nodes.insert(capability.node_id)
                 || !peers.insert(capability.peer_id.to_bytes())
                 || !public_keys.insert(capability.public_key)
@@ -756,21 +3801,26 @@ trait LocalRouteBackend: Clone + Send + Sync + 'static {
     fn prepare<'a>(
         &'a mut self,
         request: &'a PrepareLeaseBatch,
-    ) -> impl Future<Output = Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>>> + Send + 'a;
+    ) -> impl Future<
+        Output = Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>>,
+    > + Send
+    + 'a;
 
     fn activate<'a>(
         &'a mut self,
+        owner: &'a mut RuntimeBoundPreparedLeaseBatch,
         request: &'a ActivateLeaseBatch,
     ) -> impl Future<Output = Result<ActivatedLeaseBatch, Self::Error>> + Send + 'a;
 
     fn commit<'a>(
         &'a mut self,
+        owner: &'a mut RuntimeBoundPreparedLeaseBatch,
         request: &'a CommitLeaseBatch,
     ) -> impl Future<Output = Result<CommittedLeaseBatch, Self::Error>> + Send + 'a;
 
     fn destroy<'a>(
         &'a mut self,
-        request: &'a DestroyContext,
+        owner: &'a RuntimeBoundPreparedLeaseBatch,
     ) -> impl Future<Output = Result<DestroyedContext, Self::Error>> + Send + 'a;
 
     fn reconcile_expired_prepare(
@@ -785,7 +3835,7 @@ impl LocalRouteBackend for HelperClient {
     async fn prepare(
         &mut self,
         request: &PrepareLeaseBatch,
-    ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+    ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
         self.prepare_lease_batch(request.clone())
             .await
             .map_err(|failure| match failure {
@@ -800,20 +3850,25 @@ impl LocalRouteBackend for HelperClient {
 
     async fn activate(
         &mut self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         request: &ActivateLeaseBatch,
     ) -> Result<ActivatedLeaseBatch, Self::Error> {
-        self.activate_lease_batch(request.clone()).await
+        self.activate_lease_batch(owner, request.clone()).await
     }
 
     async fn commit(
         &mut self,
+        owner: &mut RuntimeBoundPreparedLeaseBatch,
         request: &CommitLeaseBatch,
     ) -> Result<CommittedLeaseBatch, Self::Error> {
-        self.commit_lease_batch(request.clone()).await
+        self.commit_lease_batch(owner, request.clone()).await
     }
 
-    async fn destroy(&mut self, request: &DestroyContext) -> Result<DestroyedContext, Self::Error> {
-        self.destroy_context(request.clone()).await
+    async fn destroy(
+        &mut self,
+        owner: &RuntimeBoundPreparedLeaseBatch,
+    ) -> Result<DestroyedContext, Self::Error> {
+        self.destroy_context(owner).await
     }
 
     async fn reconcile_expired_prepare(
@@ -828,6 +3883,11 @@ trait ReservationTransport: Send + 'static {
     type Error: Send + 'static;
 
     fn ambiguous_after_dispatch(error: &Self::Error) -> bool;
+
+    fn endpoint_traversal_hints(
+        &mut self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> impl Future<Output = Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error>> + Send;
 
     fn exit_forward<'a>(
         &'a mut self,
@@ -895,6 +3955,13 @@ impl ReservationTransport for DiscoveryControlHandle {
         *error == OutboundReservationError::AmbiguousAfterDispatch
     }
 
+    async fn endpoint_traversal_hints(
+        &mut self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+        DiscoveryControlHandle::endpoint_traversal_hints(self, bindings).await
+    }
+
     async fn exit_forward<'a>(
         &'a mut self,
         control: &'a DirectRelayCapability,
@@ -948,6 +4015,7 @@ trait ClientReservationProtocol: Send + 'static {
     type FinalizeRequest: Send + 'static;
     type ExitBundle: Send + 'static;
     type RelayGrant: Send + Sync + 'static;
+    type NativeAuthorization: Send + 'static;
 
     fn sign_hold(&mut self, intent: &ExitReservationIntent) -> Result<Vec<u8>, RouteSetupError>;
 
@@ -1013,6 +4081,8 @@ trait ClientReservationProtocol: Send + 'static {
 
     fn exit_bundle_path_count(bundle: &Self::ExitBundle) -> usize;
 
+    fn signed_exit_reservation(bundle: &Self::ExitBundle) -> &[u8];
+
     fn sign_relay_request(
         &mut self,
         bundle: &Self::ExitBundle,
@@ -1044,6 +4114,12 @@ trait ClientReservationProtocol: Send + 'static {
         signed_receipt: &[u8],
         now_ms: u64,
     ) -> Result<(), RouteSetupError>;
+
+    fn take_native_route_authorization(
+        &mut self,
+        request: &Self::FinalizeRequest,
+        now_ms: u64,
+    ) -> Result<Self::NativeAuthorization, RouteSetupError>;
 
     fn grant_path_id(grant: &Self::RelayGrant) -> u32;
 
@@ -1089,6 +4165,7 @@ impl ClientReservationProtocol for ReservationSession {
     type FinalizeRequest = SignedExitFinalizeRequest;
     type ExitBundle = VerifiedFinalizedExitBundle;
     type RelayGrant = VerifiedRelayGrant;
+    type NativeAuthorization = ClientNativeRouteAuthorization;
 
     fn sign_hold(&mut self, intent: &ExitReservationIntent) -> Result<Vec<u8>, RouteSetupError> {
         self.coordinator
@@ -1274,6 +4351,10 @@ impl ClientReservationProtocol for ReservationSession {
         bundle.path_count()
     }
 
+    fn signed_exit_reservation(bundle: &Self::ExitBundle) -> &[u8] {
+        bundle.signed_exit_reservation()
+    }
+
     fn sign_relay_request(
         &mut self,
         bundle: &Self::ExitBundle,
@@ -1329,6 +4410,16 @@ impl ClientReservationProtocol for ReservationSession {
             .map_err(|_| RouteSetupError::ReservationProtocol(RouteSetupPhase::ExitConfirmations))
     }
 
+    fn take_native_route_authorization(
+        &mut self,
+        request: &Self::FinalizeRequest,
+        now_ms: u64,
+    ) -> Result<Self::NativeAuthorization, RouteSetupError> {
+        self.coordinator
+            .take_native_route_authorization(*request.finalize_id(), now_ms)
+            .map_err(|_| RouteSetupError::ReservationProtocol(RouteSetupPhase::ExitConfirmations))
+    }
+
     fn grant_path_id(grant: &Self::RelayGrant) -> u32 {
         grant.path_id()
     }
@@ -1352,6 +4443,7 @@ struct IssuedProbe<Q, P> {
     path_id: u32,
     request: Q,
     permit: P,
+    expires_at_ms: u64,
 }
 
 struct SelectedProbe<P> {
@@ -1451,7 +4543,7 @@ fn select_verified_probe_subset_with_rng<P, R>(
 ) -> Result<SelectedProbeSet<P::Probe>, RouteSetupError>
 where
     P: ClientReservationProtocol,
-    R: rand_core::RngCore + ?Sized,
+    R: RngCore + ?Sized,
 {
     let maximum = usize::try_from(request.final_path_upper()?)
         .map_err(|_| RouteSetupError::Invalid("final path upper"))?;
@@ -1693,9 +4785,12 @@ where
                     )
                 }
                 Ok(prepared) => {
-                    let Some(destroy) =
-                        destroy_authority(route_context_id, &prepared.context_handle)
-                    else {
+                    if prepared.prepare().route_context_id.as_slice() != route_context_id
+                        || HelperContextHandle::try_from(
+                            prepared.prepared().context_handle.as_slice(),
+                        )
+                        .is_err()
+                    {
                         retirement.fail_stop();
                         std::mem::forget((reservation, protocol));
                         let _ = sender.send(PrepareTicketSettlement::Failed(
@@ -1703,10 +4798,11 @@ where
                         ));
                         guard.disarm();
                         return;
-                    };
-                    let mut owner = reservation.bind(destroy, protocol, reservation_id);
-                    let endpoints = bind_prepared_endpoint_leases(&request, prepared)
-                        .map_err(|_| RouteSetupError::HelperCorrelation);
+                    }
+                    let endpoints =
+                        bind_prepared_endpoint_leases(&request, prepared.prepared().clone())
+                            .map_err(|_| RouteSetupError::HelperCorrelation);
+                    let mut owner = reservation.bind(prepared, protocol, reservation_id);
                     match endpoints {
                         Ok(endpoints) => {
                             if endpoints.client_leases().len() != request.leases.len()
@@ -1740,6 +4836,7 @@ where
 
     fn activate_ticket(
         &self,
+        runtime_owner: Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>,
         request: ActivateLeaseBatch,
         setup_deadline: Instant,
     ) -> oneshot::Receiver<Result<ActivatedLeaseBatch, RouteSetupError>> {
@@ -1749,7 +4846,8 @@ where
         let helper_deadline = self.helper_deadline(setup_deadline);
         tokio::spawn(async move {
             let mut guard = HelperTicketGuard::new(retirement.clone());
-            let mut call = Box::pin(local.activate(&request));
+            let mut runtime_owner = runtime_owner.lock().await;
+            let mut call = Box::pin(local.activate(&mut runtime_owner, &request));
             let (result, mut deadline_violated) = tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(helper_deadline) => {
@@ -1775,6 +4873,7 @@ where
 
     fn commit_ticket(
         &self,
+        runtime_owner: Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>,
         request: CommitLeaseBatch,
         setup_deadline: Instant,
     ) -> oneshot::Receiver<Result<CommittedLeaseBatch, RouteSetupError>> {
@@ -1784,7 +4883,8 @@ where
         let helper_deadline = self.helper_deadline(setup_deadline);
         tokio::spawn(async move {
             let mut guard = HelperTicketGuard::new(retirement.clone());
-            let mut call = Box::pin(local.commit(&request));
+            let mut runtime_owner = runtime_owner.lock().await;
+            let mut call = Box::pin(local.commit(&mut runtime_owner, &request));
             let (result, mut deadline_violated) = tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(helper_deadline) => {
@@ -1812,6 +4912,1272 @@ where
 struct RouteSetupManager<P, L> {
     context: RouteSetupExecutionContext<P, L>,
     retirement: RetirementSupervisor<P>,
+}
+
+/// Callable production owner for route setup and bounded helper-context retirement.
+///
+/// Connect supplies one already validated affine `PreProbeContinuation`; this orchestrator owns
+/// the real discovery/reservation/helper lifecycle without interpreting command input.
+pub(crate) struct ProductionRouteOrchestrator {
+    manager: RouteSetupManager<ReservationSession, HelperClient>,
+}
+
+/// One cancellable production route attempt.
+#[must_use = "a production route attempt must be awaited or cancelled"]
+pub(crate) struct ProductionRouteAttempt {
+    handle: RouteSetupHandle<ReservationSession>,
+}
+
+/// Affine owner of one established production route.
+///
+/// Dropping this value delegates Destroy-first retirement to the existing owner RAII. Prefer
+/// `disconnect` to wait for the exact cleanup result.
+#[must_use = "an established route must remain owned until disconnect"]
+pub(crate) struct ProductionRoute {
+    established: EstablishedRoute<ReservationSession>,
+    expiry: ClientRouteExpiry,
+}
+
+/// A committed one-relay UDP route with its helper-owned Client socket adopted but not yet
+/// connected. The only missing input is the public Exit certificate whose signed digest is
+/// already retained in `native_authorization`.
+#[must_use = "a prepared UDP route must be activated or disconnected"]
+pub(crate) struct PreparedProductionUdpRoute {
+    // Field order is intentional: an ordinary Drop closes the socket before the route owner can
+    // schedule helper Destroy for the namespace.
+    transport: CommittedQuicUdpTransport,
+    path: VerifiedSingleRelayPath,
+    route: ProductionRoute,
+}
+
+/// A prepared route whose exact Exit certificate has been matched to the signed reservation.
+#[must_use = "a certificate-bound UDP route must be activated or disconnected"]
+pub(crate) struct CertificateBoundProductionUdpRoute {
+    prepared: PreparedProductionUdpRoute,
+    client_config: quinn::ClientConfig,
+    target: ProtectedExitUdpTarget,
+    server_name: String,
+}
+
+/// Active QUIC-DATAGRAM Client association and its still-owned helper route.
+#[must_use = "an active UDP route must remain owned until shutdown"]
+pub(crate) struct ActiveProductionUdpRoute {
+    // Field order is intentional for the same socket-before-namespace Drop barrier.
+    client: SingleRelayUdpClient,
+    route: ProductionRoute,
+    return_path: Option<ClientUdpReturnPath>,
+}
+
+#[derive(Clone, Copy)]
+struct ClientUdpReturnPath {
+    application: SocketAddr,
+    remote: SocketAddr,
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub(crate) enum ProductionUdpRouteError {
+    #[error("committed route is not one exact single-relay UDP route")]
+    InvalidRoute,
+    #[error("committed Client UDP socket handoff failed")]
+    HelperSocket,
+    #[error("Exit certificate does not match the signed native route identity")]
+    ExitCertificate,
+    #[error("exact committed Exit UDP session start failed")]
+    SessionStart,
+    #[error("single-relay UDP association activation failed")]
+    Association,
+    #[error("single-relay UDP route cleanup remains pending")]
+    CleanupPending,
+}
+
+struct ProductionUdpPreparationFailure {
+    route: ProductionRoute,
+    cause: ProductionUdpRouteError,
+}
+
+struct ProductionUdpCertificateFailure {
+    prepared: PreparedProductionUdpRoute,
+    cause: ProductionUdpRouteError,
+}
+
+struct ProductionUdpSessionFailure {
+    prepared: PreparedProductionUdpRoute,
+    cause: ProductionUdpRouteError,
+}
+
+struct ProductionUdpActivationFailure {
+    route: ProductionRoute,
+    cause: ProductionUdpRouteError,
+}
+
+/// Compact failure returned to the Connect/runtime seam.
+#[derive(Debug, Error)]
+pub(crate) enum ProductionRouteError {
+    /// A real native-process preflight identity has not yet crossed the production boundary.
+    #[error("production native transport identity is unavailable")]
+    NativeTransportIdentityUnavailable,
+    /// Setup failed; `cleanup_pending` means retirement remains quarantined and owned.
+    #[error("production route setup failed")]
+    Setup {
+        /// Whether exact helper cleanup remains pending in the retirement worker.
+        cleanup_pending: bool,
+    },
+    /// Exact Destroy is still quarantined and owned for retry.
+    #[error("production route cleanup remains pending")]
+    CleanupPending,
+    /// The route orchestrator or its retirement worker was unavailable.
+    #[error("production route orchestrator is unavailable")]
+    Unavailable,
+}
+
+impl ProductionRouteError {
+    /// Whether helper-side state remains owned for retry.
+    #[must_use]
+    pub(crate) const fn cleanup_pending(&self) -> bool {
+        matches!(
+            self,
+            Self::Setup {
+                cleanup_pending: true
+            } | Self::CleanupPending
+        )
+    }
+}
+
+impl ProductionRouteOrchestrator {
+    /// Start the long-lived production route and retirement owner.
+    pub(crate) fn start(helper: HelperClient) -> Result<Self, ProductionRouteError> {
+        RouteSetupManager::start(
+            helper,
+            MAXIMUM_RETIREMENT_OWNERS,
+            MAXIMUM_CALL_DURATION,
+            MAXIMUM_CALL_DURATION,
+        )
+        .map(|manager| Self { manager })
+        .map_err(|_| ProductionRouteError::Unavailable)
+    }
+
+    /// Start one real selected route attempt over the existing discovery actor.
+    pub(crate) fn connect(
+        &self,
+        selected: PreProbeContinuation,
+        discovery: DiscoveryControlHandle,
+    ) -> ProductionRouteAttempt {
+        ProductionRouteAttempt {
+            handle: self
+                .manager
+                .spawn_preprobe(selected, discovery, SystemRouteSetupClock),
+        }
+    }
+
+    /// Report whether this orchestrator still owns helper-side network state.
+    #[must_use]
+    pub(crate) fn has_network_state(&self) -> bool {
+        self.manager.has_network_state()
+    }
+
+    /// Stop only after all established or quarantined route owners settle.
+    pub(crate) async fn shutdown(self) -> Result<(), ProductionRouteError> {
+        self.manager
+            .shutdown()
+            .await
+            .map_err(|_| ProductionRouteError::Unavailable)
+    }
+
+    /// Let the retirement supervisor finish quarantined cleanup without delaying a failed Connect
+    /// response. The spawned owner keeps retrying exact Destroy until the helper confirms it.
+    fn shutdown_detached(self) {
+        self.manager.shutdown_detached();
+    }
+}
+
+impl ProductionRouteAttempt {
+    /// Request cancellation; the owned task still waits for any dispatched helper phase to settle.
+    pub(crate) fn cancel(&self) {
+        self.handle.cancel();
+    }
+
+    /// Wait for an established affine route owner or fully classified cleanup failure.
+    pub(crate) async fn wait(self) -> Result<ProductionRoute, ProductionRouteError> {
+        self.handle
+            .wait()
+            .await
+            .map(|established| {
+                let expiry = ClientRouteExpiry::from_hard_expiry(
+                    established.request.parameters.hard_expires_at_unix,
+                    crate::unix_millis(),
+                    Instant::now(),
+                );
+                ProductionRoute {
+                    established,
+                    expiry,
+                }
+            })
+            .map_err(|failure| {
+                tracing::warn!(
+                    error = %failure.cause,
+                    cleanup_pending = failure.cleanup == CleanupStatus::Quarantined,
+                    "production route setup failed before transport activation"
+                );
+                if failure.cause == RouteSetupError::NativeRouteScopeUnavailable {
+                    ProductionRouteError::NativeTransportIdentityUnavailable
+                } else {
+                    ProductionRouteError::Setup {
+                        cleanup_pending: failure.cleanup == CleanupStatus::Quarantined,
+                    }
+                }
+            })
+    }
+}
+
+impl ProductionRoute {
+    /// Borrow the selected active path IDs without exposing helper handles.
+    #[must_use]
+    pub(crate) fn active_path_ids(&self) -> &[u32] {
+        &self.established.active_path_ids
+    }
+
+    /// Borrow the selected warm path IDs without exposing helper handles.
+    #[must_use]
+    pub(crate) fn warm_path_ids(&self) -> &[u32] {
+        &self.established.warm_path_ids
+    }
+
+    /// Exact single transport admitted by the signed reservation.
+    #[must_use]
+    pub(crate) fn selected_transport(&self) -> Option<Transport> {
+        let [transport] = self
+            .established
+            .request
+            .parameters
+            .allowed_transports
+            .as_slice()
+        else {
+            return None;
+        };
+        Some(*transport)
+    }
+
+    /// Opaque helper context handle for transport descriptor acquisition.
+    #[must_use]
+    pub(crate) fn context_handle(&self) -> &[u8] {
+        &self.established.commit_proof.context_handle
+    }
+
+    fn committed_single_udp_identity(
+        &self,
+        path: &VerifiedSingleRelayPath,
+    ) -> Result<CommittedSingleUdpRouteIdentity, ClientRouteConnectError> {
+        let [authority] = self.established.relay_authorities.as_slice() else {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        };
+        if self.selected_transport() != Some(Transport::UdpSinglePath)
+            || path.route_context_id() != &self.established.request.parameters.route_context_id
+            || path.relay_node_id() != &authority.node_id
+            || path.exit_node_id() != &self.established.request.exit.wire_node_id
+            || authority.peer_id == self.established.request.exit.peer_id
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        Ok(CommittedSingleUdpRouteIdentity {
+            route_context_id: *path.route_context_id(),
+            native_path: path.path_id(),
+            relay_peer_id: authority.peer_id.to_string(),
+            exit_peer_id: self.established.request.exit.peer_id.to_string(),
+        })
+    }
+
+    fn committed_mpquic_identity(
+        &self,
+    ) -> Result<CommittedRelayRouteIdentity, ClientRouteConnectError> {
+        self.committed_multipath_identity(Transport::MultipathQuic)
+    }
+
+    fn committed_mptcp_paths(&self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        self.committed_multipath_identity(Transport::TcpMptcp)?
+            .selected_mptcp_paths(&self.established.active_path_ids)
+    }
+
+    fn committed_multipath_identity(
+        &self,
+        transport: Transport,
+    ) -> Result<CommittedRelayRouteIdentity, ClientRouteConnectError> {
+        let path_count = self.established.relay_grants.len();
+        if self.selected_transport() != Some(transport)
+            || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+            || self.established.relay_authorities.len() != path_count
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let route_context_id = self.established.request.parameters.route_context_id;
+        let mut paths = Vec::with_capacity(path_count);
+        let mut path_ids = BTreeSet::new();
+        let mut relay_peers = BTreeSet::new();
+        for (grant, authority) in self
+            .established
+            .relay_grants
+            .iter()
+            .zip(&self.established.relay_authorities)
+        {
+            let path_id = grant.path_id();
+            let relay_peer_id = authority.peer_id.to_string();
+            if grant.route_context_id() != &route_context_id
+                || grant.relay_node_id() != &authority.node_id
+                || authority.peer_id == self.established.request.exit.peer_id
+                || !path_ids.insert(path_id)
+                || !relay_peers.insert(relay_peer_id.clone())
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+            paths.push(CommittedRelayPathIdentity {
+                path_id,
+                relay_peer_id,
+            });
+        }
+        paths.sort_unstable_by_key(|path| path.path_id);
+        Ok(CommittedRelayRouteIdentity {
+            route_context_id,
+            exit_peer_id: self.established.request.exit.peer_id.to_string(),
+            paths,
+        })
+    }
+
+    /// Whether an authenticated Exit listener signal belongs to this committed path set.
+    #[must_use]
+    pub(crate) fn accepts_mptcp_listener(&self, signal: &ExitMptcpListenerSignal) -> bool {
+        let expected_paths = self
+            .established
+            .relay_grants
+            .iter()
+            .map(ReservationSession::grant_path_id)
+            .collect::<BTreeSet<_>>();
+        signal.route_context_id() == self.established.request.parameters.route_context_id
+            && expected_paths.len() == self.established.relay_grants.len()
+            && expected_paths
+                .iter()
+                .copied()
+                .eq(signal.selected_path_ids().iter().copied())
+    }
+
+    /// Consume an exact committed UDP route and acquire its Client QUIC descriptor from helper.
+    ///
+    /// The descriptor is bound only to the canonical Client overlay address of the sole selected
+    /// Relay path. It remains explicitly unconnected, so this step cannot create a direct
+    /// Client-to-Exit underlay path.
+    async fn prepare_single_relay_udp(
+        self,
+        helper: &HelperClient,
+        now_ms: u64,
+    ) -> Result<PreparedProductionUdpRoute, ProductionUdpPreparationFailure> {
+        let path = match verified_single_relay_udp_path(&self.established, now_ms) {
+            Ok(path) => path,
+            Err(cause) => return Err(ProductionUdpPreparationFailure { route: self, cause }),
+        };
+        let request = match client_udp_socket_request(&self.established, &path) {
+            Ok(request) => request,
+            Err(cause) => return Err(ProductionUdpPreparationFailure { route: self, cause }),
+        };
+        let Ok(acquired) = helper.acquire_transport_socket(request).await else {
+            return Err(ProductionUdpPreparationFailure {
+                route: self,
+                cause: ProductionUdpRouteError::HelperSocket,
+            });
+        };
+        let (descriptor, metadata) = acquired.into_parts();
+        let Ok(transport) = CommittedQuicUdpTransport::from_helper_handoff(
+            descriptor,
+            &metadata,
+            &path,
+            CommittedUdpRole::Client,
+        ) else {
+            return Err(ProductionUdpPreparationFailure {
+                route: self,
+                cause: ProductionUdpRouteError::HelperSocket,
+            });
+        };
+        Ok(PreparedProductionUdpRoute {
+            transport,
+            path,
+            route: self,
+        })
+    }
+
+    /// Run exact Destroy-first teardown and wait for its retirement result.
+    pub(crate) async fn disconnect(self) -> Result<(), ProductionRouteError> {
+        match self.established.teardown().await {
+            RetirementOutcome::Destroyed { .. } => Ok(()),
+            RetirementOutcome::Quarantined => Err(ProductionRouteError::CleanupPending),
+        }
+    }
+}
+
+impl PreparedProductionUdpRoute {
+    /// Commit the exact selected data Relay and bind the Exit's authenticated readiness signal.
+    async fn start_exit_session(
+        self,
+        discovery: &DiscoveryControlHandle,
+        now_ms: u64,
+    ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpSessionFailure> {
+        let dispatch =
+            match udp_session_start_dispatch(&self.route.established, &self.path, false, now_ms) {
+                Ok(dispatch) => dispatch,
+                Err(cause) => {
+                    return Err(ProductionUdpSessionFailure {
+                        prepared: self,
+                        cause,
+                    });
+                }
+            };
+        let Ok(response) = discovery
+            .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+            .await
+        else {
+            return Err(ProductionUdpSessionFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::SessionStart,
+            });
+        };
+        let Ok(encoded_signal) = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        ) else {
+            return Err(ProductionUdpSessionFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::SessionStart,
+            });
+        };
+        let local_signal = match verified_udp_exit_session_signal(&encoded_signal, &self.path) {
+            Ok(signal) => signal,
+            Err(cause) => {
+                return Err(ProductionUdpSessionFailure {
+                    prepared: self,
+                    cause,
+                });
+            }
+        };
+        self.bind_exit_session_signal(&local_signal)
+            .map_err(|failure| ProductionUdpSessionFailure {
+                prepared: failure.prepared,
+                cause: failure.cause,
+            })
+    }
+
+    /// Bind the public Exit certificate to the exact digest and TLS name signed into this route.
+    ///
+    /// The Exit port is fixed inside the protected overlay namespace. A successful QUIC handshake
+    /// is therefore the readiness signal; an unready or substituted Exit cannot yield an active
+    /// owner.
+    fn bind_exit_session_signal(
+        self,
+        signal: &DiscoveryUdpExitSessionSignal,
+    ) -> Result<CertificateBoundProductionUdpRoute, ProductionUdpCertificateFailure> {
+        let certificate_der = signal.certificate_der().to_vec();
+        let Some(authorization) = self.route.established.native_authorization.as_ref() else {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        };
+        let identity = authorization.native_route_identity();
+        let expected_certificate_sha256 = identity.certificate_sha256.clone();
+        let server_name = identity.tls_server_name.clone();
+        let digest = Sha256::digest(&certificate_der);
+        if expected_certificate_sha256.len() != digest.len()
+            || digest
+                .as_slice()
+                .ct_eq(expected_certificate_sha256.as_slice())
+                .unwrap_u8()
+                != 1
+        {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        }
+        let certificate = CertificateDer::from(certificate_der);
+        let mut roots = RootCertStore::empty();
+        if roots.add(certificate).is_err() {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        }
+        let Ok(client_config) = quinn::ClientConfig::with_root_certificates(Arc::new(roots)) else {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        };
+        let Ok(target) = ProtectedExitUdpTarget::new(&self.path, SINGLE_RELAY_UDP_EXIT_PORT) else {
+            return Err(ProductionUdpCertificateFailure {
+                prepared: self,
+                cause: ProductionUdpRouteError::ExitCertificate,
+            });
+        };
+        Ok(CertificateBoundProductionUdpRoute {
+            prepared: self,
+            client_config,
+            target,
+            server_name,
+        })
+    }
+
+    async fn disconnect(self) -> Result<(), ProductionUdpRouteError> {
+        let Self {
+            route, transport, ..
+        } = self;
+        drop(transport);
+        route
+            .disconnect()
+            .await
+            .map_err(|_| ProductionUdpRouteError::CleanupPending)
+    }
+}
+
+impl CertificateBoundProductionUdpRoute {
+    fn bind_ingress(
+        &self,
+        ingress: PolicyAuthorizedUdpIngress,
+        policy: &VerifiedManifest,
+        idle_timeout: Duration,
+        now_ms: u64,
+    ) -> Result<RouteAuthorizedUdpIngress, ()> {
+        let protocol = self
+            .prepared
+            .route
+            .established
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(())?;
+        ingress
+            .bind_to_route(
+                &self.prepared.path,
+                &protocol.coordinator,
+                policy,
+                idle_timeout,
+                now_ms,
+            )
+            .map_err(|_| ())
+    }
+
+    fn bind_dns_ingress(
+        &self,
+        ingress: PolicyAuthorizedDnsIngress,
+        policy: &VerifiedManifest,
+        now_ms: u64,
+    ) -> Result<RouteAuthorizedUdpIngress, ()> {
+        let protocol = self
+            .prepared
+            .route
+            .established
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(())?;
+        ingress
+            .bind_to_route(&self.prepared.path, &protocol.coordinator, policy, now_ms)
+            .map_err(|_| ())
+    }
+
+    /// Establish the existing single-relay QUIC-DATAGRAM Client over the protected Exit target.
+    async fn activate(
+        self,
+        flow: &AuthorizedUdpFlow,
+        signed_authorization: &[u8],
+        authorization_timeout: Duration,
+        now_ms: u64,
+    ) -> Result<ActiveProductionUdpRoute, ProductionUdpActivationFailure> {
+        let Self {
+            prepared,
+            client_config,
+            target,
+            server_name,
+        } = self;
+        let PreparedProductionUdpRoute {
+            route,
+            path,
+            transport,
+        } = prepared;
+        match SingleRelayUdpClient::connect(
+            transport,
+            target,
+            client_config,
+            &server_name,
+            path,
+            flow,
+            signed_authorization,
+            authorization_timeout,
+            now_ms,
+        )
+        .await
+        {
+            Ok(client) => Ok(ActiveProductionUdpRoute {
+                client,
+                route,
+                return_path: None,
+            }),
+            Err(_error) => Err(ProductionUdpActivationFailure {
+                route,
+                cause: ProductionUdpRouteError::Association,
+            }),
+        }
+    }
+
+    async fn disconnect(self) -> Result<(), ProductionUdpRouteError> {
+        self.prepared.disconnect().await
+    }
+}
+
+impl ActiveProductionUdpRoute {
+    async fn shutdown(self) -> Result<(), ProductionUdpRouteError> {
+        let Self {
+            route,
+            client,
+            return_path: _,
+        } = self;
+        client.shutdown().await;
+        route
+            .disconnect()
+            .await
+            .map_err(|_| ProductionUdpRouteError::CleanupPending)
+    }
+}
+
+fn verified_single_relay_udp_path(
+    route: &EstablishedRoute<ReservationSession>,
+    now_ms: u64,
+) -> Result<VerifiedSingleRelayPath, ProductionUdpRouteError> {
+    let [path_id] = route.active_path_ids.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    let [grant] = route.relay_grants.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    if route.request.parameters.allowed_transports != [Transport::UdpSinglePath]
+        || !route.warm_path_ids.is_empty()
+        || route.commit_proof.leases.len() != 1
+        || grant.path_id() != *path_id
+        || route.signed_exit_reservation.is_empty()
+    {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    let mut replay = ReplayCache::new(4).map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let path = VerifiedSingleRelayPath::verify(
+        &route.signed_exit_reservation,
+        grant.signed_relay_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    if path.reservation_id() != &route.request.parameters.reservation_id
+        || path.route_context_id() != &route.request.parameters.route_context_id
+        || path.path_id() != *path_id
+        || route
+            .native_authorization
+            .as_ref()
+            .is_none_or(|authorization| {
+                authorization.reservation_id() != path.reservation_id()
+                    || authorization.route_context_id() != path.route_context_id()
+            })
+    {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    Ok(path)
+}
+
+fn client_udp_socket_request(
+    route: &EstablishedRoute<ReservationSession>,
+    path: &VerifiedSingleRelayPath,
+) -> Result<AcquireTransportSocket, ProductionUdpRouteError> {
+    committed_quic_udp_socket_request(
+        &route.commit_proof.context_handle,
+        path,
+        CommittedUdpRole::Client,
+        CLIENT_SINGLE_RELAY_UDP_PORT,
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)
+}
+
+struct UdpSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+fn udp_session_start_dispatch(
+    route: &EstablishedRoute<ReservationSession>,
+    path: &VerifiedSingleRelayPath,
+    native_connect_ip: bool,
+    now_ms: u64,
+) -> Result<UdpSessionStartDispatch, ProductionUdpRouteError> {
+    let [grant] = route.relay_grants.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    let [relay] = route.relay_authorities.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    let [confirmation] = route.confirmations.as_slice() else {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    };
+    if ReservationSession::grant_path_id(grant) != path.path_id()
+        || relay.node_id != *path.relay_node_id()
+    {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    let signed_credential_delivery = if native_connect_ip {
+        let authorization = route
+            .native_authorization
+            .as_ref()
+            .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+        let protocol = route
+            .owner
+            .as_ref()
+            .and_then(PreparedContextOwner::protocol)
+            .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+        protocol
+            .coordinator
+            .sign_native_route_credential_delivery(authorization, now_ms)
+            .map_err(|_| ProductionUdpRouteError::InvalidRoute)?
+    } else {
+        Vec::new()
+    };
+    let start = UdpSessionStartRequest::new(
+        route.signed_exit_reservation.clone(),
+        ReservationSession::signed_relay_reservation(grant).to_vec(),
+        confirmation.signed_confirmation.clone(),
+        confirmation.signed_receipt.clone(),
+        signed_credential_delivery,
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+        &confirmation.signed_confirmation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let receipt_envelope =
+        decode_canonical::<SignedEnvelope>(&confirmation.signed_receipt, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let request_id: [u8; ID_BYTES] = confirmation_envelope
+        .nonce
+        .get(..ID_BYTES)
+        .and_then(|value| value.try_into().ok())
+        .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+        .ok_or(ProductionUdpRouteError::InvalidRoute)?;
+    let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis())
+        .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let deadline_unix_ms = now_ms
+        .checked_add(call_ms)
+        .ok_or(ProductionUdpRouteError::InvalidRoute)?
+        .min(path.expires_at_ms())
+        .min(confirmation_envelope.expires_at_ms)
+        .min(receipt_envelope.expires_at_ms);
+    if deadline_unix_ms <= now_ms {
+        return Err(ProductionUdpRouteError::InvalidRoute);
+    }
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    let request = DatapathRelayRequest::new(
+        request_id.to_vec(),
+        relay.node_id.to_vec(),
+        relay.peer_id.to_bytes(),
+        deadline_unix_ms,
+        DatapathRelayOperation::UdpSessionStart,
+        encoded,
+        Vec::new(),
+    )
+    .map_err(|_| ProductionUdpRouteError::InvalidRoute)?;
+    Ok(UdpSessionStartDispatch {
+        relay: relay.clone(),
+        request,
+    })
+}
+
+fn verified_udp_exit_session_signal(
+    encoded: &[u8],
+    path: &VerifiedSingleRelayPath,
+) -> Result<DiscoveryUdpExitSessionSignal, ProductionUdpRouteError> {
+    let signal =
+        decode_canonical::<DiscoveryUdpExitSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    if signal.validate().is_err()
+        || signal.reservation_id() != path.reservation_id()
+        || signal.route_context_id() != path.route_context_id()
+        || signal.path_id() != path.path_id()
+        || signal.exit_native_instance_id().len() != 32
+        || signal
+            .exit_native_instance_id()
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(ProductionUdpRouteError::SessionStart);
+    }
+    Ok(signal)
+}
+
+/// Commit the sole data Relay and obtain the native Exit readiness bound to that exact path.
+async fn start_native_udp_exit_session(
+    route: &ProductionRoute,
+    path: &VerifiedSingleRelayPath,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<DiscoveryUdpExitSessionSignal, ProductionUdpRouteError> {
+    let dispatch = udp_session_start_dispatch(&route.established, path, true, now_ms)?;
+    let response = discovery
+        .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+        .await
+        .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    let encoded_signal = accepted_datapath_response(
+        &dispatch.request,
+        &response,
+        &dispatch.relay,
+        RouteSetupPhase::Committing,
+    )
+    .map_err(|_| ProductionUdpRouteError::SessionStart)?;
+    verified_udp_exit_session_signal(&encoded_signal, path)
+}
+
+struct MptcpSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+/// Commit every finalized data Relay concurrently, then require one byte-identical Exit signal.
+///
+/// Dispatch must be concurrent: the Exit deliberately withholds readiness until every Relay in
+/// the canonical proof set has committed and arrived. No request targets the Exit directly.
+async fn start_mptcp_exit_session(
+    route: &ProductionRoute,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<ExitMptcpListenerSignal, ClientRouteConnectError> {
+    let dispatches = mptcp_session_start_dispatches(&route.established, now_ms)
+        .map_err(|()| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+    let expected_responses = dispatches.len();
+    let mut tasks = tokio::task::JoinSet::new();
+    for dispatch in dispatches {
+        let discovery = discovery.clone();
+        tasks.spawn(async move {
+            let response = discovery
+                .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+                .await;
+            (dispatch, response)
+        });
+    }
+
+    let mut canonical_signal = None;
+    let mut received = 0_usize;
+    while let Some(joined) = tasks.join_next().await {
+        let (dispatch, response) =
+            joined.map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        let response =
+            response.map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        let encoded = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        )
+        .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+        if canonical_signal
+            .as_ref()
+            .is_some_and(|first: &Vec<u8>| first != &encoded)
+        {
+            return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+        }
+        canonical_signal.get_or_insert(encoded);
+        received = received.saturating_add(1);
+    }
+    if received != expected_responses {
+        return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+    }
+    verified_mptcp_exit_session_signal(
+        canonical_signal
+            .as_deref()
+            .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?,
+        &route.established,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-atomic exact-set validation and byte-identical dispatch construction"
+)]
+fn mptcp_session_start_dispatches(
+    route: &EstablishedRoute<ReservationSession>,
+    now_ms: u64,
+) -> Result<Vec<MptcpSessionStartDispatch>, ()> {
+    let path_count = route.relay_grants.len();
+    if route.request.parameters.allowed_transports != [Transport::TcpMptcp]
+        || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+        || route.relay_authorities.len() != path_count
+        || route.confirmations.len() != path_count
+        || route.commit_proof.leases.len() != path_count
+        || route.signed_exit_reservation.is_empty()
+        || route.active_path_ids.len() < 2
+    {
+        return Err(());
+    }
+
+    let mut selected_path_ids = route
+        .active_path_ids
+        .iter()
+        .chain(&route.warm_path_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if selected_path_ids.len() != path_count
+        || selected_path_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(());
+    }
+
+    let mut indexes = (0..path_count).collect::<Vec<_>>();
+    indexes.sort_unstable_by_key(|index| route.relay_grants[*index].path_id());
+    let grant_path_ids = indexes
+        .iter()
+        .map(|index| route.relay_grants[*index].path_id())
+        .collect::<Vec<_>>();
+    if grant_path_ids != selected_path_ids {
+        return Err(());
+    }
+
+    let exit_envelope = decode_canonical::<SignedEnvelope>(
+        &route.signed_exit_reservation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ())?;
+    let mut proofs = Vec::with_capacity(path_count);
+    let mut wrappers = Vec::with_capacity(path_count);
+    let mut request_ids = BTreeSet::new();
+    for index in indexes {
+        let grant = &route.relay_grants[index];
+        let relay = &route.relay_authorities[index];
+        let confirmation = &route.confirmations[index];
+        if grant.relay_node_id() != &relay.node_id {
+            return Err(());
+        }
+        let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_confirmation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let receipt_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_receipt,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let request_id: [u8; ID_BYTES] = confirmation_envelope
+            .nonce
+            .get(..ID_BYTES)
+            .and_then(|value| value.try_into().ok())
+            .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+            .ok_or(())?;
+        if !request_ids.insert(request_id) {
+            return Err(());
+        }
+        let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis()).map_err(|_| ())?;
+        let deadline_unix_ms = now_ms
+            .checked_add(call_ms)
+            .ok_or(())?
+            .min(route.request.parameters.expires_at_ms)
+            .min(grant.expires_at_ms())
+            .min(exit_envelope.expires_at_ms)
+            .min(confirmation_envelope.expires_at_ms)
+            .min(receipt_envelope.expires_at_ms);
+        if deadline_unix_ms <= now_ms {
+            return Err(());
+        }
+        proofs.push(MptcpSessionPathProof::new(
+            grant.signed_relay_reservation().to_vec(),
+            confirmation.signed_confirmation.clone(),
+            confirmation.signed_receipt.clone(),
+        ));
+        wrappers.push((relay.clone(), request_id, deadline_unix_ms));
+    }
+
+    let start = MptcpSessionStartRequest::new(route.signed_exit_reservation.clone(), proofs)
+        .map_err(|_| ())?;
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
+    wrappers
+        .into_iter()
+        .map(|(relay, request_id, deadline_unix_ms)| {
+            let request = DatapathRelayRequest::new(
+                request_id.to_vec(),
+                relay.node_id.to_vec(),
+                relay.peer_id.to_bytes(),
+                deadline_unix_ms,
+                DatapathRelayOperation::MptcpSessionStart,
+                encoded.clone(),
+                Vec::new(),
+            )
+            .map_err(|_| ())?;
+            Ok(MptcpSessionStartDispatch { relay, request })
+        })
+        .collect()
+}
+
+fn verified_mptcp_exit_session_signal(
+    encoded: &[u8],
+    route: &EstablishedRoute<ReservationSession>,
+) -> Result<ExitMptcpListenerSignal, ClientRouteConnectError> {
+    let signal =
+        decode_canonical::<DiscoveryExitMptcpSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+            .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?;
+    let mut selected_path_ids = route
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::path_id)
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if signal.validate().is_err()
+        || signal.reservation_id() != route.request.parameters.reservation_id
+        || signal.route_context_id() != route.request.parameters.route_context_id
+        || signal.selected_path_ids() != selected_path_ids
+    {
+        return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
+    }
+    ExitMptcpListenerSignal::try_from_discovery(
+        &signal,
+        &route
+            .native_authorization
+            .as_ref()
+            .ok_or(ClientRouteConnectError::MptcpExitListenerSignalUnavailable)?
+            .native_route_identity()
+            .certificate_sha256,
+    )
+    .map_err(|_| ClientRouteConnectError::MptcpExitListenerSignalUnavailable)
+}
+
+struct MpquicSessionStartDispatch {
+    relay: DirectRelayCapability,
+    request: DatapathRelayRequest,
+}
+
+/// Commit the complete selected Relay set concurrently and accept only one byte-identical native
+/// Exit readiness signal. Every copy carries the same Client-signed HPKE credential delivery; no
+/// request or native socket ever targets an Exit underlay address directly.
+async fn start_mpquic_exit_session(
+    route: &ProductionRoute,
+    discovery: &DiscoveryControlHandle,
+    now_ms: u64,
+) -> Result<ExitMpquicSessionSignal, ClientRouteConnectError> {
+    let dispatches = mpquic_session_start_dispatches(&route.established, now_ms)
+        .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let expected_responses = dispatches.len();
+    let mut tasks = tokio::task::JoinSet::new();
+    for dispatch in dispatches {
+        let discovery = discovery.clone();
+        tasks.spawn(async move {
+            let response = discovery
+                .request_datapath_relay(dispatch.relay.peer_id, dispatch.request.clone())
+                .await;
+            (dispatch, response)
+        });
+    }
+
+    let mut canonical_signal = None;
+    let mut received = 0_usize;
+    while let Some(joined) = tasks.join_next().await {
+        let (dispatch, response) =
+            joined.map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let response =
+            response.map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let encoded = accepted_datapath_response(
+            &dispatch.request,
+            &response,
+            &dispatch.relay,
+            RouteSetupPhase::Committing,
+        )
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        if canonical_signal
+            .as_ref()
+            .is_some_and(|first: &Vec<u8>| first != &encoded)
+        {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        canonical_signal.get_or_insert(encoded);
+        received = received.saturating_add(1);
+    }
+    if received != expected_responses {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    verified_mpquic_exit_session_signal(
+        canonical_signal
+            .as_deref()
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?,
+        &route.established,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fail-atomic exact-set proof and opaque-credential dispatch construction"
+)]
+fn mpquic_session_start_dispatches(
+    route: &EstablishedRoute<ReservationSession>,
+    now_ms: u64,
+) -> Result<Vec<MpquicSessionStartDispatch>, ()> {
+    let path_count = route.relay_grants.len();
+    if route.request.parameters.allowed_transports != [Transport::MultipathQuic]
+        || !(2..=usize::try_from(MAX_HELPER_PATHS).unwrap_or(8)).contains(&path_count)
+        || route.relay_authorities.len() != path_count
+        || route.confirmations.len() != path_count
+        || route.commit_proof.leases.len() != path_count
+        || route.signed_exit_reservation.is_empty()
+        || route.active_path_ids.len() < 2
+    {
+        return Err(());
+    }
+
+    let authorization = route.native_authorization.as_ref().ok_or(())?;
+    if authorization.reservation_id() != &route.request.parameters.reservation_id
+        || authorization.route_context_id() != &route.request.parameters.route_context_id
+        || authorization.expires_at_ms() <= now_ms
+    {
+        return Err(());
+    }
+    let protocol = route
+        .owner
+        .as_ref()
+        .and_then(PreparedContextOwner::protocol)
+        .ok_or(())?;
+    let signed_credential_delivery = protocol
+        .coordinator
+        .sign_native_route_credential_delivery(authorization, now_ms)
+        .map_err(|_| ())?;
+
+    let mut selected_path_ids = route
+        .active_path_ids
+        .iter()
+        .chain(&route.warm_path_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    if selected_path_ids.len() != path_count
+        || selected_path_ids.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(());
+    }
+
+    let mut indexes = (0..path_count).collect::<Vec<_>>();
+    indexes.sort_unstable_by_key(|index| route.relay_grants[*index].path_id());
+    let grant_path_ids = indexes
+        .iter()
+        .map(|index| route.relay_grants[*index].path_id())
+        .collect::<Vec<_>>();
+    if grant_path_ids != selected_path_ids {
+        return Err(());
+    }
+
+    let exit_envelope = decode_canonical::<SignedEnvelope>(
+        &route.signed_exit_reservation,
+        MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .map_err(|_| ())?;
+    let mut proofs = Vec::with_capacity(path_count);
+    let mut wrappers = Vec::with_capacity(path_count);
+    let mut request_ids = BTreeSet::new();
+    for index in indexes {
+        let grant = &route.relay_grants[index];
+        let relay = &route.relay_authorities[index];
+        let confirmation = &route.confirmations[index];
+        if grant.relay_node_id() != &relay.node_id {
+            return Err(());
+        }
+        let confirmation_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_confirmation,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let receipt_envelope = decode_canonical::<SignedEnvelope>(
+            &confirmation.signed_receipt,
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .map_err(|_| ())?;
+        let request_id: [u8; ID_BYTES] = confirmation_envelope
+            .nonce
+            .get(..ID_BYTES)
+            .and_then(|value| value.try_into().ok())
+            .filter(|value: &[u8; ID_BYTES]| value.iter().any(|byte| *byte != 0))
+            .ok_or(())?;
+        if !request_ids.insert(request_id) {
+            return Err(());
+        }
+        let call_ms = u64::try_from(DATAPATH_RELAY_REQUEST_TIMEOUT.as_millis()).map_err(|_| ())?;
+        let deadline_unix_ms = now_ms
+            .checked_add(call_ms)
+            .ok_or(())?
+            .min(route.request.parameters.expires_at_ms)
+            .min(grant.expires_at_ms())
+            .min(exit_envelope.expires_at_ms)
+            .min(confirmation_envelope.expires_at_ms)
+            .min(receipt_envelope.expires_at_ms);
+        if deadline_unix_ms <= now_ms {
+            return Err(());
+        }
+        proofs.push(MpquicSessionPathProof::new(
+            grant.signed_relay_reservation().to_vec(),
+            confirmation.signed_confirmation.clone(),
+            confirmation.signed_receipt.clone(),
+        ));
+        wrappers.push((relay.clone(), request_id, deadline_unix_ms));
+    }
+
+    let start = MpquicSessionStartRequest::new(
+        route.signed_exit_reservation.clone(),
+        proofs,
+        signed_credential_delivery,
+    )
+    .map_err(|_| ())?;
+    let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
+    wrappers
+        .into_iter()
+        .map(|(relay, request_id, deadline_unix_ms)| {
+            let request = DatapathRelayRequest::new(
+                request_id.to_vec(),
+                relay.node_id.to_vec(),
+                relay.peer_id.to_bytes(),
+                deadline_unix_ms,
+                DatapathRelayOperation::MpquicSessionStart,
+                encoded.clone(),
+                Vec::new(),
+            )
+            .map_err(|_| ())?;
+            Ok(MpquicSessionStartDispatch { relay, request })
+        })
+        .collect()
+}
+
+fn verified_mpquic_exit_session_signal(
+    encoded: &[u8],
+    route: &EstablishedRoute<ReservationSession>,
+) -> Result<ExitMpquicSessionSignal, ClientRouteConnectError> {
+    let signal = decode_canonical::<ExitMpquicSessionSignal>(encoded, MAX_CONTROL_MESSAGE_SIZE)
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    let mut selected_path_ids = route
+        .relay_grants
+        .iter()
+        .map(VerifiedRelayGrant::path_id)
+        .collect::<Vec<_>>();
+    selected_path_ids.sort_unstable();
+    let authorization = route
+        .native_authorization
+        .as_ref()
+        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+    if signal.validate().is_err()
+        || signal.reservation_id() != route.request.parameters.reservation_id
+        || signal.route_context_id() != route.request.parameters.route_context_id
+        || signal.exit_native_instance_id()
+            != authorization
+                .native_route_identity()
+                .exit_native_instance_id
+        || signal.selected_path_ids() != selected_path_ids
+    {
+        return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+    }
+    Ok(signal)
 }
 
 impl<P, L> RouteSetupManager<P, L>
@@ -1858,6 +6224,15 @@ where
             .map_err(|()| RouteSetupError::SupervisorStopped)
     }
 
+    /// Begin shutdown while retaining every retirement owner in a detached task.
+    fn shutdown_detached(self) {
+        drop(tokio::spawn(async move {
+            if self.shutdown().await.is_err() {
+                tracing::warn!("detached route retirement supervisor stopped unexpectedly");
+            }
+        }));
+    }
+
     fn spawn_owned<F, Fut>(&self, operation: F) -> RouteSetupHandle<P>
     where
         F: FnOnce(RouteSetupExecutionContext<P, L>, watch::Receiver<bool>) -> Fut + Send + 'static,
@@ -1892,7 +6267,7 @@ where
     }
 
     #[cfg(test)]
-    fn retirement_state(&self) -> &std::sync::Arc<retirement::RetirementState> {
+    fn retirement_state(&self) -> &Arc<retirement::RetirementState> {
         self.retirement.state()
     }
 
@@ -2136,6 +6511,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 path_id: relay_intent.path_id,
                 request: probe_request,
                 permit,
+                expires_at_ms,
             });
         }
 
@@ -2147,8 +6523,9 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 .authorities
                 .relay_for_path(issued_probe.path_id)
                 .ok_or(RouteSetupError::Capability)?;
-            let expires_at_ms =
-                bounded_phase_expiry(clock.unix_millis(), intent.hold_expires_at_ms)?;
+            // The outer datapath wrapper is part of the exact signed-request scope. Reuse the
+            // expiry signed into this probe request instead of deriving a later value.
+            let expires_at_ms = issued_probe.expires_at_ms;
             let rpc = datapath_request(
                 relay,
                 DatapathRelayOperation::ExecuteProbe,
@@ -2288,7 +6665,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         cancellation: &mut watch::Receiver<bool>,
         deadline: Instant,
         measurement: VerifiedRouteMeasurement<P>,
-    ) -> Result<ExecutionProof<P::RelayGrant>, RouteSetupError>
+    ) -> Result<ExecutionProof<P::RelayGrant, P::NativeAuthorization>, RouteSetupError>
     where
         L: LocalRouteBackend,
         R: ReservationTransport,
@@ -2319,9 +6696,32 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         self.ensure_live(clock, cancellation, deadline)?;
 
         self.phase = RouteSetupPhase::Preparing;
-        let prepare_request = self
-            .request
-            .prepare_request(&selected_paths, active_path_count);
+        let traversal_bindings = selected_paths
+            .iter()
+            .map(|path| EndpointTraversalBinding {
+                path_id: path.path_id,
+                role: WireguardRole::Client,
+                observer_id: path.relay.identity.wire_node_id,
+                observer_peer_id: path.relay.identity.peer_id,
+            })
+            .collect();
+        let traversal_hints = match bounded_call(
+            deadline,
+            self.limits.call_timeout,
+            cancellation,
+            self.phase,
+            transport.endpoint_traversal_hints(traversal_bindings),
+        )
+        .await
+        {
+            Ok(Ok(hints)) => hints,
+            // A direct public underlay remains independently usable; the helper decides whether
+            // absent observations are fatal only after checking IPv6 and public IPv4 first.
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        };
+        let prepare_request =
+            self.request
+                .prepare_request(&selected_paths, active_path_count, traversal_hints);
         let protocol = self
             .protocol
             .take()
@@ -2424,6 +6824,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
         self.phase = RouteSetupPhase::RelayReservations;
         let mut grants = Vec::with_capacity(selected_paths.len());
+        let mut relay_authorities = Vec::with_capacity(selected_paths.len());
         for (path_index, path) in selected_paths.iter().enumerate() {
             self.ensure_live(clock, cancellation, deadline)?;
             let relay = self
@@ -2473,14 +6874,18 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 return Err(RouteSetupError::ReservationProtocol(self.phase));
             }
             grants.push(grant);
+            relay_authorities.push(relay.clone());
         }
 
         self.phase = RouteSetupPhase::ExitConfirmations;
+        let mut confirmations = Vec::with_capacity(grants.len());
         for grant in &grants {
             self.ensure_live(clock, cancellation, deadline)?;
             let now_ms = clock.unix_millis();
-            let expires_at_ms =
-                bounded_phase_expiry(now_ms, self.request.parameters.expires_at_ms)?;
+            // ConfirmRelay still crosses the request-bounded control-to-Exit forwarding
+            // capability. Its wrapper may authorize the long reservation, but must itself remain
+            // inside the short setup/hold authority just like every earlier Exit setup phase.
+            let expires_at_ms = bounded_phase_expiry(now_ms, intent.hold_expires_at_ms)?;
             let signed_confirmation = self
                 .prepared
                 .as_mut()
@@ -2521,10 +6926,30 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                     &signed_receipt,
                     clock.unix_millis(),
                 )?;
+            confirmations.push(RelayConfirmationProof {
+                signed_confirmation,
+                signed_receipt,
+            });
         }
+
+        let signed_exit_reservation = P::signed_exit_reservation(&finalized).to_vec();
+        if signed_exit_reservation.is_empty() {
+            return Err(RouteSetupError::ReservationProtocol(self.phase));
+        }
+        let native_authorization = self
+            .prepared
+            .as_mut()
+            .and_then(PreparedContextOwner::protocol_mut)
+            .ok_or(RouteSetupError::HelperCorrelation)?
+            .take_native_route_authorization(&finalize, clock.unix_millis())?;
 
         self.ensure_live(clock, cancellation, deadline)?;
         self.phase = RouteSetupPhase::Activating;
+        let runtime_owner = self
+            .prepared
+            .as_ref()
+            .and_then(PreparedContextOwner::runtime_owner)
+            .ok_or(RouteSetupError::HelperCorrelation)?;
         let activation = activation_request::<P>(
             self.request.parameters.route_context_id,
             self.prepared
@@ -2534,7 +6959,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             &grants,
         )?;
         let activated = await_helper_ticket(
-            context.activate_ticket(activation.clone(), deadline),
+            context.activate_ticket(runtime_owner, activation.clone(), deadline),
             deadline,
             cancellation,
             self.phase,
@@ -2545,8 +6970,13 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
         self.phase = RouteSetupPhase::Committing;
         let commit_request = commit_request(&activation);
+        let runtime_owner = self
+            .prepared
+            .as_ref()
+            .and_then(PreparedContextOwner::runtime_owner)
+            .ok_or(RouteSetupError::HelperCorrelation)?;
         let committed = await_helper_ticket(
-            context.commit_ticket(commit_request.clone(), deadline),
+            context.commit_ticket(runtime_owner, commit_request.clone(), deadline),
             deadline,
             cancellation,
             self.phase,
@@ -2556,9 +6986,13 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
         self.ensure_live(clock, cancellation, deadline)?;
         Ok(ExecutionProof {
             grants,
+            relay_authorities,
+            confirmations,
             active_path_ids,
             warm_path_ids,
             commit: committed,
+            signed_exit_reservation,
+            native_authorization,
         })
     }
 
@@ -2647,29 +7081,46 @@ impl<P: ClientReservationProtocol> MeasuredRouteSetup<P> {
                 owner: transaction.prepared.take(),
                 request: transaction.request,
                 relay_grants: proof.grants,
+                relay_authorities: proof.relay_authorities,
+                confirmations: proof.confirmations,
                 active_path_ids: proof.active_path_ids,
                 warm_path_ids: proof.warm_path_ids,
                 commit_proof: proof.commit,
+                signed_exit_reservation: proof.signed_exit_reservation,
+                native_authorization: Some(proof.native_authorization),
             }),
             Err(cause) => Err(transaction.rollback(cause).await),
         }
     }
 }
 
-struct ExecutionProof<G> {
+struct ExecutionProof<G, A> {
     grants: Vec<G>,
+    relay_authorities: Vec<DirectRelayCapability>,
+    confirmations: Vec<RelayConfirmationProof>,
     active_path_ids: Vec<u32>,
     warm_path_ids: Vec<u32>,
     commit: CommittedLeaseBatch,
+    signed_exit_reservation: Vec<u8>,
+    native_authorization: A,
+}
+
+struct RelayConfirmationProof {
+    signed_confirmation: Vec<u8>,
+    signed_receipt: Vec<u8>,
 }
 
 struct EstablishedRoute<P: ClientReservationProtocol> {
     owner: Option<PreparedContextOwner<P>>,
     request: RouteSetupRequest,
     relay_grants: Vec<P::RelayGrant>,
+    relay_authorities: Vec<DirectRelayCapability>,
+    confirmations: Vec<RelayConfirmationProof>,
     active_path_ids: Vec<u32>,
     warm_path_ids: Vec<u32>,
     commit_proof: CommittedLeaseBatch,
+    signed_exit_reservation: Vec<u8>,
+    native_authorization: Option<P::NativeAuthorization>,
 }
 
 impl<P: ClientReservationProtocol> EstablishedRoute<P> {
@@ -3054,15 +7505,6 @@ async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
     }
 }
 
-fn destroy_authority(route_context_id: [u8; ID_BYTES], handle: &[u8]) -> Option<DestroyContext> {
-    HelperContextHandle::try_from(handle)
-        .ok()
-        .map(|context_handle| DestroyContext {
-            route_context_id: route_context_id.to_vec(),
-            context_handle: context_handle.as_bytes().to_vec(),
-        })
-}
-
 fn activation_request<P: ClientReservationProtocol>(
     route_context_id: [u8; ID_BYTES],
     batch: &LocalEndpointLeaseBatch,
@@ -3258,6 +7700,551 @@ mod tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
 
+    #[tokio::test]
+    async fn general_udp_pipeline_empty_route_drain_does_not_wait_or_retain_lock() {
+        let routes = ClientRouteControl::new(PathBuf::from("/unused-native-udp-test.sock"));
+        let response = timeout(
+            Duration::from_millis(50),
+            routes.try_receive_native_udp_response(),
+        )
+        .await
+        .expect("empty drain must not wait for a response")
+        .expect("idle route is an empty queue");
+        assert!(response.is_none());
+        assert!(routes.state.try_lock().is_ok(), "route owner lock released");
+    }
+
+    #[test]
+    fn general_udp_lifetime_retains_two_continuations_then_expires_idle() {
+        let monotonic_now = Instant::now();
+        let mut lifetime = GeneralUdpSessionLifetime::start(
+            Duration::from_secs(5),
+            NOW_MS + 20_000,
+            NOW_MS,
+            monotonic_now,
+        )
+        .expect("live UDP association");
+
+        lifetime
+            .record_activity(NOW_MS + 2_000, monotonic_now + Duration::from_secs(2))
+            .expect("second datagram retains association");
+        lifetime
+            .record_activity(NOW_MS + 4_000, monotonic_now + Duration::from_secs(4))
+            .expect("third datagram retains association");
+
+        assert!(!lifetime.is_expired(NOW_MS + 8_999, monotonic_now + Duration::from_millis(8_999)));
+        assert!(lifetime.is_expired(NOW_MS + 9_000, monotonic_now + Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn general_udp_lifetime_never_outlives_signed_expiry() {
+        let monotonic_now = Instant::now();
+        let lifetime = GeneralUdpSessionLifetime::start(
+            Duration::from_secs(30),
+            NOW_MS + 3_000,
+            NOW_MS,
+            monotonic_now,
+        )
+        .expect("live UDP association");
+
+        assert_eq!(lifetime.deadline(), monotonic_now + Duration::from_secs(3));
+        assert!(lifetime.is_expired(NOW_MS + 3_000, monotonic_now + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn client_route_expiry_fails_closed_at_the_signed_wall_deadline() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS + 2_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(!expiry.is_expired(NOW_MS + 1_999, monotonic_now));
+        assert!(expiry.is_expired(NOW_MS + 2_000, monotonic_now));
+    }
+
+    #[test]
+    fn client_route_expiry_monotonic_projection_survives_wall_clock_rollback() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS + 2_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(!expiry.is_expired(
+            NOW_MS.saturating_sub(60_000),
+            monotonic_now + Duration::from_millis(1_999),
+        ));
+        assert!(expiry.is_expired(
+            NOW_MS.saturating_sub(60_000),
+            monotonic_now + Duration::from_millis(2_000),
+        ));
+    }
+
+    #[test]
+    fn already_expired_route_projection_is_never_reusable() {
+        let monotonic_now = Instant::now();
+        let expiry =
+            ClientRouteExpiry::from_hard_expiry((NOW_MS - 1_000) / 1_000, NOW_MS, monotonic_now);
+
+        assert!(expiry.is_expired(NOW_MS, monotonic_now));
+    }
+
+    #[test]
+    fn mptcp_acquire_retires_only_a_helper_route_that_is_no_longer_owned() {
+        for result in [HelperResult::CleanupIncomplete, HelperResult::NotFound] {
+            assert!(mptcp_acquire_failure_lost_helper_route(
+                &MptcpTransportError::Helper(HelperClientError::Rejected(result))
+            ));
+        }
+        for result in [
+            HelperResult::Kernel,
+            HelperResult::Unavailable,
+            HelperResult::Capacity,
+        ] {
+            assert!(!mptcp_acquire_failure_lost_helper_route(
+                &MptcpTransportError::Helper(HelperClientError::Rejected(result))
+            ));
+        }
+    }
+
+    #[test]
+    fn active_browser_flow_defers_only_minimum_crossing_path_removal() {
+        assert!(retain_degraded_path_for_active_browser_flow(2, 2, 1));
+        assert!(!retain_degraded_path_for_active_browser_flow(2, 2, 0));
+        assert!(!retain_degraded_path_for_active_browser_flow(3, 2, 1));
+    }
+
+    fn native_path_status(path_id: u32, data_carrying: bool) -> NativePathStatus {
+        NativePathStatus {
+            path_id,
+            smoothed_rtt_us: 1_000_u64.saturating_mul(u64::from(path_id)),
+            packets_lost: 0,
+            delivered_bytes: 0,
+            congestion_window_bytes: 64 * 1_024,
+            bytes_in_flight: 512,
+            delivery_rate_bps: 8_000_000,
+            data_carrying,
+        }
+    }
+
+    #[test]
+    fn browser_mpquic_packet_scope_uses_negotiated_protocol_mtu() {
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_420),
+            Ok(MAXIMUM_MPQUIC_TUNNEL_MTU)
+        );
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_280),
+            Ok(MINIMUM_MPQUIC_TUNNEL_MTU)
+        );
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_279),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        );
+        assert_eq!(
+            maximum_mpquic_tunnel_packet_bytes(1_421),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        );
+    }
+
+    #[test]
+    fn tcp_route_retry_is_bounded_to_transient_bootstrap_failures() {
+        let now = Instant::now();
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::Busy,
+                now,
+                now + TCP_CONNECT_RECOVERY_HORIZON
+            ),
+            Some(TCP_CONNECT_RETRY_INTERVAL)
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::PreselectionUnavailable,
+                now,
+                now + Duration::from_millis(250)
+            ),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(
+                ClientRouteConnectError::TransportRuntimeUnavailable,
+                now,
+                now + TCP_CONNECT_RECOVERY_HORIZON
+            ),
+            None
+        );
+        assert_eq!(
+            tcp_connect_retry_delay(ClientRouteConnectError::Busy, now, now),
+            None
+        );
+    }
+
+    #[test]
+    fn single_udp_route_retry_is_bounded_to_transient_bootstrap_failures() {
+        let now = Instant::now();
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::PreselectionUnavailable,
+                now,
+                now + SINGLE_UDP_CONNECT_RECOVERY_HORIZON
+            ),
+            Some(SINGLE_UDP_CONNECT_RETRY_INTERVAL)
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::Busy,
+                now,
+                now + Duration::from_millis(250)
+            ),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(
+                ClientRouteConnectError::TransportRuntimeUnavailable,
+                now,
+                now + SINGLE_UDP_CONNECT_RECOVERY_HORIZON
+            ),
+            None
+        );
+        assert_eq!(
+            single_udp_connect_retry_delay(ClientRouteConnectError::Busy, now, now),
+            None
+        );
+    }
+
+    #[test]
+    fn committed_mptcp_projection_uses_selected_ids_without_native_activity_claims() {
+        let identity = CommittedRelayRouteIdentity {
+            route_context_id: [6; ID_BYTES],
+            exit_peer_id: "committed-exit".to_owned(),
+            paths: (1..=3)
+                .map(|path_id| CommittedRelayPathIdentity {
+                    path_id,
+                    relay_peer_id: format!("committed-relay-{path_id}"),
+                })
+                .collect(),
+        };
+        let paths = identity.selected_mptcp_paths(&[3, 1]).unwrap();
+        assert_eq!(
+            paths.iter().map(|path| path.path_id).collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(paths[0].relay_peer_id, "committed-relay-1");
+        assert_eq!(paths[1].relay_peer_id, "committed-relay-3");
+        assert!(paths.iter().all(|path| {
+            path.route_context_id == [6; ID_BYTES]
+                && path.exit_peer_id == "committed-exit"
+                && path.state == PathState::Reachable as i32
+                && path.smoothed_rtt_micros == 0
+                && path.user_bytes == 0
+        }));
+        for invalid in [&[1][..], &[1, 1], &[1, 4], &[0, 1]] {
+            assert!(identity.selected_mptcp_paths(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn committed_mpquic_identity_projects_native_status_by_exact_path_id() {
+        let identity = CommittedRelayRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: vec![
+                CommittedRelayPathIdentity {
+                    path_id: 1,
+                    relay_peer_id: "relay-one".to_owned(),
+                },
+                CommittedRelayPathIdentity {
+                    path_id: 2,
+                    relay_peer_id: "relay-two".to_owned(),
+                },
+            ],
+        };
+
+        let summaries = identity
+            .project(
+                &[native_path_status(2, true), native_path_status(1, false)],
+                std::iter::empty(),
+            )
+            .expect("exact status projection");
+
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].path_id, 1);
+        assert_eq!(summaries[0].relay_peer_id, "relay-one");
+        assert_eq!(summaries[0].state, PathState::Reachable as i32);
+        assert_eq!(summaries[1].path_id, 2);
+        assert_eq!(summaries[1].relay_peer_id, "relay-two");
+        assert_eq!(summaries[1].state, PathState::Active as i32);
+        assert_eq!(summaries[1].smoothed_rtt_micros, 2_000);
+        assert!(summaries.iter().all(|summary| summary.user_bytes == 0));
+    }
+
+    #[test]
+    fn committed_single_udp_identity_projects_only_its_real_native_path() {
+        let identity = CommittedSingleUdpRouteIdentity {
+            route_context_id: [9; ID_BYTES],
+            native_path: 1,
+            relay_peer_id: "udp-relay".to_owned(),
+            exit_peer_id: "udp-exit".to_owned(),
+        };
+        let reachable = identity
+            .project(&[native_path_status(1, false)])
+            .expect("native path");
+        assert_eq!(reachable.route_context_id, vec![9; ID_BYTES]);
+        assert_eq!(reachable.relay_peer_id, "udp-relay");
+        assert_eq!(reachable.exit_peer_id, "udp-exit");
+        assert_eq!(reachable.state, PathState::Reachable as i32);
+        assert_eq!(reachable.user_bytes, 0);
+        let mut active = native_path_status(1, true);
+        active.delivered_bytes = 1234;
+        let projected = identity
+            .project(std::slice::from_ref(&active))
+            .expect("native active path");
+        assert_eq!(projected.state, PathState::Active as i32);
+        assert_eq!(projected.user_bytes, 1234);
+        assert_eq!(projected.smoothed_rtt_micros, active.smoothed_rtt_us);
+        assert!(identity.project(&[]).is_err());
+        assert!(identity.project(&[native_path_status(2, true)]).is_err());
+        assert!(identity.project(&[active.clone(), active]).is_err());
+    }
+
+    #[test]
+    fn committed_mpquic_identity_rejects_duplicate_native_path_status() {
+        let identity = CommittedRelayRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: vec![
+                CommittedRelayPathIdentity {
+                    path_id: 1,
+                    relay_peer_id: "relay-one".to_owned(),
+                },
+                CommittedRelayPathIdentity {
+                    path_id: 2,
+                    relay_peer_id: "relay-two".to_owned(),
+                },
+            ],
+        };
+
+        assert!(matches!(
+            identity.project(
+                &[native_path_status(1, true), native_path_status(1, true),],
+                std::iter::empty(),
+            ),
+            Err(ClientRouteConnectError::TransportRuntimeUnavailable)
+        ));
+    }
+
+    #[test]
+    fn committed_mpquic_identity_keeps_warm_path_out_of_active_projection() {
+        let identity = CommittedRelayRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            exit_peer_id: "exit-peer".to_owned(),
+            paths: (1..=3)
+                .map(|path_id| CommittedRelayPathIdentity {
+                    path_id,
+                    relay_peer_id: format!("relay-{path_id}"),
+                })
+                .collect(),
+        };
+
+        let summaries = identity
+            .project(
+                &[native_path_status(1, true), native_path_status(2, true)],
+                [3],
+            )
+            .expect("active plus warm projection");
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[2].path_id, 3);
+        assert_eq!(summaries[2].state, PathState::Backup as i32);
+        assert_eq!(summaries[2].user_bytes, 0);
+    }
+
+    #[test]
+    fn production_health_promotes_warm_path_after_live_peer_progress_stalls() {
+        let start = UnixTime::from_secs(1_000);
+        let mut health =
+            ProductionMpquicPathHealth::new(&[1, 2], [3], start).expect("health state");
+        let initial = [native_path_status(1, true), native_path_status(2, true)];
+        assert!(health.observe(&initial, start).expect("initial").is_empty());
+
+        let mut progressed = initial;
+        progressed[0].delivered_bytes = 2_400;
+        let degraded_at = UnixTime::from_secs(1_011);
+        assert_eq!(
+            health.observe(&progressed, degraded_at).expect("metrics"),
+            [2]
+        );
+        assert!(health.authorizes_replacement(2, 3, degraded_at));
+        health
+            .record_replacement(2, 3, degraded_at)
+            .expect("promote warm path");
+
+        let promoted = [progressed[0].clone(), native_path_status(3, false)];
+        assert!(
+            health
+                .observe(&promoted, degraded_at)
+                .expect("post replacement")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn default_connect_profile_selects_configured_udp_ipv4_capacity_exactly() {
+        let config = Config::default();
+        let parameters = client_preselection_parameters(&config).expect("default route profile");
+        let (transport, family, minimum, local, ceiling, minimum_other, maximum_other, bound) =
+            parameters.fields_for_test();
+        assert_eq!(transport, Transport::UdpSinglePath);
+        assert_eq!(family, volparossa_protocol::ObservationAddressFamily::Ipv4);
+        assert_eq!(minimum, Bandwidth::new(10, 10).expect("minimum"));
+        assert_eq!(local, Bandwidth::new(100, 100).expect("local"));
+        assert_eq!(ceiling, Bandwidth::new(80, 80).expect("ceiling"));
+        assert_eq!((minimum_other, maximum_other), (1, 1));
+        assert_eq!(
+            bound,
+            config
+                .network
+                .candidate_pool_size
+                .min(volparossa_selection::MAXIMUM_SELECTION_CANDIDATES)
+        );
+    }
+
+    #[test]
+    fn connect_profile_uses_ipv6_and_multipath_bounds_without_hidden_fallback() {
+        let mut config = Config::default();
+        config.udp.enabled = false;
+        config.routing.client_address_family = ClientAddressFamily::Ipv6;
+        let expected_minimum = usize::from(config.selection.minimum_multipath_paths);
+        let expected_maximum = usize::from(config.selection.maximum_multipath_paths);
+        let parameters = client_preselection_parameters(&config).expect("MPTCP route profile");
+        let (transport, family, _, _, _, minimum_other, maximum_other, _) =
+            parameters.fields_for_test();
+        assert_eq!(transport, Transport::TcpMptcp);
+        assert_eq!(family, volparossa_protocol::ObservationAddressFamily::Ipv6);
+        assert_eq!(minimum_other, expected_minimum);
+        assert_eq!(maximum_other, expected_maximum);
+
+        config.tcp.enabled = false;
+        config.quic.enabled = false;
+        assert_eq!(
+            client_preselection_parameters(&config).err(),
+            Some(ClientRouteConnectError::InvalidProfile)
+        );
+    }
+
+    #[test]
+    fn connect_path_requirement_is_exact_and_never_degrades_multipath() {
+        let mut config = Config::default();
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::UdpSinglePath, 1))
+        );
+
+        config.udp.enabled = false;
+        config.selection.minimum_multipath_paths = 4;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::TcpMptcp, 4))
+        );
+        let parameters = client_preselection_parameters(&config).expect("MPTCP parameters");
+        let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
+        assert_eq!(minimum_other, 4);
+
+        config.tcp.enabled = false;
+        config.selection.minimum_multipath_paths = 2;
+        config.quic.minimum_paths = 3;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Ok((Transport::MultipathQuic, 3))
+        );
+        let parameters = client_preselection_parameters(&config).expect("MPQUIC parameters");
+        let (_, _, _, _, _, minimum_other, _, _) = parameters.fields_for_test();
+        assert_eq!(minimum_other, 3);
+
+        config.quic.allow_degraded_single_path = true;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Err(ClientRouteConnectError::InvalidProfile)
+        );
+        config.quic.allow_degraded_single_path = false;
+        config.quic.minimum_paths = 1;
+        config.selection.minimum_multipath_paths = 1;
+        assert_eq!(
+            client_native_path_requirement(&config),
+            Err(ClientRouteConnectError::InvalidProfile)
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeNativeReady {
+        completed_paths: Vec<u32>,
+        next_path: u32,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct FakeNativeCompleted {
+        paths: Vec<u32>,
+    }
+
+    #[tokio::test]
+    async fn required_path_driver_stops_after_one_udp_or_the_exact_multipath_minimum() {
+        for required_paths in [1_usize, 2, 4] {
+            let completed = drive_required_native_paths(
+                FakeNativeReady {
+                    completed_paths: Vec::new(),
+                    next_path: 1,
+                },
+                required_paths,
+                |mut ready| async move {
+                    ready.completed_paths.push(ready.next_path);
+                    Ok::<_, ClientRouteConnectError>(FakeNativeCompleted {
+                        paths: ready.completed_paths,
+                    })
+                },
+                |completed| async move {
+                    let next_path = u32::try_from(completed.paths.len() + 1)
+                        .expect("bounded native path count");
+                    Ok(FakeNativeReady {
+                        completed_paths: completed.paths,
+                        next_path,
+                    })
+                },
+                |completed| completed.paths.len(),
+            )
+            .await
+            .expect("required paths complete");
+            assert_eq!(
+                completed.paths,
+                (1..=u32::try_from(required_paths).expect("bounded requirement"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_path_driver_fails_closed_without_single_path_fallback() {
+        let result = drive_required_native_paths(
+            FakeNativeReady {
+                completed_paths: Vec::new(),
+                next_path: 1,
+            },
+            2,
+            |mut ready| async move {
+                ready.completed_paths.push(ready.next_path);
+                Ok::<_, ClientRouteConnectError>(FakeNativeCompleted {
+                    paths: ready.completed_paths,
+                })
+            },
+            |_completed| async {
+                Err::<FakeNativeReady, _>(ClientRouteConnectError::NativePermitUnavailable)
+            },
+            |completed| completed.paths.len(),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err(ClientRouteConnectError::NativePermitUnavailable)
+        );
+    }
+
     #[derive(Default)]
     #[allow(
         clippy::struct_excessive_bools,
@@ -3359,7 +8346,7 @@ mod tests {
     #[derive(Default)]
     struct ZeroRng;
 
-    impl rand_core::RngCore for ZeroRng {
+    impl RngCore for ZeroRng {
         fn next_u32(&mut self) -> u32 {
             0
         }
@@ -3395,7 +8382,7 @@ mod tests {
         async fn prepare(
             &mut self,
             request: &PrepareLeaseBatch,
-        ) -> Result<PreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
+        ) -> Result<RuntimeBoundPreparedLeaseBatch, LocalPrepareFailure<Self::Error>> {
             self.shared.record("local.prepare");
             let (block, delay_ms, ambiguous) = {
                 let mut state = self.shared.state.lock().expect("fake state");
@@ -3446,14 +8433,18 @@ mod tests {
                     }
                 })
                 .collect();
-            Ok(PreparedLeaseBatch {
-                context_handle: vec![99; HELPER_HANDLE_BYTES],
-                leases,
-            })
+            Ok(RuntimeBoundPreparedLeaseBatch::for_test(
+                request.clone(),
+                PreparedLeaseBatch {
+                    context_handle: vec![99; HELPER_HANDLE_BYTES],
+                    leases,
+                },
+            ))
         }
 
         async fn activate(
             &mut self,
+            owner: &mut RuntimeBoundPreparedLeaseBatch,
             request: &ActivateLeaseBatch,
         ) -> Result<ActivatedLeaseBatch, Self::Error> {
             encode_request(&HelperRequest {
@@ -3474,18 +8465,26 @@ mod tests {
             if block {
                 self.shared.activate_release.notified().await;
             }
-            Ok(ActivatedLeaseBatch {
+            owner
+                .begin_activation(request)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            let response = ActivatedLeaseBatch {
                 context_handle: request.context_handle.clone(),
                 lease_handles: request
                     .leases
                     .iter()
                     .map(|lease| lease.lease_handle.clone())
                     .collect(),
-            })
+            };
+            owner
+                .finish_activation(&response)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            Ok(response)
         }
 
         async fn commit(
             &mut self,
+            owner: &mut RuntimeBoundPreparedLeaseBatch,
             request: &CommitLeaseBatch,
         ) -> Result<CommittedLeaseBatch, Self::Error> {
             self.shared.record("local.commit");
@@ -3494,7 +8493,10 @@ mod tests {
             if block {
                 self.shared.commit_release.notified().await;
             }
-            Ok(CommittedLeaseBatch {
+            owner
+                .begin_commit(request)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            let response = CommittedLeaseBatch {
                 context_handle: request.context_handle.clone(),
                 leases: request
                     .leases
@@ -3506,12 +8508,16 @@ mod tests {
                         transmitted_bytes: 10,
                     })
                     .collect(),
-            })
+            };
+            owner
+                .finish_commit(&response)
+                .map_err(|_| FakeLocalError::Definitive)?;
+            Ok(response)
         }
 
         async fn destroy(
             &mut self,
-            _request: &DestroyContext,
+            _owner: &RuntimeBoundPreparedLeaseBatch,
         ) -> Result<DestroyedContext, Self::Error> {
             self.shared.record("local.destroy");
             let block = self.shared.state.lock().expect("fake state").block_destroy;
@@ -3620,6 +8626,7 @@ mod tests {
                 .collect(),
             setup_expires_at_unix: NOW_MS / 1_000 + 20,
             hard_expires_at_unix: NOW_MS / 1_000 + 60,
+            traversal_hints: Vec::new(),
         };
         let response = PreparedLeaseBatch {
             context_handle: vec![99; HELPER_HANDLE_BYTES],
@@ -3658,6 +8665,7 @@ mod tests {
 
     struct FakeExitBundle {
         path_ids: Vec<u32>,
+        signed_exit_reservation: Vec<u8>,
     }
 
     #[derive(Debug)]
@@ -3703,6 +8711,7 @@ mod tests {
         type FinalizeRequest = FakeFinalizeRequest;
         type ExitBundle = FakeExitBundle;
         type RelayGrant = FakeRelayGrant;
+        type NativeAuthorization = ();
 
         fn sign_hold(
             &mut self,
@@ -3970,11 +8979,16 @@ mod tests {
             self.shared.record("protocol.verify.finalize");
             Ok(FakeExitBundle {
                 path_ids: request.path_ids.clone(),
+                signed_exit_reservation: signed_responses[0].clone(),
             })
         }
 
         fn exit_bundle_path_count(bundle: &Self::ExitBundle) -> usize {
             bundle.path_ids.len()
+        }
+
+        fn signed_exit_reservation(bundle: &Self::ExitBundle) -> &[u8] {
+            &bundle.signed_exit_reservation
         }
 
         fn sign_relay_request(
@@ -4070,6 +9084,14 @@ mod tests {
             Ok(())
         }
 
+        fn take_native_route_authorization(
+            &mut self,
+            _request: &Self::FinalizeRequest,
+            _now_ms: u64,
+        ) -> Result<Self::NativeAuthorization, RouteSetupError> {
+            Ok(())
+        }
+
         fn grant_path_id(grant: &Self::RelayGrant) -> u32 {
             grant.path_id
         }
@@ -4113,6 +9135,13 @@ mod tests {
 
         fn ambiguous_after_dispatch(error: &Self::Error) -> bool {
             *error == FakeTransportError::Ambiguous
+        }
+
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
         }
 
         async fn exit_forward(
@@ -4197,6 +9226,12 @@ mod tests {
                 }
                 ExitForwardOperation::FetchExitAdvertisement
                 | ExitForwardOperation::NativeProbePermit
+                | ExitForwardOperation::NativeProbeAuthorize
+                | ExitForwardOperation::NativeProbeReady
+                | ExitForwardOperation::NativeProbeResult
+                | ExitForwardOperation::UdpSessionStart
+                | ExitForwardOperation::MptcpSessionStart
+                | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -4307,7 +9342,13 @@ mod tests {
                     .map_err(|_| FakeTransportError::Definitive)?;
                     ControlMessageType::RelayReservation
                 }
-                DatapathRelayOperation::Unspecified => {
+                DatapathRelayOperation::NativeProbeReady
+                | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::NativeProbeAuthorize
+                | DatapathRelayOperation::UdpSessionStart
+                | DatapathRelayOperation::MptcpSessionStart
+                | DatapathRelayOperation::MpquicSessionStart
+                | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
             };
@@ -4363,6 +9404,7 @@ mod tests {
                     masque_context_id: request.masque_context_id(),
                     client_native_instance_id: request.client_native_instance_id().to_vec(),
                     exit_native_instance_id: TEST_EXIT_NATIVE_INSTANCE_ID.to_vec(),
+                    credential_hpke_public_key: Vec::new(),
                 },
                 b"-----BEGIN CERTIFICATE-----\ntest-certificate\n-----END CERTIFICATE-----\n"
                     .to_vec(),
@@ -4425,6 +9467,13 @@ mod tests {
 
         fn ambiguous_after_dispatch(_error: &Self::Error) -> bool {
             false
+        }
+
+        async fn endpoint_traversal_hints(
+            &mut self,
+            _bindings: Vec<EndpointTraversalBinding>,
+        ) -> Result<Vec<volparossa_routing::TraversalEndpointHint>, Self::Error> {
+            Ok(Vec::new())
         }
 
         #[allow(
@@ -4526,6 +9575,12 @@ mod tests {
                 }
                 ExitForwardOperation::FetchExitAdvertisement
                 | ExitForwardOperation::NativeProbePermit
+                | ExitForwardOperation::NativeProbeAuthorize
+                | ExitForwardOperation::NativeProbeReady
+                | ExitForwardOperation::NativeProbeResult
+                | ExitForwardOperation::UdpSessionStart
+                | ExitForwardOperation::MptcpSessionStart
+                | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(
@@ -4619,7 +9674,13 @@ mod tests {
                         .encoded()
                         .to_vec()
                 }
-                DatapathRelayOperation::Unspecified => return Err(RealTransportError),
+                DatapathRelayOperation::NativeProbeReady
+                | DatapathRelayOperation::NativeProbeStart
+                | DatapathRelayOperation::NativeProbeAuthorize
+                | DatapathRelayOperation::UdpSessionStart
+                | DatapathRelayOperation::MptcpSessionStart
+                | DatapathRelayOperation::MpquicSessionStart
+                | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(
                 request.request_id().to_vec(),
@@ -5275,6 +10336,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detached_shutdown_returns_while_quarantined_owner_keeps_retrying() {
+        let (route, manager, shared) = established_fake_route().await;
+        let retirement = Arc::clone(manager.retirement_state());
+        shared.state.lock().expect("fake state").fail_destroy = true;
+
+        assert_eq!(route.teardown().await, RetirementOutcome::Quarantined);
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+
+        manager.shutdown_detached();
+        assert!(retirement.worker_alive());
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+
+        timeout(TEST_TIMEOUT, async {
+            while shared
+                .events()
+                .iter()
+                .filter(|event| event.as_str() == "local.destroy")
+                .count()
+                < 2
+            {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached supervisor keeps retrying permanent quarantine");
+        assert!(retirement.worker_alive());
+        assert_eq!(retirement.outstanding(), 1);
+        assert_eq!(retirement.quarantined(), 1);
+        assert!(
+            !shared
+                .events()
+                .iter()
+                .any(|event| event == "protocol.release")
+        );
+
+        shared.state.lock().expect("fake state").fail_destroy = false;
+        wait_for_event(&shared, "protocol.release").await;
+        timeout(TEST_TIMEOUT, async {
+            while retirement.worker_alive() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached supervisor exits after exact Destroy succeeds");
+        assert_eq!(retirement.outstanding(), 0);
+        assert_eq!(retirement.quarantined(), 0);
+        assert!(!retirement.fail_stopped());
+    }
+
+    #[tokio::test]
     async fn route_attempt_owner_must_drain_before_manager_shutdown_completes() {
         let (route, manager, shared) = established_fake_route().await;
         let retirement = Arc::clone(manager.retirement_state());
@@ -5365,12 +10478,12 @@ mod tests {
             .expect("forwarded exit capability"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control-real").expect("operator"),
-                asn: 64_410,
+                asn: Some(64_410),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 10, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit-real").expect("operator"),
-                asn: 64_420,
+                asn: Some(64_420),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 10, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -5544,12 +10657,12 @@ mod tests {
             .expect("valid forwarded exit snapshot"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control").expect("operator"),
-                asn: 64_499,
+                asn: Some(64_499),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 1, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit").expect("operator"),
-                asn: 64_500,
+                asn: Some(64_500),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 1, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -5700,12 +10813,12 @@ mod tests {
             .expect("fixture forwarded exit"),
             control_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-control").expect("operator"),
-                asn: 64_499,
+                asn: Some(64_499),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([44, 1, 1]),
             },
             exit_diversity: DiversitySnapshot {
                 operator_id: OperatorId::new("operator-exit").expect("operator"),
-                asn: 64_500,
+                asn: Some(64_500),
                 observed_network_prefix: ObservedNetworkPrefix::ipv4_24([45, 1, 1]),
             },
             evidence_batch_id: [55; ID_BYTES],
@@ -5816,7 +10929,7 @@ mod tests {
         let observed_network_prefix = ObservedNetworkPrefix::ipv4_24([octet, 1, 1]);
         let diversity = DiversitySnapshot {
             operator_id: OperatorId::new(format!("operator-relay-{index}")).expect("operator"),
-            asn: 64_501 + u32::try_from(index).expect("bounded relay index"),
+            asn: Some(64_501 + u32::try_from(index).expect("bounded relay index")),
             observed_network_prefix,
         };
         let candidate = Candidate {
@@ -5850,10 +10963,11 @@ mod tests {
                     sample_window_seconds: 30,
                 },
                 network: NetworkMetadata {
+                    uplink: volparossa_core::NetworkUplink::IndependentInternet,
                     operator_id: diversity.operator_id.clone(),
                     region: "eu-west".to_owned(),
                     country_code: "NL".to_owned(),
-                    asn: Some(diversity.asn),
+                    asn: diversity.asn,
                     ipv4_prefix_hint: None,
                     ipv6_prefix_hint: None,
                 },
@@ -6172,7 +11286,14 @@ mod tests {
         reason = "the full phase-order test also proves one signed frame across exact retries"
     )]
     async fn v4_phase_order_uses_real_probes_noncontiguous_subset_and_exact_retry_bytes() {
-        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let mut fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let forwarding_expiry_ms = NOW_MS + 20_000;
+        fixture
+            .transaction
+            .transaction
+            .authorities
+            .exit
+            .expires_at_ms = forwarding_expiry_ms;
         {
             fixture
                 .shared
@@ -6246,6 +11367,17 @@ mod tests {
                 .expect("finalize frames");
             assert_eq!(frames.len(), 3);
             assert!(frames.windows(2).all(|pair| pair[0] == pair[1]));
+            let confirmations = state
+                .exit_frames
+                .get(&(ExitForwardOperation::ConfirmRelay as i32))
+                .expect("confirmation frames");
+            assert_eq!(confirmations.len(), 3);
+            assert!(
+                confirmations
+                    .iter()
+                    .all(|frame| frame.deadline_unix_ms() == forwarding_expiry_ms),
+                "Exit confirmations must not outlive short forwarding authority"
+            );
             let [activation] = state.activation_batches.as_slice() else {
                 panic!("one exact activation batch");
             };
@@ -7077,7 +12209,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_v4_services_and_scope_validators_complete_udp_with_exact_test_probe_evidence() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real signed lifecycle also proves the exact post-commit UDP activation frame"
+    )]
+    async fn production_route_owner_completes_and_disconnects_one_real_v4_lifecycle() {
         // The exact-match verifier below is test-only. Production intentionally remains
         // ProbeEvidenceUnavailable until helper-proven, exit-participating probes are wired.
         let fixture = real_service_fixture();
@@ -7093,6 +12229,8 @@ mod tests {
         assert_eq!(established.active_path_ids, [1]);
         assert!(established.warm_path_ids.is_empty());
         assert_eq!(established.relay_grants.len(), 1);
+        assert_eq!(established.relay_authorities.len(), 1);
+        assert_eq!(established.confirmations.len(), 1);
         assert_eq!(established.commit_proof.leases.len(), 1);
         assert_eq!(
             *fixture.scope_events.lock().expect("scope events"),
@@ -7126,13 +12264,121 @@ mod tests {
                 "the real verified relay envelope must reach helper activation byte-for-byte"
             );
         }
-        assert_eq!(retirement_state.outstanding(), 1);
+        let verified_path = verified_single_relay_udp_path(&established, NOW_MS)
+            .expect("real route yields one verified UDP path");
+        let acquire = client_udp_socket_request(&established, &verified_path)
+            .expect("real route yields one exact helper socket request");
+        let start = udp_session_start_dispatch(&established, &verified_path, true, NOW_MS)
+            .expect("real route yields one exact UDP session start");
+        assert_eq!(start.relay.node_id, *verified_path.relay_node_id());
         assert_eq!(
-            established.teardown().await,
-            RetirementOutcome::Destroyed {
-                released_local_leases: 1,
-            }
+            start.request.validated_operation(),
+            Ok(DatapathRelayOperation::UdpSessionStart)
         );
+        assert_eq!(start.request.relay_node_id(), start.relay.node_id);
+        assert_eq!(
+            start.request.relay_peer_id(),
+            start.relay.peer_id.to_bytes()
+        );
+        let start_frame = decode_canonical::<UdpSessionStartRequest>(
+            start.request.client_signed_request(),
+            MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("canonical UDP start frame");
+        start_frame.validate().expect("correlated UDP proof set");
+        assert_eq!(
+            start_frame.signed_exit_reservation(),
+            established.signed_exit_reservation
+        );
+        assert_eq!(
+            start_frame.signed_relay_reservation(),
+            established.relay_grants[0].signed_relay_reservation()
+        );
+        assert_eq!(
+            start_frame.signed_confirmation(),
+            established.confirmations[0].signed_confirmation
+        );
+        assert_eq!(
+            start_frame.signed_confirmation_receipt(),
+            established.confirmations[0].signed_receipt
+        );
+        let exit_signal = DiscoveryUdpExitSessionSignal::new(
+            *verified_path.reservation_id(),
+            *verified_path.route_context_id(),
+            verified_path.path_id(),
+            vec![0x30, 1, 2],
+            [9; 32],
+        )
+        .expect("bounded Exit signal");
+        let exit_signal = encode_canonical(&exit_signal, MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical Exit signal");
+        assert_eq!(
+            verified_udp_exit_session_signal(&exit_signal, &verified_path)
+                .expect("exact Exit signal")
+                .certificate_der(),
+            [0x30, 1, 2]
+        );
+        let wrong_path_signal = DiscoveryUdpExitSessionSignal::new(
+            *verified_path.reservation_id(),
+            *verified_path.route_context_id(),
+            verified_path.path_id() + 1,
+            vec![0x30, 1, 2],
+            [9; 32],
+        )
+        .expect("bounded wrong-path Exit signal");
+        let wrong_path_signal = encode_canonical(&wrong_path_signal, MAX_CONTROL_MESSAGE_SIZE)
+            .expect("canonical wrong-path Exit signal");
+        assert!(matches!(
+            verified_udp_exit_session_signal(&wrong_path_signal, &verified_path),
+            Err(ProductionUdpRouteError::SessionStart)
+        ));
+        let expected_client = overlay_addresses(
+            *verified_path.route_context_id(),
+            u8::try_from(verified_path.path_id()).expect("bounded path"),
+        )
+        .expect("canonical overlay")
+        .client;
+        assert_eq!(acquire.route_context_id, verified_path.route_context_id());
+        assert_eq!(
+            acquire.context_handle,
+            established.commit_proof.context_handle
+        );
+        assert_eq!(acquire.path_id, verified_path.path_id());
+        assert_eq!(acquire.role, WireguardRole::Client as i32);
+        assert_eq!(
+            acquire.descriptor_kind,
+            TransportSocketKind::QuicUdpUnconnected as i32
+        );
+        assert_eq!(
+            acquire.expected_local,
+            Some(TransportSocketAddress {
+                address: expected_client.octets().to_vec(),
+                port: u32::from(CLIENT_SINGLE_RELAY_UDP_PORT),
+            })
+        );
+        assert!(acquire.expected_remote.is_none());
+        assert_eq!(
+            established
+                .native_authorization
+                .as_ref()
+                .expect("retained native authorization")
+                .native_route_identity()
+                .tls_server_name,
+            "route.exit.example"
+        );
+        let expiry = ClientRouteExpiry::from_hard_expiry(
+            established.request.parameters.hard_expires_at_unix,
+            NOW_MS,
+            Instant::now(),
+        );
+        let route = ProductionRoute {
+            established,
+            expiry,
+        };
+        assert_eq!(route.active_path_ids(), [1]);
+        assert!(route.warm_path_ids().is_empty());
+        assert_eq!(retirement_state.outstanding(), 1);
+        route.disconnect().await.expect("production disconnect");
         assert_eq!(retirement_state.outstanding(), 0);
         fixture
             .manager
@@ -7710,6 +12956,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_native_rtt_drives_postprobe_spread_instead_of_rpc_latency() {
+        let fixture = fixture(1);
+        let mut parameters = fixture.transaction.transaction.request.parameters.clone();
+        parameters.post_probe_policy.relay_policy.active_paths = 2;
+        parameters.post_probe_policy.relay_policy.minimum_paths = 2;
+        parameters.post_probe_policy.relay_policy.maximum_paths = 2;
+        parameters.post_probe_policy.relay_policy.warm_backup_paths = 0;
+        let mut request = rebuild_prospective_request(
+            &fixture.transaction.transaction.authorities,
+            &[0, 1],
+            parameters,
+        );
+        request.paths[0]
+            .proof
+            .bind_client_native_round_trip(1_000)
+            .expect("first exact client native RTT");
+        request.paths[1]
+            .proof
+            .bind_client_native_round_trip(2_000)
+            .expect("second exact client native RTT");
+
+        let probes = request
+            .paths
+            .iter()
+            .map(|path| {
+                let path_id = path.path_id;
+                let rpc_window_micros = u64::from(path_id) * 100_000;
+                (
+                    path_id,
+                    FakeProbe {
+                        projection: ProbeProjection {
+                            path_id,
+                            transport: Transport::TcpMptcp,
+                            address_family: ProbeAddressFamily::Ipv4,
+                            minimum_directional_capacity_mbps: 100,
+                            evidence_bytes: 1_000,
+                            client_to_relay_rtt_micros: rpc_window_micros,
+                            relay_to_exit_rtt_micros: rpc_window_micros,
+                            total_rtt_micros: rpc_window_micros * 2,
+                            unique_throughput_gain_ratio: 0.0,
+                            meaningful_failover: false,
+                        },
+                        token: UniqueProbeToken {
+                            session: 0,
+                            path_id,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let selected = select_verified_probe_subset_with_rng::<FakeProtocol, _>(
+            &request,
+            probes,
+            NOW_MS,
+            &mut ZeroRng,
+        )
+        .expect("local native RTTs fit the 20 ms policy spread");
+        assert_eq!(selected.active.len(), 2);
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("clean manager shutdown");
+    }
+
+    #[tokio::test]
     async fn udp_policy_one_one_one_accepts_four_prospectives_and_finalizes_exactly_one() {
         let mut fixture = fixture(1);
         let mut parameters = fixture.transaction.transaction.request.parameters.clone();
@@ -8082,6 +13395,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn request_bounded_forwarded_authority_only_needs_to_cover_route_setup() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let request = &fixture.transaction.transaction.request;
+        let mut authorities = fixture.transaction.transaction.authorities.clone();
+        let setup_expiry_ms = request
+            .parameters
+            .setup_expires_at_unix
+            .checked_mul(1_000)
+            .expect("bounded setup expiry");
+        assert!(request.parameters.expires_at_ms > setup_expiry_ms);
+
+        authorities.exit.expires_at_ms = setup_expiry_ms;
+        assert_eq!(authorities.validate(request), Ok(()));
+        assert!(request.exit.expires_at_ms > authorities.exit.expires_at_ms);
+
+        authorities.exit.expires_at_ms = setup_expiry_ms.saturating_sub(1);
+        assert_eq!(
+            authorities.validate(request),
+            Err(RouteSetupError::Capability)
+        );
+    }
+
     fn assert_unmeasured_setup_surface(product: &str) {
         assert!(!product.contains("std::ops::Deref"));
         assert!(!product.contains("std::ops::DerefMut"));
@@ -8104,7 +13440,14 @@ mod tests {
         assert!(!product.contains("fn into_parts("));
         assert!(!product.contains("fn decompose("));
         assert!(!product.contains("fn transaction("));
-        assert!(!product.contains("fn deadline("));
+        let unmeasured_impl = product
+            .split("impl<P: ClientReservationProtocol> UnmeasuredRouteSetup<P> {")
+            .nth(1)
+            .expect("private unmeasured setup implementation")
+            .split("\n}\n\nimpl<P: ClientReservationProtocol> RouteSetupTransaction<P> {")
+            .next()
+            .expect("private unmeasured setup implementation end");
+        assert!(!unmeasured_impl.contains("fn deadline("));
         assert!(!product.contains("RouteSetupTransaction::execute_owned"));
         assert!(!product.contains("fn with_protocol("));
         assert!(!product.contains("resolve_and_generate"));
@@ -8355,7 +13698,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "operator_id: OperatorId,",
-                "asn: u32,",
+                "asn: Option<u32>,",
                 "prefix: ObservedNetworkPrefix,",
             ]
         );
@@ -8424,6 +13767,35 @@ mod tests {
         assert_unmeasured_setup_surface(product);
         assert_affine_route_setup_surface(product);
         assert_actor_bound_proof_surface(include_str!("route_setup/selection_bridge.rs"));
+    }
+
+    #[test]
+    fn client_route_cleanup_never_uses_all_owned_authority() {
+        let source = include_str!("route_setup.rs");
+        let (product, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("product source before test module");
+        assert!(
+            !product.contains("cleanup_owned("),
+            "one Client transaction must not destroy another participant's Relay/Exit resources"
+        );
+        let (_, probe) = product
+            .split_once("async fn complete_client_native_probe(")
+            .expect("native probe completion");
+        let (probe, _) = probe
+            .split_once("async fn begin_client_route(")
+            .expect("next function");
+        let retained = probe
+            .find("prepared.retain_cleanup_authority()")
+            .expect("cleanup authority");
+        let joined = probe
+            .find(".bind_prepared_endpoint(")
+            .expect("consuming join");
+        assert!(
+            retained < joined,
+            "cleanup authority must survive consuming joins"
+        );
+        assert!(probe.contains("helper.destroy_context_after_join(&cleanup).await"));
     }
 
     #[test]

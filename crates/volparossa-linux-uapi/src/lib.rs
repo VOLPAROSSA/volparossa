@@ -32,13 +32,16 @@
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod egress;
+pub use egress::{EgressObservation, IndependentEgress};
+
 use std::{
     env,
     ffi::{OsStr, OsString},
     fmt,
     io::{self, IoSlice, IoSliceMut},
     mem,
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     num::NonZeroU64,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -1153,6 +1156,7 @@ pub struct ReceivedUdpDatagram {
     bytes: usize,
     source: SocketAddr,
     original_destination: SocketAddr,
+    gro_segment_size: Option<usize>,
 }
 
 impl ReceivedUdpDatagram {
@@ -1172,6 +1176,13 @@ impl ReceivedUdpDatagram {
     #[must_use]
     pub const fn original_destination(self) -> SocketAddr {
         self.original_destination
+    }
+
+    /// Kernel-provided payload size for each UDP GRO segment, when this receive coalesced
+    /// multiple original datagrams. The final segment may be shorter.
+    #[must_use]
+    pub const fn gro_segment_size(self) -> Option<usize> {
+        self.gro_segment_size
     }
 }
 
@@ -1213,6 +1224,89 @@ pub fn validate_ingress_socket<F: AsFd>(
     }
     let snapshot = inspect_ingress_socket(socket)?;
     validate_ingress_snapshot(snapshot, kind, family, expected_local_port)
+}
+
+/// Revalidate one source-bound transparent IPv4 or IPv6 UDP reply descriptor.
+///
+/// The helper must have bound the descriptor to the exact original remote tuple. It deliberately
+/// remains unconnected: a connected reverse-flow socket would win Linux's established-socket
+/// lookup for later TPROXY ingress datagrams and silently consume the application's uplink. The
+/// typed owner retains the exact intercepted application tuple used by `sendto`. TTL one confines
+/// delivery to the immediately adjacent client namespace even if a caller substitutes a routable
+/// peer.
+///
+/// # Errors
+///
+/// Returns an error unless all immutable kernel socket properties and both tuples match exactly.
+pub fn validate_ingress_udp_reply_socket<F: AsFd>(
+    socket: &F,
+    remote: SocketAddr,
+    application: SocketAddr,
+) -> io::Result<()> {
+    let family = match (remote, application) {
+        (SocketAddr::V4(remote), SocketAddr::V4(application))
+            if *remote.ip() != Ipv4Addr::BROADCAST && *application.ip() != Ipv4Addr::BROADCAST =>
+        {
+            IngressSocketFamily::Ipv4
+        }
+        (SocketAddr::V6(_), SocketAddr::V6(_)) => IngressSocketFamily::Ipv6,
+        _ => return Err(invalid_data("ingress UDP reply families differ")),
+    };
+    if remote == application || !valid_reply_endpoint(remote) || !valid_reply_endpoint(application)
+    {
+        return Err(invalid_data("invalid ingress UDP reply tuple"));
+    }
+    let reference = SockRef::from(socket);
+    let descriptor_flags =
+        FdFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFD).map_err(errno_io)?);
+    let status_flags =
+        OFlag::from_bits_truncate(fcntl(socket, FcntlArg::F_GETFL).map_err(errno_io)?);
+    let expected_domain = match family {
+        IngressSocketFamily::Ipv4 => Domain::IPV4,
+        IngressSocketFamily::Ipv6 => Domain::IPV6,
+    };
+    let one_hop = match family {
+        IngressSocketFamily::Ipv4 => reference.ttl_v4()? == 1,
+        IngressSocketFamily::Ipv6 => reference.unicast_hops_v6()? == 1,
+    };
+    let ipv6_only = match family {
+        IngressSocketFamily::Ipv4 => true,
+        IngressSocketFamily::Ipv6 => getsockopt(socket, sockopt::Ipv6V6Only).map_err(errno_io)?,
+    };
+    let unconnected = reference
+        .peer_addr()
+        .is_err_and(|error| error.raw_os_error() == Some(libc::ENOTCONN));
+    if reference.domain()? != expected_domain
+        || reference.r#type()? != Type::DGRAM
+        || reference.protocol()? != Some(Protocol::UDP)
+        || reference.local_addr()?.as_socket() != Some(remote)
+        || !unconnected
+        || !getsockopt(socket, sockopt::IpTransparent).map_err(errno_io)?
+        || !one_hop
+        || !ipv6_only
+        || reference.is_listener()?
+        || !descriptor_flags.contains(FdFlag::FD_CLOEXEC)
+        || !status_flags.contains(OFlag::O_NONBLOCK)
+    {
+        return Err(invalid_data(
+            "ingress UDP reply socket properties do not match",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_reply_endpoint(value: SocketAddr) -> bool {
+    match value {
+        SocketAddr::V4(value) => {
+            !value.ip().is_unspecified()
+                && !value.ip().is_multicast()
+                && *value.ip() != Ipv4Addr::BROADCAST
+                && value.port() != 0
+        }
+        SocketAddr::V6(value) => {
+            !value.ip().is_unspecified() && !value.ip().is_multicast() && value.port() != 0
+        }
+    }
 }
 
 fn inspect_ingress_socket<F: AsFd>(socket: &F) -> io::Result<KernelIngressSnapshot> {
@@ -1365,6 +1459,68 @@ pub fn tcp_original_destination<F: AsFd>(
     Ok(destination)
 }
 
+/// Recover the original destination of one accepted TCP connection redirected to a dedicated
+/// local ingress listener.
+///
+/// Unlike [`tcp_original_destination`], a REDIRECT listener necessarily has a different concrete
+/// local tuple from the pre-NAT destination. The descriptor shape, address family, peer and
+/// original-destination evidence are still revalidated, and the caller supplies the one closed
+/// destination port accepted by that dedicated listener.
+///
+/// # Errors
+///
+/// Returns an error for a wrong socket shape, family mismatch, invalid tuples, missing kernel
+/// evidence, a zero expected port, or an original destination on any other port.
+pub fn tcp_redirect_original_destination<F: AsFd>(
+    socket: &F,
+    family: IngressSocketFamily,
+    expected_destination_port: u16,
+) -> io::Result<SocketAddr> {
+    if expected_destination_port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "redirect destination port is zero",
+        ));
+    }
+    let snapshot = inspect_ingress_socket(socket)?;
+    if snapshot.family != family
+        || snapshot.socket_type != Type::STREAM
+        || snapshot.protocol != Some(Protocol::TCP)
+        || !snapshot.transparent
+        || snapshot.listening
+        || !snapshot.nonblocking
+        || !snapshot.close_on_exec
+        || matches!(family, IngressSocketFamily::Ipv6) && snapshot.ipv6_only != Some(true)
+    {
+        return Err(invalid_data(
+            "accepted redirected TCP socket properties do not match",
+        ));
+    }
+    validate_concrete_address(snapshot.local, family)?;
+    let peer = SockRef::from(socket)
+        .peer_addr()?
+        .as_socket()
+        .ok_or_else(|| invalid_data("accepted redirected TCP socket has no Internet peer"))?;
+    validate_concrete_address(peer, family)?;
+    let destination = match family {
+        IngressSocketFamily::Ipv4 => {
+            let raw = getsockopt(socket, sockopt::OriginalDst).map_err(errno_io)?;
+            SocketAddr::V4(ipv4_original_destination(raw)?)
+        }
+        IngressSocketFamily::Ipv6 => {
+            let raw = getsockopt(socket, sockopt::Ip6tOriginalDst).map_err(errno_io)?;
+            SocketAddr::V6(ipv6_original_destination(raw)?)
+        }
+    };
+    let destination = validate_concrete_address(destination, family)?;
+    if destination.port() != expected_destination_port || destination == snapshot.local {
+        return Err(invalid_data(
+            "redirected TCP original destination does not match dedicated listener",
+        ));
+    }
+    Ok(destination)
+}
+
 /// Receive one UDP datagram and require exactly one matching original-destination ancillary value.
 ///
 /// The descriptor is fully revalidated before recvmsg. Missing, duplicate, wrong-family, extra,
@@ -1408,9 +1564,10 @@ fn receive_udp_record<F: AsFd>(
     let mut control_space = nix::cmsg_space!(
         libc::sockaddr_in,
         libc::sockaddr_in6,
+        i32,
         [RawFd; MAX_HANDOFF_FDS]
     );
-    let (bytes, flags, source, accumulator, descriptors, control_parse_failed) = {
+    let (bytes, flags, source, accumulator, gro_segment_size, descriptors, control_parse_failed) = {
         let message = recvmsg::<SockaddrStorage>(
             socket.as_fd().as_raw_fd(),
             &mut vectors,
@@ -1419,6 +1576,7 @@ fn receive_udp_record<F: AsFd>(
         )
         .map_err(errno_io)?;
         let mut accumulator = OriginalDestinationAccumulator::new(family);
+        let mut gro_segment_size = None;
         let mut descriptors = Vec::new();
         let mut control_parse_failed = false;
         match message.cmsgs() {
@@ -1445,6 +1603,11 @@ fn receive_udp_record<F: AsFd>(
                                 descriptors.push(unsafe { OwnedFd::from_raw_fd(raw) });
                             }
                         }
+                        ControlMessageOwned::UdpGroSegments(value) => {
+                            if gro_segment_size.replace(value).is_some() {
+                                accumulator.observe_extra();
+                            }
+                        }
                         _ => accumulator.observe_extra(),
                     }
                 }
@@ -1457,6 +1620,7 @@ fn receive_udp_record<F: AsFd>(
             message.flags,
             source,
             accumulator,
+            gro_segment_size,
             descriptors,
             control_parse_failed,
         )
@@ -1466,11 +1630,13 @@ fn receive_udp_record<F: AsFd>(
     let source = source
         .ok_or_else(|| invalid_data("UDP datagram has no Internet source"))
         .and_then(|value| validate_concrete_address(value, family));
+    let gro_segment_size = validate_udp_gro_segment_size(gro_segment_size, bytes);
     if flags.intersects(MsgFlags::MSG_TRUNC | MsgFlags::MSG_CTRUNC)
         || control_parse_failed
         || !descriptors.is_empty()
         || destination.is_err()
         || source.is_err()
+        || gro_segment_size.is_err()
     {
         let initialized = bytes.min(payload.len());
         payload[..initialized].fill(0);
@@ -1482,7 +1648,19 @@ fn receive_udp_record<F: AsFd>(
         bytes,
         source: source.expect("checked source result"),
         original_destination: destination.expect("checked destination result"),
+        gro_segment_size: gro_segment_size.expect("checked UDP GRO segment size"),
     })
+}
+
+fn validate_udp_gro_segment_size(raw: Option<i32>, bytes: usize) -> io::Result<Option<usize>> {
+    raw.map(|value| {
+        usize::try_from(value)
+            .ok()
+            .filter(|size| *size != 0 && *size <= bytes)
+            .filter(|size| bytes.div_ceil(*size) <= 64)
+            .ok_or_else(|| invalid_data("invalid UDP GRO segment size"))
+    })
+    .transpose()
 }
 
 struct OriginalDestinationAccumulator {
@@ -3580,6 +3758,26 @@ exec env LISTEN_PID=$$ LISTEN_FDS=2 LISTEN_FDNAMES=first:second VOLPAROSSA_UAPI_
         let mut zero_port = OriginalDestinationAccumulator::new(IngressSocketFamily::Ipv4);
         zero_port.observe_ipv4(SocketAddrV4::new(*ipv4.ip(), 0));
         assert!(zero_port.finish().is_err());
+    }
+
+    #[test]
+    fn udp_gro_segment_metadata_preserves_exact_datagram_boundaries() {
+        assert_eq!(
+            validate_udp_gro_segment_size(Some(1_200), 4_800).expect("four exact segments"),
+            Some(1_200)
+        );
+        assert_eq!(
+            validate_udp_gro_segment_size(Some(1_200), 4_976).expect("short final segment"),
+            Some(1_200)
+        );
+        assert_eq!(
+            validate_udp_gro_segment_size(None, 4_800).expect("ordinary datagram"),
+            None
+        );
+        for invalid in [Some(0), Some(-1), Some(4_801)] {
+            assert!(validate_udp_gro_segment_size(invalid, 4_800).is_err());
+        }
+        assert!(validate_udp_gro_segment_size(Some(1), 65).is_err());
     }
 
     #[test]

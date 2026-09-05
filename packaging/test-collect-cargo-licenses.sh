@@ -29,6 +29,8 @@ jq '
     | .packages |= map(select(
         (.id as $id | ($workspace_members | index($id)) != null)
         or (.name == "hickory-proto" and .version == "0.25.2")
+        or (.name == "base256emoji" and .version == "1.0.2")
+        or (.name == "blake3" and .version == "1.8.5")
         or (.name == "libp2p-yamux" and .version == "0.47.0")
         or (.name == "time" and .version == "0.3.41")
         or (.name == "yamux" and .version == "0.13.10")
@@ -39,6 +41,9 @@ notices=$test_tmp/notices
 ./packaging/collect-cargo-licenses.sh "$focused_metadata" "$notices" >"$test_tmp/collector.log"
 
 for license_path in \
+    "$notices/blake3-1.8.5/LICENSE_A2" \
+    "$notices/blake3-1.8.5/LICENSE_A2LLVM" \
+    "$notices/blake3-1.8.5/LICENSE_CC0" \
     "$notices/hickory-proto-0.25.2/LICENSE-APACHE" \
     "$notices/hickory-proto-0.25.2/LICENSE-MIT" \
     "$notices/libp2p-yamux-0.47.0/LICENSE" \
@@ -49,6 +54,15 @@ for license_path in \
 do
     [ -f "$license_path" ] || fail "vendored license was not collected: $license_path"
 done
+
+awk -F '\t' '
+    $1 == "base256emoji" && $2 == "1.0.2" &&
+    $4 == "crates.io+vcs-license-f7cf4ae2c15123376d6634ca7aed005034b396ec" {
+        found = 1
+    }
+    END { exit !found }
+' "$notices/DEPENDENCIES.tsv" ||
+    fail 'license-expression-only VCS provenance is absent from notice inventory'
 
 awk -F '	' '
     $1 == "hickory-proto" &&

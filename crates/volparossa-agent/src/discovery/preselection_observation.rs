@@ -9,6 +9,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
+use libp2p::{PeerId, request_response::OutboundRequestId};
 use rand_core::{OsRng, RngCore};
 use tokio::time::Instant;
 use volparossa_core::{Bandwidth, IpFamily, ObservedNetworkPrefix};
@@ -106,7 +107,10 @@ const MAXIMUM_TOMBSTONES: usize = 36;
         reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
-const MAXIMUM_BATCH_TOMBSTONES: usize = 4;
+// A failed batch can consume only one challenge tombstone.  Keep the independently bounded batch
+// ledger large enough for every live challenge rather than blocking valid retries after four
+// route attempts while retaining the same 120-second replay window.
+const MAXIMUM_BATCH_TOMBSTONES: usize = MAXIMUM_TOMBSTONES;
 #[cfg_attr(
     not(test),
     allow(
@@ -122,7 +126,11 @@ const REPLAY_CAPACITY: usize = 40;
         reason = "private affine A1 owner internals; only DiscoveryRuntime enters"
     )
 )]
-const REQUEST_LIFETIME_MS: u64 = 5_000;
+// This is the signed evidence lifetime, not the wire RPC timeout. Discovery still caps each
+// request-response dispatch at PRESELECTION_OBSERVATION_REQUEST_TIMEOUT (five seconds). Retaining
+// the one-shot challenge for two minutes leaves bounded room for the native sampler plus the
+// production route transaction without making a replay reusable.
+const REQUEST_LIFETIME_MS: u64 = 120_000;
 #[cfg_attr(
     not(test),
     allow(
@@ -163,6 +171,10 @@ const COOLDOWN_MS: u64 = 30_000;
     )
 )]
 const COOLDOWN: Duration = Duration::from_secs(30);
+/// A proven local transport drop has already released the exact service slot. Keep admission
+/// bounded while allowing the command-level one-second retry to refresh its candidate snapshot.
+const OUTBOUND_FAILURE_COOLDOWN_MS: u64 = 250;
+const OUTBOUND_FAILURE_COOLDOWN: Duration = Duration::from_millis(250);
 
 #[cfg_attr(
     not(test),
@@ -981,7 +993,6 @@ struct RequestBinding<'a> {
     policy: super::RouteCandidatePolicySnapshot,
     challenge: [u8; CHALLENGE_LENGTH],
     created_at_ms: u64,
-    attempt_deadline_ms: u64,
 }
 
 #[cfg_attr(
@@ -1497,6 +1508,33 @@ impl PendingPreselectionAttempt {
         self.cancel_at(terminal_ms, terminal_mono)
     }
 
+    fn cool_after_outbound_failure(
+        self,
+    ) -> Result<CoolingPreselectionAttemptGate, PreselectionAttemptFailure> {
+        let terminal_ms = crate::unix_millis();
+        let terminal_mono = Instant::now();
+        if terminal_ms < self.pending.created_at_ms || terminal_mono < self.pending.prepared_at_mono
+        {
+            return Err(PreselectionAttemptFailure {
+                gate: None,
+                error: PreselectionAttemptError::InvalidTime,
+            });
+        }
+        cooling_gate_with_delay(
+            self.gate,
+            self.pending.created_at_ms,
+            terminal_ms,
+            self.pending.prepared_at_mono,
+            terminal_mono,
+            OUTBOUND_FAILURE_COOLDOWN_MS,
+            OUTBOUND_FAILURE_COOLDOWN,
+        )
+        .ok_or(PreselectionAttemptFailure {
+            gate: None,
+            error: PreselectionAttemptError::InvalidTime,
+        })
+    }
+
     fn cancel_at(
         self,
         terminal_ms: u64,
@@ -1601,6 +1639,30 @@ impl DispatchedPreselectionAttempt {
     ) -> Result<CoolingPreselectionAttemptGate, PreselectionOwnerTransitionFailure> {
         match service.cancel_preselection_observation_transaction(self.transaction) {
             Ok(attempt) => attempt.cancel().map_err(into_owner_transition_failure),
+            Err(failure) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
+                Self {
+                    transaction: failure.into_transaction(),
+                },
+            ))),
+        }
+    }
+
+    /// Consume one exact service-correlated outbound transport failure and retain all attempt
+    /// tombstones while shortening only its local retry gate.
+    pub(super) fn consume_outbound_failure(
+        self,
+        service: &mut DiscoveryService,
+        event_peer: PeerId,
+        event_request: OutboundRequestId,
+    ) -> Result<CoolingPreselectionAttemptGate, PreselectionOwnerTransitionFailure> {
+        match service.consume_preselection_observation_outbound_failure_with_context(
+            self.transaction,
+            event_peer,
+            event_request,
+        ) {
+            Ok(attempt) => attempt
+                .cool_after_outbound_failure()
+                .map_err(into_owner_transition_failure),
             Err(failure) => Err(PreselectionOwnerTransitionFailure::Retained(Box::new(
                 Self {
                     transaction: failure.into_transaction(),
@@ -2009,9 +2071,9 @@ where
         )?;
         let transcript = purpose_consume_transcript(record.transcript)?;
         if transcript.valid_until_ms() <= trusted_now_ms
-            || transcript
-                .upstream_network_prefix()
-                .is_some_and(|prefix| prefix.family() != family || !prefix.is_public_routable())
+            || transcript.upstream_network_prefix().is_some_and(|prefix| {
+                prefix.family() != family || !(prefix.is_public_routable() || prefix.is_local_lan())
+            })
         {
             return Err(PreselectionAttemptError::Protocol);
         }
@@ -2106,7 +2168,8 @@ fn validate_transport_freshness_facts(
     trusted_now_ms: u64,
 ) -> Result<(), PreselectionAttemptError> {
     if facts.observed_network_prefix.family() != family
-        || !facts.observed_network_prefix.is_public_routable()
+        || !(facts.observed_network_prefix.is_public_routable()
+            || facts.observed_network_prefix.is_local_lan())
     {
         return Err(PreselectionAttemptError::Transport);
     }
@@ -2388,13 +2451,18 @@ fn validate_subject_set_matches_snapshot(
                 .min(forwarded.policy_expires_at_ms)
                 .min(control.capability_expires_at_ms)
         || forwarded.expires_at_ms > exit.capability_expires_at_ms
+        || forwarded.expires_at_ms > forwarded.control_relay_advertisement_expires_at_ms
         || control.node_id != forwarded.control_relay_node_id
         || control.peer_id != forwarded.control_relay_peer_id.to_bytes()
         || control.public_key != forwarded.control_relay_public_key
-        || control.advertisement_sequence != forwarded.control_relay_advertisement_sequence
-        || control.advertisement_expires_at_ms
-            != forwarded.control_relay_advertisement_expires_at_ms
-        || control.advertisement_payload_hash != forwarded.control_relay_advertisement_payload_hash
+        || forwarded.control_relay_advertisement_sequence == 0
+        || forwarded.control_relay_advertisement_expires_at_ms <= now_ms
+        || control.advertisement_sequence < forwarded.control_relay_advertisement_sequence
+        || (control.advertisement_sequence == forwarded.control_relay_advertisement_sequence
+            && (control.advertisement_expires_at_ms
+                != forwarded.control_relay_advertisement_expires_at_ms
+                || control.advertisement_payload_hash
+                    != forwarded.control_relay_advertisement_payload_hash))
         || control.advertisement_payload_hash
             != nested_control.advertisement().advertisement_payload_hash()
         || control.advertisement_payload_hash
@@ -2586,6 +2654,9 @@ fn prepare_request(
     } = *preparation;
     let subjects = &snapshot.preselection_subjects;
     let policy = snapshot.policy;
+    if created_at_ms >= attempt_deadline_ms {
+        return Err(PreselectionAttemptError::InvalidTime);
+    }
     let subject = subjects
         .entries
         .get(plan.subject)
@@ -2608,7 +2679,6 @@ fn prepare_request(
         policy,
         challenge: plan.challenge,
         created_at_ms,
-        attempt_deadline_ms,
     })?;
     let expires_at_mono = prepared_at_mono
         .checked_add(Duration::from_millis(REQUEST_LIFETIME_MS))
@@ -2654,12 +2724,10 @@ fn request_for_subject(
         policy,
         challenge,
         created_at_ms,
-        attempt_deadline_ms,
     } = *binding;
     let expires_at_ms = created_at_ms
         .checked_add(REQUEST_LIFETIME_MS)
         .ok_or(PreselectionAttemptError::InvalidTime)?
-        .min(attempt_deadline_ms)
         .min(subject.advertisement_expires_at_ms)
         .min(subject.capability_expires_at_ms)
         .min(subject.local_discovery_authority_expires_at_ms)
@@ -2724,13 +2792,33 @@ fn cooling_gate(
     not_before_mono: Instant,
     terminal_mono: Instant,
 ) -> Option<CoolingPreselectionAttemptGate> {
+    cooling_gate_with_delay(
+        gate,
+        not_before_ms,
+        terminal_ms,
+        not_before_mono,
+        terminal_mono,
+        COOLDOWN_MS,
+        COOLDOWN,
+    )
+}
+
+fn cooling_gate_with_delay(
+    gate: PreselectionAttemptGate,
+    not_before_ms: u64,
+    terminal_ms: u64,
+    not_before_mono: Instant,
+    terminal_mono: Instant,
+    delay_ms: u64,
+    delay: Duration,
+) -> Option<CoolingPreselectionAttemptGate> {
     if terminal_ms < not_before_ms || terminal_mono < not_before_mono {
         return None;
     }
     Some(CoolingPreselectionAttemptGate {
         gate,
-        ready_at_ms: terminal_ms.checked_add(COOLDOWN_MS)?,
-        ready_at: terminal_mono.checked_add(COOLDOWN)?,
+        ready_at_ms: terminal_ms.checked_add(delay_ms)?,
+        ready_at: terminal_mono.checked_add(delay)?,
     })
 }
 
@@ -3001,6 +3089,7 @@ mod tests {
             exit: request.actor.clone(),
             scope: request.scope.clone(),
             upstream_network_prefix: Some(ObservationNetworkPrefix {
+                scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![8, 8, 8],
             }),
@@ -3045,7 +3134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_dispatch_fails_closed_and_cools_when_connection_provenance_is_absent() {
+    async fn owner_dispatch_waits_for_response_binding_when_connection_provenance_is_absent() {
         let fixture = preselection_snapshot_fixture(1, false).await;
         let started_at_mono = Instant::now();
         let pending = PreselectionAttemptGate::new()
@@ -3070,13 +3159,12 @@ mod tests {
         )
         .expect("client discovery service");
 
-        let failure = match pending.dispatch(&mut service) {
-            Ok(_) => panic!("a request-derived target without live provenance must not dispatch"),
-            Err(failure) => failure,
-        };
-        let PreselectionOwnerTransitionFailure::Cooling(cooling) = failure else {
-            panic!("terminal dispatch rejection must retain only cooling authority");
-        };
+        let dispatch = pending.dispatch(&mut service).unwrap_or_else(|_| {
+            panic!("request-response must be allowed to dial the exact target")
+        });
+        let cooling = dispatch
+            .cancel(&mut service)
+            .unwrap_or_else(|_| panic!("exact queued dispatch must remain cancellable"));
         assert_eq!(cooling.gate.tombstones.len(), 1);
         assert_eq!(cooling.gate.batch_tombstones.len(), 1);
         assert!(cooling.gate.replay.is_empty());
@@ -4278,7 +4366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwarded_request_separates_canonical_actor_expiry_from_local_authority() {
+    async fn forwarded_request_bounds_local_authority_by_canonical_actor_expiry() {
         let fixture = preselection_snapshot_fixture(1, false).await;
         let started_at_ms = fixture.now_ms + 18_000;
         let started_at_mono = Instant::now();
@@ -4301,8 +4389,8 @@ mod tests {
         let (_, exit_index) = pending.snapshot.preselection_subjects.forwarded_pairs[0];
         let exit = &pending.snapshot.preselection_subjects.entries[exit_index];
         assert!(
-            exit.local_discovery_authority_expires_at_ms < exit.capability_expires_at_ms,
-            "old discovery request deadline is deliberately stricter than the canonical actor cap"
+            exit.local_discovery_authority_expires_at_ms <= exit.capability_expires_at_ms,
+            "local discovery authority must never outlive the canonical actor cap"
         );
         let request = request(&pending);
         assert_eq!(
@@ -4332,7 +4420,7 @@ mod tests {
                 expires_at: started_at_mono + TOMBSTONE_LIFETIME,
             });
         }
-        for value in 1_u8..=3 {
+        for value in 1_u8..=35 {
             gate.batch_tombstones.push_back(BatchTombstone {
                 batch_id: [value; BATCH_ID_LENGTH],
                 expires_at: started_at_mono + TOMBSTONE_LIFETIME,
@@ -4352,9 +4440,12 @@ mod tests {
                 ),
                 |request_count| Ok(minted_entropy(request_count, 241)),
             )
-            .unwrap_or_else(|_| panic!("34+2 challenges and 3+1 batches fit exactly"));
+            .unwrap_or_else(|_| panic!("34+2 challenges and 35+1 batches fit exactly"));
         assert_eq!(pending.gate.tombstones.len(), 35);
-        assert_eq!(pending.gate.batch_tombstones.len(), 4);
+        assert_eq!(
+            pending.gate.batch_tombstones.len(),
+            MAXIMUM_BATCH_TOMBSTONES
+        );
         let dispatch = ObservationDispatchId {
             batch_id: pending.batch_id,
             ordinal: pending.pending.dispatch_id.ordinal,
@@ -5167,7 +5258,7 @@ mod tests {
         );
         assert_eq!(product.matches("pub(super) struct ").count(), 9);
         assert_eq!(product.matches("pub(super) enum ").count(), 5);
-        assert_eq!(product.matches("pub(super) fn ").count(), 13);
+        assert_eq!(product.matches("pub(super) fn ").count(), 14);
         assert_eq!(product.matches("pub(crate) struct ").count(), 7);
         assert_eq!(product.matches("pub(crate) enum ").count(), 1);
         assert_eq!(product.matches("pub(crate) fn ").count(), 6);
@@ -5291,8 +5382,22 @@ mod tests {
             .split_once("\n}\n\nfn preselection_attempt_error(")
             .expect("dispatched owner implementation end")
             .0;
-        assert_eq!(dispatched_impl.matches("pub(super) fn ").count(), 2);
+        assert_eq!(dispatched_impl.matches("pub(super) fn ").count(), 3);
         assert!(dispatched_impl.contains("self.transaction, arrival"));
+        assert!(
+            dispatched_impl
+                .contains("consume_preselection_observation_outbound_failure_with_context(")
+        );
+        assert!(
+            dispatched_impl
+                .contains("event_peer: PeerId,\n        event_request: OutboundRequestId,")
+        );
+        assert_eq!(
+            product
+                .matches("request_response::OutboundRequestId")
+                .count(),
+            1
+        );
         assert!(dispatched_impl.contains("transaction: *transaction,"));
         assert!(dispatched_impl.contains("failure.into_transaction()"));
         for forbidden in [
@@ -5323,9 +5428,9 @@ mod tests {
             "const MAXIMUM_REQUESTS: usize = 9;",
             "const MAXIMUM_ENVELOPES: usize = 10;",
             "const MAXIMUM_TOMBSTONES: usize = 36;",
-            "const MAXIMUM_BATCH_TOMBSTONES: usize = 4;",
+            "const MAXIMUM_BATCH_TOMBSTONES: usize = MAXIMUM_TOMBSTONES;",
             "const REPLAY_CAPACITY: usize = 40;",
-            "const REQUEST_LIFETIME_MS: u64 = 5_000;",
+            "const REQUEST_LIFETIME_MS: u64 = 120_000;",
             "const ATTEMPT_LIFETIME_MS: u64 = 30_000;",
             "const TOMBSTONE_LIFETIME_MS: u64 = 120_000;",
             "const TOMBSTONE_LIFETIME: Duration = Duration::from_secs(120);",
@@ -5448,14 +5553,12 @@ mod tests {
         }
         for forbidden in [
             "ConnectionId",
-            "OutboundRequestId",
             "Multiaddr",
             "SocketAddr",
             "IpAddr",
             "tokio::spawn",
             "mpsc::",
             "oneshot::",
-            "request_response",
             "NetworkBehaviour",
             "RouteSessionAuthority",
             "ReservationSession",
@@ -5619,7 +5722,8 @@ mod tests {
         );
         assert_eq!(
             parent_product.matches("advertisement_fingerprint(").count(),
-            3
+            5,
+            "stored ingest, local Relay publication, forwarded Exit validation and revalidation are the only fingerprint consumers"
         );
         assert_eq!(
             parent_product

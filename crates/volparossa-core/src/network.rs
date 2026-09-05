@@ -1,4 +1,4 @@
-//! Shared fail-closed classification for Internet-facing endpoint addresses.
+//! Distinct fail-closed classifications for Internet-facing and direct local endpoints.
 
 use crate::{IpFamily, advertisement::ObservedNetworkOrigin};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -15,6 +15,8 @@ pub struct ObservedNetworkPrefix(ObservedNetworkPrefixKind);
 enum ObservedNetworkPrefixKind {
     Ipv4([u8; 3]),
     Ipv6([u8; 6]),
+    LocalIpv4([u8; 3]),
+    LocalIpv6([u8; 6]),
 }
 
 impl ObservedNetworkPrefix {
@@ -28,6 +30,18 @@ impl ObservedNetworkPrefix {
     #[must_use]
     pub const fn ipv6_48(prefix: [u8; 6]) -> Self {
         Self(ObservedNetworkPrefixKind::Ipv6(prefix))
+    }
+
+    /// Retains an untrusted direct-local IPv4 /24 without claiming Internet diversity.
+    #[must_use]
+    pub const fn local_ipv4_24(prefix: [u8; 3]) -> Self {
+        Self(ObservedNetworkPrefixKind::LocalIpv4(prefix))
+    }
+
+    /// Retains an untrusted direct-local IPv6 /48 without claiming Internet diversity.
+    #[must_use]
+    pub const fn local_ipv6_48(prefix: [u8; 6]) -> Self {
+        Self(ObservedNetworkPrefixKind::LocalIpv6(prefix))
     }
 
     /// Canonicalizes a legacy locally observed address and discards its host suffix.
@@ -51,8 +65,12 @@ impl ObservedNetworkPrefix {
     #[must_use]
     pub const fn family(self) -> IpFamily {
         match self.0 {
-            ObservedNetworkPrefixKind::Ipv4(_) => IpFamily::Ipv4,
-            ObservedNetworkPrefixKind::Ipv6(_) => IpFamily::Ipv6,
+            ObservedNetworkPrefixKind::Ipv4(_) | ObservedNetworkPrefixKind::LocalIpv4(_) => {
+                IpFamily::Ipv4
+            }
+            ObservedNetworkPrefixKind::Ipv6(_) | ObservedNetworkPrefixKind::LocalIpv6(_) => {
+                IpFamily::Ipv6
+            }
         }
     }
 
@@ -62,8 +80,46 @@ impl ObservedNetworkPrefix {
         match self.0 {
             ObservedNetworkPrefixKind::Ipv4(prefix) => is_public_routable_ipv4_prefix(prefix),
             ObservedNetworkPrefixKind::Ipv6(prefix) => is_public_routable_ipv6_prefix(prefix),
+            ObservedNetworkPrefixKind::LocalIpv4(_) | ObservedNetworkPrefixKind::LocalIpv6(_) => {
+                false
+            }
         }
     }
+
+    /// Returns whether this explicitly local-scope prefix is RFC 1918 IPv4 or IPv6 ULA.
+    ///
+    /// This is address classification, not proof of a directly connected interface or of
+    /// independent Internet origin. Privileged per-lease kernel validation remains required.
+    #[must_use]
+    pub fn is_local_lan(self) -> bool {
+        match self.0 {
+            ObservedNetworkPrefixKind::LocalIpv4([first, second, _]) => {
+                is_local_lan_ipv4_prefix(first, second)
+            }
+            ObservedNetworkPrefixKind::LocalIpv6(prefix) => prefix[0] & 0xfe == 0xfc,
+            ObservedNetworkPrefixKind::Ipv4(_) | ObservedNetworkPrefixKind::Ipv6(_) => false,
+        }
+    }
+}
+
+/// Classifies only RFC 1918 IPv4 and IPv6 unique-local unicast as possible direct LAN endpoints.
+///
+/// Excludes link-local, loopback, CGNAT, documentation, multicast and public addresses. This is
+/// deliberately not a reachability claim; an on-link endpoint also needs an authenticated peer
+/// binding and fresh privileged validation of the exact assigned address and connected route.
+#[must_use]
+pub fn is_local_lan_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let [first, second, _, _] = address.octets();
+            is_local_lan_ipv4_prefix(first, second)
+        }
+        IpAddr::V6(address) => address.octets()[0] & 0xfe == 0xfc,
+    }
+}
+
+const fn is_local_lan_ipv4_prefix(first: u8, second: u8) -> bool {
+    first == 10 || (first == 172 && second >= 16 && second <= 31) || (first == 192 && second == 168)
 }
 
 /// Return whether an address is ordinary, publicly routable unicast.
@@ -137,6 +193,54 @@ mod tests {
         ObservedNetworkOrigin {
             address: value.parse().expect("observed address"),
         }
+    }
+
+    #[test]
+    fn local_lan_classification_never_relaxes_public_origin() {
+        for value in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.1",
+            "fc00::1",
+            "fd12:3456:789a::1",
+        ] {
+            let address = value.parse().expect("address");
+            assert!(is_local_lan_ip(address), "{value}");
+            assert!(!is_public_routable_ip(address), "{value}");
+        }
+        for value in [
+            "8.8.8.8",
+            "172.15.1.1",
+            "172.32.1.1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "100.64.1.1",
+            "169.254.1.1",
+            "192.0.2.1",
+            "198.18.1.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+            "::ffff:192.168.1.1",
+        ] {
+            assert!(!is_local_lan_ip(value.parse().expect("address")), "{value}");
+        }
+        let local = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+        assert!(local.is_local_lan());
+        assert!(!local.is_public_routable());
+        assert!(local != ObservedNetworkPrefix::ipv4_24([192, 168, 1]));
+        assert!(!ObservedNetworkPrefix::ipv4_24([192, 168, 1]).is_local_lan());
+        assert!(!ObservedNetworkPrefix::local_ipv4_24([8, 8, 8]).is_local_lan());
+        assert!(!ObservedNetworkPrefix::local_ipv4_24([8, 8, 8]).is_public_routable());
+        let ula = ObservedNetworkPrefix::local_ipv6_48([0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a]);
+        assert!(ula.is_local_lan());
+        assert!(!ula.is_public_routable());
+        assert_eq!(ula.family(), IpFamily::Ipv6);
     }
 
     #[test]
@@ -291,13 +395,16 @@ mod tests {
             .split("\n}")
             .next()
             .expect("prefix inherent API end");
-        assert_eq!(inherent_api.matches("\n    pub ").count(), 5);
+        assert_eq!(inherent_api.matches("\n    pub ").count(), 8);
         for required in [
             "pub const fn ipv4_24(",
             "pub const fn ipv6_48(",
             "pub fn from_origin(",
             "pub const fn family(",
             "pub fn is_public_routable(",
+            "pub const fn local_ipv4_24(",
+            "pub const fn local_ipv6_48(",
+            "pub fn is_local_lan(",
         ] {
             assert!(inherent_api.contains(required), "missing API: {required}");
         }

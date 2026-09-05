@@ -1,5 +1,6 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
+mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
 
@@ -20,12 +21,12 @@ use preselection_sampler::{
 };
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
-    net::IpAddr,
+    net::{IpAddr, UdpSocket as StdUdpSocket},
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -35,12 +36,16 @@ use libp2p::{
     request_response,
     swarm::{ConnectionId, SwarmEvent},
 };
+use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::cell::Cell;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use tokio::{
+    net::UdpSocket,
     sync::{RwLock, mpsc, oneshot, watch},
+    task::JoinHandle,
     time::{Instant, MissedTickBehavior, timeout},
 };
 
@@ -48,22 +53,29 @@ use volparossa_config::{Config, RolesConfig};
 use volparossa_core::{
     Bandwidth, CapacitySnapshot, NetworkMetadata, NodeAdvertisement as CoreAdvertisement,
     NodeCapabilities, NodeId, NodeQuality, NodeRoles, OperatorId, PeerId as CorePeerId, PolicyHash,
-    UnixTime,
+    UnixTime, is_local_lan_ip, is_public_routable_ip,
 };
 use volparossa_discovery::{
     AdvertisementResponse, BehaviourEvent, BoundClientPreselectionTransport,
-    BoundNativeProbeControlConnection, ClientPreselectionResponseArrival,
-    DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation, DatapathRelayRequest,
-    DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles, DiscoveryService,
-    EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation,
-    ExitForwardRequest, ExitForwardResponse, ForwardStatus, LocalPreselectionPolicy,
+    BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
+    ClientPreselectionResponseArrival, DATAPATH_RELAY_REQUEST_TIMEOUT, DatapathRelayOperation,
+    DatapathRelayRequest, DatapathRelayResponse, DiscoveryEvent, DiscoveryProtocolRoles,
+    DiscoveryService, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_TIMEOUT,
+    ExitForwardOperation, ExitForwardRequest, ExitForwardResponse, ExitMpquicSessionSignal,
+    ExitMptcpSessionSignal, ForwardStatus, LocalPreselectionPolicy,
     MAX_CONCURRENT_DATAPATH_RELAY_STREAMS, MAX_CONCURRENT_FORWARDING_STREAMS,
-    MAX_FORWARDING_FRAME_BYTES, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
-    UpstreamExitForwardRequest, UpstreamExitForwardResponse, advertisement_envelope_matches_peer,
-    capability, signed_envelope_matches_peer,
+    MAX_FORWARDING_FRAME_BYTES, MpquicSessionStartRequest, MptcpSessionStartRequest,
+    NativeProbeReadyForwardRequest, PRESELECTION_OBSERVATION_REQUEST_TIMEOUT, PeerLink,
+    UdpExitSessionSignal, UdpSessionStartRequest, UpstreamExitForwardRequest,
+    UpstreamExitForwardResponse, advertisement_envelope_matches_peer, capability,
+    signed_envelope_matches_peer,
 };
-use volparossa_exit::{ExitService, ExitServiceConfig};
+use volparossa_exit::{
+    AcceptedExitConfirmation, AcceptedExitReservationBundle, ExitService, ExitServiceConfig,
+    ProbeEvidence, ProbeEvidenceError, ProbeEvidenceVerifier,
+};
 use volparossa_identity::Identity;
+use volparossa_linux_uapi::{EgressObservation, IndependentEgress};
 use volparossa_local_control::{
     LogLevel, PeerSummary, PolicySnapshot as AgentPolicySnapshot, Reachability,
 };
@@ -71,30 +83,69 @@ use volparossa_metrics::MetricsRegistry;
 use volparossa_peerstore::PeerStore;
 use volparossa_policy::VerifiedManifest;
 use volparossa_protocol::{
-    AdvertisementCapabilities, ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest,
-    ExitReservation, ExitReservationConfirmation, ExitReservationFinalizeRequest,
-    MAX_NATIVE_PROBE_LIFETIME_MS, NativeProbePathScope, NativeProbePermitRequest,
-    NodeAdvertisement as WireAdvertisement, ObservationAddressFamily, PreselectionActorBinding,
-    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayReservationRequest,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, decode_canonical, encode_canonical,
-    node_id_from_public_key, verify_control_message,
+    AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
+    ClientSessionCapability, ControlPayload, ExitCapacityHold, ExitCapacityHoldRequest,
+    ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
+    ExitReservationFinalizeRequest, IssuedNativeProbeRelayReady, MAX_CONTROL_PAYLOAD_SIZE,
+    MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES, MAX_NATIVE_PROBE_LIFETIME_MS,
+    NativeProbeEndpointBinding, NativeProbeForwardingProof, NativeProbeLeaseProof,
+    NativeProbePathScope, NativeProbePermitRequest, NativeProbeRelayLocalProofs, NativeProbeStart,
+    NativeRouteCredentialDelivery, NodeAdvertisement as WireAdvertisement,
+    ObservationAddressFamily, ObservationNetworkPrefix, PreselectionActorBinding, ProbeLegEvidence,
+    RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
+    RelayReservation, RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+    VerifiedNativeProbePermit, VerifiedNativeProbeStartForRelay, decode_canonical,
+    encode_canonical, exit_confirmation_envelope_hash, generate_nonce,
+    native_probe_prepared_lease_commitment, node_id_from_public_key, sign_control_message_with,
+    sign_native_probe_relay_ready_with, sign_native_probe_relay_result_with,
+    verify_control_message, verify_native_probe_authorization_chain,
+    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
+    verify_native_probe_permit, verify_native_probe_start_for_relay, verify_relay_reservation,
 };
-use volparossa_relay::{RelayService, RelayServiceConfig};
+use volparossa_quic::NativeClient;
+use volparossa_relay::{AcceptedRelayReservation, RelayService, RelayServiceConfig};
+use volparossa_routing::{
+    AcquireTransportSocket, ActivateLeaseBatch, CommitLeaseBatch, CommittedLeaseBatch, ContextRole,
+    LeaseActivation, LeaseCommit, LeasePlan, MAX_HELPER_PATHS, NATIVE_PROBE_CLIENT_PORT,
+    NATIVE_PROBE_DATAGRAM_BYTES, NATIVE_PROBE_EXIT_PORT, PrepareLeaseBatch, PublicUdpEndpoint,
+    TransportSocketAddress, TransportSocketKind, TraversalEndpointHint, WireguardRole,
+};
 use volparossa_selection::MAXIMUM_SELECTION_CANDIDATES;
+use volparossa_udp::{DatagramLimits, VerifiedSingleRelayPath};
+use volparossa_wireguard::{ExitEndpointLease, RelayEndpointLease, overlay_addresses};
 
 use crate::{
     advertisement::{AdvertisementPublisher, LocalAdvertisementInput},
+    endpoint_leases::{
+        bind_prepared_exit_endpoint_leases, bind_prepared_relay_endpoint_lease,
+        protocol_endpoint_for_native,
+    },
+    helper::{HelperClient, RuntimeBoundPreparedLeaseBatch},
+    mpquic_runtime::{
+        ActiveProductionMpquicExitRoute, ExitMpquicPathAuthorization,
+        ProductionMpquicExitPreflight, start_production_mpquic_exit,
+        start_production_single_path_udp_exit,
+    },
+    mptcp_flow_runtime::{
+        ProductionMptcpExitCleanup, ProductionMptcpExitCompletion, ProductionMptcpExitRuntime,
+    },
+    mptcp_transport::{ExitMptcpListenerSignal, ExitMptcpTransport, PRODUCTION_MPTCP_EXIT_PORT},
     roles::RoleStore,
     route_setup::{PreparedPreselectionEvidence, prepare_preselection_evidence},
     state::AgentState,
+    udp_exit_provider::{
+        ProductionExitNativeRouteIdentityProvider, route_certificate_der, start_production_udp_exit,
+    },
     unix_millis, unix_seconds,
 };
 
 const PEERSTORE_LOAD_BOUND: usize = 1_000;
 const PEER_RETENTION_SECONDS: u64 = 3_600;
 const ROLE_COMMAND_CAPACITY: usize = 8;
+const MPTCP_EXIT_RUNTIME_EVENT_CAPACITY: usize = 64;
 const ROLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RESERVATION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
+const CAPABILITY_QUERY_INTERVAL: Duration = Duration::from_secs(5);
 const MAXIMUM_RESERVATION_TTL_SECONDS: u64 = 15 * 60;
 const TUNNEL_SETUP_TIMEOUT_SECONDS: u64 = 30;
 const SERVICE_REPLAY_CAPACITY: usize = 65_536;
@@ -103,10 +154,25 @@ const MAX_PENDING_PER_PEER: usize = 16;
 const MAX_COALESCED_WAITERS: usize = 3;
 const MAX_DISPATCH_ATTEMPTS: usize = 3;
 const MAX_LEDGER_ENTRIES: usize = 256;
-const MAX_LEDGER_BYTES: usize = 8 * 1024 * 1024;
-const MAX_LEDGER_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
+// One complete two-path route keeps several idempotent 512-KiB response reservations alive at
+// once (advertisement, native phases, production probes and transport activation). Keep that
+// protocol transaction bounded without rejecting its later phases merely because the control
+// Relay is also one of the selected data Relays.
+const MAX_LEDGER_BYTES: usize = 128 * 1024 * 1024;
+const MAX_LEDGER_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
 const MAX_EXIT_PROVIDER_PEERS: usize = 1_024;
-const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
+const MAX_CURRENT_EXIT_CONTROL_CANDIDATES: usize = 3;
+const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
+pub(crate) const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
+const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
+// A provider observation is client-local: a selected control Relay may not have converged on the
+// same DHT record yet. Retire that exact Relay/Exit lineage long enough to rotate through the
+// bounded control set, but retry it well inside the provider observation and A01 liveness windows.
+const AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS: u64 = 10_000;
+// Helper Destroy can legitimately remain ambiguous for its full five-second RPC bound. Retrying
+// that synchronous call on every one-second actor tick starves discovery traffic, so quarantine
+// the affine owner and retry slowly while the helper's durable reaper also converges cleanup.
+const HELPER_CLEANUP_RETRY_BACKOFF_MS: u64 = 60_000;
 const PROVIDER_OBSERVATION_TTL_MS: u64 = 120_000;
 const CLIENT_PRESELECTION_TIMEOUT: Duration = Duration::from_secs(TUNNEL_SETUP_TIMEOUT_SECONDS);
 
@@ -116,6 +182,8 @@ pub(crate) struct DiscoveryRuntimeResources {
     pub(crate) policy: Option<VerifiedManifest>,
     pub(crate) role_store: RoleStore,
     pub(crate) metrics: MetricsRegistry,
+    pub(crate) helper: HelperClient,
+    pub(crate) mpquic_socket: PathBuf,
 }
 
 /// Route-policy-only input for one actor-owned client preselection attempt.
@@ -163,6 +231,31 @@ impl ClientPreselectionParameters {
             requested_candidate_bound,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) const fn fields_for_test(
+        &self,
+    ) -> (
+        Transport,
+        ObservationAddressFamily,
+        Bandwidth,
+        Bandwidth,
+        Bandwidth,
+        usize,
+        usize,
+        usize,
+    ) {
+        (
+            self.transport,
+            self.address_family,
+            self.minimum_capacity,
+            self.local_profile_capacity,
+            self.conservative_capacity_ceiling,
+            self.minimum_other_relays,
+            self.maximum_other_relays,
+            self.requested_candidate_bound,
+        )
+    }
 }
 
 /// Detail-free terminal result at the production client-preselection handle.
@@ -190,6 +283,32 @@ pub(crate) struct DiscoveryControlHandle {
 impl DiscoveryControlHandle {
     fn from_sender(sender: mpsc::Sender<DiscoveryCommand>) -> Self {
         Self { sender }
+    }
+
+    /// Test transport replies only after every Ready request crosses the actor queue.
+    #[cfg(test)]
+    pub(crate) fn native_ready_barrier_for_test(count: usize) -> (Self, JoinHandle<usize>) {
+        let (sender, mut receiver) = mpsc::channel(count);
+        let task = tokio::spawn(async move {
+            let mut replies = Vec::new();
+            while replies.len() < count {
+                let Some(DiscoveryCommand::RequestDatapathRelay { request, reply, .. }) =
+                    receiver.recv().await
+                else {
+                    panic!("expected one native Ready request per candidate");
+                };
+                assert_eq!(
+                    request.validated_operation(),
+                    Ok(DatapathRelayOperation::NativeProbeReady)
+                );
+                replies.push(reply);
+            }
+            for reply in replies {
+                let _ = reply.send(Err(OutboundReservationError::SendFailed));
+            }
+            count
+        });
+        (Self { sender }, task)
     }
 
     pub async fn set_roles(
@@ -355,6 +474,16 @@ impl DiscoveryControlHandle {
         Self::await_rpc(response, DATAPATH_RELAY_REQUEST_TIMEOUT).await
     }
 
+    pub(crate) async fn endpoint_traversal_hints(
+        &self,
+        bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<TraversalEndpointHint>, OutboundReservationError> {
+        let (reply, response) = oneshot::channel();
+        self.send_rpc(DiscoveryCommand::ResolveEndpointTraversalHints { bindings, reply })
+            .await?;
+        Self::await_rpc(response, ROLE_COMMAND_TIMEOUT).await
+    }
+
     async fn send_rpc(&self, command: DiscoveryCommand) -> Result<(), OutboundReservationError> {
         timeout(ROLE_COMMAND_TIMEOUT, self.sender.send(command))
             .await
@@ -411,6 +540,10 @@ enum DiscoveryCommand {
         exit_peer_id: Libp2pPeerId,
         reply: oneshot::Sender<Option<ForwardedExitCapability>>,
     },
+    ResolveEndpointTraversalHints {
+        bindings: Vec<EndpointTraversalBinding>,
+        reply: oneshot::Sender<Result<Vec<TraversalEndpointHint>, OutboundReservationError>>,
+    },
     RequestExitForward {
         control_relay_peer: Libp2pPeerId,
         request: ExitForwardRequest,
@@ -421,6 +554,15 @@ enum DiscoveryCommand {
         request: DatapathRelayRequest,
         reply: oneshot::Sender<Result<DatapathRelayResponse, OutboundReservationError>>,
     },
+}
+
+/// Exact authenticated control peer allowed to contribute one local endpoint observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EndpointTraversalBinding {
+    pub(crate) path_id: u32,
+    pub(crate) role: WireguardRole,
+    pub(crate) observer_id: [u8; 32],
+    pub(crate) observer_peer_id: Libp2pPeerId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -519,6 +661,304 @@ struct PendingRelayForward {
     dispatch_attempts: usize,
     reserved_bytes: usize,
     client_channels: Vec<request_response::ResponseChannel<ExitForwardResponse>>,
+    native_ready: Option<PendingNativeProbeReady>,
+    native_authorization: Option<PendingNativeProbeAuthorization>,
+    native_result: Option<PendingNativeProbeResult>,
+    udp_session: Option<PendingUdpSessionStart>,
+    mptcp_session: Option<PendingMptcpSessionStart>,
+    mpquic_session: Option<PendingMpquicSessionStart>,
+}
+
+struct PendingNativeProbeReady {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    authenticated_client_peer: Libp2pPeerId,
+    permit: VerifiedNativeProbePermit,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct PreparedNativeProbeReady {
+    authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
+    ready: IssuedNativeProbeRelayReady,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+/// One shared Exit helper Prepare for every exact path signed into a native attempt.
+struct ExitNativeReadyAttempt {
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    exit_leases: Vec<ExitEndpointLease>,
+    authorized_data_relays: HashMap<u32, DirectRelayCapability>,
+    ready_paths: HashSet<u32>,
+    pending_activations: HashMap<u32, LeaseActivation>,
+    activated: bool,
+    probe_tasks: HashMap<u32, JoinHandle<Result<[u8; NATIVE_PROBE_DATAGRAM_BYTES], ()>>>,
+    pending_results: HashMap<u32, PendingExitNativeProbeResult>,
+    candidate_set_hash: [u8; 32],
+    expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
+}
+
+struct PendingExitNativeProbeResult {
+    connection: BoundNativeProbeDataRelayConnection,
+    authenticated_data_relay: Libp2pPeerId,
+    authenticated_data_relay_node_id: [u8; 32],
+    probe_id: [u8; FORWARD_ID_BYTES],
+    forward_id: [u8; FORWARD_ID_BYTES],
+    path_id: u32,
+    observed_network_prefix: ObservationNetworkPrefix,
+    scope: NativeProbePathScope,
+    channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+}
+
+/// Relay-owned affine Start plus the exact already-prepared helper endpoint pair.
+///
+/// A preceding Ready/Start handler installs this value under the authenticated client and derived
+/// authorization request ID. `NativeProbeAuthorize` consumes it exactly once before any upstream
+/// Exit dispatch.
+struct PreparedNativeProbeAuthorization {
+    authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
+    start: VerifiedNativeProbeStartForRelay,
+    endpoint: RelayEndpointLease,
+}
+
+struct PendingNativeProbeAuthorization {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    start: VerifiedNativeProbeStartForRelay,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct ActiveNativeRelayProbe {
+    authenticated_client_peer: Libp2pPeerId,
+    authorized_relay: DirectRelayCapability,
+    endpoint: RelayEndpointLease,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+/// One fresh, helper-observed native probe that may authorize exactly one standard probe result.
+///
+/// The standard reservation protocol deliberately carries no native endpoints. Retaining this
+/// affine ticket lets its `ExecuteProbe` phase reuse the immediately preceding real
+/// Client-to-Relay-to-Exit observation instead of fabricating a second probe or accepting an
+/// unsigned metric. The ticket is consumed when the Relay signs that result.
+struct RecentNativeRelayEvidence {
+    authenticated_client_peer: Libp2pPeerId,
+    scope: NativeProbePathScope,
+    client_relay: ProbeLegEvidence,
+    relay_exit: ProbeLegEvidence,
+    expires_at_ms: u64,
+}
+
+/// One Exit-observed native proof that may authorize exactly one structurally verified standard
+/// result from the same actors, policy and transport.
+///
+/// Native preselection and the later reservation intentionally use different ephemeral client
+/// sessions. The one-shot ticket plus exact authenticated actor lineage bridges those phases;
+/// their unrelated session identifiers must never be compared.
+#[derive(Clone)]
+struct RecentNativeExitEvidence {
+    evidence_id: [u8; 32],
+    scope: NativeProbePathScope,
+    authenticated_data_relay_node_id: [u8; 32],
+    authenticated_data_relay_peer_id: Vec<u8>,
+    measured_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+struct ExactNativeExitEvidenceVerifier {
+    tickets: Vec<RecentNativeExitEvidence>,
+    consumed: Mutex<HashSet<[u8; 32]>>,
+    now_ms: u64,
+}
+
+impl ExactNativeExitEvidenceVerifier {
+    fn new(tickets: &[RecentNativeExitEvidence], now_ms: u64) -> Self {
+        Self {
+            tickets: tickets.to_vec(),
+            consumed: Mutex::new(HashSet::new()),
+            now_ms,
+        }
+    }
+
+    fn consumed(&self) -> HashSet<[u8; 32]> {
+        self.consumed
+            .lock()
+            .map_or_else(|_| HashSet::new(), |consumed| consumed.clone())
+    }
+}
+
+impl ProbeEvidenceVerifier for ExactNativeExitEvidenceVerifier {
+    fn verify(&self, evidence: &ProbeEvidence<'_>) -> Result<(), ProbeEvidenceError> {
+        let result = decoded_signed_payload::<RelayProbeResult>(evidence.signed_result()).ok_or(
+            ProbeEvidenceError::Rejected("standard probe result framing"),
+        )?;
+        let consumed = self
+            .consumed
+            .lock()
+            .map_err(|_| ProbeEvidenceError::Unavailable)?;
+        let ticket = self.tickets.iter().find(|ticket| {
+            !consumed.contains(&ticket.evidence_id)
+                && native_exit_ticket_matches_standard_result(
+                    ticket,
+                    &result,
+                    evidence,
+                    self.now_ms,
+                )
+        });
+        let evidence_id =
+            ticket
+                .map(|ticket| ticket.evidence_id)
+                .ok_or(ProbeEvidenceError::Rejected(
+                    "matching native Exit evidence unavailable",
+                ))?;
+        drop(consumed);
+        self.consumed
+            .lock()
+            .map_err(|_| ProbeEvidenceError::Unavailable)?
+            .insert(evidence_id);
+        Ok(())
+    }
+}
+
+struct PendingNativeProbeResult {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    start: VerifiedNativeProbeStartForRelay,
+    endpoint: RelayEndpointLease,
+    committed: CommittedLeaseBatch,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+}
+
+struct PreparedProductionRelayRoute {
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    accepted: AcceptedRelayReservation,
+    authenticated_client_peer: Libp2pPeerId,
+    commit: Option<CommitLeaseBatch>,
+    committed_start: Option<Vec<u8>>,
+    committed_signal: Option<Vec<u8>>,
+    usable: bool,
+    expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
+}
+
+fn helper_cleanup_due(expires_at_ms: u64, cleanup_not_before_ms: u64, now_ms: u64) -> bool {
+    now_ms == u64::MAX || (expires_at_ms <= now_ms && cleanup_not_before_ms <= now_ms)
+}
+
+struct PendingUdpSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    route: PreparedProductionRelayRoute,
+}
+
+struct PendingMptcpSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    selected_path_ids: Vec<u32>,
+    route: PreparedProductionRelayRoute,
+}
+
+struct PendingMpquicSessionStart {
+    datapath_request_id: [u8; FORWARD_ID_BYTES],
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
+    canonical_start: Vec<u8>,
+    route: PreparedProductionRelayRoute,
+}
+
+struct VerifiedMpquicRelayDispatch {
+    exit: ExitReservation,
+    relay: RelayReservation,
+    signed_relay_reservation: Vec<u8>,
+}
+
+struct PendingMptcpExitRelay {
+    forward_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<UpstreamExitForwardResponse>>,
+}
+
+struct PendingMptcpExitSession {
+    canonical_start: Vec<u8>,
+    selected_path_ids: Vec<u32>,
+    relays: HashMap<u32, PendingMptcpExitRelay>,
+    expires_at_ms: u64,
+}
+
+struct PendingMpquicExitRelay {
+    forward_id: [u8; FORWARD_ID_BYTES],
+    channels: Vec<request_response::ResponseChannel<UpstreamExitForwardResponse>>,
+}
+
+struct PendingMpquicExitSession {
+    canonical_start: Vec<u8>,
+    selected_path_ids: Vec<u32>,
+    relays: HashMap<u32, PendingMpquicExitRelay>,
+    expires_at_ms: u64,
+}
+
+/// Cancellation never drops an affine runtime; completion precedes exact helper cleanup retry.
+struct ExitRuntimeRetirement {
+    shutdown: watch::Sender<bool>,
+    completed: oneshot::Receiver<()>,
+    cleanup: crate::helper::RuntimeBoundContextCleanup,
+    cleanup_not_before_ms: u64,
+}
+
+/// Exit-owned helper context and finalized grant awaiting exact Relay confirmations.
+///
+/// The helper leases are prepared before their public endpoints are signed. Activation happens
+/// only after `ExitService` has authenticated each Relay reservation and exposed its exact public
+/// relay-to-Exit endpoint. Commit and transport-socket adoption remain deferred to the exact
+/// transport-specific session Start.
+struct PreparedProductionExitRoute {
+    canonical_finalize_request: Vec<u8>,
+    bundle: AcceptedExitReservationBundle,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    exit_leases: Vec<ExitEndpointLease>,
+    pending_activations: HashMap<u32, LeaseActivation>,
+    commit: Option<CommitLeaseBatch>,
+    mpquic_preflight: Option<ProductionMpquicExitPreflight>,
+    expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
+}
+
+/// A genuine helper-owned Exit MPTCP listener retained with its reservation and TLS identity.
+///
+/// The stream/TLS proxy consumes these owners in the next vertical slice. Until then the actor
+/// keeps them affine, answers only exact idempotent Start retries, and destroys the helper context
+/// at signed expiry.
+pub(crate) struct ActiveProductionMptcpExitRoute {
+    canonical_start: Vec<u8>,
+    encoded_signal: Vec<u8>,
+    runtime: Option<ProductionMptcpExitRuntime>,
+    cleanup: Option<ProductionMptcpExitCleanup>,
+    runtime_started: bool,
+    reservation_id: [u8; FORWARD_ID_BYTES],
+    expires_at_ms: u64,
+    cleanup_not_before_ms: u64,
+}
+
+struct MptcpExitRuntimeCompletionEvent {
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    completion: ProductionMptcpExitCompletion,
+}
+
+enum MptcpExitRuntimeEvent {
+    FlowCompleted {
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        reservation_id: [u8; FORWARD_ID_BYTES],
+        succeeded: bool,
+    },
+    RuntimeCompleted(MptcpExitRuntimeCompletionEvent),
 }
 
 #[derive(Clone)]
@@ -577,6 +1017,19 @@ struct RetryLedgerEntry {
 struct PreparedNativeProbePermitResponse {
     connection: BoundNativeProbeControlConnection,
     authenticated_control_relay: Libp2pPeerId,
+    channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    response: UpstreamExitForwardResponse,
+}
+
+/// Exact service-local handoff for one authenticated native authorization response.
+///
+/// The selected data-Relay connection proof remains affine through the immediate synchronous
+/// response send. The Exit service has already independently verified all five signed phases and
+/// retained its standard reservation before this value can exist.
+#[must_use = "a prepared native authorization response must be sent or dropped as one owner"]
+struct PreparedNativeProbeAuthorizationResponse {
+    connection: BoundNativeProbeDataRelayConnection,
+    authenticated_data_relay: Libp2pPeerId,
     channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
     response: UpstreamExitForwardResponse,
 }
@@ -752,10 +1205,25 @@ impl RouteCandidateAdvertisement {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct DirectRelayCandidateSnapshot {
     advertisement: RouteCandidateAdvertisement,
     capability: DirectRelayCapability,
+    authenticated_local_prefix: Option<volparossa_core::ObservedNetworkPrefix>,
+}
+
+impl fmt::Debug for DirectRelayCandidateSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DirectRelayCandidateSnapshot")
+            .field("advertisement", &self.advertisement)
+            .field("capability", &self.capability)
+            .field(
+                "has_authenticated_local_prefix",
+                &self.authenticated_local_prefix.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl DirectRelayCandidateSnapshot {
@@ -767,6 +1235,13 @@ impl DirectRelayCandidateSnapshot {
         &self.capability
     }
 
+    /// Current authenticated LAN metadata for sampling, never a `FreshEvidence` capability.
+    pub(crate) const fn authenticated_local_prefix(
+        &self,
+    ) -> Option<volparossa_core::ObservedNetworkPrefix> {
+        self.authenticated_local_prefix
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(
         advertisement: RouteCandidateAdvertisement,
@@ -775,6 +1250,20 @@ impl DirectRelayCandidateSnapshot {
         Self {
             advertisement,
             capability,
+            authenticated_local_prefix: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_local_prefix(
+        advertisement: RouteCandidateAdvertisement,
+        capability: DirectRelayCapability,
+        prefix: volparossa_core::ObservedNetworkPrefix,
+    ) -> Self {
+        Self {
+            advertisement,
+            capability,
+            authenticated_local_prefix: Some(prefix),
         }
     }
 }
@@ -880,6 +1369,19 @@ struct RevalidatedStoredCandidate {
 struct ForwardedExitKey {
     control_relay_peer: Libp2pPeerId,
     exit_peer: Libp2pPeerId,
+}
+
+enum AutomaticExitFetchAttemptState {
+    InFlight(oneshot::Receiver<Result<ExitForwardResponse, OutboundReservationError>>),
+    RetryNotBefore(u64),
+}
+
+struct AutomaticExitFetchAttempt {
+    key: ForwardedExitKey,
+    authorized_control: DirectRelayCapability,
+    request: ExitForwardRequest,
+    dispatch_attempts: usize,
+    state: AutomaticExitFetchAttemptState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1180,15 +1682,35 @@ pub struct DiscoveryRuntime {
     local_node_id: [u8; 32],
     config: Config,
     roles: RolesConfig,
+    helper: HelperClient,
+    mpquic_socket: PathBuf,
     relay_service: Option<RelayService>,
     exit_service: Option<ExitService>,
+    independent_egress: Option<IndependentEgress>,
+    independent_egress_available: bool,
+    independent_egress_observation: Option<EgressObservation>,
+    independent_exit_retiring: bool,
+    exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
     provider_queries: HashMap<kad::QueryId, ProviderQueryKind>,
+    relay_provider_peers: HashMap<Libp2pPeerId, u64>,
+    // Scheduling-only partition: these untrusted provider IDs are never dialed for Client relay
+    // advertisements. Signed forwarded provenance is still required to become an Exit candidate.
+    reserved_provider_exit_peers: HashMap<Libp2pPeerId, u64>,
     relay_advertisement_requests: HashMap<request_response::OutboundRequestId, Libp2pPeerId>,
     exit_provider_peers: HashMap<Libp2pPeerId, u64>,
+    automatic_exit_fetches: HashMap<ForwardedExitKey, u64>,
+    automatic_exit_fetch_attempts: Vec<AutomaticExitFetchAttempt>,
+    // Bounded, non-authoritative control scheduling hint. Every fetch still revalidates the current
+    // direct Relay capability, provider observation, signed Exit advertisement and policy.
+    preferred_exit_controls: HashMap<Libp2pPeerId, Libp2pPeerId>,
     direct_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
+    // Incoming data-relay authority for this node's Exit service is not local Client selection.
+    exit_data_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
+    /// Signed control authorities for this Exit service, independent from its Client selection.
+    exit_control_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
     forwarded_exit_targets: HashMap<Libp2pPeerId, u64>,
@@ -1203,12 +1725,31 @@ pub struct DiscoveryRuntime {
     relay_forward_index: HashMap<RelayForwardKey, request_response::OutboundRequestId>,
     completed_relay_forwards: HashMap<RelayForwardKey, CompletedRelayForward>,
     retry_relay_forwards: HashMap<RelayForwardKey, RetryLedgerEntry>,
+    prepared_native_ready: HashMap<[u8; FORWARD_ID_BYTES], PreparedNativeProbeReady>,
+    prepared_native_authorizations:
+        HashMap<[u8; FORWARD_ID_BYTES], PreparedNativeProbeAuthorization>,
+    prepared_native_authorization_helpers:
+        HashMap<[u8; FORWARD_ID_BYTES], RuntimeBoundPreparedLeaseBatch>,
+    active_native_relay_helpers: HashMap<[u8; FORWARD_ID_BYTES], ActiveNativeRelayProbe>,
+    recent_native_relay_evidence: Vec<RecentNativeRelayEvidence>,
+    recent_native_exit_evidence: Vec<RecentNativeExitEvidence>,
+    prepared_production_relay_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute>,
+    prepared_production_exit_routes: HashMap<[u8; FORWARD_ID_BYTES], PreparedProductionExitRoute>,
+    pending_mptcp_exit_sessions: HashMap<[u8; FORWARD_ID_BYTES], PendingMptcpExitSession>,
+    pending_mpquic_exit_sessions: HashMap<[u8; FORWARD_ID_BYTES], PendingMpquicExitSession>,
+    active_production_mptcp_exit_routes:
+        HashMap<[u8; FORWARD_ID_BYTES], ActiveProductionMptcpExitRoute>,
+    mptcp_exit_runtime_events: mpsc::Sender<MptcpExitRuntimeEvent>,
+    mptcp_exit_runtime_completions: mpsc::Receiver<MptcpExitRuntimeEvent>,
+    exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
+    pending_exit_native_ready: HashMap<[u8; FORWARD_ID_BYTES], native_ready::ExitNativeReadySet>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
     completed_datapath: HashMap<DatapathKey, CompletedDatapath>,
     retry_datapath: HashMap<DatapathKey, RetryLedgerEntry>,
     candidate_limit: usize,
     observed_endpoints: HashMap<Libp2pPeerId, (String, Option<IpAddr>)>,
+    local_endpoint_observations: HashMap<Libp2pPeerId, BTreeSet<IpAddr>>,
     publisher: AdvertisementPublisher,
     served_local_advertisement: Option<Vec<u8>>,
     control_addresses: BTreeSet<String>,
@@ -1222,6 +1763,23 @@ pub struct DiscoveryRuntime {
 }
 
 impl DiscoveryRuntime {
+    /// Install listeners and initial peer dials only after the owned mesh address exists.
+    /// No radio operation is performed by this unprivileged actor.
+    pub(crate) fn configure_mesh_network(
+        &mut self,
+        mesh_installed: bool,
+    ) -> Result<(), DiscoveryRuntimeError> {
+        configure_network(&mut self.service, &self.config)?;
+        if mesh_installed {
+            if let Some(address) = mesh_listener_address(&self.config)? {
+                self.service
+                    .listen_on(address)
+                    .map_err(|_| DiscoveryRuntimeError::Build)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Builds and configures the real libp2p swarm without altering host routes,
     /// firewall, DNS, or interfaces.
     #[allow(
@@ -1240,6 +1798,8 @@ impl DiscoveryRuntime {
             policy,
             role_store: _role_store,
             metrics,
+            helper,
+            mpquic_socket,
         } = resources;
         let protocol_roles = DiscoveryProtocolRoles::new(roles.client, roles.relay, roles.exit);
         let mut service =
@@ -1249,7 +1809,11 @@ impl DiscoveryRuntime {
             .ed25519_public_key_bytes()
             .map_err(|_| DiscoveryRuntimeError::Build)?;
         let local_node_id = node_id_from_public_key(&local_public_key);
-        configure_network(&mut service, config)?;
+        // An explicitly configured mesh and its on-link bootstrap addresses do not exist yet.
+        // Startup creates the helper-owned interface before listening/dialing on that underlay.
+        if !config.wifi_mesh.enabled {
+            configure_network(&mut service, config)?;
+        }
         let replay_capacity = config
             .network
             .candidate_pool_size
@@ -1269,7 +1833,18 @@ impl DiscoveryRuntime {
         } else {
             None
         };
-        let exit_service = if roles.exit {
+        let independent_egress = config
+            .network
+            .independent_egress_interface
+            .as_deref()
+            .map(IndependentEgress::new)
+            .transpose()
+            .map_err(|_| DiscoveryRuntimeError::RolePrerequisites)?;
+        let independent_egress_available = independent_egress.is_none();
+        if roles.exit && policy.is_none() {
+            return Err(DiscoveryRuntimeError::PolicyUnavailable);
+        }
+        let exit_service = if roles.exit && independent_egress_available {
             let policy = policy.ok_or(DiscoveryRuntimeError::PolicyUnavailable)?;
             Some(
                 build_exit_service(local_node_id, config, policy, &metrics)
@@ -1279,6 +1854,8 @@ impl DiscoveryRuntime {
             None
         };
         let (role_sender, role_commands) = mpsc::channel(ROLE_COMMAND_CAPACITY);
+        let (mptcp_exit_runtime_events, mptcp_exit_runtime_completions) =
+            mpsc::channel(MPTCP_EXIT_RUNTIME_EVENT_CAPACITY);
         let client_preselection = if roles.client {
             PreselectionAttemptGate::new().map_or(
                 ClientPreselectionOwner::Closed,
@@ -1298,15 +1875,29 @@ impl DiscoveryRuntime {
             local_node_id,
             config: config.clone(),
             roles,
+            helper,
+            mpquic_socket,
             relay_service,
             exit_service,
+            independent_egress,
+            independent_egress_available,
+            independent_egress_observation: None,
+            independent_exit_retiring: false,
+            exit_runtime_retirements: HashMap::new(),
             metrics,
             role_commands,
             client_preselection,
             provider_queries: HashMap::new(),
+            relay_provider_peers: HashMap::new(),
+            reserved_provider_exit_peers: HashMap::new(),
             relay_advertisement_requests: HashMap::new(),
             exit_provider_peers: HashMap::new(),
+            automatic_exit_fetches: HashMap::new(),
+            automatic_exit_fetch_attempts: Vec::new(),
+            preferred_exit_controls: HashMap::new(),
             direct_relays: HashMap::new(),
+            exit_data_relays: HashMap::new(),
+            exit_control_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
             forwarded_exit_targets: HashMap::new(),
@@ -1321,12 +1912,28 @@ impl DiscoveryRuntime {
             relay_forward_index: HashMap::new(),
             completed_relay_forwards: HashMap::new(),
             retry_relay_forwards: HashMap::new(),
+            prepared_native_ready: HashMap::new(),
+            prepared_native_authorizations: HashMap::new(),
+            prepared_native_authorization_helpers: HashMap::new(),
+            active_native_relay_helpers: HashMap::new(),
+            recent_native_relay_evidence: Vec::new(),
+            recent_native_exit_evidence: Vec::new(),
+            prepared_production_relay_routes: HashMap::new(),
+            prepared_production_exit_routes: HashMap::new(),
+            pending_mptcp_exit_sessions: HashMap::new(),
+            pending_mpquic_exit_sessions: HashMap::new(),
+            active_production_mptcp_exit_routes: HashMap::new(),
+            mptcp_exit_runtime_events,
+            mptcp_exit_runtime_completions,
+            exit_native_ready_attempts: HashMap::new(),
+            pending_exit_native_ready: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
             completed_datapath: HashMap::new(),
             retry_datapath: HashMap::new(),
             candidate_limit: config.network.candidate_pool_size.min(PEERSTORE_LOAD_BOUND),
             observed_endpoints: HashMap::new(),
+            local_endpoint_observations: HashMap::new(),
             publisher: AdvertisementPublisher::new(
                 sequence_path,
                 config.network.advertisement_ttl_seconds,
@@ -1347,16 +1954,23 @@ impl DiscoveryRuntime {
 
     /// Runs provider queries, advertisement verification, and bounded
     /// peerstore maintenance until shutdown.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one actor loop owns publication, capability convergence, reservations and commands"
+    )]
     pub async fn run(
         mut self,
         state: Arc<RwLock<AgentState>>,
         mut shutdown: watch::Receiver<bool>,
     ) {
         self.synchronize_exit_policy(&state).await;
+        self.publish_local(&state).await;
         self.query_capabilities(&state).await;
         self.refresh_candidates(&state).await;
         let mut maintenance = tokio::time::interval(self.publisher.refresh_interval());
         maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut capability_maintenance = tokio::time::interval(CAPABILITY_QUERY_INTERVAL);
+        capability_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut reservation_maintenance = tokio::time::interval(RESERVATION_MAINTENANCE_INTERVAL);
         reservation_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -1375,6 +1989,12 @@ impl DiscoveryRuntime {
                 _ = maintenance.tick() => {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
+                    self.destroy_expired_exit_native_attempts(now_ms).await;
+                    self.destroy_expired_production_relay_routes(now_ms).await;
+                    self.expire_pending_mptcp_exit_sessions(now_ms).await;
+                    self.expire_pending_mpquic_exit_sessions(now_ms).await;
+                    self.destroy_expired_production_exit_routes(now_ms).await;
+                    self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1386,6 +2006,7 @@ impl DiscoveryRuntime {
                     self.publish_local(&state).await;
                     Self::log_expiry_reclaim(&state, relay_purged, exit_purged).await;
                     self.query_capabilities(&state).await;
+                    self.schedule_exit_advertisement_fetches();
                     let now = UnixTime::from_secs(unix_seconds());
                     if self.store.prune_expired(now, PEER_RETENTION_SECONDS).is_err() {
                         state.write().await.log(LogLevel::Warn, "PEERSTORE_PRUNE_FAILED", unix_millis());
@@ -1395,6 +2016,12 @@ impl DiscoveryRuntime {
                 _ = reservation_maintenance.tick() => {
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
+                    self.destroy_expired_exit_native_attempts(now_ms).await;
+                    self.destroy_expired_production_relay_routes(now_ms).await;
+                    self.expire_pending_mptcp_exit_sessions(now_ms).await;
+                    self.expire_pending_mpquic_exit_sessions(now_ms).await;
+                    self.destroy_expired_production_exit_routes(now_ms).await;
+                    self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
                     let relay_purged = self
                         .relay_service
                         .as_mut()
@@ -1411,7 +2038,7 @@ impl DiscoveryRuntime {
                             exit_purged,
                         ).await;
                     }
-                    let reaped = self.reap_outbound_reservations(Instant::now());
+                    let reaped = Box::pin(self.reap_outbound_reservations(Instant::now())).await;
                     if reaped.ambiguous > 0 {
                         log_reservation_event(&state, "RESERVATION_RPC_TIMEOUT").await;
                     }
@@ -1421,6 +2048,14 @@ impl DiscoveryRuntime {
                             "RESERVATION_RPC_CALLER_CLOSED",
                         ).await;
                     }
+                    // The automatic fetch owner uses a one-second retry backoff. Drive it on the
+                    // matching bounded maintenance clock instead of stretching every retry to the
+                    // five-second provider-query cadence.
+                    self.schedule_exit_advertisement_fetches();
+                }
+                _ = capability_maintenance.tick() => {
+                    self.query_capabilities(&state).await;
+                    self.schedule_exit_advertisement_fetches();
                 }
                 event = next_actor_discovery_event(
                     &mut self.service,
@@ -1428,7 +2063,7 @@ impl DiscoveryRuntime {
                     self.local_public_key,
                     responder_policy,
                 ) => {
-                    self.handle_sanitized_event(event, &state).await;
+                    Box::pin(self.handle_sanitized_event(event, &state)).await;
                 }
                 command = self.role_commands.recv() => {
                     let Some(command) = command else {
@@ -1437,8 +2072,36 @@ impl DiscoveryRuntime {
                     };
                     self.handle_command(command, &state).await;
                 }
+                completion = self.mptcp_exit_runtime_completions.recv() => {
+                    if let Some(completion) = completion {
+                        match completion {
+                            MptcpExitRuntimeEvent::FlowCompleted {
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                            } => self.finish_mptcp_exit_flow(
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                                &state,
+                            ).await,
+                            MptcpExitRuntimeEvent::RuntimeCompleted(completion) => {
+                                self.finish_mptcp_exit_runtime(completion, &state).await;
+                            }
+                        }
+                    }
+                }
             }
         }
+        self.drain_exit_runtimes_for_shutdown(&state).await;
+        self.destroy_expired_exit_native_attempts(u64::MAX).await;
+        Box::pin(self.fail_all_pending_route_sessions()).await;
+        self.destroy_expired_production_relay_routes(u64::MAX).await;
+        self.expire_pending_mptcp_exit_sessions(u64::MAX).await;
+        self.expire_pending_mpquic_exit_sessions(u64::MAX).await;
+        self.destroy_expired_production_exit_routes(u64::MAX).await;
+        self.destroy_expired_active_mptcp_exit_routes(u64::MAX)
+            .await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
@@ -1453,7 +2116,7 @@ impl DiscoveryRuntime {
         state: &Arc<RwLock<AgentState>>,
     ) {
         match event {
-            DiscoveryEvent::Other(event) => self.handle_event(event, state).await,
+            DiscoveryEvent::Other(event) => Box::pin(self.handle_event(event, state)).await,
             DiscoveryEvent::ClientPreselectionResponse(arrival) => {
                 if let Some(code) = self.handle_client_preselection_response(arrival) {
                     state.write().await.log(LogLevel::Warn, code, unix_millis());
@@ -1466,6 +2129,12 @@ impl DiscoveryRuntime {
                     unix_millis(),
                 );
             }
+            DiscoveryEvent::PreselectionResponderRejected(reject) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, reject.event_code(), unix_millis());
+            }
             _ => {
                 state.write().await.log(
                     LogLevel::Error,
@@ -1476,6 +2145,10 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the closed actor command set stays in one exhaustive dispatcher"
+    )]
     async fn handle_command(&mut self, command: DiscoveryCommand, state: &Arc<RwLock<AgentState>>) {
         self.maintain_client_preselection();
         match command {
@@ -1509,6 +2182,9 @@ impl DiscoveryRuntime {
             DiscoveryCommand::BeginClientPreselection { parameters, reply } => {
                 self.begin_client_preselection(parameters, reply, state)
                     .await;
+            }
+            DiscoveryCommand::ResolveEndpointTraversalHints { bindings, reply } => {
+                let _ = reply.send(self.exact_endpoint_traversal_hints(bindings));
             }
             DiscoveryCommand::ResolveDirectRelay {
                 expected_node_id,
@@ -1611,6 +2287,10 @@ impl DiscoveryRuntime {
         match &self.client_preselection {
             ClientPreselectionOwner::Available(_) => {}
             ClientPreselectionOwner::Active(_) | ClientPreselectionOwner::Cooling(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Debug, "PRESELECTION_OWNER_BUSY", unix_millis());
                 let _ = reply.send(Err(ClientPreselectionError::Busy));
                 return;
             }
@@ -1649,6 +2329,11 @@ impl DiscoveryRuntime {
         ) {
             Ok(snapshot) => snapshot,
             Err(RouteCandidateSnapshotError::InvalidLimit) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_SNAPSHOT_INVALID_LIMIT",
+                    captured_at_ms,
+                );
                 let _ = reply.send(Err(ClientPreselectionError::InvalidParameters));
                 return;
             }
@@ -1659,6 +2344,11 @@ impl DiscoveryRuntime {
                 | RouteCandidateSnapshotError::PolicyUnavailable
                 | RouteCandidateSnapshotError::StoreUnavailable,
             ) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_SNAPSHOT_UNAVAILABLE",
+                    captured_at_ms,
+                );
                 let _ = reply.send(Err(ClientPreselectionError::Unavailable));
                 return;
             }
@@ -1673,6 +2363,25 @@ impl DiscoveryRuntime {
         let snapshot = match narrow_route_candidate_snapshot(snapshot, scope) {
             Ok(snapshot) => snapshot,
             Err(failure) => {
+                let diagnostic = match failure.error {
+                    PreselectionSamplingError::InvalidPolicy => {
+                        "PRESELECTION_SAMPLE_INVALID_POLICY"
+                    }
+                    PreselectionSamplingError::InvalidSnapshot => {
+                        "PRESELECTION_SAMPLE_INVALID_SNAPSHOT"
+                    }
+                    PreselectionSamplingError::NoEligibleForwardedExit => {
+                        "PRESELECTION_SAMPLE_NO_EXIT"
+                    }
+                    PreselectionSamplingError::InsufficientDiverseRelays => {
+                        "PRESELECTION_SAMPLE_INSUFFICIENT_RELAYS"
+                    }
+                    PreselectionSamplingError::Entropy => "PRESELECTION_SAMPLE_ENTROPY",
+                };
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Debug, diagnostic, captured_at_ms);
                 let error = if failure.error == PreselectionSamplingError::InvalidPolicy {
                     ClientPreselectionError::InvalidParameters
                 } else {
@@ -1716,6 +2425,11 @@ impl DiscoveryRuntime {
                 self.install_client_preselection_gate_recovery(consume_preselection_begin_failure(
                     failure,
                 ));
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_GATE_BEGIN_FAILED",
+                    unix_millis(),
+                );
                 let _ = reply.send(Err(ClientPreselectionError::Unavailable));
                 return;
             }
@@ -1755,15 +2469,22 @@ impl DiscoveryRuntime {
                     self.client_preselection = ClientPreselectionOwner::Active(active);
                 }
             }
-            Err(failure) => self.install_client_preselection_transition_failure(
-                failure,
-                Vec::new(),
-                reply,
-                request_deadline,
-                attempt_deadline,
-                ClientPreselectionError::Transport,
-                Some(ClientPreselectionError::Transport),
-            ),
+            Err(failure) => {
+                state.write().await.log(
+                    LogLevel::Debug,
+                    "PRESELECTION_INITIAL_DISPATCH_FAILED",
+                    unix_millis(),
+                );
+                self.install_client_preselection_transition_failure(
+                    failure,
+                    Vec::new(),
+                    reply,
+                    request_deadline,
+                    attempt_deadline,
+                    ClientPreselectionError::Transport,
+                    Some(ClientPreselectionError::Transport),
+                );
+            }
         }
     }
 
@@ -1952,6 +2673,50 @@ impl DiscoveryRuntime {
                         Some("PRESELECTION_FRESH_EVIDENCE_REJECTED")
                     }
                 }
+            }
+        }
+    }
+
+    fn handle_client_preselection_outbound_failure(
+        &mut self,
+        peer: Libp2pPeerId,
+        request_id: request_response::OutboundRequestId,
+    ) -> bool {
+        let owner = std::mem::replace(&mut self.client_preselection, ClientPreselectionOwner::Lost);
+        let ClientPreselectionOwner::Active(active) = owner else {
+            self.client_preselection = owner;
+            return false;
+        };
+        let ActiveClientPreselection {
+            dispatch,
+            transports,
+            reply,
+            request_deadline,
+            attempt_deadline,
+            terminal_error,
+        } = active;
+        match dispatch.consume_outbound_failure(&mut self.service, peer, request_id) {
+            Ok(gate) | Err(PreselectionOwnerTransitionFailure::Cooling(gate)) => {
+                self.client_preselection = ClientPreselectionOwner::Cooling(gate);
+                let _ = reply.send(Err(ClientPreselectionError::Transport));
+                true
+            }
+            Err(PreselectionOwnerTransitionFailure::Retained(dispatch)) => {
+                self.client_preselection =
+                    ClientPreselectionOwner::Active(ActiveClientPreselection {
+                        dispatch: *dispatch,
+                        transports,
+                        reply,
+                        request_deadline,
+                        attempt_deadline,
+                        terminal_error,
+                    });
+                false
+            }
+            Err(PreselectionOwnerTransitionFailure::Closed) => {
+                self.client_preselection = ClientPreselectionOwner::Closed;
+                let _ = reply.send(Err(ClientPreselectionError::Transport));
+                true
             }
         }
     }
@@ -2440,6 +3205,7 @@ impl DiscoveryRuntime {
             );
         if !valid_before_ingest {
             self.finish_client_definitive_error(pending, OutboundReservationError::InvalidResponse);
+            log_reservation_event(state, "EXIT_FORWARD_CLIENT_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
         }
         let ingest = self
@@ -2450,6 +3216,7 @@ impl DiscoveryRuntime {
             if let Some(commit) = ingest.commit.as_ref() {
                 self.finish_advertisement_commit(commit, state).await;
             }
+            log_reservation_event(state, "EXIT_FORWARD_CLIENT_INGEST_REJECTED").await;
             return OutboundEventOutcome::InvalidResponse;
         }
         self.cache_client_result(&pending, Ok(response.clone()));
@@ -2459,6 +3226,7 @@ impl DiscoveryRuntime {
         if let Some(commit) = ingest.commit.as_ref() {
             self.finish_advertisement_commit(commit, state).await;
         }
+        log_reservation_event(state, "EXIT_FORWARD_CLIENT_COMPLETED").await;
         OutboundEventOutcome::Completed
     }
 
@@ -2478,13 +3246,16 @@ impl DiscoveryRuntime {
         let authority_current = pending.attempt_deadline > Instant::now()
             && pending.operation_expires_at_ms > now_ms
             && self.direct_relays.get(&peer).is_some_and(|current| {
-                current == &pending.authorized_relay
-                    && direct_relay_target_matches(
-                        current,
-                        pending.relay_node_id,
-                        peer,
-                        pending.operation_expires_at_ms,
-                    )
+                direct_relay_authority_lineage_matches(
+                    current,
+                    &pending.authorized_relay,
+                    pending.operation_expires_at_ms,
+                ) && direct_relay_target_matches(
+                    current,
+                    pending.relay_node_id,
+                    peer,
+                    pending.operation_expires_at_ms,
+                )
             });
         let valid = authority_current
             && response.validate().is_ok()
@@ -2493,6 +3264,12 @@ impl DiscoveryRuntime {
             && response.relay_node_id() == pending.relay_node_id
             && response.relay_peer_id() == peer.to_bytes()
             && (response.validated_status() != Ok(ForwardStatus::Granted)
+                || matches!(
+                    pending.operation,
+                    DatapathRelayOperation::UdpSessionStart
+                        | DatapathRelayOperation::MptcpSessionStart
+                        | DatapathRelayOperation::MpquicSessionStart
+                )
                 || signed_envelope_matches_peer(response.signed_response(), &peer));
         let pending = self.pending_datapath.remove(&request_id).expect("present");
         self.datapath_index.remove(&pending.key);
@@ -2515,8 +3292,11 @@ impl DiscoveryRuntime {
             .direct_relays
             .get(&pending.key.control_relay_peer)
             .is_some_and(|current| {
-                current == &pending.authorized_control
-                    && current.expires_at_ms >= pending.operation_expires_at_ms
+                direct_relay_authority_lineage_matches(
+                    current,
+                    &pending.authorized_control,
+                    pending.operation_expires_at_ms,
+                )
             });
         if !control_current
             || !self.forwarded_exit_peer_is_eligible(pending.expected_exit_peer, now_ms)
@@ -2646,7 +3426,7 @@ impl DiscoveryRuntime {
         OutboundEventOutcome::Failed
     }
 
-    fn reap_outbound_reservations(&mut self, now: Instant) -> OutboundReapCounts {
+    async fn reap_outbound_reservations(&mut self, now: Instant) -> OutboundReapCounts {
         self.purge_completed(now);
         let client_ids = self
             .pending_client_forwards
@@ -2682,7 +3462,7 @@ impl DiscoveryRuntime {
             if let Some(pending) = self.pending_relay_forwards.remove(&id) {
                 self.relay_forward_index.remove(&pending.key);
                 counts.ambiguous = counts.ambiguous.saturating_add(1);
-                self.finish_relay_ambiguity(pending);
+                Box::pin(self.finish_relay_ambiguity_awaited(pending)).await;
             }
         }
         counts
@@ -2708,6 +3488,32 @@ impl DiscoveryRuntime {
         self.retry_relay_forwards.clear();
     }
 
+    async fn fail_all_pending_route_sessions(&mut self) {
+        let pending_ids = self
+            .pending_relay_forwards
+            .iter()
+            .filter_map(|(id, pending)| {
+                (pending.udp_session.is_some()
+                    || pending.mptcp_session.is_some()
+                    || pending.mpquic_session.is_some())
+                .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for id in pending_ids {
+            let Some(mut pending) = self.pending_relay_forwards.remove(&id) else {
+                continue;
+            };
+            self.relay_forward_index.remove(&pending.key);
+            if let Some(udp) = pending.udp_session.take() {
+                self.finish_udp_session_unavailable(udp).await;
+            } else if let Some(mptcp) = pending.mptcp_session.take() {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+            } else if let Some(mpquic) = pending.mpquic_session.take() {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+            }
+        }
+    }
+
     fn reject_queued_outbound_commands(&mut self) {
         while let Ok(command) = self.role_commands.try_recv() {
             match command {
@@ -2722,6 +3528,9 @@ impl DiscoveryRuntime {
                 }
                 DiscoveryCommand::ResolveForwardedExit { reply, .. } => {
                     let _ = reply.send(None);
+                }
+                DiscoveryCommand::ResolveEndpointTraversalHints { reply, .. } => {
+                    let _ = reply.send(Err(OutboundReservationError::Shutdown));
                 }
                 DiscoveryCommand::RouteCandidateSnapshot { reply, .. } => {
                     let _ = reply.send(Err(RouteCandidateSnapshotError::Closed));
@@ -2751,6 +3560,10 @@ impl DiscoveryRuntime {
             .retain(|_, entry| entry.expires_at_ms > now_ms);
         self.retry_datapath
             .retain(|_, entry| entry.expires_at_ms > now_ms);
+        self.recent_native_relay_evidence
+            .retain(|evidence| evidence.expires_at_ms > now_ms);
+        self.recent_native_exit_evidence
+            .retain(|evidence| evidence.expires_at_ms > now_ms);
         let expired_direct_relays = self
             .direct_relays
             .iter()
@@ -2805,6 +3618,27 @@ impl DiscoveryRuntime {
             .retain(|_, record| record.expires_at_ms > now_ms);
         self.exit_provider_peers
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.relay_provider_peers
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.reserved_provider_exit_peers
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.exit_data_relays.retain(|_, capability| {
+            capability.expires_at_ms > now_ms
+                && capability.advertisement_expires_at_ms > now_ms
+                && capability.policy_expires_at_ms > now_ms
+        });
+        self.exit_control_relays.retain(|_, capability| {
+            capability.expires_at_ms > now_ms
+                && capability.advertisement_expires_at_ms > now_ms
+                && capability.policy_expires_at_ms > now_ms
+        });
+        self.preferred_exit_controls
+            .retain(|exit_peer, control_peer| {
+                exit_peer != control_peer
+                    && self.exit_provider_peers.contains_key(exit_peer)
+                    && self.direct_relays.contains_key(control_peer)
+            });
+        self.retain_live_automatic_exit_fetch_history();
         if self.forwarded_exit_fail_closed_until_ms <= now_ms {
             self.forwarded_exit_fail_closed_until_ms = 0;
         }
@@ -2815,6 +3649,21 @@ impl DiscoveryRuntime {
         pending: &PendingClientForward,
         outcome: Result<ExitForwardResponse, OutboundReservationError>,
     ) {
+        let response_bytes = outcome.as_ref().ok().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_client_forwards.insert(
             pending.key,
             CompletedClientForward {
@@ -2823,7 +3672,7 @@ impl DiscoveryRuntime {
                 operation: pending.operation,
                 outcome,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical client result already cached");
@@ -2834,13 +3683,28 @@ impl DiscoveryRuntime {
         pending: &PendingDatapath,
         outcome: Result<DatapathRelayResponse, OutboundReservationError>,
     ) {
+        let response_bytes = outcome.as_ref().ok().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_datapath.insert(
             pending.key,
             CompletedDatapath {
                 canonical_request: pending.canonical_request.clone(),
                 outcome,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical datapath result already cached");
@@ -2868,10 +3732,19 @@ impl DiscoveryRuntime {
             + self.pending_datapath.len()
             + self.completed_datapath.len()
             + self.retry_datapath.len()
+            + self
+                .pending_exit_native_ready
+                .values()
+                .map(native_ready::ExitNativeReadySet::entry_count)
+                .sum::<usize>()
     }
 
     fn ledger_reserved_bytes(&self) -> usize {
         let groups = [
+            self.pending_exit_native_ready
+                .values()
+                .map(native_ready::ExitNativeReadySet::retained_bytes)
+                .fold(0, usize::saturating_add),
             self.pending_client_forwards
                 .values()
                 .map(|entry| entry.reserved_bytes)
@@ -2914,6 +3787,10 @@ impl DiscoveryRuntime {
 
     fn ledger_reserved_bytes_for_peer(&self, peer: Libp2pPeerId) -> usize {
         let groups = [
+            self.pending_exit_native_ready
+                .values()
+                .map(|set| set.retained_bytes_for_peer(peer))
+                .fold(0, usize::saturating_add),
             self.pending_client_forwards
                 .values()
                 .filter(|entry| entry.key.control_relay_peer == peer)
@@ -2964,26 +3841,21 @@ impl DiscoveryRuntime {
     }
 
     fn peer_is_forwarded_exit_target(&self, peer: Libp2pPeerId, now_ms: u64) -> bool {
+        let local_peer = *self.service.local_peer_id();
         self.forwarded_exit_targets
             .get(&peer)
             .is_some_and(|expires_at_ms| *expires_at_ms > now_ms)
             || self.forwarded_exits.values().any(|capability| {
-                capability.exit_peer_id == peer && capability.expires_at_ms > now_ms
+                capability.control_relay_peer_id != local_peer
+                    && capability.exit_peer_id == peer
+                    && capability.expires_at_ms > now_ms
             })
             || self
                 .pending_client_forwards
                 .values()
                 .any(|pending| pending.expected_exit_peer == peer)
             || self
-                .pending_relay_forwards
-                .values()
-                .any(|pending| pending.expected_exit_peer == peer)
-            || self
                 .retry_client_forwards
-                .values()
-                .any(|entry| entry.target_peer == peer && entry.expires_at_ms > now_ms)
-            || self
-                .retry_relay_forwards
                 .values()
                 .any(|entry| entry.target_peer == peer && entry.expires_at_ms > now_ms)
     }
@@ -3004,6 +3876,46 @@ impl DiscoveryRuntime {
             .values()
             .any(|pending_peer| *pending_peer == peer);
         !(direct_association || privacy_conflict || pending_direct_association)
+    }
+
+    /// Server-side forwarding belongs to the authenticated remote client, not this node's own
+    /// Client selection. Its exact signed Relay/Exit authority is checked by each caller.
+    fn relay_forward_exit_peer_is_eligible(
+        &self,
+        authenticated_client_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+    ) -> bool {
+        let local_peer = *self.service.local_peer_id();
+        self.roles.relay
+            && authenticated_client_peer != local_peer
+            && exit_peer != local_peer
+            && exit_peer != authenticated_client_peer
+    }
+
+    /// A local Relay-owned capability must not inherit unrelated local Client provenance guards.
+    /// Remote-control capabilities remain subject to the original Client fail-closed checks.
+    fn forwarded_exit_authority_is_eligible(
+        &self,
+        control_relay_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> bool {
+        let local_peer = *self.service.local_peer_id();
+        if control_relay_peer == local_peer {
+            self.roles.relay && exit_peer != local_peer
+        } else {
+            self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        }
+    }
+
+    /// Native Ready and Authorization derive their target from an exact, verified Permit chain.
+    /// A simultaneous local Client role cannot invalidate forwarding for a different client.
+    fn permit_bound_exit_peer_is_eligible(
+        &self,
+        authenticated_client_peer: Libp2pPeerId,
+        exit_peer: Libp2pPeerId,
+    ) -> bool {
+        self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
     }
 
     fn mark_forwarded_exit_target(&mut self, peer: Libp2pPeerId, expires_at_ms: u64) -> bool {
@@ -3102,6 +4014,21 @@ impl DiscoveryRuntime {
                 && expires_at_ms > now_ms
         };
 
+        self.exit_data_relays.retain(|_, capability| {
+            policy_matches(
+                capability.policy_version,
+                capability.policy_hash,
+                capability.policy_expires_at_ms,
+            )
+        });
+        self.exit_control_relays.retain(|_, capability| {
+            policy_matches(
+                capability.policy_version,
+                capability.policy_hash,
+                capability.policy_expires_at_ms,
+            )
+        });
+
         let stale_direct = self
             .direct_relays
             .iter()
@@ -3158,9 +4085,211 @@ impl DiscoveryRuntime {
         self.revoke_forwarded_keys(&stale_forwarded, false);
     }
 
-    async fn synchronize_exit_policy(&mut self, state: &Arc<RwLock<AgentState>>) {
-        self.revoke_capabilities_outside_active_policy(state).await;
+    fn exit_uplink_unavailable(&self) -> bool {
+        self.roles.exit
+            && self.independent_egress.is_some()
+            && (!self.independent_egress_available || self.independent_exit_retiring)
+    }
+
+    fn exit_authority_enabled(&self) -> bool {
+        self.roles.exit && !self.exit_uplink_unavailable() && self.exit_service.is_some()
+    }
+
+    fn can_start_exit_runtime(&self, context_id: &[u8; FORWARD_ID_BYTES]) -> bool {
+        self.exit_authority_enabled()
+            && self.exit_runtime_retirements.len() < MAX_LEDGER_ENTRIES
+            && !self.exit_runtime_retirements.contains_key(context_id)
+    }
+
+    async fn observe_independent_egress(&mut self, state: &Arc<RwLock<AgentState>>) -> bool {
+        self.reap_exit_runtime_retirements(unix_millis()).await;
         if !self.roles.exit {
+            return false;
+        }
+        let Some(egress) = self.independent_egress.clone() else {
+            return false;
+        };
+        let observation = tokio::task::spawn_blocking(move || egress.observe())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+        self.apply_independent_egress_observation(observation, state)
+            .await
+    }
+
+    async fn apply_independent_egress_observation(
+        &mut self,
+        observation: Option<EgressObservation>,
+        state: &Arc<RwLock<AgentState>>,
+    ) -> bool {
+        let was_unavailable = self.exit_uplink_unavailable();
+        // A recreated interface or lost address family invalidates existing socket pins too.
+        let lost =
+            self.independent_egress_available && self.independent_egress_observation != observation;
+        self.independent_egress_available = observation.is_some();
+        self.independent_egress_observation = observation;
+        if lost {
+            self.independent_exit_retiring = true;
+            self.exit_service = None;
+            clear_exit_metric(&self.metrics);
+            // Historical Exit advertisements must stop authorizing new signed replies too.
+            self.withdraw_local();
+            self.publish_local(state).await;
+            state.write().await.log(
+                LogLevel::Warn,
+                "INDEPENDENT_EGRESS_WITHDRAWN",
+                unix_millis(),
+            );
+        }
+        if self.independent_exit_retiring {
+            self.retire_independent_exit_contexts().await;
+            self.independent_exit_retiring = !self.exit_runtime_retirements.is_empty()
+                || !self.exit_native_ready_attempts.is_empty()
+                || !self.prepared_production_exit_routes.is_empty()
+                || !self.active_production_mptcp_exit_routes.is_empty();
+        }
+        lost || was_unavailable != self.exit_uplink_unavailable()
+    }
+
+    async fn retire_independent_exit_contexts(&mut self) {
+        for runtime in self.exit_runtime_retirements.values() {
+            let _ = runtime.shutdown.send(true);
+        }
+        for attempt in self.exit_native_ready_attempts.values_mut() {
+            attempt.expires_at_ms = 0;
+            for task in attempt.probe_tasks.values() {
+                task.abort();
+            }
+        }
+        for route in self.prepared_production_exit_routes.values_mut() {
+            route.expires_at_ms = 0;
+        }
+        for route in self.active_production_mptcp_exit_routes.values_mut() {
+            route.expires_at_ms = 0;
+        }
+        self.expire_pending_exit_native_ready(u64::MAX);
+        self.expire_pending_mptcp_exit_sessions(u64::MAX).await;
+        self.expire_pending_mpquic_exit_sessions(u64::MAX).await;
+        let now_ms = unix_millis();
+        self.destroy_expired_exit_native_attempts(now_ms).await;
+        self.destroy_expired_production_exit_routes(now_ms).await;
+        self.destroy_expired_active_mptcp_exit_routes(now_ms).await;
+        self.recent_native_exit_evidence.clear();
+        self.exit_control_relays.clear();
+        self.exit_data_relays.clear();
+    }
+
+    fn retain_exit_runtime(
+        &mut self,
+        context_id: [u8; FORWARD_ID_BYTES],
+        cleanup: crate::helper::RuntimeBoundContextCleanup,
+    ) -> (watch::Receiver<bool>, oneshot::Sender<()>) {
+        let (shutdown, receiver) = watch::channel(false);
+        let (completion, completed) = oneshot::channel();
+        let previous = self.exit_runtime_retirements.insert(
+            context_id,
+            ExitRuntimeRetirement {
+                shutdown,
+                completed,
+                cleanup,
+                cleanup_not_before_ms: 0,
+            },
+        );
+        debug_assert!(previous.is_none(), "checked exact Exit runtime owner");
+        (receiver, completion)
+    }
+
+    async fn reap_exit_runtime_retirements(&mut self, now_ms: u64) {
+        let completed = self
+            .exit_runtime_retirements
+            .iter_mut()
+            .filter_map(|(id, runtime)| {
+                if runtime.cleanup_not_before_ms > now_ms {
+                    return None;
+                }
+                match runtime.completed.try_recv() {
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Ok(()) | Err(oneshot::error::TryRecvError::Closed) => Some(*id),
+                }
+            })
+            .collect::<Vec<_>>();
+        for context_id in completed {
+            let runtime = self
+                .exit_runtime_retirements
+                .get(&context_id)
+                .expect("checked");
+            if self
+                .helper
+                .destroy_context_after_join(&runtime.cleanup)
+                .await
+                .is_err()
+            {
+                let runtime = self
+                    .exit_runtime_retirements
+                    .get_mut(&context_id)
+                    .expect("checked");
+                runtime.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+            } else {
+                self.exit_runtime_retirements.remove(&context_id);
+            }
+        }
+    }
+
+    async fn drain_exit_runtimes_for_shutdown(&mut self, state: &Arc<RwLock<AgentState>>) {
+        for runtime in self.exit_runtime_retirements.values() {
+            let _ = runtime.shutdown.send(true);
+        }
+        // The parent actor join has a five-second deadline. Keep a destruction-only guard in
+        // the map even if a stalled helper call is canceled; global helper shutdown remains
+        // responsible for unconfirmed owners, never a successful-cleanup claim.
+        let drained = timeout(Duration::from_secs(3), async {
+            while !self.exit_runtime_retirements.is_empty() {
+                self.reap_exit_runtime_retirements(unix_millis()).await;
+                if self.exit_runtime_retirements.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    event = self.mptcp_exit_runtime_completions.recv() => {
+                        if let Some(MptcpExitRuntimeEvent::RuntimeCompleted(completion)) = event {
+                            self.finish_mptcp_exit_runtime(completion, state).await;
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(25)) => {}
+                }
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            state.write().await.log(
+                LogLevel::Error,
+                "EXIT_RUNTIME_SHUTDOWN_CLEANUP_PENDING",
+                unix_millis(),
+            );
+        }
+    }
+
+    async fn synchronize_exit_policy(&mut self, state: &Arc<RwLock<AgentState>>) {
+        let uplink_changed = self.observe_independent_egress(state).await;
+        self.synchronize_exit_policy_after_observation(state, uplink_changed)
+            .await;
+    }
+
+    async fn synchronize_exit_policy_after_observation(
+        &mut self,
+        state: &Arc<RwLock<AgentState>>,
+        uplink_changed: bool,
+    ) {
+        self.revoke_capabilities_outside_active_policy(state).await;
+        if !self.roles.exit || self.exit_uplink_unavailable() {
+            if self.exit_uplink_unavailable() {
+                self.exit_service = None;
+                clear_exit_metric(&self.metrics);
+                return;
+            }
+            self.destroy_expired_production_exit_routes(u64::MAX).await;
             if self.exit_service.take().is_some() {
                 clear_exit_metric(&self.metrics);
             }
@@ -3174,8 +4303,15 @@ impl DiscoveryRuntime {
                 .is_some_and(|service| service.policy_hash() == policy.policy_hash())
         });
         if unchanged {
+            if uplink_changed {
+                self.publish_local(state).await;
+            }
             return;
         }
+
+        // Finalized helper routes are inseparable from the policy-bound ExitService that admitted
+        // them. Destroy their affine helper owners before replacing that service.
+        self.destroy_expired_production_exit_routes(u64::MAX).await;
 
         let had_service = self.exit_service.take().is_some();
         clear_exit_metric(&self.metrics);
@@ -3204,6 +4340,9 @@ impl DiscoveryRuntime {
                     .log(LogLevel::Warn, "EXIT_POLICY_SERVICE_WITHDRAWN", now_ms);
             }
             None => {}
+        }
+        if uplink_changed {
+            self.publish_local(state).await;
         }
     }
 
@@ -3256,9 +4395,13 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one local publication transaction installs its served and affine authority state"
+    )]
     async fn publish_local(&mut self, state: &Arc<RwLock<AgentState>>) {
         let now_ms = unix_millis();
-        if self.roles.relay || self.roles.exit {
+        if !(self.roles.relay || self.roles.exit) {
             self.withdraw_local();
             return;
         }
@@ -3266,10 +4409,13 @@ impl DiscoveryRuntime {
             self.withdraw_local();
             return;
         };
-        let (roles, policy) = {
+        let (mut roles, policy) = {
             let state = state.read().await;
             (state.roles(), state.policy_snapshot(now_ms))
         };
+        if self.exit_uplink_unavailable() {
+            roles.exit = false;
+        }
         let Ok(policy_hash) = <[u8; 32]>::try_from(policy.policy_hash.as_slice()) else {
             self.withdraw_local();
             return;
@@ -3278,9 +4424,16 @@ impl DiscoveryRuntime {
             self.withdraw_local();
             return;
         }
+        let Some(capacity) = self.local_advertisement_capacity(roles, now_ms) else {
+            self.withdraw_local();
+            return;
+        };
         let input = LocalAdvertisementInput {
             roles,
             operator_id,
+            capabilities: self.local_advertisement_capabilities(),
+            capacity,
+            origin: self.local_advertisement_origin(),
             policy_version: policy.manifest_version,
             policy_hash,
             policy_expires_at_ms: policy.expires_at_ms,
@@ -3307,6 +4460,31 @@ impl DiscoveryRuntime {
             return;
         }
         self.served_local_advertisement = Some(signed.envelope.clone());
+
+        if roles.relay {
+            let Some(fingerprint) = advertisement_fingerprint(&signed.envelope) else {
+                self.withdraw_local();
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "ADVERTISEMENT_PUBLISH_FAILED", now_ms);
+                return;
+            };
+            self.local_relay_snapshot = Some(DirectRelayCapability {
+                node_id: self.local_node_id,
+                peer_id: *self.service.local_peer_id(),
+                public_key: self.local_public_key,
+                advertisement_sequence: signed.sequence_number,
+                advertisement_expires_at_ms: signed.expires_at_ms,
+                advertisement_payload_hash: fingerprint.payload_hash,
+                policy_version: policy.manifest_version,
+                policy_hash,
+                policy_expires_at_ms: policy.expires_at_ms,
+                expires_at_ms: signed.expires_at_ms.min(policy.expires_at_ms),
+            });
+        } else {
+            self.local_relay_snapshot = None;
+        }
 
         let removed: Vec<String> = self
             .active_provider_keys
@@ -3335,12 +4513,258 @@ impl DiscoveryRuntime {
         }
     }
 
+    fn local_advertisement_capabilities(&self) -> AdvertisementCapabilities {
+        AdvertisementCapabilities {
+            tcp_mptcp: self.config.tcp.enabled,
+            udp_single_path: self.config.udp.enabled,
+            multipath_quic: self.config.quic.enabled,
+            ipv4: false,
+            ipv6: false,
+            udp_hole_punching: false,
+        }
+    }
+
+    fn local_advertisement_origin(&self) -> AdvertisementNetwork {
+        if self.exit_uplink_unavailable() {
+            return AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::LocalOnly as i32,
+                region: self.config.network.advertised_region.clone(),
+                country_code: self.config.network.advertised_country_code.clone(),
+                asn: 0,
+                ipv4_prefix_hint: String::new(),
+                ipv6_prefix_hint: String::new(),
+                operator_id: String::new(),
+            };
+        }
+        AdvertisementNetwork {
+            uplink: match self.config.network.uplink {
+                volparossa_config::NetworkUplink::IndependentInternet => {
+                    volparossa_protocol::AdvertisementUplink::IndependentInternet
+                }
+                volparossa_config::NetworkUplink::LocalOnly => {
+                    volparossa_protocol::AdvertisementUplink::LocalOnly
+                }
+            } as i32,
+            region: self.config.network.advertised_region.clone(),
+            country_code: self.config.network.advertised_country_code.clone(),
+            asn: self.config.network.advertised_asn,
+            ipv4_prefix_hint: self
+                .config
+                .network
+                .advertised_ipv4_prefix
+                .clone()
+                .unwrap_or_default(),
+            ipv6_prefix_hint: self
+                .config
+                .network
+                .advertised_ipv6_prefix
+                .clone()
+                .unwrap_or_default(),
+            operator_id: String::new(),
+        }
+    }
+
+    fn local_advertisement_capacity(
+        &mut self,
+        roles: RolesConfig,
+        now_ms: u64,
+    ) -> Option<AdvertisementCapacity> {
+        let relay_available = if roles.relay {
+            Some(self.relay_service.as_mut()?.available(now_ms)?)
+        } else {
+            None
+        };
+        let exit_available = if roles.exit {
+            Some(self.exit_service.as_mut()?.available(now_ms)?)
+        } else {
+            None
+        };
+        let estimated_free = match (relay_available, exit_available) {
+            (Some(relay), Some(exit)) => Bandwidth {
+                up_mbps: relay.bandwidth.up_mbps.min(exit.bandwidth.up_mbps),
+                down_mbps: relay.bandwidth.down_mbps.min(exit.bandwidth.down_mbps),
+            },
+            (Some(relay), None) => relay.bandwidth,
+            (None, Some(exit)) => exit.bandwidth,
+            (None, None) => return None,
+        };
+        let relay_reserved = relay_available.map_or(Bandwidth::default(), |available| Bandwidth {
+            up_mbps: self
+                .config
+                .capacity
+                .relay_upload_limit_mbps
+                .saturating_sub(available.bandwidth.up_mbps),
+            down_mbps: self
+                .config
+                .capacity
+                .relay_download_limit_mbps
+                .saturating_sub(available.bandwidth.down_mbps),
+        });
+        let exit_reserved = exit_available.map_or(Bandwidth::default(), |available| Bandwidth {
+            up_mbps: self
+                .config
+                .capacity
+                .exit_upload_limit_mbps
+                .saturating_sub(available.bandwidth.up_mbps),
+            down_mbps: self
+                .config
+                .capacity
+                .exit_download_limit_mbps
+                .saturating_sub(available.bandwidth.down_mbps),
+        });
+        Some(AdvertisementCapacity {
+            operator_relay_limit_up_mbps: u64::from(
+                self.config.capacity.relay_upload_limit_mbps * u32::from(roles.relay),
+            ),
+            operator_relay_limit_down_mbps: u64::from(
+                self.config.capacity.relay_download_limit_mbps * u32::from(roles.relay),
+            ),
+            operator_exit_limit_up_mbps: u64::from(
+                self.config.capacity.exit_upload_limit_mbps * u32::from(roles.exit),
+            ),
+            operator_exit_limit_down_mbps: u64::from(
+                self.config.capacity.exit_download_limit_mbps * u32::from(roles.exit),
+            ),
+            currently_reserved_up_mbps: u64::from(
+                relay_reserved.up_mbps.saturating_add(exit_reserved.up_mbps),
+            ),
+            currently_reserved_down_mbps: u64::from(
+                relay_reserved
+                    .down_mbps
+                    .saturating_add(exit_reserved.down_mbps),
+            ),
+            estimated_free_up_mbps: u64::from(estimated_free.up_mbps),
+            estimated_free_down_mbps: u64::from(estimated_free.down_mbps),
+            active_relay_sessions: relay_available.map_or(0, |available| {
+                self.config
+                    .capacity
+                    .maximum_relay_sessions
+                    .saturating_sub(available.free_slots)
+            }),
+            active_exit_sessions: exit_available.map_or(0, |available| {
+                self.config
+                    .capacity
+                    .maximum_exit_sessions
+                    .saturating_sub(available.free_slots)
+            }),
+            free_relay_slots: relay_available.map_or(0, |available| available.free_slots),
+            free_exit_slots: exit_available.map_or(0, |available| available.free_slots),
+            sample_window_seconds: 0,
+        })
+    }
+
     fn withdraw_local(&mut self) {
         self.served_local_advertisement = None;
+        self.local_relay_snapshot = None;
         self.service.clear_local_advertisement();
         for key in std::mem::take(&mut self.active_provider_keys) {
             let _ = self.service.stop_providing(&key);
         }
+    }
+
+    /// Re-announces the small desired provider-key set after the DHT gains usable connectivity.
+    ///
+    /// `start_providing` can begin while a freshly started service has only configured routing
+    /// addresses and no established QUIC connection. Keeping the signed advertisement served and
+    /// retrying its one or two capability indexes is both bounded and authority-free; withdrawing
+    /// the advertisement on that transient query timeout makes startup order observable forever.
+    async fn reannounce_local_providers(&mut self, state: &Arc<RwLock<AgentState>>) {
+        let keys = self
+            .active_provider_keys
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if self.service.provide(&key).is_err() {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "ADVERTISEMENT_PROVIDER_FAILED",
+                    unix_millis(),
+                );
+            }
+        }
+    }
+
+    fn record_local_endpoint_observation(
+        &mut self,
+        observer_peer: Libp2pPeerId,
+        observed_address: &Multiaddr,
+    ) {
+        let Some(address) = multiaddr_ip(observed_address)
+            .filter(|address| is_public_routable_ip(*address) || is_local_lan_ip(*address))
+        else {
+            return;
+        };
+        let observations = self
+            .local_endpoint_observations
+            .entry(observer_peer)
+            .or_default();
+        // At most two distinct observations per family are useful: one is usable and two make
+        // that family ambiguous. Retaining more would only consume actor memory.
+        let same_family = observations
+            .iter()
+            .filter(|candidate| candidate.is_ipv4() == address.is_ipv4())
+            .count();
+        if same_family < 2 {
+            observations.insert(address);
+        }
+    }
+
+    fn exact_endpoint_traversal_hints(
+        &self,
+        mut bindings: Vec<EndpointTraversalBinding>,
+    ) -> Result<Vec<TraversalEndpointHint>, OutboundReservationError> {
+        if bindings.is_empty()
+            || bindings.len() > usize::try_from(MAX_HELPER_PATHS).unwrap_or(8) * 2
+        {
+            return Err(OutboundReservationError::InvalidRequest);
+        }
+        bindings.sort_by_key(|binding| (binding.path_id, binding.role as i32));
+        if bindings
+            .windows(2)
+            .any(|pair| (pair[0].path_id, pair[0].role) == (pair[1].path_id, pair[1].role))
+        {
+            return Err(OutboundReservationError::InvalidRequest);
+        }
+
+        let local_peer = *self.service.local_peer_id();
+        let mut hints = Vec::new();
+        for binding in bindings {
+            if !(1..=MAX_HELPER_PATHS).contains(&binding.path_id)
+                || binding.role == WireguardRole::Unspecified
+                || binding.observer_id == [0; 32]
+                || binding.observer_peer_id == local_peer
+                || !self
+                    .observed_endpoints
+                    .contains_key(&binding.observer_peer_id)
+            {
+                return Err(OutboundReservationError::InvalidRequest);
+            }
+            let Some(observations) = self
+                .local_endpoint_observations
+                .get(&binding.observer_peer_id)
+            else {
+                continue;
+            };
+            for ipv4 in [false, true] {
+                let candidates = observations
+                    .iter()
+                    .filter(|address| address.is_ipv4() == ipv4)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let [address] = candidates.as_slice() else {
+                    continue;
+                };
+                if let Some(hint) = endpoint_hint_from_observation(
+                    &binding,
+                    *address,
+                    &self.observed_endpoints[&binding.observer_peer_id],
+                ) {
+                    hints.push(hint);
+                }
+            }
+        }
+        Ok(hints)
     }
 
     #[allow(
@@ -3385,6 +4809,7 @@ impl DiscoveryRuntime {
                 self.observed_endpoints
                     .insert(peer_id, (remote.to_string(), multiaddr_ip(&remote)));
                 state.write().await.peer_connected(peer_id.to_string());
+                self.reannounce_local_providers(state).await;
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -3392,7 +4817,13 @@ impl DiscoveryRuntime {
                 ..
             } => {
                 self.observed_endpoints.remove(&peer_id);
+                self.local_endpoint_observations.remove(&peer_id);
                 state.write().await.peer_disconnected(&peer_id.to_string());
+            }
+            SwarmEvent::Behaviour(BehaviourEvent::Identify(
+                libp2p::identify::Event::Received { peer_id, info, .. },
+            )) => {
+                self.record_local_endpoint_observation(peer_id, &info.observed_addr);
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
@@ -3417,7 +4848,7 @@ impl DiscoveryRuntime {
                     );
                 }
                 if step.last {
-                    self.provider_queries.remove(&id);
+                    self.finish_provider_query(id);
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -3429,19 +4860,19 @@ impl DiscoveryRuntime {
                     ..
                 },
             )) => {
-                self.withdraw_local();
                 state.write().await.log(
                     LogLevel::Warn,
                     "ADVERTISEMENT_PROVIDER_FAILED",
                     unix_millis(),
                 );
                 self.provider_queries.remove(&id);
+                self.reannounce_local_providers(state).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed { id, step, .. },
             )) => {
                 if step.last {
-                    self.provider_queries.remove(&id);
+                    self.finish_provider_query(id);
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Advertisements(
@@ -3481,13 +4912,45 @@ impl DiscoveryRuntime {
                 self.relay_advertisement_requests.remove(&request_id);
             }
             SwarmEvent::Behaviour(BehaviourEvent::PreselectionObservation(
-                request_response::Event::OutboundFailure { .. },
+                request_response::Event::OutboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                    ..
+                },
             )) => {
-                // The opaque service slot remains active until its local timer consumes the exact
-                // transaction. A raw failure cannot safely identify or cancel an affine owner.
+                let failure_code = match error {
+                    request_response::OutboundFailure::DialFailure => {
+                        "PRESELECTION_OUTBOUND_DIAL_FAILED"
+                    }
+                    request_response::OutboundFailure::Timeout => "PRESELECTION_OUTBOUND_TIMED_OUT",
+                    request_response::OutboundFailure::ConnectionClosed => {
+                        "PRESELECTION_OUTBOUND_CONNECTION_CLOSED"
+                    }
+                    request_response::OutboundFailure::UnsupportedProtocols => {
+                        "PRESELECTION_OUTBOUND_PROTOCOL_UNSUPPORTED"
+                    }
+                    request_response::OutboundFailure::Io(error) => match error.kind() {
+                        std::io::ErrorKind::UnexpectedEof => {
+                            "PRESELECTION_OUTBOUND_IO_UNEXPECTED_EOF"
+                        }
+                        std::io::ErrorKind::InvalidData => "PRESELECTION_OUTBOUND_IO_INVALID_DATA",
+                        std::io::ErrorKind::ConnectionReset => {
+                            "PRESELECTION_OUTBOUND_IO_CONNECTION_RESET"
+                        }
+                        std::io::ErrorKind::BrokenPipe => "PRESELECTION_OUTBOUND_IO_BROKEN_PIPE",
+                        std::io::ErrorKind::TimedOut => "PRESELECTION_OUTBOUND_IO_TIMED_OUT",
+                        _ => "PRESELECTION_OUTBOUND_IO_OTHER",
+                    },
+                };
+                let owned = self.handle_client_preselection_outbound_failure(peer, request_id);
                 state.write().await.log(
                     LogLevel::Warn,
-                    "PRESELECTION_OUTBOUND_FAILED",
+                    if owned {
+                        failure_code
+                    } else {
+                        "PRESELECTION_OUTBOUND_FAILURE_UNOWNED"
+                    },
                     unix_millis(),
                 );
             }
@@ -3495,10 +4958,10 @@ impl DiscoveryRuntime {
                 self.handle_exit_forward_event(event, state).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::ExitForwardUpstream(event)) => {
-                self.handle_exit_forward_upstream_event(event, state).await;
+                Box::pin(self.handle_exit_forward_upstream_event(event, state)).await;
             }
             SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(event)) => {
-                self.handle_datapath_event(event, state).await;
+                Box::pin(self.handle_datapath_event(event, state)).await;
             }
             SwarmEvent::OutgoingConnectionError { .. }
             | SwarmEvent::IncomingConnectionError { .. } => {
@@ -3512,11 +4975,7 @@ impl DiscoveryRuntime {
         }
     }
 
-    fn handle_provider_peers(
-        &mut self,
-        kind: ProviderQueryKind,
-        providers: std::collections::HashSet<Libp2pPeerId>,
-    ) {
+    fn handle_provider_peers(&mut self, kind: ProviderQueryKind, providers: HashSet<Libp2pPeerId>) {
         self.purge_completed(Instant::now());
         let now_ms = unix_millis();
         let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
@@ -3526,17 +4985,11 @@ impl DiscoveryRuntime {
             }
             match kind {
                 ProviderQueryKind::Relay => {
-                    if self.relay_advertisement_requests.len() >= self.candidate_limit.max(1)
-                        || self.peer_is_forwarded_exit_target(peer, now_ms)
-                        || self
-                            .relay_advertisement_requests
-                            .values()
-                            .any(|pending_peer| *pending_peer == peer)
+                    if self.relay_provider_peers.contains_key(&peer)
+                        || self.relay_provider_peers.len() < self.candidate_limit.max(1)
                     {
-                        continue;
-                    }
-                    if let Ok(request_id) = self.service.request_relay_advertisement(&peer) {
-                        self.relay_advertisement_requests.insert(request_id, peer);
+                        self.relay_provider_peers
+                            .insert(peer, provider_expires_at_ms);
                     }
                 }
                 ProviderQueryKind::Exit => {
@@ -3549,6 +5002,504 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.schedule_relay_advertisement_fetches(now_ms);
+        self.schedule_exit_advertisement_fetches();
+    }
+
+    fn finish_provider_query(&mut self, id: kad::QueryId) {
+        if self.provider_queries.remove(&id) == Some(ProviderQueryKind::Exit) {
+            // The service coalesces same-capability queries. Partition only after its complete
+            // result stream, including terminal events with no additional provider records.
+            self.schedule_relay_advertisement_fetches(unix_millis());
+            self.schedule_exit_advertisement_fetches();
+        }
+    }
+
+    fn schedule_relay_advertisement_fetches(&mut self, now_ms: u64) {
+        if self.roles.client && self.roles.relay {
+            // On a homogeneous network the Relay and Exit provider indexes contain the same
+            // peers. Fetching every Relay advertisement first would irreversibly associate every
+            // possible Exit directly with this Client. Reserve a sticky, bounded portion before
+            // making those requests. Provider-result order does not decide the privacy boundary.
+            // This also applies to local-only consumers: not offering Exit service themselves
+            // must not make them directly contact every available remote Exit as a Relay.
+            if self.reserved_provider_exit_peers.is_empty()
+                && self
+                    .provider_queries
+                    .values()
+                    .any(|kind| *kind == ProviderQueryKind::Exit)
+            {
+                // A streamed result may contain only adjacent peers before the opposite peer
+                // arrives. Do not turn that partial observation into a sticky privacy boundary.
+                return;
+            }
+            self.reserve_provider_exit_candidates(now_ms);
+            if self.reserved_provider_exit_peers.is_empty() {
+                return;
+            }
+        }
+        let mut peers = self
+            .relay_provider_peers
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|peer| peer.to_bytes());
+        for peer in peers {
+            if self.relay_advertisement_requests.len() >= self.candidate_limit.max(1)
+                || self.reserved_provider_exit_peers.contains_key(&peer)
+                || self.peer_is_forwarded_exit_target(peer, now_ms)
+                || self
+                    .relay_advertisement_requests
+                    .values()
+                    .any(|pending| *pending == peer)
+            {
+                continue;
+            }
+            // A fresh provider observation may refer to a restarted or changed Relay while the
+            // previous advertisement is still unexpired. Refresh within the existing request
+            // bounds; expiry is an authority ceiling, not a reason to suppress updates.
+            if let Ok(request_id) = self.service.request_relay_advertisement(&peer) {
+                self.relay_advertisement_requests.insert(request_id, peer);
+            }
+        }
+    }
+
+    fn reserve_provider_exit_candidates(&mut self, now_ms: u64) {
+        // An Exit query finishing says nothing about peers which have not announced yet.
+        // This route architecture needs a separate Exit, control Relay and data Relay. Do not
+        // permanently sacrifice one of the first two neighbors before that pool can exist.
+        if self.reserved_provider_exit_peers.is_empty()
+            && self
+                .relay_provider_peers
+                .keys()
+                .chain(self.exit_provider_peers.keys())
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                < 3
+        {
+            return;
+        }
+        for (peer, expires_at_ms) in &mut self.reserved_provider_exit_peers {
+            if let Some(observed_expiry) = self.exit_provider_peers.get(peer) {
+                *expires_at_ms = (*expires_at_ms).max(*observed_expiry);
+            }
+        }
+        let target_count = (self.exit_provider_peers.len() / 3)
+            .max(1)
+            .min(self.candidate_limit.max(1));
+        // Prefer authenticated neighbors and explicit bootstrap contacts as Relay contacts.
+        // Bootstrap configuration is only a scheduling preference, not signed service authority;
+        // including it prevents connection-start order from reserving a known adjacent contact.
+        let mut directly_connected = self
+            .observed_endpoints
+            .iter()
+            .filter_map(|(peer, (endpoint, _))| {
+                (!endpoint.contains("/p2p-circuit")).then_some(*peer)
+            })
+            .collect::<HashSet<_>>();
+        directly_connected.extend(
+            self.config
+                .network
+                .bootstrap_peers
+                .iter()
+                .filter_map(|address| parse_bootstrap(address).ok())
+                .map(|link| *link.peer_id()),
+        );
+        let mut peers = self.exit_provider_peers.keys().copied().collect::<Vec<_>>();
+        let has_provider_only_exit = peers.iter().any(|peer| {
+            !directly_connected.contains(peer)
+                && self.forwarded_exit_peer_is_eligible(*peer, now_ms)
+        });
+        // Relay results can arrive ahead of Exit results. Even a three-peer union must not
+        // turn a first Exit result containing only one or two known neighbors into a sticky
+        // fallback. A non-neighbor Exit is usable immediately; dense fallback needs its full
+        // minimum three-role provider pool in this index as well.
+        if !has_provider_only_exit && self.exit_provider_peers.len() < 3 {
+            return;
+        }
+        // Keep existing reservations private even if the topology changed. A newly discovered
+        // provider-only Exit can still be reserved when an earlier fallback reserved a neighbor.
+        let mut preferred_count = self
+            .reserved_provider_exit_peers
+            .keys()
+            .filter(|peer| !has_provider_only_exit || !directly_connected.contains(peer))
+            .count();
+        // Selection is local to each Client, not a network-wide permanent Relay/Exit class.
+        peers.sort_by_cached_key(|peer| {
+            let mut hash = Sha256::new();
+            hash.update(b"VOLPAROSSA-provider-partition-v1");
+            hash.update(self.local_node_id);
+            hash.update(peer.to_bytes());
+            <[u8; 32]>::from(hash.finalize())
+        });
+        for peer in peers {
+            if preferred_count >= target_count
+                || self.reserved_provider_exit_peers.len() >= self.candidate_limit.max(1)
+            {
+                break;
+            }
+            if (!has_provider_only_exit || !directly_connected.contains(&peer))
+                && !self.reserved_provider_exit_peers.contains_key(&peer)
+                && self.forwarded_exit_peer_is_eligible(peer, now_ms)
+            {
+                self.reserved_provider_exit_peers
+                    .insert(peer, self.exit_provider_peers[&peer]);
+                preferred_count += 1;
+            }
+        }
+    }
+
+    /// Fetch provider-only Exit advertisements through at most three current control Relays.
+    ///
+    /// A client never dials the Exit here. The actor sends the existing bounded fetch RPC to one
+    /// current direct Relay, and only the normal forwarded-provenance commit can make the response
+    /// selectable.
+    fn schedule_exit_advertisement_fetches(&mut self) {
+        if !self.roles.client {
+            return;
+        }
+        let now_ms = unix_millis();
+        self.drive_automatic_exit_fetch_attempts(now_ms);
+        self.retain_live_automatic_exit_fetch_history();
+        if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1) {
+            return;
+        }
+
+        let mut controls = self
+            .direct_relays
+            .values()
+            .filter(|control| control.expires_at_ms > now_ms.saturating_add(1_000))
+            .cloned()
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        let mut exits = self
+            .exit_provider_peers
+            .iter()
+            .filter_map(|(peer, expiry)| {
+                (*expiry > now_ms.saturating_add(1_000)).then_some((*peer, *expiry))
+            })
+            .collect::<Vec<_>>();
+        exits.sort_by(|(left, _), (right, _)| left.to_bytes().cmp(&right.to_bytes()));
+
+        for (exit_peer, provider_expiry_ms) in exits {
+            if self.automatic_exit_fetch_attempts.len() >= self.candidate_limit.max(1)
+                || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+                || self
+                    .automatic_exit_fetch_attempts
+                    .iter()
+                    .any(|attempt| attempt.key.exit_peer == exit_peer)
+            {
+                continue;
+            }
+            let Some(control) = self.next_automatic_exit_control(&controls, exit_peer, now_ms)
+            else {
+                continue;
+            };
+            let key = ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            };
+            let deadline_unix_ms = now_ms
+                .saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
+                .min(provider_expiry_ms)
+                .min(control.expires_at_ms.saturating_sub(1));
+            if deadline_unix_ms <= now_ms.saturating_add(1_000) {
+                continue;
+            }
+            let mut forward_id = [0_u8; FORWARD_ID_BYTES];
+            OsRng.fill_bytes(&mut forward_id);
+            forward_id[0] |= 1;
+            let Ok(request) = ExitForwardRequest::new(
+                forward_id.to_vec(),
+                control.node_id.to_vec(),
+                control.peer_id.to_bytes(),
+                control.public_key.to_vec(),
+                exit_peer.to_bytes(),
+                Vec::new(),
+                deadline_unix_ms,
+                ExitForwardOperation::FetchExitAdvertisement,
+                Vec::new(),
+            ) else {
+                continue;
+            };
+            let (reply, receiver) = oneshot::channel();
+            self.automatic_exit_fetches.insert(key, deadline_unix_ms);
+            self.begin_client_forward(control.peer_id, request.clone(), reply);
+            self.automatic_exit_fetch_attempts
+                .push(AutomaticExitFetchAttempt {
+                    key,
+                    authorized_control: control,
+                    request,
+                    dispatch_attempts: 1,
+                    state: AutomaticExitFetchAttemptState::InFlight(receiver),
+                });
+        }
+    }
+
+    fn next_automatic_exit_control(
+        &self,
+        controls: &[DirectRelayCapability],
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> Option<DirectRelayCapability> {
+        let mut current = 0;
+        // Count all currently live pairs, including a control whose own advertisement is too
+        // near expiry to start another RPC. It still occupies a snapshot slot until expiry.
+        let live_controls = self
+            .direct_relays
+            .values()
+            .filter(|control| self.has_current_forwarded_exit_control(control, exit_peer, now_ms))
+            .map(|control| control.peer_id)
+            .collect::<Vec<_>>();
+        let mut missing = Vec::new();
+        for control in controls
+            .iter()
+            .filter(|control| control.peer_id != exit_peer)
+        {
+            if self.has_current_forwarded_exit_control(
+                control,
+                exit_peer,
+                now_ms.saturating_add(1_000),
+            ) {
+                current += 1;
+                if current >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+                    return None;
+                }
+            } else {
+                missing.push(control.clone());
+            }
+        }
+        // A still-live slot with less than the refresh margin must be refreshed in place;
+        // replacing it now could briefly publish a fourth valid lineage in the next snapshot.
+        if live_controls.len() >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+            missing.retain(|control| live_controls.contains(&control.peer_id));
+        }
+        // Retain the preferred lineage and its existing refresh/cooldown semantics. Once it is
+        // current, enroll at most two authenticated alternatives so normal selection can vary
+        // control/data roles. Existing affine capabilities and in-flight requests never migrate.
+        self.next_untried_exit_control(&missing, exit_peer, now_ms)
+    }
+
+    /// An older affine capability remains valid for its owner, but cannot suppress an exact
+    /// signed-advertisement refresh needed by a new preselection snapshot on this control pair.
+    fn has_current_forwarded_exit_control(
+        &self,
+        control: &DirectRelayCapability,
+        exit_peer: Libp2pPeerId,
+        required_until_ms: u64,
+    ) -> bool {
+        self.forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            })
+            .is_some_and(|capability| {
+                forwarded_exit_capability_matches(
+                    capability,
+                    control,
+                    control.node_id,
+                    control.peer_id,
+                    control.public_key,
+                    capability.exit_node_id,
+                    exit_peer,
+                    required_until_ms,
+                ) && forwarded_control_projection_lineage_matches(
+                    capability,
+                    control,
+                    required_until_ms,
+                )
+            })
+    }
+
+    fn next_untried_exit_control(
+        &self,
+        controls: &[DirectRelayCapability],
+        exit_peer: Libp2pPeerId,
+        now_ms: u64,
+    ) -> Option<DirectRelayCapability> {
+        if let Some(preferred_peer) = self.preferred_exit_controls.get(&exit_peer) {
+            let preferred_key = ForwardedExitKey {
+                control_relay_peer: *preferred_peer,
+                exit_peer,
+            };
+            if let Some(control) = controls
+                .iter()
+                .find(|control| control.peer_id == *preferred_peer && control.peer_id != exit_peer)
+            {
+                let available = self
+                    .automatic_exit_fetches
+                    .get(&preferred_key)
+                    .is_none_or(|expiry| *expiry <= now_ms)
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == preferred_key);
+                return available.then(|| control.clone());
+            }
+        }
+
+        if let Some(control) = controls
+            .iter()
+            .find(|control| {
+                let key = ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                };
+                control.peer_id != exit_peer
+                    && !self.automatic_exit_fetches.contains_key(&key)
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == key)
+            })
+            .cloned()
+        {
+            return Some(control);
+        }
+
+        // Every never-tried live control wins over an expired suppression. Once the bounded set
+        // has completed a round, choose the least-recently suppressed eligible lineage. Retaining
+        // expired entries while both peers remain live makes this a fair rotation instead of
+        // repeatedly selecting the lexicographically first Relay.
+        controls
+            .iter()
+            .filter_map(|control| {
+                let key = ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                };
+                let retry_at_ms = self.automatic_exit_fetches.get(&key).copied()?;
+                (control.peer_id != exit_peer
+                    && retry_at_ms <= now_ms
+                    && !self
+                        .automatic_exit_fetch_attempts
+                        .iter()
+                        .any(|pending| pending.key == key))
+                .then_some((retry_at_ms, control))
+            })
+            .min_by(|(left_time, left), (right_time, right)| {
+                left_time
+                    .cmp(right_time)
+                    .then_with(|| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()))
+            })
+            .map(|(_, control)| control.clone())
+    }
+
+    /// Keep only bounded scheduling history for currently live provider/control pairs.
+    fn retain_live_automatic_exit_fetch_history(&mut self) {
+        let providers = &self.exit_provider_peers;
+        let controls = &self.direct_relays;
+        self.automatic_exit_fetches.retain(|key, _| {
+            providers.contains_key(&key.exit_peer) && controls.contains_key(&key.control_relay_peer)
+        });
+    }
+
+    fn drive_automatic_exit_fetch_attempts(&mut self, now_ms: u64) {
+        let attempts = std::mem::take(&mut self.automatic_exit_fetch_attempts);
+        let mut retained = Vec::with_capacity(attempts.len());
+        for mut attempt in attempts {
+            match &mut attempt.state {
+                AutomaticExitFetchAttemptState::InFlight(receiver) => match receiver.try_recv() {
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        retained.push(attempt);
+                        continue;
+                    }
+                    Ok(Err(
+                        OutboundReservationError::Busy
+                        | OutboundReservationError::Capacity
+                        | OutboundReservationError::SendFailed
+                        | OutboundReservationError::AmbiguousAfterDispatch,
+                    )) if attempt.dispatch_attempts < MAX_DISPATCH_ATTEMPTS => {
+                        let retry_at_ms =
+                            now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS);
+                        self.automatic_exit_fetches.insert(attempt.key, retry_at_ms);
+                        attempt.state = AutomaticExitFetchAttemptState::RetryNotBefore(retry_at_ms);
+                        retained.push(attempt);
+                        continue;
+                    }
+                    Ok(Ok(response)) => {
+                        if response.validated_status() != Ok(ForwardStatus::Granted) {
+                            self.retain_exhausted_exit_fetch_control(attempt.key, now_ms);
+                        }
+                        continue;
+                    }
+                    Ok(Err(_)) | Err(oneshot::error::TryRecvError::Closed) => {
+                        self.retain_exhausted_exit_fetch_control(attempt.key, now_ms);
+                        continue;
+                    }
+                },
+                AutomaticExitFetchAttemptState::RetryNotBefore(retry_at_ms)
+                    if *retry_at_ms > now_ms =>
+                {
+                    retained.push(attempt);
+                    continue;
+                }
+                AutomaticExitFetchAttemptState::RetryNotBefore(_) => {}
+            }
+
+            if attempt.dispatch_attempts >= MAX_DISPATCH_ATTEMPTS
+                || !self.automatic_exit_fetch_retry_is_current(&attempt, now_ms)
+            {
+                continue;
+            }
+            let (reply, receiver) = oneshot::channel();
+            self.begin_client_forward(
+                attempt.key.control_relay_peer,
+                attempt.request.clone(),
+                reply,
+            );
+            attempt.dispatch_attempts = attempt.dispatch_attempts.saturating_add(1);
+            attempt.state = AutomaticExitFetchAttemptState::InFlight(receiver);
+            self.automatic_exit_fetches
+                .insert(attempt.key, attempt.request.deadline_unix_ms());
+            retained.push(attempt);
+        }
+        self.automatic_exit_fetch_attempts = retained;
+    }
+
+    /// Prevent a failed control Relay from starving later candidates while still recovering when
+    /// that Relay's local DHT view converges after the client observed the Exit provider.
+    fn retain_exhausted_exit_fetch_control(&mut self, key: ForwardedExitKey, now_ms: u64) {
+        let exhausted_until_ms = self
+            .exit_provider_peers
+            .get(&key.exit_peer)
+            .copied()
+            .unwrap_or_else(|| now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS))
+            .min(now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS));
+        self.automatic_exit_fetches.insert(key, exhausted_until_ms);
+    }
+
+    fn automatic_exit_fetch_retry_is_current(
+        &self,
+        attempt: &AutomaticExitFetchAttempt,
+        now_ms: u64,
+    ) -> bool {
+        let request = &attempt.request;
+        request.validate().is_ok()
+            && forward_request_scope_matches(
+                request,
+                ExitForwardOperation::FetchExitAdvertisement,
+                now_ms,
+            )
+            && request.control_relay_peer_id() == attempt.key.control_relay_peer.to_bytes()
+            && request.exit_peer_id() == attempt.key.exit_peer.to_bytes()
+            && self
+                .exit_provider_peers
+                .get(&attempt.key.exit_peer)
+                .is_some_and(|expires_at_ms| *expires_at_ms > now_ms.saturating_add(1_000))
+            && self.forwarded_exit_peer_is_eligible(attempt.key.exit_peer, now_ms)
+            && !self.forwarded_exits.contains_key(&attempt.key)
+            && self
+                .direct_relays
+                .get(&attempt.key.control_relay_peer)
+                .is_some_and(|current| {
+                    direct_relay_authority_lineage_matches(
+                        current,
+                        &attempt.authorized_control,
+                        request.deadline_unix_ms(),
+                    )
+                })
     }
 
     async fn handle_exit_forward_event(
@@ -3564,7 +5515,7 @@ impl DiscoveryRuntime {
                         request, channel, ..
                     },
                 ..
-            } => self.begin_relay_forward(peer, &request, channel),
+            } => self.begin_relay_forward_observed(peer, &request, channel, state),
             request_response::Event::Message {
                 peer,
                 message:
@@ -3578,12 +5529,14 @@ impl DiscoveryRuntime {
                     .complete_client_forward(request_id, peer, &response, state)
                     .await;
                 log_outbound_event(state, outcome).await;
+                self.schedule_exit_advertisement_fetches();
             }
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
                 let outcome = self.fail_client_forward(request_id, peer);
                 log_outbound_event(state, outcome).await;
+                self.schedule_exit_advertisement_fetches();
             }
             request_response::Event::InboundFailure { .. }
             | request_response::Event::ResponseSent { .. } => {}
@@ -3604,7 +5557,10 @@ impl DiscoveryRuntime {
                         request, channel, ..
                     },
                 ..
-            } => self.answer_exit_forward_upstream(peer, connection_id, request, channel),
+            } => {
+                self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)
+                    .await;
+            }
             request_response::Event::Message {
                 peer,
                 message:
@@ -3614,15 +5570,14 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
-                let outcome = self
-                    .complete_relay_forward(request_id, peer, response, state)
-                    .await;
+                let outcome =
+                    Box::pin(self.complete_relay_forward(request_id, peer, response, state)).await;
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
-                let outcome = self.fail_relay_forward(request_id, peer);
+                let outcome = Box::pin(self.fail_relay_forward(request_id, peer)).await;
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::InboundFailure { .. }
@@ -3630,6 +5585,10 @@ impl DiscoveryRuntime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the typed inbound operation dispatch keeps every affine continuation explicit"
+    )]
     async fn handle_datapath_event(
         &mut self,
         event: request_response::Event<DatapathRelayRequest, DatapathRelayResponse>,
@@ -3644,6 +5603,89 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
+                match request.validated_operation() {
+                    Ok(DatapathRelayOperation::ExecuteProbe) => {
+                        self.answer_production_execute_probe(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::ReservePath) => {
+                        self.begin_production_relay_reservation(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::NativeProbeReady) => {
+                        self.begin_native_probe_ready(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::NativeProbeAuthorize) => {
+                        Box::pin(self.begin_native_probe_start_authorization(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        ))
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::NativeProbeStart) => {
+                        self.begin_native_probe_result(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::UdpSessionStart) => {
+                        self.begin_udp_session_start(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::MptcpSessionStart) => {
+                        self.begin_mptcp_session_start(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(DatapathRelayOperation::MpquicSessionStart) => {
+                        self.begin_mpquic_session_start(
+                            authenticated_client_peer,
+                            &request,
+                            channel,
+                            state,
+                        )
+                        .await;
+                        return;
+                    }
+                    _ => {}
+                }
                 let local_peer = *self.service.local_peer_id();
                 if let Some(response) = inbound_datapath_unavailable_response(
                     &request,
@@ -3679,38 +5721,2024 @@ impl DiscoveryRuntime {
         }
     }
 
+    /// Translate one immediately preceding helper-proven native path observation into the
+    /// standard reservation protocol's Relay-signed probe result.
+    ///
+    /// This does not trust metrics supplied by the client and does not claim a second network
+    /// measurement. The affine ticket was created only after the native Relay helper committed,
+    /// the Exit returned its signed observation, and the Relay proved bidirectional forwarding.
     #[allow(
         clippy::too_many_lines,
-        reason = "single-owner relay admission transaction"
+        reason = "one exact native-evidence consumption and signed response are fail-atomic"
     )]
-    fn begin_relay_forward(
+    async fn answer_production_execute_probe(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                tracing::warn!(rejection = $code, "production Relay ExecuteProbe rejected");
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::ExecuteProbe,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let request_valid = request.validate().is_ok();
+        let scope_matches =
+            datapath_request_scope_matches(request, DatapathRelayOperation::ExecuteProbe, now_ms);
+        let remote_client = authenticated_client_peer != local_peer;
+        let relay_role = self.roles.relay;
+        let relay_service = self.relay_service.is_some();
+        let relay_node_matches = request.relay_node_id() == self.local_node_id;
+        let relay_peer_matches = request.relay_peer_id() == local_peer.to_bytes();
+        if !request_valid
+            || !scope_matches
+            || !remote_client
+            || !relay_role
+            || !relay_service
+            || !relay_node_matches
+            || !relay_peer_matches
+        {
+            tracing::warn!(
+                request_valid,
+                scope_matches,
+                remote_client,
+                relay_role,
+                relay_service,
+                relay_node_matches,
+                relay_peer_matches,
+                "production Relay ExecuteProbe scope diagnostics"
+            );
+            reject!("PRODUCTION_RELAY_PROBE_SCOPE_REJECTED");
+        }
+        let Ok(mut replay) = ReplayCache::new(1) else {
+            reject!("PRODUCTION_RELAY_PROBE_FRAME_REJECTED");
+        };
+        let Ok(verified_permit) = verify_control_message::<RelayProbePermit>(
+            request.exit_signed_authorization(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_FRAME_REJECTED");
+        };
+        let permit = verified_permit.into_message();
+        self.recent_native_relay_evidence
+            .retain(|evidence| evidence.expires_at_ms > now_ms);
+        let matching_client = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.authenticated_client_peer == authenticated_client_peer)
+            .count();
+        let matching_data_relay = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence
+                    .scope
+                    .data_relay
+                    .as_ref()
+                    .is_some_and(|data_relay| {
+                        data_relay.node_id == permit.relay_node_id
+                            && data_relay.peer_id == permit.relay_peer_id
+                    })
+            })
+            .count();
+        let matching_control = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence.scope.control.as_ref().is_some_and(|control| {
+                    control.node_id == permit.control_relay_node_id
+                        && control.peer_id == permit.control_relay_peer_id
+                })
+            })
+            .count();
+        let matching_exit = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence.scope.exit.as_ref().is_some_and(|exit| {
+                    exit.node_id == permit.exit_node_id && exit.peer_id == permit.exit_peer_id
+                })
+            })
+            .count();
+        let matching_policy = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.policy_hash == permit.policy_hash)
+            .count();
+        let matching_transport = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.transport == permit.transport)
+            .count();
+        let matching_family = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.scope.address_family == permit.address_family)
+            .count();
+        let matching_expiry = self
+            .recent_native_relay_evidence
+            .iter()
+            .filter(|evidence| evidence.expires_at_ms <= evidence.scope.attempt_expires_at_ms)
+            .count();
+        let Some(index) = self
+            .recent_native_relay_evidence
+            .iter()
+            .rposition(|evidence| {
+                let Some(data_relay) = evidence.scope.data_relay.as_ref() else {
+                    return false;
+                };
+                let Some(control) = evidence.scope.control.as_ref() else {
+                    return false;
+                };
+                let Some(exit) = evidence.scope.exit.as_ref() else {
+                    return false;
+                };
+                evidence.authenticated_client_peer == authenticated_client_peer
+                    && data_relay.node_id == permit.relay_node_id
+                    && data_relay.peer_id == permit.relay_peer_id
+                    && control.node_id == permit.control_relay_node_id
+                    && control.peer_id == permit.control_relay_peer_id
+                    && exit.node_id == permit.exit_node_id
+                    && exit.peer_id == permit.exit_peer_id
+                    && evidence.scope.policy_hash == permit.policy_hash
+                    && evidence.scope.transport == permit.transport
+                    && evidence.scope.address_family == permit.address_family
+                    && evidence.expires_at_ms <= evidence.scope.attempt_expires_at_ms
+            })
+        else {
+            tracing::warn!(
+                retained = self.recent_native_relay_evidence.len(),
+                matching_client,
+                matching_data_relay,
+                matching_control,
+                matching_exit,
+                matching_policy,
+                matching_transport,
+                matching_family,
+                matching_expiry,
+                "production Relay ExecuteProbe native evidence diagnostics"
+            );
+            reject!("PRODUCTION_RELAY_PROBE_NATIVE_EVIDENCE_UNAVAILABLE");
+        };
+        let evidence = self.recent_native_relay_evidence.remove(index);
+        let measured_at_ms = evidence.client_relay.measured_at_ms;
+        let expires_at_ms = permit
+            .expires_at_ms
+            .min(evidence.expires_at_ms)
+            .min(measured_at_ms.saturating_add(30_000));
+        if expires_at_ms <= now_ms {
+            reject!("PRODUCTION_RELAY_PROBE_NATIVE_EVIDENCE_EXPIRED");
+        }
+        let nonce = generate_nonce();
+        let result = RelayProbeResult {
+            probe_id: permit.probe_id.clone(),
+            relay_probe_permit: request.exit_signed_authorization().to_vec(),
+            relay_node_id: permit.relay_node_id.clone(),
+            relay_peer_id: permit.relay_peer_id.clone(),
+            exit_node_id: permit.exit_node_id.clone(),
+            exit_peer_id: permit.exit_peer_id.clone(),
+            exit_boot_id: permit.exit_boot_id.clone(),
+            hold_id: permit.hold_id.clone(),
+            capability_id: permit.capability_id.clone(),
+            reservation_id: permit.reservation_id.clone(),
+            route_context_id: permit.route_context_id.clone(),
+            client_session_id: permit.client_session_id.clone(),
+            policy_hash: permit.policy_hash.clone(),
+            transport: permit.transport,
+            address_family: permit.address_family,
+            client_relay: Some(evidence.client_relay),
+            relay_exit: Some(evidence.relay_exit),
+            measured_at_ms,
+            expires_at_ms,
+            nonce: nonce.to_vec(),
+        };
+        let identity = &self.identity;
+        let Ok(signed_result) = sign_control_message_with(
+            &result,
+            self.local_public_key,
+            result.measured_at_ms,
+            result.expires_at_ms,
+            nonce,
+            TimePolicy::default(),
+            |message| identity.sign(message).ok(),
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_SIGNING_FAILED");
+        };
+        let Ok(response) = DatapathRelayResponse::granted(
+            request.request_id().to_vec(),
+            DatapathRelayOperation::ExecuteProbe,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            signed_result,
+        ) else {
+            reject!("PRODUCTION_RELAY_PROBE_RESPONSE_FAILED");
+        };
+        if self
+            .service
+            .send_datapath_relay_response(channel, response)
+            .is_err()
+        {
+            log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_PROBE_DELIVERY_FAILED");
+            return;
+        }
+        log_reservation_event(state, "PRODUCTION_RELAY_PROBE_COMPLETED").await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the signed standard grant and exact Relay helper owner are one transaction"
+    )]
+    async fn begin_production_relay_reservation(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::ReservePath,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(request, DatapathRelayOperation::ReservePath, now_ms)
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("PRODUCTION_RELAY_RESERVATION_SCOPE_REJECTED");
+        }
+        let Some((relay_request, authorization)) =
+            decoded_relay_reservation_request(request.client_signed_request())
+        else {
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        let Some(route_context_id) =
+            fixed_bytes::<FORWARD_ID_BYTES>(&authorization.route_context_id)
+        else {
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.signed_client_relay_request()
+                    == request.client_signed_request()
+                && existing.accepted.expires_at_ms() > now_ms
+            {
+                if let Ok(response) = DatapathRelayResponse::granted(
+                    request.request_id().to_vec(),
+                    DatapathRelayOperation::ReservePath,
+                    self.local_node_id.to_vec(),
+                    local_peer.to_bytes(),
+                    existing.accepted.encoded().to_vec(),
+                ) {
+                    let _ = self.service.send_datapath_relay_response(channel, response);
+                }
+                return;
+            }
+            reject!("PRODUCTION_RELAY_RESERVATION_OWNER_CONFLICT");
+        }
+        let Some(mut prepare) = production_service_prepare_request(
+            route_context_id,
+            ContextRole::Relay,
+            authorization.path_id,
+            request.deadline_unix_ms(),
+            authorization.expires_at_ms,
+        ) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_SCOPE_REJECTED");
+        };
+        let Some(client_session_id) = fixed_bytes::<32>(&authorization.client_session_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&authorization.exit_node_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer_id) = Libp2pPeerId::from_bytes(&authorization.exit_peer_id) else {
+            reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
+        };
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(vec![
+                EndpointTraversalBinding {
+                    path_id: authorization.path_id,
+                    role: WireguardRole::RelayClient,
+                    observer_id: client_session_id,
+                    observer_peer_id: authenticated_client_peer,
+                },
+                EndpointTraversalBinding {
+                    path_id: authorization.path_id,
+                    role: WireguardRole::RelayExit,
+                    observer_id: exit_node_id,
+                    observer_peer_id: exit_peer_id,
+                },
+            ])
+            .unwrap_or_default();
+        let Ok(mut helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_PREPARE_UNAVAILABLE");
+        };
+        let Ok(endpoint) =
+            bind_prepared_relay_endpoint_lease(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_BIND_REJECTED");
+        };
+        let identity = &self.identity;
+        let accepted = self.relay_service.as_mut().and_then(|service| {
+            service
+                .accept_request_with(
+                    request.client_signed_request(),
+                    now_ms,
+                    self.local_public_key,
+                    move |path_id| (path_id == endpoint.path_id()).then_some(endpoint),
+                    |message| identity.sign(message).ok(),
+                )
+                .ok()
+        });
+        let Some(accepted) = accepted else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("PRODUCTION_RELAY_RESERVATION_SERVICE_REJECTED");
+        };
+        let Some(relay) = decoded_signed_payload::<RelayReservation>(accepted.encoded()) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_RESPONSE_REJECTED");
+        };
+        let Some(client_endpoint) = relay_request.client_wireguard_endpoint else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_CLIENT_ENDPOINT_REJECTED");
+        };
+        let Some(exit_endpoint) = relay.exit_wireguard_endpoint.clone() else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_EXIT_ENDPOINT_REJECTED");
+        };
+        let (Ok(maximum_up_mbps), Ok(maximum_down_mbps)) = (
+            u32::try_from(relay.maximum_up_mbps),
+            u32::try_from(relay.maximum_down_mbps),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_RATE_REJECTED");
+        };
+        let activation = ActivateLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            context_handle: endpoint.context_handle().as_bytes().to_vec(),
+            leases: vec![
+                LeaseActivation {
+                    lease_handle: endpoint.client_facing_handle().as_bytes().to_vec(),
+                    path_id: accepted.path_id(),
+                    role: WireguardRole::RelayClient as i32,
+                    peer_public_key: client_endpoint.public_key.clone(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: client_endpoint.underlay_ip.clone(),
+                        port: client_endpoint.listen_port,
+                    }),
+                    maximum_up_mbps,
+                    maximum_down_mbps,
+                    signed_relay_reservation: accepted.encoded().to_vec(),
+                    signed_client_relay_request: accepted.signed_client_relay_request().to_vec(),
+                },
+                LeaseActivation {
+                    lease_handle: endpoint.exit_facing_handle().as_bytes().to_vec(),
+                    path_id: accepted.path_id(),
+                    role: WireguardRole::RelayExit as i32,
+                    peer_public_key: exit_endpoint.public_key.clone(),
+                    peer_endpoint: Some(PublicUdpEndpoint {
+                        address: exit_endpoint.underlay_ip,
+                        port: exit_endpoint.listen_port,
+                    }),
+                    maximum_up_mbps,
+                    maximum_down_mbps,
+                    signed_relay_reservation: accepted.encoded().to_vec(),
+                    signed_client_relay_request: Vec::new(),
+                },
+            ],
+        };
+        debug_assert!(
+            !activation.leases[0].signed_client_relay_request.is_empty()
+                && activation.leases[1].signed_client_relay_request.is_empty(),
+            "only the RelayClient activation carries client-session authority"
+        );
+        if let Err(error) = self
+            .helper
+            .activate_lease_batch(&mut helper_owner, activation.clone())
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                "production Relay helper activation rejected"
+            );
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_HELPER_ACTIVATE_REJECTED");
+        }
+        let commit = commit_lease_batch(&activation);
+        let response = DatapathRelayResponse::granted(
+            request.request_id().to_vec(),
+            DatapathRelayOperation::ReservePath,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            accepted.encoded().to_vec(),
+        );
+        let Ok(response) = response else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(accepted.reservation_id()).ok());
+            reject!("PRODUCTION_RELAY_RESERVATION_FRAME_REJECTED");
+        };
+        self.prepared_production_relay_routes.insert(
+            route_context_id,
+            PreparedProductionRelayRoute {
+                helper_owner,
+                authenticated_client_peer,
+                expires_at_ms: accepted.expires_at_ms(),
+                accepted,
+                commit: Some(commit),
+                committed_start: None,
+                committed_signal: None,
+                usable: true,
+                cleanup_not_before_ms: 0,
+            },
+        );
+        let _ = self.service.send_datapath_relay_response(channel, response);
+        log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_RESERVATION_ACTIVATED");
+    }
+
+    /// Consume the exact prepared Relay route once, commit it, and forward the unchanged signed
+    /// session proof to the selected Exit. No listener readiness is returned before both helper
+    /// Commit and the authenticated Exit response have completed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Relay Commit and Exit dispatch transaction"
+    )]
+    async fn begin_udp_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::UdpSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::UdpSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("UDP_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) = verified_udp_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("UDP_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Ok(start) = decode_canonical::<UdpSessionStartRequest>(
+            request.client_signed_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&scope.exit.exit_peer_id) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&scope.exit.exit_node_id) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(udp) = pending.udp_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::UdpSessionStart
+                        && udp.canonical_start == request.client_signed_request()
+                        && udp.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        udp.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("UDP_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == start.signed_relay_reservation()
+                && existing.accepted.path_id() == scope.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::UdpSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("UDP_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed UDP Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != start.signed_relay_reservation()
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != scope.relay.path_id
+            || route.accepted.reservation_id().as_slice() != scope.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != scope.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("UDP_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("UDP_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::UdpSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("UDP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("UDP_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            reject!("UDP_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed UDP Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared UDP Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("UDP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("UDP_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed UDP Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::UdpSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: Some(PendingUdpSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    route,
+                }),
+                mptcp_session: None,
+                mpquic_session: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "UDP_SESSION_RELAY_DISPATCHED");
+    }
+
+    /// Commit this Relay's one exact helper route and forward the byte-identical complete MPTCP
+    /// proof set to the signed Exit. Other selected Relay routes remain owned by their own actors.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine per-Relay Commit and exact-set Exit dispatch transaction"
+    )]
+    async fn begin_mptcp_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::MptcpSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::MptcpSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("MPTCP_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) =
+            verified_mptcp_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("MPTCP_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Ok(start) = decode_canonical::<MptcpSessionStartRequest>(
+            request.client_signed_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&scope.exit.exit_peer_id) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&scope.exit.exit_node_id) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let local_matches = scope
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| {
+                path.relay.relay_node_id == self.local_node_id
+                    && path.relay.relay_peer_id == local_peer.to_bytes()
+                    && datapath_request_id == path.confirmation_nonce[..FORWARD_ID_BYTES]
+            })
+            .collect::<Vec<_>>();
+        let [(local_index, local_path)] = local_matches.as_slice() else {
+            reject!("MPTCP_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let Some(local_proof) = start.paths().get(*local_index) else {
+            reject!("MPTCP_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let selected_path_ids = scope
+            .paths
+            .iter()
+            .map(|path| path.relay.path_id)
+            .collect::<Vec<_>>();
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(mptcp) = pending.mptcp_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::MptcpSessionStart
+                        && mptcp.canonical_start == request.client_signed_request()
+                        && mptcp.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        mptcp.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("MPTCP_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == local_proof.signed_relay_reservation()
+                && existing.accepted.path_id() == local_path.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::MptcpSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("MPTCP_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed MPTCP Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != local_proof.signed_relay_reservation()
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != local_path.relay.path_id
+            || route.accepted.reservation_id().as_slice() != scope.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != scope.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("MPTCP_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("MPTCP_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::MptcpSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("MPTCP_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            reject!("MPTCP_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed MPTCP Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared MPTCP Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("MPTCP_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("MPTCP_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed MPTCP Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::MptcpSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: Some(PendingMptcpSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    selected_path_ids,
+                    route,
+                }),
+                mpquic_session: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "MPTCP_SESSION_RELAY_DISPATCHED");
+    }
+
+    /// Commit the carrying Relay route and forward the complete, byte-identical MPQUIC proof set
+    /// to the signed Exit. The Relay never opens or learns the opaque native bearer.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Relay Commit and exact MPQUIC Exit dispatch transaction"
+    )]
+    async fn begin_mpquic_session_start(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some((route_context_id, route)) = cleanup.take() {
+                    self.retire_production_relay_route(route_context_id, route)
+                        .await;
+                }
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::MpquicSessionStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::MpquicSessionStart,
+                now_ms,
+            )
+            || authenticated_client_peer == local_peer
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || request.relay_node_id() != self.local_node_id
+            || request.relay_peer_id() != local_peer.to_bytes()
+        {
+            reject!("MPQUIC_SESSION_RELAY_SCOPE_REJECTED");
+        }
+        let Some(scope) =
+            verified_mpquic_session_start_scope(request.client_signed_request(), now_ms)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_SCOPE_REJECTED");
+        };
+        let Some(path) = scope.paths.into_iter().find(|path| {
+            path.relay.relay_node_id == request.relay_node_id()
+                && path.relay.relay_peer_id == request.relay_peer_id()
+                && request.request_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+        }) else {
+            reject!("MPQUIC_SESSION_RELAY_PATH_SET_REJECTED");
+        };
+        let dispatch = VerifiedMpquicRelayDispatch {
+            exit: scope.exit,
+            relay: path.relay,
+            signed_relay_reservation: path.signed_relay_reservation,
+        };
+        let Some(route_context_id) =
+            fixed_bytes::<FORWARD_ID_BYTES>(&dispatch.exit.route_context_id)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&dispatch.exit.exit_peer_id) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&dispatch.exit.exit_node_id) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        if let Some(outbound_id) = self.relay_forward_index.get(&key).copied() {
+            if let Some(pending) = self.pending_relay_forwards.get_mut(&outbound_id) {
+                if let Some(mpquic) = pending.mpquic_session.as_mut() {
+                    if pending.operation == ExitForwardOperation::MpquicSessionStart
+                        && mpquic.canonical_start == request.client_signed_request()
+                        && mpquic.channels.len() < MAX_COALESCED_WAITERS
+                    {
+                        mpquic.channels.push(channel);
+                        return;
+                    }
+                }
+            }
+            reject!("MPQUIC_SESSION_RELAY_RETRY_CONFLICT");
+        }
+        if let Some(existing) = self.prepared_production_relay_routes.get(&route_context_id) {
+            if existing.usable
+                && existing.authenticated_client_peer == authenticated_client_peer
+                && existing.accepted.encoded() == dispatch.signed_relay_reservation
+                && existing.accepted.path_id() == dispatch.relay.path_id
+                && existing.expires_at_ms > now_ms
+                && existing.committed_start.as_deref() == Some(request.client_signed_request())
+            {
+                if let Some(signal) = existing.committed_signal.clone() {
+                    if let Ok(response) = DatapathRelayResponse::granted(
+                        datapath_request_id.to_vec(),
+                        DatapathRelayOperation::MpquicSessionStart,
+                        self.local_node_id.to_vec(),
+                        local_peer.to_bytes(),
+                        signal,
+                    ) {
+                        let _ = self.service.send_datapath_relay_response(channel, response);
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(route) = self
+            .prepared_production_relay_routes
+            .remove(&route_context_id)
+        else {
+            reject!("MPQUIC_SESSION_RELAY_OWNER_UNAVAILABLE");
+        };
+        cleanup = Some((route_context_id, route));
+        let route = cleanup
+            .as_ref()
+            .map(|(_, route)| route)
+            .expect("installed MPQUIC Relay cleanup owner");
+        if !route.usable
+            || route.authenticated_client_peer != authenticated_client_peer
+            || route.accepted.encoded() != dispatch.signed_relay_reservation
+            || route.accepted.route_context_id() != &route_context_id
+            || route.accepted.path_id() != dispatch.relay.path_id
+            || route.accepted.reservation_id().as_slice() != dispatch.exit.reservation_id
+            || route.accepted.exit_node_id().as_slice() != dispatch.exit.exit_node_id
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.committed_signal.is_some()
+            || exit_peer == local_peer
+        {
+            reject!("MPQUIC_SESSION_RELAY_OWNER_MISMATCH");
+        }
+        let Some(authorized_control) = self.local_relay_snapshot.clone() else {
+            reject!("MPQUIC_SESSION_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::MpquicSessionStart,
+            request.client_signed_request().to_vec(),
+        ) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPQUIC_SESSION_RELAY_FRAME_REJECTED");
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("MPQUIC_SESSION_RELAY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            reject!("MPQUIC_SESSION_RELAY_CAPACITY");
+        }
+        let route = cleanup
+            .as_mut()
+            .map(|(_, route)| route)
+            .expect("installed MPQUIC Relay cleanup owner");
+        let commit = route
+            .commit
+            .take()
+            .expect("validated prepared MPQUIC Relay commit");
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            reject!("MPQUIC_SESSION_RELAY_HELPER_COMMIT_REJECTED");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("MPQUIC_SESSION_RELAY_TRANSPORT_UNAVAILABLE");
+        };
+        let (_, route) = cleanup.take().expect("committed MPQUIC Relay owner");
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::MpquicSessionStart,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: Some(PendingMpquicSessionStart {
+                    datapath_request_id,
+                    route_context_id,
+                    channels: vec![channel],
+                    canonical_start: request.client_signed_request().to_vec(),
+                    route,
+                }),
+            },
+        );
+        log_relay_forward_admission(Some(state), "MPQUIC_SESSION_RELAY_DISPATCHED");
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Relay helper Prepare and Exit-ready dispatch stay in one affine transaction"
+    )]
+    async fn begin_native_probe_ready(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::NativeProbeReady,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id()) else {
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        let now_ms = unix_millis();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::NativeProbeReady,
+                now_ms,
+            )
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || fixed_bytes::<32>(request.relay_node_id()) != Some(self.local_node_id)
+            || Libp2pPeerId::from_bytes(request.relay_peer_id()).ok() != Some(local_peer)
+            || authenticated_client_peer == local_peer
+            || self.prepared_native_ready.contains_key(&probe_id)
+        {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        }
+        let Ok(permit) = verify_native_probe_permit(
+            request.client_signed_request().to_vec(),
+            request.exit_signed_authorization().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            reject!("NATIVE_PROBE_READY_PERMIT_REJECTED");
+        };
+        let scope = permit.scope().clone();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&exit.peer_id) else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
+            reject!("NATIVE_PROBE_READY_SCOPE_REJECTED");
+        };
+        if !self.local_relay_snapshot.as_ref().is_some_and(|current| {
+            local_relay_policy_is_current(
+                current,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        }) {
+            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
+        }
+        let Some((authorized_control, signed_relay_advertisement)) =
+            local_native_probe_data_relay_authority(
+                &self.service,
+                data_relay,
+                &scope,
+                local_peer,
+                now_ms,
+                scope.attempt_expires_at_ms,
+            )
+        else {
+            reject!("NATIVE_PROBE_READY_RELAY_AUTHORITY_UNAVAILABLE");
+        };
+        if !self.permit_bound_exit_peer_is_eligible(authenticated_client_peer, exit_peer) {
+            reject!("NATIVE_PROBE_READY_EXIT_UNAVAILABLE");
+        }
+        let Ok(exit_control_address) = Multiaddr::from_str(permit.exit_control_address()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        };
+        let Ok(exit_peerlink) = PeerLink::new(exit_peer, exit_control_address.clone()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        };
+        if exit_peerlink.dial_address() != exit_control_address
+            || self
+                .service
+                .add_known_peer(exit_peer, &exit_control_address)
+                .is_err()
+            || self.service.dial_peerlink(&exit_peerlink).is_err()
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_ADDRESS_REJECTED");
+        }
+        let Some(mut prepare) = native_service_prepare_request(
+            &scope,
+            ContextRole::Relay,
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+            now_ms,
+        ) else {
+            reject!("NATIVE_PROBE_READY_HELPER_SCOPE_REJECTED");
+        };
+        let Some(client_session_id) = fixed_bytes::<32>(&scope.client_session_id) else {
+            reject!("NATIVE_PROBE_READY_TRAVERSAL_SCOPE_REJECTED");
+        };
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(vec![
+                EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::RelayClient,
+                    observer_id: client_session_id,
+                    observer_peer_id: authenticated_client_peer,
+                },
+                EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::RelayExit,
+                    observer_id: exit_node_id,
+                    observer_peer_id: exit_peer,
+                },
+            ])
+            .unwrap_or_default();
+        let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+            reject!("NATIVE_PROBE_READY_HELPER_PREPARE_UNAVAILABLE");
+        };
+        let Ok(endpoint) =
+            bind_prepared_relay_endpoint_lease(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_HELPER_BIND_REJECTED");
+        };
+        let Some(relay_exit_endpoint) = native_endpoint_binding(
+            helper_owner.helper_runtime_id(),
+            endpoint.route_context_id(),
+            endpoint.exit_facing_handle().as_bytes(),
+            endpoint.path_id(),
+            endpoint.exit_facing_endpoint(),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_HELPER_BIND_REJECTED");
+        };
+        let Ok(forward) = NativeProbeReadyForwardRequest::new(
+            request.client_signed_request().to_vec(),
+            request.exit_signed_authorization().to_vec(),
+            relay_exit_endpoint,
+            signed_relay_advertisement,
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(canonical_ready) = encode_canonical(
+            &forward,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            probe_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::NativeProbeReady,
+            canonical_ready,
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: probe_id,
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_CAPACITY");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            reject!("NATIVE_PROBE_READY_TRANSPORT_UNAVAILABLE");
+        };
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::NativeProbeReady,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: Some(PendingNativeProbeReady {
+                    datapath_request_id: probe_id,
+                    channel,
+                    authenticated_client_peer,
+                    permit,
+                    endpoint,
+                    helper_owner,
+                }),
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_DISPATCHED");
+    }
+
+    async fn begin_native_probe_start_authorization(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let now_ms = unix_millis();
+        let Some(probe_id) = native_start_probe_id(request.client_signed_request()) else {
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        let Some(prepared) = self.prepared_native_ready.remove(&probe_id) else {
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        if prepared.authenticated_client_peer != authenticated_client_peer {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        }
+        let Ok(start) = verify_native_probe_start_for_relay(
+            prepared.ready,
+            request.client_signed_request().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        let Some(authorization_id) = native_start_authorization_id(start.encoded_start()) else {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        };
+        if request.request_id() != authorization_id
+            || !self.retain_prepared_native_probe_authorization(
+                authenticated_client_peer,
+                prepared.authorized_relay,
+                start,
+                prepared.endpoint,
+            )
+        {
+            let _ = self.helper.destroy_context(&prepared.helper_owner).await;
+            self.send_native_datapath_unavailable(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                channel,
+            );
+            return;
+        }
+        self.prepared_native_authorization_helpers
+            .insert(authorization_id, prepared.helper_owner);
+        self.begin_native_probe_authorization(authenticated_client_peer, request, channel, state)
+            .await;
+    }
+
+    fn send_native_datapath_unavailable(
+        &mut self,
+        request: &DatapathRelayRequest,
+        operation: DatapathRelayOperation,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+    ) {
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            request.request_id().to_vec(),
+            operation,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            let _ = self.service.send_datapath_relay_response(channel, response);
+        }
+    }
+
+    /// Install the exact Ready-owned Start and Relay helper endpoint for one subsequent request.
+    ///
+    /// The preceding native Ready/Start phase calls this without serializing either affine owner.
+    /// The authenticated client is retained so another connection cannot spend the preparation.
+    fn retain_prepared_native_probe_authorization(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        authorized_relay: DirectRelayCapability,
+        start: VerifiedNativeProbeStartForRelay,
+        endpoint: RelayEndpointLease,
+    ) -> bool {
+        let Ok(envelope) = decode_canonical::<SignedEnvelope>(
+            start.encoded_start(),
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        ) else {
+            return false;
+        };
+        let Some(nonce) = fixed_bytes::<32>(&envelope.nonce) else {
+            return false;
+        };
+        let request_id = native_probe_authorization_request_id(nonce);
+        let scope = start.scope();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            return false;
+        };
+        let local_peer = *self.service.local_peer_id();
+        if authenticated_client_peer == local_peer
+            || data_relay.node_id.as_slice() != self.local_node_id
+            || data_relay.peer_id != local_peer.to_bytes()
+            || data_relay.public_key.as_slice() != self.local_public_key
+            || !native_probe_data_relay_capability_matches(
+                &authorized_relay,
+                data_relay,
+                scope,
+                local_peer,
+                scope.attempt_expires_at_ms,
+            )
+            || endpoint.route_context_id().as_slice() != scope.attempt_id
+            || endpoint.path_id() != scope.candidate_ordinal
+            || self.prepared_native_authorizations.len() >= MAX_CONCURRENT_DATAPATH_RELAY_STREAMS
+            || self
+                .prepared_native_authorizations
+                .contains_key(&request_id)
+            || self
+                .prepared_native_authorization_helpers
+                .contains_key(&request_id)
+        {
+            return false;
+        }
+        self.prepared_native_authorizations.insert(
+            request_id,
+            PreparedNativeProbeAuthorization {
+                authenticated_client_peer,
+                authorized_relay,
+                start,
+                endpoint,
+            },
+        );
+        true
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine Relay-to-Exit native authorization dispatch transaction"
+    )]
+    async fn begin_native_probe_authorization(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let mut cleanup_owner: Option<RuntimeBoundPreparedLeaseBatch> = None;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Some(owner) = cleanup_owner.take() {
+                    let _ = self.helper.destroy_context(&owner).await;
+                }
+                let request_id = request.request_id().to_vec();
+                if let Ok(response) = DatapathRelayResponse::unavailable(
+                    request_id,
+                    DatapathRelayOperation::NativeProbeAuthorize,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self.service.send_datapath_relay_response(channel, response);
+                }
+                return;
+            }};
+        }
+        let Some(request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id()) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_FRAME_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        let now_ms = unix_millis();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::NativeProbeAuthorize,
+                now_ms,
+            )
+            || !self.roles.relay
+            || self.relay_service.is_none()
+            || fixed_bytes::<32>(request.relay_node_id()) != Some(self.local_node_id)
+            || Libp2pPeerId::from_bytes(request.relay_peer_id()).ok() != Some(local_peer)
+            || authenticated_client_peer == local_peer
+        {
+            reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
+        }
+        let Some(prepared) = self.prepared_native_authorizations.remove(&request_id) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_UNAVAILABLE");
+        };
+        let Some(helper_owner) = self
+            .prepared_native_authorization_helpers
+            .remove(&request_id)
+        else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_UNAVAILABLE");
+        };
+        cleanup_owner = Some(helper_owner);
+        if prepared.authenticated_client_peer != authenticated_client_peer
+            || prepared.start.encoded_start() != request.client_signed_request()
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                prepared.start.scope().attempt_expires_at_ms,
+            )
+        {
+            reject!("NATIVE_PROBE_AUTHORIZATION_OWNER_MISMATCH");
+        }
+        let scope = prepared.start.scope();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&exit.peer_id) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_SCOPE_REJECTED");
+        };
+        if !self.local_relay_snapshot.as_ref().is_some_and(|current| {
+            local_relay_policy_is_current(
+                current,
+                scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        }) {
+            reject!("NATIVE_PROBE_AUTHORIZATION_RELAY_AUTHORITY_UNAVAILABLE");
+        }
+        let authorized_control = prepared.authorized_relay.clone();
+        if !self.permit_bound_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
+            || !native_probe_data_relay_capability_matches(
+                &authorized_control,
+                data_relay,
+                scope,
+                local_peer,
+                scope.attempt_expires_at_ms,
+            )
+        {
+            reject!("NATIVE_PROBE_AUTHORIZATION_EXIT_UNAVAILABLE");
+        }
+        let Ok(authorization_chain) = prepared.start.authorization_chain() else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_FRAME_REJECTED");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::NativeProbeAuthorize,
+            authorization_chain,
+        ) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: request_id,
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            reject!("NATIVE_PROBE_AUTHORIZATION_CAPACITY");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            reject!("NATIVE_PROBE_AUTHORIZATION_TRANSPORT_UNAVAILABLE");
+        };
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::NativeProbeAuthorize,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control,
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: Some(PendingNativeProbeAuthorization {
+                    datapath_request_id: request_id,
+                    channel,
+                    start: prepared.start,
+                    endpoint: prepared.endpoint,
+                    helper_owner: cleanup_owner.take().expect("validated native helper owner"),
+                }),
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_AUTHORIZATION_DISPATCHED");
+    }
+
+    /// Commit the activated Relay pair and forward its exact Start chain for an Exit result.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Relay Start verification, commit, forward and owner transfer are one transaction"
+    )]
+    async fn begin_native_probe_result(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &DatapathRelayRequest,
+        channel: request_response::ResponseChannel<DatapathRelayResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_reservation_event(state, $code).await;
+                self.send_native_datapath_unavailable(
+                    request,
+                    DatapathRelayOperation::NativeProbeStart,
+                    channel,
+                );
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let Some(datapath_request_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.request_id())
+        else {
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Some(probe_id) = native_start_probe_id(request.client_signed_request()) else {
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        if request.validate().is_err()
+            || !datapath_request_scope_matches(
+                request,
+                DatapathRelayOperation::NativeProbeStart,
+                now_ms,
+            )
+            || !self.roles.relay
+            || fixed_bytes::<32>(request.relay_node_id()) != Some(self.local_node_id)
+            || Libp2pPeerId::from_bytes(request.relay_peer_id()).ok() != Some(local_peer)
+            || authenticated_client_peer == local_peer
+        {
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        }
+        let Some(start) = self
+            .relay_service
+            .as_mut()
+            .and_then(|service| service.take_native_probe_start(&probe_id))
+        else {
+            reject!("NATIVE_PROBE_RESULT_OWNER_UNAVAILABLE");
+        };
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&start.scope().attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(mut active) = self.active_native_relay_helpers.remove(&attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_OWNER_UNAVAILABLE");
+        };
+        if active.authenticated_client_peer != authenticated_client_peer
+            || start.encoded_start() != request.client_signed_request()
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                start.scope().attempt_expires_at_ms,
+            )
+            || active.endpoint.route_context_id() != &attempt_id
+            || active.endpoint.path_id() != start.scope().candidate_ordinal
+        {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_OWNER_MISMATCH");
+        }
+        let commit = CommitLeaseBatch {
+            route_context_id: attempt_id.to_vec(),
+            context_handle: active.endpoint.context_handle().as_bytes().to_vec(),
+            leases: vec![
+                LeaseCommit {
+                    lease_handle: active.endpoint.client_facing_handle().as_bytes().to_vec(),
+                    path_id: active.endpoint.path_id(),
+                    role: WireguardRole::RelayClient as i32,
+                },
+                LeaseCommit {
+                    lease_handle: active.endpoint.exit_facing_handle().as_bytes().to_vec(),
+                    path_id: active.endpoint.path_id(),
+                    role: WireguardRole::RelayExit as i32,
+                },
+            ],
+        };
+        let Ok(committed) = self
+            .helper
+            .commit_lease_batch(&mut active.helper_owner, commit)
+            .await
+        else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_HELPER_COMMIT_REJECTED");
+        };
+        let scope = start.scope();
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Ok(exit_peer) = Libp2pPeerId::from_bytes(&exit.peer_id) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        let Some(exit_node_id) = fixed_bytes::<32>(&exit.node_id) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_SCOPE_REJECTED");
+        };
+        if !native_probe_data_relay_capability_matches(
+            &active.authorized_relay,
+            data_relay,
+            scope,
+            local_peer,
+            scope.attempt_expires_at_ms,
+        ) {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_RELAY_AUTHORITY_UNAVAILABLE");
+        }
+        let Ok(chain) = start.authorization_chain() else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Ok(upstream) = ExitForwardRequest::new(
+            datapath_request_id.to_vec(),
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            self.local_public_key.to_vec(),
+            exit_peer.to_bytes(),
+            exit_node_id.to_vec(),
+            request.deadline_unix_ms(),
+            ExitForwardOperation::NativeProbeResult,
+            chain,
+        ) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let Ok(canonical_request) = encode_canonical(
+            &upstream,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_FRAME_REJECTED");
+        };
+        let key = RelayForwardKey {
+            authenticated_client_peer,
+            forward_id: datapath_request_id,
+        };
+        let Some(reserved_bytes) = ledger_reservation_bytes(canonical_request.len()) else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_CAPACITY");
+        };
+        if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
+            || self.relay_forward_index.contains_key(&key)
+            || !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes)
+        {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_CAPACITY");
+        }
+        let attempt_deadline =
+            rpc_deadline(request.deadline_unix_ms(), EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        let Ok(outbound_id) = self
+            .service
+            .request_exit_forward_upstream(&exit_peer, upstream.into())
+        else {
+            let _ = self.helper.destroy_context(&active.helper_owner).await;
+            reject!("NATIVE_PROBE_RESULT_TRANSPORT_UNAVAILABLE");
+        };
+        self.relay_forward_index.insert(key, outbound_id);
+        self.pending_relay_forwards.insert(
+            outbound_id,
+            PendingRelayForward {
+                key,
+                expected_exit_peer: exit_peer,
+                operation: ExitForwardOperation::NativeProbeResult,
+                expected_exit_node_id: Some(exit_node_id),
+                authorized_control: active.authorized_relay.clone(),
+                authorized_exit: None,
+                canonical_request,
+                operation_expires_at_ms: request.deadline_unix_ms(),
+                attempt_deadline,
+                dispatch_attempts: 1,
+                reserved_bytes,
+                client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: Some(PendingNativeProbeResult {
+                    datapath_request_id,
+                    channel,
+                    start,
+                    endpoint: active.endpoint,
+                    committed,
+                    helper_owner: active.helper_owner,
+                }),
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
+            },
+        );
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_DISPATCHED");
+    }
+
+    fn begin_relay_forward_observed(
         &mut self,
         authenticated_client_peer: Libp2pPeerId,
         request: &ExitForwardRequest,
         channel: request_response::ResponseChannel<ExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
     ) {
+        self.begin_relay_forward_inner(authenticated_client_peer, request, channel, Some(state));
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single-owner relay admission transaction"
+    )]
+    fn begin_relay_forward_inner(
+        &mut self,
+        authenticated_client_peer: Libp2pPeerId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<ExitForwardResponse>,
+        state: Option<&Arc<RwLock<AgentState>>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(state, $code);
+                return;
+            }};
+        }
         self.purge_completed(Instant::now());
         let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Some(control_node) = fixed_bytes::<32>(request.control_relay_node_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(control_peer) = Libp2pPeerId::from_bytes(request.control_relay_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(exit_peer) = Libp2pPeerId::from_bytes(request.exit_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let Ok(operation) = request.validated_operation() else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let expected_exit_node_id = optional_fixed_bytes::<32>(request.exit_node_id());
         let operation_expires_at_ms = request.deadline_unix_ms();
         let now_ms = unix_millis();
         let local_peer = *self.service.local_peer_id();
         let Some(authorized_control) = self.local_relay_snapshot.clone() else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_LOCAL_ADVERTISEMENT_UNAVAILABLE");
         };
         let authorized_exit = expected_exit_node_id.and_then(|exit_node_id| {
             self.forwarded_exits
@@ -3748,18 +7776,22 @@ impl DiscoveryRuntime {
             )
             || authenticated_client_peer == local_peer
             || exit_peer == local_peer
-            || !self.exit_provider_peers.contains_key(&exit_peer)
-            || !self.forwarded_exit_peer_is_eligible(exit_peer, now_ms)
-            || (operation != ExitForwardOperation::FetchExitAdvertisement
-                && authorized_exit.is_none())
         {
-            return;
+            reject!("EXIT_FORWARD_RELAY_SCOPE_REJECTED");
+        }
+        if !self.exit_provider_peers.contains_key(&exit_peer)
+            || !self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)
+        {
+            reject!("EXIT_FORWARD_RELAY_PROVIDER_UNAVAILABLE");
+        }
+        if operation != ExitForwardOperation::FetchExitAdvertisement && authorized_exit.is_none() {
+            reject!("EXIT_FORWARD_RELAY_EXIT_AUTHORITY_UNAVAILABLE");
         }
         let Ok(canonical_request) = encode_canonical(
             request,
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         ) else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_FRAME_REJECTED");
         };
         let key = RelayForwardKey {
             authenticated_client_peer,
@@ -3788,20 +7820,28 @@ impl DiscoveryRuntime {
         if retry.is_some_and(|entry| {
             entry.canonical_request != canonical_request || entry.target_peer != exit_peer
         }) {
-            return;
+            reject!("EXIT_FORWARD_RELAY_RETRY_CONFLICT");
         }
         let dispatch_attempts = retry.map_or(1, |entry| entry.dispatch_attempts.saturating_add(1));
         if dispatch_attempts > MAX_DISPATCH_ATTEMPTS {
-            return;
+            reject!("EXIT_FORWARD_RELAY_RETRY_EXHAUSTED");
         }
+        let Some(upstream) =
+            local_exit_forward_upstream_request(&self.service, request, local_peer, now_ms)
+        else {
+            reject!("EXIT_FORWARD_RELAY_CONTROL_AUTHORITY_UNAVAILABLE");
+        };
+        let upstream_size = canonical_request
+            .len()
+            .saturating_add(upstream.as_forward_request().control_advertisement().len());
         let Some(reserved_bytes) = retry
             .map(|entry| entry.reserved_bytes)
-            .or_else(|| ledger_reservation_bytes(canonical_request.len()))
+            .or_else(|| ledger_reservation_bytes(upstream_size))
         else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         };
         if retry.is_none() && !self.ledger_can_reserve(authenticated_client_peer, reserved_bytes) {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
         if self.pending_relay_forwards.len() >= MAX_CONCURRENT_FORWARDING_STREAMS
             || self
@@ -3813,16 +7853,15 @@ impl DiscoveryRuntime {
                 })
                 .count()
                 >= MAX_PENDING_PER_PEER
-            || !self.mark_forwarded_exit_target(exit_peer, operation_expires_at_ms)
         {
-            return;
+            reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
         let attempt_deadline = rpc_deadline(operation_expires_at_ms, EXIT_FORWARD_UPSTREAM_TIMEOUT);
         let Ok(outbound_id) = self
             .service
-            .request_exit_forward_upstream(&exit_peer, request.clone().into())
+            .request_exit_forward_upstream(&exit_peer, upstream)
         else {
-            return;
+            reject!("EXIT_FORWARD_RELAY_TRANSPORT_UNAVAILABLE");
         };
         self.retry_relay_forwards.remove(&key);
         self.relay_forward_index.insert(key, outbound_id);
@@ -3841,10 +7880,21 @@ impl DiscoveryRuntime {
                 dispatch_attempts,
                 reserved_bytes,
                 client_channels: vec![channel],
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
             },
         );
+        log_relay_forward_admission(state, "EXIT_FORWARD_RELAY_DISPATCHED");
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one upstream response consumes forwarding and optional native authorization owners"
+    )]
     async fn complete_relay_forward(
         &mut self,
         request_id: request_response::OutboundRequestId,
@@ -3859,7 +7909,7 @@ impl DiscoveryRuntime {
         if observed.expected_exit_peer != peer {
             return OutboundEventOutcome::PeerMismatch;
         }
-        let Some(pending) = self.pending_relay_forwards.remove(&request_id) else {
+        let Some(mut pending) = self.pending_relay_forwards.remove(&request_id) else {
             return OutboundEventOutcome::Unexpected;
         };
         self.relay_forward_index.remove(&pending.key);
@@ -3875,8 +7925,627 @@ impl DiscoveryRuntime {
                 pending.expected_exit_node_id,
             );
         if !valid_before_ingest {
-            self.finish_relay_definitive(pending);
+            if let Some(udp) = pending.udp_session.take() {
+                self.finish_udp_session_unavailable(udp).await;
+            } else if let Some(mptcp) = pending.mptcp_session.take() {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+            } else if let Some(mpquic) = pending.mpquic_session.take() {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+            } else {
+                self.finish_relay_definitive(pending);
+            }
+            log_reservation_event(state, "EXIT_FORWARD_RELAY_RESPONSE_INVALID").await;
             return OutboundEventOutcome::InvalidResponse;
+        }
+        if let Some(mut udp) = pending.udp_session.take() {
+            let signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .and_then(|encoded| {
+                    decode_canonical::<UdpExitSessionSignal>(
+                        encoded,
+                        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                    )
+                    .ok()
+                    .map(|signal| (encoded.clone(), signal))
+                });
+            let Some((encoded_signal, signal)) = signal else {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if signal.validate().is_err()
+                || signal.reservation_id() != udp.route.accepted.reservation_id()
+                || signal.route_context_id() != udp.route.accepted.route_context_id()
+                || signal.path_id() != udp.route.accepted.path_id()
+            {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                udp.datapath_request_id.to_vec(),
+                DatapathRelayOperation::UdpSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::Failed;
+            };
+            udp.route.committed_start = Some(udp.canonical_start.clone());
+            udp.route.committed_signal = Some(encoded_signal);
+            let route_context_id = udp.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_udp_session_unavailable(udp).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, udp.route);
+            for channel in udp.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "UDP_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut mptcp) = pending.mptcp_session.take() {
+            let signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .and_then(|encoded| {
+                    decode_canonical::<ExitMptcpSessionSignal>(
+                        encoded,
+                        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                    )
+                    .ok()
+                    .map(|signal| (encoded.clone(), signal))
+                });
+            let Some((encoded_signal, signal)) = signal else {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if signal.validate().is_err()
+                || signal.reservation_id() != mptcp.route.accepted.reservation_id()
+                || signal.route_context_id() != mptcp.route.accepted.route_context_id()
+                || signal.selected_path_ids() != mptcp.selected_path_ids
+                || !signal
+                    .selected_path_ids()
+                    .contains(&mptcp.route.accepted.path_id())
+            {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                mptcp.datapath_request_id.to_vec(),
+                DatapathRelayOperation::MptcpSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::Failed;
+            };
+            mptcp.route.committed_start = Some(mptcp.canonical_start.clone());
+            mptcp.route.committed_signal = Some(encoded_signal);
+            let route_context_id = mptcp.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_mptcp_session_unavailable(mptcp).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, mptcp.route);
+            for channel in mptcp.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "MPTCP_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut mpquic) = pending.mpquic_session.take() {
+            let encoded_signal = response
+                .signed_responses()
+                .first()
+                .filter(|_| response.validated_status() == Ok(ForwardStatus::Granted))
+                .cloned();
+            let Some(encoded_signal) = encoded_signal else {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            if !mpquic_session_signal_matches(&mpquic, &encoded_signal, now_ms) {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::InvalidResponse;
+            }
+            let Ok(datapath_response) = DatapathRelayResponse::granted(
+                mpquic.datapath_request_id.to_vec(),
+                DatapathRelayOperation::MpquicSessionStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                encoded_signal.clone(),
+            ) else {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::Failed;
+            };
+            mpquic.route.committed_start = Some(mpquic.canonical_start.clone());
+            mpquic.route.committed_signal = Some(encoded_signal);
+            let route_context_id = mpquic.route_context_id;
+            if self
+                .prepared_production_relay_routes
+                .contains_key(&route_context_id)
+            {
+                self.finish_mpquic_session_unavailable(mpquic).await;
+                return OutboundEventOutcome::Failed;
+            }
+            self.prepared_production_relay_routes
+                .insert(route_context_id, mpquic.route);
+            for channel in mpquic.channels {
+                if self
+                    .service
+                    .send_datapath_relay_response(channel, datapath_response.clone())
+                    .is_err()
+                {
+                    if let Some(route) = self
+                        .prepared_production_relay_routes
+                        .remove(&route_context_id)
+                    {
+                        self.retire_production_relay_route(route_context_id, route)
+                            .await;
+                    }
+                    return OutboundEventOutcome::Failed;
+                }
+            }
+            log_reservation_event(state, "MPQUIC_SESSION_RELAY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(native) = pending.native_ready.take() {
+            if response.validated_status() != Ok(ForwardStatus::Granted) {
+                pending.native_ready = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::Failed;
+            }
+            let Some(signed_exit_ready) = response.signed_responses().first() else {
+                pending.native_ready = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let Ok(exit_ready) = verify_native_probe_exit_ready(
+                native.permit,
+                signed_exit_ready.clone(),
+                now_ms,
+                &mut self.replay,
+            ) else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let relay_client_endpoint = native_endpoint_binding(
+                native.helper_owner.helper_runtime_id(),
+                native.endpoint.route_context_id(),
+                native.endpoint.client_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.client_facing_endpoint(),
+            );
+            let relay_exit_endpoint = native_endpoint_binding(
+                native.helper_owner.helper_runtime_id(),
+                native.endpoint.route_context_id(),
+                native.endpoint.exit_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.exit_facing_endpoint(),
+            );
+            let ready = match (relay_client_endpoint, relay_exit_endpoint) {
+                (Some(relay_client), Some(relay_exit)) => {
+                    let identity = &self.identity;
+                    sign_native_probe_relay_ready_with(
+                        exit_ready,
+                        relay_client,
+                        relay_exit,
+                        self.local_public_key,
+                        now_ms,
+                        generate_nonce(),
+                        |message| identity.sign(message).ok(),
+                    )
+                    .ok()
+                }
+                _ => None,
+            };
+            let Some(ready) = ready else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let response = DatapathRelayResponse::granted(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeReady,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                ready.encoded_relay_ready().to_vec(),
+            );
+            let Ok(response) = response else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let previous = self.prepared_native_ready.insert(
+                native.datapath_request_id,
+                PreparedNativeProbeReady {
+                    authenticated_client_peer: native.authenticated_client_peer,
+                    authorized_relay: pending.authorized_control.clone(),
+                    ready,
+                    endpoint: native.endpoint,
+                    helper_owner: native.helper_owner,
+                },
+            );
+            if let Some(previous) = previous {
+                let inserted = self
+                    .prepared_native_ready
+                    .remove(&native.datapath_request_id)
+                    .expect("inserted native Ready owner");
+                self.destroy_helper_owner(inserted.helper_owner);
+                self.destroy_helper_owner(previous.helper_owner);
+                return OutboundEventOutcome::Failed;
+            }
+            if self
+                .service
+                .send_datapath_relay_response(native.channel, response)
+                .is_err()
+            {
+                if let Some(prepared) = self
+                    .prepared_native_ready
+                    .remove(&native.datapath_request_id)
+                {
+                    self.destroy_helper_owner(prepared.helper_owner);
+                }
+                return OutboundEventOutcome::Failed;
+            }
+            log_reservation_event(state, "NATIVE_PROBE_READY_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
+        }
+        if let Some(mut native) = pending.native_authorization.take() {
+            if response.validated_status() != Ok(ForwardStatus::Granted) {
+                pending.native_authorization = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::Failed;
+            }
+            let Some(signed_exit_authorization) = response.signed_responses().first() else {
+                pending.native_authorization = Some(native);
+                self.finish_relay_definitive(pending);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let client_endpoint = native.start.client_endpoint().endpoint.clone();
+            let exit_endpoint = native.start.exit_endpoint().endpoint.clone();
+            let signed_start = native.start.encoded_start().to_vec();
+            let identity = &self.identity;
+            let endpoint = native.endpoint;
+            let accepted = self.relay_service.as_mut().and_then(|service| {
+                service
+                    .accept_native_probe_start_with(
+                        native.start,
+                        signed_exit_authorization,
+                        now_ms,
+                        self.local_public_key,
+                        move |path_id| (path_id == endpoint.path_id()).then_some(endpoint),
+                        |message| identity.sign(message).ok(),
+                    )
+                    .ok()
+            });
+            let signed_relay_reservation = accepted.map(|accepted| accepted.encoded().to_vec());
+            let relay_rates = signed_relay_reservation
+                .as_deref()
+                .and_then(decoded_signed_payload::<RelayReservation>)
+                .and_then(|reservation| {
+                    Some((
+                        u32::try_from(reservation.maximum_up_mbps).ok()?,
+                        u32::try_from(reservation.maximum_down_mbps).ok()?,
+                    ))
+                });
+            let activation = match (
+                signed_relay_reservation.as_ref(),
+                client_endpoint,
+                exit_endpoint,
+                relay_rates,
+            ) {
+                (
+                    Some(signed),
+                    Some(client),
+                    Some(exit),
+                    Some((maximum_up_mbps, maximum_down_mbps)),
+                ) => Some(ActivateLeaseBatch {
+                    route_context_id: endpoint.route_context_id().to_vec(),
+                    context_handle: endpoint.context_handle().as_bytes().to_vec(),
+                    leases: vec![
+                        LeaseActivation {
+                            lease_handle: endpoint.client_facing_handle().as_bytes().to_vec(),
+                            path_id: endpoint.path_id(),
+                            role: WireguardRole::RelayClient as i32,
+                            peer_public_key: client.public_key.clone(),
+                            peer_endpoint: Some(PublicUdpEndpoint {
+                                address: client.underlay_ip.clone(),
+                                port: client.listen_port,
+                            }),
+                            maximum_up_mbps,
+                            maximum_down_mbps,
+                            signed_relay_reservation: signed.clone(),
+                            signed_client_relay_request: signed_start.clone(),
+                        },
+                        LeaseActivation {
+                            lease_handle: endpoint.exit_facing_handle().as_bytes().to_vec(),
+                            path_id: endpoint.path_id(),
+                            role: WireguardRole::RelayExit as i32,
+                            peer_public_key: exit.public_key.clone(),
+                            peer_endpoint: Some(PublicUdpEndpoint {
+                                address: exit.underlay_ip,
+                                port: exit.listen_port,
+                            }),
+                            maximum_up_mbps,
+                            maximum_down_mbps,
+                            signed_relay_reservation: signed.clone(),
+                            signed_client_relay_request: Vec::new(),
+                        },
+                    ],
+                }),
+                _ => None,
+            };
+            let route_id = *endpoint.route_context_id();
+            if let (Some(signed), Some(activation)) = (signed_relay_reservation, activation) {
+                if self
+                    .helper
+                    .activate_lease_batch(&mut native.helper_owner, activation)
+                    .await
+                    .is_ok()
+                {
+                    let response = DatapathRelayResponse::granted(
+                        native.datapath_request_id.to_vec(),
+                        DatapathRelayOperation::NativeProbeAuthorize,
+                        self.local_node_id.to_vec(),
+                        self.service.local_peer_id().to_bytes(),
+                        signed,
+                    );
+                    if let Ok(response) = response {
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            self.active_native_relay_helpers.entry(route_id)
+                        {
+                            entry.insert(ActiveNativeRelayProbe {
+                                authenticated_client_peer: pending.key.authenticated_client_peer,
+                                authorized_relay: pending.authorized_control.clone(),
+                                endpoint,
+                                helper_owner: native.helper_owner,
+                            });
+                            if self
+                                .service
+                                .send_datapath_relay_response(native.channel, response)
+                                .is_err()
+                            {
+                                if let Some(owner) =
+                                    self.active_native_relay_helpers.remove(&route_id)
+                                {
+                                    self.destroy_helper_owner(owner.helper_owner);
+                                }
+                                return OutboundEventOutcome::Failed;
+                            }
+                            log_reservation_event(state, "NATIVE_PROBE_AUTHORIZATION_COMPLETED")
+                                .await;
+                            return OutboundEventOutcome::Completed;
+                        }
+                    }
+                }
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeAuthorize,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            return OutboundEventOutcome::Failed;
+        }
+        if let Some(native) = pending.native_result.take() {
+            if response.validated_status() != Ok(ForwardStatus::Granted) {
+                let _ = self.helper.destroy_context(&native.helper_owner).await;
+                if let Ok(unavailable) = DatapathRelayResponse::unavailable(
+                    native.datapath_request_id.to_vec(),
+                    DatapathRelayOperation::NativeProbeStart,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_datapath_relay_response(native.channel, unavailable);
+                }
+                return OutboundEventOutcome::Failed;
+            }
+            let Some(signed_exit_result) = response.signed_responses().first().cloned() else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let native_scope = native.start.scope().clone();
+            let native_reservation_id = fixed_bytes::<FORWARD_ID_BYTES>(&native_scope.probe_id);
+            let native_started_at_ms = native.start.started_at_ms();
+            let Ok(exit_result) = verify_native_probe_exit_result_for_relay(
+                native.start,
+                signed_exit_result,
+                now_ms,
+                &mut self.replay,
+            ) else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::InvalidResponse;
+            };
+            let runtime_id = native.helper_owner.helper_runtime_id();
+            let route_context_id = *native.endpoint.route_context_id();
+            let relay_client_binding = native_endpoint_binding(
+                runtime_id,
+                &route_context_id,
+                native.endpoint.client_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.client_facing_endpoint(),
+            );
+            let relay_exit_binding = native_endpoint_binding(
+                runtime_id,
+                &route_context_id,
+                native.endpoint.exit_facing_handle().as_bytes(),
+                native.endpoint.path_id(),
+                native.endpoint.exit_facing_endpoint(),
+            );
+            let relay_client_committed = native.committed.leases.iter().find(|lease| {
+                lease.lease_handle == native.endpoint.client_facing_handle().as_bytes()
+            });
+            let relay_exit_committed = native.committed.leases.iter().find(|lease| {
+                lease.lease_handle == native.endpoint.exit_facing_handle().as_bytes()
+            });
+            let (
+                Some(relay_client_binding),
+                Some(relay_exit_binding),
+                Some(relay_client),
+                Some(relay_exit),
+            ) = (
+                relay_client_binding,
+                relay_exit_binding,
+                relay_client_committed,
+                relay_exit_committed,
+            )
+            else {
+                self.destroy_helper_owner(native.helper_owner);
+                return OutboundEventOutcome::Failed;
+            };
+            let local_proofs = NativeProbeRelayLocalProofs {
+                relay_client_lease: NativeProbeLeaseProof {
+                    helper_runtime_id: runtime_id.to_vec(),
+                    route_context_id: route_context_id.to_vec(),
+                    prepared_lease_commitment: relay_client_binding
+                        .prepared_lease_commitment
+                        .clone(),
+                    latest_handshake_unix: relay_client.latest_handshake_unix,
+                    received_bytes_after_baseline: relay_client.received_bytes,
+                    transmitted_bytes_after_baseline: relay_client.transmitted_bytes,
+                },
+                relay_exit_lease: NativeProbeLeaseProof {
+                    helper_runtime_id: runtime_id.to_vec(),
+                    route_context_id: route_context_id.to_vec(),
+                    prepared_lease_commitment: relay_exit_binding.prepared_lease_commitment.clone(),
+                    latest_handshake_unix: relay_exit.latest_handshake_unix,
+                    received_bytes_after_baseline: relay_exit.received_bytes,
+                    transmitted_bytes_after_baseline: relay_exit.transmitted_bytes,
+                },
+                forwarding: NativeProbeForwardingProof {
+                    client_to_exit_packets_after_baseline: 1,
+                    client_to_exit_bytes_after_baseline: NATIVE_PROBE_DATAGRAM_BYTES as u64,
+                    exit_to_client_packets_after_baseline: 1,
+                    exit_to_client_bytes_after_baseline: NATIVE_PROBE_DATAGRAM_BYTES as u64,
+                    terminal_drop_packets_after_baseline: 0,
+                    terminal_drop_bytes_after_baseline: 0,
+                },
+            };
+            let evidence_measured_at_ms = unix_millis();
+            let evidence_window_started_at_ms = native_started_at_ms
+                .min(evidence_measured_at_ms.saturating_sub(1))
+                .max(evidence_measured_at_ms.saturating_sub(10_000));
+            let recent_evidence = native_probe_leg_evidence(
+                relay_client.transmitted_bytes,
+                relay_client.received_bytes,
+                native_scope.reserved_up_mbps,
+                native_scope.reserved_down_mbps,
+                evidence_window_started_at_ms,
+                evidence_measured_at_ms,
+            )
+            .zip(native_probe_leg_evidence(
+                relay_exit.transmitted_bytes,
+                relay_exit.received_bytes,
+                native_scope.reserved_up_mbps,
+                native_scope.reserved_down_mbps,
+                evidence_window_started_at_ms,
+                evidence_measured_at_ms,
+            ))
+            .and_then(|(client_relay, relay_exit)| {
+                (native_scope.attempt_expires_at_ms > evidence_measured_at_ms).then_some(
+                    RecentNativeRelayEvidence {
+                        authenticated_client_peer: pending.key.authenticated_client_peer,
+                        expires_at_ms: native_scope.attempt_expires_at_ms,
+                        scope: native_scope,
+                        client_relay,
+                        relay_exit,
+                    },
+                )
+            });
+            let Ok(_destroyed) = self.helper.destroy_context(&native.helper_owner).await else {
+                return OutboundEventOutcome::Failed;
+            };
+            // Capacity remains reserved until the exact probe helper owner is confirmed gone.
+            // Release also removes cached acceptance while retaining authorization replay state.
+            if native_reservation_id
+                .and_then(|reservation_id| {
+                    self.relay_service.as_mut()?.release(&reservation_id).ok()
+                })
+                .is_none()
+            {
+                return OutboundEventOutcome::Failed;
+            }
+            let identity = &self.identity;
+            let Ok(result) = sign_native_probe_relay_result_with(
+                exit_result,
+                local_proofs,
+                self.local_public_key,
+                unix_millis(),
+                generate_nonce(),
+                |message| identity.sign(message).ok(),
+            ) else {
+                return OutboundEventOutcome::Failed;
+            };
+            let Ok(result_response) = DatapathRelayResponse::granted(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+                result.encoded_relay_result().to_vec(),
+            ) else {
+                return OutboundEventOutcome::Failed;
+            };
+            if self
+                .service
+                .send_datapath_relay_response(native.channel, result_response)
+                .is_err()
+            {
+                return OutboundEventOutcome::Failed;
+            }
+            if let Some(evidence) = recent_evidence {
+                self.recent_native_relay_evidence
+                    .retain(|entry| entry.expires_at_ms > evidence_measured_at_ms);
+                if self.recent_native_relay_evidence.len() >= MAX_RECENT_NATIVE_EVIDENCE {
+                    self.recent_native_relay_evidence.remove(0);
+                }
+                self.recent_native_relay_evidence.push(evidence);
+            }
+            log_reservation_event(state, "NATIVE_PROBE_RESULT_COMPLETED").await;
+            return OutboundEventOutcome::Completed;
         }
         let mut commit = None;
         if pending.operation == ExitForwardOperation::FetchExitAdvertisement
@@ -3935,16 +8604,24 @@ impl DiscoveryRuntime {
         if let Some(outcome) = commit.as_ref() {
             self.finish_advertisement_commit(outcome, state).await;
         }
+        log_reservation_event(state, "EXIT_FORWARD_RELAY_COMPLETED").await;
         OutboundEventOutcome::Completed
     }
 
     fn relay_authority_is_current(&self, pending: &PendingRelayForward, now_ms: u64) -> bool {
         let control_current = self.local_relay_snapshot.as_ref().is_some_and(|current| {
-            current == &pending.authorized_control
-                && current.expires_at_ms >= pending.operation_expires_at_ms
+            direct_relay_authority_lineage_matches(
+                current,
+                &pending.authorized_control,
+                pending.operation_expires_at_ms,
+            )
         });
         if !control_current
-            || !self.forwarded_exit_peer_is_eligible(pending.expected_exit_peer, now_ms)
+            || pending.operation_expires_at_ms <= now_ms
+            || !self.relay_forward_exit_peer_is_eligible(
+                pending.key.authenticated_client_peer,
+                pending.expected_exit_peer,
+            )
         {
             return false;
         }
@@ -3958,7 +8635,16 @@ impl DiscoveryRuntime {
                 .is_some_and(|current| {
                     current == expected && current.expires_at_ms >= pending.operation_expires_at_ms
                 }),
-            None => pending.operation == ExitForwardOperation::FetchExitAdvertisement,
+            None => matches!(
+                pending.operation,
+                ExitForwardOperation::FetchExitAdvertisement
+                    | ExitForwardOperation::NativeProbeReady
+                    | ExitForwardOperation::NativeProbeAuthorize
+                    | ExitForwardOperation::NativeProbeResult
+                    | ExitForwardOperation::UdpSessionStart
+                    | ExitForwardOperation::MptcpSessionStart
+                    | ExitForwardOperation::MpquicSessionStart
+            ),
         }
     }
 
@@ -3967,6 +8653,21 @@ impl DiscoveryRuntime {
         pending: &PendingRelayForward,
         response: Option<ExitForwardResponse>,
     ) {
+        let response_bytes = response.as_ref().map_or(0, |response| {
+            encode_canonical(
+                response,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .map_or(
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+                |encoded| encoded.len(),
+            )
+        });
+        let reserved_bytes = completed_ledger_reservation_bytes(
+            pending.canonical_request.len(),
+            response_bytes,
+            pending.reserved_bytes,
+        );
         let previous = self.completed_relay_forwards.insert(
             pending.key,
             CompletedRelayForward {
@@ -3975,7 +8676,7 @@ impl DiscoveryRuntime {
                 operation: pending.operation,
                 response,
                 expires_at_ms: pending.operation_expires_at_ms,
-                reserved_bytes: pending.reserved_bytes,
+                reserved_bytes,
             },
         );
         debug_assert!(previous.is_none(), "logical relay result already cached");
@@ -3992,7 +8693,159 @@ impl DiscoveryRuntime {
         .ok()
     }
 
-    fn finish_relay_definitive(&mut self, pending: PendingRelayForward) {
+    async fn finish_udp_session_unavailable(&mut self, udp: PendingUdpSessionStart) {
+        let PendingUdpSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            route,
+        } = udp;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::UdpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
+    async fn finish_mptcp_session_unavailable(&mut self, mptcp: PendingMptcpSessionStart) {
+        let PendingMptcpSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            selected_path_ids: _,
+            route,
+        } = mptcp;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
+    async fn finish_mpquic_session_unavailable(&mut self, mpquic: PendingMpquicSessionStart) {
+        let PendingMpquicSessionStart {
+            datapath_request_id,
+            route_context_id,
+            channels,
+            canonical_start: _,
+            route,
+        } = mpquic;
+        self.retire_production_relay_route(route_context_id, route)
+            .await;
+        if let Ok(response) = DatapathRelayResponse::unavailable(
+            datapath_request_id.to_vec(),
+            DatapathRelayOperation::MpquicSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            for channel in channels {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(channel, response.clone());
+            }
+        }
+    }
+
+    /// Destroy before releasing the Relay reservation. A failed Destroy keeps the exact affine
+    /// owner quarantined for the actor's bounded maintenance retry and never makes it reusable.
+    async fn retire_production_relay_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: PreparedProductionRelayRoute,
+    ) -> bool {
+        route.usable = false;
+        route.expires_at_ms = 0;
+        if self
+            .helper
+            .destroy_context(&route.helper_owner)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .relay_service
+                .as_mut()
+                .and_then(|service| service.release(route.accepted.reservation_id()).ok());
+            true
+        } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+            let previous = self
+                .prepared_production_relay_routes
+                .insert(route_context_id, route);
+            debug_assert!(previous.is_none(), "UDP Relay cleanup owner collision");
+            false
+        }
+    }
+
+    fn finish_relay_definitive(&mut self, mut pending: PendingRelayForward) {
+        debug_assert!(
+            pending.udp_session.is_none()
+                && pending.mptcp_session.is_none()
+                && pending.mpquic_session.is_none(),
+            "session cleanup must use the awaited affine path"
+        );
+        if let Some(native) = pending.native_ready.take() {
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeReady,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            return;
+        }
+        if let Some(native) = pending.native_authorization.take() {
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeAuthorize,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            return;
+        }
+        if let Some(native) = pending.native_result.take() {
+            if let Ok(response) = DatapathRelayResponse::unavailable(
+                native.datapath_request_id.to_vec(),
+                DatapathRelayOperation::NativeProbeStart,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self
+                    .service
+                    .send_datapath_relay_response(native.channel, response);
+            }
+            self.destroy_helper_owner(native.helper_owner);
+            return;
+        }
         let response = Self::unavailable_for_pending_relay(&pending);
         self.cache_relay_result(&pending, response.clone());
         if let Some(response) = response {
@@ -4005,7 +8858,10 @@ impl DiscoveryRuntime {
     }
 
     fn finish_relay_ambiguity(&mut self, pending: PendingRelayForward) {
-        if pending.dispatch_attempts < MAX_DISPATCH_ATTEMPTS
+        if pending.native_ready.is_none()
+            && pending.native_authorization.is_none()
+            && pending.native_result.is_none()
+            && pending.dispatch_attempts < MAX_DISPATCH_ATTEMPTS
             && pending.operation_expires_at_ms > unix_millis()
         {
             self.retry_relay_forwards.insert(
@@ -4024,7 +8880,205 @@ impl DiscoveryRuntime {
         }
     }
 
-    fn fail_relay_forward(
+    async fn finish_relay_ambiguity_awaited(&mut self, mut pending: PendingRelayForward) {
+        if let Some(udp) = pending.udp_session.take() {
+            self.finish_udp_session_unavailable(udp).await;
+        } else if let Some(mptcp) = pending.mptcp_session.take() {
+            self.finish_mptcp_session_unavailable(mptcp).await;
+        } else if let Some(mpquic) = pending.mpquic_session.take() {
+            self.finish_mpquic_session_unavailable(mpquic).await;
+        } else {
+            self.finish_relay_ambiguity(pending);
+        }
+    }
+
+    fn destroy_helper_owner(&self, owner: RuntimeBoundPreparedLeaseBatch) {
+        let helper = self.helper.clone();
+        tokio::spawn(async move {
+            let _ = helper.destroy_context(&owner).await;
+        });
+    }
+
+    async fn destroy_expired_exit_native_attempts(&mut self, now_ms: u64) -> usize {
+        self.expire_pending_exit_native_ready(now_ms);
+        let expired = self
+            .exit_native_ready_attempts
+            .iter()
+            .filter_map(|(attempt_id, attempt)| {
+                helper_cleanup_due(attempt.expires_at_ms, attempt.cleanup_not_before_ms, now_ms)
+                    .then_some(*attempt_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for attempt_id in expired {
+            let Some(mut attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
+                continue;
+            };
+            if self
+                .helper
+                .destroy_context(&attempt.helper_owner)
+                .await
+                .is_ok()
+            {
+                destroyed += 1;
+            } else {
+                attempt.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+                let previous = self.exit_native_ready_attempts.insert(attempt_id, attempt);
+                debug_assert!(previous.is_none(), "expired Exit attempt was removed above");
+            }
+        }
+        destroyed
+    }
+
+    async fn destroy_expired_production_relay_routes(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .prepared_production_relay_routes
+            .iter()
+            .filter_map(|(route_context_id, route)| {
+                helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    .then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for route_context_id in expired {
+            let Some(mut route) = self
+                .prepared_production_relay_routes
+                .remove(&route_context_id)
+            else {
+                continue;
+            };
+            route.usable = false;
+            if self
+                .helper
+                .destroy_context(&route.helper_owner)
+                .await
+                .is_ok()
+            {
+                let _ = self
+                    .relay_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.accepted.reservation_id()).ok());
+                destroyed += 1;
+            } else {
+                route.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+                let previous = self
+                    .prepared_production_relay_routes
+                    .insert(route_context_id, route);
+                debug_assert!(previous.is_none(), "expired Relay route was removed above");
+            }
+        }
+        destroyed
+    }
+
+    async fn destroy_expired_production_exit_routes(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .prepared_production_exit_routes
+            .iter()
+            .filter_map(|(route_context_id, route)| {
+                helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    .then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for route_context_id in expired {
+            let Some(mut route) = self
+                .prepared_production_exit_routes
+                .remove(&route_context_id)
+            else {
+                continue;
+            };
+            if self
+                .helper
+                .destroy_context(&route.helper_owner)
+                .await
+                .is_ok()
+            {
+                let _ = self
+                    .exit_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                destroyed += 1;
+            } else {
+                route.cleanup_not_before_ms =
+                    unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+                let previous = self
+                    .prepared_production_exit_routes
+                    .insert(route_context_id, route);
+                debug_assert!(previous.is_none(), "expired Exit route was removed above");
+            }
+        }
+        destroyed
+    }
+
+    async fn expire_pending_mptcp_exit_sessions(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .pending_mptcp_exit_sessions
+            .iter()
+            .filter_map(|(route_context_id, pending)| {
+                (pending.expires_at_ms <= now_ms).then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let count = expired.len();
+        for route_context_id in expired {
+            let Some(pending) = self.pending_mptcp_exit_sessions.remove(&route_context_id) else {
+                continue;
+            };
+            self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
+                .await;
+        }
+        count
+    }
+
+    async fn expire_pending_mpquic_exit_sessions(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .pending_mpquic_exit_sessions
+            .iter()
+            .filter_map(|(route_context_id, pending)| {
+                (pending.expires_at_ms <= now_ms).then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let count = expired.len();
+        for route_context_id in expired {
+            let Some(pending) = self.pending_mpquic_exit_sessions.remove(&route_context_id) else {
+                continue;
+            };
+            self.finish_mpquic_exit_session_unavailable(route_context_id, pending)
+                .await;
+        }
+        count
+    }
+
+    async fn destroy_expired_active_mptcp_exit_routes(&mut self, now_ms: u64) -> usize {
+        let expired = self
+            .active_production_mptcp_exit_routes
+            .iter()
+            .filter_map(|(route_context_id, route)| {
+                (helper_cleanup_due(route.expires_at_ms, route.cleanup_not_before_ms, now_ms)
+                    && !route.runtime_started)
+                    .then_some(*route_context_id)
+            })
+            .collect::<Vec<_>>();
+        let mut destroyed = 0;
+        for route_context_id in expired {
+            let Some(route) = self
+                .active_production_mptcp_exit_routes
+                .remove(&route_context_id)
+            else {
+                continue;
+            };
+            if self
+                .retire_active_mptcp_exit_route(route_context_id, route)
+                .await
+            {
+                destroyed += 1;
+            }
+        }
+        destroyed
+    }
+
+    async fn fail_relay_forward(
         &mut self,
         request_id: request_response::OutboundRequestId,
         peer: Libp2pPeerId,
@@ -4040,53 +9094,155 @@ impl DiscoveryRuntime {
             .remove(&request_id)
             .expect("present");
         self.relay_forward_index.remove(&pending.key);
-        self.finish_relay_ambiguity(pending);
+        Box::pin(self.finish_relay_ambiguity_awaited(pending)).await;
         OutboundEventOutcome::Failed
     }
 
-    fn answer_exit_forward_upstream(
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Exit admission path validates every forwarded operation and response"
+    )]
+    async fn answer_exit_forward_upstream(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
         connection_id: ConnectionId,
         request: UpstreamExitForwardRequest,
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
     ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                return;
+            }};
+        }
         let request = request.into_forward_request();
         let Ok(operation) = request.validated_operation() else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
-        if operation == ExitForwardOperation::NativeProbePermit {
-            if let Some(prepared) = self.prepare_native_probe_permit_response(
+        if operation == ExitForwardOperation::NativeProbeReady {
+            self.answer_native_probe_ready_upstream(
                 authenticated_control_relay,
                 connection_id,
                 &request,
                 channel,
-            ) {
-                self.send_prepared_native_probe_permit_response(prepared);
+                state,
+            )
+            .await;
+            return;
+        }
+        if operation == ExitForwardOperation::NativeProbeAuthorize {
+            if let Some((connection, authenticated_data_relay, response)) = self
+                .prepare_native_probe_authorization_response(
+                    authenticated_control_relay,
+                    connection_id,
+                    &request,
+                )
+                .await
+            {
+                self.send_prepared_native_probe_authorization_response(
+                    PreparedNativeProbeAuthorizationResponse {
+                        connection,
+                        authenticated_data_relay,
+                        channel,
+                        response,
+                    },
+                );
+                log_relay_forward_admission(
+                    Some(state),
+                    "NATIVE_PROBE_AUTHORIZATION_EXIT_RESPONDED",
+                );
+            } else {
+                let response = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeAuthorize,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                );
+                if let Ok(response) = response {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                log_relay_forward_admission(
+                    Some(state),
+                    "NATIVE_PROBE_AUTHORIZATION_EXIT_REJECTED",
+                );
+            }
+            return;
+        }
+        if operation == ExitForwardOperation::NativeProbeResult {
+            self.answer_native_probe_result_upstream(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+                state,
+            )
+            .await;
+            return;
+        }
+        if operation == ExitForwardOperation::NativeProbePermit {
+            if let Some((connection, authenticated_control_relay, response)) = self
+                .prepare_native_probe_permit_response(
+                    authenticated_control_relay,
+                    connection_id,
+                    &request,
+                )
+            {
+                self.send_prepared_native_probe_permit_response(
+                    PreparedNativeProbePermitResponse {
+                        connection,
+                        authenticated_control_relay,
+                        channel,
+                        response,
+                    },
+                );
+                log_relay_forward_admission(Some(state), "NATIVE_PROBE_PERMIT_EXIT_RESPONDED");
+            } else {
+                let response = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbePermit,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                );
+                if let Ok(response) = response {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                log_relay_forward_admission(Some(state), "NATIVE_PROBE_PERMIT_EXIT_REJECTED");
             }
             return;
         }
         let Some(control_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Some(control_relay_public_key) = fixed_bytes::<32>(request.control_relay_public_key())
         else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Ok(control_relay_peer) = Libp2pPeerId::from_bytes(request.control_relay_peer_id())
         else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let Ok(exit_peer) = Libp2pPeerId::from_bytes(request.exit_peer_id()) else {
-            return;
+            reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
         let local_peer = *self.service.local_peer_id();
         let now_ms = unix_millis();
         let valid_exit_target = operation == ExitForwardOperation::FetchExitAdvertisement
             || fixed_bytes::<32>(request.exit_node_id()) == Some(self.local_node_id);
-        let valid_control_relay = self
-            .direct_relays
+        let valid_control_relay = matches!(
+            operation,
+            ExitForwardOperation::FetchExitAdvertisement
+                | ExitForwardOperation::UdpSessionStart
+                | ExitForwardOperation::MptcpSessionStart
+                | ExitForwardOperation::MpquicSessionStart
+        ) || self
+            .exit_control_relays
             .get(&authenticated_control_relay)
+            .or_else(|| self.direct_relays.get(&authenticated_control_relay))
             .is_some_and(|capability| {
                 direct_relay_capability_matches(
                     capability,
@@ -4098,7 +9254,7 @@ impl DiscoveryRuntime {
             });
         if request.validate().is_err()
             || !forward_request_scope_matches(&request, operation, now_ms)
-            || !self.roles.exit
+            || !self.exit_authority_enabled()
             || self.exit_service.is_none()
             || control_relay_peer != authenticated_control_relay
             || !valid_control_relay
@@ -4106,11 +9262,32 @@ impl DiscoveryRuntime {
             || exit_peer == authenticated_control_relay
             || !valid_exit_target
         {
+            reject!("EXIT_FORWARD_EXIT_SCOPE_REJECTED");
+        }
+        if operation == ExitForwardOperation::MptcpSessionStart {
+            self.begin_production_mptcp_exit_session(
+                authenticated_control_relay,
+                &request,
+                channel,
+                state,
+            )
+            .await;
+            return;
+        }
+        if operation == ExitForwardOperation::MpquicSessionStart {
+            self.begin_production_mpquic_exit_session(
+                authenticated_control_relay,
+                &request,
+                channel,
+                state,
+            )
+            .await;
             return;
         }
         let local_peer_bytes = local_peer.to_bytes();
-        let response = if operation == ExitForwardOperation::FetchExitAdvertisement {
-            self.served_local_advertisement
+        let responses = match operation {
+            ExitForwardOperation::FetchExitAdvertisement => self
+                .served_local_advertisement
                 .as_ref()
                 .filter(|advertisement| {
                     decode_canonical::<SignedEnvelope>(
@@ -4120,29 +9297,1628 @@ impl DiscoveryRuntime {
                     .is_ok_and(|envelope| envelope.expires_at_ms > now_ms)
                 })
                 .cloned()
-                .and_then(|advertisement| {
-                    ExitForwardResponse::granted(
-                        request.forward_id().to_vec(),
-                        operation,
-                        self.local_node_id.to_vec(),
-                        local_peer_bytes.clone(),
-                        vec![advertisement],
+                .map(|advertisement| vec![advertisement]),
+            ExitForwardOperation::CapacityHold => {
+                let identity = &self.identity;
+                self.exit_service
+                    .as_mut()
+                    .and_then(|service| {
+                        service
+                            .hold_capacity_with(
+                                request.canonical_request(),
+                                &control_relay_node_id,
+                                &authenticated_control_relay.to_bytes(),
+                                now_ms,
+                                self.local_public_key,
+                                |message| identity.sign(message).ok(),
+                            )
+                            .ok()
+                    })
+                    .map(|accepted| {
+                        vec![
+                            accepted.signed_capability().to_vec(),
+                            accepted.signed_hold().to_vec(),
+                        ]
+                    })
+            }
+            ExitForwardOperation::ProbePermit => {
+                let identity = &self.identity;
+                self.exit_service
+                    .as_mut()
+                    .and_then(|service| {
+                        service
+                            .issue_probe_permit_with(
+                                request.canonical_request(),
+                                &control_relay_node_id,
+                                &authenticated_control_relay.to_bytes(),
+                                now_ms,
+                                self.local_public_key,
+                                |message| identity.sign(message).ok(),
+                            )
+                            .ok()
+                    })
+                    .map(|accepted| vec![accepted.encoded().to_vec()])
+            }
+            ExitForwardOperation::ConfirmRelay => {
+                let identity = &self.identity;
+                let accepted = self.exit_service.as_mut().and_then(|service| {
+                    service
+                        .confirm_relay_with(
+                            request.canonical_request(),
+                            &control_relay_node_id,
+                            &authenticated_control_relay.to_bytes(),
+                            now_ms,
+                            self.local_public_key,
+                            |message| identity.sign(message).ok(),
+                        )
+                        .ok()
+                });
+                if let Some(accepted) = accepted.as_ref() {
+                    self.activate_confirmed_production_exit_path(
+                        request.canonical_request(),
+                        accepted,
                     )
-                    .ok()
-                })
-        } else {
-            ExitForwardResponse::unavailable(
-                request.forward_id().to_vec(),
-                operation,
-                self.local_node_id.to_vec(),
-                local_peer_bytes,
-            )
-            .ok()
+                    .await;
+                }
+                accepted.map(|accepted| vec![accepted.signed_receipt().to_vec()])
+            }
+            ExitForwardOperation::FinalizeReservation => {
+                self.recent_native_exit_evidence
+                    .retain(|evidence| evidence.expires_at_ms > now_ms);
+                let verifier =
+                    ExactNativeExitEvidenceVerifier::new(&self.recent_native_exit_evidence, now_ms);
+                let response = self
+                    .finalize_production_exit_route(
+                        &request,
+                        control_relay_node_id,
+                        authenticated_control_relay,
+                        now_ms,
+                        &verifier,
+                    )
+                    .await;
+                if response.is_some() {
+                    let consumed = verifier.consumed();
+                    self.recent_native_exit_evidence
+                        .retain(|evidence| !consumed.contains(&evidence.evidence_id));
+                }
+                response
+            }
+            ExitForwardOperation::UdpSessionStart => self
+                .start_production_udp_exit_session(request.canonical_request(), now_ms, state)
+                .await
+                .map(|signal| vec![signal]),
+            ExitForwardOperation::NativeProbePermit
+            | ExitForwardOperation::NativeProbeAuthorize
+            | ExitForwardOperation::NativeProbeReady
+            | ExitForwardOperation::NativeProbeResult
+            | ExitForwardOperation::MptcpSessionStart
+            | ExitForwardOperation::MpquicSessionStart
+            | ExitForwardOperation::Unspecified => None,
         };
+        let response = responses
+            .and_then(|responses| {
+                ExitForwardResponse::granted(
+                    request.forward_id().to_vec(),
+                    operation,
+                    self.local_node_id.to_vec(),
+                    local_peer_bytes.clone(),
+                    responses,
+                )
+                .ok()
+            })
+            .or_else(|| {
+                ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    operation,
+                    self.local_node_id.to_vec(),
+                    local_peer_bytes,
+                )
+                .ok()
+            });
         if let Some(response) = response {
             let _ = self
                 .service
                 .send_exit_forward_upstream_response(channel, response.into());
+            log_relay_forward_admission(Some(state), "EXIT_FORWARD_EXIT_RESPONDED");
+        } else {
+            log_relay_forward_admission(Some(state), "EXIT_FORWARD_EXIT_RESPONSE_UNAVAILABLE");
+        }
+    }
+
+    /// Prepare truthful Exit helper endpoints, finalize through one exact evidence verifier and
+    /// retain every affine owner needed by confirmation and a transport-specific session Start.
+    ///
+    /// The current caller supplies a fail-closed verifier. The native-evidence bridge replaces
+    /// only that argument with its short-lived exact ticket; this transaction never accepts
+    /// structural probe fields on their own.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one fail-atomic Exit helper Prepare and signed finalization transaction"
+    )]
+    async fn finalize_production_exit_route<V>(
+        &mut self,
+        request: &ExitForwardRequest,
+        authenticated_control_relay_node_id: [u8; 32],
+        authenticated_control_relay: Libp2pPeerId,
+        now_ms: u64,
+        evidence_verifier: &V,
+    ) -> Option<Vec<Vec<u8>>>
+    where
+        V: ProbeEvidenceVerifier + ?Sized,
+    {
+        let finalize =
+            decoded_signed_payload::<ExitReservationFinalizeRequest>(request.canonical_request())?;
+        let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&finalize.route_context_id)?;
+        let capability =
+            decoded_signed_payload::<ClientSessionCapability>(&finalize.client_session_capability)?;
+
+        // Kernel MPTCP owns a fresh per-route incarnation. Both userspace native QUIC modes must
+        // instead sign the real process instance observed during preflight.
+        let native_mpquic = match capability.allowed_transports.as_slice() {
+            [transport] if *transport == Transport::TcpMptcp as i32 => false,
+            [transport]
+                if *transport == Transport::UdpSinglePath as i32
+                    || *transport == Transport::MultipathQuic as i32 =>
+            {
+                true
+            }
+            _ => return None,
+        };
+        if let Some(existing) = self.prepared_production_exit_routes.get(&route_context_id) {
+            return (existing.canonical_finalize_request == request.canonical_request()
+                && existing.expires_at_ms > now_ms)
+                .then(|| exit_finalize_response(&existing.bundle));
+        }
+        if self.prepared_production_exit_routes.len() >= MAX_CONCURRENT_FORWARDING_STREAMS {
+            return None;
+        }
+        let mpquic_preflight = if native_mpquic {
+            Some(
+                ProductionMpquicExitPreflight::new(
+                    NativeClient::new(self.mpquic_socket.clone()).ok()?,
+                )
+                .await
+                .ok()?,
+            )
+        } else {
+            None
+        };
+        let mut prepare = production_exit_prepare_request(
+            &finalize,
+            request.deadline_unix_ms(),
+            capability.expires_at_ms,
+        )?;
+        let traversal_bindings = finalize
+            .relay_paths
+            .iter()
+            .map(|path| {
+                Some(EndpointTraversalBinding {
+                    path_id: path.path_id,
+                    role: WireguardRole::Exit,
+                    observer_id: fixed_bytes::<32>(&path.relay_node_id)?,
+                    observer_peer_id: Libp2pPeerId::from_bytes(&path.relay_peer_id).ok()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        prepare.traversal_hints = self
+            .exact_endpoint_traversal_hints(traversal_bindings)
+            .unwrap_or_default();
+        let helper_owner = self
+            .helper
+            .prepare_lease_batch(prepare.clone())
+            .await
+            .ok()?;
+        let Ok(exit_batch) =
+            bind_prepared_exit_endpoint_leases(&prepare, helper_owner.prepared().clone())
+        else {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            return None;
+        };
+        let exit_leases = exit_batch.exit_leases().to_vec();
+        let exit_native_instance_id = mpquic_preflight
+            .as_ref()
+            .map_or_else(fresh_exit_route_runtime_instance_id, |preflight| {
+                Some(*preflight.native_instance_id())
+            })?;
+        let mut identity_provider = ProductionExitNativeRouteIdentityProvider;
+        let identity = &self.identity;
+        let finalized = self
+            .exit_service
+            .as_mut()?
+            .finalize_reservation_with_providers(
+                request.canonical_request(),
+                &authenticated_control_relay_node_id,
+                &authenticated_control_relay.to_bytes(),
+                now_ms,
+                self.local_public_key,
+                evidence_verifier,
+                &mut identity_provider,
+                exit_native_instance_id,
+                |path_id| {
+                    exit_leases
+                        .iter()
+                        .find(|lease| lease.path_id() == path_id)
+                        .copied()
+                },
+                |message| identity.sign(message).ok(),
+            );
+        let bundle = match finalized {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    retained_native_evidence = self.recent_native_exit_evidence.len(),
+                    finalized_paths = finalize.relay_paths.len(),
+                    "production Exit finalization rejected"
+                );
+                let _ = self.helper.destroy_context(&helper_owner).await;
+                return None;
+            }
+        };
+        if bundle.accepted().route_context_id() != &route_context_id
+            || bundle.accepted().expires_at_ms() <= now_ms
+            || bundle.accepted().maximum_paths()
+                != u32::try_from(exit_leases.len()).unwrap_or(u32::MAX)
+        {
+            let _ = self.helper.destroy_context(&helper_owner).await;
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(bundle.reservation_id()).ok());
+            return None;
+        }
+        let response = exit_finalize_response(&bundle);
+        let previous = self.prepared_production_exit_routes.insert(
+            route_context_id,
+            PreparedProductionExitRoute {
+                canonical_finalize_request: request.canonical_request().to_vec(),
+                expires_at_ms: bundle.accepted().expires_at_ms(),
+                bundle,
+                helper_owner,
+                exit_leases,
+                pending_activations: HashMap::new(),
+                commit: None,
+                mpquic_preflight,
+                cleanup_not_before_ms: 0,
+            },
+        );
+        debug_assert!(previous.is_none(), "production Exit route checked vacant");
+        Some(response)
+    }
+
+    /// Add one service-authenticated Relay endpoint to the prepared Exit helper route. The exact
+    /// set activates atomically once every finalized path has confirmed. Activation failures keep
+    /// the affine owner and deterministic request so an idempotent confirmation retry can resume.
+    async fn activate_confirmed_production_exit_path(
+        &mut self,
+        encoded_confirmation: &[u8],
+        confirmation: &AcceptedExitConfirmation,
+    ) {
+        let Some(message) =
+            decoded_signed_payload::<ExitReservationConfirmation>(encoded_confirmation)
+        else {
+            return;
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&message.route_context_id)
+        else {
+            return;
+        };
+        let Some(route) = self
+            .prepared_production_exit_routes
+            .get_mut(&route_context_id)
+        else {
+            return;
+        };
+        if confirmation.confirmed_path().reservation_id() != route.bundle.reservation_id()
+            || confirmation.expires_at_ms() <= unix_millis()
+            || route.commit.is_some()
+        {
+            return;
+        }
+        let path_id = confirmation.confirmed_path().path_id();
+        let Some(exit_lease) = route
+            .exit_leases
+            .iter()
+            .find(|lease| lease.path_id() == path_id)
+        else {
+            return;
+        };
+        if exit_lease.public_endpoint().public_key()
+            != confirmation.confirmed_path().exit_public_key()
+        {
+            return;
+        }
+        let relay_endpoint = confirmation.confirmed_path().relay_exit_endpoint();
+        let activation = LeaseActivation {
+            lease_handle: exit_lease.lease_handle().as_bytes().to_vec(),
+            path_id,
+            role: WireguardRole::Exit as i32,
+            peer_public_key: relay_endpoint.public_key().as_bytes().to_vec(),
+            peer_endpoint: Some(public_udp_endpoint(relay_endpoint)),
+            maximum_up_mbps: 0,
+            maximum_down_mbps: 0,
+            signed_relay_reservation: confirmation.signed_relay_reservation().to_vec(),
+            signed_client_relay_request: Vec::new(),
+        };
+        match route.pending_activations.entry(path_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(activation);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &activation => {}
+            std::collections::hash_map::Entry::Occupied(_) => return,
+        }
+        if route.pending_activations.len() != route.exit_leases.len() {
+            return;
+        }
+        let mut leases = route
+            .pending_activations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        leases.sort_unstable_by_key(|lease| lease.path_id);
+        let activation = ActivateLeaseBatch {
+            route_context_id: route_context_id.to_vec(),
+            context_handle: route.helper_owner.prepared().context_handle.clone(),
+            leases,
+        };
+        if self
+            .helper
+            .activate_lease_batch(&mut route.helper_owner, activation.clone())
+            .await
+            .is_ok()
+        {
+            route.commit = Some(commit_lease_batch(&activation));
+        }
+    }
+
+    /// Commit the exact confirmed Exit helper route, adopt its socket and return readiness only
+    /// after a real Quinn listener owns it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "native and DNS-only UDP activation retain affine cleanup in one transaction"
+    )]
+    async fn start_production_udp_exit_session(
+        &mut self,
+        encoded_start: &[u8],
+        now_ms: u64,
+        state: &Arc<RwLock<AgentState>>,
+    ) -> Option<Vec<u8>> {
+        let scope = verified_udp_session_start_scope(encoded_start, now_ms)?;
+        let start = decode_canonical::<UdpSessionStartRequest>(
+            encoded_start,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+        )
+        .ok()?;
+        let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
+        let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
+        if !self.can_start_exit_runtime(&route_context_id) {
+            return None;
+        }
+        let policy = state.read().await.active_policy(now_ms)?;
+        if policy.policy_hash() != &signed_policy_hash {
+            return None;
+        }
+        let route = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)?;
+        let exact_activation = route.exit_leases.len() == 1
+            && route.pending_activations.len() == 1
+            && route
+                .pending_activations
+                .get(&scope.relay.path_id)
+                .is_some_and(|activation| {
+                    activation.signed_relay_reservation == start.signed_relay_reservation()
+                });
+        if route.bundle.signed_exit_reservation() != start.signed_exit_reservation()
+            || route.bundle.accepted().reservation_id().as_slice() != scope.exit.reservation_id
+            || route.bundle.accepted().route_context_id() != &route_context_id
+            || route.bundle.accepted().maximum_paths() != 1
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.mpquic_preflight.is_none()
+            || !exact_activation
+        {
+            return None;
+        }
+        let mut route = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)?;
+        let (shutdown, completed) = self.retain_exit_runtime(
+            route_context_id,
+            route.helper_owner.retain_cleanup_authority(),
+        );
+        let native_scope = route.bundle.accepted().native_route_authorization_scope();
+        let activated = self
+            .exit_service
+            .as_mut()?
+            .bind_udp_path(
+                route.bundle.accepted(),
+                start.signed_relay_reservation(),
+                now_ms,
+            )
+            .ok()?;
+        let commit = route.commit.take()?;
+        let path = activated.into_verified_path();
+        if start.uses_native_connect_ip() {
+            let credential = self
+                .exit_service
+                .as_mut()?
+                .take_native_route_authorization_with_credential(
+                    &native_scope,
+                    start.signed_credential_delivery(),
+                    now_ms,
+                )
+                .ok()?;
+            let certificate_der = route_certificate_der(credential.authorization()).ok()?;
+            let native_path = ExitMpquicPathAuthorization::new(
+                path.path_id(),
+                start.signed_relay_reservation().to_vec(),
+            )?;
+            let result = start_production_single_path_udp_exit(
+                route.mpquic_preflight.take()?,
+                self.helper.clone(),
+                route.helper_owner,
+                commit,
+                credential,
+                native_path,
+                path,
+                policy,
+                signed_policy_hash,
+                Duration::from_secs(self.config.udp.idle_timeout_seconds),
+                certificate_der,
+                self.independent_egress.clone(),
+                now_ms,
+            )
+            .await;
+            let Ok((active, signal)) = result else {
+                let _ = self
+                    .exit_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                return None;
+            };
+            let encoded = encode_canonical(
+                &signal,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .ok()?;
+            tokio::spawn(async move {
+                let _ = active.run_until_shutdown(shutdown, now_ms).await;
+                let _ = completed.send(());
+            });
+            Some(encoded)
+        } else {
+            let authorization = self
+                .exit_service
+                .as_mut()?
+                .take_native_route_authorization(&native_scope, now_ms)
+                .ok()?;
+            let limits =
+                DatagramLimits::new(volparossa_udp::MAX_UDP_PAYLOAD_BYTES, 1_000_000, 1_000_000)
+                    .ok()?;
+            let authorization_timeout = Duration::from_secs(
+                self.config
+                    .udp
+                    .idle_timeout_seconds
+                    .clamp(1, TUNNEL_SETUP_TIMEOUT_SECONDS),
+            );
+            let result = start_production_udp_exit(
+                self.helper.clone(),
+                route.helper_owner,
+                commit,
+                path,
+                authorization,
+                policy,
+                authorization_timeout,
+                limits,
+                self.independent_egress.clone(),
+                now_ms,
+            )
+            .await;
+            let (active, signal) = match result {
+                Ok(active) => active,
+                Err(failure) => {
+                    if let Some(cleanup) = failure.into_cleanup() {
+                        tokio::spawn(async move {
+                            let _ = cleanup.destroy().await;
+                        });
+                    }
+                    let _ = self
+                        .exit_service
+                        .as_mut()
+                        .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                    return None;
+                }
+            };
+            let encoded = encode_canonical(
+                &signal,
+                usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+            )
+            .ok()?;
+            tokio::spawn(async move {
+                let _ = active.run_until_shutdown(shutdown, now_ms).await;
+                let _ = completed.send(());
+            });
+            Some(encoded)
+        }
+    }
+
+    /// Coalesce the same Client-signed MPQUIC proof set from every selected carrying Relay.
+    /// Native Exit startup and every response remain withheld until each Relay has committed and
+    /// arrived under its own confirmation nonce.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact-set MPQUIC coalescing and native startup are one fail-atomic transaction"
+    )]
+    async fn begin_production_mpquic_exit_session(
+        &mut self,
+        authenticated_control_relay: Libp2pPeerId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal, $channel:expr) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_mpquic_exit_unavailable(request.forward_id(), $channel);
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let Some(scope) = verified_mpquic_session_start_scope(request.canonical_request(), now_ms)
+        else {
+            reject!("MPQUIC_SESSION_EXIT_SCOPE_REJECTED", channel);
+        };
+        let Ok(start) = decode_canonical::<MpquicSessionStartRequest>(
+            request.canonical_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPQUIC_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("MPQUIC_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
+            reject!("MPQUIC_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let relay_matches = scope
+            .paths
+            .iter()
+            .filter(|path| {
+                path.relay.relay_node_id == request.control_relay_node_id()
+                    && path.relay.relay_peer_id == authenticated_control_relay.to_bytes()
+                    && forward_id == path.confirmation_nonce[..FORWARD_ID_BYTES]
+            })
+            .collect::<Vec<_>>();
+        let [relay_path] = relay_matches.as_slice() else {
+            reject!("MPQUIC_SESSION_EXIT_RELAY_SET_REJECTED", channel);
+        };
+        let selected_path_ids = scope
+            .paths
+            .iter()
+            .map(|path| path.relay.path_id)
+            .collect::<Vec<_>>();
+        let pending_expiry = scope
+            .expires_at_ms
+            .min(relay_path.expires_at_ms)
+            .min(request.deadline_unix_ms());
+
+        let prepared_matches = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)
+            .is_some_and(|route| {
+                route.bundle.signed_exit_reservation() == start.signed_exit_reservation()
+                    && route.bundle.accepted().reservation_id().as_slice()
+                        == scope.exit.reservation_id
+                    && route.bundle.accepted().route_context_id() == &route_context_id
+                    && usize::try_from(route.bundle.accepted().maximum_paths()).ok()
+                        == Some(selected_path_ids.len())
+                    && route.expires_at_ms > now_ms
+                    && route.commit.is_some()
+                    && route.mpquic_preflight.is_some()
+                    && route.exit_leases.len() == selected_path_ids.len()
+                    && route.pending_activations.len() == selected_path_ids.len()
+                    && scope.paths.iter().zip(start.paths()).all(|(path, proof)| {
+                        route
+                            .pending_activations
+                            .get(&path.relay.path_id)
+                            .is_some_and(|activation| {
+                                activation.signed_relay_reservation
+                                    == proof.signed_relay_reservation()
+                            })
+                    })
+            });
+        if !prepared_matches || pending_expiry <= now_ms {
+            reject!("MPQUIC_SESSION_EXIT_OWNER_MISMATCH", channel);
+        }
+
+        if let Some(existing) = self.pending_mpquic_exit_sessions.get(&route_context_id) {
+            if existing.canonical_start != request.canonical_request()
+                || existing.selected_path_ids != selected_path_ids
+            {
+                let pending = self
+                    .pending_mpquic_exit_sessions
+                    .remove(&route_context_id)
+                    .expect("observed MPQUIC Exit session");
+                self.finish_mpquic_exit_session_unavailable(route_context_id, pending)
+                    .await;
+                reject!("MPQUIC_SESSION_EXIT_SET_CONFLICT", channel);
+            }
+        }
+
+        if let Some(pending) = self.pending_mpquic_exit_sessions.get_mut(&route_context_id) {
+            pending.expires_at_ms = pending.expires_at_ms.min(pending_expiry);
+            match pending.relays.entry(relay_path.relay.path_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if entry.get().forward_id == forward_id
+                        && entry.get().channels.len() < MAX_COALESCED_WAITERS =>
+                {
+                    entry.get_mut().channels.push(channel);
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    reject!("MPQUIC_SESSION_EXIT_RELAY_RETRY_CONFLICT", channel);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(PendingMpquicExitRelay {
+                        forward_id,
+                        channels: vec![channel],
+                    });
+                }
+            }
+        } else {
+            self.pending_mpquic_exit_sessions.insert(
+                route_context_id,
+                PendingMpquicExitSession {
+                    canonical_start: request.canonical_request().to_vec(),
+                    selected_path_ids: selected_path_ids.clone(),
+                    relays: HashMap::from([(
+                        relay_path.relay.path_id,
+                        PendingMpquicExitRelay {
+                            forward_id,
+                            channels: vec![channel],
+                        },
+                    )]),
+                    expires_at_ms: pending_expiry,
+                },
+            );
+        }
+        let complete = self
+            .pending_mpquic_exit_sessions
+            .get(&route_context_id)
+            .is_some_and(|pending| {
+                pending.relays.len() == pending.selected_path_ids.len()
+                    && pending
+                        .selected_path_ids
+                        .iter()
+                        .all(|path_id| pending.relays.contains_key(path_id))
+            });
+        if !complete {
+            log_relay_forward_admission(Some(state), "MPQUIC_SESSION_EXIT_WAITING_EXACT_SET");
+            return;
+        }
+        let pending = self
+            .pending_mpquic_exit_sessions
+            .remove(&route_context_id)
+            .expect("complete MPQUIC Exit session");
+        let signal = self
+            .start_production_mpquic_exit_session(&pending.canonical_start, now_ms, state)
+            .await;
+        if let Some(encoded_signal) = signal {
+            self.send_pending_mpquic_exit_granted(pending, &encoded_signal);
+            log_relay_forward_admission(Some(state), "MPQUIC_SESSION_EXIT_NATIVE_READY");
+        } else {
+            if let Some(route) = self
+                .prepared_production_exit_routes
+                .remove(&route_context_id)
+            {
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+            }
+            self.send_pending_mpquic_exit_unavailable(pending);
+            log_relay_forward_admission(Some(state), "MPQUIC_SESSION_EXIT_RUNTIME_REJECTED");
+        }
+    }
+
+    /// Consume one exact Client-session-signed opaque bearer at the Exit, commit every confirmed
+    /// helper path and return readiness only after the preflighted native Exit owns all listeners.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one affine native Exit startup retains exact cancellation and cleanup authority"
+    )]
+    async fn start_production_mpquic_exit_session(
+        &mut self,
+        encoded_start: &[u8],
+        now_ms: u64,
+        state: &Arc<RwLock<AgentState>>,
+    ) -> Option<Vec<u8>> {
+        let scope = verified_mpquic_session_start_scope(encoded_start, now_ms)?;
+        let start = decode_canonical::<MpquicSessionStartRequest>(
+            encoded_start,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+        )
+        .ok()?;
+        let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)?;
+        let signed_policy_hash = fixed_bytes::<32>(&scope.exit.policy_hash)?;
+        if !self.can_start_exit_runtime(&route_context_id) {
+            return None;
+        }
+        let policy = state.read().await.active_policy(now_ms)?;
+        if policy.policy_hash() != &signed_policy_hash {
+            return None;
+        }
+        let route = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)?;
+        let exact_activations = route.exit_leases.len() == start.paths().len()
+            && route.pending_activations.len() == start.paths().len()
+            && scope
+                .paths
+                .iter()
+                .zip(start.paths())
+                .all(|(verified, proof)| {
+                    route
+                        .pending_activations
+                        .get(&verified.path_id)
+                        .is_some_and(|activation| {
+                            activation.signed_relay_reservation == proof.signed_relay_reservation()
+                        })
+                });
+        if route.bundle.signed_exit_reservation() != start.signed_exit_reservation()
+            || route.bundle.accepted().reservation_id().as_slice() != scope.exit.reservation_id
+            || route.bundle.accepted().route_context_id() != &route_context_id
+            || usize::try_from(route.bundle.accepted().maximum_paths()).ok()? != scope.paths.len()
+            || route.expires_at_ms <= now_ms
+            || route.commit.is_none()
+            || route.mpquic_preflight.is_none()
+            || !exact_activations
+        {
+            return None;
+        }
+        let native_scope = route.bundle.accepted().native_route_authorization_scope();
+        let credential = self
+            .exit_service
+            .as_mut()?
+            .take_native_route_authorization_with_credential(
+                &native_scope,
+                start.signed_credential_delivery(),
+                now_ms,
+            )
+            .ok()?;
+        let mut route = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)?;
+        let (shutdown, completed) = self.retain_exit_runtime(
+            route_context_id,
+            route.helper_owner.retain_cleanup_authority(),
+        );
+        let paths = scope
+            .paths
+            .into_iter()
+            .map(|path| {
+                ExitMpquicPathAuthorization::new(path.path_id, path.signed_relay_reservation)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (active, signal) = match start_production_mpquic_exit(
+            route.mpquic_preflight.take()?,
+            self.helper.clone(),
+            route.helper_owner,
+            route.commit.take()?,
+            credential,
+            paths,
+            policy,
+            signed_policy_hash,
+            Duration::from_secs(self.config.udp.idle_timeout_seconds),
+            self.independent_egress.clone(),
+            now_ms,
+        )
+        .await
+        {
+            Ok(started) => started,
+            Err(error) => {
+                // The error contains only fixed local validation text or the native process's
+                // bounded protocol diagnostic code; it never contains route secrets or traffic.
+                eprintln!("production MPQUIC Exit startup failed: {error}");
+                let _ = self
+                    .exit_service
+                    .as_mut()
+                    .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+                return None;
+            }
+        };
+        let encoded = encode_canonical(
+            &signal,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        )
+        .ok()?;
+        spawn_exit_mpquic_runtime(active, shutdown, completed, now_ms);
+        Some(encoded)
+    }
+
+    /// Coalesce one byte-identical complete MPTCP Start from every authenticated selected Relay.
+    ///
+    /// The first Relay cannot force an early listener. Only after the exact 2..=8 path set has
+    /// arrived do we consume the finalized Exit owner, commit all leases, adopt a real
+    /// `IPPROTO_MPTCP` listener, and register every selected Exit path.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact-set coalescing and affine Exit activation are one fail-atomic transaction"
+    )]
+    async fn begin_production_mptcp_exit_session(
+        &mut self,
+        authenticated_control_relay: Libp2pPeerId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal, $channel:expr) => {{
+                log_relay_forward_admission(Some(state), $code);
+                self.send_mptcp_exit_unavailable(request.forward_id(), $channel);
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        if !self.exit_authority_enabled() {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        }
+        let Some(scope) = verified_mptcp_session_start_scope(request.canonical_request(), now_ms)
+        else {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        };
+        let Ok(start) = decode_canonical::<MptcpSessionStartRequest>(
+            request.canonical_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let Some(route_context_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.route_context_id)
+        else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        if self.exit_runtime_retirements.len() >= MAX_LEDGER_ENTRIES
+            && !self
+                .active_production_mptcp_exit_routes
+                .contains_key(&route_context_id)
+        {
+            reject!("MPTCP_SESSION_EXIT_SCOPE_REJECTED", channel);
+        }
+        let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
+            reject!("MPTCP_SESSION_EXIT_FRAME_REJECTED", channel);
+        };
+        let relay_matches = scope
+            .paths
+            .iter()
+            .filter(|path| {
+                path.relay.relay_node_id == request.control_relay_node_id()
+                    && path.relay.relay_peer_id == authenticated_control_relay.to_bytes()
+                    && forward_id == path.confirmation_nonce[..FORWARD_ID_BYTES]
+            })
+            .collect::<Vec<_>>();
+        let [relay_path] = relay_matches.as_slice() else {
+            reject!("MPTCP_SESSION_EXIT_RELAY_SET_REJECTED", channel);
+        };
+        let selected_path_ids = scope
+            .paths
+            .iter()
+            .map(|path| path.relay.path_id)
+            .collect::<Vec<_>>();
+        let pending_expiry = scope
+            .paths
+            .iter()
+            .map(|path| path.expires_at_ms)
+            .min()
+            .unwrap_or(0)
+            .min(request.deadline_unix_ms());
+
+        if let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get(&route_context_id)
+        {
+            if active.expires_at_ms > now_ms
+                && active.canonical_start == request.canonical_request()
+            {
+                self.send_mptcp_exit_granted(
+                    request.forward_id(),
+                    active.encoded_signal.clone(),
+                    channel,
+                );
+                return;
+            }
+            reject!("MPTCP_SESSION_EXIT_ACTIVE_CONFLICT", channel);
+        }
+
+        let prepared_matches = self
+            .prepared_production_exit_routes
+            .get(&route_context_id)
+            .is_some_and(|route| {
+                route.bundle.signed_exit_reservation() == start.signed_exit_reservation()
+                    && route.bundle.accepted().reservation_id().as_slice()
+                        == scope.exit.reservation_id
+                    && route.bundle.accepted().route_context_id() == &route_context_id
+                    && usize::try_from(route.bundle.accepted().maximum_paths()).ok()
+                        == Some(selected_path_ids.len())
+                    && route.expires_at_ms > now_ms
+                    && route.commit.is_some()
+                    && route.exit_leases.len() == selected_path_ids.len()
+                    && route.pending_activations.len() == selected_path_ids.len()
+                    && scope.paths.iter().zip(start.paths()).all(|(path, proof)| {
+                        route
+                            .pending_activations
+                            .get(&path.relay.path_id)
+                            .is_some_and(|activation| {
+                                activation.signed_relay_reservation
+                                    == proof.signed_relay_reservation()
+                            })
+                    })
+            });
+        if !prepared_matches {
+            reject!("MPTCP_SESSION_EXIT_OWNER_MISMATCH", channel);
+        }
+
+        if let Some(existing) = self.pending_mptcp_exit_sessions.get(&route_context_id) {
+            if existing.canonical_start != request.canonical_request()
+                || existing.selected_path_ids != selected_path_ids
+            {
+                let pending = self
+                    .pending_mptcp_exit_sessions
+                    .remove(&route_context_id)
+                    .expect("observed MPTCP Exit session");
+                self.finish_mptcp_exit_session_unavailable(route_context_id, pending)
+                    .await;
+                reject!("MPTCP_SESSION_EXIT_SET_CONFLICT", channel);
+            }
+        }
+
+        if let Some(pending) = self.pending_mptcp_exit_sessions.get_mut(&route_context_id) {
+            pending.expires_at_ms = pending.expires_at_ms.min(pending_expiry);
+            match pending.relays.entry(relay_path.relay.path_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry)
+                    if entry.get().forward_id == forward_id
+                        && entry.get().channels.len() < MAX_COALESCED_WAITERS =>
+                {
+                    entry.get_mut().channels.push(channel);
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    reject!("MPTCP_SESSION_EXIT_RELAY_RETRY_CONFLICT", channel);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(PendingMptcpExitRelay {
+                        forward_id,
+                        channels: vec![channel],
+                    });
+                }
+            }
+        } else {
+            self.pending_mptcp_exit_sessions.insert(
+                route_context_id,
+                PendingMptcpExitSession {
+                    canonical_start: request.canonical_request().to_vec(),
+                    selected_path_ids: selected_path_ids.clone(),
+                    relays: HashMap::from([(
+                        relay_path.relay.path_id,
+                        PendingMptcpExitRelay {
+                            forward_id,
+                            channels: vec![channel],
+                        },
+                    )]),
+                    expires_at_ms: pending_expiry,
+                },
+            );
+        }
+        let complete = self
+            .pending_mptcp_exit_sessions
+            .get(&route_context_id)
+            .is_some_and(|pending| {
+                pending.relays.len() == pending.selected_path_ids.len()
+                    && pending
+                        .selected_path_ids
+                        .iter()
+                        .all(|path_id| pending.relays.contains_key(path_id))
+            });
+        if !complete {
+            log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_WAITING_EXACT_SET");
+            return;
+        }
+        let pending = self
+            .pending_mptcp_exit_sessions
+            .remove(&route_context_id)
+            .expect("complete MPTCP Exit session");
+        let Some(mut route) = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)
+        else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_OWNER_LOST").await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+
+        let relay_reservations = start
+            .paths()
+            .iter()
+            .map(volparossa_discovery::MptcpSessionPathProof::signed_relay_reservation)
+            .collect::<Vec<_>>();
+        let native_scope = route.bundle.accepted().native_route_authorization_scope();
+        let active_route = match self.exit_service.as_mut().map(|service| {
+            service.bind_tcp_route(route.bundle.accepted(), &relay_reservations, now_ms)
+        }) {
+            Some(Ok(active)) => active,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "MPTCP Exit route binding rejected");
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_ROUTE_BINDING_REJECTED").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+            None => {
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+        };
+        let native_authorization = match self
+            .exit_service
+            .as_mut()
+            .map(|service| service.take_native_route_authorization(&native_scope, now_ms))
+        {
+            Some(Ok(authorization)) => authorization,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "MPTCP Exit native authorization rejected");
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_NATIVE_AUTHORIZATION_REJECTED")
+                    .await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+            None => {
+                log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
+                self.retire_production_exit_route(route_context_id, route)
+                    .await;
+                self.send_pending_mptcp_exit_unavailable(pending);
+                return;
+            }
+        };
+        let Some(commit) = route.commit.take() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_COMMIT_OWNER_LOST").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        if !exact_mptcp_exit_commit(&route, &commit, &selected_path_ids) {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_COMMIT_SCOPE_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let Some(reservation_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.exit.reservation_id)
+        else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_RESERVATION_ID_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(certificate_der) = route_certificate_der(&native_authorization) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_CERTIFICATE_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(wire_signal) = ExitMptcpSessionSignal::new(
+            reservation_id,
+            route_context_id,
+            PRODUCTION_MPTCP_EXIT_PORT,
+            selected_path_ids,
+            certificate_der,
+        ) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SIGNAL_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Ok(listener_signal) = ExitMptcpListenerSignal::try_from_discovery(
+            &wire_signal,
+            &native_authorization.public_identity().certificate_sha256,
+        ) else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LISTENER_SIGNAL_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let Some(encoded_signal) = encode_canonical(
+            &wire_signal,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        )
+        .ok() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SIGNAL_ENCODING_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let context_handle = route.helper_owner.prepared().context_handle.clone();
+        if self
+            .helper
+            .commit_lease_batch(&mut route.helper_owner, commit)
+            .await
+            .is_err()
+        {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_HELPER_COMMIT_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let Ok(transport) =
+            ExitMptcpTransport::acquire_and_activate(&self.helper, listener_signal, context_handle)
+                .await
+        else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_TRANSPORT_REJECTED").await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        if !transport
+            .listener()
+            .local_addr()
+            .is_ok_and(|address| address.port() == PRODUCTION_MPTCP_EXIT_PORT)
+        {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_LISTENER_ADDRESS_REJECTED").await;
+            let _ = transport.shutdown(&self.helper).await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        let expires_at_ms = route.expires_at_ms;
+        let Some(exit_service) = self.exit_service.as_ref() else {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_SERVICE_LOST").await;
+            let _ = transport.shutdown(&self.helper).await;
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        };
+        let runtime = ProductionMptcpExitRuntime::new(
+            self.helper.clone(),
+            route.helper_owner,
+            transport,
+            active_route,
+            native_authorization,
+            exit_service,
+            now_ms,
+        );
+        let runtime = match runtime {
+            Ok(runtime) => runtime,
+            Err(failure) => {
+                let _cause = failure.cause();
+                let active = ActiveProductionMptcpExitRoute {
+                    canonical_start: pending.canonical_start.clone(),
+                    encoded_signal: encoded_signal.clone(),
+                    runtime: None,
+                    cleanup: Some(failure.into_cleanup()),
+                    runtime_started: false,
+                    reservation_id,
+                    expires_at_ms: 0,
+                    cleanup_not_before_ms: 0,
+                };
+                self.active_production_mptcp_exit_routes
+                    .insert(route_context_id, active);
+                self.send_pending_mptcp_exit_unavailable(pending);
+                log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_RUNTIME_REJECTED");
+                return;
+            }
+        };
+        let active = ActiveProductionMptcpExitRoute {
+            canonical_start: pending.canonical_start.clone(),
+            encoded_signal: encoded_signal.clone(),
+            runtime: Some(runtime),
+            cleanup: None,
+            runtime_started: false,
+            reservation_id,
+            expires_at_ms,
+            cleanup_not_before_ms: 0,
+        };
+        if self
+            .active_production_mptcp_exit_routes
+            .contains_key(&route_context_id)
+        {
+            log_reservation_event(state, "MPTCP_SESSION_EXIT_ACTIVE_OWNER_CONFLICT").await;
+            self.retire_active_mptcp_exit_route(route_context_id, active)
+                .await;
+            self.send_pending_mptcp_exit_unavailable(pending);
+            return;
+        }
+        self.active_production_mptcp_exit_routes
+            .insert(route_context_id, active);
+        self.send_pending_mptcp_exit_granted(pending, &encoded_signal);
+        self.start_mptcp_exit_runtime(route_context_id);
+        log_relay_forward_admission(Some(state), "MPTCP_SESSION_EXIT_LISTENER_READY");
+    }
+
+    fn send_mptcp_exit_unavailable(
+        &mut self,
+        forward_id: &[u8],
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::unavailable(
+            forward_id.to_vec(),
+            ExitForwardOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_mptcp_exit_granted(
+        &mut self,
+        forward_id: &[u8],
+        encoded_signal: Vec<u8>,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::granted(
+            forward_id.to_vec(),
+            ExitForwardOperation::MptcpSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+            vec![encoded_signal],
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_pending_mptcp_exit_unavailable(&mut self, pending: PendingMptcpExitSession) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mptcp_exit_unavailable(&relay.forward_id, channel);
+            }
+        }
+    }
+
+    fn send_pending_mptcp_exit_granted(
+        &mut self,
+        pending: PendingMptcpExitSession,
+        encoded_signal: &[u8],
+    ) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mptcp_exit_granted(&relay.forward_id, encoded_signal.to_vec(), channel);
+            }
+        }
+    }
+
+    fn send_mpquic_exit_unavailable(
+        &mut self,
+        forward_id: &[u8],
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::unavailable(
+            forward_id.to_vec(),
+            ExitForwardOperation::MpquicSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_mpquic_exit_granted(
+        &mut self,
+        forward_id: &[u8],
+        encoded_signal: Vec<u8>,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+    ) {
+        if let Ok(response) = ExitForwardResponse::granted(
+            forward_id.to_vec(),
+            ExitForwardOperation::MpquicSessionStart,
+            self.local_node_id.to_vec(),
+            self.service.local_peer_id().to_bytes(),
+            vec![encoded_signal],
+        ) {
+            let _ = self
+                .service
+                .send_exit_forward_upstream_response(channel, response.into());
+        }
+    }
+
+    fn send_pending_mpquic_exit_unavailable(&mut self, pending: PendingMpquicExitSession) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mpquic_exit_unavailable(&relay.forward_id, channel);
+            }
+        }
+    }
+
+    fn send_pending_mpquic_exit_granted(
+        &mut self,
+        pending: PendingMpquicExitSession,
+        encoded_signal: &[u8],
+    ) {
+        for relay in pending.relays.into_values() {
+            for channel in relay.channels {
+                self.send_mpquic_exit_granted(&relay.forward_id, encoded_signal.to_vec(), channel);
+            }
+        }
+    }
+
+    fn start_mptcp_exit_runtime(&mut self, route_context_id: [u8; FORWARD_ID_BYTES]) {
+        let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get_mut(&route_context_id)
+        else {
+            return;
+        };
+        let Some(runtime) = active.runtime.take() else {
+            return;
+        };
+        active.runtime_started = true;
+        let events = self.mptcp_exit_runtime_events.clone();
+        let reservation_id = active.reservation_id;
+        let (shutdown, completed) =
+            self.retain_exit_runtime(route_context_id, runtime.retain_cleanup_authority());
+        tokio::spawn(async move {
+            let completion = runtime
+                .run_until_shutdown(shutdown, |succeeded| {
+                    let events = events.clone();
+                    async move {
+                        let _ = events
+                            .send(MptcpExitRuntimeEvent::FlowCompleted {
+                                route_context_id,
+                                reservation_id,
+                                succeeded,
+                            })
+                            .await;
+                    }
+                })
+                .await;
+            let event = MptcpExitRuntimeEvent::RuntimeCompleted(MptcpExitRuntimeCompletionEvent {
+                route_context_id,
+                completion,
+            });
+            if let Err(error) = events.send(event).await {
+                let MptcpExitRuntimeEvent::RuntimeCompleted(completion) = error.0 else {
+                    return;
+                };
+                if let Some(cleanup) = completion.completion.into_cleanup() {
+                    let _ = cleanup.destroy().await;
+                }
+            }
+            let _ = completed.send(());
+        });
+    }
+
+    async fn finish_mptcp_exit_flow(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        reservation_id: [u8; FORWARD_ID_BYTES],
+        succeeded: bool,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let Some(active) = self
+            .active_production_mptcp_exit_routes
+            .get(&route_context_id)
+        else {
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_FLOW_OWNER_MISSING",
+                unix_millis(),
+            );
+            return;
+        };
+        if !active.runtime_started || active.reservation_id != reservation_id {
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_FLOW_SCOPE_MISMATCH",
+                unix_millis(),
+            );
+            return;
+        }
+        state.write().await.log(
+            if succeeded {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            if succeeded {
+                "MPTCP_EXIT_FLOW_COMPLETED"
+            } else {
+                "MPTCP_EXIT_FLOW_FAILED"
+            },
+            unix_millis(),
+        );
+    }
+
+    async fn finish_mptcp_exit_runtime(
+        &mut self,
+        event: MptcpExitRuntimeCompletionEvent,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let Some(mut active) = self
+            .active_production_mptcp_exit_routes
+            .remove(&event.route_context_id)
+        else {
+            if let Some(cleanup) = event.completion.into_cleanup() {
+                let _ = cleanup.destroy().await;
+            }
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_RUNTIME_OWNER_MISSING",
+                unix_millis(),
+            );
+            return;
+        };
+        if event.completion.reservation_id() != &active.reservation_id {
+            if let Some(cleanup) = event.completion.into_cleanup() {
+                let _ = cleanup.destroy().await;
+            }
+            active.expires_at_ms = 0;
+            self.active_production_mptcp_exit_routes
+                .insert(event.route_context_id, active);
+            state.write().await.log(
+                LogLevel::Error,
+                "MPTCP_EXIT_RUNTIME_SCOPE_MISMATCH",
+                unix_millis(),
+            );
+            return;
+        }
+        let succeeded = event.completion.succeeded();
+        if let Some(cleanup) = event.completion.into_cleanup() {
+            match cleanup.destroy().await {
+                Ok(()) => {}
+                Err(cleanup) => {
+                    active.cleanup = Some(cleanup);
+                    active.runtime_started = false;
+                    active.expires_at_ms = 0;
+                    active.cleanup_not_before_ms =
+                        unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+                    self.active_production_mptcp_exit_routes
+                        .insert(event.route_context_id, active);
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "MPTCP_EXIT_RUNTIME_CLEANUP_PENDING",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            }
+        }
+        let _ = self
+            .exit_service
+            .as_mut()
+            .and_then(|service| service.release(&active.reservation_id).ok());
+        state.write().await.log(
+            if succeeded {
+                LogLevel::Info
+            } else {
+                LogLevel::Warn
+            },
+            if succeeded {
+                "MPTCP_EXIT_RUNTIME_COMPLETED"
+            } else {
+                "MPTCP_EXIT_RUNTIME_FAILED"
+            },
+            unix_millis(),
+        );
+    }
+
+    async fn finish_mptcp_exit_session_unavailable(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        pending: PendingMptcpExitSession,
+    ) {
+        if let Some(route) = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)
+        {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+        }
+        self.send_pending_mptcp_exit_unavailable(pending);
+    }
+
+    async fn finish_mpquic_exit_session_unavailable(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        pending: PendingMpquicExitSession,
+    ) {
+        if let Some(route) = self
+            .prepared_production_exit_routes
+            .remove(&route_context_id)
+        {
+            self.retire_production_exit_route(route_context_id, route)
+                .await;
+        }
+        self.send_pending_mpquic_exit_unavailable(pending);
+    }
+
+    /// Destroy helper state before releasing the signed Exit allocation. A failed Destroy keeps
+    /// the owner quarantined for the actor's next bounded maintenance pass.
+    async fn retire_production_exit_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: PreparedProductionExitRoute,
+    ) -> bool {
+        route.expires_at_ms = 0;
+        if self
+            .helper
+            .destroy_context(&route.helper_owner)
+            .await
+            .is_ok()
+        {
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(route.bundle.reservation_id()).ok());
+            true
+        } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+            let previous = self
+                .prepared_production_exit_routes
+                .insert(route_context_id, route);
+            debug_assert!(previous.is_none(), "MPTCP Exit cleanup owner collision");
+            false
+        }
+    }
+
+    async fn retire_active_mptcp_exit_route(
+        &mut self,
+        route_context_id: [u8; FORWARD_ID_BYTES],
+        mut route: ActiveProductionMptcpExitRoute,
+    ) -> bool {
+        route.expires_at_ms = 0;
+        if let Some(runtime) = route.runtime.take() {
+            if let Err(cleanup) = runtime.shutdown().await {
+                route.cleanup = Some(cleanup);
+            }
+        }
+        let cleanup_complete = match route.cleanup.take() {
+            Some(cleanup) => match cleanup.destroy().await {
+                Ok(()) => true,
+                Err(cleanup) => {
+                    route.cleanup = Some(cleanup);
+                    false
+                }
+            },
+            None => true,
+        };
+        if cleanup_complete {
+            let _ = self
+                .exit_service
+                .as_mut()
+                .and_then(|service| service.release(&route.reservation_id).ok());
+            true
+        } else {
+            route.cleanup_not_before_ms =
+                unix_millis().saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+            let previous = self
+                .active_production_mptcp_exit_routes
+                .insert(route_context_id, route);
+            debug_assert!(
+                previous.is_none(),
+                "active MPTCP Exit cleanup owner collision"
+            );
+            false
         }
     }
 
@@ -4151,17 +10927,19 @@ impl DiscoveryRuntime {
     /// Every state-free wrapper, signature, current-capability and local-advertisement check runs
     /// before connection provenance is bound. The bind itself precedes the only Exit replay/sign
     /// call. There is no suspension point from that bind through the returned response owner. The
-    /// current product deliberately publishes no local Exit advertisement, so this composed
-    /// handler remains fail-closed until a later truthful Exit-capability producer exists.
+    /// handler only proceeds while a truthful, unexpired local Exit capability is being served.
     fn prepare_native_probe_permit_response(
         &mut self,
         authenticated_control_relay: Libp2pPeerId,
         connection_id: ConnectionId,
         request: &ExitForwardRequest,
-        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
-    ) -> Option<PreparedNativeProbePermitResponse> {
+    ) -> Option<(
+        BoundNativeProbeControlConnection,
+        Libp2pPeerId,
+        UpstreamExitForwardResponse,
+    )> {
         let now_ms = unix_millis();
-        if request.validate().is_err() || !self.roles.exit {
+        if request.validate().is_err() || !self.exit_authority_enabled() {
             return None;
         }
         let scope = verified_native_probe_forward_scope(request, now_ms)?;
@@ -4173,33 +10951,36 @@ impl DiscoveryRuntime {
         let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
         let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
         let local_peer = *self.service.local_peer_id();
-        let current_control = self.direct_relays.get(&authenticated_control_relay)?;
+        let exit_control_address = self.native_permit_exit_control_address(&scope)?;
+        let current_control = native_probe_relay_capability_from_advertisement(
+            request.control_advertisement(),
+            control,
+            &scope,
+            authenticated_control_relay,
+            now_ms,
+        )?;
         if control_relay_peer != authenticated_control_relay
             || control_relay_public_key != current_control.public_key
             || exit_node_id != self.local_node_id
             || exit_peer != local_peer
             || exit_peer == authenticated_control_relay
-            || !native_probe_control_capability_matches(
-                current_control,
+            || !native_probe_control_capability_lineage_matches(
+                &current_control,
                 control,
                 &scope,
                 authenticated_control_relay,
                 request.deadline_unix_ms(),
+                now_ms,
             )
-            || !self
-                .served_local_advertisement
-                .as_ref()
-                .is_some_and(|advertisement| {
-                    local_native_probe_exit_actor_matches(
-                        advertisement,
-                        exit,
-                        &scope,
-                        self.local_node_id,
-                        local_peer,
-                        self.local_public_key,
-                        now_ms,
-                    )
-                })
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
         {
             return None;
         }
@@ -4211,6 +10992,13 @@ impl DiscoveryRuntime {
             .service
             .bind_native_probe_control_connection(authenticated_control_relay, connection_id)
             .ok()?;
+        // The verified self-advertisement also authorizes subsequent reservation requests to
+        // this Exit. It never becomes a candidate for this node's unrelated Client role.
+        retain_exit_relay_capability(
+            &mut self.exit_control_relays,
+            self.candidate_limit,
+            current_control,
+        )?;
         let authenticated_control_peer = authenticated_control_relay.to_bytes();
         let identity = &self.identity;
         let accepted = self
@@ -4220,6 +11008,7 @@ impl DiscoveryRuntime {
                 request.canonical_request(),
                 &control_relay_node_id,
                 &authenticated_control_peer,
+                &exit_control_address,
                 now_ms,
                 self.local_public_key,
                 |message| identity.sign(message).ok(),
@@ -4233,12 +11022,60 @@ impl DiscoveryRuntime {
             vec![accepted.encoded().to_vec()],
         )
         .ok()?;
-        Some(PreparedNativeProbePermitResponse {
-            connection,
-            authenticated_control_relay,
-            channel,
-            response: response.into(),
-        })
+        Some((connection, authenticated_control_relay, response.into()))
+    }
+
+    /// Select this Exit's listener for the signed data Relay, not the forwarding control Relay.
+    /// A private listener requires that exact peer's current authenticated direct-LAN lineage
+    /// and unambiguous observation of our own address. This is only control dial eligibility;
+    /// it creates no native endpoint/lease authority and does not replace helper route proof.
+    fn native_permit_exit_control_address(&self, scope: &NativeProbePathScope) -> Option<String> {
+        let relay = scope.data_relay.as_ref()?;
+        let peer = Libp2pPeerId::from_bytes(&relay.peer_id).ok()?;
+        let family = ObservationAddressFamily::try_from(scope.address_family).ok()?;
+        let local_family = self
+            .service
+            .authenticated_local_peer_prefix(peer)
+            .is_some_and(|prefix| {
+                matches!(
+                    (family, prefix.family()),
+                    (
+                        ObservationAddressFamily::Ipv4,
+                        volparossa_core::IpFamily::Ipv4
+                    ) | (
+                        ObservationAddressFamily::Ipv6,
+                        volparossa_core::IpFamily::Ipv6
+                    )
+                )
+            });
+        let local_hint = if local_family {
+            let hints = self
+                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                    path_id: scope.candidate_ordinal,
+                    role: WireguardRole::Exit,
+                    observer_id: fixed_bytes::<32>(&relay.node_id)?,
+                    observer_peer_id: peer,
+                }])
+                .ok()?;
+            Some(hints.into_iter().find_map(|hint| {
+                hint.on_link.filter(|link| {
+                    matches!(
+                        (family, link.local_address.len()),
+                        (ObservationAddressFamily::Ipv4, 4) | (ObservationAddressFamily::Ipv6, 16)
+                    )
+                })
+            })?)
+        } else {
+            None
+        };
+        identity_bound_exit_control_address(
+            &self.control_addresses,
+            scope,
+            *self.service.local_peer_id(),
+            local_hint
+                .as_ref()
+                .map(|hint| hint.local_address.as_slice()),
+        )
     }
 
     fn send_prepared_native_probe_permit_response(
@@ -4254,6 +11091,878 @@ impl DiscoveryRuntime {
         let _ = self.service.send_native_probe_permit_response(
             connection,
             authenticated_control_relay,
+            channel,
+            response,
+        );
+    }
+
+    /// Verify one Relay-forwarded native Start chain and prepare the standard Exit authority.
+    ///
+    /// The data Relay comes from the exact signed scope and must equal both the authenticated
+    /// upstream peer and its current direct advertisement capability. The selected Exit must be
+    /// this process and its current local advertisement. Connection lineage is bound before the
+    /// Exit service can retain capacity or sign.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Exit authorization also activates every exact sampler path and socket"
+    )]
+    async fn prepare_native_probe_authorization_response(
+        &mut self,
+        authenticated_data_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+    ) -> Option<(
+        BoundNativeProbeDataRelayConnection,
+        Libp2pPeerId,
+        UpstreamExitForwardResponse,
+    )> {
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.exit_authority_enabled() {
+            return None;
+        }
+        let scope = verified_native_probe_authorization_forward_scope(request, now_ms)?;
+        let verified_chain =
+            verify_native_probe_authorization_chain(request.canonical_request(), now_ms).ok()?;
+        if verified_chain.scope() != &scope {
+            return None;
+        }
+        let data_relay = scope.data_relay.as_ref()?;
+        let exit = scope.exit.as_ref()?;
+        let data_relay_node_id = fixed_bytes::<32>(request.control_relay_node_id())?;
+        let data_relay_public_key = fixed_bytes::<32>(request.control_relay_public_key())?;
+        let data_relay_peer = Libp2pPeerId::from_bytes(request.control_relay_peer_id()).ok()?;
+        let exit_node_id = fixed_bytes::<32>(request.exit_node_id())?;
+        let exit_peer = Libp2pPeerId::from_bytes(request.exit_peer_id()).ok()?;
+        let attempt_id = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id)?;
+        let path_id = scope.candidate_ordinal;
+        let local_peer = *self.service.local_peer_id();
+        let authorized_data_relay = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)?
+            .authorized_data_relays
+            .get(&path_id)?;
+        if data_relay_peer != authenticated_data_relay
+            || data_relay_public_key != authorized_data_relay.public_key
+            || exit_node_id != self.local_node_id
+            || exit_peer != local_peer
+            || exit_peer == authenticated_data_relay
+            || !native_probe_data_relay_capability_matches(
+                authorized_data_relay,
+                data_relay,
+                &scope,
+                authenticated_data_relay,
+                scope.attempt_expires_at_ms,
+            )
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        {
+            return None;
+        }
+
+        let connection = self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .ok()?;
+        let authenticated_data_relay_peer = authenticated_data_relay.to_bytes();
+        let identity = &self.identity;
+        let accepted = self
+            .exit_service
+            .as_mut()?
+            .issue_native_probe_relay_authorization_with(
+                request.canonical_request(),
+                &data_relay_node_id,
+                &authenticated_data_relay_peer,
+                now_ms,
+                self.local_public_key,
+                |message| identity.sign(message).ok(),
+            )
+            .ok()?;
+        let relay_endpoint = verified_chain.relay_exit_endpoint().endpoint.as_ref()?;
+        let accepted_encoded = accepted.encoded().to_vec();
+        let accepted_chain = accepted.authorization_chain().to_vec();
+        let activation = {
+            let attempt = self.exit_native_ready_attempts.get(&attempt_id)?;
+            if !attempt.ready_paths.contains(&path_id) {
+                return None;
+            }
+            let exit_lease = attempt
+                .exit_leases
+                .iter()
+                .find(|lease| lease.path_id() == path_id)?;
+            LeaseActivation {
+                lease_handle: exit_lease.lease_handle().as_bytes().to_vec(),
+                path_id,
+                role: WireguardRole::Exit as i32,
+                peer_public_key: relay_endpoint.public_key.clone(),
+                peer_endpoint: Some(PublicUdpEndpoint {
+                    address: relay_endpoint.underlay_ip.clone(),
+                    port: relay_endpoint.listen_port,
+                }),
+                maximum_up_mbps: 0,
+                maximum_down_mbps: 0,
+                signed_relay_reservation: accepted_encoded.clone(),
+                signed_client_relay_request: accepted_chain,
+            }
+        };
+        let activate_now = {
+            let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+            match attempt.pending_activations.entry(path_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(activation);
+                }
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if entry.get() == &activation => {}
+                std::collections::hash_map::Entry::Occupied(_) => return None,
+            }
+            !attempt.activated && attempt.pending_activations.len() == attempt.exit_leases.len()
+        };
+        if activate_now {
+            let helper = self.helper.clone();
+            let activation_result = {
+                let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+                let mut leases = attempt
+                    .pending_activations
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                leases.sort_unstable_by_key(|lease| lease.path_id);
+                let activation = ActivateLeaseBatch {
+                    route_context_id: scope.attempt_id.clone(),
+                    context_handle: attempt.helper_owner.prepared().context_handle.clone(),
+                    leases,
+                };
+                helper
+                    .activate_lease_batch(&mut attempt.helper_owner, activation)
+                    .await
+            };
+            if activation_result.is_err() {
+                if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                    let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                }
+                return None;
+            }
+            let socket_requests = {
+                let attempt = self.exit_native_ready_attempts.get(&attempt_id)?;
+                attempt
+                    .exit_leases
+                    .iter()
+                    .map(|lease| {
+                        native_probe_exit_socket_request(
+                            attempt_id,
+                            &attempt.helper_owner.prepared().context_handle,
+                            lease.path_id(),
+                        )
+                        .map(|request| (lease.path_id(), request))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            let mut probe_tasks: HashMap<
+                u32,
+                JoinHandle<Result<[u8; NATIVE_PROBE_DATAGRAM_BYTES], ()>>,
+            > = HashMap::with_capacity(socket_requests.len());
+            for (path_id, socket_request) in socket_requests {
+                let Ok(acquired) = self.helper.acquire_transport_socket(socket_request).await
+                else {
+                    for task in probe_tasks.into_values() {
+                        task.abort();
+                    }
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                };
+                let (descriptor, _) = acquired.into_parts();
+                let socket = StdUdpSocket::from(descriptor);
+                if socket.set_nonblocking(true).is_err() {
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                }
+                let Ok(socket) = UdpSocket::from_std(socket) else {
+                    if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+                    }
+                    return None;
+                };
+                probe_tasks.insert(
+                    path_id,
+                    tokio::spawn(async move {
+                        let mut challenge = [0_u8; NATIVE_PROBE_DATAGRAM_BYTES];
+                        let received =
+                            timeout(EXIT_FORWARD_UPSTREAM_TIMEOUT, socket.recv(&mut challenge))
+                                .await
+                                .map_err(|_| ())?
+                                .map_err(|_| ())?;
+                        if received != NATIVE_PROBE_DATAGRAM_BYTES {
+                            return Err(());
+                        }
+                        let sent = socket.send(&challenge).await.map_err(|_| ())?;
+                        (sent == NATIVE_PROBE_DATAGRAM_BYTES)
+                            .then_some(challenge)
+                            .ok_or(())
+                    }),
+                );
+            }
+            let attempt = self.exit_native_ready_attempts.get_mut(&attempt_id)?;
+            attempt.probe_tasks = probe_tasks;
+            attempt.activated = true;
+        }
+        let response = ExitForwardResponse::granted(
+            request.forward_id().to_vec(),
+            ExitForwardOperation::NativeProbeAuthorize,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            vec![accepted_encoded],
+        )
+        .ok()?;
+        Some((connection, authenticated_data_relay, response.into()))
+    }
+
+    /// Join every exact path result, commit and destroy the shared Exit sampler, then respond.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exact-set Exit observation, commit, cleanup and signed responses are one transaction"
+    )]
+    async fn answer_native_probe_result_upstream(
+        &mut self,
+        authenticated_data_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeResult,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        if request.validate().is_err() || !self.exit_authority_enabled() {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        }
+        let Some(scope) = verified_native_probe_result_forward_scope(request, now_ms) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Ok(chain) =
+            verify_native_probe_authorization_chain(request.canonical_request(), now_ms)
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CHAIN_REJECTED");
+        };
+        if chain.scope() != &scope {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CHAIN_REJECTED");
+        }
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(probe_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.probe_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(forward_id) = fixed_bytes::<FORWARD_ID_BYTES>(request.forward_id()) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(relay_wire_endpoint) = chain.relay_exit_endpoint().endpoint.as_ref() else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let Some(observed_network_prefix) = native_probe_observed_relay_prefix(relay_wire_endpoint)
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_SCOPE_REJECTED");
+        };
+        let path_id = scope.candidate_ordinal;
+        let local_peer = *self.service.local_peer_id();
+        let Some(authorized_data_relay) = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .and_then(|attempt| attempt.authorized_data_relays.get(&path_id))
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
+        };
+        if request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
+            || request.control_relay_public_key() != authorized_data_relay.public_key
+            || request.exit_node_id() != self.local_node_id
+            || request.exit_peer_id() != local_peer.to_bytes()
+            || exit.node_id != self.local_node_id
+            || exit.peer_id != local_peer.to_bytes()
+            || !native_probe_data_relay_capability_matches(
+                authorized_data_relay,
+                data_relay,
+                &scope,
+                authenticated_data_relay,
+                scope.attempt_expires_at_ms,
+            )
+        {
+            reject!("NATIVE_PROBE_RESULT_EXIT_RELAY_REJECTED");
+        }
+        let Some(connection) = self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .ok()
+        else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_CONNECTION_REJECTED");
+        };
+        let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
+            reject!("NATIVE_PROBE_RESULT_EXIT_OWNER_UNAVAILABLE");
+        };
+        if !attempt.activated
+            || !attempt.ready_paths.contains(&path_id)
+            || !attempt.probe_tasks.contains_key(&path_id)
+            || attempt.pending_results.contains_key(&path_id)
+            || attempt
+                .exit_leases
+                .iter()
+                .all(|lease| lease.path_id() != path_id)
+        {
+            reject!("NATIVE_PROBE_RESULT_EXIT_OWNER_MISMATCH");
+        }
+        attempt.pending_results.insert(
+            path_id,
+            PendingExitNativeProbeResult {
+                connection,
+                authenticated_data_relay,
+                authenticated_data_relay_node_id: data_relay_node_id,
+                probe_id,
+                forward_id,
+                path_id,
+                observed_network_prefix,
+                scope: scope.clone(),
+                channel,
+            },
+        );
+        if attempt.pending_results.len() != attempt.exit_leases.len() {
+            log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_EXIT_RETAINED");
+            return;
+        }
+        let Some(mut attempt) = self.exit_native_ready_attempts.remove(&attempt_id) else {
+            return;
+        };
+        if attempt.probe_tasks.len() != attempt.exit_leases.len()
+            || attempt.pending_results.len() != attempt.exit_leases.len()
+        {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        }
+        let tasks = attempt.probe_tasks.drain().collect::<Vec<_>>();
+        let mut challenges = HashMap::with_capacity(tasks.len());
+        for (path_id, task) in tasks {
+            let Ok(Ok(challenge)) = task.await else {
+                self.fail_exit_native_result_attempt(attempt).await;
+                return;
+            };
+            challenges.insert(path_id, challenge);
+        }
+        let mut lease_commits = attempt
+            .exit_leases
+            .iter()
+            .map(|lease| LeaseCommit {
+                lease_handle: lease.lease_handle().as_bytes().to_vec(),
+                path_id: lease.path_id(),
+                role: WireguardRole::Exit as i32,
+            })
+            .collect::<Vec<_>>();
+        lease_commits.sort_unstable_by_key(|lease| lease.path_id);
+        let commit_request = CommitLeaseBatch {
+            route_context_id: attempt_id.to_vec(),
+            context_handle: attempt.helper_owner.prepared().context_handle.clone(),
+            leases: lease_commits,
+        };
+        let Ok(committed) = self
+            .helper
+            .commit_lease_batch(&mut attempt.helper_owner, commit_request)
+            .await
+        else {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        };
+        if committed.leases.len() != attempt.exit_leases.len() {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        }
+        let helper_runtime_id = attempt.helper_owner.helper_runtime_id();
+        let Ok(_destroyed) = self.helper.destroy_context(&attempt.helper_owner).await else {
+            self.fail_exit_native_result_attempt(attempt).await;
+            return;
+        };
+        let mut responses = Vec::with_capacity(attempt.pending_results.len());
+        let mut pending_results = attempt.pending_results.into_values().collect::<Vec<_>>();
+        pending_results.sort_unstable_by_key(|pending| pending.path_id);
+        for pending in pending_results {
+            let Some(exit_lease) = attempt
+                .exit_leases
+                .iter()
+                .find(|lease| lease.path_id() == pending.path_id)
+            else {
+                return;
+            };
+            let Some(lease) = committed
+                .leases
+                .iter()
+                .find(|lease| lease.lease_handle == exit_lease.lease_handle().as_bytes())
+            else {
+                return;
+            };
+            let Some(challenge) = challenges.remove(&pending.path_id) else {
+                return;
+            };
+            let measured_at_ms = unix_millis();
+            let identity = &self.identity;
+            let accepted = self.exit_service.as_mut().and_then(|service| {
+                service
+                    .issue_native_probe_result_from_observation_with(
+                        pending.probe_id,
+                        &pending.authenticated_data_relay_node_id,
+                        &pending.authenticated_data_relay.to_bytes(),
+                        helper_runtime_id,
+                        attempt_id,
+                        challenge,
+                        pending.observed_network_prefix.clone(),
+                        lease.latest_handshake_unix,
+                        lease.received_bytes,
+                        lease.transmitted_bytes,
+                        measured_at_ms,
+                        self.local_public_key,
+                        |message| identity.sign(message).ok(),
+                    )
+                    .ok()
+            });
+            let Some(accepted) = accepted else {
+                return;
+            };
+            let evidence_id: [u8; 32] = Sha256::digest(accepted.encoded()).into();
+            let evidence = RecentNativeExitEvidence {
+                evidence_id,
+                scope: pending.scope.clone(),
+                authenticated_data_relay_node_id: pending.authenticated_data_relay_node_id,
+                authenticated_data_relay_peer_id: pending.authenticated_data_relay.to_bytes(),
+                measured_at_ms,
+                expires_at_ms: pending.scope.attempt_expires_at_ms,
+            };
+            let Ok(response) = ExitForwardResponse::granted(
+                pending.forward_id.to_vec(),
+                ExitForwardOperation::NativeProbeResult,
+                self.local_node_id.to_vec(),
+                local_peer.to_bytes(),
+                vec![accepted.encoded().to_vec()],
+            ) else {
+                return;
+            };
+            responses.push((pending, response.into(), evidence));
+        }
+        for (pending, response, evidence) in responses {
+            if self
+                .service
+                .send_native_probe_result_response(
+                    pending.connection,
+                    pending.authenticated_data_relay,
+                    pending.channel,
+                    response,
+                )
+                .is_ok()
+            {
+                self.recent_native_exit_evidence
+                    .retain(|entry| entry.expires_at_ms > evidence.measured_at_ms);
+                if self.recent_native_exit_evidence.len() >= MAX_RECENT_NATIVE_EVIDENCE {
+                    self.recent_native_exit_evidence.remove(0);
+                }
+                self.recent_native_exit_evidence.push(evidence);
+            }
+        }
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_RESULT_EXIT_RESPONDED");
+    }
+
+    async fn fail_exit_native_result_attempt(&mut self, mut attempt: ExitNativeReadyAttempt) {
+        for task in attempt.probe_tasks.drain().map(|(_, task)| task) {
+            task.abort();
+        }
+        let _ = self.helper.destroy_context(&attempt.helper_owner).await;
+        for pending in attempt.pending_results.into_values() {
+            if let Ok(response) = ExitForwardResponse::unavailable(
+                pending.forward_id.to_vec(),
+                ExitForwardOperation::NativeProbeResult,
+                self.local_node_id.to_vec(),
+                self.service.local_peer_id().to_bytes(),
+            ) {
+                let _ = self.service.send_native_probe_result_response(
+                    pending.connection,
+                    pending.authenticated_data_relay,
+                    pending.channel,
+                    response.into(),
+                );
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one Exit helper Prepare and affine readiness response remain a single transaction"
+    )]
+    async fn answer_native_probe_ready_upstream(
+        &mut self,
+        authenticated_data_relay: Libp2pPeerId,
+        connection_id: ConnectionId,
+        request: &ExitForwardRequest,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeReady,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        if request.validate().is_err()
+            || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+            || !self.exit_authority_enabled()
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        }
+        let Ok(forward) = decode_canonical::<NativeProbeReadyForwardRequest>(
+            request.canonical_request(),
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        let Some(relay_exit_endpoint) = forward.relay_exit_endpoint().cloned() else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        let Ok(permit) = verify_native_probe_permit(
+            forward.signed_permit_request().to_vec(),
+            forward.signed_permit().to_vec(),
+            now_ms,
+            &mut self.replay,
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_PERMIT_REJECTED");
+        };
+        let scope = permit.scope().clone();
+        if forward.validate().is_err()
+            || relay_exit_endpoint.path_id != scope.candidate_ordinal
+            || relay_exit_endpoint.route_context_id != scope.attempt_id
+            || relay_exit_endpoint
+                .endpoint
+                .as_ref()
+                .is_none_or(|endpoint| endpoint.validate("native Exit traversal endpoint").is_err())
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        }
+        let Some(data_relay) = scope.data_relay.as_ref() else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(exit) = scope.exit.as_ref() else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_node_id) = fixed_bytes::<32>(request.control_relay_node_id()) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(data_relay_public_key) = fixed_bytes::<32>(request.control_relay_public_key())
+        else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let local_peer = *self.service.local_peer_id();
+        if request.validated_operation() != Ok(ExitForwardOperation::NativeProbeReady)
+            || request.forward_id() != scope.probe_id
+            || !native_rpc_deadline_is_within_authority(
+                request.deadline_unix_ms(),
+                scope.attempt_expires_at_ms,
+            )
+            || request.control_relay_peer_id() != authenticated_data_relay.to_bytes()
+            || request.exit_node_id() != self.local_node_id
+            || request.exit_peer_id() != local_peer.to_bytes()
+            || data_relay.node_id.as_slice() != data_relay_node_id
+            || data_relay.public_key.as_slice() != data_relay_public_key
+            || !local_native_probe_exit_actor_is_served(
+                &self.service,
+                exit,
+                &scope,
+                self.local_node_id,
+                local_peer,
+                self.local_public_key,
+                now_ms,
+            )
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        }
+        // This capability serves another Client's signed route at our Exit. It must not enter
+        // this node's own Client candidate/provenance cache or inherit that Client's conflicts.
+        let Some(authorized_data_relay) = cache_exit_data_relay_capability(
+            &mut self.exit_data_relays,
+            self.candidate_limit,
+            forward.signed_relay_advertisement(),
+            data_relay,
+            &scope,
+            authenticated_data_relay,
+            now_ms,
+        ) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        if self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .is_err()
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_CONNECTION_REJECTED");
+        }
+        self.collect_exit_native_ready(
+            native_ready::PendingExitNativeReady {
+                authenticated_data_relay,
+                connection_id,
+                request: request.clone(),
+                forward,
+                scope,
+                authorized_data_relay,
+                data_relay_node_id,
+                channel,
+            },
+            state,
+        )
+        .await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one shared Exit helper Prepare and affine per-path response transaction"
+    )]
+    async fn finish_exit_native_ready(
+        &mut self,
+        pending: native_ready::PendingExitNativeReady,
+        prepare: PrepareLeaseBatch,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let native_ready::PendingExitNativeReady {
+            authenticated_data_relay,
+            connection_id,
+            request,
+            forward,
+            scope,
+            authorized_data_relay,
+            data_relay_node_id,
+            channel,
+        } = pending;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeReady,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(relay_exit_endpoint) = forward.relay_exit_endpoint().cloned() else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        let Some(candidate_set_hash) = fixed_bytes::<32>(&scope.candidate_set_hash) else {
+            reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
+        };
+        if self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .is_some_and(|attempt| {
+                !native_exit_ready_prepare_matches(attempt.helper_owner.prepare(), &prepare, now_ms)
+                    || attempt.candidate_set_hash != candidate_set_hash
+                    || attempt.expires_at_ms != scope.attempt_expires_at_ms
+                    || attempt.ready_paths.contains(&scope.candidate_ordinal)
+            })
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        }
+        if !self.exit_native_ready_attempts.contains_key(&attempt_id) {
+            if self.exit_native_ready_attempts.len() >= MAX_CONCURRENT_FORWARDING_STREAMS {
+                reject!("NATIVE_PROBE_READY_EXIT_CAPACITY");
+            }
+            let Ok(helper_owner) = self.helper.prepare_lease_batch(prepare.clone()).await else {
+                reject!("NATIVE_PROBE_READY_EXIT_HELPER_PREPARE_UNAVAILABLE");
+            };
+            let Ok(exit_batch) =
+                bind_prepared_exit_endpoint_leases(&prepare, helper_owner.prepared().clone())
+            else {
+                let _ = self.helper.destroy_context(&helper_owner).await;
+                reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
+            };
+            let previous = self.exit_native_ready_attempts.insert(
+                attempt_id,
+                ExitNativeReadyAttempt {
+                    helper_owner,
+                    exit_leases: exit_batch.exit_leases().to_vec(),
+                    authorized_data_relays: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    ready_paths: HashSet::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    pending_activations: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    activated: false,
+                    probe_tasks: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    pending_results: HashMap::with_capacity(
+                        usize::try_from(scope.required_path_count).unwrap_or(0),
+                    ),
+                    candidate_set_hash,
+                    expires_at_ms: scope.attempt_expires_at_ms,
+                    cleanup_not_before_ms: 0,
+                },
+            );
+            debug_assert!(
+                previous.is_none(),
+                "native Exit attempt already checked vacant"
+            );
+        }
+        let Some((helper_runtime_id, exit_lease)) = self
+            .exit_native_ready_attempts
+            .get(&attempt_id)
+            .and_then(|attempt| {
+                attempt
+                    .exit_leases
+                    .iter()
+                    .find(|lease| lease.path_id() == scope.candidate_ordinal)
+                    .copied()
+                    .map(|lease| (attempt.helper_owner.helper_runtime_id(), lease))
+            })
+        else {
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
+            reject!("NATIVE_PROBE_READY_EXIT_HELPER_BIND_REJECTED");
+        };
+        let Some(connection) = self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .ok()
+        else {
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
+            reject!("NATIVE_PROBE_READY_EXIT_CONNECTION_REJECTED");
+        };
+        let identity = &self.identity;
+        let accepted = self.exit_service.as_mut().and_then(|service| {
+            service
+                .issue_native_probe_ready_from_permit_with(
+                    forward.signed_permit_request(),
+                    forward.signed_permit(),
+                    &data_relay_node_id,
+                    &authenticated_data_relay.to_bytes(),
+                    relay_exit_endpoint,
+                    helper_runtime_id,
+                    exit_lease,
+                    now_ms,
+                    self.local_public_key,
+                    |message| identity.sign(message).ok(),
+                )
+                .ok()
+        });
+        let Some(accepted) = accepted else {
+            reject!("NATIVE_PROBE_READY_EXIT_SERVICE_REJECTED");
+        };
+        let Some(attempt) = self.exit_native_ready_attempts.get_mut(&attempt_id) else {
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        };
+        if attempt
+            .authorized_data_relays
+            .insert(scope.candidate_ordinal, authorized_data_relay)
+            .is_some()
+            || !attempt.ready_paths.insert(scope.candidate_ordinal)
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_OWNER_CONFLICT");
+        }
+        let response = ExitForwardResponse::granted(
+            request.forward_id().to_vec(),
+            ExitForwardOperation::NativeProbeReady,
+            self.local_node_id.to_vec(),
+            local_peer.to_bytes(),
+            vec![accepted.encoded().to_vec()],
+        );
+        let Ok(response) = response else {
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
+        if self
+            .service
+            .send_native_probe_ready_response(
+                connection,
+                authenticated_data_relay,
+                channel,
+                response.into(),
+            )
+            .is_err()
+        {
+            if let Some(attempt) = self.exit_native_ready_attempts.remove(&attempt_id) {
+                self.destroy_helper_owner(attempt.helper_owner);
+            }
+            log_relay_forward_admission(
+                Some(state),
+                "NATIVE_PROBE_READY_EXIT_RESPONSE_UNAVAILABLE",
+            );
+            return;
+        }
+        log_relay_forward_admission(Some(state), "NATIVE_PROBE_READY_EXIT_RESPONDED");
+    }
+
+    fn send_prepared_native_probe_authorization_response(
+        &mut self,
+        prepared: PreparedNativeProbeAuthorizationResponse,
+    ) {
+        let PreparedNativeProbeAuthorizationResponse {
+            connection,
+            authenticated_data_relay,
+            channel,
+            response,
+        } = prepared;
+        let _ = self.service.send_native_probe_authorization_response(
+            connection,
+            authenticated_data_relay,
             channel,
             response,
         );
@@ -4351,15 +12060,22 @@ impl DiscoveryRuntime {
             self.direct_relays.get(control_relay_peer)
         };
         current.is_some_and(|current| {
-            current == &authority.authorized_control
-                && direct_relay_target_matches(
-                    current,
-                    *control_relay_node_id,
-                    *control_relay_peer,
-                    *request_deadline_ms,
-                )
-        }) && self.forwarded_exit_peer_is_eligible(*exit_peer, clock.unix_ms)
-            && self.peer_is_forwarded_exit_target(*exit_peer, clock.unix_ms)
+            direct_relay_authority_lineage_matches(
+                current,
+                &authority.authorized_control,
+                *request_deadline_ms,
+            ) && direct_relay_target_matches(
+                current,
+                *control_relay_node_id,
+                *control_relay_peer,
+                *request_deadline_ms,
+            )
+        }) && self.forwarded_exit_authority_is_eligible(
+            *control_relay_peer,
+            *exit_peer,
+            clock.unix_ms,
+        ) && (*control_relay_peer == *self.service.local_peer_id()
+            || self.peer_is_forwarded_exit_target(*exit_peer, clock.unix_ms))
     }
 
     async fn ingest_advertisement(
@@ -4403,6 +12119,7 @@ impl DiscoveryRuntime {
         }
         if outcome.refresh_candidates {
             self.refresh_candidates(state).await;
+            self.schedule_exit_advertisement_fetches();
         }
     }
 
@@ -4471,7 +12188,7 @@ impl DiscoveryRuntime {
         let Ok(verified) = verified else {
             return AdvertisementCommitOutcome::rejected(Some((
                 LogLevel::Warn,
-                "ADVERTISEMENT_VERIFY_FAILED",
+                "ADVERTISEMENT_SIGNATURE_VERIFY_FAILED",
                 now_ms,
             )));
         };
@@ -4588,7 +12305,7 @@ impl DiscoveryRuntime {
             if replayed || active_replays >= self.forwarded_replay_capacity {
                 return AdvertisementCommitOutcome::rejected(Some((
                     LogLevel::Warn,
-                    "ADVERTISEMENT_VERIFY_FAILED",
+                    "ADVERTISEMENT_FORWARDED_REPLAY_REJECTED",
                     clock.unix_ms,
                 )));
             }
@@ -4606,7 +12323,7 @@ impl DiscoveryRuntime {
         {
             return AdvertisementCommitOutcome::rejected(Some((
                 LogLevel::Warn,
-                "ADVERTISEMENT_VERIFY_FAILED",
+                "ADVERTISEMENT_DIRECT_REPLAY_REJECTED",
                 clock.unix_ms,
             )));
         }
@@ -4673,12 +12390,13 @@ impl DiscoveryRuntime {
                     || *control_relay_node_id == accepted.node_id
                     || !deadline_is_bounded(*request_deadline_ms, now_ms)
                     || !control_valid
-                    || !self.forwarded_exit_peer_is_eligible(peer, now_ms)
-                    || !self.peer_is_forwarded_exit_target(peer, now_ms)
+                    || !self.forwarded_exit_authority_is_eligible(*control_relay_peer, peer, now_ms)
+                    || (*control_relay_peer != *self.service.local_peer_id()
+                        && !self.peer_is_forwarded_exit_target(peer, now_ms))
                 {
                     0
                 } else {
-                    accepted.expires_at_ms.min(*request_deadline_ms).min(
+                    accepted.expires_at_ms.min(
                         control
                             .as_ref()
                             .map_or(0, |capability| capability.expires_at_ms),
@@ -4796,6 +12514,15 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
+                // Identify observations can be transient link addresses. Retain the
+                // authenticated relay's own signed listeners as stable dial candidates so a
+                // later link flap cannot strand preselection on an obsolete observation.
+                // Forwarded Exit advertisements deliberately never reach this branch.
+                for endpoint in &advertisement.control_endpoints {
+                    if let Ok(address) = Multiaddr::from_str(endpoint) {
+                        let _ = self.service.add_known_peer(peer, &address);
+                    }
+                }
                 if removed_expiry.is_some_and(|expiry| expiry > capability_expiry_ms) {
                     self.record_privacy_conflict(
                         peer,
@@ -4854,8 +12581,18 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
-                let _ = self
-                    .mark_forwarded_exit_target(exit_peer, accepted.advertisement_expires_at_ms);
+                if !self.preferred_exit_controls.contains_key(&exit_peer)
+                    && self.preferred_exit_controls.len() < MAX_EXIT_PROVIDER_PEERS
+                {
+                    self.preferred_exit_controls
+                        .insert(exit_peer, control_relay_peer);
+                }
+                if control_relay_peer != *self.service.local_peer_id() {
+                    let _ = self.mark_forwarded_exit_target(
+                        exit_peer,
+                        accepted.advertisement_expires_at_ms,
+                    );
+                }
             }
         }
         AdvertisementCommitOutcome::accepted(accepted, diagnostic)
@@ -4895,16 +12632,39 @@ impl DiscoveryRuntime {
         relay_authorized: bool,
         force_control_revoke: bool,
     ) -> Option<u64> {
+        let local_control_peer = *self.service.local_peer_id();
+        let exit_authority_changed = force_control_revoke
+            || self.forwarded_exits.iter().any(|(key, capability)| {
+                key.control_relay_peer == local_control_peer
+                    && key.exit_peer == peer
+                    && (capability.exit_node_id != accepted.node_id
+                        || capability.exit_peer_id != accepted.peer_id
+                        || capability.exit_public_key != accepted.public_key
+                        || capability.policy_version != accepted.policy_version
+                        || capability.policy_hash != accepted.policy_hash
+                        || capability.policy_expires_at_ms != accepted.policy_expires_at_ms)
+            });
         let control_authority_changed = force_control_revoke
-            || self
-                .direct_relays
-                .get(&peer)
-                .is_some_and(|current| accepted.sequence_number > current.advertisement_sequence);
+            || !relay_authorized
+            || self.direct_relays.get(&peer).is_some_and(|current| {
+                current.node_id != accepted.node_id
+                    || current.peer_id != accepted.peer_id
+                    || current.public_key != accepted.public_key
+                    || current.policy_version != accepted.policy_version
+                    || current.policy_hash != accepted.policy_hash
+                    || current.policy_expires_at_ms != accepted.policy_expires_at_ms
+            });
+        self.preferred_exit_controls.remove(&peer);
+        if control_authority_changed {
+            self.preferred_exit_controls
+                .retain(|_, control_peer| *control_peer != peer);
+        }
         let mut keys = self
             .forwarded_exits
             .iter()
             .filter_map(|(key, capability)| {
-                let target_conflict = key.exit_peer == peer;
+                let target_conflict = key.exit_peer == peer
+                    && (key.control_relay_peer != local_control_peer || exit_authority_changed);
                 let control_changed = key.control_relay_peer == peer
                     && control_authority_changed
                     && (!relay_authorized
@@ -4918,7 +12678,6 @@ impl DiscoveryRuntime {
                 (target_conflict || control_changed).then_some(*key)
             })
             .collect::<Vec<_>>();
-        let local_control_peer = *self.service.local_peer_id();
         for pending in self.pending_client_forwards.values() {
             if pending.expected_exit_peer == peer
                 || (control_authority_changed && pending.key.control_relay_peer == peer)
@@ -4933,7 +12692,7 @@ impl DiscoveryRuntime {
             }
         }
         for pending in self.pending_relay_forwards.values() {
-            if pending.expected_exit_peer == peer
+            if (pending.expected_exit_peer == peer && exit_authority_changed)
                 || (control_authority_changed && pending.authorized_control.peer_id == peer)
             {
                 let key = ForwardedExitKey {
@@ -4959,7 +12718,7 @@ impl DiscoveryRuntime {
             }
         }
         for entry in self.retry_relay_forwards.values() {
-            if entry.target_peer == peer
+            if (entry.target_peer == peer && exit_authority_changed)
                 || (control_authority_changed && local_control_peer == peer)
             {
                 let key = ForwardedExitKey {
@@ -4985,7 +12744,7 @@ impl DiscoveryRuntime {
             }
         }
         for entry in self.completed_relay_forwards.values() {
-            if entry.target_peer == peer
+            if (entry.target_peer == peer && exit_authority_changed)
                 || (control_authority_changed && local_control_peer == peer)
             {
                 let key = ForwardedExitKey {
@@ -5028,13 +12787,18 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_keys {
             if let Some(entry) = self.retry_datapath.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_datapath.insert(
                     key,
                     CompletedDatapath {
                         canonical_request: entry.canonical_request,
                         outcome: Err(OutboundReservationError::InvalidResponse),
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -5042,6 +12806,11 @@ impl DiscoveryRuntime {
         for (key, entry) in &mut self.completed_datapath {
             if key.relay_peer == peer {
                 entry.outcome = Err(OutboundReservationError::InvalidResponse);
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
     }
@@ -5098,8 +12867,11 @@ impl DiscoveryRuntime {
             .pending_relay_forwards
             .iter()
             .filter_map(|(id, pending)| {
-                ((!preserve_fetch_attempts
-                    || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
+                (pending.udp_session.is_none()
+                    && pending.mptcp_session.is_none()
+                    && pending.mpquic_session.is_none()
+                    && (!preserve_fetch_attempts
+                        || pending.operation != ExitForwardOperation::FetchExitAdvertisement)
                     && keys.contains(&ForwardedExitKey {
                         control_relay_peer: pending.authorized_control.peer_id,
                         exit_peer: pending.expected_exit_peer,
@@ -5129,6 +12901,11 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_client_keys {
             if let Some(entry) = self.retry_client_forwards.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_client_forwards.insert(
                     key,
                     CompletedClientForward {
@@ -5137,7 +12914,7 @@ impl DiscoveryRuntime {
                         operation: entry.operation.expect("client retry operation"),
                         outcome: Err(OutboundReservationError::InvalidResponse),
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -5157,6 +12934,11 @@ impl DiscoveryRuntime {
             .collect::<Vec<_>>();
         for key in retry_relay_keys {
             if let Some(entry) = self.retry_relay_forwards.remove(&key) {
+                let reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
                 self.completed_relay_forwards.insert(
                     key,
                     CompletedRelayForward {
@@ -5165,7 +12947,7 @@ impl DiscoveryRuntime {
                         operation: entry.operation.expect("relay retry operation"),
                         response: None,
                         expires_at_ms: entry.expires_at_ms,
-                        reserved_bytes: entry.reserved_bytes,
+                        reserved_bytes,
                     },
                 );
             }
@@ -5176,6 +12958,11 @@ impl DiscoveryRuntime {
                 exit_peer: entry.target_peer,
             }) {
                 entry.outcome = Err(OutboundReservationError::InvalidResponse);
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
         for entry in self.completed_relay_forwards.values_mut() {
@@ -5184,6 +12971,11 @@ impl DiscoveryRuntime {
                 exit_peer: entry.target_peer,
             }) {
                 entry.response = None;
+                entry.reserved_bytes = completed_ledger_reservation_bytes(
+                    entry.canonical_request.len(),
+                    0,
+                    entry.reserved_bytes,
+                );
             }
         }
         removed_expiry
@@ -5257,6 +13049,7 @@ impl DiscoveryRuntime {
             &mut direct_relays,
             &mut forwarded_exits,
             maximum_candidates,
+            Self::random_exit_control_index,
         );
         let preselection_subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
             &revalidated,
@@ -5414,6 +13207,9 @@ impl DiscoveryRuntime {
             direct_relays.push(DirectRelayCandidateSnapshot {
                 advertisement: candidate.advertisement.clone(),
                 capability: capability.clone(),
+                authenticated_local_prefix: self
+                    .service
+                    .authenticated_local_peer_prefix(exact.peer_id),
             });
         }
         direct_relays
@@ -5477,18 +13273,16 @@ impl DiscoveryRuntime {
         let upper_expiry = exact
             .signed_expires_at_ms
             .min(policy.expires_at_ms)
-            .min(control.expires_at_ms);
+            .min(control.expires_at_ms)
+            .min(capability.control_relay_advertisement_expires_at_ms);
         exact.exit
             && !self.direct_relays.contains_key(&exact.peer_id)
             && self.forwarded_exit_peer_is_eligible(exact.peer_id, captured_at_ms)
-            && capability.control_relay_node_id == control.node_id
-            && capability.control_relay_peer_id == control.peer_id
-            && capability.control_relay_public_key == control.public_key
-            && capability.control_relay_advertisement_sequence == control.advertisement_sequence
-            && capability.control_relay_advertisement_expires_at_ms
-                == control.advertisement_expires_at_ms
-            && capability.control_relay_advertisement_payload_hash
-                == control.advertisement_payload_hash
+            && forwarded_control_projection_lineage_matches(
+                capability,
+                control,
+                captured_at_ms.saturating_add(1),
+            )
             && capability.exit_node_id == exact.wire_node_id
             && capability.exit_peer_id == exact.peer_id
             && capability.exit_public_key == exact.public_key
@@ -5506,10 +13300,55 @@ impl DiscoveryRuntime {
             && capability.control_relay_public_key != capability.exit_public_key
     }
 
+    /// Draw once per Exit, before affine observation subjects are built. Alternative forwarding
+    /// lineages do not turn the same Exit into multiple weighted selection candidates.
+    fn random_exit_control_index(count: usize) -> Option<usize> {
+        if count == 0 || count > MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
+            return None;
+        }
+        if count == 1 {
+            return Some(0);
+        }
+        let count = u16::try_from(count).ok()?;
+        let ceiling = 256 - (256 % count);
+        // Bounded rejection sampling, without modulo bias or an entropy-failure fallback.
+        for _ in 0..16 {
+            let mut byte = [0_u8];
+            OsRng.try_fill_bytes(&mut byte).ok()?;
+            let value = u16::from(byte[0]);
+            if value < ceiling {
+                return Some(usize::from(value % count));
+            }
+        }
+        None
+    }
+
+    fn same_forwarded_exit_snapshot(
+        left: &ForwardedExitCandidateSnapshot,
+        right: &ForwardedExitCandidateSnapshot,
+    ) -> bool {
+        let left_cap = &left.capability;
+        let right_cap = &right.capability;
+        left.advertisement == right.advertisement
+            && left_cap.exit_node_id == right_cap.exit_node_id
+            && left_cap.exit_peer_id == right_cap.exit_peer_id
+            && left_cap.exit_public_key == right_cap.exit_public_key
+            && left_cap.exit_advertisement_sequence == right_cap.exit_advertisement_sequence
+            && left_cap.exit_advertisement_expires_at_ms
+                == right_cap.exit_advertisement_expires_at_ms
+            && left_cap.exit_advertisement_payload_hash == right_cap.exit_advertisement_payload_hash
+            && left_cap.policy_version == right_cap.policy_version
+            && left_cap.policy_hash == right_cap.policy_hash
+            && left_cap.policy_expires_at_ms == right_cap.policy_expires_at_ms
+        // The capability expiry is intentionally lineage-specific: each current control can
+        // authorize the exact same signed Exit for a different remaining bounded lifetime.
+    }
+
     fn finalize_route_candidate_projection(
         direct_relays: &mut [DirectRelayCandidateSnapshot],
         forwarded_exits: &mut Vec<ForwardedExitCandidateSnapshot>,
         maximum_candidates: usize,
+        mut choose_control: impl FnMut(usize) -> Option<usize>,
     ) {
         direct_relays.sort_by(|left, right| {
             (left.capability.node_id, left.capability.peer_id.to_bytes()).cmp(&(
@@ -5531,20 +13370,35 @@ impl DiscoveryRuntime {
                     right.capability.control_relay_peer_id.to_bytes(),
                 ))
         });
-        let mut forwarded_node_counts = HashMap::<[u8; 32], usize>::new();
-        let mut forwarded_peer_counts = HashMap::<Libp2pPeerId, usize>::new();
-        for candidate in forwarded_exits.iter() {
-            *forwarded_node_counts
-                .entry(candidate.capability.exit_node_id)
-                .or_default() += 1;
-            *forwarded_peer_counts
-                .entry(candidate.capability.exit_peer_id)
-                .or_default() += 1;
+        let mut selected = Vec::with_capacity(forwarded_exits.len());
+        for group in forwarded_exits
+            .chunk_by(|left, right| left.capability.exit_node_id == right.capability.exit_node_id)
+        {
+            let first = &group[0];
+            let mut control_nodes = HashSet::new();
+            let mut control_peers = HashSet::new();
+            let mut control_keys = HashSet::new();
+            if group.len() > MAX_CURRENT_EXIT_CONTROL_CANDIDATES
+                || group.iter().any(|candidate| {
+                    !Self::same_forwarded_exit_snapshot(first, candidate)
+                        || !control_nodes.insert(candidate.capability.control_relay_node_id)
+                        || !control_peers.insert(candidate.capability.control_relay_peer_id)
+                        || !control_keys.insert(candidate.capability.control_relay_public_key)
+                })
+                || forwarded_exits.iter().any(|other| {
+                    other.capability.exit_node_id != first.capability.exit_node_id
+                        && (other.capability.exit_peer_id == first.capability.exit_peer_id
+                            || other.capability.exit_public_key == first.capability.exit_public_key)
+                })
+            {
+                continue;
+            }
+            if let Some(index) = choose_control(group.len()).filter(|index| *index < group.len()) {
+                selected.push(group[index].clone());
+            }
         }
-        forwarded_exits.retain(|candidate| {
-            forwarded_node_counts.get(&candidate.capability.exit_node_id) == Some(&1)
-                && forwarded_peer_counts.get(&candidate.capability.exit_peer_id) == Some(&1)
-        });
+        selected.truncate(maximum_candidates.saturating_sub(direct_relays.len()));
+        *forwarded_exits = selected;
 
         debug_assert!(
             direct_relays.len().saturating_add(forwarded_exits.len()) <= maximum_candidates
@@ -5591,6 +13445,18 @@ impl DiscoveryRuntime {
     }
 }
 
+fn spawn_exit_mpquic_runtime(
+    active: ActiveProductionMpquicExitRoute,
+    shutdown: watch::Receiver<bool>,
+    completed: oneshot::Sender<()>,
+    now_ms: u64,
+) {
+    tokio::spawn(async move {
+        let _ = active.run_until_shutdown(shutdown, now_ms).await;
+        let _ = completed.send(());
+    });
+}
+
 fn preselection_responder_policy(
     roles: RolesConfig,
     policy: &AgentPolicySnapshot,
@@ -5624,6 +13490,14 @@ async fn log_reservation_event(state: &Arc<RwLock<AgentState>>, event_code: &'st
         .write()
         .await
         .log(LogLevel::Debug, event_code, unix_millis());
+}
+
+fn log_relay_forward_admission(state: Option<&Arc<RwLock<AgentState>>>, event_code: &'static str) {
+    if let Some(state) = state {
+        if let Ok(mut guard) = state.try_write() {
+            guard.log(LogLevel::Debug, event_code, unix_millis());
+        }
+    }
 }
 
 async fn log_outbound_event(state: &Arc<RwLock<AgentState>>, outcome: OutboundEventOutcome) {
@@ -5681,6 +13555,52 @@ fn direct_relay_capability_matches(
     ) && capability.public_key == expected_public_key
 }
 
+fn direct_relay_authority_lineage_matches(
+    current: &DirectRelayCapability,
+    authorized: &DirectRelayCapability,
+    required_until_ms: u64,
+) -> bool {
+    current.node_id == authorized.node_id
+        && current.peer_id == authorized.peer_id
+        && current.public_key == authorized.public_key
+        && current.policy_version == authorized.policy_version
+        && current.policy_hash == authorized.policy_hash
+        && current.policy_expires_at_ms == authorized.policy_expires_at_ms
+        && current.expires_at_ms >= required_until_ms
+        && authorized.expires_at_ms >= required_until_ms
+}
+
+/// Keeps a still-live forwarded Exit usable across an ordinary advertisement refresh by the same
+/// authenticated control Relay. Equal sequences remain fingerprint-exact; only a strictly newer
+/// current sequence may carry forward the older, still-live provenance.
+fn forwarded_control_projection_lineage_matches(
+    capability: &ForwardedExitCapability,
+    current: &DirectRelayCapability,
+    required_until_ms: u64,
+) -> bool {
+    let sequence_matches = if capability.control_relay_advertisement_sequence
+        == current.advertisement_sequence
+    {
+        capability.control_relay_advertisement_expires_at_ms == current.advertisement_expires_at_ms
+            && capability.control_relay_advertisement_payload_hash
+                == current.advertisement_payload_hash
+    } else {
+        capability.control_relay_advertisement_sequence < current.advertisement_sequence
+    };
+
+    capability.control_relay_node_id == current.node_id
+        && capability.control_relay_peer_id == current.peer_id
+        && capability.control_relay_public_key == current.public_key
+        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_expires_at_ms >= required_until_ms
+        && capability.policy_version == current.policy_version
+        && capability.policy_hash == current.policy_hash
+        && capability.policy_expires_at_ms == current.policy_expires_at_ms
+        && capability.expires_at_ms >= required_until_ms
+        && current.expires_at_ms >= required_until_ms
+        && sequence_matches
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "two immutable identity snapshots"
@@ -5701,10 +13621,8 @@ fn forwarded_exit_capability_matches(
         && capability.control_relay_node_id == control.node_id
         && capability.control_relay_peer_id == control.peer_id
         && capability.control_relay_public_key == control.public_key
-        && capability.control_relay_advertisement_sequence == control.advertisement_sequence
-        && capability.control_relay_advertisement_expires_at_ms
-            == control.advertisement_expires_at_ms
-        && capability.control_relay_advertisement_payload_hash == control.advertisement_payload_hash
+        && capability.control_relay_advertisement_sequence != 0
+        && capability.control_relay_advertisement_expires_at_ms >= required_until_ms
         && capability.exit_node_id == expected_exit_node_id
         && capability.exit_peer_id == expected_exit_peer_id
         && capability.policy_version == control.policy_version
@@ -5750,6 +13668,62 @@ fn fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
     bytes.try_into().ok()
 }
 
+fn native_probe_exit_socket_request(
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    context_handle: &[u8],
+    path_id: u32,
+) -> Option<AcquireTransportSocket> {
+    let path_number = u8::try_from(path_id).ok()?;
+    let addresses = overlay_addresses(route_context_id, path_number).ok()?;
+    Some(AcquireTransportSocket {
+        route_context_id: route_context_id.to_vec(),
+        context_handle: context_handle.to_vec(),
+        path_id,
+        role: WireguardRole::Exit as i32,
+        descriptor_kind: TransportSocketKind::NativeProbeUdpConnected as i32,
+        expected_local: Some(TransportSocketAddress {
+            address: addresses.exit.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_EXIT_PORT),
+        }),
+        expected_remote: Some(TransportSocketAddress {
+            address: addresses.client.octets().to_vec(),
+            port: u32::from(NATIVE_PROBE_CLIENT_PORT),
+        }),
+    })
+}
+
+fn native_probe_observed_relay_prefix(
+    endpoint: &volparossa_protocol::WireguardEndpoint,
+) -> Option<ObservationNetworkPrefix> {
+    let underlay_ip = endpoint.underlay_ip.as_slice();
+    let address = match underlay_ip.len() {
+        4 => IpAddr::from(<[u8; 4]>::try_from(underlay_ip).ok()?),
+        16 => IpAddr::from(<[u8; 16]>::try_from(underlay_ip).ok()?),
+        _ => return None,
+    };
+    // This is Exit-side Relay-to-Exit evidence, never the Client's local LAN origin.
+    let scope = volparossa_protocol::UnderlayScope::try_from(endpoint.underlay_scope).ok()?;
+    if !match scope {
+        volparossa_protocol::UnderlayScope::PublicInternet => is_public_routable_ip(address),
+        volparossa_protocol::UnderlayScope::DirectLocalLan => is_local_lan_ip(address),
+    } {
+        return None;
+    }
+    match underlay_ip.len() {
+        4 => Some(ObservationNetworkPrefix {
+            scope: scope as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            network_prefix: underlay_ip[..3].to_vec(),
+        }),
+        16 => Some(ObservationNetworkPrefix {
+            scope: scope as i32,
+            address_family: ObservationAddressFamily::Ipv6 as i32,
+            network_prefix: underlay_ip[..6].to_vec(),
+        }),
+        _ => None,
+    }
+}
+
 fn optional_fixed_bytes<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
     (!bytes.is_empty()).then(|| fixed_bytes(bytes)).flatten()
 }
@@ -5760,9 +13734,122 @@ fn ledger_reservation_bytes(canonical_request_bytes: usize) -> Option<usize> {
         .filter(|reserved| *reserved <= MAX_LEDGER_BYTES_PER_PEER)
 }
 
+/// Replace a pending worst-case response reservation with the bytes actually retained.
+///
+/// A completed ledger entry stores its canonical request and, at most, one canonical response.
+/// Keep the original reservation if an impossible overflow or oversized encoded response is
+/// observed so accounting always remains conservative.
+fn completed_ledger_reservation_bytes(
+    canonical_request_bytes: usize,
+    canonical_response_bytes: usize,
+    pending_reserved_bytes: usize,
+) -> usize {
+    canonical_request_bytes
+        .checked_add(canonical_response_bytes)
+        .filter(|completed| *completed <= pending_reserved_bytes)
+        .unwrap_or(pending_reserved_bytes)
+}
+
+fn native_exit_ticket_matches_standard_result(
+    ticket: &RecentNativeExitEvidence,
+    result: &RelayProbeResult,
+    evidence: &ProbeEvidence<'_>,
+    now_ms: u64,
+) -> bool {
+    let Some(data_relay) = ticket.scope.data_relay.as_ref() else {
+        return false;
+    };
+    let Some(control) = ticket.scope.control.as_ref() else {
+        return false;
+    };
+    let Some(exit) = ticket.scope.exit.as_ref() else {
+        return false;
+    };
+    let Some(permit) = decoded_signed_payload::<RelayProbePermit>(&result.relay_probe_permit)
+    else {
+        return false;
+    };
+    let valid_leg = |leg: &ProbeLegEvidence| {
+        leg.up_capacity_mbps > 0
+            && leg.down_capacity_mbps > 0
+            && leg.rtt_micros > 0
+            && leg.transmitted_bytes >= NATIVE_PROBE_DATAGRAM_BYTES as u64
+            && leg.received_bytes >= NATIVE_PROBE_DATAGRAM_BYTES as u64
+            && leg.window_started_at_ms < leg.window_ended_at_ms
+            && leg.window_ended_at_ms == leg.measured_at_ms
+            && leg.measured_at_ms == result.measured_at_ms
+    };
+    ticket.expires_at_ms > now_ms
+        && result.expires_at_ms > now_ms
+        && result.expires_at_ms <= ticket.expires_at_ms
+        && result.measured_at_ms <= now_ms
+        && result
+            .measured_at_ms
+            .saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
+            >= ticket.measured_at_ms
+        && ticket
+            .measured_at_ms
+            .saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
+            >= result.measured_at_ms
+        && ticket.authenticated_data_relay_node_id.as_slice() == data_relay.node_id
+        && ticket.authenticated_data_relay_peer_id == data_relay.peer_id
+        && result.relay_node_id == data_relay.node_id
+        && result.relay_peer_id == data_relay.peer_id
+        && permit.control_relay_node_id == control.node_id
+        && permit.control_relay_peer_id == control.peer_id
+        && result.exit_node_id == exit.node_id
+        && result.exit_peer_id == exit.peer_id
+        && result.policy_hash == ticket.scope.policy_hash
+        && result.transport == ticket.scope.transport
+        && result.address_family == ticket.scope.address_family
+        && evidence.path_id() == ticket.scope.candidate_ordinal
+        && evidence.transport() as i32 == ticket.scope.transport
+        && evidence.address_family() as i32 == ticket.scope.address_family
+        && valid_leg(evidence.client_relay())
+        && valid_leg(evidence.relay_exit())
+}
+
+fn native_probe_leg_evidence(
+    transmitted_bytes: u64,
+    received_bytes: u64,
+    reserved_up_mbps: u64,
+    reserved_down_mbps: u64,
+    window_started_at_ms: u64,
+    window_ended_at_ms: u64,
+) -> Option<ProbeLegEvidence> {
+    let duration_ms = window_ended_at_ms.checked_sub(window_started_at_ms)?;
+    if duration_ms == 0
+        || transmitted_bytes == 0
+        || received_bytes == 0
+        || reserved_up_mbps == 0
+        || reserved_down_mbps == 0
+    {
+        return None;
+    }
+    Some(ProbeLegEvidence {
+        // The native exchange is a liveness/RTT probe, not a throughput benchmark. Capacity was
+        // already signed, reserved, and enforced for this exact scope before the probe ran.
+        up_capacity_mbps: reserved_up_mbps,
+        down_capacity_mbps: reserved_down_mbps,
+        rtt_micros: duration_ms.saturating_mul(1_000).clamp(1, 60_000_000),
+        transmitted_bytes,
+        received_bytes,
+        window_started_at_ms,
+        window_ended_at_ms,
+        measured_at_ms: window_ended_at_ms,
+    })
+}
+
 fn deadline_is_bounded(deadline_unix_ms: u64, now_ms: u64) -> bool {
     deadline_unix_ms > now_ms
         && deadline_unix_ms <= now_ms.saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS)
+}
+
+fn native_rpc_deadline_is_within_authority(
+    deadline_unix_ms: u64,
+    authority_expires_at_ms: u64,
+) -> bool {
+    deadline_unix_ms <= authority_expires_at_ms
 }
 
 fn inbound_datapath_unavailable_response(
@@ -5811,8 +13898,118 @@ fn datapath_request_scope_matches(
         DatapathRelayOperation::ReservePath => {
             reserve_path_scope_matches(request, now_ms, &mut replay)
         }
+        DatapathRelayOperation::NativeProbeReady => {
+            native_probe_ready_scope_matches(request, now_ms, &mut replay)
+        }
+        DatapathRelayOperation::NativeProbeStart | DatapathRelayOperation::NativeProbeAuthorize => {
+            native_probe_start_scope_matches(request, operation, now_ms, &mut replay)
+        }
+        DatapathRelayOperation::UdpSessionStart => {
+            verified_udp_session_start_scope(request.client_signed_request(), now_ms).is_some_and(
+                |scope| {
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &scope.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.relay_node_id() == scope.relay.relay_node_id
+                        && request.relay_peer_id() == scope.relay.relay_peer_id
+                },
+            )
+        }
+        DatapathRelayOperation::MptcpSessionStart => {
+            verified_mptcp_session_start_scope(request.client_signed_request(), now_ms)
+                .and_then(|scope| {
+                    scope.paths.into_iter().find(|path| {
+                        request.relay_node_id() == path.relay.relay_node_id
+                            && request.relay_peer_id() == path.relay.relay_peer_id
+                    })
+                })
+                .is_some_and(|path| {
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
+        DatapathRelayOperation::MpquicSessionStart => {
+            verified_mpquic_session_start_scope(request.client_signed_request(), now_ms)
+                .and_then(|scope| {
+                    scope.paths.into_iter().find(|path| {
+                        request.relay_node_id() == path.relay.relay_node_id
+                            && request.relay_peer_id() == path.relay.relay_peer_id
+                    })
+                })
+                .is_some_and(|path| {
+                    request.exit_signed_authorization().is_empty()
+                        && request.request_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
         DatapathRelayOperation::Unspecified => false,
     }
+}
+
+fn native_probe_ready_scope_matches(
+    wrapper: &DatapathRelayRequest,
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> bool {
+    let Ok(permit) = verify_native_probe_permit(
+        wrapper.client_signed_request().to_vec(),
+        wrapper.exit_signed_authorization().to_vec(),
+        now_ms,
+        replay,
+    ) else {
+        return false;
+    };
+    let scope = permit.scope();
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    wrapper.request_id() == scope.probe_id
+        && native_rpc_deadline_is_within_authority(
+            wrapper.deadline_unix_ms(),
+            scope.attempt_expires_at_ms,
+        )
+        && wrapper.relay_node_id() == data_relay.node_id
+        && wrapper.relay_peer_id() == data_relay.peer_id
+}
+
+fn native_probe_start_scope_matches(
+    wrapper: &DatapathRelayRequest,
+    operation: DatapathRelayOperation,
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> bool {
+    let Ok(start) = verify_control_message::<NativeProbeStart>(
+        wrapper.client_signed_request(),
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_NATIVE_PROBE_LIFETIME_MS,
+            maximum_clock_skew_ms: TimePolicy::default().maximum_clock_skew_ms,
+        },
+        replay,
+    ) else {
+        return false;
+    };
+    let nonce = *start.nonce();
+    let expires_at_ms = start.expires_at_ms();
+    let start = start.into_message();
+    let Some(scope) = start.scope.as_ref() else {
+        return false;
+    };
+    let Some(data_relay) = scope.data_relay.as_ref() else {
+        return false;
+    };
+    let expected_request_id = if operation == DatapathRelayOperation::NativeProbeAuthorize {
+        native_probe_authorization_request_id(nonce)
+    } else {
+        nonce[..FORWARD_ID_BYTES]
+            .try_into()
+            .expect("fixed nonce prefix")
+    };
+    wrapper.request_id() == expected_request_id
+        && native_rpc_deadline_is_within_authority(wrapper.deadline_unix_ms(), expires_at_ms)
+        && wrapper.relay_node_id() == data_relay.node_id
+        && wrapper.relay_peer_id() == data_relay.peer_id
 }
 
 #[allow(
@@ -6162,16 +14359,490 @@ fn verified_native_probe_forward_scope(
     let scope = verified.message().scope.as_ref()?;
     let control = scope.control.as_ref()?;
     let exit = scope.exit.as_ref()?;
-    inner_forward_scope_matches(
-        request,
-        verified.nonce(),
-        verified.expires_at_ms(),
-        &control.node_id,
-        &control.peer_id,
-        &exit.node_id,
-        &exit.peer_id,
+    (request.forward_id() == &verified.nonce()[..FORWARD_ID_BYTES]
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
+        && request.control_relay_node_id() == control.node_id
+        && request.control_relay_peer_id() == control.peer_id
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id)
+        .then(|| scope.clone())
+}
+
+fn verified_native_probe_authorization_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbeAuthorize
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let verified =
+        verify_native_probe_authorization_chain(request.canonical_request(), now_ms).ok()?;
+    let scope = verified.scope();
+    let data_relay = scope.data_relay.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    let start_envelope = decode_canonical::<SignedEnvelope>(
+        verified.encoded_start(),
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
     )
+    .ok()?;
+    let start_nonce = fixed_bytes::<32>(&start_envelope.nonce)?;
+    let authorization_id = native_probe_authorization_request_id(start_nonce);
+    (request.forward_id() == authorization_id
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
+        && request.control_relay_node_id() == data_relay.node_id
+        && request.control_relay_peer_id() == data_relay.peer_id
+        && request.control_relay_public_key() == data_relay.public_key
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id)
+        .then(|| scope.clone())
+}
+
+fn verified_native_probe_result_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbeResult
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let verified =
+        verify_native_probe_authorization_chain(request.canonical_request(), now_ms).ok()?;
+    let scope = verified.scope();
+    let data_relay = scope.data_relay.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    let start_envelope = decode_canonical::<SignedEnvelope>(
+        verified.encoded_start(),
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let request_id = start_envelope.nonce.get(..FORWARD_ID_BYTES)?;
+    (request.forward_id() == request_id
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            verified.expires_at_ms(),
+        )
+        && request.control_relay_node_id() == data_relay.node_id
+        && request.control_relay_peer_id() == data_relay.peer_id
+        && request.control_relay_public_key() == data_relay.public_key
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id)
+        .then(|| scope.clone())
+}
+
+fn verified_native_probe_ready_forward_scope(
+    request: &ExitForwardRequest,
+    now_ms: u64,
+) -> Option<NativeProbePathScope> {
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbeReady
+        || !deadline_is_bounded(request.deadline_unix_ms(), now_ms)
+    {
+        return None;
+    }
+    let ready = decode_canonical::<NativeProbeReadyForwardRequest>(
+        request.canonical_request(),
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+    )
+    .ok()?;
+    let mut replay = ReplayCache::new(2).ok()?;
+    let permit = verify_native_probe_permit(
+        ready.signed_permit_request().to_vec(),
+        ready.signed_permit().to_vec(),
+        now_ms,
+        &mut replay,
+    )
+    .ok()?;
+    let scope = permit.scope();
+    let data_relay = scope.data_relay.as_ref()?;
+    let exit = scope.exit.as_ref()?;
+    (request.forward_id() == scope.probe_id
+        && native_rpc_deadline_is_within_authority(
+            request.deadline_unix_ms(),
+            scope.attempt_expires_at_ms,
+        )
+        && request.control_relay_node_id() == data_relay.node_id
+        && request.control_relay_peer_id() == data_relay.peer_id
+        && request.control_relay_public_key() == data_relay.public_key
+        && request.exit_node_id() == exit.node_id
+        && request.exit_peer_id() == exit.peer_id
+        && ready
+            .relay_exit_endpoint()
+            .is_some_and(|binding| binding.route_context_id == scope.attempt_id))
     .then(|| scope.clone())
+}
+
+fn native_probe_authorization_request_id(mut start_nonce: [u8; 32]) -> [u8; FORWARD_ID_BYTES] {
+    start_nonce[0] ^= 0x80;
+    let mut request_id: [u8; FORWARD_ID_BYTES] = start_nonce[..FORWARD_ID_BYTES]
+        .try_into()
+        .expect("fixed nonce prefix");
+    if request_id.iter().all(|byte| *byte == 0) {
+        request_id[FORWARD_ID_BYTES - 1] = 1;
+    }
+    request_id
+}
+
+fn native_start_probe_id(encoded_start: &[u8]) -> Option<[u8; FORWARD_ID_BYTES]> {
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_start,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let start =
+        decode_canonical::<NativeProbeStart>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).ok()?;
+    fixed_bytes::<FORWARD_ID_BYTES>(&start.scope?.probe_id)
+}
+
+fn native_start_authorization_id(encoded_start: &[u8]) -> Option<[u8; FORWARD_ID_BYTES]> {
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_start,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    Some(native_probe_authorization_request_id(fixed_bytes::<32>(
+        &envelope.nonce,
+    )?))
+}
+
+fn decoded_signed_payload<M: ControlPayload>(encoded: &[u8]) -> Option<M> {
+    let envelope =
+        decode_canonical::<SignedEnvelope>(encoded, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+            .ok()?;
+    let payload = decode_canonical::<M>(&envelope.payload, MAX_CONTROL_PAYLOAD_SIZE).ok()?;
+    payload.validate().ok()?;
+    Some(payload)
+}
+
+fn decoded_relay_reservation_request(
+    encoded: &[u8],
+) -> Option<(RelayReservationRequest, RelayAuthorization)> {
+    let request = decoded_signed_payload::<RelayReservationRequest>(encoded)?;
+    let authorization = decoded_signed_payload::<RelayAuthorization>(&request.exit_authorization)?;
+    Some((request, authorization))
+}
+
+fn exit_finalize_response(bundle: &AcceptedExitReservationBundle) -> Vec<Vec<u8>> {
+    std::iter::once(bundle.signed_exit_reservation().to_vec())
+        .chain(bundle.relay_authorizations().iter().cloned())
+        .collect()
+}
+
+fn fresh_exit_route_runtime_instance_id() -> Option<[u8; 32]> {
+    loop {
+        let mut instance_id = [0_u8; 32];
+        OsRng.try_fill_bytes(&mut instance_id).ok()?;
+        if instance_id != [0; 32] {
+            return Some(instance_id);
+        }
+    }
+}
+
+fn endpoint_hint_from_observation(
+    binding: &EndpointTraversalBinding,
+    observed: IpAddr,
+    remote: &(String, Option<IpAddr>),
+) -> Option<TraversalEndpointHint> {
+    let bytes = |address: IpAddr| match address {
+        IpAddr::V4(address) => address.octets().to_vec(),
+        IpAddr::V6(address) => address.octets().to_vec(),
+    };
+    let (observed_address, on_link) = if is_public_routable_ip(observed) {
+        (bytes(observed), None)
+    } else {
+        let peer = remote.1?;
+        if remote.0.contains("/p2p-circuit")
+            || !is_local_lan_ip(observed)
+            || !is_local_lan_ip(peer)
+            || observed.is_ipv4() != peer.is_ipv4()
+            || observed == peer
+        {
+            return None;
+        }
+        (
+            Vec::new(),
+            Some(volparossa_routing::OnLinkUnderlayHint {
+                local_address: bytes(observed),
+                peer_address: bytes(peer),
+            }),
+        )
+    };
+    // The permanent transport PeerId stays helper-local. RelayClient's observer_id is the
+    // signed ephemeral session actor; neither this hint nor its interface proof goes to Exit.
+    Some(TraversalEndpointHint {
+        path_id: binding.path_id,
+        role: binding.role as i32,
+        observer_id: binding.observer_id.to_vec(),
+        observer_peer_id: binding.observer_peer_id.to_bytes(),
+        observed_address,
+        on_link,
+    })
+}
+
+fn public_udp_endpoint(
+    endpoint: volparossa_wireguard::PublicWireGuardEndpoint,
+) -> PublicUdpEndpoint {
+    let address = match endpoint.underlay_ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
+    };
+    PublicUdpEndpoint {
+        address,
+        port: u32::from(endpoint.listen_port()),
+    }
+}
+
+fn production_exit_prepare_request(
+    finalize: &ExitReservationFinalizeRequest,
+    setup_expires_at_ms: u64,
+    hard_expires_at_ms: u64,
+) -> Option<PrepareLeaseBatch> {
+    let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&finalize.route_context_id)?;
+    if route_context_id == [0; FORWARD_ID_BYTES]
+        || finalize.relay_paths.is_empty()
+        || finalize.relay_paths.len() > usize::from(volparossa_wireguard::MAX_PATHS)
+        || setup_expires_at_ms > hard_expires_at_ms
+    {
+        return None;
+    }
+    // Helper ownership may never extend past the millisecond authority that created it. Rounding
+    // up would make almost every non-second-aligned signed grant fail Activate's expiry binding.
+    let setup_expires_at_unix = setup_expires_at_ms / 1_000;
+    let hard_expires_at_unix = hard_expires_at_ms / 1_000;
+    if setup_expires_at_unix <= unix_seconds() || hard_expires_at_unix < setup_expires_at_unix {
+        return None;
+    }
+    let mut path_ids = finalize
+        .relay_paths
+        .iter()
+        .map(|path| path.path_id)
+        .collect::<Vec<_>>();
+    path_ids.sort_unstable();
+    if path_ids.iter().enumerate().any(|(index, path_id)| {
+        *path_id == 0
+            || *path_id > u32::from(volparossa_wireguard::MAX_PATHS)
+            || path_ids.get(index.saturating_sub(1)) == Some(path_id) && index != 0
+    }) {
+        return None;
+    }
+    let path_count = u32::try_from(path_ids.len()).ok()?;
+    Some(PrepareLeaseBatch {
+        route_context_id: route_context_id.to_vec(),
+        role: ContextRole::Exit as i32,
+        mptcp_accepted_addrs: path_count,
+        mptcp_subflows: path_count,
+        leases: path_ids
+            .into_iter()
+            .map(|path_id| LeasePlan {
+                path_id,
+                role: WireguardRole::Exit as i32,
+            })
+            .collect(),
+        setup_expires_at_unix,
+        hard_expires_at_unix,
+        traversal_hints: Vec::new(),
+    })
+}
+
+fn production_service_prepare_request(
+    route_context_id: [u8; FORWARD_ID_BYTES],
+    role: ContextRole,
+    path_id: u32,
+    setup_expires_at_ms: u64,
+    hard_expires_at_ms: u64,
+) -> Option<PrepareLeaseBatch> {
+    if route_context_id.iter().all(|byte| *byte == 0)
+        || !(1..=8).contains(&path_id)
+        || setup_expires_at_ms > hard_expires_at_ms
+        || !matches!(role, ContextRole::Relay | ContextRole::Exit)
+    {
+        return None;
+    }
+    // Keep privileged lifetime within the exact signed millisecond authority (see the Exit path
+    // above); truncation is deliberately fail-closed by at most 999 ms.
+    let setup_expires_at_unix = setup_expires_at_ms / 1_000;
+    let hard_expires_at_unix = hard_expires_at_ms / 1_000;
+    if setup_expires_at_unix <= unix_seconds() || hard_expires_at_unix < setup_expires_at_unix {
+        return None;
+    }
+    let lease_roles: &[WireguardRole] = match role {
+        ContextRole::Relay => &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+        ContextRole::Exit => &[WireguardRole::Exit],
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    Some(PrepareLeaseBatch {
+        route_context_id: route_context_id.to_vec(),
+        role: role as i32,
+        mptcp_accepted_addrs: 1,
+        mptcp_subflows: 1,
+        leases: lease_roles
+            .iter()
+            .map(|lease_role| LeasePlan {
+                path_id,
+                role: *lease_role as i32,
+            })
+            .collect(),
+        setup_expires_at_unix,
+        hard_expires_at_unix,
+        traversal_hints: Vec::new(),
+    })
+}
+
+fn commit_lease_batch(activation: &ActivateLeaseBatch) -> CommitLeaseBatch {
+    CommitLeaseBatch {
+        route_context_id: activation.route_context_id.clone(),
+        context_handle: activation.context_handle.clone(),
+        leases: activation
+            .leases
+            .iter()
+            .map(|lease| LeaseCommit {
+                lease_handle: lease.lease_handle.clone(),
+                path_id: lease.path_id,
+                role: lease.role,
+            })
+            .collect(),
+    }
+}
+
+fn exact_mptcp_exit_commit(
+    route: &PreparedProductionExitRoute,
+    commit: &CommitLeaseBatch,
+    selected_path_ids: &[u32],
+) -> bool {
+    let prepare = route.helper_owner.prepare();
+    if ContextRole::try_from(prepare.role).ok() != Some(ContextRole::Exit)
+        || prepare.route_context_id != route.bundle.accepted().route_context_id()
+        || commit.route_context_id != prepare.route_context_id
+        || commit.context_handle != route.helper_owner.prepared().context_handle
+        || selected_path_ids.len() < 2
+        || selected_path_ids.len() > usize::from(volparossa_wireguard::MAX_PATHS)
+        || prepare.leases.len() != selected_path_ids.len()
+        || commit.leases.len() != selected_path_ids.len()
+    {
+        return false;
+    }
+    let prepared = prepare
+        .leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let committed = commit
+        .leases
+        .iter()
+        .map(|lease| (lease.path_id, lease.role))
+        .collect::<BTreeSet<_>>();
+    let expected = selected_path_ids
+        .iter()
+        .copied()
+        .map(|path_id| (path_id, WireguardRole::Exit as i32))
+        .collect::<BTreeSet<_>>();
+    prepared.len() == selected_path_ids.len()
+        && committed.len() == selected_path_ids.len()
+        && prepared == expected
+        && committed == expected
+}
+
+fn native_service_prepare_request(
+    scope: &NativeProbePathScope,
+    role: ContextRole,
+    lease_roles: &[WireguardRole],
+    now_ms: u64,
+) -> Option<PrepareLeaseBatch> {
+    if scope.attempt_id.len() != FORWARD_ID_BYTES
+        || scope.attempt_id.iter().all(|byte| *byte == 0)
+        || !(1..=u32::try_from(volparossa_protocol::MAX_NATIVE_PROBE_PATHS).ok()?)
+            .contains(&scope.required_path_count)
+        || !(1..=scope.required_path_count).contains(&scope.candidate_ordinal)
+        || scope.attempt_expires_at_ms <= now_ms.saturating_add(1_000)
+        || !matches!(
+            (role, lease_roles),
+            (
+                ContextRole::Relay,
+                [WireguardRole::RelayClient, WireguardRole::RelayExit]
+            ) | (ContextRole::Exit, [WireguardRole::Exit])
+        )
+    {
+        return None;
+    }
+    let now_unix = now_ms / 1_000;
+    let hard_expires_at_unix = scope.attempt_expires_at_ms / 1_000;
+    let setup_expires_at_unix =
+        hard_expires_at_unix.min(now_unix.checked_add(TUNNEL_SETUP_TIMEOUT_SECONDS)?);
+    let leases = match role {
+        ContextRole::Relay => lease_roles
+            .iter()
+            .map(|lease_role| LeasePlan {
+                path_id: scope.candidate_ordinal,
+                role: *lease_role as i32,
+            })
+            .collect(),
+        ContextRole::Exit => (1..=scope.required_path_count)
+            .map(|path_id| LeasePlan {
+                path_id,
+                role: WireguardRole::Exit as i32,
+            })
+            .collect(),
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    let local_path_count = match role {
+        ContextRole::Exit => scope.required_path_count,
+        ContextRole::Relay => 1,
+        ContextRole::Unspecified | ContextRole::Client => return None,
+    };
+    (setup_expires_at_unix > now_unix).then(|| PrepareLeaseBatch {
+        route_context_id: scope.attempt_id.clone(),
+        role: role as i32,
+        mptcp_accepted_addrs: local_path_count,
+        mptcp_subflows: local_path_count,
+        leases,
+        setup_expires_at_unix,
+        hard_expires_at_unix,
+        traversal_hints: Vec::new(),
+    })
+}
+
+fn native_exit_ready_prepare_matches(
+    owner_prepare: &PrepareLeaseBatch,
+    requested_prepare: &PrepareLeaseBatch,
+    now_ms: u64,
+) -> bool {
+    if owner_prepare.setup_expires_at_unix <= now_ms / 1_000 {
+        return false;
+    }
+    let mut requested_prepare = requested_prepare.clone();
+    requested_prepare.setup_expires_at_unix = owner_prepare.setup_expires_at_unix;
+    owner_prepare == &requested_prepare
+}
+
+fn native_endpoint_binding(
+    helper_runtime_id: [u8; 32],
+    route_context_id: &[u8; FORWARD_ID_BYTES],
+    lease_handle: &[u8; 32],
+    path_id: u32,
+    endpoint: volparossa_wireguard::PublicWireGuardEndpoint,
+) -> Option<NativeProbeEndpointBinding> {
+    let wire = protocol_endpoint_for_native(endpoint);
+    let commitment = native_probe_prepared_lease_commitment(
+        &helper_runtime_id,
+        route_context_id,
+        lease_handle,
+        &wire,
+    )
+    .ok()?;
+    Some(NativeProbeEndpointBinding {
+        helper_runtime_id: helper_runtime_id.to_vec(),
+        route_context_id: route_context_id.to_vec(),
+        endpoint: Some(wire),
+        prepared_lease_commitment: commitment.to_vec(),
+        path_id,
+    })
 }
 
 fn native_probe_control_capability_matches(
@@ -6196,6 +14867,353 @@ fn native_probe_control_capability_matches(
         && capability.policy_hash.as_slice() == scope.policy_hash
         && capability.policy_expires_at_ms == scope.policy_expires_at_ms
         && capability.expires_at_ms >= required_until_ms
+}
+
+/// Accept an exact control-Relay capability or an asynchronously observed same-identity version.
+///
+/// The Client and Exit can receive consecutive signed Relay advertisements in either order. The
+/// actor committed by the verified Permit scope must cover the complete attempt. The Exit's own
+/// view is used only to prove that the authenticated forwarding peer still serves the same policy
+/// through this bounded RPC. An equal sequence still requires exact payload and expiry equality, so
+/// a contradictory same-version advertisement cannot be substituted.
+fn native_probe_control_capability_lineage_matches(
+    current: &DirectRelayCapability,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    operation_deadline_ms: u64,
+    now_ms: u64,
+) -> bool {
+    if native_probe_control_capability_matches(
+        current,
+        actor,
+        scope,
+        authenticated_peer,
+        operation_deadline_ms,
+    ) {
+        return true;
+    }
+
+    scope.control.as_ref() == Some(actor)
+        && actor.node_id.as_slice() == current.node_id
+        && actor.peer_id == current.peer_id.to_bytes()
+        && actor.public_key.as_slice() == current.public_key
+        && actor.advertisement_sequence > 0
+        && actor.advertisement_sequence != current.advertisement_sequence
+        && fixed_bytes::<32>(&actor.advertisement_payload_hash).is_some_and(|hash| hash != [0; 32])
+        && actor.advertisement_expires_at_ms >= scope.attempt_expires_at_ms
+        && actor.capability_expires_at_ms >= scope.attempt_expires_at_ms
+        && actor.capability_expires_at_ms <= actor.advertisement_expires_at_ms
+        && actor.capability_expires_at_ms <= scope.policy_expires_at_ms
+        && current.peer_id == authenticated_peer
+        && current.policy_version == scope.policy_version
+        && current.policy_hash.as_slice() == scope.policy_hash
+        && current.policy_expires_at_ms == scope.policy_expires_at_ms
+        && current.advertisement_expires_at_ms > now_ms
+        && current.advertisement_expires_at_ms >= operation_deadline_ms
+        && current.expires_at_ms >= operation_deadline_ms
+}
+
+fn cache_exit_data_relay_capability(
+    cache: &mut HashMap<Libp2pPeerId, DirectRelayCapability>,
+    candidate_limit: usize,
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
+    if scope.attempt_expires_at_ms <= now_ms {
+        return None;
+    }
+    if let Some(current) = cache.get(&authenticated_peer).filter(|current| {
+        native_probe_data_relay_capability_matches(
+            current,
+            actor,
+            scope,
+            authenticated_peer,
+            scope.attempt_expires_at_ms,
+        )
+    }) {
+        return Some(current.clone());
+    }
+    let capability = native_probe_data_relay_capability_from_advertisement(
+        encoded_advertisement,
+        actor,
+        scope,
+        authenticated_peer,
+        now_ms,
+    )?;
+    if !native_probe_data_relay_capability_matches(
+        &capability,
+        actor,
+        scope,
+        authenticated_peer,
+        scope.attempt_expires_at_ms,
+    ) {
+        return None;
+    }
+    retain_exit_relay_capability(cache, candidate_limit, capability)
+}
+
+/// Keep bounded Exit-service authority without changing the independent Client candidate set.
+fn retain_exit_relay_capability(
+    cache: &mut HashMap<Libp2pPeerId, DirectRelayCapability>,
+    candidate_limit: usize,
+    capability: DirectRelayCapability,
+) -> Option<DirectRelayCapability> {
+    let authenticated_peer = capability.peer_id;
+    if cache.get(&authenticated_peer) == Some(&capability) {
+        return Some(capability);
+    }
+    let replace_cached = match cache.get(&authenticated_peer) {
+        Some(current)
+            if current.node_id != capability.node_id
+                || current.public_key != capability.public_key
+                || current.peer_id != capability.peer_id
+                || current.policy_version != capability.policy_version
+                || current.policy_hash != capability.policy_hash
+                || current.policy_expires_at_ms != capability.policy_expires_at_ms
+                || current.advertisement_sequence == capability.advertisement_sequence =>
+        {
+            return None;
+        }
+        Some(current) => current.advertisement_sequence < capability.advertisement_sequence,
+        None if cache.len() >= candidate_limit.max(1) => return None,
+        None => true,
+    };
+    if replace_cached {
+        cache.insert(authenticated_peer, capability.clone());
+    }
+    Some(capability)
+}
+
+fn native_probe_data_relay_capability_matches(
+    capability: &DirectRelayCapability,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    required_until_ms: u64,
+) -> bool {
+    scope.data_relay.as_ref() == Some(actor)
+        && actor.node_id.as_slice() == capability.node_id
+        && actor.peer_id == capability.peer_id.to_bytes()
+        && actor.public_key.as_slice() == capability.public_key
+        && actor.advertisement_sequence == capability.advertisement_sequence
+        && actor.advertisement_expires_at_ms == capability.advertisement_expires_at_ms
+        && capability
+            .advertisement_payload_hash
+            .matches_native_probe_commitment(&actor.advertisement_payload_hash)
+        && actor.capability_expires_at_ms == capability.expires_at_ms
+        && capability.peer_id == authenticated_peer
+        && capability.policy_version == scope.policy_version
+        && capability.policy_hash.as_slice() == scope.policy_hash
+        && capability.policy_expires_at_ms == scope.policy_expires_at_ms
+        && capability.expires_at_ms >= required_until_ms
+}
+
+fn local_relay_policy_is_current(
+    capability: &DirectRelayCapability,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    capability.node_id == local_node_id
+        && capability.peer_id == local_peer_id
+        && capability.public_key == local_public_key
+        && capability.policy_version == scope.policy_version
+        && capability.policy_hash.as_slice() == scope.policy_hash
+        && capability.policy_expires_at_ms == scope.policy_expires_at_ms
+        && capability.expires_at_ms > now_ms
+}
+
+/// Reconstruct the exact data-Relay capability carried by a native Ready request.
+///
+/// The request's authenticated libp2p connection remains the authority for peer identity. The
+/// carried advertisement is accepted only as a self-contained cryptographic proof of the exact
+/// actor already committed by the signed native scope; it deliberately does not enter the normal
+/// advertisement replay, persistence, candidate, or provider-record paths.
+fn native_probe_data_relay_capability_from_advertisement(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
+    if scope.data_relay.as_ref() != Some(actor) {
+        return None;
+    }
+    native_probe_relay_capability_from_advertisement(
+        encoded_advertisement,
+        actor,
+        scope,
+        authenticated_peer,
+        now_ms,
+    )
+}
+
+/// Verify a self-contained signed Relay capability for the exact control or data actor.
+/// This never consults or populates this node's independent Client candidate cache.
+fn native_probe_relay_capability_from_advertisement(
+    encoded_advertisement: &[u8],
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    authenticated_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<DirectRelayCapability> {
+    if !advertisement_envelope_matches_peer(encoded_advertisement, &authenticated_peer) {
+        return None;
+    }
+    let envelope = decode_canonical::<SignedEnvelope>(
+        encoded_advertisement,
+        volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+    )
+    .ok()?;
+    let payload_hash = fixed_bytes::<32>(&envelope.payload_hash)?;
+    let fingerprint = advertisement_fingerprint(encoded_advertisement)?;
+    let mut replay = ReplayCache::new(1).ok()?;
+    let verified = verify_control_message::<WireAdvertisement>(
+        encoded_advertisement,
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    let advertisement = verified.message();
+    let roles = advertisement.roles.as_ref()?;
+    let capabilities = advertisement.capabilities.as_ref()?;
+    let policy = advertisement.policy.as_ref()?;
+    let network = advertisement.network.as_ref()?;
+    let policy_hash = fixed_bytes::<32>(&policy.whitelist_hash)?;
+    let node_id = *verified.sender_id();
+    let public_key = *verified.sender_public_key();
+    let advertisement_expires_at_ms = verified.expires_at_ms();
+    let maximum_capability_expiry = advertisement_expires_at_ms.min(scope.policy_expires_at_ms);
+
+    if (scope.data_relay.as_ref() != Some(actor) && scope.control.as_ref() != Some(actor))
+        || !roles.relay
+        || (network.asn == 0
+            && network.uplink != volparossa_protocol::AdvertisementUplink::LocalOnly as i32)
+        || !native_probe_capabilities_support_scope(capabilities, scope)
+        || node_id_from_public_key(&public_key) != node_id
+        || advertisement.node_id.as_slice() != node_id
+        || advertisement.peer_id != authenticated_peer.to_bytes()
+        || advertisement.sequence_number == 0
+        || advertisement.sequence_number != actor.advertisement_sequence
+        || advertisement.expires_at_ms != advertisement_expires_at_ms
+        || advertisement_expires_at_ms != actor.advertisement_expires_at_ms
+        || advertisement_expires_at_ms <= now_ms
+        || policy.whitelist_version != scope.policy_version
+        || policy_hash.as_slice() != scope.policy_hash
+        || scope.policy_expires_at_ms <= now_ms
+        || actor.node_id.as_slice() != node_id
+        || actor.peer_id != authenticated_peer.to_bytes()
+        || actor.public_key.as_slice() != public_key
+        || actor.advertisement_payload_hash.as_slice() != payload_hash
+        || actor.capability_expires_at_ms > maximum_capability_expiry
+        || actor.capability_expires_at_ms <= now_ms
+    {
+        return None;
+    }
+
+    Some(DirectRelayCapability {
+        node_id,
+        peer_id: authenticated_peer,
+        public_key,
+        advertisement_sequence: advertisement.sequence_number,
+        advertisement_expires_at_ms,
+        advertisement_payload_hash: fingerprint.payload_hash,
+        policy_version: scope.policy_version,
+        policy_hash,
+        policy_expires_at_ms: scope.policy_expires_at_ms,
+        expires_at_ms: actor.capability_expires_at_ms,
+    })
+}
+
+/// Recover the exact still-valid local Relay authority committed by a native scope.
+///
+/// Publication refresh is intentionally independent from an already signed attempt. Search the
+/// bounded served lineage and reverify every candidate instead of substituting the current local
+/// advertisement for the actor that the Permit actually names.
+fn local_native_probe_data_relay_authority(
+    service: &DiscoveryService,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_peer: Libp2pPeerId,
+    now_ms: u64,
+    required_until_ms: u64,
+) -> Option<(DirectRelayCapability, Vec<u8>)> {
+    service.bounded_local_advertisements().find_map(|encoded| {
+        let capability = native_probe_data_relay_capability_from_advertisement(
+            encoded, actor, scope, local_peer, now_ms,
+        )?;
+        native_probe_data_relay_capability_matches(
+            &capability,
+            actor,
+            scope,
+            local_peer,
+            required_until_ms,
+        )
+        .then(|| (capability, encoded.to_vec()))
+    })
+}
+
+/// The control Relay adds only its own exact signed authority on the upstream hop. The
+/// client-session-signed request stays byte-identical, and no Client endpoint accompanies it.
+fn local_exit_forward_upstream_request(
+    service: &DiscoveryService,
+    request: &ExitForwardRequest,
+    local_peer: Libp2pPeerId,
+    now_ms: u64,
+) -> Option<UpstreamExitForwardRequest> {
+    request.validate().ok()?;
+    if !request.control_advertisement().is_empty() {
+        return None;
+    }
+    let upstream = UpstreamExitForwardRequest::from(request.clone());
+    if request.validated_operation().ok()? != ExitForwardOperation::NativeProbePermit {
+        return Some(upstream);
+    }
+    let scope = verified_native_probe_forward_scope(request, now_ms)?;
+    let actor = scope.control.as_ref()?;
+    let advertisement = service.bounded_local_advertisements().find_map(|encoded| {
+        let capability = native_probe_relay_capability_from_advertisement(
+            encoded, actor, &scope, local_peer, now_ms,
+        )?;
+        native_probe_control_capability_matches(
+            &capability,
+            actor,
+            &scope,
+            local_peer,
+            scope.attempt_expires_at_ms,
+        )
+        .then(|| encoded.to_vec())
+    })?;
+    upstream.with_control_advertisement(advertisement).ok()
+}
+
+fn local_native_probe_exit_actor_is_served(
+    service: &DiscoveryService,
+    actor: &PreselectionActorBinding,
+    scope: &NativeProbePathScope,
+    local_node_id: [u8; 32],
+    local_peer_id: Libp2pPeerId,
+    local_public_key: [u8; 32],
+    now_ms: u64,
+) -> bool {
+    service.bounded_local_advertisements().any(|encoded| {
+        local_native_probe_exit_actor_matches(
+            encoded,
+            actor,
+            scope,
+            local_node_id,
+            local_peer_id,
+            local_public_key,
+            now_ms,
+        )
+    })
 }
 
 #[allow(
@@ -6270,8 +15288,8 @@ fn local_native_probe_exit_actor_matches(
         && actor.advertisement_sequence == advertisement.sequence_number
         && actor.advertisement_expires_at_ms == verified.expires_at_ms()
         && actor.advertisement_payload_hash.as_slice() == payload_hash
-        && actor.capability_expires_at_ms == expected_capability_expiry
-        && expected_capability_expiry > now_ms
+        && actor.capability_expires_at_ms <= expected_capability_expiry
+        && actor.capability_expires_at_ms > now_ms
 }
 
 fn native_probe_capabilities_support_scope(
@@ -6299,6 +15317,10 @@ fn native_probe_time_policy() -> TimePolicy {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive operation matrix keeps every signed forward scope explicit"
+)]
 fn forward_request_scope_matches(
     request: &ExitForwardRequest,
     operation: ExitForwardOperation,
@@ -6393,8 +15415,428 @@ fn forward_request_scope_matches(
         ExitForwardOperation::NativeProbePermit => {
             verified_native_probe_forward_scope(request, now_ms).is_some()
         }
+        ExitForwardOperation::NativeProbeAuthorize => {
+            verified_native_probe_authorization_forward_scope(request, now_ms).is_some()
+        }
+        ExitForwardOperation::NativeProbeReady => {
+            verified_native_probe_ready_forward_scope(request, now_ms).is_some()
+        }
+        ExitForwardOperation::NativeProbeResult => {
+            verified_native_probe_result_forward_scope(request, now_ms).is_some()
+        }
+        ExitForwardOperation::UdpSessionStart => {
+            verified_udp_session_start_scope(request.canonical_request(), now_ms).is_some_and(
+                |scope| {
+                    request.forward_id() == &scope.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= scope.expires_at_ms
+                        && request.control_relay_node_id() == scope.relay.relay_node_id
+                        && request.control_relay_peer_id() == scope.relay.relay_peer_id
+                        && request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id
+                },
+            )
+        }
+        ExitForwardOperation::MptcpSessionStart => {
+            verified_mptcp_session_start_scope(request.canonical_request(), now_ms)
+                .and_then(|scope| {
+                    (request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id)
+                        .then(|| {
+                            scope.paths.into_iter().find(|path| {
+                                request.control_relay_node_id() == path.relay.relay_node_id
+                                    && request.control_relay_peer_id() == path.relay.relay_peer_id
+                            })
+                        })
+                        .flatten()
+                })
+                .is_some_and(|path| {
+                    request.forward_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
+        ExitForwardOperation::MpquicSessionStart => {
+            verified_mpquic_session_start_scope(request.canonical_request(), now_ms)
+                .and_then(|scope| {
+                    (request.exit_node_id() == scope.exit.exit_node_id
+                        && request.exit_peer_id() == scope.exit.exit_peer_id)
+                        .then(|| {
+                            scope.paths.into_iter().find(|path| {
+                                request.control_relay_node_id() == path.relay.relay_node_id
+                                    && request.control_relay_peer_id() == path.relay.relay_peer_id
+                            })
+                        })
+                        .flatten()
+                })
+                .is_some_and(|path| {
+                    request.forward_id() == &path.confirmation_nonce[..FORWARD_ID_BYTES]
+                        && request.deadline_unix_ms() <= path.expires_at_ms
+                })
+        }
         ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
     }
+}
+
+struct VerifiedMpquicPathScope {
+    relay: RelayReservation,
+    path_id: u32,
+    signed_relay_reservation: Vec<u8>,
+    confirmation_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+struct VerifiedMpquicSessionStartScope {
+    exit: ExitReservation,
+    paths: Vec<VerifiedMpquicPathScope>,
+    expires_at_ms: u64,
+}
+
+fn mpquic_session_signal_matches(
+    pending: &PendingMpquicSessionStart,
+    encoded_signal: &[u8],
+    now_ms: u64,
+) -> bool {
+    let Some(scope) = verified_mpquic_session_start_scope(&pending.canonical_start, now_ms) else {
+        return false;
+    };
+    let Some(native_identity) = scope.exit.native_route_identity.as_ref() else {
+        return false;
+    };
+    let expected_path_ids = scope
+        .paths
+        .iter()
+        .map(|path| path.path_id)
+        .collect::<Vec<_>>();
+    decode_canonical::<ExitMpquicSessionSignal>(
+        encoded_signal,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+    )
+    .ok()
+    .is_some_and(|signal| {
+        signal.validate().is_ok()
+            && signal.reservation_id() == pending.route.accepted.reservation_id()
+            && signal.route_context_id() == pending.route.accepted.route_context_id()
+            && signal.exit_native_instance_id() == native_identity.exit_native_instance_id
+            && signal.selected_path_ids() == expected_path_ids
+            && signal
+                .selected_path_ids()
+                .contains(&pending.route.accepted.path_id())
+    })
+}
+
+/// Verify every signature in one complete MPQUIC activation frame without consuming the
+/// actor-owned replay state. The Exit service consumes the credential delivery in its persistent
+/// replay cache immediately before native handoff.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact signed MPQUIC proof-set verification transaction"
+)]
+fn verified_mpquic_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedMpquicSessionStartScope> {
+    let request = decode_canonical::<MpquicSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let replay_capacity = request.paths().len().checked_mul(4)?.checked_add(2)?;
+    let mut replay = ReplayCache::new(replay_capacity).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let mut expires_at_ms = exit_verified.expires_at_ms();
+    let exit = exit_verified.into_message();
+    if exit_sender.as_slice() != exit.exit_node_id {
+        return None;
+    }
+    let credential_verified = verify_control_message::<NativeRouteCredentialDelivery>(
+        request.signed_credential_delivery(),
+        now_ms,
+        TimePolicy::default(),
+        &mut replay,
+    )
+    .ok()?;
+    expires_at_ms = expires_at_ms.min(credential_verified.expires_at_ms());
+    if credential_verified.sender_id().as_slice() != exit.client_session_id
+        || credential_verified.sender_public_key().as_slice() != exit.client_session_public_key
+    {
+        return None;
+    }
+
+    let mut paths = Vec::with_capacity(request.paths().len());
+    for proof in request.paths() {
+        let (relay_verified, authorization_verified) = verify_relay_reservation(
+            proof.signed_relay_reservation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let relay_sender = *relay_verified.sender_id();
+        let relay_expiry = relay_verified.expires_at_ms();
+        let authorization_sender = *authorization_verified.sender_id();
+        let authorization_expiry = authorization_verified.expires_at_ms();
+        let relay_grant = relay_verified.into_message();
+        let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+            proof.signed_confirmation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let confirmation_sender = *confirmation_verified.sender_id();
+        let confirmation_public_key = *confirmation_verified.sender_public_key();
+        let confirmation_nonce = *confirmation_verified.nonce();
+        let confirmation_expiry = confirmation_verified.expires_at_ms();
+        let confirmation = confirmation_verified.into_message();
+        let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+            proof.signed_confirmation_receipt(),
+            now_ms,
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .ok()?;
+        let receipt_sender = *receipt_verified.sender_id();
+        let receipt_expiry = receipt_verified.expires_at_ms();
+        let receipt = receipt_verified.into_message();
+        let confirmation_hash =
+            exit_confirmation_envelope_hash(proof.signed_confirmation()).ok()?;
+        if relay_sender.as_slice() != relay_grant.relay_node_id
+            || authorization_sender != exit_sender
+            || confirmation_sender.as_slice() != exit.client_session_id
+            || confirmation_public_key.as_slice() != exit.client_session_public_key
+            || receipt_sender != exit_sender
+            || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+            || confirmation.relay_reservation != proof.signed_relay_reservation()
+        {
+            return None;
+        }
+        expires_at_ms = expires_at_ms
+            .min(relay_expiry)
+            .min(authorization_expiry)
+            .min(confirmation_expiry)
+            .min(receipt_expiry);
+        paths.push(VerifiedMpquicPathScope {
+            path_id: relay_grant.path_id,
+            relay: relay_grant,
+            signed_relay_reservation: proof.signed_relay_reservation().to_vec(),
+            confirmation_nonce,
+            expires_at_ms: relay_expiry
+                .min(authorization_expiry)
+                .min(confirmation_expiry)
+                .min(receipt_expiry),
+        });
+    }
+    for path in &mut paths {
+        path.expires_at_ms = path.expires_at_ms.min(expires_at_ms);
+    }
+    Some(VerifiedMpquicSessionStartScope {
+        exit,
+        paths,
+        expires_at_ms,
+    })
+}
+
+struct VerifiedUdpSessionStartScope {
+    exit: ExitReservation,
+    relay: RelayReservation,
+    confirmation_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+fn verified_udp_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedUdpSessionStartScope> {
+    let request = decode_canonical::<UdpSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let mut path_replay = ReplayCache::new(4).ok()?;
+    let path = VerifiedSingleRelayPath::verify(
+        request.signed_exit_reservation(),
+        request.signed_relay_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut path_replay,
+    )
+    .ok()?;
+    let mut verification_replay = ReplayCache::new(4).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let exit = exit_verified.into_message();
+    let relay_verified = verify_control_message::<RelayReservation>(
+        request.signed_relay_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let relay_sender = *relay_verified.sender_id();
+    let relay = relay_verified.into_message();
+    let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+        request.signed_confirmation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let confirmation_sender = *confirmation_verified.sender_id();
+    let confirmation_public_key = *confirmation_verified.sender_public_key();
+    let confirmation_nonce = *confirmation_verified.nonce();
+    let confirmation = confirmation_verified.into_message();
+    let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+        request.signed_confirmation_receipt(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_replay,
+    )
+    .ok()?;
+    let receipt_sender = *receipt_verified.sender_id();
+    let receipt_expiry = receipt_verified.expires_at_ms();
+    let receipt = receipt_verified.into_message();
+    let confirmation_hash = exit_confirmation_envelope_hash(request.signed_confirmation()).ok()?;
+    if exit_sender != *path.exit_node_id()
+        || relay_sender != *path.relay_node_id()
+        || confirmation_sender != *path.client_ephemeral_id()
+        || confirmation_public_key.as_slice() != relay.client_session_public_key
+        || receipt_sender != *path.exit_node_id()
+        || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+        || receipt.client_session_id != confirmation.client_session_id
+        || receipt.capability_id != confirmation.capability_id
+        || receipt.hold_id != confirmation.hold_id
+        || receipt.finalize_id != confirmation.finalize_id
+        || receipt.control_relay_node_id != confirmation.control_relay_node_id
+        || receipt.control_relay_peer_id != confirmation.control_relay_peer_id
+        || receipt.exit_node_id != confirmation.exit_node_id
+        || receipt.exit_peer_id != confirmation.exit_peer_id
+        || receipt.exit_boot_id != confirmation.exit_boot_id
+    {
+        return None;
+    }
+    let expires_at_ms = receipt_expiry.min(path.expires_at_ms());
+    Some(VerifiedUdpSessionStartScope {
+        exit,
+        relay,
+        confirmation_nonce,
+        expires_at_ms,
+    })
+}
+
+struct VerifiedMptcpSessionPathScope {
+    relay: RelayReservation,
+    confirmation_nonce: [u8; 32],
+    expires_at_ms: u64,
+}
+
+struct VerifiedMptcpSessionStartScope {
+    exit: ExitReservation,
+    paths: Vec<VerifiedMptcpSessionPathScope>,
+}
+
+/// Verify every signature in one complete MPTCP activation set before actor lineage is matched.
+fn verified_mptcp_session_start_scope(
+    encoded: &[u8],
+    now_ms: u64,
+) -> Option<VerifiedMptcpSessionStartScope> {
+    let request = decode_canonical::<MptcpSessionStartRequest>(
+        encoded,
+        usize::try_from(MAX_FORWARDING_FRAME_BYTES).ok()?,
+    )
+    .ok()?;
+    request.validate().ok()?;
+    let replay_capacity = request.paths().len().checked_mul(3)?.checked_add(1)?;
+    let mut verification_cache = ReplayCache::new(replay_capacity).ok()?;
+    let exit_verified = verify_control_message::<ExitReservation>(
+        request.signed_exit_reservation(),
+        now_ms,
+        TimePolicy::default(),
+        &mut verification_cache,
+    )
+    .ok()?;
+    let exit_sender = *exit_verified.sender_id();
+    let exit_expiry = exit_verified.expires_at_ms();
+    let exit = exit_verified.into_message();
+    if exit_sender.as_slice() != exit.exit_node_id {
+        return None;
+    }
+    let mut paths = Vec::with_capacity(request.paths().len());
+    for proof in request.paths() {
+        let relay_verified = verify_control_message::<RelayReservation>(
+            proof.signed_relay_reservation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let relay_sender = *relay_verified.sender_id();
+        let relay_expiry = relay_verified.expires_at_ms();
+        let relay = relay_verified.into_message();
+        let confirmation_verified = verify_control_message::<ExitReservationConfirmation>(
+            proof.signed_confirmation(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let confirmation_sender = *confirmation_verified.sender_id();
+        let confirmation_public_key = *confirmation_verified.sender_public_key();
+        let confirmation_nonce = *confirmation_verified.nonce();
+        let confirmation_expiry = confirmation_verified.expires_at_ms();
+        let confirmation = confirmation_verified.into_message();
+        let receipt_verified = verify_control_message::<ExitConfirmationReceipt>(
+            proof.signed_confirmation_receipt(),
+            now_ms,
+            TimePolicy::default(),
+            &mut verification_cache,
+        )
+        .ok()?;
+        let receipt_sender = *receipt_verified.sender_id();
+        let receipt_expiry = receipt_verified.expires_at_ms();
+        let receipt = receipt_verified.into_message();
+        let confirmation_hash =
+            exit_confirmation_envelope_hash(proof.signed_confirmation()).ok()?;
+        if relay_sender.as_slice() != relay.relay_node_id
+            || confirmation_sender.as_slice() != exit.client_session_id
+            || confirmation_public_key.as_slice() != relay.client_session_public_key
+            || receipt_sender != exit_sender
+            || receipt.confirmation_envelope_hash.as_slice() != confirmation_hash
+            || receipt.client_session_id != confirmation.client_session_id
+            || receipt.capability_id != confirmation.capability_id
+            || receipt.hold_id != confirmation.hold_id
+            || receipt.finalize_id != confirmation.finalize_id
+            || receipt.control_relay_node_id != confirmation.control_relay_node_id
+            || receipt.control_relay_peer_id != confirmation.control_relay_peer_id
+            || receipt.exit_node_id != confirmation.exit_node_id
+            || receipt.exit_peer_id != confirmation.exit_peer_id
+            || receipt.exit_boot_id != confirmation.exit_boot_id
+        {
+            return None;
+        }
+        paths.push(VerifiedMptcpSessionPathScope {
+            relay,
+            confirmation_nonce,
+            expires_at_ms: exit_expiry
+                .min(relay_expiry)
+                .min(confirmation_expiry)
+                .min(receipt_expiry),
+        });
+    }
+    Some(VerifiedMptcpSessionStartScope { exit, paths })
 }
 
 /// Test-only access to the production exit-forward scope validator.
@@ -6485,10 +15927,52 @@ fn exit_response_matches(
         && response.exit_peer_id() == expected_exit_peer.to_bytes()
         && expected_exit_node_id.is_none_or(|node_id| response.exit_node_id() == node_id)
         && (response.validated_status() != Ok(ForwardStatus::Granted)
+            || matches!(
+                operation,
+                ExitForwardOperation::UdpSessionStart
+                    | ExitForwardOperation::MptcpSessionStart
+                    | ExitForwardOperation::MpquicSessionStart
+            )
             || response
                 .signed_responses()
                 .iter()
                 .all(|envelope| signed_envelope_matches_peer(envelope, &expected_exit_peer)))
+}
+
+fn mesh_listener_address(config: &Config) -> Result<Option<Multiaddr>, DiscoveryRuntimeError> {
+    use libp2p::multiaddr::Protocol;
+    let ip: IpAddr = config
+        .wifi_mesh
+        .local_address
+        .parse()
+        .map_err(|_| DiscoveryRuntimeError::ListenAddress)?;
+    if config.network.listen_addresses.is_empty() && ip.is_ipv4() {
+        return Ok(None); // The normal IPv4 wildcard QUIC listener covers this new interface.
+    }
+    for text in &config.network.listen_addresses {
+        let address =
+            Multiaddr::from_str(text).map_err(|_| DiscoveryRuntimeError::ListenAddress)?;
+        let same_address = address.iter().any(|protocol| match protocol {
+            Protocol::Ip4(value) => {
+                ip.is_ipv4() && (value.is_unspecified() || IpAddr::V4(value) == ip)
+            }
+            Protocol::Ip6(value) => {
+                ip.is_ipv6() && (value.is_unspecified() || IpAddr::V6(value) == ip)
+            }
+            _ => false,
+        });
+        if same_address
+            && address
+                .iter()
+                .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        {
+            return Ok(None);
+        }
+    }
+    let family = if ip.is_ipv4() { "ip4" } else { "ip6" };
+    Multiaddr::from_str(&format!("/{family}/{ip}/udp/0/quic-v1"))
+        .map(Some)
+        .map_err(|_| DiscoveryRuntimeError::ListenAddress)
 }
 
 fn configure_network(
@@ -6564,19 +16048,19 @@ fn build_exit_service(
         config.capacity.exit_download_limit_mbps,
     )
     .map_err(|_| ())?;
-    ExitService::new(
-        ExitServiceConfig::enabled(
-            node_id,
-            bandwidth,
-            config.capacity.maximum_exit_sessions,
-            MAXIMUM_RESERVATION_TTL_SECONDS,
-            TUNNEL_SETUP_TIMEOUT_SECONDS,
-            SERVICE_REPLAY_CAPACITY,
-        ),
-        policy,
-        Some(metrics.clone()),
-    )
-    .map_err(|_| ())
+    let mut service_config = ExitServiceConfig::enabled(
+        node_id,
+        bandwidth,
+        config.capacity.maximum_exit_sessions,
+        MAXIMUM_RESERVATION_TTL_SECONDS,
+        TUNNEL_SETUP_TIMEOUT_SECONDS,
+        SERVICE_REPLAY_CAPACITY,
+    );
+    if let Some(interface) = config.network.independent_egress_interface.as_deref() {
+        service_config = service_config
+            .with_independent_egress(IndependentEgress::new(interface).map_err(|_| ())?);
+    }
+    ExitService::new(service_config, policy, Some(metrics.clone())).map_err(|_| ())
 }
 
 fn clear_relay_metric(metrics: &MetricsRegistry) {
@@ -6624,6 +16108,43 @@ fn multiaddr_ip(address: &Multiaddr) -> Option<IpAddr> {
         Protocol::Ip4(address) => Some(IpAddr::V4(address)),
         Protocol::Ip6(address) => Some(IpAddr::V6(address)),
         _ => None,
+    })
+}
+
+fn identity_bound_exit_control_address(
+    control_addresses: &BTreeSet<String>,
+    scope: &NativeProbePathScope,
+    exit_peer: Libp2pPeerId,
+    adjacent_local_address: Option<&[u8]>,
+) -> Option<String> {
+    let family = ObservationAddressFamily::try_from(scope.address_family).ok()?;
+    control_addresses.iter().find_map(|text| {
+        let address = Multiaddr::from_str(text).ok()?;
+        let ip = multiaddr_ip(&address)?;
+        let address_matches_family = matches!(
+            (family, ip),
+            (ObservationAddressFamily::Ipv4, IpAddr::V4(_))
+                | (ObservationAddressFamily::Ipv6, IpAddr::V6(_))
+        );
+        if !address_matches_family {
+            return None;
+        }
+        let eligible = adjacent_local_address.map_or_else(
+            || is_public_routable_ip(ip),
+            |local| {
+                is_local_lan_ip(ip)
+                    && match ip {
+                        IpAddr::V4(ip) => local == ip.octets(),
+                        IpAddr::V6(ip) => local == ip.octets(),
+                    }
+            },
+        );
+        if !eligible {
+            return None;
+        }
+        let peerlink = PeerLink::new(exit_peer, address).ok()?;
+        let identity_bound = peerlink.dial_address().to_string();
+        (identity_bound.len() <= MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES).then_some(identity_bound)
     })
 }
 
@@ -6782,6 +16303,16 @@ fn convert_advertisement(wire: &WireAdvertisement, now: UnixTime) -> Result<Core
             sample_window_seconds: u16::try_from(capacity.sample_window_seconds).map_err(|_| ())?,
         },
         network: NetworkMetadata {
+            uplink: match volparossa_protocol::AdvertisementUplink::try_from(network.uplink)
+                .map_err(|_| ())?
+            {
+                volparossa_protocol::AdvertisementUplink::IndependentInternet => {
+                    volparossa_core::NetworkUplink::IndependentInternet
+                }
+                volparossa_protocol::AdvertisementUplink::LocalOnly => {
+                    volparossa_core::NetworkUplink::LocalOnly
+                }
+            },
             operator_id: OperatorId::new(network.operator_id.clone()).map_err(|_| ())?,
             region: network.region.clone(),
             country_code: network.country_code.clone(),
@@ -6843,9 +16374,9 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet, HashSet},
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::PermissionsExt,
         sync::{
-            Arc,
+            Arc, Mutex, OnceLock,
             atomic::{AtomicU64, Ordering},
         },
         time::Duration,
@@ -6868,6 +16399,14 @@ mod tests {
 
     static NEXT_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(90_000);
 
+    const fn test_client_roles() -> RolesConfig {
+        RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        }
+    }
+
     struct RuntimeFixture {
         runtime: DiscoveryRuntime,
         control: DiscoveryControlHandle,
@@ -6889,9 +16428,14 @@ mod tests {
             .expect("memory address");
         let mut config = Config {
             roles,
+            runtime_mode: volparossa_config::RuntimeMode::Development,
             ..Config::default()
         };
         config.network.operator_id = Some("operator-test".to_owned());
+        config.network.advertised_region = "test".to_owned();
+        config.network.advertised_country_code = "NL".to_owned();
+        config.network.advertised_asn = 64_512;
+        config.network.advertised_ipv4_prefix = Some("44.160.1.0/24".to_owned());
         config.network.listen_addresses = vec![address.to_string()];
         config.network.advertisement_ttl_seconds = 30;
         config.capacity.relay_upload_limit_mbps = 100;
@@ -6923,6 +16467,11 @@ mod tests {
                 policy: Some(policy.clone()),
                 role_store: role_store.clone(),
                 metrics,
+                helper: HelperClient::new(
+                    directory.path().join("helper.sock"),
+                    directory.path().join("helper.token"),
+                ),
+                mpquic_socket: directory.path().join("mpquic.sock"),
             },
         )
         .expect("discovery runtime");
@@ -6933,6 +16482,169 @@ mod tests {
             policy,
             role_store,
             directory,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_local_endpoint_observations_keep_transport_and_actor_bindings() {
+        let mut fixture = fixture(test_client_roles());
+        let observer = *Identity::generate().peer_id();
+        fixture.runtime.observed_endpoints.insert(
+            observer,
+            (
+                "/ip4/192.168.8.2/udp/443/quic-v1".to_owned(),
+                Some("192.168.8.2".parse().unwrap()),
+            ),
+        );
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip4/192.168.8.1/udp/443/quic-v1".parse().unwrap(),
+        );
+        let binding = EndpointTraversalBinding {
+            path_id: 1,
+            role: WireguardRole::RelayClient,
+            observer_id: [7; 32],
+            observer_peer_id: observer,
+        };
+        let hints = fixture
+            .runtime
+            .exact_endpoint_traversal_hints(vec![binding.clone()])
+            .expect("direct local authenticated observer");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].observer_id, vec![7; 32]);
+        assert_eq!(hints[0].observer_peer_id, observer.to_bytes());
+        assert!(hints[0].observed_address.is_empty());
+        let local = hints[0].on_link.as_ref().unwrap();
+        assert_eq!(local.local_address, vec![192, 168, 8, 1]);
+        assert_eq!(local.peer_address, vec![192, 168, 8, 2]);
+        fixture
+            .runtime
+            .observed_endpoints
+            .get_mut(&observer)
+            .unwrap()
+            .0
+            .push_str("/p2p-circuit");
+        assert!(
+            fixture
+                .runtime
+                .exact_endpoint_traversal_hints(vec![binding])
+                .unwrap()
+                .is_empty()
+        );
+        let mut wire_endpoint = volparossa_protocol::WireguardEndpoint {
+            public_key: vec![8; 32],
+            underlay_ip: vec![192, 168, 8, 2],
+            listen_port: 41_000,
+            underlay_scope: volparossa_protocol::UnderlayScope::PublicInternet as i32,
+        };
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_none());
+        wire_endpoint.underlay_scope = volparossa_protocol::UnderlayScope::DirectLocalLan as i32;
+        let local = native_probe_observed_relay_prefix(&wire_endpoint).unwrap();
+        assert_eq!(local.network_prefix, vec![192, 168, 8]);
+        assert_eq!(
+            local.scope,
+            volparossa_protocol::UnderlayScope::DirectLocalLan as i32
+        );
+        wire_endpoint.underlay_ip = vec![8, 8, 8, 8];
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_none());
+        wire_endpoint.underlay_scope = volparossa_protocol::UnderlayScope::PublicInternet as i32;
+        assert!(native_probe_observed_relay_prefix(&wire_endpoint).is_some());
+    }
+
+    #[tokio::test]
+    async fn traversal_observations_bind_only_the_exact_active_peer_and_path() {
+        let mut fixture = fixture(test_client_roles());
+        let observer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .observed_endpoints
+            .insert(observer, ("/ip4/1.1.1.1/udp/443/quic-v1".to_owned(), None));
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip6/2606:4700:4700::1111/udp/443/quic-v1"
+                .parse()
+                .expect("IPv6 observation"),
+        );
+        fixture.runtime.record_local_endpoint_observation(
+            observer,
+            &"/ip4/8.8.8.8/udp/443/quic-v1"
+                .parse()
+                .expect("IPv4 observation"),
+        );
+        let hints = fixture
+            .runtime
+            .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                path_id: 2,
+                role: WireguardRole::Client,
+                observer_id: [7; 32],
+                observer_peer_id: observer,
+            }])
+            .expect("exact active peer");
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].path_id, 2);
+        assert_eq!(hints[0].observer_peer_id, observer.to_bytes());
+        assert_eq!(hints[0].observed_address.len(), 16);
+        assert_eq!(hints[1].observed_address, vec![8, 8, 8, 8]);
+
+        let foreign = Identity::generate().peer_id().to_owned();
+        assert_eq!(
+            fixture
+                .runtime
+                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
+                    path_id: 2,
+                    role: WireguardRole::Client,
+                    observer_id: [7; 32],
+                    observer_peer_id: foreign,
+                }]),
+            Err(OutboundReservationError::InvalidRequest)
+        );
+    }
+
+    fn local_advertisement_input(
+        roles: RolesConfig,
+        operator_id: &str,
+        policy: &VerifiedManifest,
+        control_addresses: BTreeSet<String>,
+    ) -> LocalAdvertisementInput {
+        LocalAdvertisementInput {
+            roles,
+            operator_id: operator_id.to_owned(),
+            capabilities: AdvertisementCapabilities {
+                tcp_mptcp: true,
+                udp_single_path: true,
+                multipath_quic: true,
+                ipv4: false,
+                ipv6: false,
+                udp_hole_punching: false,
+            },
+            capacity: AdvertisementCapacity {
+                operator_relay_limit_up_mbps: u64::from(roles.relay) * 100,
+                operator_relay_limit_down_mbps: u64::from(roles.relay) * 100,
+                operator_exit_limit_up_mbps: u64::from(roles.exit) * 100,
+                operator_exit_limit_down_mbps: u64::from(roles.exit) * 100,
+                currently_reserved_up_mbps: 0,
+                currently_reserved_down_mbps: 0,
+                estimated_free_up_mbps: 100,
+                estimated_free_down_mbps: 100,
+                active_relay_sessions: 0,
+                active_exit_sessions: 0,
+                free_relay_slots: u32::from(roles.relay) * 4,
+                free_exit_slots: u32::from(roles.exit) * 4,
+                sample_window_seconds: 0,
+            },
+            origin: AdvertisementNetwork {
+                uplink: volparossa_protocol::AdvertisementUplink::IndependentInternet as i32,
+                region: "test".to_owned(),
+                country_code: "NL".to_owned(),
+                asn: 64_512,
+                ipv4_prefix_hint: "44.160.1.0/24".to_owned(),
+                ipv6_prefix_hint: "2606:4700:100::/48".to_owned(),
+                operator_id: String::new(),
+            },
+            policy_version: policy.manifest_version(),
+            policy_hash: *policy.policy_hash(),
+            policy_expires_at_ms: policy.expires_at_ms(),
+            control_addresses,
         }
     }
 
@@ -7074,6 +16786,58 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_helper_cleanup_is_quarantined_between_bounded_retries() {
+        let expired_at_ms = 1_000_u64;
+        let failed_at_ms = 2_000_u64;
+        let retry_at_ms = failed_at_ms.saturating_add(HELPER_CLEANUP_RETRY_BACKOFF_MS);
+
+        assert!(helper_cleanup_due(expired_at_ms, 0, failed_at_ms));
+        assert!(!helper_cleanup_due(
+            expired_at_ms,
+            retry_at_ms,
+            failed_at_ms.saturating_add(1),
+        ));
+        assert!(!helper_cleanup_due(
+            expired_at_ms,
+            retry_at_ms,
+            retry_at_ms.saturating_sub(1),
+        ));
+        assert!(helper_cleanup_due(expired_at_ms, retry_at_ms, retry_at_ms,));
+        assert!(helper_cleanup_due(expired_at_ms, u64::MAX, u64::MAX,));
+
+        let source = include_str!("discovery.rs");
+        let runtime_impl = braced_item(source, "impl DiscoveryRuntime {");
+        let relay_cleanup = braced_item(
+            runtime_impl,
+            "async fn destroy_expired_production_relay_routes(",
+        );
+        let quarantine = relay_cleanup
+            .find("route.usable = false;")
+            .expect("expired Relay is quarantined");
+        let destroy = relay_cleanup
+            .find(".destroy_context(&route.helper_owner)")
+            .expect("helper Destroy attempt");
+        let retry = relay_cleanup
+            .find("HELPER_CLEANUP_RETRY_BACKOFF_MS")
+            .expect("bounded retry deadline");
+        let reinsert = relay_cleanup
+            .find(".insert(route_context_id, route)")
+            .expect("affine owner retained");
+        assert!(quarantine < destroy);
+        assert!(destroy < retry);
+        assert!(retry < reinsert);
+
+        for cleanup in [
+            "async fn destroy_expired_exit_native_attempts(",
+            "async fn destroy_expired_production_relay_routes(",
+            "async fn destroy_expired_production_exit_routes(",
+            "async fn destroy_expired_active_mptcp_exit_routes(",
+        ] {
+            assert!(braced_item(runtime_impl, cleanup).contains("helper_cleanup_due("));
+        }
+    }
+
+    #[test]
     fn signer_ownership_surface_stays_actor_bound() {
         let advertisement_source = include_str!("advertisement.rs");
         let publisher_marker = "pub(crate) struct AdvertisementPublisher {";
@@ -7109,7 +16873,7 @@ mod tests {
         assert!(!publisher_impl.contains("-> Identity"));
 
         let role_validation = sign
-            .find("if !input.roles.client")
+            .find("if !(input.roles.relay || input.roles.exit)")
             .expect("role validation");
         let input_validation = sign
             .find("if input.control_addresses.is_empty()")
@@ -7141,7 +16905,7 @@ mod tests {
             "async fn publish_local(&mut self, state: &Arc<RwLock<AgentState>>) {",
         );
         let service_role_guard = publish
-            .find("if self.roles.relay || self.roles.exit")
+            .find("if !(self.roles.relay || self.roles.exit)")
             .expect("service-role guard");
         let operator_read = publish
             .find("let Some(operator_id)")
@@ -7157,7 +16921,7 @@ mod tests {
 
     #[tokio::test]
     async fn actor_identity_cryptographically_matches_swarm_and_local_advertisement() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let public_key = fixture
             .runtime
@@ -7175,14 +16939,16 @@ mod tests {
             .publisher
             .sign(
                 &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-identity-coherence".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
+                &local_advertisement_input(
+                    RolesConfig {
+                        client: true,
+                        relay: true,
+                        exit: false,
+                    },
+                    "operator-identity-coherence",
+                    &fixture.policy,
+                    BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
+                ),
                 now_ms,
             )
             .expect("actor-signed advertisement");
@@ -7248,7 +17014,7 @@ mod tests {
         let mut expired = active.clone();
         expired.expires_at_ms = now_ms;
         for (roles, policy) in [
-            (RolesConfig::default(), active),
+            (test_client_roles(), active),
             (relay_roles, inactive),
             (relay_roles, malformed),
             (relay_roles, zero_version),
@@ -7466,13 +17232,26 @@ mod tests {
             .families
             .ipv6
             .then(|| {
-                format!(
-                    "2606:4700:{:02x}{:02x}::/48",
-                    nonce[0],
-                    sequence_number % 255
-                )
+                let prefix_segment = (u16::from(nonce[0]) << 8)
+                    | u16::try_from(sequence_number % 255).expect("bounded sequence suffix");
+                format!("2606:4700:{prefix_segment:x}::/48")
             })
             .unwrap_or_default();
+    }
+
+    fn generated_nonce_with_unique_network_discriminator() -> [u8; 32] {
+        static USED_DISCRIMINATORS: OnceLock<Mutex<BTreeSet<u8>>> = OnceLock::new();
+        let used = USED_DISCRIMINATORS.get_or_init(|| Mutex::new(BTreeSet::new()));
+        loop {
+            let nonce = generate_nonce();
+            if used
+                .lock()
+                .expect("network discriminator set")
+                .insert(nonce[0])
+            {
+                return nonce;
+            }
+        }
     }
 
     #[allow(
@@ -7504,17 +17283,19 @@ mod tests {
             )),
             30,
         );
+        let seed_roles = if roles.relay || roles.exit {
+            roles
+        } else {
+            RolesConfig {
+                client: true,
+                relay: true,
+                exit: false,
+            }
+        };
         let seed = publisher
             .sign(
                 identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-proof".to_owned(),
-                    policy_version: policy.manifest_version(),
-                    policy_hash: *policy.policy_hash(),
-                    policy_expires_at_ms: policy.expires_at_ms(),
-                    control_addresses,
-                },
+                &local_advertisement_input(seed_roles, "operator-proof", policy, control_addresses),
                 now_ms,
             )
             .expect("seed advertisement");
@@ -7541,6 +17322,22 @@ mod tests {
         capabilities.ipv4 = advertised.families.ipv4;
         capabilities.ipv6 = advertised.families.ipv6;
         let capacity = wire.capacity.as_mut().expect("capacity");
+        let sample_window_seconds = capacity.sample_window_seconds;
+        *capacity = AdvertisementCapacity {
+            operator_relay_limit_up_mbps: 0,
+            operator_relay_limit_down_mbps: 0,
+            operator_exit_limit_up_mbps: 0,
+            operator_exit_limit_down_mbps: 0,
+            currently_reserved_up_mbps: 0,
+            currently_reserved_down_mbps: 0,
+            estimated_free_up_mbps: 0,
+            estimated_free_down_mbps: 0,
+            active_relay_sessions: 0,
+            active_exit_sessions: 0,
+            free_relay_slots: 0,
+            free_exit_slots: 0,
+            sample_window_seconds,
+        };
         if roles.relay {
             capacity.operator_relay_limit_up_mbps = 100;
             capacity.operator_relay_limit_down_mbps = 100;
@@ -7577,6 +17374,8 @@ mod tests {
         fixture: RuntimeFixture,
         now_ms: u64,
         control: DirectRelayCapability,
+        control_identity: Identity,
+        control_advertisement: Vec<u8>,
         scope: NativeProbePathScope,
         request: ExitForwardRequest,
         local_advertisement: Vec<u8>,
@@ -7644,8 +17443,32 @@ mod tests {
         let actor_expires_at_ms = now_ms.saturating_add(20_000);
 
         let control_identity = Identity::generate();
-        let control =
+        let mut control =
             direct_capability(&control_identity, &fixture.policy, 17, actor_expires_at_ms);
+        let control_advertisement = service_advertisement(
+            &control_identity,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.policy,
+            17,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let control_envelope: SignedEnvelope = decode_canonical(
+            &control_advertisement,
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("signed control advertisement");
+        control.advertisement_expires_at_ms = control_envelope.expires_at_ms;
+        control.advertisement_payload_hash = advertisement_fingerprint(&control_advertisement)
+            .expect("control fingerprint")
+            .payload_hash;
         fixture
             .runtime
             .direct_relays
@@ -7666,7 +17489,7 @@ mod tests {
             roles,
             &fixture.policy,
             23,
-            [0x73; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         )
@@ -7709,8 +17532,11 @@ mod tests {
             policy_expires_at_ms: fixture.policy.expires_at_ms(),
             challenge_hash: vec![0x34; 32],
             attempt_expires_at_ms: request_expires_at_ms,
+            required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
         };
-        let nonce = [0x35; 32];
+        let nonce = generate_nonce();
         let permit_request = NativeProbePermitRequest {
             scope: Some(scope.clone()),
             created_at_ms: now_ms,
@@ -7744,6 +17570,8 @@ mod tests {
             fixture,
             now_ms,
             control,
+            control_identity,
+            control_advertisement,
             scope,
             request,
             local_advertisement,
@@ -7751,7 +17579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_permit_forward_scope_requires_exact_signed_wrapper_lineage() {
+    async fn native_permit_forward_scope_accepts_bounded_transaction_deadline() {
         let fixture = native_permit_forward_fixture();
         let verified = verified_native_probe_forward_scope(&fixture.request, fixture.now_ms)
             .expect("exact native Permit scope");
@@ -7782,12 +17610,26 @@ mod tests {
             fixture.request.canonical_request().to_vec(),
         );
         assert!(verified_native_probe_forward_scope(&wrong_forward, fixture.now_ms).is_none());
-        let wrong_deadline = rebuild(
+        let transactional_deadline = rebuild(
             fixture.request.forward_id().to_vec(),
             fixture.request.deadline_unix_ms().saturating_sub(1),
             fixture.request.canonical_request().to_vec(),
         );
-        assert!(verified_native_probe_forward_scope(&wrong_deadline, fixture.now_ms).is_none());
+        assert!(
+            verified_native_probe_forward_scope(&transactional_deadline, fixture.now_ms)
+                == Some(fixture.scope.clone())
+        );
+        assert!(forward_request_scope_matches(
+            &transactional_deadline,
+            ExitForwardOperation::NativeProbePermit,
+            fixture.now_ms,
+        ));
+        let authority_overrun = rebuild(
+            fixture.request.forward_id().to_vec(),
+            fixture.request.deadline_unix_ms().saturating_add(1),
+            fixture.request.canonical_request().to_vec(),
+        );
+        assert!(verified_native_probe_forward_scope(&authority_overrun, fixture.now_ms).is_none());
 
         let mut envelope: SignedEnvelope = decode_canonical(
             fixture.request.canonical_request(),
@@ -7803,6 +17645,119 @@ mod tests {
             tampered,
         );
         assert!(verified_native_probe_forward_scope(&wrong_signature, fixture.now_ms).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_address_selects_lan_and_public_relay_listeners_separately() {
+        let fixture = native_permit_forward_fixture();
+        let scope = &fixture.scope;
+        let exit_peer = *fixture.fixture.runtime.service.local_peer_id();
+        // The unrelated private address sorts first, exactly as the mixed-link regression.
+        let listeners = [
+            "/ip4/10.241.20.2/udp/41000/quic-v1",
+            "/ip4/10.241.21.2/udp/41000/quic-v1",
+            "/ip4/46.162.3.1/udp/41000/quic-v1",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        let lan = identity_bound_exit_control_address(
+            &listeners,
+            scope,
+            exit_peer,
+            Some(&[10, 241, 21, 2]),
+        )
+        .expect("the LAN Relay receives its exact observed active Exit listener");
+        let public = identity_bound_exit_control_address(&listeners, scope, exit_peer, None)
+            .expect("the public Relay does not inherit another peer's private listener");
+        assert_eq!(
+            lan,
+            format!("/ip4/10.241.21.2/udp/41000/quic-v1/p2p/{exit_peer}")
+        );
+        assert_eq!(
+            public,
+            format!("/ip4/46.162.3.1/udp/41000/quic-v1/p2p/{exit_peer}")
+        );
+        assert!(
+            identity_bound_exit_control_address(
+                &listeners,
+                scope,
+                exit_peer,
+                Some(&[10, 241, 22, 2]),
+            )
+            .is_none(),
+            "an unserved observed address never falls back to a different LAN"
+        );
+        let private_only = listeners
+            .into_iter()
+            .filter(|address| address.contains("/10."))
+            .collect();
+        assert!(
+            identity_bound_exit_control_address(&private_only, scope, exit_peer, None).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_permit_private_listener_needs_current_authenticated_data_relay_lineage() {
+        let mut fixture = native_permit_forward_fixture();
+        let relay = fixture.scope.data_relay.as_ref().unwrap();
+        let relay_peer = Libp2pPeerId::from_bytes(&relay.peer_id).unwrap();
+        let runtime = &mut fixture.fixture.runtime;
+        runtime.control_addresses = [
+            "/ip4/10.241.21.2/udp/41000/quic-v1",
+            "/ip4/46.162.3.1/udp/41000/quic-v1",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+        // A remembered/private peer claim alone cannot select a private listener. The live,
+        // bounded connection registry must still agree that this exact data peer is direct LAN.
+        runtime.observed_endpoints.insert(
+            relay_peer,
+            (
+                "/ip4/10.241.21.1/udp/41000/quic-v1".to_owned(),
+                Some("10.241.21.1".parse().unwrap()),
+            ),
+        );
+        runtime.record_local_endpoint_observation(
+            relay_peer,
+            &"/ip4/10.241.21.2/udp/41000/quic-v1".parse().unwrap(),
+        );
+        assert!(
+            runtime
+                .service
+                .authenticated_local_peer_prefix(relay_peer)
+                .is_none()
+        );
+        let selected = runtime
+            .native_permit_exit_control_address(&fixture.scope)
+            .unwrap();
+        assert!(selected.starts_with("/ip4/46.162.3.1/"));
+        runtime
+            .control_addresses
+            .retain(|address| address.contains("/10."));
+        assert!(
+            runtime
+                .native_permit_exit_control_address(&fixture.scope)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_rpc_deadline_is_capped_by_signed_authority() {
+        let authority_expires_at_ms = 300_000;
+        assert!(native_rpc_deadline_is_within_authority(
+            30_000,
+            authority_expires_at_ms
+        ));
+        assert!(native_rpc_deadline_is_within_authority(
+            authority_expires_at_ms,
+            authority_expires_at_ms
+        ));
+        assert!(!native_rpc_deadline_is_within_authority(
+            authority_expires_at_ms.saturating_add(1),
+            authority_expires_at_ms
+        ));
     }
 
     #[tokio::test]
@@ -7904,6 +17859,429 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_permit_accepts_async_same_identity_control_views() {
+        let fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.control.as_ref().expect("control actor");
+        let peer = fixture.control.peer_id;
+        let deadline = fixture.request.deadline_unix_ms();
+        let mut refreshed = fixture.control.clone();
+        refreshed.advertisement_sequence = refreshed.advertisement_sequence.saturating_add(1);
+        refreshed.advertisement_payload_hash = refreshed.advertisement_payload_hash.xor_for_test();
+
+        assert!(!native_probe_control_capability_matches(
+            &refreshed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+        ));
+        assert!(native_probe_control_capability_lineage_matches(
+            &refreshed,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut substituted_identity = refreshed.clone();
+        substituted_identity.public_key[0] ^= 1;
+        assert!(!native_probe_control_capability_lineage_matches(
+            &substituted_identity,
+            actor,
+            &fixture.scope,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut lagging = fixture.control.clone();
+        lagging.advertisement_sequence = actor.advertisement_sequence.saturating_sub(1);
+        lagging.advertisement_payload_hash = lagging.advertisement_payload_hash.xor_for_test();
+        lagging.advertisement_expires_at_ms = deadline.saturating_add(1_000);
+        lagging.expires_at_ms = deadline.saturating_add(1_000);
+        let mut long_attempt = fixture.scope.clone();
+        long_attempt.attempt_expires_at_ms = actor.capability_expires_at_ms;
+        assert!(native_probe_control_capability_lineage_matches(
+            &lagging,
+            actor,
+            &long_attempt,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut actor_lifetime_overrun = long_attempt.clone();
+        actor_lifetime_overrun.attempt_expires_at_ms =
+            actor.capability_expires_at_ms.saturating_add(1);
+        assert!(!native_probe_control_capability_lineage_matches(
+            &lagging,
+            actor,
+            &actor_lifetime_overrun,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut stale_for_operation = lagging.clone();
+        stale_for_operation.expires_at_ms = deadline.saturating_sub(1);
+        assert!(!native_probe_control_capability_lineage_matches(
+            &stale_for_operation,
+            actor,
+            &long_attempt,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+
+        let mut contradictory_same_sequence = lagging;
+        contradictory_same_sequence.advertisement_sequence = actor.advertisement_sequence;
+        assert!(!native_probe_control_capability_lineage_matches(
+            &contradictory_same_sequence,
+            actor,
+            &long_attempt,
+            peer,
+            deadline,
+            fixture.now_ms,
+        ));
+    }
+
+    fn exit_data_relay_cache_input(
+        fixture: &NativePermitForwardFixture,
+        relay: &Identity,
+        sequence: u64,
+    ) -> (Vec<u8>, NativeProbePathScope) {
+        let encoded = service_advertisement(
+            relay,
+            RolesConfig {
+                client: true,
+                relay: true,
+                exit: true,
+            },
+            &fixture.fixture.policy,
+            sequence,
+            generate_nonce(),
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let mut scope = fixture.scope.clone();
+        scope.data_relay = Some(actor_from_signed_advertisement(
+            &encoded,
+            relay,
+            scope.attempt_expires_at_ms,
+            fixture.now_ms,
+        ));
+        (encoded, scope)
+    }
+
+    #[tokio::test]
+    async fn native_permit_control_authority_is_carried_without_exit_client_candidates() {
+        let mut fixture = native_permit_forward_fixture();
+        fixture.fixture.runtime.direct_relays.clear();
+        let mut control_service = DiscoveryService::new_with_protocol_roles(
+            fixture.control_identity.keypair().clone(),
+            DiscoveryProtocolRoles::new(false, true, false),
+        )
+        .expect("control service");
+        control_service
+            .set_local_advertisement(fixture.control_advertisement.clone())
+            .expect("serve exact signed control advertisement");
+        let upstream = local_exit_forward_upstream_request(
+            &control_service,
+            &fixture.request,
+            fixture.control.peer_id,
+            fixture.now_ms,
+        )
+        .expect("control adds its own authority without rewriting the signed Client request");
+        let forwarded = upstream.as_forward_request();
+        assert_eq!(
+            forwarded.canonical_request(),
+            fixture.request.canonical_request()
+        );
+        assert_eq!(
+            forwarded.control_advertisement(),
+            fixture.control_advertisement
+        );
+        let actor = fixture.scope.control.as_ref().unwrap();
+        let accepted = native_probe_relay_capability_from_advertisement(
+            forwarded.control_advertisement(),
+            actor,
+            &fixture.scope,
+            fixture.control.peer_id,
+            fixture.now_ms,
+        )
+        .expect("Exit verifies exact signed authority without its own Client candidates");
+        assert_eq!(accepted, fixture.control);
+        assert!(fixture.fixture.runtime.direct_relays.is_empty());
+        assert!(
+            retain_exit_relay_capability(
+                &mut fixture.fixture.runtime.exit_control_relays,
+                1,
+                accepted.clone(),
+            )
+            .is_some()
+        );
+        assert_eq!(
+            fixture
+                .fixture
+                .runtime
+                .exit_control_relays
+                .get(&accepted.peer_id),
+            Some(&accepted)
+        );
+        assert!(fixture.fixture.runtime.direct_relays.is_empty());
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                &[],
+                actor,
+                &fixture.scope,
+                fixture.control.peer_id,
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                forwarded.control_advertisement(),
+                actor,
+                &fixture.scope,
+                *Identity::generate().peer_id(),
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        let mut wrong_actor = actor.clone();
+        wrong_actor.advertisement_payload_hash[0] ^= 1;
+        let mut wrong_scope = fixture.scope.clone();
+        wrong_scope.control = Some(wrong_actor.clone());
+        assert!(
+            native_probe_relay_capability_from_advertisement(
+                forwarded.control_advertisement(),
+                &wrong_actor,
+                &wrong_scope,
+                fixture.control.peer_id,
+                fixture.now_ms,
+            )
+            .is_none()
+        );
+        let production = include_str!("discovery.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .unwrap()
+            .0;
+        let handler = braced_item(production, "fn prepare_native_probe_permit_response(");
+        assert!(!handler.contains(".direct_relays"));
+        assert!(handler.contains("request.control_advertisement()"));
+    }
+
+    #[tokio::test]
+    async fn native_ready_exit_service_cache_is_separate_from_local_client_provenance() {
+        let mut fixture = native_permit_forward_fixture();
+        fixture.fixture.runtime.roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        let relay = Identity::generate();
+        let peer = *relay.peer_id();
+        let (encoded, scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        fixture
+            .fixture
+            .runtime
+            .record_privacy_conflict(peer, 31, scope.attempt_expires_at_ms);
+        let client_candidates = fixture.fixture.runtime.direct_relays.clone();
+        let client_conflicts = fixture.fixture.runtime.privacy_conflicts.clone();
+        let runtime = &mut fixture.fixture.runtime;
+        let accepted = cache_exit_data_relay_capability(
+            &mut runtime.exit_data_relays,
+            runtime.candidate_limit,
+            &encoded,
+            scope.data_relay.as_ref().unwrap(),
+            &scope,
+            peer,
+            fixture.now_ms,
+        )
+        .expect("another Client's signed data-Relay authority is Exit-service scoped");
+        assert_eq!(runtime.exit_data_relays.get(&peer), Some(&accepted));
+        assert_eq!(runtime.direct_relays, client_candidates);
+        assert_eq!(runtime.privacy_conflicts, client_conflicts);
+        let production = include_str!("discovery.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .unwrap()
+            .0;
+        let ready = braced_item(production, "async fn answer_native_probe_ready_upstream(");
+        assert!(ready.contains("&mut self.exit_data_relays"));
+        assert!(!ready.contains(".direct_relays"));
+        assert!(!ready.contains("self.privacy_conflicts"));
+        assert!(ready.contains("verify_native_probe_permit("));
+        assert!(ready.contains(".bind_native_probe_data_relay_connection("));
+    }
+
+    #[tokio::test]
+    async fn native_ready_exit_service_cache_bounds_peers_and_preserves_signed_lineage() {
+        let fixture = native_permit_forward_fixture();
+        let relay = Identity::generate();
+        let peer = *relay.peer_id();
+        let mut cache = HashMap::new();
+        let (encoded, scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        let admit =
+            |cache: &mut HashMap<_, _>, encoded: &[u8], scope: &NativeProbePathScope, peer| {
+                cache_exit_data_relay_capability(
+                    cache,
+                    1,
+                    encoded,
+                    scope.data_relay.as_ref().unwrap(),
+                    scope,
+                    peer,
+                    fixture.now_ms,
+                )
+            };
+        let first = admit(&mut cache, &encoded, &scope, peer).expect("first peer");
+        let other = Identity::generate();
+        let (other_encoded, other_scope) = exit_data_relay_cache_input(&fixture, &other, 31);
+        assert!(admit(&mut cache, &other_encoded, &other_scope, *other.peer_id()).is_none());
+        assert_eq!(cache.len(), 1);
+        assert!(admit(&mut cache, &encoded, &scope, *other.peer_id()).is_none());
+        let (conflict_encoded, conflict_scope) = exit_data_relay_cache_input(&fixture, &relay, 31);
+        assert!(admit(&mut cache, &conflict_encoded, &conflict_scope, peer).is_none());
+        assert_eq!(cache.get(&peer), Some(&first));
+
+        let (new_encoded, new_scope) = exit_data_relay_cache_input(&fixture, &relay, 32);
+        let latest = admit(&mut cache, &new_encoded, &new_scope, peer).expect("same-peer refresh");
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&peer), Some(&latest));
+        assert_eq!(admit(&mut cache, &encoded, &scope, peer), Some(first));
+        assert_eq!(
+            cache.get(&peer),
+            Some(&latest),
+            "old signed scope cannot roll cache back"
+        );
+        let mut wrong_policy = scope.clone();
+        wrong_policy.policy_hash[0] ^= 1;
+        assert!(admit(&mut cache, &encoded, &wrong_policy, peer).is_none());
+        assert!(
+            cache_exit_data_relay_capability(
+                &mut cache,
+                1,
+                &new_encoded,
+                new_scope.data_relay.as_ref().unwrap(),
+                &new_scope,
+                peer,
+                new_scope.attempt_expires_at_ms,
+            )
+            .is_none()
+        );
+        assert_eq!(cache.get(&peer), Some(&latest));
+    }
+
+    #[tokio::test]
+    async fn native_ready_recovers_exact_previous_local_relay_advertisement_after_refresh() {
+        let roles = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        let mut fixture = fixture(roles);
+        let now_ms = unix_millis();
+        let required_until_ms = now_ms.saturating_add(5_000);
+        let original = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            41,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let original_envelope: SignedEnvelope =
+            decode_canonical(&original, volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE)
+                .expect("original local Relay envelope");
+        let actor = actor_from_signed_advertisement(
+            &original,
+            &fixture.runtime.identity,
+            original_envelope
+                .expires_at_ms
+                .min(fixture.policy.expires_at_ms()),
+            now_ms,
+        );
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0xb1; FORWARD_ID_BYTES],
+            probe_id: vec![0xb2; FORWARD_ID_BYTES],
+            candidate_set_hash: vec![0xb3; 32],
+            candidate_ordinal: 1,
+            data_relay: Some(actor.clone()),
+            control: None,
+            exit: None,
+            client_session_id: vec![0xb4; 32],
+            client_session_public_key: vec![0xb5; 32],
+            transport: Transport::UdpSinglePath as i32,
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            policy_version: fixture.policy.manifest_version(),
+            policy_hash: fixture.policy.policy_hash().to_vec(),
+            policy_expires_at_ms: fixture.policy.expires_at_ms(),
+            challenge_hash: vec![0xb6; 32],
+            attempt_expires_at_ms: required_until_ms,
+            required_path_count: 1,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
+        };
+        fixture
+            .runtime
+            .service
+            .set_local_advertisement(original.clone())
+            .expect("install original local Relay advertisement");
+
+        let replacement = service_advertisement(
+            &fixture.runtime.identity,
+            roles,
+            &fixture.policy,
+            42,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        fixture
+            .runtime
+            .service
+            .set_local_advertisement(replacement.clone())
+            .expect("refresh local Relay advertisement");
+
+        assert!(
+            native_probe_data_relay_capability_from_advertisement(
+                &replacement,
+                &actor,
+                &scope,
+                *fixture.runtime.service.local_peer_id(),
+                now_ms,
+            )
+            .is_none(),
+            "the current advertisement must not be substituted for the signed actor"
+        );
+        let (capability, encoded) = local_native_probe_data_relay_authority(
+            &fixture.runtime.service,
+            &actor,
+            &scope,
+            *fixture.runtime.service.local_peer_id(),
+            now_ms,
+            required_until_ms,
+        )
+        .expect("exact still-valid previous Relay authority");
+        assert_eq!(encoded, original);
+        assert!(native_probe_data_relay_capability_matches(
+            &capability,
+            &actor,
+            &scope,
+            *fixture.runtime.service.local_peer_id(),
+            required_until_ms,
+        ));
+    }
+
+    #[tokio::test]
     async fn native_permit_local_exit_actor_requires_current_signed_role_and_policy() {
         let fixture = native_permit_forward_fixture();
         let runtime = &fixture.fixture.runtime;
@@ -7920,6 +18298,39 @@ mod tests {
             )
         };
         assert!(matches(&fixture.local_advertisement, actor, &fixture.scope,));
+
+        let mut conservative_actor = actor.clone();
+        conservative_actor.capability_expires_at_ms = conservative_actor
+            .capability_expires_at_ms
+            .saturating_sub(1);
+        let mut conservative_scope = fixture.scope.clone();
+        conservative_scope.exit = Some(conservative_actor.clone());
+        assert!(matches(
+            &fixture.local_advertisement,
+            &conservative_actor,
+            &conservative_scope,
+        ));
+
+        let mut overlong_actor = actor.clone();
+        overlong_actor.capability_expires_at_ms =
+            overlong_actor.capability_expires_at_ms.saturating_add(1);
+        let mut overlong_scope = fixture.scope.clone();
+        overlong_scope.exit = Some(overlong_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &overlong_actor,
+            &overlong_scope,
+        ));
+
+        let mut expired_actor = actor.clone();
+        expired_actor.capability_expires_at_ms = fixture.now_ms;
+        let mut expired_scope = fixture.scope.clone();
+        expired_scope.exit = Some(expired_actor.clone());
+        assert!(!matches(
+            &fixture.local_advertisement,
+            &expired_actor,
+            &expired_scope,
+        ));
 
         let mut wrong_actor = actor.clone();
         wrong_actor.advertisement_sequence = wrong_actor.advertisement_sequence.saturating_add(1);
@@ -7955,7 +18366,7 @@ mod tests {
             },
             &fixture.fixture.policy,
             actor.advertisement_sequence,
-            [0x74; 32],
+            generate_nonce(),
             fixture.now_ms,
             &fixture.fixture.directory,
         );
@@ -7964,6 +18375,236 @@ mod tests {
             actor,
             &fixture.scope,
         ));
+    }
+
+    #[tokio::test]
+    async fn native_exit_accepts_exact_previous_local_advertisement_after_refresh() {
+        let mut fixture = native_permit_forward_fixture();
+        let actor = fixture.scope.exit.as_ref().expect("Exit actor").clone();
+        fixture
+            .fixture
+            .runtime
+            .service
+            .set_local_advertisement(fixture.local_advertisement.clone())
+            .expect("install original local Exit advertisement");
+        let replacement = service_advertisement(
+            &fixture.fixture.runtime.identity,
+            RolesConfig {
+                client: true,
+                relay: false,
+                exit: true,
+            },
+            &fixture.fixture.policy,
+            actor.advertisement_sequence.saturating_add(1),
+            generate_nonce(),
+            fixture.now_ms,
+            &fixture.fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        fixture
+            .fixture
+            .runtime
+            .service
+            .set_local_advertisement(replacement.clone())
+            .expect("refresh local Exit advertisement");
+        let runtime = &fixture.fixture.runtime;
+        assert!(!local_native_probe_exit_actor_matches(
+            &replacement,
+            &actor,
+            &fixture.scope,
+            runtime.local_node_id,
+            *runtime.service.local_peer_id(),
+            runtime.local_public_key,
+            fixture.now_ms,
+        ));
+        assert!(local_native_probe_exit_actor_is_served(
+            &runtime.service,
+            &actor,
+            &fixture.scope,
+            runtime.local_node_id,
+            *runtime.service.local_peer_id(),
+            runtime.local_public_key,
+            fixture.now_ms,
+        ));
+    }
+
+    #[test]
+    fn production_session_starts_use_prepared_route_proofs_without_advertisement_cache() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        for handler in [
+            "async fn begin_udp_session_start(",
+            "async fn begin_mptcp_session_start(",
+            "async fn begin_mpquic_session_start(",
+        ] {
+            let relay_start = braced_item(production, handler);
+            for proof in [
+                "prepared_production_relay_routes",
+                "route.accepted.reservation_id()",
+                "route.accepted.exit_node_id()",
+                "authorized_exit: None",
+            ] {
+                assert!(
+                    relay_start.contains(proof),
+                    "missing Relay proof {proof} in {handler}"
+                );
+            }
+            assert!(!relay_start.contains("self.forwarded_exits"));
+        }
+
+        let relay_authority = braced_item(production, "fn relay_authority_is_current(");
+        let cache_independent = relay_authority
+            .find("None => matches!(")
+            .expect("cache-independent operations");
+        for operation in [
+            "ExitForwardOperation::UdpSessionStart",
+            "ExitForwardOperation::MptcpSessionStart",
+            "ExitForwardOperation::MpquicSessionStart",
+        ] {
+            assert!(relay_authority[cache_independent..].contains(operation));
+        }
+
+        let exit_forward = braced_item(production, "async fn answer_exit_forward_upstream(");
+        let advertisement_cache = exit_forward
+            .find(".direct_relays")
+            .expect("ordinary forwarded operation advertisement cache");
+        for operation in [
+            "| ExitForwardOperation::UdpSessionStart",
+            "| ExitForwardOperation::MptcpSessionStart",
+            "| ExitForwardOperation::MpquicSessionStart",
+        ] {
+            assert!(
+                exit_forward
+                    .find(operation)
+                    .is_some_and(|bypass| bypass < advertisement_cache),
+                "missing prepared-session cache bypass {operation}"
+            );
+        }
+
+        let exit_start = braced_item(production, "async fn begin_production_mpquic_exit_session(");
+        for proof in [
+            "path.relay.relay_peer_id == authenticated_control_relay.to_bytes()",
+            "forward_id == path.confirmation_nonce[..FORWARD_ID_BYTES]",
+            "prepared_production_exit_routes",
+            "route.bundle.signed_exit_reservation() == start.signed_exit_reservation()",
+            "route.pending_activations.len() == selected_path_ids.len()",
+        ] {
+            assert!(exit_start.contains(proof), "missing Exit proof {proof}");
+        }
+    }
+
+    #[test]
+    fn native_permit_chain_targets_exact_exit_without_provider_catalog() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        let ready = braced_item(production, "async fn begin_native_probe_ready(");
+        let permit = ready
+            .find("verify_native_probe_permit(")
+            .expect("verified short-lived Exit Permit");
+        let eligibility = ready
+            .find("permit_bound_exit_peer_is_eligible(")
+            .expect("privacy-safe permit target gate");
+        let dispatch = ready
+            .find(".request_exit_forward_upstream(&exit_peer")
+            .expect("exact Permit Exit dispatch");
+        assert!(permit < eligibility && eligibility < dispatch);
+        assert!(ready.contains("local_native_probe_data_relay_authority("));
+        assert!(!ready.contains("exit_provider_peers"));
+
+        let authorization = braced_item(production, "async fn begin_native_probe_authorization(");
+        for retained in [
+            "prepared.start.encoded_start() != request.client_signed_request()",
+            "prepared.start.authorization_chain()",
+            "permit_bound_exit_peer_is_eligible(",
+            "native_probe_data_relay_capability_matches(",
+            ".request_exit_forward_upstream(&exit_peer",
+        ] {
+            assert!(
+                authorization.contains(retained),
+                "missing Permit-descended authorization binding {retained}"
+            );
+        }
+        assert!(!authorization.contains("exit_provider_peers"));
+
+        let generic = braced_item(production, "fn begin_relay_forward_inner(");
+        assert!(generic.contains("self.exit_provider_peers.contains_key(&exit_peer)"));
+        assert!(generic.contains(
+            "self.relay_forward_exit_peer_is_eligible(authenticated_client_peer, exit_peer)"
+        ));
+    }
+
+    #[tokio::test]
+    async fn permit_bound_exit_target_scopes_client_conflicts_to_the_client_role() {
+        let now_ms = unix_millis();
+        let mut fixture = fixture(RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        });
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let client_peer = Identity::generate().peer_id().to_owned();
+        let local_peer = *fixture.runtime.service.local_peer_id();
+
+        assert!(!fixture.runtime.exit_provider_peers.contains_key(&exit_peer));
+        assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
+        );
+        for (client, exit) in [
+            (client_peer, local_peer),
+            (local_peer, exit_peer),
+            (exit_peer, exit_peer),
+        ] {
+            assert!(
+                !fixture
+                    .runtime
+                    .permit_bound_exit_peer_is_eligible(client, exit)
+            );
+        }
+
+        let direct = direct_capability(
+            &exit_identity,
+            &fixture.policy,
+            1,
+            now_ms.saturating_add(20_000),
+        );
+        fixture.runtime.direct_relays.insert(exit_peer, direct);
+        assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        );
+
+        fixture.runtime.direct_relays.remove(&exit_peer);
+        fixture
+            .runtime
+            .record_privacy_conflict(exit_peer, 2, now_ms.saturating_add(20_000));
+        assert!(
+            fixture
+                .runtime
+                .permit_bound_exit_peer_is_eligible(client_peer, exit_peer)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+        );
     }
 
     #[test]
@@ -7975,11 +18616,9 @@ mod tests {
             .0;
         let handler = braced_item(production, "async fn handle_exit_forward_upstream_event(");
         assert!(handler.contains("connection_id,"));
-        assert!(
-            handler.contains(
-                "self.answer_exit_forward_upstream(peer, connection_id, request, channel)"
-            )
-        );
+        assert!(handler.contains(
+            "self.answer_exit_forward_upstream(peer, connection_id, request, channel, state)"
+        ));
 
         let caller = braced_item(production, "fn prepare_native_probe_permit_response(");
         assert_eq!(
@@ -7989,11 +18628,11 @@ mod tests {
             1,
         );
         let capability_check = caller
-            .find("native_probe_control_capability_matches(")
-            .expect("current control capability check");
+            .find("native_probe_control_capability_lineage_matches(")
+            .expect("current control capability lineage check");
         let local_advertisement_check = caller
-            .find("local_native_probe_exit_actor_matches(")
-            .expect("current local Exit advertisement check");
+            .find("local_native_probe_exit_actor_is_served(")
+            .expect("bounded local Exit advertisement check");
         let connection_bind = caller
             .find(".bind_native_probe_control_connection(")
             .expect("event connection bind");
@@ -8024,13 +18663,304 @@ mod tests {
         assert!(!sender.contains(".await"));
 
         let publisher = braced_item(production, "async fn publish_local(");
-        let exit_role_guard = publisher
-            .find("if self.roles.relay || self.roles.exit")
-            .expect("current product withdraws local Relay/Exit advertisements");
+        let service_role_guard = publisher
+            .find("if !(self.roles.relay || self.roles.exit)")
+            .expect("service advertisement role gate");
+        let capacity_snapshot = publisher
+            .find("self.local_advertisement_capacity(roles, now_ms)")
+            .expect("current local capacity snapshot");
         let served_assignment = publisher
             .find("self.served_local_advertisement = Some(")
-            .expect("client-only local advertisement assignment");
-        assert!(exit_role_guard < served_assignment);
+            .expect("service advertisement assignment");
+        assert!(service_role_guard < capacity_snapshot);
+        assert!(capacity_snapshot < served_assignment);
+    }
+
+    #[test]
+    fn native_authorization_request_id_is_distinct_nonzero_and_deterministic() {
+        let start = [0x35; 32];
+        let authorization = native_probe_authorization_request_id(start);
+        assert_ne!(authorization, start[..FORWARD_ID_BYTES]);
+        assert_eq!(authorization[0], start[0] ^ 0x80);
+        assert!(authorization.iter().any(|byte| *byte != 0));
+        assert_eq!(authorization, native_probe_authorization_request_id(start));
+
+        let mut zero_after_toggle = [0_u8; 32];
+        zero_after_toggle[0] = 0x80;
+        assert_eq!(native_probe_authorization_request_id(zero_after_toggle), {
+            let mut expected = [0_u8; FORWARD_ID_BYTES];
+            expected[FORWARD_ID_BYTES - 1] = 1;
+            expected
+        });
+    }
+
+    #[test]
+    fn native_probe_liveness_evidence_preserves_reserved_capacity() {
+        let evidence = native_probe_leg_evidence(
+            NATIVE_PROBE_DATAGRAM_BYTES as u64,
+            NATIVE_PROBE_DATAGRAM_BYTES as u64,
+            8,
+            12,
+            1_000,
+            11_000,
+        )
+        .expect("native liveness evidence");
+
+        assert_eq!(evidence.up_capacity_mbps, 8);
+        assert_eq!(evidence.down_capacity_mbps, 12);
+        assert_eq!(
+            evidence.transmitted_bytes,
+            NATIVE_PROBE_DATAGRAM_BYTES as u64
+        );
+        assert_eq!(evidence.received_bytes, NATIVE_PROBE_DATAGRAM_BYTES as u64);
+        assert_eq!(evidence.rtt_micros, 10_000_000);
+        assert_eq!(evidence.measured_at_ms, 11_000);
+    }
+
+    #[test]
+    fn native_service_prepare_plan_is_role_exact_and_deadline_bound() {
+        let now_ms = unix_millis();
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0x36; FORWARD_ID_BYTES],
+            probe_id: vec![0x37; FORWARD_ID_BYTES],
+            candidate_ordinal: 2,
+            attempt_expires_at_ms: now_ms.saturating_add(300_000),
+            required_path_count: 3,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 12,
+            ..NativeProbePathScope::default()
+        };
+        let relay = native_service_prepare_request(
+            &scope,
+            ContextRole::Relay,
+            &[WireguardRole::RelayClient, WireguardRole::RelayExit],
+            now_ms,
+        )
+        .expect("relay prepare plan");
+        assert_eq!(relay.route_context_id, scope.attempt_id);
+        assert_eq!(relay.role, ContextRole::Relay as i32);
+        assert_eq!(relay.leases.len(), 2);
+        assert!(relay.leases.iter().all(|lease| lease.path_id == 2));
+        assert_eq!(relay.setup_expires_at_unix, now_ms / 1_000 + 30);
+        assert_eq!(
+            relay.hard_expires_at_unix,
+            scope.attempt_expires_at_ms / 1_000
+        );
+        assert!(relay.setup_expires_at_unix < relay.hard_expires_at_unix);
+
+        let exit = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms,
+        )
+        .expect("exit prepare plan");
+        assert_eq!(exit.leases.len(), 3);
+        assert_eq!(exit.setup_expires_at_unix, relay.setup_expires_at_unix);
+        assert_eq!(exit.hard_expires_at_unix, relay.hard_expires_at_unix);
+        assert_eq!(
+            exit.leases
+                .iter()
+                .map(|lease| (lease.path_id, lease.role))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, WireguardRole::Exit as i32),
+                (2, WireguardRole::Exit as i32),
+                (3, WireguardRole::Exit as i32),
+            ]
+        );
+
+        assert!(
+            native_service_prepare_request(
+                &scope,
+                ContextRole::Relay,
+                &[WireguardRole::RelayExit, WireguardRole::RelayClient],
+                now_ms,
+            )
+            .is_none()
+        );
+        assert!(
+            native_service_prepare_request(
+                &scope,
+                ContextRole::Client,
+                &[WireguardRole::Client],
+                now_ms,
+            )
+            .is_none()
+        );
+        let mut expiring = scope;
+        expiring.attempt_expires_at_ms = now_ms.saturating_add(1_000);
+        assert!(
+            native_service_prepare_request(
+                &expiring,
+                ContextRole::Exit,
+                &[WireguardRole::Exit],
+                now_ms,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn native_exit_ready_reuses_live_owner_across_setup_deadline_ticks() {
+        let now_ms = 1_000_000;
+        let scope = NativeProbePathScope {
+            attempt_id: vec![0x38; FORWARD_ID_BYTES],
+            probe_id: vec![0x39; FORWARD_ID_BYTES],
+            candidate_ordinal: 1,
+            attempt_expires_at_ms: now_ms + 300_000,
+            required_path_count: 2,
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 8,
+            ..NativeProbePathScope::default()
+        };
+        let owner = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms,
+        )
+        .expect("first Exit prepare");
+        let requested = native_service_prepare_request(
+            &scope,
+            ContextRole::Exit,
+            &[WireguardRole::Exit],
+            now_ms + 1_000,
+        )
+        .expect("next-path Exit prepare");
+        assert_ne!(owner.setup_expires_at_unix, requested.setup_expires_at_unix);
+        assert!(native_exit_ready_prepare_matches(
+            &owner,
+            &requested,
+            now_ms + 1_000
+        ));
+
+        let mut conflicting = requested.clone();
+        conflicting.mptcp_subflows += 1;
+        assert!(!native_exit_ready_prepare_matches(
+            &owner,
+            &conflicting,
+            now_ms + 1_000
+        ));
+        assert!(!native_exit_ready_prepare_matches(
+            &owner,
+            &requested,
+            owner.setup_expires_at_unix * 1_000
+        ));
+    }
+
+    #[test]
+    fn native_ready_production_chain_prepares_signs_and_retains_before_authorize() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+
+        let relay_ready = braced_item(production, "async fn begin_native_probe_ready(");
+        let relay_prepare = relay_ready
+            .find(".prepare_lease_batch(")
+            .expect("Relay helper Prepare");
+        let ready_dispatch = relay_ready
+            .find(".request_exit_forward_upstream(")
+            .expect("Ready upstream dispatch");
+        assert!(relay_prepare < ready_dispatch);
+        assert!(relay_ready.contains("native_ready: Some(PendingNativeProbeReady"));
+
+        let exit_ready = braced_item(production, "async fn answer_native_probe_ready_upstream(");
+        assert!(exit_ready.contains("self.collect_exit_native_ready("));
+        assert!(!exit_ready.contains(".prepare_lease_batch("));
+        let collector_source = include_str!("discovery/native_ready.rs");
+        let collector = braced_item(collector_source, "async fn collect_exit_native_ready(");
+        assert!(
+            collector.find("if !complete {").unwrap()
+                < collector
+                    .find("self.prepare_complete_exit_native_ready(")
+                    .unwrap()
+        );
+        assert!(!collector.contains(".prepare_lease_batch("));
+        let exit_ready = braced_item(production, "async fn finish_exit_native_ready(");
+        let exit_prepare = exit_ready
+            .find(".prepare_lease_batch(")
+            .expect("Exit helper Prepare");
+        let connection_bind = exit_ready
+            .find(".bind_native_probe_data_relay_connection(")
+            .expect("affine data-Relay connection");
+        let issue_ready = exit_ready
+            .find(".issue_native_probe_ready_from_permit_with(")
+            .expect("Exit Ready issue");
+        let send_ready = exit_ready
+            .find(".send_native_probe_ready_response(")
+            .expect("affine Ready response");
+        assert!(exit_prepare < connection_bind);
+        assert!(connection_bind < issue_ready);
+        assert!(issue_ready < send_ready);
+
+        let client_start = braced_item(
+            production,
+            "async fn begin_native_probe_start_authorization(",
+        );
+        let verify_start = client_start
+            .find("verify_native_probe_start_for_relay(")
+            .expect("full Start verification");
+        let retain = client_start
+            .find(".retain_prepared_native_probe_authorization(")
+            .expect("affine prepared authorization retention");
+        let authorize = client_start
+            .find(".begin_native_probe_authorization(")
+            .expect("Authorize dispatch");
+        assert!(verify_start < retain);
+        assert!(retain < authorize);
+    }
+
+    #[test]
+    fn native_authorization_runtime_preserves_relay_exit_relay_ownership() {
+        let source = include_str!("discovery.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("production/test boundary")
+            .0;
+        let datapath_handler = braced_item(production, "async fn handle_datapath_event(");
+        assert!(datapath_handler.contains("DatapathRelayOperation::NativeProbeAuthorize"));
+        assert!(datapath_handler.contains("self.begin_native_probe_start_authorization("));
+
+        let relay_dispatch = braced_item(production, "fn begin_native_probe_authorization(");
+        for required in [
+            "prepared_native_authorizations.remove(&request_id)",
+            "prepared.authenticated_client_peer != authenticated_client_peer",
+            "prepared.start.encoded_start() != request.client_signed_request()",
+            "ExitForwardOperation::NativeProbeAuthorize",
+            ".request_exit_forward_upstream(&exit_peer, upstream.into())",
+            "native_authorization: Some(PendingNativeProbeAuthorization",
+        ] {
+            assert!(relay_dispatch.contains(required), "missing {required}");
+        }
+        assert!(!relay_dispatch.contains("request_datapath_relay(&exit_peer"));
+
+        let exit_prepare = braced_item(
+            production,
+            "async fn prepare_native_probe_authorization_response(",
+        );
+        let connection_bind = exit_prepare
+            .find(".bind_native_probe_data_relay_connection(")
+            .expect("exact inbound data Relay connection bind");
+        let exit_issue = exit_prepare
+            .find(".issue_native_probe_relay_authorization_with(")
+            .expect("standard Exit authorization issue");
+        assert!(connection_bind < exit_issue);
+        assert!(exit_prepare.contains("native_probe_data_relay_capability_matches("));
+        assert!(exit_prepare.contains(".activate_lease_batch("));
+        assert!(exit_prepare.contains(".await"));
+
+        let relay_complete = braced_item(production, "async fn complete_relay_forward(");
+        let relay_accept = relay_complete
+            .find(".accept_native_probe_start_with(")
+            .expect("standard nested Relay reservation");
+        let client_reply = relay_complete[relay_accept..]
+            .find(".send_datapath_relay_response(native.channel, response)")
+            .map(|offset| relay_accept + offset)
+            .expect("direct response to authenticated Client hop after Relay acceptance");
+        assert!(relay_accept < client_reply);
     }
 
     async fn ingest_direct_snapshot_advertisement(
@@ -8192,7 +19122,7 @@ mod tests {
         advertised: PreselectionTestCapabilities,
     ) -> PreselectionSnapshotFixture {
         assert!((1..=8).contains(&other_relays));
-        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let relay_roles = RolesConfig {
             client: false,
@@ -8206,7 +19136,7 @@ mod tests {
                 &control,
                 relay_roles,
                 1,
-                [191; 32],
+                generate_nonce(),
                 now_ms,
                 advertised,
             )
@@ -8231,7 +19161,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                [192; 32],
+                generate_nonce(),
                 now_ms,
                 advertised,
             )
@@ -8303,7 +19233,7 @@ mod tests {
                 (1..=other_relays).contains(&clusters) && clusters <= 32
             })
         );
-        let mut fixture = Box::new(fixture(RolesConfig::default()));
+        let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let relay_roles = RolesConfig {
             client: false,
@@ -8685,8 +19615,164 @@ mod tests {
         }
     }
 
+    fn independent_egress_fixture() -> RuntimeFixture {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        fixture.runtime.config.network.independent_egress_interface = Some("wan-test".to_owned());
+        fixture.runtime.independent_egress = Some(IndependentEgress::new("wan-test").unwrap());
+        fixture.runtime.independent_egress_observation = Some(EgressObservation {
+            ifindex: 7,
+            ipv4: true,
+            ipv6: false,
+        });
+        fixture.runtime.control_addresses =
+            BTreeSet::from(["/ip4/10.241.1.1/udp/42100/quic-v1".to_owned()]);
+        fixture
+    }
+
+    fn verified_served_advertisement(runtime: &DiscoveryRuntime) -> WireAdvertisement {
+        let mut replay = ReplayCache::new(1).unwrap();
+        verify_control_message::<WireAdvertisement>(
+            runtime
+                .served_local_advertisement
+                .as_ref()
+                .expect("served advertisement"),
+            unix_millis(),
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("actual locally signed advertisement")
+        .message()
+        .clone()
+    }
+
     #[tokio::test]
-    async fn service_roles_remain_fail_closed_without_readiness_authority() {
+    async fn independent_egress_loss_and_recovery_preserve_other_roles_and_signed_policy() {
+        let mut fixture = independent_egress_fixture();
+        let roles = fixture.runtime.roles;
+        let observation = fixture.runtime.independent_egress_observation;
+        fixture.runtime.publish_local(&fixture.state).await;
+        let before = verified_served_advertisement(&fixture.runtime);
+        assert!(before.roles.as_ref().unwrap().exit);
+        assert!(fixture.runtime.exit_authority_enabled());
+
+        let changed = fixture
+            .runtime
+            .apply_independent_egress_observation(None, &fixture.state)
+            .await;
+        fixture
+            .runtime
+            .synchronize_exit_policy_after_observation(&fixture.state, changed)
+            .await;
+        assert!(!fixture.runtime.exit_authority_enabled());
+        assert!(fixture.runtime.exit_service.is_none());
+        assert!(fixture.runtime.relay_service.is_some());
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert_eq!(fixture.runtime.roles, roles);
+        assert_eq!(fixture.runtime.config.roles, roles);
+        assert_eq!(fixture.state.read().await.roles(), roles);
+        let withdrawn = verified_served_advertisement(&fixture.runtime);
+        assert!(withdrawn.roles.as_ref().unwrap().relay);
+        assert!(!withdrawn.roles.as_ref().unwrap().exit);
+        let origin = withdrawn.network.as_ref().unwrap();
+        assert_eq!(
+            origin.uplink,
+            volparossa_protocol::AdvertisementUplink::LocalOnly as i32
+        );
+        assert_eq!(origin.asn, 0);
+        assert!(origin.ipv4_prefix_hint.is_empty() && origin.ipv6_prefix_hint.is_empty());
+        assert!(
+            fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::RELAY)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::EXIT)
+        );
+
+        let changed = fixture
+            .runtime
+            .apply_independent_egress_observation(observation, &fixture.state)
+            .await;
+        fixture
+            .runtime
+            .synchronize_exit_policy_after_observation(&fixture.state, changed)
+            .await;
+        assert!(fixture.runtime.exit_authority_enabled());
+        let recovered = verified_served_advertisement(&fixture.runtime);
+        assert!(recovered.roles.as_ref().unwrap().exit);
+        assert_eq!(recovered.network, before.network);
+        assert_eq!(recovered.policy, before.policy);
+        assert!(before.sequence_number < withdrawn.sequence_number);
+        assert!(withdrawn.sequence_number < recovered.sequence_number);
+    }
+
+    #[tokio::test]
+    async fn independent_egress_replacement_waits_for_exact_runtime_cleanup() {
+        let mut fixture = independent_egress_fixture();
+        let context = [9; FORWARD_ID_BYTES];
+        let owner = RuntimeBoundPreparedLeaseBatch::for_test(
+            PrepareLeaseBatch {
+                route_context_id: context.to_vec(),
+                ..Default::default()
+            },
+            volparossa_routing::PreparedLeaseBatch {
+                context_handle: vec![4; 32],
+                leases: Vec::new(),
+            },
+        );
+        let (shutdown, completed) = fixture
+            .runtime
+            .retain_exit_runtime(context, owner.retain_cleanup_authority());
+        let replacement = Some(EgressObservation {
+            ifindex: 8,
+            ipv4: true,
+            ipv6: false,
+        });
+        fixture
+            .runtime
+            .apply_independent_egress_observation(replacement, &fixture.state)
+            .await;
+        assert!(*shutdown.borrow());
+        assert!(fixture.runtime.independent_exit_retiring);
+        assert!(!fixture.runtime.exit_authority_enabled());
+        assert!(fixture.runtime.relay_service.is_some());
+        fixture
+            .runtime
+            .apply_independent_egress_observation(replacement, &fixture.state)
+            .await;
+        assert!(
+            !fixture.runtime.exit_authority_enabled(),
+            "new uplink cannot outrun old cleanup"
+        );
+        assert_eq!(fixture.runtime.exit_runtime_retirements.len(), 1);
+        completed.send(()).unwrap();
+        // No helper exists in this pure fixture: completion alone is not a Destroy receipt.
+        fixture
+            .runtime
+            .reap_exit_runtime_retirements(unix_millis())
+            .await;
+        assert!(
+            fixture
+                .runtime
+                .exit_runtime_retirements
+                .contains_key(&context)
+        );
+        assert!(!fixture.runtime.exit_authority_enabled());
+    }
+
+    #[tokio::test]
+    async fn service_roles_publish_current_signed_advertisement_and_provider() {
         let roles = RolesConfig {
             client: true,
             relay: true,
@@ -8694,92 +19780,58 @@ mod tests {
         };
         let mut fixture = fixture(roles);
         let now_ms = unix_millis();
-        let expected_relay_snapshot = direct_capability(
-            &fixture.runtime.identity,
-            &fixture.policy,
-            1,
-            now_ms.saturating_add(60_000),
-        );
-        fixture.runtime.local_relay_snapshot = Some(expected_relay_snapshot.clone());
-        let signed = fixture
-            .runtime
-            .publisher
-            .sign(
-                &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-service-role-guard".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
-                now_ms,
-            )
-            .expect("seed client advertisement");
-        fixture
-            .runtime
-            .service
-            .set_local_advertisement(signed.envelope.clone())
-            .expect("installed local advertisement");
-        fixture.runtime.served_local_advertisement = Some(signed.envelope);
-        fixture
-            .runtime
-            .service
-            .provide(capability::RELAY)
-            .expect("active relay provider query");
-        fixture
-            .runtime
-            .active_provider_keys
-            .insert(capability::RELAY.to_owned());
-        assert!(fixture.runtime.service.is_serving_local_advertisement());
-        assert!(fixture.runtime.served_local_advertisement.is_some());
-        assert_eq!(
-            fixture.runtime.active_provider_keys,
-            BTreeSet::from([capability::RELAY.to_owned()])
-        );
-
-        let sequence_path = fixture.directory.path().join("advertisement.sequence");
-        let sequence_before = fs::read(&sequence_path).expect("sequence before rejection");
-        let metadata_before =
-            fs::symlink_metadata(&sequence_path).expect("sequence metadata before rejection");
-
+        fixture.runtime.control_addresses =
+            BTreeSet::from(["/ip4/44.160.1.8/tcp/42100".to_owned()]);
         fixture.runtime.publish_local(&fixture.state).await;
 
-        let metadata_after =
-            fs::symlink_metadata(&sequence_path).expect("sequence metadata after rejection");
-        let sequence_after = fs::read(&sequence_path).expect("sequence after rejection");
-
-        assert!(!fixture.runtime.service.is_serving_local_advertisement());
-        assert!(fixture.runtime.served_local_advertisement.is_none());
-        assert!(fixture.runtime.active_provider_keys.is_empty());
-        assert_eq!(
-            fixture.runtime.local_relay_snapshot,
-            Some(expected_relay_snapshot)
+        let encoded = fixture
+            .runtime
+            .served_local_advertisement
+            .as_ref()
+            .expect("served service advertisement");
+        let mut replay = ReplayCache::new(1).expect("replay cache");
+        let verified = verify_control_message::<WireAdvertisement>(
+            encoded,
+            now_ms.saturating_add(1),
+            TimePolicy::default(),
+            &mut replay,
+        )
+        .expect("verified service advertisement");
+        let message = verified.message();
+        assert!(
+            message
+                .roles
+                .as_ref()
+                .is_some_and(|advertised| advertised.relay)
         );
-        assert_eq!(sequence_after, sequence_before);
-        assert_eq!(metadata_after.dev(), metadata_before.dev());
-        assert_eq!(metadata_after.ino(), metadata_before.ino());
-        assert_eq!(metadata_after.mode(), metadata_before.mode());
-        assert_eq!(metadata_after.nlink(), metadata_before.nlink());
-        assert_eq!(metadata_after.uid(), metadata_before.uid());
-        assert_eq!(metadata_after.gid(), metadata_before.gid());
-        assert_eq!(metadata_after.rdev(), metadata_before.rdev());
-        assert_eq!(metadata_after.size(), metadata_before.size());
-        assert_eq!(metadata_after.atime(), metadata_before.atime());
-        assert_eq!(metadata_after.atime_nsec(), metadata_before.atime_nsec());
-        assert_eq!(metadata_after.mtime(), metadata_before.mtime());
-        assert_eq!(metadata_after.mtime_nsec(), metadata_before.mtime_nsec());
-        assert_eq!(metadata_after.ctime(), metadata_before.ctime());
-        assert_eq!(metadata_after.ctime_nsec(), metadata_before.ctime_nsec());
-        assert_eq!(metadata_after.blksize(), metadata_before.blksize());
-        assert_eq!(metadata_after.blocks(), metadata_before.blocks());
+        assert!(message.capabilities.as_ref().is_some_and(|capabilities| {
+            capabilities.ipv4
+                && capabilities.tcp_mptcp
+                && capabilities.udp_single_path
+                && capabilities.multipath_quic
+        }));
+        assert_eq!(
+            message
+                .capacity
+                .as_ref()
+                .map(|capacity| capacity.free_relay_slots),
+            Some(4)
+        );
+        assert!(fixture.runtime.service.is_serving_local_advertisement());
+        assert!(
+            fixture
+                .runtime
+                .active_provider_keys
+                .contains(capability::RELAY)
+        );
     }
 
     #[tokio::test]
     async fn role_changes_require_restart_without_mutation_or_persistence() {
-        let expected = RolesConfig::default();
+        let expected = test_client_roles();
         let mut fixture = fixture(expected);
+        let persisted_before =
+            fs::read(fixture.directory.path().join("roles.json")).expect("initial persisted roles");
         assert_eq!(
             fixture
                 .runtime
@@ -8802,17 +19854,15 @@ mod tests {
         assert_eq!(fixture.runtime.roles, expected);
         assert_eq!(fixture.state.read().await.roles(), expected);
         assert_eq!(
-            fixture
-                .role_store
-                .load_or_initialize(candidate)
-                .expect("persisted roles"),
-            expected
+            fs::read(fixture.directory.path().join("roles.json"))
+                .expect("unchanged persisted roles"),
+            persisted_before
         );
     }
 
     #[tokio::test]
     async fn fetch_wrapper_deadline_is_bounded_to_thirty_seconds() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let now_ms = unix_millis();
@@ -8849,8 +19899,763 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immutable_forwarded_capability_binds_both_ads_and_policy() {
-        let fixture = fixture(RolesConfig::default());
+    async fn ambiguous_automatic_exit_fetch_retries_exact_lineage_after_short_backoff() {
+        let mut fixture = fixture(test_client_roles());
+        let control_identity = Identity::generate();
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        let now_ms = unix_millis();
+        let deadline_unix_ms = now_ms.saturating_add(25_000);
+        let forward_id = [73; FORWARD_ID_BYTES];
+        let (control, request) = authorize_fetch(
+            &mut fixture,
+            &control_identity,
+            exit_peer,
+            forward_id,
+            deadline_unix_ms,
+        );
+        let alternate_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        let key = ForwardedExitKey {
+            control_relay_peer: control.peer_id,
+            exit_peer,
+        };
+        let (reply, receiver) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(control.peer_id, request.clone(), reply);
+        let request_id = *fixture
+            .runtime
+            .pending_client_forwards
+            .keys()
+            .next()
+            .expect("initial automatic dispatch");
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(key, deadline_unix_ms);
+        fixture
+            .runtime
+            .automatic_exit_fetch_attempts
+            .push(AutomaticExitFetchAttempt {
+                key,
+                authorized_control: control.clone(),
+                request: request.clone(),
+                dispatch_attempts: 1,
+                state: AutomaticExitFetchAttemptState::InFlight(receiver),
+            });
+        assert_eq!(
+            fixture
+                .runtime
+                .fail_client_forward(request_id, control.peer_id),
+            OutboundEventOutcome::Failed
+        );
+
+        fixture.runtime.drive_automatic_exit_fetch_attempts(now_ms);
+
+        let retry_at_ms = now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetches.get(&key).copied(),
+            Some(retry_at_ms)
+        );
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert!(matches!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].state,
+            AutomaticExitFetchAttemptState::RetryNotBefore(value) if value == retry_at_ms
+        ));
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert!(
+            fixture
+                .runtime
+                .automatic_exit_fetch_attempts
+                .iter()
+                .all(|attempt| attempt.key.control_relay_peer != alternate_control.peer_id)
+        );
+
+        fixture
+            .runtime
+            .drive_automatic_exit_fetch_attempts(retry_at_ms);
+
+        let logical_key = ClientForwardKey {
+            control_relay_peer: control.peer_id,
+            forward_id,
+        };
+        assert!(
+            fixture
+                .runtime
+                .client_forward_index
+                .contains_key(&logical_key)
+        );
+        assert!(
+            !fixture
+                .runtime
+                .retry_client_forwards
+                .contains_key(&logical_key)
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        let attempt = &fixture.runtime.automatic_exit_fetch_attempts[0];
+        assert_eq!(attempt.key, key);
+        assert_eq!(attempt.request, request);
+        assert_eq!(attempt.dispatch_attempts, 2);
+        assert!(matches!(
+            attempt.state,
+            AutomaticExitFetchAttemptState::InFlight(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn exhausted_automatic_exit_fetch_lineages_rotate_to_an_untried_control() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let deadline_unix_ms = now_ms.saturating_add(25_000);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, deadline_unix_ms);
+
+        let mut controls = (1_u64..=3)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    now_ms.saturating_add(60_000),
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+        }
+
+        for control in &controls[..2] {
+            fixture.runtime.automatic_exit_fetches.insert(
+                ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                },
+                deadline_unix_ms,
+            );
+        }
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].key,
+            ForwardedExitKey {
+                control_relay_peer: controls[2].peer_id,
+                exit_peer,
+            }
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert!(
+            fixture
+                .runtime
+                .pending_client_forwards
+                .values()
+                .all(|pending| {
+                    pending.key.control_relay_peer == controls[2].peer_id
+                        && pending.expected_exit_peer == exit_peer
+                        && pending.operation == ExitForwardOperation::FetchExitAdvertisement
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_scale_controls_rotate_then_retry_inside_provider_lifetime() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
+        let request_deadline_ms = now_ms.saturating_add(MAX_FORWARD_OPERATION_LIFETIME_MS);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, provider_expires_at_ms);
+
+        let mut controls = (1_u64..=6)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    provider_expires_at_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+        }
+
+        for (index, control) in controls[..5].iter().enumerate() {
+            let key = ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            };
+            let request = fetch_request(
+                control,
+                exit_peer,
+                [u8::try_from(index + 1).expect("bounded index"); FORWARD_ID_BYTES],
+                request_deadline_ms,
+            );
+            let (reply, receiver) = oneshot::channel();
+            drop(reply);
+            fixture
+                .runtime
+                .automatic_exit_fetches
+                .insert(key, request_deadline_ms);
+            fixture
+                .runtime
+                .automatic_exit_fetch_attempts
+                .push(AutomaticExitFetchAttempt {
+                    key,
+                    authorized_control: control.clone(),
+                    request,
+                    dispatch_attempts: MAX_DISPATCH_ATTEMPTS,
+                    state: AutomaticExitFetchAttemptState::InFlight(receiver),
+                });
+
+            fixture.runtime.drive_automatic_exit_fetch_attempts(now_ms);
+
+            assert_eq!(
+                fixture.runtime.automatic_exit_fetches.get(&key),
+                Some(&now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS))
+            );
+            assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+        }
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0]
+                .key
+                .control_relay_peer,
+            controls[5].peer_id
+        );
+    }
+
+    #[tokio::test]
+    async fn all_exhausted_exit_fetch_controls_have_a_bounded_quiet_period() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let provider_expires_at_ms = now_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS);
+        let exit_peer = Identity::generate().peer_id().to_owned();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, provider_expires_at_ms);
+
+        let mut controls = (1_u64..=6)
+            .map(|sequence| {
+                direct_capability(
+                    &Identity::generate(),
+                    &fixture.policy,
+                    sequence,
+                    provider_expires_at_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        for control in &controls {
+            fixture
+                .runtime
+                .direct_relays
+                .insert(control.peer_id, control.clone());
+            fixture.runtime.retain_exhausted_exit_fetch_control(
+                ForwardedExitKey {
+                    control_relay_peer: control.peer_id,
+                    exit_peer,
+                },
+                now_ms,
+            );
+        }
+
+        let retry_at_ms = now_ms.saturating_add(AUTOMATIC_EXIT_FETCH_EXHAUSTED_COOLDOWN_MS);
+        assert!(
+            fixture
+                .runtime
+                .next_untried_exit_control(&controls, exit_peer, retry_at_ms.saturating_sub(1))
+                .is_none()
+        );
+        let first_retry = fixture
+            .runtime
+            .next_untried_exit_control(&controls, exit_peer, retry_at_ms)
+            .expect("oldest exhausted control becomes retryable");
+        assert_eq!(first_retry.peer_id, controls[0].peer_id);
+        fixture.runtime.retain_exhausted_exit_fetch_control(
+            ForwardedExitKey {
+                control_relay_peer: first_retry.peer_id,
+                exit_peer,
+            },
+            retry_at_ms,
+        );
+        let second_retry = fixture
+            .runtime
+            .next_untried_exit_control(&controls, exit_peer, retry_at_ms)
+            .expect("rotation advances while first control cools down");
+        assert_eq!(second_retry.peer_id, controls[1].peer_id);
+    }
+
+    #[tokio::test]
+    async fn automatic_exit_fetch_enrolls_an_alternate_without_moving_the_first_owner() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = exit.peer_id().to_owned();
+        let first_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        let second_control = install_control(&mut fixture, &Identity::generate(), now_ms);
+        fixture
+            .runtime
+            .preferred_exit_controls
+            .insert(exit_peer, first_control.peer_id);
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, now_ms.saturating_add(25_000));
+        fixture.runtime.forwarded_exits.insert(
+            ForwardedExitKey {
+                control_relay_peer: first_control.peer_id,
+                exit_peer,
+            },
+            forwarded_capability_for_identity(
+                &first_control,
+                &exit,
+                1,
+                now_ms.saturating_add(25_000),
+            ),
+        );
+
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        let attempt = &fixture.runtime.automatic_exit_fetch_attempts[0];
+        assert_eq!(
+            attempt.key,
+            ForwardedExitKey {
+                control_relay_peer: second_control.peer_id,
+                exit_peer,
+            }
+        );
+        assert_eq!(
+            attempt.request.control_relay_peer_id(),
+            second_control.peer_id.to_bytes()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&first_control.peer_id)
+        );
+        assert!(
+            fixture
+                .runtime
+                .forwarded_exits
+                .contains_key(&ForwardedExitKey {
+                    control_relay_peer: first_control.peer_id,
+                    exit_peer,
+                })
+        );
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the regression keeps all three control replacements and invalidation together"
+    )]
+    async fn automatic_exit_fetch_keeps_current_control_until_it_is_invalid() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let deadline = now_ms.saturating_add(25_000);
+        let exit = Identity::generate();
+        let exit_peer = exit.peer_id().to_owned();
+        let mut controls = Vec::new();
+        for sequence in 1..=3 {
+            let identity = Identity::generate();
+            assert!(
+                ingest_direct_snapshot_advertisement(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false
+                    },
+                    sequence,
+                    generate_nonce(),
+                    now_ms
+                )
+                .await
+                .is_some()
+            );
+            controls.push(
+                fixture
+                    .runtime
+                    .direct_relays
+                    .get(identity.peer_id())
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        controls.sort_by(|left, right| left.peer_id.to_bytes().cmp(&right.peer_id.to_bytes()));
+        let preferred = controls[2].clone();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, deadline);
+        assert!(
+            fixture
+                .runtime
+                .mark_forwarded_exit_target(exit_peer, deadline)
+        );
+        let advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&preferred, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
+                    &fixture.state,
+                )
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
+        let alternate = controls[0].clone();
+        assert!(fixture.runtime.has_current_forwarded_exit_control(
+            &preferred,
+            exit_peer,
+            now_ms + 1_000
+        ));
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .expect("first success leaves an alternate eligible")
+                .peer_id,
+            alternate.peer_id
+        );
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&alternate, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
+                    &fixture.state,
+                )
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
+        let third = controls[1].clone();
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .expect("one remaining bounded alternate")
+                .peer_id,
+            third.peer_id
+        );
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: exit_peer,
+                        provenance: forwarded_provenance(&third, &exit, deadline),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
+                    &fixture.state
+                )
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        let fourth = direct_capability(
+            &Identity::generate(),
+            &fixture.policy,
+            4,
+            now_ms.saturating_add(60_000),
+        );
+        fixture
+            .runtime
+            .direct_relays
+            .insert(fourth.peer_id, fourth.clone());
+        controls.push(fourth);
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms)
+                .is_none()
+        );
+
+        // Rolling expiry refreshes only the missing slot; three valid pairs never enroll a
+        // fourth. Already-authorized owners and the first preferred control remain unchanged.
+        let alternate_key = ForwardedExitKey {
+            control_relay_peer: alternate.peer_id,
+            exit_peer,
+        };
+        fixture
+            .runtime
+            .forwarded_exits
+            .get_mut(&alternate_key)
+            .unwrap()
+            .expires_at_ms = now_ms + 2_000;
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(alternate_key, now_ms);
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, now_ms + 1_100)
+                .expect("900ms live slot refreshes instead of enrolling fourth")
+                .peer_id,
+            alternate.peer_id
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls[..3], exit_peer, now_ms + 2_001)
+                .expect("expired alternate becomes refreshable")
+                .peer_id,
+            alternate.peer_id
+        );
+        assert_eq!(
+            fixture.runtime.preferred_exit_controls.get(&exit_peer),
+            Some(&preferred.peer_id)
+        );
+
+        // Simulate expiry of only the request-bounded local forwarding capability. The hint is
+        // non-authoritative, but a still-current fetch suppression must not rotate the Exit onto
+        // another control lineage while the preferred Relay itself remains current.
+        fixture.runtime.forwarded_exits.clear();
+        let preferred_key = ForwardedExitKey {
+            control_relay_peer: preferred.peer_id,
+            exit_peer,
+        };
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(preferred_key, deadline);
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert!(fixture.runtime.automatic_exit_fetch_attempts.is_empty());
+
+        // Once that exact suppression expires, scheduling refreshes the same current control.
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(preferred_key, now_ms);
+        fixture.runtime.schedule_exit_advertisement_fetches();
+
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert_eq!(
+            fixture.runtime.automatic_exit_fetch_attempts[0].key,
+            ForwardedExitKey {
+                control_relay_peer: preferred.peer_id,
+                exit_peer,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarded_exit_capability_outlives_completed_fetch_operation() {
+        let mut fixture = fixture(test_client_roles());
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let now_ms = unix_millis();
+        let request_deadline_ms = now_ms.saturating_add(20_000);
+        let control = install_control(&mut fixture, &control_identity, now_ms);
+        let accepted = ingest_forwarded_snapshot_exit(
+            &mut fixture,
+            &control,
+            &exit_identity,
+            1,
+            generate_nonce(),
+            now_ms,
+        )
+        .await
+        .expect("forwarded Exit advertisement");
+        let capability = fixture
+            .runtime
+            .forwarded_exits
+            .get(&ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            })
+            .expect("committed forwarded Exit capability");
+
+        assert_eq!(
+            capability.expires_at_ms,
+            accepted.expires_at_ms.min(control.expires_at_ms)
+        );
+        assert!(capability.expires_at_ms > request_deadline_ms);
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression covers lineage projection and selectable recovery"
+    )]
+    async fn refreshed_control_lineage_keeps_forwarded_exit_selectable() {
+        let mut fixture = fixture(test_client_roles());
+        let initial_ms = unix_millis();
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let original_control = install_valid_snapshot_route_for(
+            &mut fixture,
+            &control_identity,
+            &exit_identity,
+            initial_ms,
+        )
+        .await;
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                generate_nonce(),
+                initial_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let refresh_ms = unix_millis();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &control_identity,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                2,
+                generate_nonce(),
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+        let refreshed_control = fixture
+            .runtime
+            .direct_relays
+            .get(control_identity.peer_id())
+            .expect("refreshed direct control")
+            .clone();
+        assert_ne!(
+            original_control.advertisement_payload_hash,
+            refreshed_control.advertisement_payload_hash
+        );
+        assert!(fixture.runtime.forwarded_exits.values().any(|capability| {
+            capability.control_relay_advertisement_payload_hash
+                == original_control.advertisement_payload_hash
+        }));
+        let lineage_snapshot = route_snapshot_at(&mut fixture, 10, refresh_ms)
+            .await
+            .expect("live control lineage remains in the route snapshot");
+        assert_eq!(lineage_snapshot.forwarded_exits().len(), 1);
+        assert!(
+            narrow_route_candidate_snapshot(
+                lineage_snapshot,
+                PreselectionSamplingScope::new(
+                    Transport::UdpSinglePath,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth::new(10, 10).expect("minimum capacity"),
+                    1,
+                    1,
+                ),
+            )
+            .is_ok(),
+            "a newer signed control advertisement from the same identity and policy must not hide the Exit"
+        );
+
+        fixture.runtime.exit_provider_peers.insert(
+            exit_peer,
+            refresh_ms.saturating_add(PROVIDER_OBSERVATION_TTL_MS),
+        );
+        let original_key = ForwardedExitKey {
+            control_relay_peer: original_control.peer_id,
+            exit_peer,
+        };
+        let retained = fixture.runtime.forwarded_exits[&original_key].clone();
+        assert!(fixture.runtime.has_current_forwarded_exit_control(
+            &refreshed_control,
+            exit_peer,
+            refresh_ms.saturating_add(1_000),
+        ));
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        // A current older lineage suppresses its own refresh, not bounded enrollment of a
+        // different authenticated control. The original affine capability must remain exact.
+        let [alternate] = fixture.runtime.automatic_exit_fetch_attempts.as_slice() else {
+            panic!("exactly one alternate control enrollment");
+        };
+        assert_eq!(
+            alternate.key,
+            ForwardedExitKey {
+                control_relay_peer: *other_relay.peer_id(),
+                exit_peer,
+            }
+        );
+        assert_eq!(
+            alternate.request.control_relay_peer_id(),
+            other_relay.peer_id().to_bytes()
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        assert_eq!(fixture.runtime.forwarded_exits[&original_key], retained);
+    }
+
+    #[tokio::test]
+    async fn affine_forwarded_capability_survives_refresh_but_not_policy_change() {
+        let fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let now_ms = unix_millis();
@@ -8893,16 +20698,43 @@ mod tests {
             exit_peer_id,
             now_ms.saturating_add(10_000),
         ));
-        let mut rekeyed = control.clone();
-        rekeyed.advertisement_sequence = rekeyed.advertisement_sequence.saturating_add(1);
-        assert!(!forwarded_exit_capability_matches(
+        assert!(forwarded_control_projection_lineage_matches(
             &capability,
-            &rekeyed,
-            rekeyed.node_id,
-            rekeyed.peer_id,
-            rekeyed.public_key,
+            &control,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut refreshed = control.clone();
+        refreshed.advertisement_sequence = refreshed.advertisement_sequence.saturating_add(1);
+        refreshed.advertisement_payload_hash = refreshed.advertisement_payload_hash.xor_for_test();
+        assert!(forwarded_exit_capability_matches(
+            &capability,
+            &refreshed,
+            refreshed.node_id,
+            refreshed.peer_id,
+            refreshed.public_key,
             exit_node_id,
             exit_peer_id,
+            now_ms.saturating_add(10_000),
+        ));
+        assert!(forwarded_control_projection_lineage_matches(
+            &capability,
+            &refreshed,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut substituted_same_sequence = control.clone();
+        substituted_same_sequence.advertisement_payload_hash = substituted_same_sequence
+            .advertisement_payload_hash
+            .xor_for_test();
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &substituted_same_sequence,
+            now_ms.saturating_add(10_000),
+        ));
+        let mut rolled_back = control.clone();
+        rolled_back.advertisement_sequence = rolled_back.advertisement_sequence.saturating_sub(1);
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &rolled_back,
             now_ms.saturating_add(10_000),
         ));
         let mut policy_changed = control.clone();
@@ -8917,11 +20749,16 @@ mod tests {
             exit_peer_id,
             now_ms.saturating_add(10_000),
         ));
+        assert!(!forwarded_control_projection_lineage_matches(
+            &capability,
+            &policy_changed,
+            now_ms.saturating_add(10_000),
+        ));
     }
 
     #[tokio::test]
     async fn ledger_reserves_max_response_bytes_globally_and_per_peer() {
-        let mut global = fixture(RolesConfig::default());
+        let mut global = fixture(test_client_roles());
         let frame_bytes = usize::try_from(MAX_FORWARDING_FRAME_BYTES).expect("frame bound");
         let reserved = ledger_reservation_bytes(frame_bytes).expect("max-frame reservation");
         let expires_at_ms = unix_millis().saturating_add(20_000);
@@ -8959,7 +20796,7 @@ mod tests {
         let fresh_peer = Identity::generate().peer_id().to_owned();
         assert!(!global.runtime.ledger_can_reserve(fresh_peer, reserved));
 
-        let mut per_peer = fixture(RolesConfig::default());
+        let mut per_peer = fixture(test_client_roles());
         let peer = Identity::generate().peer_id().to_owned();
         let mut peer_entries = 0_usize;
         while per_peer.runtime.ledger_can_reserve(peer, reserved) {
@@ -8990,9 +20827,146 @@ mod tests {
         assert!(!per_peer.runtime.ledger_can_reserve(peer, reserved));
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one regression covers all three completed route-ledger families"
+    )]
+    #[tokio::test]
+    async fn completed_route_ledgers_charge_only_bytes_they_retain() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let expires_at_ms = now_ms.saturating_add(20_000);
+        let relay_identity = Identity::generate();
+        let relay = direct_capability(&relay_identity, &fixture.policy, 1, expires_at_ms);
+        let exit_identity = Identity::generate();
+        let exit_peer = exit_identity.peer_id().to_owned();
+        let exit_public_key = exit_identity
+            .ed25519_public_key_bytes()
+            .expect("exit public key");
+        let exit_node_id = node_id_from_public_key(&exit_public_key);
+        let frame_limit = usize::try_from(MAX_FORWARDING_FRAME_BYTES).expect("frame bound");
+
+        let client_request = vec![0x11; 97];
+        let client_reserved = ledger_reservation_bytes(client_request.len()).expect("reservation");
+        let client_key = ClientForwardKey {
+            control_relay_peer: relay.peer_id,
+            forward_id: [0x12; FORWARD_ID_BYTES],
+        };
+        let client_pending = PendingClientForward {
+            key: client_key,
+            expected_exit_peer: exit_peer,
+            operation: ExitForwardOperation::FetchExitAdvertisement,
+            expected_exit_node_id: Some(exit_node_id),
+            authorized_control: relay.clone(),
+            authorized_exit: None,
+            canonical_request: client_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: client_reserved,
+            waiters: Vec::new(),
+        };
+        fixture.runtime.cache_client_result(
+            &client_pending,
+            Err(OutboundReservationError::InvalidResponse),
+        );
+        assert_eq!(
+            fixture.runtime.completed_client_forwards[&client_key].reserved_bytes,
+            client_request.len()
+        );
+
+        let datapath_request = vec![0x21; 113];
+        let datapath_reserved =
+            ledger_reservation_bytes(datapath_request.len()).expect("reservation");
+        let datapath_key = DatapathKey {
+            relay_peer: relay.peer_id,
+            request_id: [0x22; FORWARD_ID_BYTES],
+        };
+        let datapath_pending = PendingDatapath {
+            key: datapath_key,
+            operation: DatapathRelayOperation::NativeProbeReady,
+            relay_node_id: relay.node_id,
+            authorized_relay: relay.clone(),
+            canonical_request: datapath_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: datapath_reserved,
+            waiters: Vec::new(),
+        };
+        let datapath_response = DatapathRelayResponse::unavailable(
+            datapath_key.request_id.to_vec(),
+            DatapathRelayOperation::NativeProbeReady,
+            relay.node_id.to_vec(),
+            relay.peer_id.to_bytes(),
+        )
+        .expect("Unavailable datapath response");
+        let datapath_response_bytes = encode_canonical(&datapath_response, frame_limit)
+            .expect("canonical datapath response")
+            .len();
+        fixture
+            .runtime
+            .cache_datapath_result(&datapath_pending, Ok(datapath_response));
+        assert_eq!(
+            fixture.runtime.completed_datapath[&datapath_key].reserved_bytes,
+            datapath_request.len() + datapath_response_bytes
+        );
+
+        let client_identity = Identity::generate();
+        let relay_request = vec![0x31; 131];
+        let relay_reserved = ledger_reservation_bytes(relay_request.len()).expect("reservation");
+        let relay_key = RelayForwardKey {
+            authenticated_client_peer: client_identity.peer_id().to_owned(),
+            forward_id: [0x32; FORWARD_ID_BYTES],
+        };
+        let relay_pending = PendingRelayForward {
+            key: relay_key,
+            expected_exit_peer: exit_peer,
+            operation: ExitForwardOperation::FetchExitAdvertisement,
+            expected_exit_node_id: Some(exit_node_id),
+            authorized_control: relay,
+            authorized_exit: None,
+            canonical_request: relay_request.clone(),
+            operation_expires_at_ms: expires_at_ms,
+            attempt_deadline: Instant::now() + Duration::from_secs(5),
+            dispatch_attempts: 1,
+            reserved_bytes: relay_reserved,
+            client_channels: Vec::new(),
+            native_ready: None,
+            native_authorization: None,
+            native_result: None,
+            udp_session: None,
+            mptcp_session: None,
+            mpquic_session: None,
+        };
+        let relay_response = ExitForwardResponse::unavailable(
+            relay_key.forward_id.to_vec(),
+            ExitForwardOperation::FetchExitAdvertisement,
+            exit_node_id.to_vec(),
+            exit_peer.to_bytes(),
+        )
+        .expect("Unavailable relay response");
+        let relay_response_bytes = encode_canonical(&relay_response, frame_limit)
+            .expect("canonical relay response")
+            .len();
+        fixture
+            .runtime
+            .cache_relay_result(&relay_pending, Some(relay_response));
+        assert_eq!(
+            fixture.runtime.completed_relay_forwards[&relay_key].reserved_bytes,
+            relay_request.len() + relay_response_bytes
+        );
+
+        assert_eq!(
+            completed_ledger_reservation_bytes(usize::MAX, 1, relay_reserved),
+            relay_reserved,
+            "overflow must retain the conservative pending reservation"
+        );
+    }
+
     #[tokio::test]
     async fn full_tombstone_ledger_returns_exact_cached_result_without_dispatch() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -9075,7 +21049,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_ambiguity_dispatches_exactly_three_times_then_tombstones() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -9135,7 +21109,7 @@ mod tests {
 
     #[tokio::test]
     async fn received_unavailable_is_definitive_until_operation_expiry() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -9216,7 +21190,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_or_pending_direct_exit_association_causes_zero_forward_dispatch() {
-        let mut direct_fixture = fixture(RolesConfig::default());
+        let mut direct_fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -9251,7 +21225,7 @@ mod tests {
         );
         assert!(direct_fixture.runtime.pending_client_forwards.is_empty());
 
-        let mut pending_fixture = fixture(RolesConfig::default());
+        let mut pending_fixture = fixture(test_client_roles());
         let (control, request) = authorize_fetch(
             &mut pending_fixture,
             &control_identity,
@@ -9283,8 +21257,293 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_provider_refreshes_live_advertisement_without_duplicate_requests() {
+        let mut fixture = fixture(test_client_roles());
+        let relay_identity = Identity::generate();
+        let now_ms = unix_millis();
+        let control = install_control(&mut fixture, &relay_identity, now_ms);
+        assert!(control.expires_at_ms > now_ms.saturating_add(1_000));
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([control.peer_id]));
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 1);
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([control.peer_id]));
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn combined_role_provider_partition_keeps_exit_and_two_relays_in_either_event_order() {
+        for (offers_exit, relay_first) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let combined_roles = RolesConfig {
+                client: true,
+                relay: true,
+                exit: offers_exit,
+            };
+            let mut fixture = fixture(combined_roles);
+            let peers = (0..3)
+                .map(|_| *Identity::generate().peer_id())
+                .collect::<HashSet<_>>();
+            let first = if relay_first {
+                ProviderQueryKind::Relay
+            } else {
+                ProviderQueryKind::Exit
+            };
+            let second = if relay_first {
+                ProviderQueryKind::Exit
+            } else {
+                ProviderQueryKind::Relay
+            };
+            fixture.runtime.handle_provider_peers(first, peers.clone());
+            assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+            fixture.runtime.handle_provider_peers(second, peers.clone());
+            assert_eq!(fixture.runtime.reserved_provider_exit_peers.len(), 1);
+            assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+            let reserved = *fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .keys()
+                .next()
+                .unwrap();
+            assert!(
+                fixture
+                    .runtime
+                    .forwarded_exit_peer_is_eligible(reserved, unix_millis())
+            );
+            assert!(
+                fixture
+                    .runtime
+                    .relay_advertisement_requests
+                    .values()
+                    .all(|peer| *peer != reserved)
+            );
+            // A refreshed untrusted provider index neither changes an existing partition nor
+            // creates selectable signed authority. The original Exit remains undialed.
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Relay, peers.clone());
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Exit, peers);
+            assert!(
+                fixture
+                    .runtime
+                    .reserved_provider_exit_peers
+                    .contains_key(&reserved)
+            );
+            assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+            assert!(fixture.runtime.direct_relays.is_empty());
+            assert!(fixture.runtime.forwarded_exits.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_partition_preserves_square_neighbors_after_a_complete_result_stream() {
+        for offers_exit in [true, false] {
+            let mut fixture = fixture(RolesConfig {
+                client: true,
+                relay: true,
+                exit: offers_exit,
+            });
+            let neighbors = [
+                *Identity::generate().peer_id(),
+                *Identity::generate().peer_id(),
+            ];
+            let opposite = *Identity::generate().peer_id();
+            for peer in neighbors {
+                fixture
+                    .runtime
+                    .observed_endpoints
+                    .insert(peer, ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None));
+            }
+            // Relay and Exit queries are independent; duplicate Exit queries are coalesced.
+            let mut queries = Vec::new();
+            for (capability_key, kind) in [
+                (capability::EXIT, ProviderQueryKind::Exit),
+                (capability::RELAY, ProviderQueryKind::Relay),
+            ] {
+                let query = fixture
+                    .runtime
+                    .service
+                    .find_providers(capability_key)
+                    .unwrap();
+                fixture.runtime.provider_queries.insert(query, kind);
+                queries.push(query);
+            }
+            fixture.runtime.handle_provider_peers(
+                ProviderQueryKind::Relay,
+                HashSet::from([neighbors[0], neighbors[1], opposite]),
+            );
+            fixture
+                .runtime
+                .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([neighbors[0]]));
+            assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+            assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+            fixture.runtime.handle_provider_peers(
+                ProviderQueryKind::Exit,
+                HashSet::from([neighbors[1], opposite]),
+            );
+            assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+            fixture.runtime.finish_provider_query(queries[0]);
+            assert_eq!(fixture.runtime.provider_queries.len(), 1);
+            assert_eq!(fixture.runtime.reserved_provider_exit_peers.len(), 1);
+            assert!(
+                fixture
+                    .runtime
+                    .reserved_provider_exit_peers
+                    .contains_key(&opposite)
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .relay_advertisement_requests
+                    .values()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                HashSet::from(neighbors)
+            );
+            assert!(fixture.runtime.direct_relays.is_empty());
+            assert!(fixture.runtime.forwarded_exits.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_partition_waits_for_a_usable_pool_across_completed_queries() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        let neighbors = [
+            *Identity::generate().peer_id(),
+            *Identity::generate().peer_id(),
+        ];
+        for peer in neighbors {
+            fixture
+                .runtime
+                .observed_endpoints
+                .insert(peer, ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None));
+        }
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from(neighbors));
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from(neighbors));
+        // A first query has fully finished; the next provider is not merely another streamed chunk.
+        assert!(fixture.runtime.provider_queries.is_empty());
+        assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        let opposite = *Identity::generate().peer_id();
+        // The Relay index may finish ahead of the next Exit query. Its completeness must not
+        // make either already-known neighbor into the permanently reserved Exit.
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, HashSet::from([opposite]));
+        assert!(fixture.runtime.reserved_provider_exit_peers.is_empty());
+        assert!(fixture.runtime.relay_advertisement_requests.is_empty());
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([opposite]));
+        assert_eq!(
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .keys()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([opposite])
+        );
+        assert_eq!(
+            fixture
+                .runtime
+                .relay_advertisement_requests
+                .values()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from(neighbors)
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_partition_all_connected_fallback_is_deterministic_and_can_expand_privately() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        let peers = (0..3)
+            .map(|_| *Identity::generate().peer_id())
+            .collect::<HashSet<_>>();
+        for peer in &peers {
+            fixture.runtime.observed_endpoints.insert(
+                *peer,
+                ("/ip4/44.12.34.1/udp/41000/quic-v1".to_owned(), None),
+            );
+        }
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, peers.clone());
+        let first_partition = fixture.runtime.reserved_provider_exit_peers.clone();
+        assert_eq!(first_partition.len(), 1);
+        fixture.runtime.reserved_provider_exit_peers.clear();
+        fixture
+            .runtime
+            .reserve_provider_exit_candidates(unix_millis());
+        assert_eq!(
+            fixture.runtime.reserved_provider_exit_peers,
+            first_partition
+        );
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Relay, peers);
+        assert_eq!(fixture.runtime.relay_advertisement_requests.len(), 2);
+
+        let opposite = *Identity::generate().peer_id();
+        // A logical connection through Circuit Relay is not a directly connected neighbor.
+        fixture.runtime.observed_endpoints.insert(
+            opposite,
+            (
+                format!(
+                    "/ip4/44.12.34.1/udp/41000/quic-v1/p2p/{}/p2p-circuit",
+                    fixture.runtime.service.local_peer_id()
+                ),
+                None,
+            ),
+        );
+        fixture
+            .runtime
+            .handle_provider_peers(ProviderQueryKind::Exit, HashSet::from([opposite]));
+        assert!(
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .contains_key(&opposite)
+        );
+        assert!(first_partition.keys().all(|peer| {
+            fixture
+                .runtime
+                .reserved_provider_exit_peers
+                .contains_key(peer)
+        }));
+        assert!(
+            fixture
+                .runtime
+                .relay_advertisement_requests
+                .values()
+                .all(|peer| *peer != opposite)
+        );
+        assert!(fixture.runtime.direct_relays.is_empty());
+        assert!(fixture.runtime.forwarded_exits.is_empty());
+    }
+
+    #[tokio::test]
     async fn forwarded_target_blocks_direct_relay_provider_fetch_and_expires() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let exit_peer = Identity::generate().peer_id().to_owned();
         let now_ms = unix_millis();
         assert!(
@@ -9312,7 +21571,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_provenance_revokes_capless_inflight_fetch_and_late_response() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -9381,7 +21640,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_exit_ad_is_scoped_per_control_relay_but_replay_is_rejected_per_pair() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay_a = Identity::generate();
         let relay_b = Identity::generate();
         let exit = Identity::generate();
@@ -9402,7 +21661,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [91; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -9462,6 +21721,90 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn relay_owned_exit_authority_coexists_with_local_client_relay_observations() {
+        let roles = RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        };
+        for direct_first in [false, true] {
+            let mut fixture = fixture(roles);
+            let now_ms = unix_millis();
+            let deadline = now_ms.saturating_add(20_000);
+            let local = direct_capability(
+                &fixture.runtime.identity,
+                &fixture.policy,
+                1,
+                deadline.saturating_add(10_000),
+            );
+            fixture.runtime.local_relay_snapshot = Some(local.clone());
+            let exit = Identity::generate();
+            let exit_peer = exit.peer_id().to_owned();
+            let advertisement = service_advertisement(
+                &exit,
+                roles,
+                &fixture.policy,
+                1,
+                generate_nonce(),
+                now_ms,
+                &fixture.directory,
+            );
+            let direct = AdvertisementProvenance::DirectRelay {
+                authenticated_peer: exit_peer,
+            };
+            let forwarded = forwarded_provenance(&local, &exit, deadline);
+            let provenances = if direct_first {
+                [direct, forwarded]
+            } else {
+                [forwarded, direct]
+            };
+            for provenance in provenances {
+                assert!(
+                    fixture
+                        .runtime
+                        .ingest_advertisement(
+                            exit_peer,
+                            advertisement.clone(),
+                            provenance,
+                            &fixture.state,
+                        )
+                        .await
+                        .is_some()
+                );
+            }
+            let key = ForwardedExitKey {
+                control_relay_peer: local.peer_id,
+                exit_peer,
+            };
+            assert!(fixture.runtime.forwarded_exits.contains_key(&key));
+            assert!(fixture.runtime.direct_relays.contains_key(&exit_peer));
+            assert!(
+                !fixture
+                    .runtime
+                    .peer_is_forwarded_exit_target(exit_peer, now_ms)
+            );
+            assert!(
+                !fixture
+                    .runtime
+                    .forwarded_exit_peer_is_eligible(exit_peer, now_ms)
+            );
+            assert!(fixture.runtime.forwarded_exit_authority_is_eligible(
+                local.peer_id,
+                exit_peer,
+                now_ms,
+            ));
+
+            // An actual signed policy change still invalidates server-owned Exit authority.
+            let mut changed = accepted_for_identity(&exit, &fixture.policy, 2, deadline);
+            changed.policy_hash[0] ^= 1;
+            fixture
+                .runtime
+                .revoke_for_direct_advertisement(exit_peer, &changed, true, false);
+            assert!(!fixture.runtime.forwarded_exits.contains_key(&key));
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "both provenance event orders are one invariant"
@@ -9476,7 +21819,7 @@ mod tests {
         let now_ms = unix_millis();
         let deadline = now_ms.saturating_add(20_000);
 
-        let mut direct_first = fixture(RolesConfig::default());
+        let mut direct_first = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let control = install_control(&mut direct_first, &relay, now_ms);
@@ -9486,7 +21829,7 @@ mod tests {
             roles,
             &direct_first.policy,
             1,
-            [101; 32],
+            generate_nonce(),
             now_ms,
             &direct_first.directory,
         );
@@ -9530,7 +21873,7 @@ mod tests {
                 })
         );
 
-        let mut forwarded_first = fixture(RolesConfig::default());
+        let mut forwarded_first = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let control = install_control(&mut forwarded_first, &relay, now_ms);
@@ -9543,7 +21886,7 @@ mod tests {
             roles,
             &forwarded_first.policy,
             1,
-            [102; 32],
+            generate_nonce(),
             now_ms,
             &forwarded_first.directory,
         );
@@ -9597,7 +21940,7 @@ mod tests {
 
     #[tokio::test]
     async fn higher_exit_sequence_with_role_withdrawal_revokes_old_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let now_ms = unix_millis();
@@ -9616,7 +21959,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [111; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -9634,10 +21977,10 @@ mod tests {
         );
         let withdrawal = service_advertisement(
             &exit,
-            RolesConfig::default(),
+            test_client_roles(),
             &fixture.policy,
             2,
-            [112; 32],
+            generate_nonce(),
             now_ms.saturating_add(1),
             &fixture.directory,
         );
@@ -9676,8 +22019,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_relay_role_withdrawal_revokes_control_and_forwarded_exit_authority() {
+        let mut fixture = fixture(test_client_roles());
+        let relay = Identity::generate();
+        let exit = Identity::generate();
+        let relay_peer = relay.peer_id().to_owned();
+        let exit_peer = exit.peer_id().to_owned();
+        let now_ms = unix_millis();
+        let deadline = now_ms.saturating_add(20_000);
+        let relay_advertisement = service_advertisement(
+            &relay,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    relay_peer,
+                    relay_advertisement,
+                    AdvertisementProvenance::DirectRelay {
+                        authenticated_peer: relay_peer,
+                    },
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+        let control = fixture
+            .runtime
+            .direct_relays
+            .get(&relay_peer)
+            .expect("direct Relay authority")
+            .clone();
+        fixture
+            .runtime
+            .mark_forwarded_exit_target(exit_peer, deadline);
+        let exit_advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .ingest_advertisement(
+                    exit_peer,
+                    exit_advertisement,
+                    forwarded_provenance(&control, &exit, deadline),
+                    &fixture.state,
+                )
+                .await
+                .is_some()
+        );
+
+        let withdrawal = service_advertisement(
+            &relay,
+            test_client_roles(),
+            &fixture.policy,
+            2,
+            generate_nonce(),
+            now_ms.saturating_add(1),
+            &fixture.directory,
+        );
+        let _ = fixture
+            .runtime
+            .ingest_advertisement(
+                relay_peer,
+                withdrawal,
+                AdvertisementProvenance::DirectRelay {
+                    authenticated_peer: relay_peer,
+                },
+                &fixture.state,
+            )
+            .await;
+
+        assert!(!fixture.runtime.direct_relays.contains_key(&relay_peer));
+        assert!(
+            !fixture
+                .runtime
+                .forwarded_exits
+                .contains_key(&ForwardedExitKey {
+                    control_relay_peer: relay_peer,
+                    exit_peer,
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn active_policy_change_revokes_all_old_capability_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let relay = Identity::generate();
         let exit = Identity::generate();
         let now_ms = unix_millis();
@@ -9696,7 +22143,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [121; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -9748,14 +22195,16 @@ mod tests {
             .publisher
             .sign(
                 &fixture.runtime.identity,
-                &LocalAdvertisementInput {
-                    roles: RolesConfig::default(),
-                    operator_id: "operator-policy-barrier".to_owned(),
-                    policy_version: fixture.policy.manifest_version(),
-                    policy_hash: *fixture.policy.policy_hash(),
-                    policy_expires_at_ms: fixture.policy.expires_at_ms(),
-                    control_addresses: BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
-                },
+                &local_advertisement_input(
+                    RolesConfig {
+                        client: true,
+                        relay: true,
+                        exit: true,
+                    },
+                    "operator-policy-barrier",
+                    &fixture.policy,
+                    BTreeSet::from(["/ip4/127.0.0.1/tcp/42100".to_owned()]),
+                ),
                 now_ms,
             )
             .expect("valid local signed advertisement");
@@ -9891,6 +22340,12 @@ mod tests {
                 dispatch_attempts: 1,
                 reserved_bytes: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
             },
         );
 
@@ -10120,7 +22575,7 @@ mod tests {
 
     #[tokio::test]
     async fn stored_advertisement_revalidation_preserves_roles_without_minting_exit_authority() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let service = Identity::generate();
         let peer = service.peer_id().to_owned();
         let now_ms = unix_millis();
@@ -10140,7 +22595,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [131; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -10188,7 +22643,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_is_exact_bounded_and_deterministic() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         for (index, identity) in (0_u8..3).map(|index| (index, Identity::generate())) {
             assert!(
@@ -10282,7 +22737,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_never_observes_half_committed_advertisement() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let identity = Identity::generate();
         let peer = identity.peer_id().to_owned();
         let now_ms = unix_millis();
@@ -10295,7 +22750,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [154; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -10374,7 +22829,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_policy_revocation_linearizes_before_reply() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let identity = Identity::generate();
         let now_ms = unix_millis();
         assert!(
@@ -10387,7 +22842,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [155; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -10488,7 +22943,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [160; 32],
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
@@ -10501,9 +22956,16 @@ mod tests {
             .expect("stored control capability")
             .clone();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, valid_exit, 1, [161; 32], now_ms,)
-                .await
-                .is_some()
+            ingest_forwarded_snapshot_exit(
+                fixture,
+                &control,
+                valid_exit,
+                1,
+                generated_nonce_with_unique_network_discriminator(),
+                now_ms,
+            )
+            .await
+            .is_some()
         );
         control
     }
@@ -10539,7 +23001,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [162; 32],
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
@@ -10610,6 +23072,28 @@ mod tests {
         })
         .await
         .expect("preselection outbound failure timeout")
+    }
+
+    async fn next_unconnected_client_preselection_outbound_failure(
+        runtime: &mut DiscoveryRuntime,
+    ) -> DiscoveryEvent {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let event = runtime.service.next_event().await;
+                if matches!(
+                    &event,
+                    DiscoveryEvent::Other(SwarmEvent::Behaviour(
+                        BehaviourEvent::PreselectionObservation(
+                            request_response::Event::OutboundFailure { .. },
+                        ),
+                    ))
+                ) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("unconnected preselection outbound failure timeout")
     }
 
     #[tokio::test]
@@ -10879,46 +23363,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_outbound_failure_retains_active_slot_until_owner_timeout() {
+    async fn exact_outbound_failure_releases_owner_after_bounded_short_cooldown() {
         let ActiveClientPreselectionFixture {
             mut fixture,
             mut control_service,
-            mut response,
+            response,
             ..
         } = Box::pin(active_client_preselection_fixture()).await;
         let failure =
             next_client_preselection_outbound_failure(&mut fixture.runtime, &mut control_service)
                 .await;
 
-        fixture
-            .runtime
-            .handle_sanitized_event(failure, &fixture.state)
-            .await;
-
-        assert!(matches!(
-            fixture.runtime.client_preselection,
-            ClientPreselectionOwner::Active(_)
-        ));
-        assert!(
+        Box::pin(
             fixture
                 .runtime
-                .service
-                .client_preselection_slot_active_for_test()
-        );
-        assert!(matches!(
-            response.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
+                .handle_sanitized_event(failure, &fixture.state),
+        )
+        .await;
 
-        let ClientPreselectionOwner::Active(active) = &mut fixture.runtime.client_preselection
-        else {
-            panic!("raw failure must retain active owner");
-        };
-        active.request_deadline = Instant::now();
-        fixture.runtime.maintain_client_preselection();
         assert!(matches!(
-            response.await.expect("owner timeout"),
-            Err(ClientPreselectionError::Timeout)
+            response.await.expect("exact outbound failure"),
+            Err(ClientPreselectionError::Transport)
         ));
         assert!(
             !fixture
@@ -10929,6 +23394,13 @@ mod tests {
         assert!(matches!(
             fixture.runtime.client_preselection,
             ClientPreselectionOwner::Cooling(_)
+        ));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        fixture.runtime.maintain_client_preselection();
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
         ));
     }
 
@@ -11044,6 +23516,137 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end regression retains the complete refreshed control lineage"
+    )]
+    async fn production_client_preselection_accepts_same_lineage_control_refresh() {
+        let mut fixture = fixture(RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        });
+        let initial_ms = unix_millis().saturating_sub(2_000);
+        let control_identity = Identity::generate();
+        let exit_identity = Identity::generate();
+        let original_control = install_valid_snapshot_route_for(
+            &mut fixture,
+            &control_identity,
+            &exit_identity,
+            initial_ms,
+        )
+        .await;
+
+        let refresh_ms = unix_millis();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &control_identity,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                2,
+                generate_nonce(),
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+        let refreshed_control = fixture
+            .runtime
+            .direct_relays
+            .get(control_identity.peer_id())
+            .expect("refreshed control capability")
+            .clone();
+        assert_eq!(refreshed_control.node_id, original_control.node_id);
+        assert_eq!(refreshed_control.peer_id, original_control.peer_id);
+        assert_eq!(refreshed_control.public_key, original_control.public_key);
+        assert_eq!(refreshed_control.policy_hash, original_control.policy_hash);
+        assert_ne!(
+            refreshed_control.advertisement_sequence,
+            original_control.advertisement_sequence
+        );
+        assert_ne!(
+            refreshed_control.advertisement_expires_at_ms,
+            original_control.advertisement_expires_at_ms
+        );
+        assert_ne!(
+            refreshed_control.advertisement_payload_hash,
+            original_control.advertisement_payload_hash
+        );
+
+        let retained_exit = fixture
+            .runtime
+            .forwarded_exits
+            .values()
+            .next()
+            .expect("same-lineage forwarded exit survives refresh");
+        assert_eq!(
+            retained_exit.control_relay_advertisement_sequence,
+            original_control.advertisement_sequence
+        );
+        assert_eq!(
+            retained_exit.control_relay_advertisement_expires_at_ms,
+            original_control.advertisement_expires_at_ms
+        );
+        assert_eq!(
+            retained_exit.control_relay_advertisement_payload_hash,
+            original_control.advertisement_payload_hash
+        );
+
+        let other_relay = Identity::generate();
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &other_relay,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                generate_nonce(),
+                refresh_ms,
+            )
+            .await
+            .is_some()
+        );
+
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
+        let failure =
+            next_unconnected_client_preselection_outbound_failure(&mut fixture.runtime).await;
+        Box::pin(
+            fixture
+                .runtime
+                .handle_sanitized_event(failure, &fixture.state),
+        )
+        .await;
+        assert!(matches!(
+            response.await.expect("terminal dispatch result"),
+            Err(ClientPreselectionError::Transport)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Cooling(_)
+        ));
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
+    }
+
+    #[tokio::test]
     async fn production_client_preselection_samples_before_request_derived_dispatch_and_cools() {
         let mut fixture = fixture(RolesConfig {
             client: true,
@@ -11063,7 +23666,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11079,6 +23682,14 @@ mod tests {
                 &fixture.state,
             )
             .await;
+        let failure =
+            next_unconnected_client_preselection_outbound_failure(&mut fixture.runtime).await;
+        Box::pin(
+            fixture
+                .runtime
+                .handle_sanitized_event(failure, &fixture.state),
+        )
+        .await;
         assert!(matches!(
             response.await.expect("terminal dispatch result"),
             Err(ClientPreselectionError::Transport)
@@ -11239,17 +23850,12 @@ mod tests {
             2,
         );
 
-        let failure_arm = product
-            .split_once(
-                "BehaviourEvent::PreselectionObservation(\n                request_response::Event::OutboundFailure { .. },",
-            )
-            .expect("opaque outbound failure arm")
-            .1
-            .split_once("SwarmEvent::Behaviour(BehaviourEvent::ExitForward(event))")
-            .expect("outbound failure arm end")
-            .0;
-        assert!(!failure_arm.contains("request_id"));
-        assert!(!failure_arm.contains("cancel_client_preselection"));
+        let failure_handler =
+            braced_item(product, "fn handle_client_preselection_outbound_failure(");
+        assert!(failure_handler.contains("dispatch.consume_outbound_failure("));
+        assert!(failure_handler.contains("PreselectionOwnerTransitionFailure::Retained(dispatch)"));
+        assert!(product.contains("PRESELECTION_OUTBOUND_CONNECTION_CLOSED"));
+        assert!(product.contains("PRESELECTION_OUTBOUND_FAILURE_UNOWNED"));
         let maintenance = braced_item(product, "fn maintain_client_preselection(");
         assert!(maintenance.contains("active.request_deadline"));
         assert!(maintenance.contains("active.attempt_deadline"));
@@ -11283,9 +23889,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_snapshot_rejects_every_payload_hash_drift_against_fresh_storage() {
-        for mutation in 0_u8..5 {
-            let mut fixture = fixture(RolesConfig::default());
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one provenance-drift matrix exercises every fail-closed mutation"
+    )]
+    async fn route_snapshot_rejects_external_and_forwarded_control_provenance_drift() {
+        for mutation in 0_u8..7 {
+            let mut fixture = fixture(test_client_roles());
             let now_ms = unix_millis();
             let (control, exit_peer) = install_valid_snapshot_route(&mut fixture, now_ms).await;
             let baseline = route_snapshot_at(&mut fixture, 10, now_ms)
@@ -11356,13 +23966,36 @@ mod tests {
                     accepted.fingerprint.payload_hash =
                         accepted.fingerprint.payload_hash.xor_for_test();
                 }
+                5 => {
+                    let forwarded = fixture
+                        .runtime
+                        .forwarded_exits
+                        .get_mut(&forwarded_key)
+                        .expect("forwarded capability");
+                    forwarded.control_relay_advertisement_sequence = forwarded
+                        .control_relay_advertisement_sequence
+                        .saturating_add(1);
+                }
+                6 => {
+                    let forwarded = fixture
+                        .runtime
+                        .forwarded_exits
+                        .get_mut(&forwarded_key)
+                        .expect("forwarded capability");
+                    forwarded.control_relay_advertisement_expires_at_ms = forwarded
+                        .control_relay_advertisement_expires_at_ms
+                        .saturating_add(1_000);
+                }
                 _ => unreachable!(),
             }
 
             let drifted = route_snapshot_at(&mut fixture, 10, now_ms)
                 .await
                 .expect("hash drift is filtered, not surfaced");
-            assert!(drifted.forwarded_exits().is_empty(), "mutation {mutation}");
+            assert!(
+                drifted.forwarded_exits().is_empty(),
+                "forwarded control-advertisement drift must remain unavailable: mutation {mutation}"
+            );
             let control_present = drifted
                 .direct_relays()
                 .iter()
@@ -11386,7 +24019,7 @@ mod tests {
                     exit: true,
                 },
                 1,
-                [162; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11411,7 +24044,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [163; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11446,7 +24079,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [164; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11477,7 +24110,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [165; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11498,14 +24131,14 @@ mod tests {
         let control = install_control(fixture, &control_identity, now_ms);
         let exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, &control, &exit, 1, [166; 32], now_ms)
+            ingest_forwarded_snapshot_exit(fixture, &control, &exit, 1, generate_nonce(), now_ms)
                 .await
                 .is_some()
         );
         fixture.runtime.direct_relays.remove(&control.peer_id);
     }
 
-    async fn install_ambiguous_snapshot_exit(
+    async fn install_alternative_control_snapshot_exit(
         fixture: &mut RuntimeFixture,
         first_control: &DirectRelayCapability,
         now_ms: u64,
@@ -11521,7 +24154,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                [167; 32],
+                generate_nonce(),
                 now_ms,
             )
             .await
@@ -11533,14 +24166,14 @@ mod tests {
             .get(second_identity.peer_id())
             .expect("second control")
             .clone();
-        let ambiguous_exit = Identity::generate();
-        let ambiguous_peer = ambiguous_exit.peer_id().to_owned();
+        let shared_exit = Identity::generate();
+        let shared_peer = shared_exit.peer_id().to_owned();
         let deadline = now_ms.saturating_add(20_000);
         fixture
             .runtime
-            .mark_forwarded_exit_target(ambiguous_peer, deadline);
+            .mark_forwarded_exit_target(shared_peer, deadline);
         let advertisement = service_advertisement(
-            &ambiguous_exit,
+            &shared_exit,
             RolesConfig {
                 client: false,
                 relay: false,
@@ -11548,7 +24181,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [168; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -11557,16 +24190,225 @@ mod tests {
                 fixture
                     .runtime
                     .ingest_advertisement(
-                        ambiguous_peer,
+                        shared_peer,
                         advertisement.clone(),
-                        forwarded_provenance(control, &ambiguous_exit, deadline),
+                        forwarded_provenance(control, &shared_exit, deadline),
                         &fixture.state,
                     )
                     .await
                     .is_some()
             );
         }
-        (second_control, ambiguous_peer)
+        (second_control, shared_peer)
+    }
+
+    async fn signed_alternative_exit_controls_fixture() -> (Box<RuntimeFixture>, u64) {
+        let mut fixture = Box::new(fixture(test_client_roles()));
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = *exit.peer_id();
+        let deadline = now_ms.saturating_add(20_000);
+        fixture
+            .runtime
+            .mark_forwarded_exit_target(exit_peer, deadline);
+        let advertisement = service_advertisement_with_capabilities(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            [60; 32],
+            now_ms,
+            &fixture.directory,
+            PreselectionTestCapabilities::all(),
+        );
+        for discriminator in 40..43 {
+            let identity = Identity::generate();
+            assert!(
+                ingest_direct_snapshot_advertisement_with_capabilities(
+                    &mut fixture,
+                    &identity,
+                    RolesConfig {
+                        client: false,
+                        relay: true,
+                        exit: false
+                    },
+                    1,
+                    [discriminator; 32],
+                    now_ms,
+                    PreselectionTestCapabilities::all(),
+                )
+                .await
+                .is_some()
+            );
+            let control = fixture.runtime.direct_relays[identity.peer_id()].clone();
+            assert!(
+                fixture
+                    .runtime
+                    .ingest_advertisement(
+                        exit_peer,
+                        advertisement.clone(),
+                        forwarded_provenance(&control, &exit, deadline),
+                        &fixture.state,
+                    )
+                    .await
+                    .is_some()
+            );
+        }
+        assert_eq!(fixture.runtime.forwarded_exits.len(), 3);
+        (fixture, now_ms)
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_alternative_controls_keep_one_exact_signed_exit_and_affine_subjects() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let policy = DiscoveryRuntime::validated_route_candidate_policy(&active, now_ms).unwrap();
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .expect("every persisted advertisement is reverified");
+        let mut selected_controls = HashSet::new();
+        for choice in 0..3 {
+            let mut direct =
+                fixture
+                    .runtime
+                    .project_direct_route_candidates(&revalidated, now_ms, policy);
+            let mut exits = fixture.runtime.project_forwarded_route_candidates(
+                &revalidated,
+                &direct,
+                now_ms,
+                policy,
+            );
+            assert_eq!(exits.len(), 3);
+            let originals = exits.clone();
+            DiscoveryRuntime::finalize_route_candidate_projection(
+                &mut direct,
+                &mut exits,
+                10,
+                |count| {
+                    assert_eq!(count, 3);
+                    Some(choice)
+                },
+            );
+            assert_eq!(exits.len(), 1, "one Exit gets one selection weight");
+            assert!(
+                originals.contains(&exits[0]),
+                "selected lineage is not rewritten"
+            );
+            selected_controls.insert(exits[0].capability.control_relay_peer_id);
+            let subjects = preselection_observation::PreselectionSubjectSet::from_snapshot(
+                &revalidated,
+                &direct,
+                &exits,
+            );
+            assert!(subjects.available);
+            let snapshot = RouteCandidateSnapshot {
+                captured_at_ms: now_ms,
+                policy,
+                direct_relays: direct,
+                forwarded_exits: exits,
+                preselection_subjects: subjects,
+            };
+            let narrowed = narrow_route_candidate_snapshot(
+                snapshot,
+                PreselectionSamplingScope::new(
+                    Transport::MultipathQuic,
+                    ObservationAddressFamily::Ipv4,
+                    Bandwidth {
+                        up_mbps: 10,
+                        down_mbps: 10,
+                    },
+                    2,
+                    2,
+                ),
+            )
+            .unwrap_or_else(|failure| panic!("exact narrowed snapshot: {:?}", failure.error));
+            assert_eq!(narrowed.forwarded_exits.len(), 1);
+            assert_eq!(narrowed.direct_relays.len(), 3);
+            assert!(
+                PreselectionAttemptGate::new()
+                    .unwrap()
+                    .begin(
+                        narrowed,
+                        Transport::MultipathQuic,
+                        ObservationAddressFamily::Ipv4,
+                        Bandwidth {
+                            up_mbps: 10,
+                            down_mbps: 10
+                        },
+                        Bandwidth {
+                            up_mbps: 100,
+                            down_mbps: 100
+                        },
+                        Bandwidth {
+                            up_mbps: 80,
+                            down_mbps: 80
+                        },
+                    )
+                    .is_ok(),
+                "affine request still has exactly one Exit/control pair"
+            );
+        }
+        assert_eq!(
+            selected_controls.len(),
+            3,
+            "every current lineage is reachable by a bounded draw"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_snapshot_alternative_controls_reject_conflicts_duplicates_and_invalid_choice() {
+        let (fixture, now_ms) = signed_alternative_exit_controls_fixture().await;
+        let active = fixture.state.read().await.policy_snapshot(now_ms);
+        let policy = DiscoveryRuntime::validated_route_candidate_policy(&active, now_ms).unwrap();
+        let revalidated = fixture
+            .runtime
+            .load_revalidated_route_candidates(10, now_ms, policy)
+            .unwrap();
+        let direct = fixture
+            .runtime
+            .project_direct_route_candidates(&revalidated, now_ms, policy);
+        let original = fixture.runtime.project_forwarded_route_candidates(
+            &revalidated,
+            &direct,
+            now_ms,
+            policy,
+        );
+        for mutation in 0..9 {
+            let mut direct = direct.clone();
+            let mut exits = original.clone();
+            match mutation {
+                0 => exits[1].capability.exit_advertisement_sequence += 1,
+                1 => {
+                    exits[1].capability.exit_advertisement_payload_hash = exits[1]
+                        .capability
+                        .exit_advertisement_payload_hash
+                        .xor_for_test();
+                }
+                2 => exits[1].capability.policy_version += 1,
+                3 => exits[1] = exits[0].clone(),
+                4 => exits.push(exits[0].clone()),
+                5 => exits[1].capability.exit_node_id[0] ^= 1,
+                6 => exits[1].capability.exit_peer_id = *Identity::generate().peer_id(),
+                7 | 8 => {}
+                _ => unreachable!(),
+            }
+            DiscoveryRuntime::finalize_route_candidate_projection(
+                &mut direct,
+                &mut exits,
+                10,
+                |count| match mutation {
+                    7 => None,
+                    8 => Some(count),
+                    _ => Some(0),
+                },
+            );
+            assert!(exits.is_empty(), "ambiguous lineage mutation {mutation}");
+        }
     }
 
     async fn install_pending_direct_snapshot_exit(
@@ -11576,7 +24418,7 @@ mod tests {
     ) -> Libp2pPeerId {
         let exit = Identity::generate();
         assert!(
-            ingest_forwarded_snapshot_exit(fixture, control, &exit, 1, [169; 32], now_ms)
+            ingest_forwarded_snapshot_exit(fixture, control, &exit, 1, generate_nonce(), now_ms)
                 .await
                 .is_some()
         );
@@ -11596,7 +24438,7 @@ mod tests {
     #[tokio::test]
     async fn route_candidate_snapshot_excludes_expired_conflicted_unpaired_and_direct_exit_records()
     {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
 
         let (control, valid_exit_peer) = install_valid_snapshot_route(&mut fixture, now_ms).await;
@@ -11606,8 +24448,8 @@ mod tests {
         let self_peer = install_self_snapshot_relay(&mut fixture, now_ms).await;
 
         install_orphan_snapshot_exit(&mut fixture, now_ms).await;
-        let (second_control, ambiguous_peer) =
-            install_ambiguous_snapshot_exit(&mut fixture, &control, now_ms).await;
+        let (second_control, alternative_peer) =
+            install_alternative_control_snapshot_exit(&mut fixture, &control, now_ms).await;
         let pending_peer =
             install_pending_direct_snapshot_exit(&mut fixture, &control, now_ms).await;
 
@@ -11626,16 +24468,14 @@ mod tests {
         assert!(!direct_peers.contains(&self_peer));
         assert!(!direct_peers.contains(&direct_exit_peer));
 
-        assert_eq!(snapshot.forwarded_exits().len(), 1);
+        assert_eq!(snapshot.forwarded_exits().len(), 2);
         assert_eq!(
-            snapshot.forwarded_exits()[0].capability().exit_peer_id,
-            valid_exit_peer
-        );
-        assert!(
             snapshot
                 .forwarded_exits()
                 .iter()
-                .all(|candidate| candidate.capability().exit_peer_id != ambiguous_peer)
+                .map(|candidate| candidate.capability().exit_peer_id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([valid_exit_peer, alternative_peer])
         );
         assert!(
             snapshot
@@ -11647,7 +24487,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_candidate_snapshot_store_failure_and_dropped_reply_fail_closed() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         fixture.runtime.route_snapshot_store_failure = true;
         let (reply, received) = oneshot::channel();
         fixture
@@ -11830,7 +24670,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_datapath_replies_once_only_for_exact_typed_authority() {
-        let fixture = fixture(RolesConfig::default());
+        let fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
         let local_node_id = fixture.runtime.local_node_id;
         let local_peer = *fixture.runtime.service.local_peer_id();
@@ -11998,7 +24838,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn forwarded_ingest_expiry_at_commit_boundary_has_no_response_mutation() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -12013,7 +24853,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [139; 32],
+            generate_nonce(),
             advertisement_now_ms,
             &fixture.directory,
         );
@@ -12085,7 +24925,7 @@ mod tests {
     #[tokio::test]
     async fn client_fetch_rejects_late_or_revoked_response_before_ingest() {
         for case in 0_u8..3 {
-            let mut fixture = fixture(RolesConfig::default());
+            let mut fixture = fixture(test_client_roles());
             let control_identity = Identity::generate();
             let exit_identity = Identity::generate();
             let exit_peer = exit_identity.peer_id().to_owned();
@@ -12201,7 +25041,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn client_fetch_purges_expired_cap_after_owning_pending() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -12274,7 +25114,7 @@ mod tests {
             },
             &fixture.policy,
             2,
-            [161; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -12399,6 +25239,12 @@ mod tests {
                 attempt_deadline: Instant::now() + Duration::from_secs(5),
                 dispatch_attempts: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
             },
         );
         fixture.runtime.forwarded_exits.insert(
@@ -12446,7 +25292,7 @@ mod tests {
             },
             &fixture.policy,
             2,
-            [171; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -12459,15 +25305,13 @@ mod tests {
         )
         .expect("Granted advertisement response");
         assert_eq!(
-            fixture
-                .runtime
-                .complete_relay_forward(
-                    request_id,
-                    exit_peer,
-                    response.clone().into(),
-                    &fixture.state,
-                )
-                .await,
+            Box::pin(fixture.runtime.complete_relay_forward(
+                request_id,
+                exit_peer,
+                response.clone().into(),
+                &fixture.state,
+            ))
+            .await,
             OutboundEventOutcome::Completed
         );
         assert!(fixture.runtime.pending_relay_forwards.is_empty());
@@ -12486,10 +25330,13 @@ mod tests {
             2
         );
         assert_eq!(
-            fixture
-                .runtime
-                .complete_relay_forward(request_id, exit_peer, response.into(), &fixture.state,)
-                .await,
+            Box::pin(fixture.runtime.complete_relay_forward(
+                request_id,
+                exit_peer,
+                response.into(),
+                &fixture.state,
+            ))
+            .await,
             OutboundEventOutcome::Unexpected
         );
         assert_eq!(fixture.runtime.completed_relay_forwards.len(), 1);
@@ -12500,7 +25347,7 @@ mod tests {
     )]
     #[tokio::test]
     async fn client_fetch_after_commit_deadline_is_not_reclassified() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -12545,7 +25392,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [181; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -12669,6 +25516,12 @@ mod tests {
                 attempt_deadline,
                 dispatch_attempts: 1,
                 client_channels: Vec::new(),
+                native_ready: None,
+                native_authorization: None,
+                native_result: None,
+                udp_session: None,
+                mptcp_session: None,
+                mpquic_session: None,
             },
         );
         let advertisement = service_advertisement(
@@ -12680,7 +25533,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [183; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );
@@ -12725,13 +25578,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn production_helper_expiry_is_rounded_within_signed_authority() {
+        let now = unix_seconds();
+        let setup_seconds = now.checked_add(60).expect("setup seconds");
+        let hard_seconds = now.checked_add(120).expect("hard seconds");
+        let finalize = ExitReservationFinalizeRequest {
+            route_context_id: vec![0x91; FORWARD_ID_BYTES],
+            relay_paths: vec![volparossa_protocol::FinalizedRelayPath {
+                path_id: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        for residue_ms in [1_u64, 999] {
+            let setup_ms = setup_seconds
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_add(residue_ms))
+                .expect("setup milliseconds");
+            let hard_ms = hard_seconds
+                .checked_mul(1_000)
+                .and_then(|value| value.checked_add(residue_ms))
+                .expect("hard milliseconds");
+            let exit = production_exit_prepare_request(&finalize, setup_ms, hard_ms)
+                .expect("Exit helper scope");
+            let service = production_service_prepare_request(
+                [0x92; FORWARD_ID_BYTES],
+                ContextRole::Relay,
+                1,
+                setup_ms,
+                hard_ms,
+            )
+            .expect("service helper scope");
+
+            for prepare in [exit, service] {
+                assert_eq!(prepare.setup_expires_at_unix, setup_seconds);
+                assert_eq!(prepare.hard_expires_at_unix, hard_seconds);
+                assert!(
+                    prepare.setup_expires_at_unix * 1_000 <= setup_ms,
+                    "helper setup ownership must not outlive signed authority"
+                );
+                assert!(
+                    prepare.hard_expires_at_unix * 1_000 <= hard_ms,
+                    "helper hard ownership must not outlive signed authority"
+                );
+            }
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "a blocked finish proves the completion cache and reply precede refresh"
     )]
     #[tokio::test]
     async fn client_completion_is_cached_and_replied_before_refresh() {
-        let mut fixture = fixture(RolesConfig::default());
+        let mut fixture = fixture(test_client_roles());
         let control_identity = Identity::generate();
         let exit_identity = Identity::generate();
         let exit_peer = exit_identity.peer_id().to_owned();
@@ -12768,7 +25670,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [185; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
         );

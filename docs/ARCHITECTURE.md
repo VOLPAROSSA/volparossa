@@ -4,6 +4,29 @@ This document distinguishes the **required v1 design** from verified implementat
 claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
 
+## Reciprocal peer participation (revised 2026-09-05)
+
+All network nodes run the same software. A production node consuming client service must also
+offer relay service with nonzero capacity and, when it has its own usable Internet uplink,
+policy-limited exit service. Local-only nodes contribute direct connectivity and forwarding
+without pretending to provide independent Internet egress. This supersedes the older
+optional client-only participation model. Installation leaves all roles disabled; participation is
+an explicit configuration accepting bandwidth contribution and allowed egress through the node's
+public address when one exists. Role-isolated development fixtures are for boundary testing, not an alternative
+production participation mode. There are no required central relay or exit servers.
+
+Roles are functions of a node, not permanent network classes. For each route the client, each
+relay, and exit remain distinct nodes. Offering exit service never authorizes a direct client-to-exit
+datapath, unrestricted egress, or bypassing the common signed whitelist. The native Client and Exit
+process roles remain immutable and isolated even when both workers run on the same user node.
+The implementation status must separately record combined-role runtime and topology verification;
+these requirements are not a claim that those checks have passed.
+
+The [direct-link extension](LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi underlays to the
+same route model. Local links do not authorize a direct Client--Exit datapath. Independence
+and spare capacity must be measured: two relays sharing one uplink or radio channel do not
+automatically provide additive throughput.
+
 ## Trust and process boundaries
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
@@ -40,6 +63,15 @@ selected control relay. Direct-then-forwarded provenance is rejected; forwarded-
 provenance withdraws and quarantines the exit capability for the advertisement lifetime. Within one
 route, the exit must differ by node ID and Peer ID from the control relay and every datapath relay.
 The control relay may also become one datapath relay only after its own v4 probe and grant.
+
+These provenance restrictions are scoped to the local Client's own route choices. A node also
+serving as Relay may forward another authenticated client's exact signed request to an Exit that
+it knows separately as a Relay for its own use. That server-owned Exit capability cannot enter the
+local Client selection snapshot. Likewise, an Exit's incoming data-relay authority has its own
+bounded cache. A fresh direct advertisement does not revoke an independent server-owned route
+merely because its provenance differs; actual identity, policy and lifetime changes still apply.
+Combined-role provider discovery reserves a bounded local subset of Exit candidates before direct
+Relay fetches, so a network of identical participants is not exhausted by the first provider query.
 
 ```mermaid
 sequenceDiagram
@@ -109,8 +141,9 @@ That order is normative: no final relay is selected without real probe evidence,
 finalization precedes helper `Prepare`, and no local path is activated before every exact signed
 confirmation receipt exists. A received fail-closed `Unavailable` is a failed setup; only a truly
 ambiguous transport outcome permits an exact-byte retry within the original deadline and expiry.
-Production currently cannot complete the real probe or helper steps, so this sequence is a design
-and protocol boundary rather than an operational route claim.
+The Debian 13 role-isolated topology now exercises these production probe/helper steps through
+real MPTCP and MPQUIC traffic. Combined-role and local-only operation require their own runtime
+evidence; see the exact-revision checkpoint in IMPLEMENTATION_STATUS.md.
 
 Reservation messages bind the fresh `client_session_id`, random route-context ID, and path ID but
 carry no permanent client identity, overlay prefix, or overlay host address. Client, relay, and exit
