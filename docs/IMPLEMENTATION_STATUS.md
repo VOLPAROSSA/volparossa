@@ -24,7 +24,14 @@ single-path baseline (2.003x), with exact 32-MiB hashes and independent path evi
 the bounded v1 benchmark, not a LAN/Wi-Fi speed-gain claim. Cleanup left zero owned objects and
 unchanged host-state hashes. The DNS request never acquired its route: its preselection probe
 reached the Exit, but the Relay's exact Destroy timed out before the terminal result could
-return. Earlier Relay cleanup quarantines in the same run are under diagnosis; the DNS parser
+return. A real isolated Relay lifecycle reproduced a cleanup defect: the nftables deactivation
+transaction tried deleting INPUT rule handles from the FORWARD chain, so Linux rejected the
+atomic batch with ENOENT and retained the active fence and both links. Deletions now use each
+rule's exact owning chain, preserving handle/generation binding. Eight real Prepare/Activate/
+Destroy cycles now pass with both links absent after each cycle; the encoder regression and
+strict helper Clippy also pass. This fixes the reproduced defect; the complete run must still
+verify A08 and the separately observed ten-second coordinator retirement behavior. Eight fixed,
+identity-free cleanup checkpoints identify the stage if that behavior recurs. The DNS parser
 and acceptance gate are unchanged. A14's actual crash sequence still has no pass.
 Benchmarks now select and record a suitable real route before starting
 payloads; committed MPTCP paths are Reachable metadata, never a substitute for kernel subflow

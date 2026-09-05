@@ -12326,6 +12326,7 @@ impl WorkerCoordinator {
 
 #[cfg(test)]
 mod tests {
+    mod live_relay_cleanup;
     use std::{
         env, fs,
         io::Read,

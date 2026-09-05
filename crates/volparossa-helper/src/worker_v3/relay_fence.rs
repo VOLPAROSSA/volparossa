@@ -2484,12 +2484,12 @@ fn encode_deactivate_rules_transaction(
         &encode_batch_boundary_payload(Some(journal.generation))?,
     )?;
 
-    for (sequence, handle) in [
-        (2, journal.handles.input_rules[1]),
-        (3, journal.handles.input_rules[0]),
-        (4, journal.handles.forward_rules[2]),
-        (5, journal.handles.forward_rules[1]),
-        (6, journal.handles.forward_rules[0]),
+    for (sequence, chain, handle) in [
+        (2, INPUT_CHAIN_NAME, journal.handles.input_rules[1]),
+        (3, INPUT_CHAIN_NAME, journal.handles.input_rules[0]),
+        (4, FORWARD_CHAIN_NAME, journal.handles.forward_rules[2]),
+        (5, FORWARD_CHAIN_NAME, journal.handles.forward_rules[1]),
+        (6, FORWARD_CHAIN_NAME, journal.handles.forward_rules[0]),
     ] {
         let mut delete = encode_request_nfgen(NFPROTO_INET, 0);
         encode_attribute(
@@ -2497,11 +2497,7 @@ fn encode_deactivate_rules_transaction(
             NFTA_RULE_TABLE,
             &encode_nul_string(&journal.specification.identity.table_name)?,
         )?;
-        encode_attribute(
-            &mut delete,
-            NFTA_RULE_CHAIN,
-            &encode_nul_string(FORWARD_CHAIN_NAME)?,
-        )?;
+        encode_attribute(&mut delete, NFTA_RULE_CHAIN, &encode_nul_string(chain)?)?;
         encode_attribute(&mut delete, NFTA_RULE_HANDLE, &handle.to_be_bytes())?;
         transaction.push(
             NFT_MSG_DELRULE,
@@ -5557,6 +5553,29 @@ mod tests {
         assert_eq!(
             delete_handles(&deactivation, NFT_MSG_DELRULE, NFTA_RULE_HANDLE),
             vec![19, 18, 17, 16, 15]
+        );
+        let chains = transaction_frames(&deactivation)
+            .into_iter()
+            .filter(|frame| read_ne_u16(frame, 4).unwrap() == NFT_MSG_DELRULE)
+            .map(|frame| {
+                let (_, payload) = split_nfgenmsg(&frame[NLMSG_HEADER_LEN..]).unwrap();
+                let attributes = parse_attributes(payload, MAX_RULE_ATTRIBUTES).unwrap();
+                let chains = attributes_of_kind(&attributes, NFTA_RULE_CHAIN);
+                let [chain] = chains.as_slice() else {
+                    panic!("one exact owning chain for every rule deletion")
+                };
+                read_nul_string(chain.payload, MAX_TABLE_NAME_BYTES).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            chains,
+            vec![
+                INPUT_CHAIN_NAME,
+                INPUT_CHAIN_NAME,
+                FORWARD_CHAIN_NAME,
+                FORWARD_CHAIN_NAME,
+                FORWARD_CHAIN_NAME,
+            ]
         );
         assert_eq!(
             delete_handles(&deactivation, NFT_MSG_DELSET, NFTA_SET_HANDLE),

@@ -127,6 +127,42 @@ const FUNCTIONAL_ALPHA_KEEPALIVE_SECONDS: u32 = 1;
 /// Outer call budget reserved for exact process reap and immediate namespace-pin release.
 const WORKER_FAIL_CLOSED_RETIREMENT_TAIL: Duration = Duration::from_millis(500);
 
+#[derive(Clone, Copy)]
+enum CleanupCheckpoint {
+    ChildDestroy,
+    ChildSettled,
+    WorkerReap,
+    WorkerReaped,
+    DeadWorkerResources,
+    ParentLinks,
+    DurableSettlement,
+    Complete,
+}
+
+impl CleanupCheckpoint {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ChildDestroy => "CLEANUP_CHILD_DESTROY",
+            Self::ChildSettled => "CLEANUP_CHILD_SETTLED",
+            Self::WorkerReap => "CLEANUP_WORKER_REAP",
+            Self::WorkerReaped => "CLEANUP_WORKER_REAPED",
+            Self::DeadWorkerResources => "CLEANUP_DEAD_WORKER_RESOURCES",
+            Self::ParentLinks => "CLEANUP_PARENT_LINKS",
+            Self::DurableSettlement => "CLEANUP_DURABLE_SETTLEMENT",
+            Self::Complete => "CLEANUP_EXACT_COMPLETE",
+        }
+    }
+
+    fn record(self) {
+        // At most eight fixed checkpoints per bounded cleanup attempt. No peer, endpoint,
+        // key, payload or route identity is emitted; the outer request already has its audit ID.
+        tracing::info!(
+            diagnostic_code = self.code(),
+            "helper exact cleanup checkpoint"
+        );
+    }
+}
+
 mod uplink_sharing;
 use uplink_sharing::OpenSharingEntry;
 mod wifi_mesh;
@@ -1457,10 +1493,12 @@ impl FunctionalAlphaLeaseBackend {
                 }),
             );
             if let Ok(destroy_deadline) = worker_operation_deadline(deadline) {
+                CleanupCheckpoint::ChildDestroy.record();
                 let execution = self
                     .coordinator
                     .execute_until(key.context_id, generation, destroy, destroy_deadline)
                     .await;
+                CleanupCheckpoint::ChildSettled.record();
                 let mut state = lock_state(&self.state);
                 let Ok(entry) = exact_entry_mut(&mut state, key) else {
                     return false;
@@ -1478,11 +1516,13 @@ impl FunctionalAlphaLeaseBackend {
             entry.worker.take()
         };
         if let Some(worker) = worker {
+            CleanupCheckpoint::WorkerReap.record();
             match self
                 .coordinator
                 .settle_and_terminate_lifecycle_until(worker, deadline)
             {
                 WorkerGenerationReap::Confirmed(proof) => {
+                    CleanupCheckpoint::WorkerReaped.record();
                     // Process death alone does not destroy an anonymous network namespace while
                     // duplicated recovery descriptors still pin it. Exact reap replaces the
                     // live-process identity proof: close the complete authenticated duplicate
@@ -1555,6 +1595,7 @@ impl FunctionalAlphaLeaseBackend {
             }
         };
         if let Some((restart_custody, plan)) = dead_worker_cleanup {
+            CleanupCheckpoint::DeadWorkerResources.record();
             let cleanup = self.dead_worker_reaper.cleanup(
                 &plan,
                 restart_custody.borrowed_network_namespace(),
@@ -1586,6 +1627,7 @@ impl FunctionalAlphaLeaseBackend {
             return false;
         }
 
+        CleanupCheckpoint::ParentLinks.record();
         let parent_absent = {
             let mut state = lock_state(&self.state);
             let Ok(entry) = exact_entry_mut(&mut state, key) else {
@@ -1631,11 +1673,16 @@ impl FunctionalAlphaLeaseBackend {
                 return false;
             }
             let parent = ExactParentKernelAbsent::after_exact_parent_kernel_absence(key);
+            CleanupCheckpoint::DurableSettlement.record();
             if !self.settle_durable_cleanup(key, parent, deadline).await {
                 return false;
             }
         }
-        remove_exact_entry(&self.state, key)
+        let removed = remove_exact_entry(&self.state, key);
+        if removed {
+            CleanupCheckpoint::Complete.record();
+        }
+        removed
     }
 
     #[allow(
@@ -5752,7 +5799,7 @@ fn parse_public_udp_endpoint(value: Option<&PublicUdpEndpoint>) -> Option<(IpAdd
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::{
         env,
         io::{Read as _, Seek as _, SeekFrom},
@@ -6352,7 +6399,10 @@ mod tests {
         );
     }
 
-    fn run_inside_disposable_user_network_namespace(test_name: &str, marker: &str) -> bool {
+    pub(in crate::worker_v3) fn run_inside_disposable_user_network_namespace(
+        test_name: &str,
+        marker: &str,
+    ) -> bool {
         if env::var(marker).ok().as_deref() == Some("1") {
             return true;
         }
@@ -6377,7 +6427,11 @@ mod tests {
         test_name: &str,
         marker: &str,
     ) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+        use std::os::unix::fs::MetadataExt as _;
+
         const OUTPUT_LIMIT_BYTES: u64 = 65_536;
+        let parent_namespace =
+            std::fs::metadata("/proc/self/ns/net").expect("parent namespace identity");
         let mut stdout_file = tempfile::tempfile().expect("anonymous bounded child stdout");
         let mut stderr_file = tempfile::tempfile().expect("anonymous bounded child stderr");
         let stdout_sink = stdout_file.try_clone().expect("clone child stdout");
@@ -6401,6 +6455,14 @@ mod tests {
             .args(["--exact", test_name, "--nocapture"])
             .arg("--test-threads=1")
             .env(marker, "1")
+            .env(
+                "VOLPAROSSA_TEST_PARENT_NETNS_DEVICE",
+                parent_namespace.dev().to_string(),
+            )
+            .env(
+                "VOLPAROSSA_TEST_PARENT_NETNS_INODE",
+                parent_namespace.ino().to_string(),
+            )
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_sink))
@@ -6424,6 +6486,32 @@ mod tests {
             "disposable namespace child exceeded bounded {stream}"
         );
         bytes
+    }
+
+    #[test]
+    fn cleanup_checkpoint_codes_are_fixed_distinct_and_bounded() {
+        let stages = [
+            CleanupCheckpoint::ChildDestroy,
+            CleanupCheckpoint::ChildSettled,
+            CleanupCheckpoint::WorkerReap,
+            CleanupCheckpoint::WorkerReaped,
+            CleanupCheckpoint::DeadWorkerResources,
+            CleanupCheckpoint::ParentLinks,
+            CleanupCheckpoint::DurableSettlement,
+            CleanupCheckpoint::Complete,
+        ];
+        let codes = stages.map(CleanupCheckpoint::code);
+        assert_eq!(codes.len(), 8);
+        for (index, code) in codes.iter().enumerate() {
+            assert!(code.starts_with("CLEANUP_") && code.len() <= 32);
+            assert!(
+                code.bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte == b'_')
+            );
+            assert!(!codes[..index].contains(code));
+        }
+        assert_eq!(codes[0], "CLEANUP_CHILD_DESTROY");
+        assert_eq!(codes[7], "CLEANUP_EXACT_COMPLETE");
     }
 
     fn unprivileged_user_namespace_policy_denied(
