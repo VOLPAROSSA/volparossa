@@ -405,6 +405,59 @@ grep -F 'refresh_a14_live_custody()' "$GUEST" >/dev/null
 grep -F -- '--transport mptcp >"$WORK/a14-refresh-connect.out"' "$GUEST" >/dev/null
 grep -F 'refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED' "$GUEST" \
     >/dev/null
+grep -F 'start_mptcp_download a14-custody a14-custody 0 - || return 1' "$GUEST" >/dev/null
+grep -F 'live_application_flow:$live_flow' "$GUEST" >/dev/null
+python3 -B - "$GUEST" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+source_path = Path(sys.argv[1])
+source = source_path.read_text(encoding="utf-8")
+
+def function(name):
+    start = source.index(name + "() {\n")
+    return source[start:source.index("\n}\n", start) + 3]
+
+reader = function("optional_json_evidence")
+report = function("write_report")
+cleanup = function("cleanup")
+assert cleanup.index("copy_artifacts || original_status=1") < cleanup.index("a14_success=false")
+assert '--slurpfile helper_restarts "$WORK/a14-helper-restarts.json"' not in cleanup
+assert '[ "$original_status" -eq 0 ]' in cleanup
+with tempfile.TemporaryDirectory(prefix="a14-report-test-", dir=source_path.parent) as raw:
+    directory = Path(raw)
+    specimen = directory / "specimen.json"
+    cases = [(None, None), ("", None), ("{broken", None),
+             ('{"success":true}', {"success": True}), ('{}\n{}', None)]
+    for payload, expected in cases:
+        if payload is not None:
+            specimen.write_text(payload, encoding="ascii")
+        result = subprocess.run(["sh", "-eu", "-c", reader + '\noptional_json_evidence "$1"',
+                                 "a14-test", str(specimen)], capture_output=True, text=True, check=True)
+        assert json.loads(result.stdout) == expected
+    (directory / "a01-evidence.json").write_text('{"success":true}', encoding="ascii")
+    (directory / "a14-evidence.json").write_text("{truncated", encoding="ascii")
+    environment = os.environ.copy()
+    for name in re.findall(r'--argjson \S+ "\$([A-Za-z_][A-Za-z_0-9]*)"', report):
+        environment[name] = "false"
+    for name in re.findall(r'--arg \S+ "\$([A-Za-z_][A-Za-z_0-9]*)"', report):
+        environment[name] = "a14-test"
+    environment.update(WORK=str(directory), output_directory=str(directory),
+                       OUTPUT_UID=str(os.getuid()), OUTPUT_GID=str(os.getgid()),
+                       A01_REQUESTED="true", A01_SUCCEEDED="true", A01_STATUS="0")
+    subprocess.run(["sh", "-eu", "-c", reader + "\n" + report + "\nwrite_report 1"],
+                   env=environment, capture_output=True, text=True, check=True)
+    result = json.loads((directory / "report.json").read_text(encoding="ascii"))
+    assert result["a01_bootstrap_resilience"]["evidence"]["success"]
+    assert result["a14_forced_crash_cleanup"]["evidence"] is None
+    assert result["runner_exit_status"] == 1
+print("A14 missing/malformed evidence preserves a failed report and earlier proof")
+PYTHON
 grep -F 'systemctl kill --kill-whom=all --signal=KILL "$crash_unit"' "$GUEST" \
     >/dev/null
 grep -F 'active_control_path_records:$control_path_records' "$GUEST" >/dev/null

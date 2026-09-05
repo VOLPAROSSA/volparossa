@@ -530,6 +530,10 @@ copy_artifacts() {
         a13-destination-route-before.txt a13-destination-route-after.txt \
         a14-refresh-disconnect.out a14-refresh-disconnect.err \
         a14-refresh-connect.out a14-refresh-connect.err \
+        a14-custody-client-0.json a14-custody-client.err \
+        a14-custody-client-capture-0.json a14-custody-client-capture.log \
+        a14-custody-exit-capture-0.json a14-custody-exit-capture.log \
+        a14-live-flow.json \
         a14-owned-before.json a14-worker-custody-before.json \
         a14-worker-custody-after.json a14-owned-after-paths.txt a14-paths-before.txt \
         a14-crashes.json a14-helper-restarts.json a14-evidence.json \
@@ -666,78 +670,26 @@ retire_unit() {
 
 write_report() {
     report_status=$1
-    topology_scale=null
-    if [ -f "$WORK/topology-scale.json" ]; then
-        topology_scale=$(cat "$WORK/topology-scale.json" 2>/dev/null || printf 'null')
-    fi
-    helper_records='[]'
-    if [ -f "$WORK/helper-units.json" ]; then
-        helper_records=$(cat "$WORK/helper-units.json" 2>/dev/null || printf '[]')
-    fi
-    a01_evidence=null
-    if [ -f "$WORK/a01-evidence.json" ]; then
-        a01_evidence=$(cat "$WORK/a01-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a02_evidence=null
-    if [ -f "$WORK/a02-evidence.json" ]; then
-        a02_evidence=$(cat "$WORK/a02-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    mpquic_records='[]'
-    if [ -f "$WORK/mpquic-units.json" ]; then
-        mpquic_records=$(cat "$WORK/mpquic-units.json" 2>/dev/null || printf '[]')
-    fi
-    a03_evidence=null
-    if [ -f "$WORK/a03-evidence.json" ]; then
-        a03_evidence=$(cat "$WORK/a03-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a04_evidence=null
-    if [ -f "$WORK/a04-evidence.json" ]; then
-        a04_evidence=$(cat "$WORK/a04-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a05_evidence=null
-    if [ -f "$WORK/a05-evidence.json" ]; then
-        a05_evidence=$(cat "$WORK/a05-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a06_evidence=null
-    if [ -f "$WORK/a06-evidence.json" ]; then
-        a06_evidence=$(cat "$WORK/a06-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a07_evidence=null
-    if [ -f "$WORK/a07-evidence.json" ]; then
-        a07_evidence=$(cat "$WORK/a07-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a08_evidence=null
-    if [ -f "$WORK/a08-evidence.json" ]; then
-        a08_evidence=$(cat "$WORK/a08-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a09_evidence=null
-    if [ -f "$WORK/a09-evidence.json" ]; then
-        a09_evidence=$(cat "$WORK/a09-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a10_evidence=null
-    if [ -f "$WORK/a10-evidence.json" ]; then
-        a10_evidence=$(cat "$WORK/a10-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a11_evidence=null
-    if [ -f "$WORK/a11-evidence.json" ]; then
-        a11_evidence=$(cat "$WORK/a11-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a12_evidence=null
-    if [ -f "$WORK/a12-evidence.json" ]; then
-        a12_evidence=$(cat "$WORK/a12-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a13_evidence=null
-    if [ -f "$WORK/a13-evidence.json" ]; then
-        a13_evidence=$(cat "$WORK/a13-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a14_evidence=null
-    if [ -f "$WORK/a14-evidence.json" ]; then
-        a14_evidence=$(cat "$WORK/a14-evidence.json" 2>/dev/null || printf 'null')
-    fi
-    a15_evidence=null
-    if [ -f "$WORK/a15-evidence.json" ]; then
-        a15_evidence=$(cat "$WORK/a15-evidence.json" 2>/dev/null || printf 'null')
-    fi
+    topology_scale=$(optional_json_evidence "$WORK/topology-scale.json")
+    helper_records=$(optional_json_evidence "$WORK/helper-units.json")
+    [ "$helper_records" != null ] || helper_records='[]'
+    mpquic_records=$(optional_json_evidence "$WORK/mpquic-units.json")
+    [ "$mpquic_records" != null ] || mpquic_records='[]'
+    a01_evidence=$(optional_json_evidence "$WORK/a01-evidence.json")
+    a02_evidence=$(optional_json_evidence "$WORK/a02-evidence.json")
+    a03_evidence=$(optional_json_evidence "$WORK/a03-evidence.json")
+    a04_evidence=$(optional_json_evidence "$WORK/a04-evidence.json")
+    a05_evidence=$(optional_json_evidence "$WORK/a05-evidence.json")
+    a06_evidence=$(optional_json_evidence "$WORK/a06-evidence.json")
+    a07_evidence=$(optional_json_evidence "$WORK/a07-evidence.json")
+    a08_evidence=$(optional_json_evidence "$WORK/a08-evidence.json")
+    a09_evidence=$(optional_json_evidence "$WORK/a09-evidence.json")
+    a10_evidence=$(optional_json_evidence "$WORK/a10-evidence.json")
+    a11_evidence=$(optional_json_evidence "$WORK/a11-evidence.json")
+    a12_evidence=$(optional_json_evidence "$WORK/a12-evidence.json")
+    a13_evidence=$(optional_json_evidence "$WORK/a13-evidence.json")
+    a14_evidence=$(optional_json_evidence "$WORK/a14-evidence.json")
+    a15_evidence=$(optional_json_evidence "$WORK/a15-evidence.json")
     jq -S -c -n \
         --arg commit "$expected_commit" \
         --arg run_id "$RUN_ID" \
@@ -880,8 +832,19 @@ write_report() {
     chmod 0600 "$output_directory/report.json"
 }
 
+optional_json_evidence() {
+    optional_json=null
+    if [ -s "$1" ] && [ -f "$1" ] && [ ! -L "$1" ]; then
+        optional_json=$(jq -c -s 'if length == 1 then .[0] else null end' "$1" 2>/dev/null) \
+            || optional_json=null
+    fi
+    printf '%s\n' "$optional_json"
+}
+
 cleanup() {
     original_status=$?
+    failure_phase=$PHASE
+    failure_reason=$OBSERVED_BLOCKER
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
@@ -1080,9 +1043,12 @@ cleanup() {
         + remaining_worker_namespace_references \
         + remaining_helper_fdstore_descriptors + host_leaks))
 
+    # Preserve completed datapath evidence even when a later optional crash/restart record is
+    # absent or malformed. Report assembly below must not be the only route to artifact export.
+    copy_artifacts || original_status=1
     if [ "$A14_REQUESTED" = true ]; then
         a14_success=false
-        if [ "$REMAINING_OWNED_OBJECTS" -eq 0 ] \
+        if [ "$original_status" -eq 0 ] && [ "$REMAINING_OWNED_OBJECTS" -eq 0 ] \
             && [ -s "$WORK/a14-owned-before.json" ] \
             && [ -s "$WORK/a14-crashes.json" ] \
             && [ -s "$WORK/a14-helper-restarts.json" ]; then
@@ -1095,20 +1061,18 @@ cleanup() {
             original_status=1
             OBSERVED_BLOCKER=A14_FORCED_CRASH_CLEANUP_INCOMPLETE
         fi
-        a14_before=null
-        [ ! -s "$WORK/a14-owned-before.json" ] \
-            || a14_before=$(cat "$WORK/a14-owned-before.json")
-        a14_crashes=null
-        [ ! -s "$WORK/a14-crashes.json" ] \
-            || a14_crashes=$(cat "$WORK/a14-crashes.json")
-        a14_worker_after=null
-        [ ! -s "$WORK/a14-worker-custody-after.json" ] \
-            || a14_worker_after=$(cat "$WORK/a14-worker-custody-after.json")
+        a14_before=$(optional_json_evidence "$WORK/a14-owned-before.json")
+        a14_crashes=$(optional_json_evidence "$WORK/a14-crashes.json")
+        a14_worker_after=$(optional_json_evidence "$WORK/a14-worker-custody-after.json")
+        a14_helper_restarts=$(optional_json_evidence "$WORK/a14-helper-restarts.json")
+        a14_live_flow=$(optional_json_evidence "$WORK/a14-live-flow.json")
         jq -S -c -n \
             --argjson before "$a14_before" \
             --argjson crashes "$a14_crashes" \
             --argjson worker_after "$a14_worker_after" \
-            --slurpfile helper_restarts "$WORK/a14-helper-restarts.json" \
+            --argjson helper_restarts "$a14_helper_restarts" \
+            --argjson live_flow "$a14_live_flow" \
+            --arg failure_phase "$failure_phase" --arg failure_reason "$failure_reason" \
             --slurpfile host "$WORK/a15-evidence.json" \
             --argjson success "$a14_success" \
             --argjson namespaces "$REMAINING_NAMESPACES" \
@@ -1125,7 +1089,9 @@ cleanup() {
             --argjson remaining "$REMAINING_OWNED_OBJECTS" \
             '{schema_version:1,acceptance_id:"A14",success:$success,
               forced_crashes:$crashes,owned_before:$before,
-              helper_restart_recovery:$helper_restarts[0],
+              helper_restart_recovery:$helper_restarts,live_application_flow:$live_flow,
+              failure:(if $success then null else
+                {phase:$failure_phase,reason:$failure_reason} end),
               cleanup:{worker_custody_after:$worker_after,
                 remaining_owned_objects:$remaining,
                 remaining_namespaces:$namespaces,remaining_units:$units,
@@ -1138,7 +1104,7 @@ cleanup() {
               verification_basis:{all_product_networking_namespace_owned:true,
                 owned_namespace_mounts_absent:($namespaces == 0),
                 guest_root_state_exactly_restored:$host[0].unchanged}}' \
-            >"$WORK/a14-evidence.json"
+            >"$WORK/a14-evidence.json" || original_status=1
     fi
 
     if [ "$REMAINING_NAMESPACES" -eq 0 ] && [ "$REMAINING_UNITS" -eq 0 ] \
@@ -1153,7 +1119,7 @@ cleanup() {
         CLEANUP_COMPLETE=false
         original_status=1
     fi
-    copy_artifacts
+    copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     if [ "$scenario" = mixed-link ]; then
         mixed_link_finalize_report "$original_status" || original_status=1
@@ -2810,7 +2776,7 @@ import time
 run_id = bytes.fromhex(sys.argv[1])
 case_name = sys.argv[2]
 attempt = int(sys.argv[3])
-if case_name not in {"a03-single", "a03-aggregate", "a04-failover"}:
+if case_name not in {"a03-single", "a03-aggregate", "a04-failover", "a14-custody"}:
     raise SystemExit("invalid bounded MPTCP download case")
 if attempt < 0 or attempt >= 30:
     raise SystemExit("invalid bounded MPTCP download attempt")
@@ -3091,7 +3057,7 @@ while running:
                 evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
             else:
                 matched = None
-                for case_name in ("a03-single", "a03-aggregate", "a04-failover"):
+                for case_name in ("a03-single", "a03-aggregate", "a04-failover", "a14-custody"):
                     prefix = b"volparossa-" + case_name.encode("ascii") + b":" + run_id
                     if len(received) == len(prefix) + 4 and received.startswith(prefix):
                         matched = (case_name, prefix)
@@ -3108,12 +3074,28 @@ while running:
                 release_path = os.path.join(
                     sys.argv[3], f"download-{case_name}-{attempt}.release"
                 )
-                open(ready_path, "x", encoding="ascii").write("ready\n")
+                if case_name == "a14-custody":
+                    # The Client remains blocked on this real MPTCP application until A14
+                    # kills the product processes. No stale native probe owner is counted.
+                    with open(ready_path, "x", encoding="ascii") as output:
+                        json.dump({
+                            "schema_version": 1, "case": case_name, "attempt": attempt,
+                            "listen": {"ip": "47.163.4.2", "port": 18080},
+                            "source": {"ip": source[0], "port": source[1]},
+                            "request_bytes": len(received),
+                            "request_sha256": hashlib.sha256(received).hexdigest(),
+                            "release_gate_closed": True,
+                        }, output, sort_keys=True, separators=(",", ":"))
+                        output.write("\n")
+                else:
+                    open(ready_path, "x", encoding="ascii").write("ready\n")
                 release_deadline = time.monotonic() + 90
-                while not os.path.exists(release_path):
+                while running and not os.path.exists(release_path):
                     if time.monotonic() >= release_deadline:
                         raise SystemExit("bounded download release was not observed")
                     time.sleep(0.05)
+                if not running:
+                    break
                 response_label = b"a03" if case_name.startswith("a03-") else b"a04"
                 response_seed = b"volparossa-download:" + response_label + b":" + run_id
                 response_hash = hashlib.sha256()
@@ -3994,8 +3976,8 @@ refresh_a14_live_custody() {
     a14_connect_attempt_error=$WORK/a14-refresh-connect-attempt.err
     : >"$WORK/a14-refresh-connect.err"
     # A disconnected preselection owner cools for 30 seconds. Establish a new route immediately
-    # before the crash inventory so earlier A08-A10 wall-clock time cannot retire the four affine
-    # Client/Relay/Exit worker namespaces or their eight systemd FD-store descriptors first.
+    # before opening the crash fixture. Connect retires its native probe leases; the real
+    # application below, not that selection probe, must own the crash-tested workers.
     while [ "$a14_connect_attempt" -lt 120 ]; do
         set +e
         "$binary_directory/volparossa" \
@@ -4012,7 +3994,16 @@ refresh_a14_live_custody() {
         a14_connect_attempt=$((a14_connect_attempt + 1))
     done
     rm -f -- "$a14_connect_attempt_error"
-    [ "$a14_connect_status" -eq 0 ]
+    [ "$a14_connect_status" -eq 0 ] || return 1
+    start_mptcp_download a14-custody a14-custody 0 - || return 1
+    jq -e --arg exit_source "$A02_EXIT_SOURCE" '
+      .case == "a14-custody" and .attempt == 0 and .release_gate_closed and
+      .listen == {ip:"47.163.4.2",port:18080} and .source.ip == $exit_source and
+      .source.port > 0 and .request_bytes > 0 and (.request_sha256 | length) == 64
+    ' "$DOWNLOAD_DESTINATION_READY" >/dev/null || return 1
+    kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null || return 1
+    install -o root -g root -m 0600 "$DOWNLOAD_DESTINATION_READY" \
+        "$WORK/a14-live-flow.json"
 }
 
 record_a14_worker_custody_inventory() {
@@ -6145,7 +6136,7 @@ A14_STATUS=1
 refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED
 PHASE=a14-forced-crash
 record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
-# A14 deliberately replaced the earlier application route with a fresh active MPTCP route.
+# A14 deliberately replaced the earlier application route with a fresh held MPTCP application.
 # Therefore inventory its still-owned namespaces, sockets and ingress policy instead of requiring
 # stale MPQUIC-only local-control path records or relying on an earlier route's remaining TTL.
 jq -e '
