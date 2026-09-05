@@ -90,6 +90,9 @@ impl std::fmt::Debug for AcceptedNativeProbeRelayAuthorization {
 pub(super) struct CachedNativeProbeRelayAuthorization {
     pub(super) response: AcceptedNativeProbeRelayAuthorization,
     pub(super) expires_at_ms: u64,
+    // Keep the bounded cache entry until its original expiry so an old Start cannot
+    // reacquire capacity after the helper-confirmed terminal probe result.
+    retired: bool,
 }
 
 /// Exit-signed readiness plus the probe identity retained by the production service.
@@ -699,9 +702,30 @@ impl ExitService {
             local_public_key,
             signer,
         )?;
+        self.retire_native_probe_capacity(&probe_id)?;
         Ok(AcceptedNativeProbeExitResult {
             encoded: issued.signed_result().to_vec(),
         })
+    }
+
+    fn retire_native_probe_capacity(&mut self, probe_id: &[u8; ID_BYTES]) -> Result<(), ExitError> {
+        let request_hash = self
+            .native_probe_authorization_cache
+            .iter()
+            .find_map(|(hash, cached)| {
+                (cached.response.reservation_id() == probe_id && !cached.retired).then_some(*hash)
+            })
+            .ok_or(ExitError::LeaseInvariant)?;
+        let key = super::text_id::<ReservationId>(probe_id)?;
+        // Only called after exact observation validation and the caller's confirmed helper
+        // Destroy. The real route can now reserve the capacity just used by its sampler.
+        self.ledger_mut()?.release(&key)?;
+        self.native_probe_authorization_cache
+            .get_mut(&request_hash)
+            .ok_or(ExitError::LedgerInvariant)?
+            .retired = true;
+        self.sync_metrics();
+        Ok(())
     }
 
     /// Independently verify one data-Relay-forwarded native Start chain and issue the standard
@@ -748,6 +772,9 @@ impl ExitService {
                 return Err(ExitError::InvalidGrant(
                     "native authorization request hash collision",
                 ));
+            }
+            if cached.retired {
+                return Err(ExitError::InvalidGrant("native probe already completed"));
             }
             return Ok(cached.response.clone());
         }
@@ -883,6 +910,7 @@ impl ExitService {
             CachedNativeProbeRelayAuthorization {
                 response: response.clone(),
                 expires_at_ms: authorization.expires_at_ms,
+                retired: false,
             },
         );
         self.sync_metrics();
@@ -1963,7 +1991,150 @@ mod tests {
                 .bandwidth,
             Bandwidth::new(92, 88).expect("remaining signed capacity")
         );
-        assert!(relay_service.take_native_probe_start(&PROBE_ID).is_some());
+        let retired_relay_start = relay_service
+            .take_native_probe_start(&PROBE_ID)
+            .expect("exact Relay Start owner");
+        assert_eq!(
+            relay_service.available(NOW_MS + 5).unwrap().bandwidth,
+            Bandwidth::new(92, 88).unwrap()
+        );
+        relay_service
+            .release(&PROBE_ID)
+            .expect("Relay probe retirement");
+        assert_eq!(
+            relay_service.available(NOW_MS + 6).unwrap().bandwidth,
+            Bandwidth::new(100, 100).unwrap()
+        );
+        assert!(relay_service.endpoint_lease(&PROBE_ID).is_none());
+        assert!(relay_service.take_native_probe_start(&PROBE_ID).is_none());
+        assert!(matches!(
+            relay_service.accept_native_probe_start_with(
+                retired_relay_start,
+                exit_authorization.encoded(),
+                NOW_MS + 6,
+                relay_public_key,
+                |_| panic!("retired authorization must not allocate a helper lease"),
+                |_| panic!("retired authorization must not sign another acceptance"),
+            ),
+            Err(volparossa_relay::RelayError::Protocol(
+                ProtocolError::Replay
+            ))
+        ));
+        assert_eq!(
+            relay_service.available(NOW_MS + 6).unwrap().bandwidth,
+            Bandwidth::new(100, 100).unwrap()
+        );
+
+        // The sampler fits, but a full-capacity real route must not fit until the sampler's
+        // helper-confirmed terminal result has retired its own allocation.
+        let control_node = fixture.control_node_id();
+        let control_peer = fixture.control_peer_id();
+        let intent = volparossa_reservation::ExitReservationIntent {
+            reservation_id: [0x91; ID_BYTES],
+            route_context_id: [0x92; ID_BYTES],
+            exit_node_id: node_id_from_public_key(&exit_public_key),
+            exit_peer_id: peer_id_from_public_key(&exit_public_key).unwrap(),
+            control_relay_node_id: control_node,
+            control_relay_peer_id: control_peer.clone(),
+            allowed_transports: vec![Transport::TcpMptcp],
+            reserved_up_mbps: 100,
+            reserved_down_mbps: 100,
+            maximum_paths: 2,
+            probe_permit_limit: 2,
+            policy_hash: *fixture.policy.policy_hash(),
+            created_at_ms: NOW_MS + 5,
+            hold_expires_at_ms: NOW_MS + 20_000,
+            reservation_expires_at_ms: NOW_MS + 60_000,
+            masque_context_id: 8,
+            client_native_instance_id: [0x93; NODE_ID_BYTES],
+        };
+        let coordinator = volparossa_reservation::ReservationCoordinator::new(16).unwrap();
+        let signed_hold = coordinator.sign_hold_request(&intent).unwrap();
+        assert!(matches!(
+            fixture.service.hold_capacity_with(
+                &signed_hold,
+                &control_node,
+                &control_peer,
+                NOW_MS + 5,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            ),
+            Err(ExitError::Reservation(_))
+        ));
+        let observed = observation(&exit_ready);
+        fixture
+            .service
+            .native_probe_ready_owners
+            .insert(PROBE_ID, exit_ready);
+        let terminal_result = fixture
+            .service
+            .issue_native_probe_result_from_observation_with(
+                PROBE_ID,
+                &relay_node_id,
+                &relay_peer_id,
+                observed.helper_runtime_id,
+                observed.route_context_id,
+                CHALLENGE,
+                observed.observed_network_prefix,
+                observed.latest_handshake_unix,
+                observed.received_bytes_after_baseline,
+                observed.transmitted_bytes_after_baseline,
+                NOW_MS + 6,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("terminal result releases only the completed probe");
+        assert!(!terminal_result.encoded().is_empty());
+        assert_eq!(
+            fixture.service.available(NOW_MS + 6).unwrap().bandwidth,
+            Bandwidth::new(100, 100).unwrap()
+        );
+        assert!(matches!(
+            fixture.service.issue_native_probe_relay_authorization_with(
+                &chain,
+                &relay_node_id,
+                &relay_peer_id,
+                NOW_MS + 7,
+                exit_public_key,
+                |_| panic!("completed probe must not re-sign or reacquire capacity"),
+            ),
+            Err(ExitError::InvalidGrant("native probe already completed"))
+        ));
+        fixture
+            .service
+            .hold_capacity_with(
+                &signed_hold,
+                &control_node,
+                &control_peer,
+                NOW_MS + 7,
+                exit_public_key,
+                |message| Some(exit_key.sign(message).to_bytes()),
+            )
+            .expect("same real hold succeeds immediately without waiting for probe TTL");
+        assert_eq!(
+            fixture
+                .service
+                .available(NOW_MS + 7)
+                .unwrap()
+                .bandwidth
+                .up_mbps,
+            0
+        );
+        assert!(
+            fixture
+                .service
+                .retire_native_probe_capacity(&PROBE_ID)
+                .is_err()
+        );
+        assert_eq!(
+            fixture
+                .service
+                .available(NOW_MS + 7)
+                .unwrap()
+                .bandwidth
+                .up_mbps,
+            0
+        );
     }
 
     #[test]

@@ -1230,7 +1230,7 @@ impl ClientNativeProbeBatchOwner {
 }
 
 impl ClientNativePreselection {
-    /// Dispatch the endpoint-free request/Permit pair only to the selected data Relay.
+    /// Collect all Permits, then dispatch Ready to the exact data Relays concurrently.
     pub(crate) async fn dispatch_relay_ready(
         self,
         discovery: &DiscoveryControlHandle,
@@ -1239,10 +1239,42 @@ impl ClientNativePreselection {
             mut batch,
             awaiting_relay_ready,
         } = self;
-        let armed = awaiting_relay_ready
-            .into_relay_ready_dispatch()?
-            .execute(discovery, &mut batch.replay)
-            .await?;
+        let expected = batch.owner.candidate_count();
+        let mut awaiting = vec![awaiting_relay_ready];
+        while let Some(permit) = batch.owner.begin_next()? {
+            awaiting.push(
+                permit
+                    .into_forward_dispatch()?
+                    .execute(discovery, &mut batch.replay)
+                    .await?,
+            );
+        }
+        if awaiting.len() != expected || expected > 8 || !batch.armed.is_empty() {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        // A shared Exit Prepare needs every signed endpoint. Waiting for one Ready before
+        // dispatching the next would deadlock that complete-set admission barrier.
+        let mut dispatches = Vec::with_capacity(expected);
+        for ready in awaiting {
+            dispatches.push(ready.into_relay_ready_dispatch()?);
+        }
+        for response in
+            native_preselection::execute_relay_ready_batch(dispatches, discovery).await?
+        {
+            batch.armed.push(response.verify(&mut batch.replay)?);
+        }
+        batch
+            .armed
+            .sort_unstable_by_key(|armed| armed.path_scope().candidate_ordinal);
+        if batch.armed.iter().enumerate().any(|(index, armed)| {
+            usize::try_from(armed.path_scope().candidate_ordinal) != Ok(index + 1)
+        }) {
+            return Err(ClientNativeProbeError::HelperCorrelation);
+        }
+        let armed = batch
+            .armed
+            .pop()
+            .ok_or(ClientNativeProbeError::HelperCorrelation)?;
         Ok(ClientNativeRelayReady { batch, armed })
     }
 }

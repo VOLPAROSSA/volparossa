@@ -157,6 +157,13 @@ pub(super) struct NativeRelayReadyDispatch {
     request: DatapathRelayRequest,
 }
 
+/// Transport completion retains its affine Permit until the batch's single replay verifier runs.
+#[must_use = "a native Ready response must be verified once or dropped"]
+pub(super) struct NativeRelayReadyResponse {
+    awaiting: AwaitingNativeRelayReady,
+    response: DatapathRelayResponse,
+}
+
 /// Relay readiness verified and waiting only for a local helper-prepared Client endpoint.
 #[must_use = "an armed native probe must be started once or dropped"]
 pub(super) struct ArmedNativeProbe {
@@ -978,12 +985,11 @@ impl AwaitingNativeRelayReady {
 }
 
 impl NativeRelayReadyDispatch {
-    /// Dispatch readiness once and consume only an exactly correlated signed Relay response.
+    /// Dispatch readiness without sharing or cloning the batch's replay authority.
     pub(super) async fn execute(
         self,
         discovery: &DiscoveryControlHandle,
-        replay: &mut ReplayCache,
-    ) -> Result<ArmedNativeProbe, NativePreselectionError> {
+    ) -> Result<NativeRelayReadyResponse, NativePreselectionError> {
         let Self {
             awaiting,
             relay_peer,
@@ -993,13 +999,7 @@ impl NativeRelayReadyDispatch {
             .request_datapath_relay(relay_peer, request)
             .await
             .map_err(map_relay_transport)?;
-        accept_relay_response(
-            awaiting,
-            &response,
-            DatapathRelayOperation::NativeProbeReady,
-            replay,
-            AwaitingNativeRelayReady::accept_relay_ready,
-        )
+        Ok(NativeRelayReadyResponse { awaiting, response })
     }
 
     #[cfg(test)]
@@ -1021,6 +1021,42 @@ impl NativeRelayReadyDispatch {
             AwaitingNativeRelayReady::accept_relay_ready,
         )
     }
+}
+
+impl NativeRelayReadyResponse {
+    /// Verify one correlated response with the same batch-wide replay cache.
+    pub(super) fn verify(
+        self,
+        replay: &mut ReplayCache,
+    ) -> Result<ArmedNativeProbe, NativePreselectionError> {
+        accept_relay_response(
+            self.awaiting,
+            &self.response,
+            DatapathRelayOperation::NativeProbeReady,
+            replay,
+            AwaitingNativeRelayReady::accept_relay_ready,
+        )
+    }
+}
+
+/// Complete the bounded transport fanout before consuming the batch-wide verifier.
+pub(super) async fn execute_relay_ready_batch(
+    dispatches: Vec<NativeRelayReadyDispatch>,
+    discovery: &DiscoveryControlHandle,
+) -> Result<Vec<NativeRelayReadyResponse>, NativePreselectionError> {
+    if dispatches.is_empty() || dispatches.len() > MAX_NATIVE_PROBE_PATHS {
+        return Err(NativePreselectionError::InvalidCandidateSet);
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    for dispatch in dispatches {
+        let discovery = discovery.clone();
+        tasks.spawn(async move { dispatch.execute(&discovery).await });
+    }
+    let mut responses = Vec::with_capacity(tasks.len());
+    while let Some(joined) = tasks.join_next().await {
+        responses.push(joined.map_err(|_| NativePreselectionError::RelayTransportUnavailable)??);
+    }
+    Ok(responses)
 }
 
 impl ArmedNativeProbe {
@@ -1554,6 +1590,29 @@ mod dispatch_tests {
         relay_key: SigningKey,
         exit_key: SigningKey,
         scope: NativeProbePathScope,
+    }
+
+    #[tokio::test]
+    async fn native_ready_client_fanout_crosses_complete_set_barrier_before_any_response() {
+        let (discovery, barrier) = DiscoveryControlHandle::native_ready_barrier_for_test(2);
+        let dispatches = (0..2)
+            .map(|_| {
+                ready_fixture()
+                    .awaiting
+                    .into_relay_ready_dispatch()
+                    .unwrap()
+            })
+            .collect();
+        // The test actor refuses both transports, but only after receiving the full set.
+        // Sequential Ready dispatch would time out here before the second request existed.
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_relay_ready_batch(dispatches, &discovery),
+        )
+        .await
+        .expect("both Ready requests reached the complete-set barrier");
+        assert!(result.is_err());
+        assert_eq!(barrier.await.unwrap(), 2);
     }
 
     #[test]

@@ -97,7 +97,10 @@ reciprocity_connect() {
     # Subshell callers isolate loop variables. No forced Relay or Exit option is used.
     reciprocity_connect_node=$1
     reciprocity_connect_attempt=0
-    reciprocity_connect_deadline=$(($(date +%s) + 180))
+    reciprocity_connect_seconds=${2:-180}
+    case $reciprocity_connect_seconds in ''|*[!0-9]*) return 1 ;; esac
+    [ "$reciprocity_connect_seconds" -ge 1 ] && [ "$reciprocity_connect_seconds" -le 180 ] || return 1
+    reciprocity_connect_deadline=$(($(date +%s) + reciprocity_connect_seconds))
     reciprocity_cli_pid=
     trap '[ -z "$reciprocity_cli_pid" ] || { kill -TERM "$reciprocity_cli_pid" 2>/dev/null || true; wait "$reciprocity_cli_pid" 2>/dev/null || true; }' EXIT
     trap 'exit 143' TERM

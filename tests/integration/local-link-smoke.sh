@@ -79,6 +79,33 @@ local_link_wait_neighbors() {
     return 1
 }
 
+local_link_select_contribution() {
+    # This square has two valid Relay assignments. Exercise the one where the offline node
+    # actually forwards data, not merely control. Resample via ordinary Disconnect/Connect
+    # before application traffic; retain every draw, and fail if the bounded sampler never
+    # selects that path. No forced peer, fabricated capacity or changed selection policy.
+    local_link_selection_deadline=$(($(date +%s) + 180))
+    local_link_selection_attempt=0
+    while [ "$local_link_selection_attempt" -lt 8 ]; do
+        local_link_selection_file="$WORK/local-link-selection-$local_link_selection_attempt.txt"
+        "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay0/control/agent.sock" \
+            paths >"$local_link_selection_file" || return 1
+        if awk -v relay="relay=$CLIENT_PEER" -v selected_exit="exit=$R2_PEER" \
+            '$1 ~ /^context=/ { paths++; if ($3 == relay && $4 == selected_exit &&
+                ($5 == "state=2" || $5 == "state=3")) matched++ }
+             END { exit !(paths == 1 && matched == 1) }' "$local_link_selection_file"; then
+            return 0
+        fi
+        local_link_selection_seconds=$((local_link_selection_deadline - $(date +%s)))
+        [ "$local_link_selection_seconds" -gt 0 ] || return 1
+        "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay0/control/agent.sock" \
+            disconnect >"$WORK/local-link-reselection-$local_link_selection_attempt.log" 2>&1 || return 1
+        (reciprocity_connect relay0 "$local_link_selection_seconds") || return 1
+        local_link_selection_attempt=$((local_link_selection_attempt + 1))
+    done
+    return 1
+}
+
 local_link_run() {
     PHASE=local-link-discovery
     for local_link_fixture in reciprocity-smoke.py local-link-smoke.py; do
@@ -111,6 +138,7 @@ local_link_run() {
         wait "$local_link_pid" || fail LOCAL_LINK_NATIVE_ROUTE_UNAVAILABLE
     done
     RECIPROCITY_PIDS=$local_link_server_pid
+    local_link_select_contribution || fail LOCAL_LINK_DATA_CONTRIBUTOR_NOT_SELECTED
     PHASE=local-link-udp
     local_link_capture_pids=
     for local_link_node in client relay0 relay2 exit; do

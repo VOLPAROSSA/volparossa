@@ -168,7 +168,8 @@ sharing_finalize_report() {
           cleanup:($scheduler_cleanup + {complete:$complete,remaining_owned_objects:$remaining}),
           host_state:($host[0] | del(.acceptance_id))}' >"$WORK/sharing-smoke.json"
     for sharing_artifact in "$WORK"/sharing-*.json "$WORK"/sharing-*.txt "$WORK"/sharing-*.log \
-        "$WORK"/reciprocity-capture-*.json "$WORK"/reciprocity-node-*.json; do
+        "$WORK"/reciprocity-capture-*.json "$WORK"/reciprocity-node-*.json \
+        "$WORK"/reciprocity-connect-client.* "$WORK"/mpquic-*-client.log "$WORK"/mpquic-*-exit.log; do
         if [ ! -f "$sharing_artifact" ] || [ -L "$sharing_artifact" ]; then continue; fi
         install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$sharing_artifact" \
             "$output_directory/$(basename -- "$sharing_artifact")"

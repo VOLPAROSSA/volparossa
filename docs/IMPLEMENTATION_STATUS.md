@@ -45,8 +45,12 @@ Both [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982300867
 [CodeQL](https://github.com/VOLPAROSSA/volparossa/actions/runs/33982298530) passed at `9da11b81`.
 Retained captures also exposed an A11 observer failure during A07's intentional Relay link-down.
 The observer now reports that explicitly marked downtime and survives it; an actual isolated
-veth packet-socket down/up check passes. Unexpected outer Relay packets remain a separate
-unresolved result, now with bounded header-only tuple diagnostics; the zero-unexpected-packet
+veth packet-socket down/up check passes. The
+[observer-fix run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33985404938)
+at `88460c29` retained both Relay reports through the intentional failure, but stopped at A11.
+Its bounded header-only tuple diagnostics identify the unexpected packets as discovery UDP
+port 41000 attempts to non-neighbor private fixture addresses, not Internet-destination
+payloads. Private discovery dial admission still needs correction; the zero-unexpected-packet
 acceptance rule is unchanged.
 `0075033e` also passed
 [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/33972360525) and
@@ -192,11 +196,18 @@ route or remove the fixture's direct-egress denial. Focused encoding checks and 
 real marked-ingress/DNS smoke pass; the new initial-route behavior needs a live KVM rerun.
 The other consumer's observed data path used the WAN neighbor, with the offline node as its
 control Relay. Therefore this run does not prove the offline node's simultaneous dataplane
-contribution; that fixture requirement remains open.
+contribution. The fixture now checks the actual selected Relay before starting applications,
+retains every draw, and uses bounded ordinary Disconnect/Connect sampling to exercise the
+offline data-Relay assignment. It fails if that assignment is never selected; final application
+and both-leg packet evidence remain mandatory. The live contribution requirement remains open.
 Client native preselection and single-path Exit Ready also carry exact observer-bound local
 interface hints into their helper Prepare operations. They cannot rely on a public default route
-on a LocalOnly node. Multi-path Exit Ready still prepares its full lease batch before receiving
-all Relay identities; mixed local Exit-facing batches need a later complete-set integration.
+on a LocalOnly node. Multi-path Ready now collects all signed Permits, dispatches Relay Ready
+concurrently, and verifies replies with the same sequential replay owner. The Exit waits for
+the complete authenticated ordinal/endpoint set before one shared helper Prepare, requiring
+exact local traversal hints for each LAN path. Partial sets expire without helper allocation.
+Nine focused tests, the mixed-plan real helper encoder check and strict agent Clippy pass;
+mixed-path application traffic remains unproven.
 Direct radio setup, simultaneous WAN+LAN aggregation and owner-priority sharing remain
 unfinished. No direct-radio or phone-without-SIM support is claimed by Debian KVM evidence.
 The first owner-priority **upload** runtime is now implemented behind explicit `sharing`
@@ -214,6 +225,11 @@ administrator changes or crash recovery. The complete-node
 installed and removed the scheduler with exact baseline restoration, but stopped at
 `SHARING_NATIVE_ROUTE_UNAVAILABLE`: the route's CapacityHold was rejected after the native
 probe, before the application/competition windows. There is no whole-node sharing pass yet.
+Completed native probes now release their exact Relay and Exit capacity reservations after
+confirmed helper destruction, before the real route's next CapacityHold. The signed-chain
+regression demonstrates a full-capacity hold failing while the probe is live and succeeding
+immediately afterward, without waiting for TTL; stale probe authorization cannot reacquire
+that capacity. The configured sharing/advertisement limits are unchanged.
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
 These narrower results do not check the full sharing item above.
 See [local-link scope](LOCAL_LINK_NETWORK.md).

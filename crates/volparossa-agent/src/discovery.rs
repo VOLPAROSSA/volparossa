@@ -1,5 +1,6 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
+mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
 
@@ -279,6 +280,32 @@ pub(crate) struct DiscoveryControlHandle {
 impl DiscoveryControlHandle {
     fn from_sender(sender: mpsc::Sender<DiscoveryCommand>) -> Self {
         Self { sender }
+    }
+
+    /// Test transport replies only after every Ready request crosses the actor queue.
+    #[cfg(test)]
+    pub(crate) fn native_ready_barrier_for_test(count: usize) -> (Self, JoinHandle<usize>) {
+        let (sender, mut receiver) = mpsc::channel(count);
+        let task = tokio::spawn(async move {
+            let mut replies = Vec::new();
+            while replies.len() < count {
+                let Some(DiscoveryCommand::RequestDatapathRelay { request, reply, .. }) =
+                    receiver.recv().await
+                else {
+                    panic!("expected one native Ready request per candidate");
+                };
+                assert_eq!(
+                    request.validated_operation(),
+                    Ok(DatapathRelayOperation::NativeProbeReady)
+                );
+                replies.push(reply);
+            }
+            for reply in replies {
+                let _ = reply.send(Err(OutboundReservationError::SendFailed));
+            }
+            count
+        });
+        (Self { sender }, task)
     }
 
     pub async fn set_roles(
@@ -1699,6 +1726,7 @@ pub struct DiscoveryRuntime {
     mptcp_exit_runtime_events: mpsc::Sender<MptcpExitRuntimeEvent>,
     mptcp_exit_runtime_completions: mpsc::Receiver<MptcpExitRuntimeEvent>,
     exit_native_ready_attempts: HashMap<[u8; FORWARD_ID_BYTES], ExitNativeReadyAttempt>,
+    pending_exit_native_ready: HashMap<[u8; FORWARD_ID_BYTES], native_ready::ExitNativeReadySet>,
     pending_datapath: HashMap<request_response::OutboundRequestId, PendingDatapath>,
     datapath_index: HashMap<DatapathKey, request_response::OutboundRequestId>,
     completed_datapath: HashMap<DatapathKey, CompletedDatapath>,
@@ -1845,6 +1873,7 @@ impl DiscoveryRuntime {
             mptcp_exit_runtime_events,
             mptcp_exit_runtime_completions,
             exit_native_ready_attempts: HashMap::new(),
+            pending_exit_native_ready: HashMap::new(),
             pending_datapath: HashMap::new(),
             datapath_index: HashMap::new(),
             completed_datapath: HashMap::new(),
@@ -3649,10 +3678,19 @@ impl DiscoveryRuntime {
             + self.pending_datapath.len()
             + self.completed_datapath.len()
             + self.retry_datapath.len()
+            + self
+                .pending_exit_native_ready
+                .values()
+                .map(native_ready::ExitNativeReadySet::entry_count)
+                .sum::<usize>()
     }
 
     fn ledger_reserved_bytes(&self) -> usize {
         let groups = [
+            self.pending_exit_native_ready
+                .values()
+                .map(native_ready::ExitNativeReadySet::retained_bytes)
+                .fold(0, usize::saturating_add),
             self.pending_client_forwards
                 .values()
                 .map(|entry| entry.reserved_bytes)
@@ -3695,6 +3733,10 @@ impl DiscoveryRuntime {
 
     fn ledger_reserved_bytes_for_peer(&self, peer: Libp2pPeerId) -> usize {
         let groups = [
+            self.pending_exit_native_ready
+                .values()
+                .map(|set| set.retained_bytes_for_peer(peer))
+                .fold(0, usize::saturating_add),
             self.pending_client_forwards
                 .values()
                 .filter(|entry| entry.key.control_relay_peer == peer)
@@ -8025,6 +8067,7 @@ impl DiscoveryRuntime {
                 return OutboundEventOutcome::InvalidResponse;
             };
             let native_scope = native.start.scope().clone();
+            let native_reservation_id = fixed_bytes::<FORWARD_ID_BYTES>(&native_scope.probe_id);
             let native_started_at_ms = native.start.started_at_ms();
             let Ok(exit_result) = verify_native_probe_exit_result_for_relay(
                 native.start,
@@ -8134,6 +8177,16 @@ impl DiscoveryRuntime {
             let Ok(_destroyed) = self.helper.destroy_context(&native.helper_owner).await else {
                 return OutboundEventOutcome::Failed;
             };
+            // Capacity remains reserved until the exact probe helper owner is confirmed gone.
+            // Release also removes cached acceptance while retaining authorization replay state.
+            if native_reservation_id
+                .and_then(|reservation_id| {
+                    self.relay_service.as_mut()?.release(&reservation_id).ok()
+                })
+                .is_none()
+            {
+                return OutboundEventOutcome::Failed;
+            }
             let identity = &self.identity;
             let Ok(result) = sign_native_probe_relay_result_with(
                 exit_result,
@@ -8525,6 +8578,7 @@ impl DiscoveryRuntime {
     }
 
     async fn destroy_expired_exit_native_attempts(&mut self, now_ms: u64) -> usize {
+        self.expire_pending_exit_native_ready(now_ms);
         let expired = self
             .exit_native_ready_attempts
             .iter()
@@ -11209,6 +11263,16 @@ impl DiscoveryRuntime {
             reject!("NATIVE_PROBE_READY_EXIT_PERMIT_REJECTED");
         };
         let scope = permit.scope().clone();
+        if forward.validate().is_err()
+            || relay_exit_endpoint.path_id != scope.candidate_ordinal
+            || relay_exit_endpoint.route_context_id != scope.attempt_id
+            || relay_exit_endpoint
+                .endpoint
+                .as_ref()
+                .is_none_or(|endpoint| endpoint.validate("native Exit traversal endpoint").is_err())
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        }
         let Some(data_relay) = scope.data_relay.as_ref() else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
@@ -11259,27 +11323,70 @@ impl DiscoveryRuntime {
         ) else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
-        let Some(mut prepare) = native_service_prepare_request(
-            &scope,
-            ContextRole::Exit,
-            &[WireguardRole::Exit],
-            now_ms,
-        ) else {
-            reject!("NATIVE_PROBE_READY_EXIT_HELPER_SCOPE_REJECTED");
-        };
-        if scope.required_path_count == 1 {
-            // The complete single-path set is already authenticated here. Multi-path Ready
-            // allocates its complete Exit batch at the first request, before later Relays are
-            // known; it cannot invent those paths' local interfaces from this one connection.
-            prepare.traversal_hints = self
-                .exact_endpoint_traversal_hints(vec![EndpointTraversalBinding {
-                    path_id: scope.candidate_ordinal,
-                    role: WireguardRole::Exit,
-                    observer_id: data_relay_node_id,
-                    observer_peer_id: authenticated_data_relay,
-                }])
-                .unwrap_or_default();
+        if self
+            .service
+            .bind_native_probe_data_relay_connection(authenticated_data_relay, connection_id)
+            .is_err()
+        {
+            reject!("NATIVE_PROBE_READY_EXIT_CONNECTION_REJECTED");
         }
+        self.collect_exit_native_ready(
+            native_ready::PendingExitNativeReady {
+                authenticated_data_relay,
+                connection_id,
+                request: request.clone(),
+                forward,
+                scope,
+                authorized_data_relay,
+                data_relay_node_id,
+                channel,
+            },
+            state,
+        )
+        .await;
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one shared Exit helper Prepare and affine per-path response transaction"
+    )]
+    async fn finish_exit_native_ready(
+        &mut self,
+        pending: native_ready::PendingExitNativeReady,
+        prepare: PrepareLeaseBatch,
+        state: &Arc<RwLock<AgentState>>,
+    ) {
+        let native_ready::PendingExitNativeReady {
+            authenticated_data_relay,
+            connection_id,
+            request,
+            forward,
+            scope,
+            authorized_data_relay,
+            data_relay_node_id,
+            channel,
+        } = pending;
+        macro_rules! reject {
+            ($code:literal) => {{
+                log_relay_forward_admission(Some(state), $code);
+                if let Ok(response) = ExitForwardResponse::unavailable(
+                    request.forward_id().to_vec(),
+                    ExitForwardOperation::NativeProbeReady,
+                    self.local_node_id.to_vec(),
+                    self.service.local_peer_id().to_bytes(),
+                ) {
+                    let _ = self
+                        .service
+                        .send_exit_forward_upstream_response(channel, response.into());
+                }
+                return;
+            }};
+        }
+        let now_ms = unix_millis();
+        let local_peer = *self.service.local_peer_id();
+        let Some(relay_exit_endpoint) = forward.relay_exit_endpoint().cloned() else {
+            reject!("NATIVE_PROBE_READY_EXIT_FRAME_REJECTED");
+        };
         let Some(attempt_id) = fixed_bytes::<FORWARD_ID_BYTES>(&scope.attempt_id) else {
             reject!("NATIVE_PROBE_READY_EXIT_SCOPE_REJECTED");
         };
@@ -18133,6 +18240,18 @@ mod tests {
         assert!(relay_ready.contains("native_ready: Some(PendingNativeProbeReady"));
 
         let exit_ready = braced_item(production, "async fn answer_native_probe_ready_upstream(");
+        assert!(exit_ready.contains("self.collect_exit_native_ready("));
+        assert!(!exit_ready.contains(".prepare_lease_batch("));
+        let collector_source = include_str!("discovery/native_ready.rs");
+        let collector = braced_item(collector_source, "async fn collect_exit_native_ready(");
+        assert!(
+            collector.find("if !complete {").unwrap()
+                < collector
+                    .find("self.prepare_complete_exit_native_ready(")
+                    .unwrap()
+        );
+        assert!(!collector.contains(".prepare_lease_batch("));
+        let exit_ready = braced_item(production, "async fn finish_exit_native_ready(");
         let exit_prepare = exit_ready
             .find(".prepare_lease_batch(")
             .expect("Exit helper Prepare");
