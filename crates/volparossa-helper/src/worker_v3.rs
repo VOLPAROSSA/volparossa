@@ -64,7 +64,8 @@ use crate::{
     internal_protocol::{
         AcquireClientIngressReplySocket, AcquireClientIngressSocket, AcquireTransportSocket,
         ActivateClientIngress, ActivateLeases, ActivatedClientIngress, ActivatedLease,
-        ActivatedLeases, AddMptcpEndpoint, ClientIngressDestroyed, ClientIngressInitialised,
+        ActivatedLeases, ActivationFailureClass, ActivationFailureDiagnostic,
+        ActivationFailurePhase, AddMptcpEndpoint, ClientIngressDestroyed, ClientIngressInitialised,
         ContextDestroyed, ContextInitialised, DestroyClientIngress, DestroyContext,
         INTERNAL_WORKER_MAGIC, INTERNAL_WORKER_PROTOCOL_VERSION, IngressReplySocketReady,
         IngressSocketReady, InitialiseClientIngress, InitialiseContext, InternalContextRole,
@@ -1812,6 +1813,112 @@ enum WorkerLeaseLifecycle {
     CleanupRequired(Vec<WorkerLeaseOwnership>),
 }
 
+fn activation_failure(
+    phase: ActivationFailurePhase,
+    class: ActivationFailureClass,
+    errno: Option<i32>,
+) -> ActivationFailureDiagnostic {
+    let errno = errno.filter(|value| (1..=4095).contains(value));
+    let class = if class == ActivationFailureClass::Errno && errno.is_none() {
+        ActivationFailureClass::Malformed
+    } else {
+        class
+    };
+    ActivationFailureDiagnostic {
+        phase: phase as i32,
+        class: class as i32,
+        errno,
+    }
+}
+
+fn activation_io_failure(
+    phase: ActivationFailurePhase,
+    error: &io::Error,
+) -> ActivationFailureDiagnostic {
+    activation_failure(
+        phase,
+        if error.kind() == io::ErrorKind::TimedOut {
+            ActivationFailureClass::TimedOut
+        } else {
+            ActivationFailureClass::Io
+        },
+        error.raw_os_error(),
+    )
+}
+
+fn activation_kernel_failure(error: &KernelError) -> ActivationFailureDiagnostic {
+    let phase = ActivationFailurePhase::WireguardActivate;
+    let class = match error {
+        KernelError::Io(error) => return activation_io_failure(phase, error),
+        KernelError::Errno(errno) => {
+            return activation_failure(phase, ActivationFailureClass::Errno, Some(*errno));
+        }
+        KernelError::Malformed => ActivationFailureClass::Malformed,
+        KernelError::Invalid => ActivationFailureClass::Invalid,
+        KernelError::Unsupported => ActivationFailureClass::Unsupported,
+    };
+    activation_failure(phase, class, None)
+}
+
+fn activation_fence_failure(
+    phase: ActivationFailurePhase,
+    error: &relay_fence::RelayFenceError,
+) -> ActivationFailureDiagnostic {
+    use relay_fence::RelayFenceError;
+    let class = match error {
+        RelayFenceError::Io(error) => return activation_io_failure(phase, error),
+        RelayFenceError::Kernel(errno) => {
+            return activation_failure(phase, ActivationFailureClass::Errno, Some(*errno));
+        }
+        RelayFenceError::Invalid => ActivationFailureClass::Invalid,
+        RelayFenceError::Expired => ActivationFailureClass::Expired,
+        RelayFenceError::Namespace => ActivationFailureClass::Namespace,
+        RelayFenceError::Malformed => ActivationFailureClass::Malformed,
+        RelayFenceError::Limit => ActivationFailureClass::Limit,
+        RelayFenceError::Inconsistent => ActivationFailureClass::Inconsistent,
+        RelayFenceError::UnexpectedPolicy => ActivationFailureClass::UnexpectedPolicy,
+        RelayFenceError::UnexpectedGeneration => ActivationFailureClass::UnexpectedGeneration,
+        RelayFenceError::Indeterminate => ActivationFailureClass::Indeterminate,
+    };
+    activation_failure(phase, class, None)
+}
+
+fn relay_activation_specification(
+    restricted: &relay_fence::RestrictedPolicyDrop,
+    ownerships: &[WorkerLeaseOwnership],
+    operation: &ActivateLeases,
+) -> Result<relay_fence::RelayFenceSpec, ActivationFailureDiagnostic> {
+    let phase = ActivationFailurePhase::RelayFenceSpecification;
+    let ([relay_client, relay_exit], [relay_client_activation, _]) =
+        (ownerships, operation.leases.as_slice())
+    else {
+        return Err(activation_failure(
+            phase,
+            ActivationFailureClass::Invalid,
+            None,
+        ));
+    };
+    let (Some(relay_client_proof), Some(relay_exit_proof), Some(now_unix)) =
+        (relay_client.proof, relay_exit.proof, current_unix_seconds())
+    else {
+        return Err(activation_failure(
+            phase,
+            ActivationFailureClass::Unavailable,
+            None,
+        ));
+    };
+    relay_fence::RelayFenceSpec::derive(
+        restricted.identity(),
+        relay_client_proof.ifindex,
+        relay_exit_proof.ifindex,
+        relay_client_activation.maximum_up_mbps,
+        relay_client_activation.maximum_down_mbps,
+        relay_client_activation.hard_expires_at_unix,
+        now_unix,
+    )
+    .map_err(|error| activation_fence_failure(phase, &error))
+}
+
 struct WorkerContext<Kernel> {
     route_context_id: ContextId,
     role: RoutingContextRole,
@@ -1823,6 +1930,7 @@ struct WorkerContext<Kernel> {
     staged_resources: Option<Vec<DurableWireguardResource>>,
     lease: Option<WorkerLeaseLifecycle>,
     mptcp: Option<WorkerMptcpPathManager>,
+    activation_failure: Option<ActivationFailureDiagnostic>,
 }
 
 struct WorkerIngressSocket {
@@ -2222,6 +2330,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             staged_resources: None,
             lease: None,
             mptcp: None,
+            activation_failure: None,
         }
     }
 
@@ -2255,6 +2364,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             staged_resources: Some(staged_resources),
             lease: None,
             mptcp: Some(mptcp),
+            activation_failure: None,
         })
     }
 
@@ -2386,6 +2496,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         operation: &ActivateLeases,
         deadline: HardDeadline,
     ) -> WorkerActivateOutcome {
+        self.activation_failure = None;
         let Some(WorkerLeaseLifecycle::Prepared(ownerships)) = self.lease.as_ref() else {
             return WorkerActivateOutcome::Failed(if self.lease.is_some() {
                 InternalWorkerResult::Conflict
@@ -2443,7 +2554,16 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                         transmitted_bytes: proof.transmitted_bytes,
                     });
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) => {
+                    self.activation_failure = Some(activation_failure(
+                        ActivationFailurePhase::HandshakeBaseline,
+                        ActivationFailureClass::Malformed,
+                        None,
+                    ));
+                    return self.fail_activation_after_ownership(ownerships, deadline);
+                }
+                Err(error) => {
+                    self.activation_failure = Some(activation_kernel_failure(&error));
                     return self.fail_activation_after_ownership(ownerships, deadline);
                 }
             }
@@ -2475,37 +2595,31 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             return if ready {
                 RelayFenceActivationOutcome::Ready
             } else {
+                self.activation_failure = Some(activation_failure(
+                    ActivationFailurePhase::RelayFenceState,
+                    ActivationFailureClass::Invalid,
+                    None,
+                ));
                 RelayFenceActivationOutcome::Recoverable
             };
         };
-        let ([relay_client, relay_exit], [relay_client_activation, _]) =
-            (ownerships, operation.leases.as_slice())
-        else {
-            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
-            return RelayFenceActivationOutcome::Recoverable;
-        };
-        let (Some(relay_client_proof), Some(relay_exit_proof), Some(now_unix)) =
-            (relay_client.proof, relay_exit.proof, current_unix_seconds())
-        else {
-            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
-            return RelayFenceActivationOutcome::Recoverable;
-        };
-        let specification = relay_fence::RelayFenceSpec::derive(
-            restricted.identity(),
-            relay_client_proof.ifindex,
-            relay_exit_proof.ifindex,
-            relay_client_activation.maximum_up_mbps,
-            relay_client_activation.maximum_down_mbps,
-            relay_client_activation.hard_expires_at_unix,
-            now_unix,
-        );
-        let Ok(specification) = specification else {
-            self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
-            return RelayFenceActivationOutcome::Recoverable;
+        let specification = relay_activation_specification(&restricted, ownerships, operation);
+        let specification = match specification {
+            Ok(specification) => specification,
+            Err(error) => {
+                self.activation_failure = Some(error);
+                self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
+                return RelayFenceActivationOutcome::Recoverable;
+            }
         };
         let Some(maximum_live_gate_timeout) =
             relay_gate_timeout(operation.hard_expires_at_boottime_ns, deadline)
         else {
+            self.activation_failure = Some(activation_failure(
+                ActivationFailurePhase::RelayFenceDeadline,
+                ActivationFailureClass::Unavailable,
+                None,
+            ));
             self.relay_fence = Some(WorkerRelayFence::Restricted(restricted));
             return RelayFenceActivationOutcome::Recoverable;
         };
@@ -2517,6 +2631,10 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
         ) {
             Ok(active) => active,
             Err(failure) => {
+                self.activation_failure = Some(activation_fence_failure(
+                    ActivationFailurePhase::RelayFenceInstall,
+                    &failure.source,
+                ));
                 return match failure.authority {
                     relay_fence::RelayFenceActivateAuthority::Restricted(restricted) => {
                         self.relay_fence = Some(WorkerRelayFence::Restricted(*restricted));
@@ -2529,7 +2647,16 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 };
             }
         };
-        let activation_baseline = relay_fence::verify_active_relay_fence(&active, deadline).ok();
+        let activation_baseline = match relay_fence::verify_active_relay_fence(&active, deadline) {
+            Ok(baseline) => Some(baseline),
+            Err(error) => {
+                self.activation_failure = Some(activation_fence_failure(
+                    ActivationFailurePhase::RelayFenceVerify,
+                    &error,
+                ));
+                None
+            }
+        };
         self.relay_fence = Some(WorkerRelayFence::Active {
             authority: Box::new(active),
             activation_baseline,
@@ -4039,7 +4166,17 @@ fn child_loop(
                 (result, outcome, exit, None)
             }
         };
-        let response = correlated_response(&request, result, outcome)?;
+        let mut response = correlated_response(&request, result, outcome)?;
+        if matches!(
+            operation,
+            internal_worker_request::Operation::ActivateLeases(_)
+        ) {
+            response.activation_failure = context
+                .as_mut()
+                .and_then(|context| context.activation_failure.take());
+            validate_response_for_request(&request, &response)
+                .map_err(|_| WorkerV3Error::Invalid)?;
+        }
         if !send_child_response_preserving_initialise_cleanup(
             channel, &request, &response, descriptor, deadline,
         )? {
@@ -4094,6 +4231,7 @@ fn correlated_response(
         request_id: request.request_id.clone(),
         result: result as i32,
         request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+        activation_failure: None,
         outcome,
     };
     validate_response_for_request(request, &response).map_err(|_| WorkerV3Error::Invalid)?;
@@ -13444,6 +13582,14 @@ mod tests {
             WorkerActivateOutcome::Failed(InternalWorkerResult::Kernel)
         ));
         assert!(context.lease.is_none());
+        assert_eq!(
+            context.activation_failure,
+            Some(ActivationFailureDiagnostic {
+                phase: ActivationFailurePhase::WireguardActivate as i32,
+                class: ActivationFailureClass::Invalid as i32,
+                errno: None,
+            })
+        );
         assert_eq!(
             context.kernel.calls,
             [

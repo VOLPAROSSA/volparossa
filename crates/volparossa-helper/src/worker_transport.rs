@@ -1935,6 +1935,7 @@ mod tests {
             request_id: request.request_id.clone(),
             result: result as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+            activation_failure: None,
             outcome,
         }
     }
@@ -2002,6 +2003,7 @@ mod tests {
             request_id: request.request_id.clone(),
             result: InternalWorkerResult::Ok as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+            activation_failure: None,
             outcome: Some(outcome),
         }
     }

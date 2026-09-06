@@ -388,6 +388,52 @@ pub(crate) enum InternalWorkerResult {
     CleanupIncomplete = 6,
 }
 
+/// Closed activation stages, without route, peer, interface or namespace identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum ActivationFailurePhase {
+    Unspecified = 0,
+    RelayFenceState = 1,
+    RelayFenceSpecification = 2,
+    RelayFenceDeadline = 3,
+    RelayFenceInstall = 4,
+    RelayFenceVerify = 5,
+    WireguardActivate = 6,
+    HandshakeBaseline = 7,
+}
+
+/// No free-form kernel error, extack, request or resource data crosses this boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub(crate) enum ActivationFailureClass {
+    Unspecified = 0,
+    Invalid = 1,
+    Expired = 2,
+    Namespace = 3,
+    Io = 4,
+    TimedOut = 5,
+    Errno = 6,
+    Malformed = 7,
+    Unsupported = 8,
+    Limit = 9,
+    Inconsistent = 10,
+    UnexpectedPolicy = 11,
+    UnexpectedGeneration = 12,
+    Indeterminate = 13,
+    Unavailable = 14,
+}
+
+/// Optional diagnostics only: never authority to retry, activate or skip rollback.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub(crate) struct ActivationFailureDiagnostic {
+    #[prost(enumeration = "ActivationFailurePhase", tag = "1")]
+    pub(crate) phase: i32,
+    #[prost(enumeration = "ActivationFailureClass", tag = "2")]
+    pub(crate) class: i32,
+    #[prost(int32, optional, tag = "3")]
+    pub(crate) errno: Option<i32>,
+}
+
 #[derive(Clone, PartialEq, Message)]
 pub(crate) struct InternalWorkerResponse {
     #[prost(uint32, tag = "1")]
@@ -400,6 +446,8 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) result: i32,
     #[prost(bytes = "vec", tag = "5")]
     pub(crate) request_digest: Vec<u8>,
+    #[prost(message, optional, tag = "6")]
+    pub(crate) activation_failure: Option<ActivationFailureDiagnostic>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
         tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25"
@@ -760,6 +808,14 @@ pub(crate) fn validate_response_for_request(
     let expected_digest = blake3::hash(encoded_request.as_slice());
     if response.request_id.as_slice() != request.request_id.as_slice()
         || response.request_digest.as_slice() != expected_digest.as_bytes()
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    if response.activation_failure.is_some()
+        && !matches!(
+            request.operation,
+            Some(internal_worker_request::Operation::ActivateLeases(_))
+        )
     {
         return Err(InternalProtocolError::Invalid);
     }
@@ -1186,6 +1242,9 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
     if value.request_digest.len() != 32 {
         return Err(InternalProtocolError::Invalid);
     }
+    if let Some(diagnostic) = &value.activation_failure {
+        validate_activation_failure(result, diagnostic)?;
+    }
     match (result, value.outcome.as_ref()) {
         (InternalWorkerResult::Ok, Some(outcome)) => match outcome {
             Outcome::Initialised(outcome) => route_id(&outcome.route_context_id),
@@ -1269,6 +1328,36 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
         | (_, Some(_)) => Err(InternalProtocolError::Invalid),
         (_, None) => Ok(()),
     }
+}
+
+fn validate_activation_failure(
+    result: InternalWorkerResult,
+    diagnostic: &ActivationFailureDiagnostic,
+) -> Result<(), InternalProtocolError> {
+    let phase = ActivationFailurePhase::try_from(diagnostic.phase)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    let class = ActivationFailureClass::try_from(diagnostic.class)
+        .map_err(|_| InternalProtocolError::Invalid)?;
+    if !matches!(
+        result,
+        InternalWorkerResult::Kernel | InternalWorkerResult::CleanupIncomplete
+    ) || phase == ActivationFailurePhase::Unspecified
+        || class == ActivationFailureClass::Unspecified
+        || diagnostic
+            .errno
+            .is_some_and(|errno| !(1..=4095).contains(&errno))
+        || (class == ActivationFailureClass::Errno && diagnostic.errno.is_none())
+        || (diagnostic.errno.is_some()
+            && !matches!(
+                class,
+                ActivationFailureClass::Errno
+                    | ActivationFailureClass::Io
+                    | ActivationFailureClass::TimedOut
+            ))
+    {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
 }
 
 fn validate_lease_batch<T>(
@@ -1875,6 +1964,7 @@ mod tests {
             request_id: request.request_id.clone(),
             result: result as i32,
             request_digest: blake3::hash(encoded.as_slice()).as_bytes().to_vec(),
+            activation_failure: None,
             outcome,
         }
     }
@@ -1965,6 +2055,7 @@ mod tests {
                 request_id: vec![7; 16],
                 result: InternalWorkerResult::Ok as i32,
                 request_digest: vec![8; 32],
+                activation_failure: None,
                 outcome: Some(outcome),
             };
             let encoded = encode_response(&value).expect("sixteen-lease response");
@@ -2379,6 +2470,91 @@ mod tests {
     }
 
     #[test]
+    fn activation_failure_diagnostic_is_closed_correlated_and_failure_only() {
+        let activate = request(internal_worker_request::Operation::ActivateLeases(
+            ActivateLeases {
+                route_context_id: vec![1; 16],
+                hard_expires_at_boottime_ns: 1,
+                leases: vec![activation_with_role(InternalEndpointRole::Client)],
+            },
+        ));
+        let diagnostic = ActivationFailureDiagnostic {
+            phase: ActivationFailurePhase::WireguardActivate as i32,
+            class: ActivationFailureClass::Errno as i32,
+            errno: Some(libc::EINVAL),
+        };
+        let mut failure = correlated_response(&activate, InternalWorkerResult::Kernel, None);
+        failure.activation_failure = Some(diagnostic);
+        let encoded = encode_response(&failure).expect("bounded diagnostic");
+        let decoded = decode_response(&encoded).expect("canonical round trip");
+        assert_eq!(decoded, failure);
+        assert!(validate_response_for_request(&activate, &decoded).is_ok());
+        for invalid in [
+            ActivationFailureDiagnostic {
+                phase: 0,
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                phase: 999,
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                class: 0,
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                class: 999,
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                errno: Some(-1),
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                errno: Some(4096),
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                errno: None,
+                ..diagnostic
+            },
+            ActivationFailureDiagnostic {
+                class: ActivationFailureClass::Malformed as i32,
+                ..diagnostic
+            },
+        ] {
+            let mut invalid_response = failure.clone();
+            invalid_response.activation_failure = Some(invalid);
+            assert!(decode_response(&invalid_response.encode_to_vec()).is_err());
+        }
+        let destroy = request(internal_worker_request::Operation::DestroyContext(
+            DestroyContext {
+                route_context_id: vec![1; 16],
+            },
+        ));
+        let mut wrong_operation = correlated_response(&destroy, InternalWorkerResult::Kernel, None);
+        wrong_operation.activation_failure = Some(diagnostic);
+        assert!(validate_response_for_request(&destroy, &wrong_operation).is_err());
+        let mut success = correlated_response(
+            &destroy,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::Destroyed(
+                ContextDestroyed {},
+            )),
+        );
+        success.activation_failure = Some(diagnostic);
+        assert!(encode_response(&success).is_err());
+        let mut contradictory = failure.clone();
+        contradictory.result = InternalWorkerResult::Invalid as i32;
+        assert!(encode_response(&contradictory).is_err());
+        let mut uncorrelated = failure.clone();
+        uncorrelated.request_digest[0] ^= 1;
+        assert!(validate_response_for_request(&activate, &uncorrelated).is_err());
+        failure.result = InternalWorkerResult::CleanupIncomplete as i32;
+        assert!(validate_response_for_request(&activate, &failure).is_ok());
+    }
+
+    #[test]
     fn response_requires_typed_outcome_and_request_digest() {
         let value = InternalWorkerResponse {
             protocol_version: INTERNAL_WORKER_PROTOCOL_VERSION,
@@ -2386,6 +2562,7 @@ mod tests {
             request_id: vec![7; 16],
             result: InternalWorkerResult::Ok as i32,
             request_digest: vec![8; 32],
+            activation_failure: None,
             outcome: Some(internal_worker_response::Outcome::Activated(
                 ActivatedLeases {
                     leases: vec![ActivatedLease {

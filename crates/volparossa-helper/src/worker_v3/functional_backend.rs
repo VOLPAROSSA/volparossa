@@ -1131,8 +1131,24 @@ impl FunctionalAlphaLeaseBackend {
             .coordinator
             .execute_until(key.context_id, generation, request, deadline)
             .await;
-        matches_activated_batch(execution.as_ref().ok(), prepared)
-            .ok_or_else(|| response_error(execution))
+        matches_activated_batch(execution.as_ref().ok(), prepared).ok_or_else(|| {
+            // execute_until has already validated credentials, canonical encoding and the
+            // exact request digest. Log only closed numeric diagnostics, never the response.
+            if let Some(diagnostic) = execution
+                .as_ref()
+                .ok()
+                .and_then(|execution| execution.response.activation_failure.as_ref())
+            {
+                tracing::warn!(
+                    diagnostic_code = "WORKER_ACTIVATION_FAILED",
+                    phase = diagnostic.phase,
+                    error_class = diagnostic.class,
+                    errno = diagnostic.errno,
+                    "worker activation failed"
+                );
+            }
+            response_error(execution)
+        })
     }
 
     async fn probe_one(
@@ -8079,6 +8095,7 @@ pub(super) mod tests {
                 request_id: vec![0xd1; 16],
                 result: result as i32,
                 request_digest: vec![0xd2; 32],
+                activation_failure: None,
                 outcome,
             },
             descriptor: None,
@@ -10557,6 +10574,7 @@ pub(super) mod tests {
                     request_id: vec![0x91; 16],
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![0x92; 32],
+                    activation_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11101,8 +11119,12 @@ pub(super) mod tests {
                 activate.request.operation,
                 Some(internal_worker_request::Operation::ActivateLeases(_))
             ));
-            let failed = correlated_response(&activate.request, InternalWorkerResult::Kernel, None)
-                .expect("correlated Activate failure");
+            let mut failed =
+                correlated_response(&activate.request, InternalWorkerResult::Kernel, None)
+                    .expect("correlated Activate failure");
+            failed.activation_failure = Some(super::super::activation_kernel_failure(
+                &crate::kernel::KernelError::Errno(libc::EINVAL),
+            ));
             send_credential_worker_response(&peer, &activate.request, &failed, None)
                 .expect("send Activate failure");
 
@@ -11202,6 +11224,7 @@ pub(super) mod tests {
                     request_id: vec![7; 16],
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
+                    activation_failure: None,
                     outcome: Some(internal_worker_response::Outcome::Activated(
                         crate::internal_protocol::ActivatedLeases {
                             leases: vec![crate::internal_protocol::ActivatedLease {
@@ -11389,6 +11412,7 @@ pub(super) mod tests {
                     request_id: vec![7; 16],
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
+                    activation_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases {
                             leases: vec![crate::internal_protocol::ProbedLease {
@@ -11470,6 +11494,7 @@ pub(super) mod tests {
                     request_id: vec![7; 16],
                     result: InternalWorkerResult::Ok as i32,
                     request_digest: vec![8; 32],
+                    activation_failure: None,
                     outcome: Some(internal_worker_response::Outcome::ProbedCommitted(
                         crate::internal_protocol::ProbedLeases { leases },
                     )),
