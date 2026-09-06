@@ -262,6 +262,34 @@ awk '
 grep -F 'INGRESS_DNS_QUERY_COMPLETED "$WORK/a08-dns-udp-completion-events.txt"' "$GUEST" >/dev/null
 grep -F 'INGRESS_DNS_TCP_QUERY_COMPLETED "$WORK/a08-dns-tcp-completion-events.txt"' "$GUEST" >/dev/null
 grep -F 'INGRESS_TCP_STREAM_COMPLETED "$WORK/a08-tls-completion-events.txt"' "$GUEST" >/dev/null
+# Failed TLS attempts must retain real diagnostics even when no success JSON exists.
+(
+    WORK=$(mktemp -d -t volparossa-a08-tls-contract.XXXXXX)
+    trap 'rm -rf -- "$WORK"' EXIT HUP INT TERM
+    mkdir "$WORK/tls-policy" "$WORK/destination"
+    printf '%s\n' 'fixture I/O failed' >"$WORK/tls-policy/a08-client.err"
+    printf '%s\n' '{"successful_exchanges":0}' >"$WORK/destination/tls-policy.json"
+    sed -n '/^capture_a08_tls_diagnostics() {$/,/^}$/p' "$GUEST" >"$WORK/capture.sh"
+    [ -s "$WORK/capture.sh" ]
+    # Preserve the real copy, but do not require root ownership in this pure contract.
+    # shellcheck disable=SC2317
+    install() { while [ "$#" -gt 2 ]; do shift; done; cp -- "$1" "$2"; }
+    # shellcheck disable=SC1091
+    . "$WORK/capture.sh"
+    A08_STATUS=1
+    capture_a08_tls_diagnostics
+    [ "$A08_STATUS" -eq 1 ]
+    [ ! -e "$WORK/a08-client.json" ]
+    cmp "$WORK/tls-policy/a08-client.err" "$WORK/a08-client.err"
+    cmp "$WORK/destination/tls-policy.json" "$WORK/a08-destination.json"
+    printf '%s\n' '{"case":"allowed-domain"}' >"$WORK/tls-policy/a08-client.json"
+    A08_STATUS=0
+    capture_a08_tls_diagnostics
+    [ "$A08_STATUS" -eq 0 ]
+    cmp "$WORK/tls-policy/a08-client.json" "$WORK/a08-client.json"
+)
+grep -F -A1 'capture_a08_tls_diagnostics' "$GUEST" \
+    | grep -F 'if [ "$A08_STATUS" -eq 0 ]; then' >/dev/null
 # Exercise the real bounded-log helpers without sourcing the privileged fixture.
 (
     WORK=$(mktemp -d -t volparossa-a08-log-contract.XXXXXX)

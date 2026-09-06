@@ -1,15 +1,19 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Pure checks of the generated privacy observer; no network sockets or mutations."""
+"""Pure collector checks plus an opt-in AF_PACKET stop proof in a disposable namespace."""
 
 import ast
+import ctypes
 import errno
 import json
+import os
 from pathlib import Path
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -57,7 +61,7 @@ class Capture:
         return result
 
 
-def buffered_observer(extra_unread_packet=False, clock=None):
+def buffered_observer(extra_unread_packet=False, clock=None, idle=False):
     """Execute the complete generated collector with actual queue semantics, not packet parsing."""
     order = []
 
@@ -72,6 +76,12 @@ def buffered_observer(extra_unread_packet=False, clock=None):
             assert enabled is False
 
         def setsockopt(self, level, option, size):
+            if option == 26:
+                self_assertion = struct.unpack("@HP", size)
+                assert level == socket.SOL_SOCKET and self_assertion[0] == 1
+                assert ctypes.string_at(self_assertion[1], 8) == struct.pack("HBBI", 6, 0, 0, 0)
+                assert namespace["running"] is False
+                return
             assert (level, option, size) == (socket.SOL_SOCKET, 33, 4 * 1024 * 1024)
 
         def getsockopt(self, level, option, size=None):
@@ -92,7 +102,8 @@ def buffered_observer(extra_unread_packet=False, clock=None):
         def close(self):
             pass
 
-    captures = [BufferedCapture("r1c", 300), BufferedCapture("r1x", 1)]
+    captures = [BufferedCapture("r1c", 0 if idle else 300),
+                BufferedCapture("r1x", 0 if idle else 1)]
     namespace = {}
 
     def ready(_read, _write, _exception, _timeout):
@@ -114,6 +125,13 @@ def buffered_observer(extra_unread_packet=False, clock=None):
 
 
 class PrivacyObserverTests(unittest.TestCase):
+    def test_idle_signal_during_select_still_stops_intake_before_final_stats(self):
+        record, order = buffered_observer(idle=True)
+        self.assertFalse(order)
+        self.assertFalse(record["truncated"])
+        self.assertTrue(all(row["intake_stopped"]
+                            for row in record["interface_statistics"].values()))
+
     def test_fair_drain_keeps_other_link_responsive_and_drains_after_stop(self):
         record, order = buffered_observer()
         self.assertEqual(order[128], "r1x")
@@ -124,6 +142,7 @@ class PrivacyObserverTests(unittest.TestCase):
             statistics = record["interface_statistics"][interface]
             self.assertEqual(statistics["receive_buffer_bytes"], 8 * 1024 * 1024)
             self.assertEqual(statistics["packet_socket_packets"], statistics["observed_frames"])
+            self.assertTrue(statistics["intake_stopped"])
 
     def test_unread_tail_or_expired_drain_cannot_report_complete_capture(self):
         for arguments in ({"extra_unread_packet": True}, {"clock": [0, 1, 1.1, 3.2]}):
@@ -219,5 +238,69 @@ class PrivacyObserverTests(unittest.TestCase):
         self.assertEqual(observer["counters"]["unexpected_outer_tuple_overflow_packets"], 1)
 
 
+def live_stop_intake():
+    """Use the exact generated stop function, not a duplicate implementation."""
+    parent = os.environ.get("VOLPAROSSA_PRIVACY_PARENT_NETNS")
+    if not parent or os.readlink("/proc/self/ns/net") == parent or os.geteuid() != 0:
+        raise RuntimeError("requires disposable unshare --user --map-root-user --net, never host")
+    print("Disposable namespace only: create privacy0<->privacy1 veth; preserve queued frames, "
+          "stop capture intake, send 400 later frames; delete the exact owned pair.", flush=True)
+    stop_node = next(node for node in TREE.body
+                     if isinstance(node, ast.FunctionDef) and node.name == "stop_capture_intake")
+    namespace = {"ctypes": ctypes, "socket": socket}
+    exec(compile(ast.Module(body=[stop_node], type_ignores=[]), "privacy-stop", "exec"), namespace)
+
+    def ip(*args):
+        subprocess.run(["ip", *args], check=True, capture_output=True)
+
+    ip("link", "add", "privacy0", "type", "veth", "peer", "name", "privacy1")
+    try:
+        for interface in ("privacy0", "privacy1"):
+            ip("link", "set", interface, "up")
+        with (socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0) as capture,
+              socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0) as sender):
+            capture.bind(("privacy0", 3))
+            capture.setblocking(False)
+            sender.bind(("privacy1", 3))
+            header = bytes.fromhex("ffffffffffff02000000000188b5")
+            expected = {b"zero-bind-still-open", b"before:0", b"before:1", b"before:2"}
+            capture.bind(("privacy0", 0))
+            assert capture.getsockname()[1] == 3, "zero bind is not a capture stop on Linux"
+            sender.send(header + b"zero-bind-still-open")
+            for index in range(3):
+                sender.send(header + f"before:{index}".encode())
+            descriptor = capture.fileno()
+            namespace["stop_capture_intake"](capture)
+            for _ in range(200):
+                sender.send(header + b"after-stop")
+            observed, frame_count = set(), 0
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    frame = capture.recv(65535)
+                except BlockingIOError:
+                    break
+                frame_count += 1
+                if frame[12:14] == b"\x88\xb5":
+                    observed.add(frame[14:])
+            else:
+                raise AssertionError("fixed stop filter failed to quiesce capture")
+            packets, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
+            assert capture.fileno() == descriptor and observed == expected
+            assert packets == frame_count and drops == 0
+            for _ in range(200):
+                sender.send(header + b"after-stats")
+            assert struct.unpack("II", capture.getsockopt(263, 6, 8)) == (0, 0)
+            print(json.dumps({"success": True, "same_capture_fd": True, "queued_markers": 4,
+                              "post_stop_markers": 0, "packet_socket_packets": packets,
+                              "observed_frames": frame_count, "packet_socket_drops": drops,
+                              "later_statistics_stable": True}))
+    finally:
+        ip("link", "delete", "privacy0")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--live-stop"]:
+        live_stop_intake()
+    else:
+        unittest.main()

@@ -2602,6 +2602,7 @@ with open(output_path, "x", encoding="ascii") as output:
     output.write("\n")
 PYTHON
 cat >"$WORK/bin/privacy-observer.py" <<'PYTHON'
+import ctypes
 import errno
 import json
 import os
@@ -2697,6 +2698,23 @@ def configure_capture_buffer(capture):
     return actual
 
 
+def stop_capture_intake(capture):
+    # Linux packet_do_bind() treats protocol zero as "keep current protocol". Instead attach
+    # one fixed classic-BPF RET 0 instruction after the capture window. packet_rcv() applies
+    # it before queue/stat accounting; existing queued frames remain available for the drain.
+    # This is never installed while observing the application's privacy window.
+    class Instruction(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte),
+                    ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32)]
+
+    class Program(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ushort), ("instructions", ctypes.POINTER(Instruction))]
+
+    instructions = (Instruction * 1)(Instruction(0x06, 0, 0, 0))  # BPF_RET | BPF_K, zero.
+    program = Program(1, instructions)
+    capture.setsockopt(socket.SOL_SOCKET, 26, bytes(program))  # SO_ATTACH_FILTER.
+
+
 sockets = {}
 interface_statistics = {}
 for interface in interfaces:
@@ -2704,6 +2722,7 @@ for interface in interfaces:
     capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0)
     interface_statistics[interface] = {
         "receive_buffer_bytes": configure_capture_buffer(capture), "observed_frames": 0,
+        "intake_stopped": False,
     }
     capture.bind((interface, 0x0003))
     capture.setblocking(False)
@@ -2736,11 +2755,17 @@ def capture_rounds():
         now = time.monotonic()
         if not running and stop_deadline is None:
             stop_deadline = now + 2
+            for capture, interface in sockets.items():
+                stop_capture_intake(capture)
+                interface_statistics[interface]["intake_stopped"] = True
         if now >= deadline or (stop_deadline is not None and now >= stop_deadline):
             truncated = True
             return
         readable, _, _ = select.select(list(sockets), [], [], 0.2 if running else 0)
         if not readable and not running:
+            # A signal can arrive during select(), before the intake-stop block above ran.
+            if stop_deadline is None:
+                continue
             return
         yield readable
 
@@ -5891,6 +5916,20 @@ capture_product_logs
 A08_COMPLETION_BASELINE_MS=$(client_log_baseline_ms) || fail A08_EVENT_BASELINE_UNAVAILABLE
 A08_COMPLETION_BEFORE=0
 PHASE=a08-allowed-visible-name-tls
+capture_a08_tls_diagnostics() {
+    for a08_client_file in a08-client.json a08-client.err; do
+        if [ -f "$WORK/tls-policy/$a08_client_file" ] \
+            && [ ! -L "$WORK/tls-policy/$a08_client_file" ]; then
+            install -o root -g root -m 0600 "$WORK/tls-policy/$a08_client_file" \
+                "$WORK/$a08_client_file"
+        fi
+    done
+    if [ -f "$WORK/destination/tls-policy.json" ] \
+        && [ ! -L "$WORK/destination/tls-policy.json" ]; then
+        install -o root -g root -m 0600 "$WORK/destination/tls-policy.json" \
+            "$WORK/a08-destination.json"
+    fi
+}
 set +e
 timeout --signal=TERM --kill-after=5s 180s \
     ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
@@ -5916,13 +5955,8 @@ while [ "$A08_STATUS" -eq 0 ] && [ "$attempt" -lt 300 ]; do
     sleep 0.1
     attempt=$((attempt + 1))
 done
+capture_a08_tls_diagnostics
 if [ "$A08_STATUS" -eq 0 ]; then
-    install -o root -g root -m 0600 "$WORK/tls-policy/a08-client.json" \
-        "$WORK/a08-client.json"
-    install -o root -g root -m 0600 "$WORK/tls-policy/a08-client.err" \
-        "$WORK/a08-client.err"
-    install -o root -g root -m 0600 "$WORK/destination/tls-policy.json" \
-        "$WORK/a08-destination.json"
     jq -S -c -n \
         --slurpfile application "$WORK/a08-client.json" \
         --slurpfile destination "$WORK/a08-destination.json" \

@@ -6,15 +6,51 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The latest [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038676673)
+at `6b6d3a10` passes A01--A07 and A15 but stops at A08: both DNS transports and the
+MPTCP route/descriptor handoff succeeded, then the destination TLS exchange timed out.
+A09--A14 were not reached. All capture buffers were actually 8 MiB with zero drops;
+the Client capture nevertheless retained one unread tail packet, so complete privacy
+proof is correctly withheld. Cleanup is complete, all owned-object counts are zero and
+the guest state is unchanged. A subsequent real TLS/backpressure regression reproduces
+a buffered-record stall in the streaming proxy: `write_all` alone can finish before
+the underlying TLS record is transmitted. The proxy now also flushes within the same
+existing write deadline; four streaming tests and strict proxy Clippy pass. The A08
+fixture retains its error log and available JSON on failures as well as success. Whether
+this resolves the observed KVM timeout still requires the next unchanged-build run.
+
+The [CUBIC mixed attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34039416469)
+at `8df52a86` completes A06's real 4-MiB request and 8-MiB response over both LAN/WAN
+paths with matching hashes. Its separate HTTP/3 captures are complete, but the general
+privacy observers retained unread tail packets (Client 2, LAN Relay 2, Exit 14; zero
+socket drops). That strict gate stopped the run before either 32-MiB comparison:
+there is no CUBIC throughput ratio. Cleanup is complete and guest state unchanged.
+The observer now stops new intake with a fixed `RET0` socket filter before draining and
+reading final counters. A real disposable veth proof retains four already-queued frames
+on the same socket and excludes 400 later frames, with zero drops and stable counters.
+The strict reconciliation and two-second drain bound remain; eight observer tests,
+nine mixed-fixture tests and the complete static topology contract pass. This fixes
+the demonstrated stop race without accepting an incomplete capture.
+
+The native process now waits on its owned Client/Exit UDP sockets and engine timers,
+instead of only sampling network work on a 10-ms control wait. Borrowed descriptors
+are rebuilt after each pump, reverse-queue backpressure remains bounded, and engine
+activity cannot extend the absolute control-frame deadline. Strict native compilation,
+nine native test targets and focused ASan/UBSan checks pass. Fixture-only HTTP/3 evidence
+now includes numeric inner-QUIC loss/congestion/RTT counters at response-ready and completion;
+three focused tests, strict example Clippy and a real 8-MiB disposable-loopback transfer
+pass. Those counters are not outer MPQUIC path evidence, and the reactive pump still
+requires an exact-source live throughput comparison.
+
 The new [scoped crash run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038675716)
 at `6b6d3a10` **passes A14 and A15**: all 25 real SIGKILL records are retained, all eleven
 helpers restart with new PIDs and republished sockets, and inherited descriptor stores are
 empty before teardown. The held MPTCP request reached the exact Exit; four durable route
 workers held eight descriptors before the crashes. All final owned-object/reference counters
 are zero, guest-state hashes match and `cleanup.complete` is true. The complete v1 sequence
-on the same revision is still running; the scoped pass is not an all-A01--A15 claim.
+on the same revision stopped at A08 above; the scoped pass is not an all-A01--A15 claim.
 
-The newest [complete v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34036578734)
+The earlier [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34036578734)
 at `fc3ec96a` reports A01--A13 and A15 success on one unchanged build, including A06 MPQUIC
 and A08 DNS after the republication fixes. A01--A10 and A15 have passing evidence, but the
 raw A11--A13 privacy captures dropped packets (Client 428, Relay1 786, Exit 434); their
@@ -44,7 +80,8 @@ drains queued packets for at most two seconds on stop and reconciles final kerne
 totals against read/lost packets. A disposable 500-frame reproduction recorded 185 read and
 315 dropped with the old effective 425,984-byte buffer. Twelve negative predicate cases,
 fair-drain/tail checks, nine mixed-fixture checks and the static KVM contract pass. Only the
-next live v1 run can establish complete zero-drop captures under the full workload.
+next corrected live v1 run can establish complete captures under the full workload;
+the `6b6d3a10` run above has zero drops but an unread final tail.
 
 Direct-LAN reconnection now has two reproduced transport fixes. With two IPv4 QUIC
 listeners, a real authenticated reconnect after LAN down/up previously arrived from the
