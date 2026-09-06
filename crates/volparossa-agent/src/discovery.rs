@@ -24399,7 +24399,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generate_nonce(),
+                generated_nonce_with_unique_network_discriminator(),
                 refresh_ms,
             )
             .await
@@ -24458,7 +24458,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generate_nonce(),
+                generated_nonce_with_unique_network_discriminator(),
                 now_ms,
             )
             .await
@@ -24474,6 +24474,10 @@ mod tests {
                 &fixture.state,
             )
             .await;
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Active(_)
+        ));
         let failure =
             next_unconnected_client_preselection_outbound_failure(&mut fixture.runtime).await;
         Box::pin(
@@ -24505,6 +24509,70 @@ mod tests {
             busy_response.await.expect("cooldown rejection"),
             Err(ClientPreselectionError::Busy)
         ));
+    }
+
+    #[tokio::test]
+    async fn production_client_preselection_rejects_colliding_network_before_dispatch() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let _ = install_valid_snapshot_route(&mut fixture, now_ms).await;
+        let stored = fixture
+            .runtime
+            .store
+            .load_candidates(UnixTime::from_secs(now_ms / 1_000), 10)
+            .expect("signed route advertisements")
+            .into_iter()
+            .next()
+            .expect("existing control or Exit diversity anchor");
+        let envelope = decode_canonical::<SignedEnvelope>(
+            stored.signed_advertisement_envelope(),
+            volparossa_protocol::MAX_CONTROL_MESSAGE_SIZE,
+        )
+        .expect("persisted signed advertisement");
+        let mut nonce = generate_nonce();
+        // The fixture derives operator, ASN and prefixes from nonce[0]. Reproduce
+        // the collision possible with an unconstrained random third advertisement.
+        nonce[0] = envelope.nonce[0];
+        assert!(
+            ingest_direct_snapshot_advertisement(
+                &mut fixture,
+                &Identity::generate(),
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                1,
+                nonce,
+                now_ms,
+            )
+            .await
+            .is_some()
+        );
+        let (reply, response) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_preselection(
+                valid_client_preselection_parameters(),
+                reply,
+                &fixture.state,
+            )
+            .await;
+        assert!(matches!(
+            response.await.expect("pre-dispatch diversity rejection"),
+            Err(ClientPreselectionError::Unavailable)
+        ));
+        assert!(matches!(
+            fixture.runtime.client_preselection,
+            ClientPreselectionOwner::Available(_)
+        ));
+        assert!(
+            !fixture
+                .runtime
+                .service
+                .client_preselection_slot_active_for_test()
+        );
+        assert_eq!(fixture.runtime.route_snapshot_build_attempts.get(), 1);
     }
 
     #[test]

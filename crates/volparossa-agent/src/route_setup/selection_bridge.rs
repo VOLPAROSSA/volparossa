@@ -8288,7 +8288,9 @@ mod tests {
             let mut io = HandoffIo::from_plan(&plan, clock);
             match mutation {
                 0 => io.control.expires_at_ms -= 1,
-                1 => io.exit.exit_advertisement_sequence += 1,
+                // Same-actor monotone refresh is covered by the positive handoff test;
+                // this negative case must exercise actual authority rollback.
+                1 => io.exit.exit_advertisement_sequence -= 1,
                 2 => {
                     io.relays
                         .last_mut()
@@ -8354,7 +8356,11 @@ mod tests {
                 .wait()
                 .await
                 .expect_err("capability drift");
-            assert!(matches!(failure.cause, RouteSetupError::Capability));
+            assert!(
+                matches!(failure.cause, RouteSetupError::Capability),
+                "mutation {mutation}: {:?}",
+                failure.cause
+            );
             assert_before_dispatch_failure(&failure);
             assert_eq!(
                 state.calls.lock().expect("handoff calls").len(),
