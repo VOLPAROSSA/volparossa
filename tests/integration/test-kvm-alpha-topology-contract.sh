@@ -23,6 +23,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
+    "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -472,6 +473,7 @@ grep -F '.helper_worker_custody.helper_fdstore_descriptors >=' "$GUEST" >/dev/nu
 grep -F '(.helper_worker_custody.durable_route_namespace_count * 2)' "$GUEST" >/dev/null
 grep -F 'nsenter --net=/proc/self/fd/9 -- ip -j -details address show' "$GUEST" >/dev/null
 python3 -B "$HERE/test-a14-worker-inventory.py"
+python3 -B "$HERE/test-crash-recovery.py"
 grep -F 'cleanup:{worker_custody_after:$worker_after' "$GUEST" >/dev/null
 grep -F 'remaining_worker_network_namespaces:$worker_namespaces' "$GUEST" >/dev/null
 grep -F 'remaining_worker_namespace_references:$worker_references' "$GUEST" >/dev/null

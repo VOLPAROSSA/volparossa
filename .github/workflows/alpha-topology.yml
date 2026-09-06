@@ -11,6 +11,7 @@ on:
         type: choice
         options:
           - datapath
+          - crash-recovery
           - alpha
           - reciprocity
           - local-link
@@ -252,6 +253,23 @@ jobs:
             fi
             exit 0
           fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = crash-recovery; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/crash-recovery.json"
+            if test -f "$report"; then
+              jq -r '
+                "scoped A14/A15 crash recovery succeeded: \(.success)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "helpers restarted: \(.a14.helper_restart_recovery.all_helpers_restarted)",
+                "remaining owned objects: \(.cleanup.remaining_owned_objects)",
+                "guest host state unchanged: \(.a15.unchanged)",
+                "A01-A13 were not executed by this scenario."
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish scoped crash-recovery evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = mixed-link; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json"
             if test -f "$report"; then
@@ -369,7 +387,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -411,6 +429,56 @@ jobs:
             ]) and
             all(.cases[]; .selected == true and .result == "PASS")
           ' "$report" >/dev/null
+
+      - name: Require scoped A14/A15 crash recovery evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'crash-recovery'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-crash-recovery-runtime" and
+            .source_revision == $revision and .scope == ["A14","A15"] and
+            .full_alpha_acceptance_claimed == false and .success == true and
+            .runner_exit_status == 0 and .a14.success == true and .a15.success == true and
+            (.a14.live_application_flow |
+              .case == "a14-custody" and .attempt == 0 and .release_gate_closed == true and
+              .listen == {ip:"47.163.4.2",port:18080} and .source.ip == "47.163.4.1" and
+              .source.port > 0 and .request_bytes > 0 and (.request_sha256 | test("^[0-9a-f]{64}$"))) and
+            (.a14.owned_before |
+              .network_namespace_count == 12 and .runtime_socket_count >= 25 and
+              ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1 and
+              (.helper_worker_custody |
+                .worker_process_count >= 4 and .worker_network_namespace_count == .worker_process_count and
+                .durable_route_namespace_count >= 4 and .live_ingress_namespace_count == 1 and
+                .worker_network_namespace_count == .durable_route_namespace_count + .live_ingress_namespace_count and
+                .helper_fdstore_descriptors >= (.durable_route_namespace_count * 2) and
+                all(.helper_custody_coverage[]; .fdstore_descriptors >= (.durable_route_namespace_count * 2)))) and
+            (.a14.forced_crashes |
+              length == 25 and ([.[] | select(.class == "agent")] | length) == 11 and
+              ([.[] | select(.class == "helper")] | length) == 11 and
+              ([.[] | select(.class == "native")] | length) == 3 and
+              all(.[]; .sigkill_delivered == true and .pid_absent_after == true)) and
+            (.a14.helper_restart_recovery |
+              .all_helpers_restarted == true and (.helpers | length) == 11 and
+              all(.helpers[]; .restarted == true and .helper_socket_republished == true and
+                .new_pid > 0 and .new_pid != .old_pid and .inherited_fdstore_descriptors_after == 0)) and
+            (.a14.cleanup | [
+              .remaining_owned_objects,.remaining_namespaces,.remaining_units,.remaining_runtime_sockets,
+              .remaining_links,.remaining_routes,.remaining_mptcp_endpoints,.remaining_mpquic_paths,
+              .remaining_nftables_rules,.remaining_worker_network_namespaces,
+              .remaining_worker_namespace_references,.remaining_helper_fdstore_descriptors,
+              .worker_custody_after.referenced_namespace_count,.worker_custody_after.remaining_reference_count
+            ] | all(.[]; . == 0)) and
+            .a15.unchanged == true and .a15.before_sha256 == .a15.after_sha256 and
+            (.a15.before_sha256 | test("^[0-9a-f]{64}$")) and
+            .cleanup == {complete:true,remaining_owned_objects:0}
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/crash-recovery.json" >/dev/null
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.a15.before_sha256' "$VOLPAROSSA_ALPHA_OUTPUT/crash-recovery.json")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.a15.after_sha256' "$VOLPAROSSA_ALPHA_OUTPUT/crash-recovery.json")"
 
       - name: Require real reciprocal runtime evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'reciprocity'
@@ -654,7 +722,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

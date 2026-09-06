@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -43,6 +43,10 @@ print_plan() {
         printf '%s\n' \
             'Alpha scenario: verify/copy the exact candidate Debian package and prove' \
             '  install, doctor, start, upgrade and removal inside the guest first.'
+    elif [ "$scenario" = crash-recovery ]; then
+        printf '%s\n' \
+            'Crash-recovery scenario: real held MPTCP application, exact A14 forced crashes and helper restart;' \
+            '  A15 unchanged host state and zero owned references; A01-A13 and packaging are not executed.'
     elif [ "$scenario" = wifi-link ]; then
         printf '%s\n' \
             'Wi-Fi link scenario: exact generic guest kernel and two simulated radios; agent-created mesh;' \
@@ -87,7 +91,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -336,7 +340,7 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json",
-              "uplink-link-smoke.json", "a15-evidence.json"}
+              "uplink-link-smoke.json", "crash-recovery.json", "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
                                            ("logs", "txt"), ("status", "txt"),
@@ -461,7 +465,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link",
-                           "sharing", "wifi-mesh", "wifi-link", "uplink-link"):
+                           "sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -488,7 +492,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -579,7 +583,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link|crash-recovery) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

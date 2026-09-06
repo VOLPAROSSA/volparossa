@@ -26,10 +26,21 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link|crash-recovery]'
 }
 
 print_plan() {
+    if [ "$scenario" = crash-recovery ]; then
+        printf '%s\n' \
+            'VOLPAROSSA crash-recovery A14/A15 runtime plan:' \
+            '  retain the same twelve disposable namespaces, eleven helpers/agents and three native units;' \
+            '  establish a real held MPTCP application through selected Relays and its actual Exit;' \
+            '  require the exact destination request hash, Exit source and durable worker FD custody;' \
+            '  SIGKILL the same 25 units, require new helper PIDs and empty inherited FD stores;' \
+            '  remove owned objects and require zero worker namespace references and unchanged host state;' \
+            '  emit crash-recovery.json for A14/A15 only; do not execute or claim A01-A13.'
+        return
+    fi
     if [ "$uplink_link" = yes ]; then
         printf '%s\n' \
             'VOLPAROSSA uplink-link runtime transition plan:' \
@@ -157,7 +168,7 @@ while [ "$#" -gt 0 ]; do
             case $2 in
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -892,6 +903,27 @@ optional_json_evidence() {
     printf '%s\n' "$optional_json"
 }
 
+crash_recovery_finalize_report() {
+    crash_status=$1
+    crash_a14=$(optional_json_evidence "$WORK/a14-evidence.json")
+    crash_a15=$(optional_json_evidence "$WORK/a15-evidence.json")
+    jq -S -c -n --arg revision "$expected_commit" \
+        --arg started "$STARTED_AT" --arg finished "$FINISHED_AT" \
+        --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
+        --argjson status "$crash_status" --argjson complete "$CLEANUP_COMPLETE" \
+        --argjson remaining "$REMAINING_OWNED_OBJECTS" \
+        --argjson a14 "$crash_a14" --argjson a15 "$crash_a15" '
+      {schema_version:1,report_kind:"volparossa-crash-recovery-runtime",
+       source_revision:$revision,scope:["A14","A15"],full_alpha_acceptance_claimed:false,
+       started_at:$started,finished_at:$finished,last_phase:$phase,runner_exit_status:$status,
+       success:($status == 0 and $complete and $remaining == 0 and
+         $a14.success == true and $a15.success == true and $a15.unchanged == true),
+       observed_blocker:(if $blocker == "NONE" then null else $blocker end),
+       a14:$a14,a15:$a15,cleanup:{complete:$complete,remaining_owned_objects:$remaining}}
+    ' >"$output_directory/crash-recovery.json" || return 1
+    chown "$OUTPUT_UID:$OUTPUT_GID" "$output_directory/crash-recovery.json"
+}
+
 cleanup() {
     original_status=$?
     failure_phase=$PHASE
@@ -1178,7 +1210,9 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = mixed-link ]; then
+    if [ "$scenario" = crash-recovery ]; then
+        crash_recovery_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = mixed-link ]; then
         mixed_link_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = sharing ]; then
         sharing_finalize_report "$original_status" || original_status=1
@@ -3301,7 +3335,7 @@ elif [ "$scenario" = reciprocity ]; then
     exit 0
 fi
 
-if [ "$scenario" != mixed-link ]; then
+if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4344,6 +4378,64 @@ force_crash_unit() {
         >"$WORK/a14-crash-$crash_class-$crash_node.json"
 }
 
+run_a14_crash_recovery() {
+PHASE=a14-refresh-live-custody
+A14_REQUESTED=true
+A14_STATUS=1
+refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED
+PHASE=a14-forced-crash
+record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
+# A14 deliberately replaced the earlier application route with a fresh held MPTCP application.
+# Therefore inventory its still-owned namespaces, sockets and ingress policy instead of requiring
+# stale MPQUIC-only local-control path records or relying on an earlier route's remaining TTL.
+jq -e '
+  .network_namespace_count == 12 and
+  .runtime_socket_count >= 25 and
+  .helper_worker_custody.worker_process_count >= 4 and
+  .helper_worker_custody.worker_network_namespace_count ==
+    .helper_worker_custody.worker_process_count and
+  .helper_worker_custody.durable_route_namespace_count >= 4 and
+  .helper_worker_custody.live_ingress_namespace_count == 1 and
+  .helper_worker_custody.worker_network_namespace_count ==
+    (.helper_worker_custody.durable_route_namespace_count +
+      .helper_worker_custody.live_ingress_namespace_count) and
+  .helper_worker_custody.helper_fdstore_descriptors >=
+    (.helper_worker_custody.durable_route_namespace_count * 2) and
+  all(.helper_worker_custody.helper_custody_coverage[];
+    .fdstore_descriptors >= (.durable_route_namespace_count * 2)) and
+  ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1
+' "$WORK/a14-owned-before.json" >/dev/null \
+    || fail A14_OWNED_INVENTORY_INCOMPLETE
+for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 \
+    exit exit2; do
+    force_crash_unit agent "$crash_node" \
+        "volparossa-alpha-agent@$crash_node.service" \
+        || fail A14_AGENT_CRASH_FAILED
+done
+for crash_node in client exit exit2; do
+    force_crash_unit native "$crash_node" \
+        "volparossa-alpha-mpquic@$crash_node.service" \
+        || fail A14_NATIVE_CRASH_FAILED
+done
+for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 \
+    exit exit2; do
+    force_crash_unit helper "$crash_node" \
+        "volparossa-alpha-helper@$crash_node.service" \
+        || fail A14_HELPER_CRASH_FAILED
+done
+verify_a14_helper_restart_recovery || fail A14_HELPER_RESTART_RECOVERY_FAILED
+jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
+jq -e '
+  length == 25 and
+  ([.[].class] | map(select(. == "agent")) | length) == 11 and
+  ([.[].class] | map(select(. == "helper")) | length) == 11 and
+  ([.[].class] | map(select(. == "native")) | length) == 3 and
+  all(.[]; .sigkill_delivered and .pid_absent_after)
+' "$WORK/a14-crashes.json" >/dev/null || fail A14_FORCED_CRASH_INCOMPLETE
+PHASE=a14-cleanup-pending
+exit 0
+}
+
 tc_sent_bytes() {
     tc_namespace=$1
     tc_interface=$2
@@ -4481,6 +4573,10 @@ finish_mptcp_download() {
     fi
     return "$download_status"
 }
+
+if [ "$scenario" = crash-recovery ]; then
+    run_a14_crash_recovery
+fi
 
 if [ "$scenario" != mixed-link ]; then
 PHASE=a02-capture
@@ -6163,58 +6259,4 @@ A13_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a13-complete
 
-PHASE=a14-refresh-live-custody
-A14_REQUESTED=true
-A14_STATUS=1
-refresh_a14_live_custody || fail A14_LIVE_CUSTODY_REFRESH_FAILED
-PHASE=a14-forced-crash
-record_a14_owned_inventory || fail A14_OWNED_INVENTORY_UNAVAILABLE
-# A14 deliberately replaced the earlier application route with a fresh held MPTCP application.
-# Therefore inventory its still-owned namespaces, sockets and ingress policy instead of requiring
-# stale MPQUIC-only local-control path records or relying on an earlier route's remaining TTL.
-jq -e '
-  .network_namespace_count == 12 and
-  .runtime_socket_count >= 25 and
-  .helper_worker_custody.worker_process_count >= 4 and
-  .helper_worker_custody.worker_network_namespace_count ==
-    .helper_worker_custody.worker_process_count and
-  .helper_worker_custody.durable_route_namespace_count >= 4 and
-  .helper_worker_custody.live_ingress_namespace_count == 1 and
-  .helper_worker_custody.worker_network_namespace_count ==
-    (.helper_worker_custody.durable_route_namespace_count +
-      .helper_worker_custody.live_ingress_namespace_count) and
-  .helper_worker_custody.helper_fdstore_descriptors >=
-    (.helper_worker_custody.durable_route_namespace_count * 2) and
-  all(.helper_worker_custody.helper_custody_coverage[];
-    .fdstore_descriptors >= (.durable_route_namespace_count * 2)) and
-  ([.namespaces[] | select(.nftables_rules > 0)] | length) >= 1
-' "$WORK/a14-owned-before.json" >/dev/null \
-    || fail A14_OWNED_INVENTORY_INCOMPLETE
-for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 \
-    exit exit2; do
-    force_crash_unit agent "$crash_node" \
-        "volparossa-alpha-agent@$crash_node.service" \
-        || fail A14_AGENT_CRASH_FAILED
-done
-for crash_node in client exit exit2; do
-    force_crash_unit native "$crash_node" \
-        "volparossa-alpha-mpquic@$crash_node.service" \
-        || fail A14_NATIVE_CRASH_FAILED
-done
-for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 \
-    exit exit2; do
-    force_crash_unit helper "$crash_node" \
-        "volparossa-alpha-helper@$crash_node.service" \
-        || fail A14_HELPER_CRASH_FAILED
-done
-verify_a14_helper_restart_recovery || fail A14_HELPER_RESTART_RECOVERY_FAILED
-jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
-jq -e '
-  length == 25 and
-  ([.[].class] | map(select(. == "agent")) | length) == 11 and
-  ([.[].class] | map(select(. == "helper")) | length) == 11 and
-  ([.[].class] | map(select(. == "native")) | length) == 3 and
-  all(.[]; .sigkill_delivered and .pid_absent_after)
-' "$WORK/a14-crashes.json" >/dev/null || fail A14_FORCED_CRASH_INCOMPLETE
-PHASE=a14-cleanup-pending
-exit 0
+run_a14_crash_recovery
