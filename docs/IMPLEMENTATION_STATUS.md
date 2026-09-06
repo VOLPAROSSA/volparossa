@@ -51,6 +51,27 @@ The same revision's [Quality run](https://github.com/VOLPAROSSA/volparossa/actio
 found three source-boundary assertions still expecting a private test module after its fixture
 helper became `pub(super)`. Their exact boundaries are updated, preserving the custody checks
 and negative mutations; all three now pass locally.
+The [next complete attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33996311895)
+at `d2d75dcc` again passed A01--A07 and A15, but did not finish A08 or execute A09--A14.
+The prior exact Client route retired in 396 ms. A subsequent Client Prepare succeeded, but
+the Relay's cleanup of an older expired worker stalled at `CLEANUP_DEAD_WORKER_RESOURCES`;
+its ten-second timeout prevented the new route from activating. Two causes now have direct
+RED-to-GREEN reproductions: kernel timeout removed the live authorization element while leaving
+the exact owned Relay table/rules, and the parent's retained `Command` stdin duplicate masked
+an early reaper exit until the protocol deadline. Post-reap cleanup now accepts that exact empty,
+closed successor without restoring forwarding authority; the duplicate is dropped after spawn.
+The real expired-fence cleanup passes, early child exit returns in 0.01 seconds rather than the
+two-second test deadline, and the real helper executable completes credential/namespace-FD
+cleanup in a disposable namespace. Foreign/extra objects and active authorization without a live
+element remain rejected. The complete live sequence still needs to confirm these fixes.
+Final disposable teardown reported zero remaining objects.
+This revision's [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33996288841)
+passed formatting, dependency checks and strict Clippy. Its new egress namespace test failed
+before test entry because the runner denied writing `uid_map`. The test now distinguishes only
+byte-exact pre-entry policy denial from an actual entered-child failure, with an explicit
+`SKIPPED_EGRESS_NETNS_PROOF` diagnostic. The mandatory KVM mode does not permit that skip.
+All four focused egress tests passed locally in mandatory mode, including real capability-free
+binding, link loss/return and rejection of fallback; strict linux-uapi Clippy passed.
 Benchmarks now select and record a suitable real route before starting
 payloads; committed MPTCP paths are Reachable metadata, never a substitute for kernel subflow
 and packet evidence.
@@ -204,9 +225,18 @@ traffic; spare capacity must be measured and enforced, not inferred from configu
 
 - [x] Local on-link authenticated discovery and two-leg datapaths without a client default route (IPv4 disposable live proof below).
 - [x] Per-path underlay/interface binding for simultaneous local and Internet paths (genuine MPQUIC transfer below; not a bandwidth-gain claim).
+- [ ] Measured useful throughput gain from combining independent LAN and Internet paths.
 - [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
 - [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
+
+The mixed-link fixture now includes a real HTTP/3 bandwidth comparison: a two-path native MPQUIC
+session loses its LAN link before a held 32-MiB response is released, then a fresh LAN+WAN
+session downloads the same size. Both client-facing Relay links are individually capped at
+8 Mbps. Passing requires more than 25% gain, exact application/Exit hashes, received data on both
+aggregate paths, exact context/path bindings, zero capture drops/leaks and complete cleanup.
+Two fixture-profile Rust checks, seven focused observer/validator checks and strict example
+Clippy pass. No throughput gain is claimed until the actual comparison passes in the VM.
 
 The next uplink-transition runtime uses optional `network.independent_egress_interface` for an
 already authorized IndependentInternet Exit. Bounded read-only netlink observations track that
@@ -235,6 +265,16 @@ until confirmation. Unrelated Relay/Exit roles and newer context projections are
 Four focused Client tests and strict agent Clippy pass; the independent-order FD-store fix is
 described above. The failed live attempt cleaned all owned objects with matching guest-state
 hashes. The complete transition remains unproven; unconfigured uplink-monitor behavior is unchanged.
+The [subsequent uplink attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33996312669)
+at `d2d75dcc` reached real traffic: 56 C-to-A-to-X echoes and 16 A-to-C-to-B echoes with their
+expected Exit sources. Exit authority was withdrawn 378 ms after uplink loss. Three distinct
+challenges on the same old application socket produced no echo and no destination receipt.
+The packet observer then failed on `ENETDOWN` from the deliberately disabled B uplink, leaving
+the complete initial-phase capture and later loss/recovery phases unproven. Only the explicitly
+declared interface transition now permits that error, retaining the same packet socket and
+requiring the exact ifindex/state sequence in the report. Six focused checks and a real disposable
+AF_PACKET down/recovery test pass, including continued observation of another link and zero
+packet drops. Failed-run cleanup left zero objects and matching guest-state hashes.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper
@@ -474,6 +514,14 @@ failure; bounded recognition of that exact property structure now passes all 18 
 checks without changing primary interface, source or ownership validation. All mesh/radio
 objects were removed and guest-state hashes matched. Full-agent application traffic over the
 mesh still needs a corrected live run.
+The [next mesh attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33994615930)
+at `092da0fb` exceeded the outer 2400-second guest-execution limit and exported only a VM console.
+It therefore supplies no finalized application, privacy or cleanup report; earlier association
+evidence cannot be substituted for this run. The runner now exports bounded existing logs and
+helper process diagnostics after a timeout, even when the normal archive is absent. It preserves
+the original failure status and explicitly records cleanup/host state as unverified. Four focused
+collector/driver tests and the script contract pass. The 2400-second bound is not removed, and a
+partial diagnostic archive cannot count as a successful or fully cleaned topology.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

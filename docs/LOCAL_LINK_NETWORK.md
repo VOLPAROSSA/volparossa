@@ -45,6 +45,11 @@ role. A separate [mixed-link run](https://github.com/VOLPAROSSA/volparossa/actio
 on the same build passed a real HTTP/3 4-MiB request and 8-MiB response on two genuine MPQUIC
 paths, one LAN and one public, to the same Exit. Both paths carried independently observed
 WireGuard data. This proves the underlay composition, not higher aggregate bandwidth.
+The extended mixed-link fixture now compares a held 32-MiB HTTP/3 response over the surviving
+WAN path with a fresh LAN+WAN native MPQUIC session, using two independent 8-Mbps link caps.
+It requires actual received traffic on both aggregate paths, more than 25% improvement, matching
+payloads, zero observer drops/leaks and complete cleanup. That live comparison has not yet passed;
+the fixture's focused checks are not measured network-speed evidence.
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio setup also remains unfinished; no hidden public-IP fallback is used.
 
