@@ -6,6 +6,14 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The new [scoped crash run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038675716)
+at `6b6d3a10` **passes A14 and A15**: all 25 real SIGKILL records are retained, all eleven
+helpers restart with new PIDs and republished sockets, and inherited descriptor stores are
+empty before teardown. The held MPTCP request reached the exact Exit; four durable route
+workers held eight descriptors before the crashes. All final owned-object/reference counters
+are zero, guest-state hashes match and `cleanup.complete` is true. The complete v1 sequence
+on the same revision is still running; the scoped pass is not an all-A01--A15 claim.
+
 The newest [complete v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34036578734)
 at `fc3ec96a` reports A01--A13 and A15 success on one unchanged build, including A06 MPQUIC
 and A08 DNS after the republication fixes. A01--A10 and A15 have passing evidence, but the
@@ -27,8 +35,8 @@ requires it, unlike the ordinary worker's correct pre-identity setup. Restart no
 the same bounded capability set; the final identity/capability checks are unchanged. The
 existing restart regression fails before the fix and passes after it. Two focused checks,
 strict helper Clippy and a disposable real-kernel bounding-mask witness pass (`0x1100`
-after the erroneous drop versus required/retained `0x1500`). Full systemd recovery remains
-for the next live crash run; this is not a completed authenticated-reaper proof.
+after the erroneous drop versus required/retained `0x1500`). The subsequent scoped live
+run above now proves actual systemd recovery with this fix.
 
 A11--A13 now explicitly reject absent, null or nonzero capture-drop counters. The collector
 also verifies its bounded 4-MiB receive buffer, reads interfaces in fair 128-frame rounds,
@@ -49,6 +57,18 @@ bounds. Shutdown disables retries before draining and closes endpoints afterward
 existing control connections during retirement. Both disposable-network reproductions,
 two focused option/bounds checks and joint strict discovery/agent Clippy pass. This is not
 yet a passing mixed-link aggregation run or physical-radio evidence.
+
+The [next mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34037899646)
+at `54f65ede` confirms restored LAN discovery and a fresh two-path route. Both 32-MiB HTTP/3
+responses completed with matching hashes, but LAN+WAN took 155.832 seconds versus WAN-only
+68.091 seconds (0.437x), so no gain is claimed. Its eight privacy captures have zero drops
+and cleanup is complete. The separate aggregate path captures hit their older 131,072-frame
+limit; that bound now scales finitely to 524,288 for the declared 32-MiB response, retaining
+truncation rejection. Three boundary checks and the static KVM contract pass. A single-variable
+congestion-control comparison now selects CUBIC only for true MPQUIC, leaving general-UDP BBR2,
+EDT scheduling, path requirements and the >25% gain threshold unchanged. The adapter compiles
+against cached native dependencies and nine native checks pass; the exact-source live build
+and throughput comparison remain required. This is an experiment, not a claimed speed fix.
 
 The [v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034165008) at `83264e55`
 passed A01--A05 and A15, but stopped selecting A06's required benchmark pair. Eight established

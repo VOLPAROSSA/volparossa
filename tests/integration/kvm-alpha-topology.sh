@@ -2386,6 +2386,13 @@ import struct
 import sys
 import time
 
+# Preserve the original 131072-frame allowance per 8 MiB response, including
+# requests, ACKs and observations on multiple interfaces. A07 and both mixed
+# cases declare at most 32 MiB responses: the same accounting gives 512K frames.
+# Payload samples remain separately bounded; exceeding this cap still truncates.
+MAX_HTTP3_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_HTTP3_CAPTURE_FRAMES = 131072 * MAX_HTTP3_RESPONSE_BYTES // (8 * 1024 * 1024)
+
 role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
@@ -2476,7 +2483,7 @@ while running and time.monotonic() < deadline:
             except BlockingIOError:
                 break
             observed_frames += 1
-            if observed_frames > 131072:
+            if observed_frames > MAX_HTTP3_CAPTURE_FRAMES:
                 truncated = True
                 running = False
                 break
