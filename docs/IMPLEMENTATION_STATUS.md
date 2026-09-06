@@ -6,6 +6,13 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The [uplink transition run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034024459)
+at `83264e55` passed all three phases and six protected application routes without restarting
+the four participant daemons. Independent-uplink loss withdrew Exit authority; the affected
+node could consume through others, then resumed Exit contribution on a fresh route after
+restoration. Complete zero-drop captures and unchanged guest-state cleanup support this scoped
+configured-interface result; it is not general Internet-health or unknown-interface discovery.
+
 The [full-agent simulated Wi-Fi run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032559440)
 at `4500d602` passed: the offline daemon consumed and relayed application traffic concurrently
 over its agent-created mesh interface, with exact hashes, two-leg packet evidence and complete
@@ -20,6 +27,12 @@ Client Prepare, Activate, native probe and Commit succeeded, and exact Destroy r
 169 ms. The later actor-authority join rejected the route. Thus the reproduced helper cleanup
 blockers were passed, but a usable DNS response and the remaining acceptance sequence were not.
 Final cleanup left zero owned objects, namespace references and stored descriptors.
+
+The `crash-recovery` scenario now runs the unchanged A14 held-MPTCP, 25-SIGKILL and
+eleven-helper-restart sequence directly, without waiting behind A01--A13. Its separate
+`crash-recovery.json` reports A14/A15 only and cannot claim complete alpha acceptance.
+Load-only, scoped-report rejection and topology-contract checks pass; live crash proof is pending.
+Fixed, identity-free authority-join stage diagnostics also retain the existing rejection behavior.
 
 The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
 at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
@@ -244,7 +257,7 @@ traffic; spare capacity must be measured and enforced, not inferred from configu
 - [x] Full-agent direct mesh discovery, concurrent offline consumption/contribution and teardown on simulated Linux radios.
 - [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
-- [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
+- [x] Offline participation and configured-uplink loss/recovery without recursive overlay-as-exit egress (IPv4 live proof below).
 
 The mixed-link fixture now includes a real HTTP/3 bandwidth comparison: a two-path native MPQUIC
 session loses its LAN link before a held 32-MiB response is released, then a fresh LAN+WAN
@@ -260,6 +273,13 @@ shared transient-error classifier now load unconditionally from `benchmark-selec
 with their behavior unchanged. Eight focused fixture checks and the static topology contract
 pass. The attempted run cleaned all owned objects and preserved its guest-state baseline;
 it produced no new throughput measurement.
+The [next comparison attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34033641848)
+at `6116db05` passed the real A06 LAN+WAN HTTP/3 transfer and privacy checks, then stopped
+while selecting its baseline: Relay2 activation returned `Kernel(6)` after confirmed rollback.
+No bandwidth ratio was produced. The baseline now reuses only the exact still-active A06
+context, paths, Relays and Exit, with normal new-flow expiry checks; the aggregate case still
+requires a fresh selected context. Nine focused fixture checks pass. This removes unnecessary
+baseline reconnection, not the observed kernel failure or the requirement for measured gain.
 
 The next uplink-transition runtime uses optional `network.independent_egress_interface` for an
 already authorized IndependentInternet Exit. Bounded read-only netlink observations track that
@@ -314,6 +334,21 @@ request bounds and replay/cooldown checks remain unchanged; only accepted signed
 the refresh clock. The old suppression is reproduced with real signed 120-second capabilities;
 eight focused scheduling/lineage checks and strict agent Clippy pass. The complete live
 restoration sequence still needs a successful rerun.
+That [complete rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034024459) at
+`83264e55` now **passes**. Its six protected UDP routes delivered 135 real echo datagrams with
+independently checked application/destination hashes. Initially and after restoration, C used
+A as Relay to X while A used offline C as Relay to B; during B's outage, B instead consumed
+through C to A's independent Exit. Each phase had more than 3.10 seconds of actual flow overlap.
+The exact configured `r2d` ifindex stayed 62 across UP--DOWN--UP/default removal and return.
+Exit authority withdrew 58 ms after the loss baseline; verified advertised roles changed
+111--011--111. Three new markers on the original A-to-B application socket produced no replies
+and no destination receipt. A fresh ordinary selection found no ready route to withdrawn B;
+no incoming Exit-grant rejection is claimed because none was observed. Restoration used a new
+context with the same four agent PIDs. All twelve capture records were complete with zero
+drops, direct-exit packets or plaintext leaks; cleanup removed all owned objects and preserved
+identical guest-state hashes. This proves one explicitly monitored IPv4 uplink, not automatic
+discovery of previously unconfigured interfaces, Internet-wide reachability or physical-radio
+recovery. The offline node never acquired a main default route or an Exit role.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper

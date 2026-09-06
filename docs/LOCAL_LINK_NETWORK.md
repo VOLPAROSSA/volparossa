@@ -51,7 +51,17 @@ It requires actual received traffic on both aggregate paths, more than 25% impro
 payloads, zero observer drops/leaks and complete cleanup. That live comparison has not yet passed;
 the fixture's focused checks are not measured network-speed evidence.
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
-evidence. Automatic radio setup also remains unfinished; no hidden public-IP fallback is used.
+evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
+public-IP fallback is used.
+
+Configured independent-uplink loss and recovery now has a
+[passing three-phase run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034024459) at
+`83264e55`: six protected routes, 135 exact echo datagrams, unchanged participant processes,
+Exit withdrawal during loss and a fresh working Exit route after restoration. The affected
+node consumed through the offline Relay while its own uplink was absent. Old-socket challenges
+did not reach the destination; all captures and cleanup passed. This monitors one explicitly
+configured interface and its real link/address/default state, not arbitrary new interfaces or
+end-to-end Internet health. The permanent offline node retained no main default or Exit role.
 
 ## Sharing capacity
 
