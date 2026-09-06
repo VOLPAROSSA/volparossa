@@ -3161,7 +3161,7 @@ fn map_preselection_error(_: ClientPreselectionError) -> ClientRouteConnectError
 /// A complete actor snapshot projected into a selection-only identity.
 ///
 /// This value is deliberately not accepted by any discovery RPC. Route execution must re-resolve
-/// an actor-minted capability and compare every field before dispatch.
+/// an actor-minted capability and verify its live identity/policy lineage before dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProspectivePeerIdentity {
     wire_node_id: [u8; 32],
@@ -3249,6 +3249,40 @@ impl ProspectivePeerIdentity {
         }
         if self.advertisement_sequence == current.advertisement_sequence {
             return self.direct_matches(current);
+        }
+        self.advertisement_sequence != 0
+            && self.advertisement_sequence < current.advertisement_sequence
+    }
+
+    /// A newer actor-minted Exit capability may authorize new reservation RPCs, but never
+    /// replaces the selected advertisement, native measurements or their original deadlines.
+    /// Endpoint authority still comes from the subsequent exact signed reservation grants.
+    fn forwarded_lineage_matches(&self, current: &Self, required_expiry_ms: u64) -> bool {
+        if self.wire_node_id != current.wire_node_id
+            || self.peer_id != current.peer_id
+            || self.public_key != current.public_key
+            || self.policy_version != current.policy_version
+            || self.policy_hash != current.policy_hash
+            || self.policy_expires_at_ms != current.policy_expires_at_ms
+            || self.advertisement_expires_at_ms < required_expiry_ms
+            || self.policy_expires_at_ms < required_expiry_ms
+            || self.expires_at_ms < required_expiry_ms
+            || self.expires_at_ms
+                > self
+                    .advertisement_expires_at_ms
+                    .min(self.policy_expires_at_ms)
+            || current.advertisement_expires_at_ms < required_expiry_ms
+            || current.policy_expires_at_ms < required_expiry_ms
+            || current.expires_at_ms < required_expiry_ms
+            || current.expires_at_ms
+                > current
+                    .advertisement_expires_at_ms
+                    .min(current.policy_expires_at_ms)
+        {
+            return false;
+        }
+        if self.advertisement_sequence == current.advertisement_sequence {
+            return self == current;
         }
         self.advertisement_sequence != 0
             && self.advertisement_sequence < current.advertisement_sequence
@@ -3796,7 +3830,9 @@ impl RouteSetupAuthorities {
                 .control
                 .identity
                 .direct_lineage_matches(&self.control, setup_required_expiry)
-            || selected_exit != request.exit
+            || !request
+                .exit
+                .forwarded_lineage_matches(&selected_exit, setup_required_expiry)
             || forwarded.exit.expires_at_ms < request.exit.expires_at_ms
             || self.control.policy_hash != request.parameters.policy_hash
             || self.exit.policy_hash != request.parameters.policy_hash
@@ -13690,7 +13726,8 @@ mod tests {
         assert_eq!(original.validate_binding(request), Ok(()));
 
         let mut changed = original.clone();
-        changed.exit.exit_advertisement_sequence += 1;
+        changed.exit.exit_advertisement_payload_hash =
+            changed.exit.exit_advertisement_payload_hash.xor_for_test();
         assert_eq!(
             changed.validate_binding(request),
             Err(RouteAuthorityRejection::SelectedBinding)
@@ -13719,6 +13756,57 @@ mod tests {
             .shutdown()
             .await
             .expect("clean diagnostic fixture shutdown");
+    }
+
+    #[tokio::test]
+    async fn forwarded_exit_lineage_rejects_rollback_identity_policy_and_deadline_drift() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let request = &fixture.transaction.transaction.request;
+        let selected = &request.exit;
+        let required = request.parameters.setup_expires_at_unix * 1_000;
+        assert!(selected.forwarded_lineage_matches(selected, required));
+        let mut refreshed = selected.clone();
+        refreshed.advertisement_sequence += 1;
+        refreshed.advertisement_payload_hash = refreshed.advertisement_payload_hash.xor_for_test();
+        assert!(selected.forwarded_lineage_matches(&refreshed, required));
+        for mutation in 0..11 {
+            let mut invalid = refreshed.clone();
+            match mutation {
+                0 => invalid.advertisement_sequence = 0,
+                1 => invalid.wire_node_id[0] ^= 1,
+                2 => invalid.peer_id = request.control.identity.peer_id,
+                3 => invalid.public_key[0] ^= 1,
+                4 => invalid.policy_hash[0] ^= 1,
+                5 => invalid.policy_version += 1,
+                6 => invalid.policy_expires_at_ms += 1,
+                7 => invalid.advertisement_expires_at_ms = required - 1,
+                8 => invalid.expires_at_ms = required - 1,
+                9 => invalid.advertisement_sequence = selected.advertisement_sequence,
+                10 => {
+                    invalid = selected.clone();
+                    invalid.advertisement_expires_at_ms += 1;
+                }
+                _ => unreachable!("bounded mutations"),
+            }
+            assert!(
+                !selected.forwarded_lineage_matches(&invalid, required),
+                "mutation {mutation}"
+            );
+        }
+        let mut expired_selected = selected.clone();
+        expired_selected.expires_at_ms = required - 1;
+        assert!(
+            !expired_selected.forwarded_lineage_matches(&refreshed, required),
+            "a new advertisement cannot extend the original selected authority"
+        );
+        let mut zero_sequence = selected.clone();
+        zero_sequence.advertisement_sequence = 0;
+        assert!(!zero_sequence.forwarded_lineage_matches(&refreshed, required));
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("clean lineage fixture shutdown");
     }
 
     #[tokio::test]

@@ -3318,7 +3318,11 @@ impl DiscoveryRuntime {
                     exit_peer: pending.expected_exit_peer,
                 })
                 .is_some_and(|current| {
-                    current == expected && current.expires_at_ms >= pending.operation_expires_at_ms
+                    forwarded_exit_authority_lineage_matches(
+                        current,
+                        expected,
+                        pending.operation_expires_at_ms,
+                    )
                 }),
             None => pending.operation == ExitForwardOperation::FetchExitAdvertisement,
         }
@@ -8652,7 +8656,11 @@ impl DiscoveryRuntime {
                     exit_peer: pending.expected_exit_peer,
                 })
                 .is_some_and(|current| {
-                    current == expected && current.expires_at_ms >= pending.operation_expires_at_ms
+                    forwarded_exit_authority_lineage_matches(
+                        current,
+                        expected,
+                        pending.operation_expires_at_ms,
+                    )
                 }),
             None => matches!(
                 pending.operation,
@@ -12381,16 +12389,6 @@ impl DiscoveryRuntime {
                 } else {
                     self.direct_relays.get(control_relay_peer).cloned()
                 };
-                let stale_keys = self
-                    .forwarded_exits
-                    .iter()
-                    .filter_map(|(candidate, capability)| {
-                        (candidate.exit_peer == peer
-                            && capability.exit_advertisement_sequence < accepted.sequence_number)
-                            .then_some(*candidate)
-                    })
-                    .collect::<Vec<_>>();
-                removed_expiry = self.revoke_forwarded_keys(&stale_keys, true);
                 let control_valid = control.as_ref().is_some_and(|control| {
                     direct_relay_target_matches(
                         control,
@@ -12401,25 +12399,44 @@ impl DiscoveryRuntime {
                         && control.policy_hash == accepted.policy_hash
                         && control.policy_expires_at_ms == accepted.policy_expires_at_ms
                 });
-                if *exit_peer != peer
-                    || *exit_node_id != accepted.node_id
-                    || !roles.exit
-                    || !policy_matches
-                    || *control_relay_peer == peer
-                    || *control_relay_node_id == accepted.node_id
-                    || !deadline_is_bounded(*request_deadline_ms, now_ms)
-                    || !control_valid
-                    || !self.forwarded_exit_authority_is_eligible(*control_relay_peer, peer, now_ms)
-                    || (*control_relay_peer != *self.service.local_peer_id()
-                        && !self.peer_is_forwarded_exit_target(peer, now_ms))
-                {
-                    0
-                } else {
+                let valid_exit = *exit_peer == peer
+                    && *exit_node_id == accepted.node_id
+                    && roles.exit
+                    && policy_matches
+                    && *control_relay_peer != peer
+                    && *control_relay_node_id != accepted.node_id
+                    && deadline_is_bounded(*request_deadline_ms, now_ms)
+                    && control_valid
+                    && self.forwarded_exit_authority_is_eligible(*control_relay_peer, peer, now_ms)
+                    && (*control_relay_peer == *self.service.local_peer_id()
+                        || self.peer_is_forwarded_exit_target(peer, now_ms));
+                // A fully verified republish does not revoke still-live transaction authority
+                // belonging to the same Exit and full policy. Other controls keep their exact
+                // old provenance and expiry; only this authenticated response mints a new cap.
+                let stale_keys = self
+                    .forwarded_exits
+                    .iter()
+                    .filter_map(|(candidate, capability)| {
+                        (candidate.exit_peer == peer
+                            && capability.exit_advertisement_sequence < accepted.sequence_number
+                            && !(valid_exit
+                                && forwarded_exit_republish_preserves_authority(
+                                    capability,
+                                    &accepted,
+                                    now_ms.saturating_add(1),
+                                )))
+                        .then_some(*candidate)
+                    })
+                    .collect::<Vec<_>>();
+                removed_expiry = self.revoke_forwarded_keys(&stale_keys, true);
+                if valid_exit {
                     accepted.expires_at_ms.min(
                         control
                             .as_ref()
                             .map_or(0, |capability| capability.expires_at_ms),
                     )
+                } else {
+                    0
                 }
             }
         };
@@ -13596,6 +13613,76 @@ fn direct_relay_authority_lineage_matches(
         && current.policy_expires_at_ms == authorized.policy_expires_at_ms
         && current.expires_at_ms >= required_until_ms
         && authorized.expires_at_ms >= required_until_ms
+}
+
+/// A newer verified Exit advertisement may leave an old control-specific capability untouched.
+/// This does not create provenance for that control or extend any captured deadline.
+fn forwarded_exit_republish_preserves_authority(
+    captured: &ForwardedExitCapability,
+    accepted: &AcceptedAdvertisement,
+    required_until_ms: u64,
+) -> bool {
+    captured.exit_node_id == accepted.node_id
+        && captured.exit_peer_id == accepted.peer_id
+        && captured.exit_public_key == accepted.public_key
+        && captured.policy_version == accepted.policy_version
+        && captured.policy_hash == accepted.policy_hash
+        && captured.policy_expires_at_ms == accepted.policy_expires_at_ms
+        && captured.exit_advertisement_sequence != 0
+        && captured.exit_advertisement_sequence < accepted.sequence_number
+        && captured.exit_advertisement_expires_at_ms >= required_until_ms
+        && captured.control_relay_advertisement_expires_at_ms >= required_until_ms
+        && captured.expires_at_ms >= required_until_ms
+        && accepted.expires_at_ms >= required_until_ms
+}
+
+/// An ordinary RPC remains bound to the same two actors and full policy across republishing.
+/// Both original and current signed authorities must cover the unchanged operation deadline.
+fn forwarded_exit_authority_lineage_matches(
+    current: &ForwardedExitCapability,
+    captured: &ForwardedExitCapability,
+    required_until_ms: u64,
+) -> bool {
+    current.control_relay_node_id == captured.control_relay_node_id
+        && current.control_relay_peer_id == captured.control_relay_peer_id
+        && current.control_relay_public_key == captured.control_relay_public_key
+        && current.exit_node_id == captured.exit_node_id
+        && current.exit_peer_id == captured.exit_peer_id
+        && current.exit_public_key == captured.exit_public_key
+        && current.policy_version == captured.policy_version
+        && current.policy_hash == captured.policy_hash
+        && current.policy_expires_at_ms == captured.policy_expires_at_ms
+        && current.policy_expires_at_ms >= required_until_ms
+        && current.expires_at_ms >= required_until_ms
+        && captured.expires_at_ms >= required_until_ms
+        && [
+            (
+                current.control_relay_advertisement_sequence,
+                current.control_relay_advertisement_expires_at_ms,
+                current.control_relay_advertisement_payload_hash,
+                captured.control_relay_advertisement_sequence,
+                captured.control_relay_advertisement_expires_at_ms,
+                captured.control_relay_advertisement_payload_hash,
+            ),
+            (
+                current.exit_advertisement_sequence,
+                current.exit_advertisement_expires_at_ms,
+                current.exit_advertisement_payload_hash,
+                captured.exit_advertisement_sequence,
+                captured.exit_advertisement_expires_at_ms,
+                captured.exit_advertisement_payload_hash,
+            ),
+        ]
+        .into_iter()
+        .all(
+            |(sequence, expiry, hash, old_sequence, old_expiry, old_hash)| {
+                old_sequence != 0
+                    && expiry >= required_until_ms
+                    && old_expiry >= required_until_ms
+                    && (sequence > old_sequence
+                        || (sequence == old_sequence && expiry == old_expiry && hash == old_hash))
+            },
+        )
 }
 
 /// Keeps a still-live forwarded Exit usable across an ordinary advertisement refresh by the same
@@ -21966,6 +22053,379 @@ mod tests {
             completed.outcome,
             Err(OutboundReservationError::InvalidResponse)
         );
+    }
+
+    fn signed_refresh_hold_request(
+        control: &DirectRelayCapability,
+        exit: &ForwardedExitCapability,
+        now_ms: u64,
+    ) -> ExitForwardRequest {
+        let identity = Identity::generate();
+        let public_key = identity.ed25519_public_key_bytes().unwrap();
+        let nonce = generate_nonce();
+        let deadline = now_ms + 10_000;
+        let hold = ExitCapacityHoldRequest {
+            reservation_id: vec![21; 16],
+            route_context_id: vec![22; 16],
+            exit_node_id: exit.exit_node_id.to_vec(),
+            client_session_id: node_id_from_public_key(&public_key).to_vec(),
+            allowed_transports: vec![Transport::UdpSinglePath as i32],
+            reserved_up_mbps: 8,
+            reserved_down_mbps: 8,
+            maximum_paths: 1,
+            policy_hash: exit.policy_hash.to_vec(),
+            created_at_ms: now_ms,
+            expires_at_ms: deadline,
+            nonce: nonce.to_vec(),
+            client_session_public_key: public_key.to_vec(),
+            control_relay_node_id: control.node_id.to_vec(),
+            control_relay_peer_id: control.peer_id.to_bytes(),
+            exit_peer_id: exit.exit_peer_id.to_bytes(),
+            reservation_expires_at_ms: deadline,
+            probe_permit_limit: 1,
+        };
+        ExitForwardRequest::new(
+            nonce[..FORWARD_ID_BYTES].to_vec(),
+            control.node_id.to_vec(),
+            control.peer_id.to_bytes(),
+            control.public_key.to_vec(),
+            exit.exit_peer_id.to_bytes(),
+            exit.exit_node_id.to_vec(),
+            deadline,
+            ExitForwardOperation::CapacityHold,
+            sign_with_identity(&hold, &identity, now_ms, deadline, nonce),
+        )
+        .unwrap()
+    }
+
+    async fn signed_refresh_fixture() -> (RuntimeFixture, [DirectRelayCapability; 2], Identity, u64)
+    {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let controls = [
+            install_control(&mut fixture, &Identity::generate(), now_ms),
+            install_control(&mut fixture, &Identity::generate(), now_ms),
+        ];
+        let exit = Identity::generate();
+        let exit_peer = *exit.peer_id();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, now_ms + 30_000);
+        fixture
+            .runtime
+            .mark_forwarded_exit_target(exit_peer, now_ms + 30_000);
+        let advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        for control in &controls {
+            assert!(
+                fixture
+                    .runtime
+                    .stage_advertisement_commit(
+                        PreparedAdvertisementCommit {
+                            peer: exit_peer,
+                            provenance: forwarded_provenance(control, &exit, now_ms + 20_000),
+                            envelope: advertisement.signed_envelope().to_vec(),
+                        },
+                        &fixture.state,
+                    )
+                    .await
+                    .accepted_advertisement()
+                    .is_some()
+            );
+        }
+        (fixture, controls, exit, now_ms)
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one signed refresh spans pending and retry ownership"
+    )]
+    async fn signed_exit_republish_preserves_pending_and_retry_without_new_provenance() {
+        let (mut fixture, controls, exit, now_ms) = Box::pin(signed_refresh_fixture()).await;
+        let keys = controls.each_ref().map(|control| ForwardedExitKey {
+            control_relay_peer: control.peer_id,
+            exit_peer: *exit.peer_id(),
+        });
+        let old = keys.map(|key| fixture.runtime.forwarded_exits[&key].clone());
+        let requests = [
+            signed_refresh_hold_request(&controls[0], &old[0], now_ms),
+            signed_refresh_hold_request(&controls[1], &old[1], now_ms),
+        ];
+        let (reply, received) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(controls[0].peer_id, requests[0].clone(), reply);
+        let pending_id = *fixture
+            .runtime
+            .pending_client_forwards
+            .keys()
+            .next()
+            .unwrap();
+        let (reply, retry_received) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(controls[1].peer_id, requests[1].clone(), reply);
+        let retry_id = *fixture
+            .runtime
+            .pending_client_forwards
+            .keys()
+            .find(|id| **id != pending_id)
+            .unwrap();
+        fixture
+            .runtime
+            .fail_client_forward(retry_id, controls[1].peer_id);
+        assert_eq!(
+            retry_received.await.unwrap(),
+            Err(OutboundReservationError::AmbiguousAfterDispatch)
+        );
+        let advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            2,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(
+                    PreparedAdvertisementCommit {
+                        peer: *exit.peer_id(),
+                        provenance: forwarded_provenance(&controls[0], &exit, now_ms + 20_000),
+                        envelope: advertisement.signed_envelope().to_vec(),
+                    },
+                    &fixture.state,
+                )
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        assert!(
+            fixture
+                .runtime
+                .pending_client_forwards
+                .contains_key(&pending_id),
+            "ordinary same-actor republish must not revoke an in-flight signed Hold"
+        );
+        assert_eq!(fixture.runtime.retry_client_forwards.len(), 1);
+        assert_eq!(
+            fixture.runtime.forwarded_exits[&keys[1]], old[1],
+            "other control provenance unchanged"
+        );
+        assert_eq!(
+            fixture.runtime.forwarded_exits[&keys[0]].exit_advertisement_sequence,
+            2
+        );
+        assert_eq!(fixture.runtime.forwarded_exits.len(), 2);
+        let response = ExitForwardResponse::unavailable(
+            requests[0].forward_id().to_vec(),
+            ExitForwardOperation::CapacityHold,
+            old[0].exit_node_id.to_vec(),
+            exit.peer_id().to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .runtime
+                .complete_client_forward(pending_id, controls[0].peer_id, &response, &fixture.state)
+                .await,
+            OutboundEventOutcome::Completed
+        );
+        assert_eq!(received.await.unwrap(), Ok(response));
+        let (reply, received) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(controls[1].peer_id, requests[1].clone(), reply);
+        let pending = fixture
+            .runtime
+            .pending_client_forwards
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(pending.dispatch_attempts, 2);
+        assert_eq!(pending.authorized_exit.as_ref(), Some(&old[1]));
+        drop(received);
+    }
+
+    #[tokio::test]
+    async fn signed_exit_republish_invalid_provenance_cannot_hide_valid_withdrawal() {
+        let (mut fixture, controls, exit, now_ms) = Box::pin(signed_refresh_fixture()).await;
+        let key = ForwardedExitKey {
+            control_relay_peer: controls[0].peer_id,
+            exit_peer: *exit.peer_id(),
+        };
+        let original = fixture.runtime.forwarded_exits.clone();
+        let request = signed_refresh_hold_request(&controls[0], &original[&key], now_ms);
+        let (reply, received) = oneshot::channel();
+        fixture
+            .runtime
+            .begin_client_forward(controls[0].peer_id, request, reply);
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        let advertisement = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: true,
+                exit: false,
+            },
+            &fixture.policy,
+            2,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        let mut invalid = forwarded_provenance(&controls[0], &exit, now_ms + 20_000);
+        if let AdvertisementProvenance::ForwardedExit {
+            request_deadline_ms,
+            ..
+        } = &mut invalid
+        {
+            *request_deadline_ms = now_ms - 1;
+        }
+        fixture
+            .runtime
+            .stage_advertisement_commit(
+                PreparedAdvertisementCommit {
+                    peer: *exit.peer_id(),
+                    provenance: invalid,
+                    envelope: advertisement.signed_envelope().to_vec(),
+                },
+                &fixture.state,
+            )
+            .await;
+        assert_eq!(
+            fixture.runtime.forwarded_exits, original,
+            "invalid provenance cannot change authority"
+        );
+        assert_eq!(fixture.runtime.pending_client_forwards.len(), 1);
+        fixture
+            .runtime
+            .stage_advertisement_commit(
+                PreparedAdvertisementCommit {
+                    peer: *exit.peer_id(),
+                    provenance: forwarded_provenance(&controls[0], &exit, now_ms + 20_000),
+                    envelope: advertisement.signed_envelope().to_vec(),
+                },
+                &fixture.state,
+            )
+            .await;
+        assert!(
+            fixture.runtime.forwarded_exits.is_empty(),
+            "valid Exit withdrawal revokes all control lineages"
+        );
+        assert!(fixture.runtime.pending_client_forwards.is_empty());
+        assert_eq!(
+            received.await.unwrap(),
+            Err(OutboundReservationError::InvalidResponse)
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_exit_republish_response_lineage_rejects_actor_policy_fingerprint_and_expiry_changes()
+     {
+        let (fixture, controls, exit, now_ms) = Box::pin(signed_refresh_fixture()).await;
+        let old = fixture.runtime.forwarded_exits[&ForwardedExitKey {
+            control_relay_peer: controls[0].peer_id,
+            exit_peer: *exit.peer_id(),
+        }]
+            .clone();
+        let deadline = now_ms + 10_000;
+        let mut current = old.clone();
+        assert!(forwarded_exit_authority_lineage_matches(
+            &current, &old, deadline
+        ));
+        current.exit_advertisement_sequence += 1;
+        current.control_relay_advertisement_sequence += 1;
+        assert!(forwarded_exit_authority_lineage_matches(
+            &current, &old, deadline
+        ));
+        let accepted = accepted_for_identity(
+            &exit,
+            &fixture.policy,
+            current.exit_advertisement_sequence,
+            current.expires_at_ms,
+        );
+        assert!(forwarded_exit_republish_preserves_authority(
+            &old,
+            &accepted,
+            now_ms + 1
+        ));
+        let mutations: [fn(&mut ForwardedExitCapability); 11] = [
+            |cap| cap.exit_node_id[0] ^= 1,
+            |cap| cap.exit_peer_id = *Identity::generate().peer_id(),
+            |cap| cap.exit_public_key[0] ^= 1,
+            |cap| cap.control_relay_public_key[0] ^= 1,
+            |cap| cap.control_relay_peer_id = *Identity::generate().peer_id(),
+            |cap| cap.policy_version += 1,
+            |cap| cap.policy_hash[0] ^= 1,
+            |cap| cap.policy_expires_at_ms -= 1,
+            |cap| cap.exit_advertisement_sequence = 0,
+            |cap| cap.control_relay_advertisement_sequence = 0,
+            |cap| cap.expires_at_ms = 0,
+        ];
+        for change in mutations {
+            let mut changed = current.clone();
+            change(&mut changed);
+            assert!(!forwarded_exit_authority_lineage_matches(
+                &changed, &old, deadline
+            ));
+        }
+        for control in [false, true] {
+            let mut changed = old.clone();
+            if control {
+                changed.control_relay_advertisement_payload_hash =
+                    AdvertisementPayloadHash::for_test([8; 32]);
+            } else {
+                changed.exit_advertisement_payload_hash =
+                    AdvertisementPayloadHash::for_test([9; 32]);
+            }
+            assert!(!forwarded_exit_authority_lineage_matches(
+                &changed, &old, deadline
+            ));
+        }
+        let mut expired = old.clone();
+        expired.expires_at_ms = deadline - 1;
+        assert!(!forwarded_exit_authority_lineage_matches(
+            &current, &expired, deadline
+        ));
+        assert!(!forwarded_exit_authority_lineage_matches(
+            &expired, &old, deadline
+        ));
+        assert!(!forwarded_exit_republish_preserves_authority(
+            &expired, &accepted, deadline
+        ));
+        for change in [
+            |cap: &mut AcceptedAdvertisement| cap.public_key[0] ^= 1,
+            |cap: &mut AcceptedAdvertisement| cap.policy_hash[0] ^= 1,
+            |cap: &mut AcceptedAdvertisement| cap.policy_version += 1,
+            |cap: &mut AcceptedAdvertisement| cap.policy_expires_at_ms -= 1,
+            |cap: &mut AcceptedAdvertisement| cap.expires_at_ms = 0,
+        ] {
+            let mut changed = accepted;
+            change(&mut changed);
+            assert!(!forwarded_exit_republish_preserves_authority(
+                &old, &changed, deadline
+            ));
+        }
     }
 
     #[tokio::test]

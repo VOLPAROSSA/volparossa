@@ -8117,6 +8117,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preprobe_handoff_accepts_newer_exit_without_rebinding_native_proof() {
+        let mut plan = prospective_plan();
+        for relay in &mut plan.prospective_relays {
+            relay
+                .proof
+                .bind_client_native_round_trip(2_000)
+                .expect("original native RTT binding");
+        }
+        let original_path_expiries = plan
+            .prospective_relays
+            .iter()
+            .map(|relay| relay.proof.evidence_valid_until_ms)
+            .collect::<Vec<_>>();
+        let clock = HandoffClock::new(NOW_MS + 1_001);
+        let mut io = HandoffIo::from_plan(&plan, clock.clone());
+        let state = Arc::clone(&io.state);
+        let (continuation, expected) = ExpectedResolvedHandoff::consume(plan, preprobe_limits());
+        let continuation = continuation
+            .bind_client_native_route_scope(ClientNativeRouteScope {
+                masque_context_id: 17,
+                client_native_instance_id: [31; 32],
+            })
+            .expect("bound original native runtime");
+
+        // Only the actor resolver advances after the affine plan/native binding was consumed.
+        // No selected request, proof, endpoint or evidence deadline is rewritten to match it.
+        io.exit.exit_advertisement_sequence += 1;
+        io.exit.exit_advertisement_payload_hash =
+            io.exit.exit_advertisement_payload_hash.xor_for_test();
+        io.exit.exit_advertisement_expires_at_ms += 1_000;
+        let (_cancellation, mut cancelled) = watch::channel(false);
+        let unmeasured = continuation
+            .resolve_into_unmeasured(&io, &clock, &mut cancelled)
+            .await
+            .expect("newer live same-Exit authority preserves the completed native binding");
+        assert_exact_resolved_handoff(&unmeasured, &io, &state, &expected);
+        for (path, original_expiry) in unmeasured
+            .transaction
+            .request
+            .paths
+            .iter()
+            .zip(original_path_expiries)
+        {
+            assert_eq!(path.proof.forwarded_exit.exit, expected.exit);
+            assert_eq!(path.proof.client_native_round_trip_micros, Some(2_000));
+            assert_eq!(path.proof.evidence_valid_until_ms, original_expiry);
+        }
+        let native = unmeasured
+            .transaction
+            .request
+            .parameters
+            .client_native_route_scope
+            .as_ref()
+            .unwrap();
+        assert_eq!(native.masque_context_id, 17);
+        assert_eq!(native.client_native_instance_id, [31; 32]);
+        assert_eq!(state.transport_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn preprobe_handoff_rechecks_post_resolve_wall_and_cancellation() {
         for (post_resolve_wall_ms, succeeds) in [
             (NOW_MS + 1_001, true),
