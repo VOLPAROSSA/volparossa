@@ -126,14 +126,14 @@
       "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
       "applies_after": "patches/volparossa-xquic.patch",
       "file": "patches/volparossa-xquic-edt.patch",
-      "sha256": "1cf0fc84fe87a6057ad654a412b7b9b2edc47d71875e06d6fc17079a6bef6ebf",
+      "sha256": "0359b92b5c14b88db3070153f43a5ec013a2167d945dadb36d347d6017cdd75e",
       "purpose": [
         "select exactly one writable path by bounded estimated delivery time",
         "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
-        "give each healthy active path continuous service within 256 KiB plus one scheduled packet after a 2 MiB ACKed bootstrap floor",
-        "stop forced service after 8 MiB attempted debt plus one scheduled packet without sufficient ACK progress",
+        "bound initial exploration to a 2 MiB ACKed floor per path without ongoing historical-byte equalisation",
+        "stop initial exploration after 8 MiB attempted debt plus one scheduled packet without sufficient ACK progress",
         "exclude congestion-blocked paths without reinjection, duplication or FEC",
-        "exercise same-session 4 MiB fairness and reject a later congested lossy path in one deterministic native contract test"
+        "exercise post-warm-up EDT selection, bounded startup debt and a 32-DATAGRAM active-blackhole regression in the exact scheduler callback"
       ]
     },
     {

@@ -61,7 +61,17 @@ The mqvpn patch adds `src/spki_pin.c`, `src/spki_pin.h`,
 existing Apache-2.0 upstream files preserve their upstream license and
 notices.
 
-No local patch is applied to lwIP or BoringSSL. The builder checks both patch
+The additional GPL-3.0-only `patches/volparossa-xquic-edt.patch`
+(`0359b92b5c14b88db3070153f43a5ec013a2167d945dadb36d347d6017cdd75e`)
+retains bounded initial exploration (2 MiB ACKed per path, at most 8 MiB attempt
+debt plus one packet), then selects by live delivery cost and congestion.
+It does not continuously equalise historical path bytes. The exact callback
+contract covers a warmed-up, still-active black hole with spare congestion
+window: all 32 small application datagrams select the healthy EDT winner.
+This is a deterministic scheduler regression, not a live failover or bandwidth
+acceptance claim. Upstream revisions and original licenses are unchanged.
+
+No local patch is applied to lwIP or BoringSSL. The builder checks all patch
 hashes, runs `git apply --check`, and applies them only to fresh
 `git archive` exports. The locked source checkouts remain unchanged.
 

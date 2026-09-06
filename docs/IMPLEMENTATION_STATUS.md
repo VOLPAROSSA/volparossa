@@ -6,6 +6,15 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+A deterministic reproduction now identifies a separate EDT policy defect: after warm-up,
+a 512-KiB historical byte deficit overrode the measured cost and sent all 32 small data
+packets to a still-active black hole (100-ms RTT, 80% loss) instead of the healthy 1-ms
+path. The ongoing forced byte-equalisation rule has been removed. The exact scheduler
+callback now sends all 32 to the healthy path; bounded initial exploration, congestion
+checks, no duplication/FEC and the live two-path/gain requirements remain unchanged.
+The complete callback contract passes and patch hashes/provenance are synchronized;
+actual failover and bandwidth proof still require the next full native build and live run.
+
 The [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34041368472)
 and [mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34041367509)
 at exact `3bacae04` now retain complete, zero-drop captures: the capture-stop repair is
