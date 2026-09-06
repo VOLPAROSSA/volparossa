@@ -2304,7 +2304,10 @@ fn begin_restart_reaper_sandbox_after_setns_with<K: SandboxKernel>(
     kernel.clear_ambient()?;
     let last_capability = kernel.last_capability()?;
     for capability in 0..=last_capability {
-        if capability != CAP_NET_ADMIN && capability != CAP_SETPCAP {
+        if capability != CAP_NET_BIND_SERVICE
+            && capability != CAP_NET_ADMIN
+            && capability != CAP_SETPCAP
+        {
             kernel.drop_bounding(capability)?;
         }
     }
@@ -3835,6 +3838,7 @@ mod tests {
             .position(|step| *step == Step::InstallProcessTreeFilter)
             .expect("confinement filter");
         assert_eq!(filter, no_new_privileges + 1);
+        assert!(!kernel.steps[..filter].contains(&Step::Drop(CAP_NET_BIND_SERVICE)));
         assert!(!kernel.steps[..filter].contains(&Step::Drop(CAP_NET_ADMIN)));
         assert!(!kernel.steps[..filter].contains(&Step::Drop(CAP_SETPCAP)));
         assert!(kernel.steps[..filter].contains(&Step::Drop(CAP_SYS_ADMIN)));
