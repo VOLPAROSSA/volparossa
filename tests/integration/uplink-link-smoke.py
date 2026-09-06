@@ -135,8 +135,12 @@ def phase_evidence(directory, run_id, phase, peers):
     identifier = phase_id(run_id, phase)
     phase_dir = directory / ("uplink-" + phase)
     captures = {node: read_json(phase_dir / f"local-link-capture-{node}.json") for node in NODES}
-    if any(item["truncated"] or item["packet_socket_drops"] or item["direct_client_exit_packets"] or item["plaintext_leaks"] for item in captures.values()):
+    if any(not item.get("capture_complete") or item["truncated"] or item["packet_socket_drops"] or item["direct_client_exit_packets"] or item["plaintext_leaks"] for item in captures.values()):
         raise ValueError("incomplete packet capture or direct/plaintext leak")
+    transition = captures["relay2"]["interface_lifecycle"]["r2d"]
+    expected = [True, False] if phase == "initial" else [phase == "restored"]
+    if not transition["complete"] or not transition["same_packet_socket"] or [event["up"] for event in transition["events"]] != expected:
+        raise ValueError("exact uplink capture transition was not proven")
     server = read_json(phase_dir / "app/server.json")
     if server["destination"] != list(fixture.DESTINATION):
         raise ValueError("substituted destination")
@@ -201,6 +205,8 @@ def build_evidence(directory, run_id):
         read_json(directory / f"uplink-egress-{phase}-routes.json"), phase != "lost") for phase in PHASES}
     if len({item["ifindex"] for item in uplink.values()}) != 1:
         raise ValueError("uplink was replaced rather than recovered")
+    if any(phase["packet_captures"]["relay2"]["interface_lifecycle"]["r2d"]["ifindex"] != uplink[phase["phase"]]["ifindex"] for phase in phases):
+        raise ValueError("packet observer did not retain the exact monitored uplink")
     offline = {phase: local.local_only_state(read_json(directory / f"uplink-client-{phase}-addresses.json"),
         read_json(directory / f"uplink-client-{phase}-routes.json")) for phase in PHASES}
     for phase in PHASES:
@@ -266,7 +272,9 @@ def main():
         fixture.client(directory, identifier, sys.argv[5])
     elif mode == "capture" and len(sys.argv) == 6 and sys.argv[5] in NODES:
         configure_capture(phase)
-        local.capture(directory, identifier, sys.argv[5])
+        expected = [True, False] if phase == "initial" else [phase == "restored"]
+        local.capture(directory, identifier, sys.argv[5],
+                      {"r2d": expected} if sys.argv[5] == "relay2" else None)
     else:
         raise ValueError("invalid bounded operation")
 

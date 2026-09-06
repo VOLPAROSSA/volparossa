@@ -5,11 +5,17 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
+import select
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -47,7 +53,13 @@ def records():
                 "wireguard_edges": {edge: 4 for pair in module.EDGES.values() for edge in pair},
                 "destination_requests": {name: 4 for name in flows},
                 "destination_responses": {name: 4 for name in flows}, "truncated": False,
-                "packet_socket_drops": 0, "direct_client_exit_packets": 0, "plaintext_leaks": 0}
+                "packet_socket_drops": 0, "direct_client_exit_packets": 0, "plaintext_leaks": 0,
+                "capture_complete": True, "interface_lifecycle": {}}
+            if node == "relay2":
+                result[prefix + f"local-link-capture-{node}.json"]["interface_lifecycle"] = {
+                    "r2d": {"ifindex": 15, "complete": True, "same_packet_socket": True,
+                        "events": [{"up": up} for up in ([True, False] if phase == "initial" else [phase == "restored"])],
+                        "network_down_errors": 1 if phase == "initial" else 0}}
         for index, (name, flow) in enumerate(flows.items()):
             payload = module.fixture.payload_for(module.phase_id(RUN, phase), name)
             digest = hashlib.sha256(payload).hexdigest()
@@ -82,6 +94,26 @@ def evaluate(data):
 
 
 class UplinkEvidence(unittest.TestCase):
+    def test_capture_link_lifecycle_rejects_other_errors_and_undeclared_changes(self):
+        link = module.local
+        up = struct.pack("16sH22x", b"r2d", 1)
+        down = struct.pack("16sH22x", b"r2d", 0)
+        observer = mock.Mock()
+        with mock.patch.object(link.socket, "if_nametoindex", return_value=15), \
+                mock.patch.object(link.fcntl, "ioctl", side_effect=[up, down, down, down, up]):
+            lifecycle = link.CaptureLinkLifecycle(observer, "r2d", [True, False])
+            observer.recv.side_effect = OSError(link.errno.ENETDOWN, "declared down")
+            self.assertIsNone(link.capture_frame(observer, lifecycle))
+            self.assertEqual(lifecycle.complete()["network_down_errors"], 1)
+            self.assertFalse(lifecycle.observe())
+            with self.assertRaises(ValueError):
+                lifecycle.observe()  # Recovery was not declared in this initial phase.
+        with self.assertRaises(OSError):
+            link.capture_frame(observer)  # Default local/WiFi observers still reject ENETDOWN.
+        observer.recv.side_effect = OSError(link.errno.ENODEV, "device disappeared")
+        with self.assertRaises(OSError):
+            link.capture_frame(observer, lifecycle)
+
     def test_new_loss_markers_keep_the_same_plaintext_and_direct_exit_guards(self):
         module.configure_capture("initial")
         original = module.local.FLOWS["relay0"]
@@ -126,6 +158,9 @@ class UplinkEvidence(unittest.TestCase):
             lambda d: d["uplink-fresh-loss-attempt.json"].update(finished_ms=100_000),
             lambda d: d.update({"uplink-fresh-loss-paths.txt": d["uplink-initial/paths-relay0.txt"]}),
             lambda d: d.update({"uplink-restored/paths-relay0.txt": d["uplink-initial/paths-relay0.txt"]}),
+            lambda d: d["uplink-initial/local-link-capture-relay2.json"]["interface_lifecycle"]["r2d"].update(events=[{"up": True}]),
+            lambda d: d["uplink-lost/local-link-capture-relay2.json"]["interface_lifecycle"]["r2d"].update(ifindex=99),
+            lambda d: d["uplink-restored/local-link-capture-relay2.json"].update(capture_complete=False),
         ]
         for index, mutate in enumerate(mutations):
             with self.subTest(index=index):
@@ -164,5 +199,75 @@ class UplinkEvidence(unittest.TestCase):
         self.assertNotIn("--force-relay", script)
 
 
+def live_packet_transition():
+    """One actual AF_PACKET down/recovery test, exclusively inside a new user+net namespace."""
+    parent = os.environ.get("VOLPAROSSA_PACKET_TEST_PARENT_NETNS")
+    if not parent or os.readlink("/proc/self/ns/net") == parent or os.geteuid() != 0:
+        raise RuntimeError("requires a disposable unshare -Urn namespace, never the host")
+    print("Disposable namespace only: create r2d<->dest0 and alt0<->alt1 veth pairs; "
+          "toggle only r2d down/up; send five link-local test frames; delete both owned pairs.", flush=True)
+
+    def ip(*args):
+        subprocess.run(["ip", *args], check=True, capture_output=True)
+
+    def send_and_receive(sender, observer, marker):
+        frame = b"\xff" * 6 + b"\x02\x00\x00\x00\x00\x01\x88\xb5" + marker
+        sender.send(frame)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if select.select([observer], [], [], 0.1)[0]:
+                received = module.local.capture_frame(observer)
+                if received is not None and marker in received:
+                    return
+        raise AssertionError("actual frame did not traverse the observed veth")
+
+    sockets, created = [], []
+    try:
+        for first, second in (("r2d", "dest0"), ("alt0", "alt1")):
+            ip("link", "add", first, "type", "veth", "peer", "name", second)
+            created.append(first)
+            ip("link", "set", first, "up")
+            ip("link", "set", second, "up")
+            for interface in (first, second):
+                raw = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+                raw.bind((interface, 0))
+                raw.setblocking(False)
+                sockets.append(raw)
+        observer, sender, other, other_sender = sockets
+        original_fd = observer.fileno()
+        lifecycle = module.local.CaptureLinkLifecycle(observer, "r2d", [True, False, True])
+        send_and_receive(sender, observer, b"before-down")
+        ip("link", "set", "r2d", "down")
+        assert not lifecycle.observe()
+        assert module.local.capture_frame(observer, lifecycle) is None
+        assert lifecycle.network_down_errors == 1, "kernel ENETDOWN regression was not exercised"
+        send_and_receive(other_sender, other, b"other-link-during-down")
+        # A new observer in the lost phase must bind and inspect the existing down interface.
+        with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as down_observer:
+            down_observer.bind(("r2d", 0))
+            down_observer.setblocking(False)
+            down_lifecycle = module.local.CaptureLinkLifecycle(down_observer, "r2d", [False])
+            assert down_lifecycle.complete()["events"][0]["up"] is False
+        ip("link", "set", "r2d", "up")
+        assert lifecycle.observe()
+        send_and_receive(sender, observer, b"after-recovery")
+        send_and_receive(other_sender, other, b"other-link-after-recovery")
+        send_and_receive(sender, observer, b"same-observer-confirmed")
+        proof = lifecycle.complete()
+        assert observer.fileno() == original_fd and proof["same_packet_socket"]
+        _, drops = struct.unpack("II", observer.getsockopt(263, 6, 8))
+        assert drops == 0
+        print(json.dumps({"success": True, "packet_socket_drops": drops,
+                          "same_observer_fd": True, "interface_lifecycle": proof}))
+    finally:
+        for raw in sockets:
+            raw.close()
+        for interface in created:
+            ip("link", "delete", interface)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--live-packet"]:
+        live_packet_transition()
+    else:
+        unittest.main()

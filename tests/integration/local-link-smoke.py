@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Concurrent local-only consumption and LAN relay contribution; bounded real UDP evidence."""
 
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import ipaddress
@@ -36,9 +38,64 @@ FLOWS = {"client": {"exit": "exit", "relays": {"relay0", "relay2"},
                     "uplink": "10.241.35.1", "egress_interface": "r2d"}}
 
 
-def capture(directory, run_id, node):
+class CaptureLinkLifecycle:
+    """An explicit disposable-fixture transition, never an arbitrary capture error waiver."""
+
+    def __init__(self, observer, interface, expected_states):
+        if not 1 <= len(expected_states) <= 3 or any(type(state) is not bool for state in expected_states):
+            raise ValueError("invalid bounded capture link transitions")
+        self.observer, self.interface = observer, interface
+        self.ifindex = socket.if_nametoindex(interface)
+        self.expected_states, self.events = tuple(expected_states), []
+        self.network_down_errors = 0
+        self.observe()
+
+    def observe(self):
+        if socket.if_nametoindex(self.interface) != self.ifindex:
+            raise ValueError("captured interface was replaced")
+        request = struct.pack("16sH22x", self.interface.encode("ascii"), 0)
+        flags = struct.unpack_from("H", fcntl.ioctl(self.observer, 0x8913, request), 16)[0]
+        up = bool(flags & 1)  # SIOCGIFFLAGS / IFF_UP from this exact namespace device.
+        if not self.events or up != self.events[-1]["up"]:
+            index = len(self.events)
+            if index >= len(self.expected_states) or up != self.expected_states[index]:
+                raise ValueError("undeclared capture link transition")
+            self.events.append({"up": up, "observed_ns": time.monotonic_ns()})
+        return up
+
+    def network_down(self):
+        if self.observe() or self.network_down_errors >= 8:
+            raise ValueError("unexpected or repeated packet-socket network-down error")
+        self.network_down_errors += 1
+
+    def complete(self):
+        self.observe()
+        if tuple(event["up"] for event in self.events) != self.expected_states:
+            raise ValueError("declared capture link transition did not complete")
+        return {"ifindex": self.ifindex, "events": self.events,
+                "network_down_errors": self.network_down_errors,
+                "same_packet_socket": True, "complete": True}
+
+
+def capture_frame(observer, lifecycle=None):
+    try:
+        return observer.recv(65535)
+    except BlockingIOError:
+        return None
+    except OSError as error:
+        if error.errno != errno.ENETDOWN or lifecycle is None:
+            raise
+        lifecycle.network_down()
+        return None
+
+
+def capture(directory, run_id, node, expected_link_states=None):
     sockets = {}
+    lifecycles = {}
     interfaces = list(INTERFACES[node])
+    expected_link_states = expected_link_states or {}
+    if set(expected_link_states) - set(interfaces):
+        raise ValueError("declared capture link is not actually observed")
     mesh_mapping = directory / "wifi-link-interfaces.json"
     if mesh_mapping.exists() and node in ("client", "relay0"):
         if mesh_mapping.is_symlink() or mesh_mapping.stat().st_size > 1024:
@@ -53,6 +110,8 @@ def capture(directory, run_id, node):
         observer.bind((interface, 0))
         observer.setblocking(False)
         sockets[observer] = interface
+        if interface in expected_link_states:
+            lifecycles[observer] = CaptureLinkLifecycle(observer, interface, expected_link_states[interface])
     markers = {fixture.payload_for(run_id, name): name for name in FLOWS}
     record = {"node": node, "interfaces": interfaces, "observed_frames": 0,
               "truncated": False, "packet_socket_drops": 0, "wireguard_edges": {},
@@ -63,12 +122,13 @@ def capture(directory, run_id, node):
     (directory / f"local-link-capture-{node}.ready").write_text("ready\n", encoding="ascii")
     deadline = time.monotonic() + 110
     while fixture.running and time.monotonic() < deadline:
+        for lifecycle in lifecycles.values():
+            lifecycle.observe()
         readable, _, _ = select.select(list(sockets), [], [], 0.2)
         for observer in readable:
             for _ in range(128):
-                try:
-                    frame = observer.recv(65535)
-                except BlockingIOError:
+                frame = capture_frame(observer, lifecycles.get(observer))
+                if frame is None:
                     break
                 record["observed_frames"] += 1
                 if record["observed_frames"] > 131072:
@@ -103,10 +163,13 @@ def capture(directory, run_id, node):
                     record["destination_responses"][flow_name] += 1
                 else:
                     record["plaintext_leaks"] += 1
+    record["interface_lifecycle"] = {
+        sockets[observer]: lifecycle.complete() for observer, lifecycle in lifecycles.items()}
     for observer in sockets:
         _, drops = struct.unpack("II", observer.getsockopt(263, 6, 8))
         record["packet_socket_drops"] += drops
         observer.close()
+    record["capture_complete"] = not record["truncated"]
     fixture.write_json(directory / f"local-link-capture-{node}.json", record)
 
 
