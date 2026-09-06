@@ -23,6 +23,8 @@ typedef struct mock_transport {
     unsigned add_calls;
     unsigned remove_calls;
     unsigned pump_calls;
+    unsigned interest_calls;
+    vmp_io_interest_t interest;
     unsigned send_calls;
     unsigned receive_calls;
     unsigned exit_create_calls;
@@ -90,6 +92,7 @@ static void init_mock(mock_transport_t *mock)
 {
     memset(mock, 0, sizeof(*mock));
     mock->receive_result = VMP_TRANSPORT_EMPTY;
+    mock->interest.next_timer_ms = UINT32_MAX;
     mock->has_assignment = true;
     mock->assignment.assigned_ipv4[0] = 10U;
     mock->assignment.assigned_ipv4[1] = 76U;
@@ -312,12 +315,21 @@ static vmp_transport_error_t mock_exit_snapshot(
     return mock->snapshot_result;
 }
 
+static vmp_transport_error_t mock_interest(void *session, vmp_io_interest_t *out)
+{
+    mock_transport_t *mock = session;
+    ++mock->interest_calls;
+    *out = mock->interest;
+    return VMP_TRANSPORT_OK;
+}
+
 static const vmp_transport_ops_t MOCK_OPS = {
     .create = mock_create,
     .destroy = mock_destroy,
     .add_path = mock_add,
     .remove_path = mock_remove,
     .pump = mock_pump,
+    .interest = mock_interest,
     .snapshot = mock_snapshot,
     .send_inner = mock_send,
     .receive_inner = mock_receive,
@@ -326,6 +338,7 @@ static const vmp_transport_ops_t MOCK_OPS = {
     .exit_add_listener = mock_exit_add,
     .exit_start = mock_exit_start,
     .exit_pump = mock_exit_pump,
+    .exit_interest = mock_interest,
     .exit_snapshot = mock_exit_snapshot,
     .exit_send_inner = mock_send,
     .exit_receive_inner = mock_receive,
@@ -1663,6 +1676,57 @@ static void test_authorization_capacity_has_no_eviction(void)
     vmp_runtime_destroy(runtime);
 }
 
+static void test_interest_expiry_and_invalid_session_are_bounded(void)
+{
+    for (unsigned mode = 0U; mode < 4U; ++mode) {
+        mock_transport_t mock;
+        init_mock(&mock);
+        mock_clock_t clock = {
+            .boottime_ms = TEST_BOOTTIME_MS,
+            .realtime_ms = TEST_NOW_MS,
+        };
+        vmp_runtime_t *runtime = create_runtime(VMP_RUNTIME_CLIENT, &mock, &clock);
+        assert(runtime != NULL);
+        const vmp_request_t start = start_request(
+            0x68U, 13U, VMP_TRANSPORT_MODE_MULTIPATH_QUIC, 2U);
+        assert(dispatch(runtime, &start).result == VMP_RESULT_INSUFFICIENT_PATHS);
+        const vmp_request_t add = add_request(0x68U, 1U, 20U);
+        assert(dispatch(runtime, &add).result == VMP_RESULT_OK);
+        int descriptors[2];
+        assert(pipe(descriptors) == 0);
+        mock.interest = (vmp_io_interest_t){
+            .count = 1U, .read_fds = {descriptors[0]}, .next_timer_ms = 37U,
+        };
+        vmp_io_interest_t interest;
+        assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+        assert(interest.count == 1U && interest.read_fds[0] == descriptors[0]);
+        assert(interest.next_timer_ms == 37U && mock.pump_calls == 0U);
+        if (mode == 0U) {
+            clock.boottime_ms += UINT64_C(59999);
+            assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+            assert(interest.next_timer_ms == 1U && interest.count == 1U);
+            ++clock.boottime_ms;
+            assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+            assert(interest.count == 0U && interest.next_timer_ms == UINT32_MAX);
+            assert(mock.destroy_calls == 1U);
+        } else {
+            if (mode == 1U) mock.interest.next_timer_ms = 0U;
+            if (mode == 2U) mock.interest.count = VMP_MAX_PATHS + 1U;
+            if (mode == 3U) {
+                mock.interest.count = 2U;
+                mock.interest.read_fds[1] = descriptors[0];
+            }
+            assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+            assert(interest.count == 0U && interest.next_timer_ms == 60000U);
+            assert(dispatch(runtime, &start).result == VMP_RESULT_TRANSPORT);
+        }
+        /* Snapshots never consume descriptor ownership. */
+        assert(fcntl(descriptors[0], F_GETFD) >= 0);
+        assert(close(descriptors[0]) == 0 && close(descriptors[1]) == 0);
+        vmp_runtime_destroy(runtime);
+    }
+}
+
 static void test_exit_multipath_listener_lifecycle(void)
 {
     mock_transport_t mock;
@@ -1688,6 +1752,10 @@ static void test_exit_multipath_listener_lifecycle(void)
      * partially collected listener set has no started transport to pump and
      * must remain eligible for its remaining listeners. */
     mock.pump_fails = true;
+    vmp_io_interest_t interest;
+    assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+    assert(interest.count == 0U && interest.next_timer_ms == 60000U);
+    assert(mock.interest_calls == 0U);
     assert(vmp_runtime_pump(runtime) == VMP_SERVER_OK);
     assert(mock.pump_calls == 0U);
     mock.pump_fails = false;
@@ -1704,6 +1772,9 @@ static void test_exit_multipath_listener_lifecycle(void)
     assert(strcmp(response.diagnostic_code, "exit_listeners_ready") == 0);
     assert(mock.exit_create_calls == 1U && mock.exit_add_calls == 2U);
     assert(mock.exit_start_calls == 1U && mock.exit_retained_paths == 2U);
+    mock.interest.next_timer_ms = 41U;
+    assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+    assert(mock.interest_calls == 1U && interest.next_timer_ms == 41U);
     assert(vmp_runtime_pump(runtime) == VMP_SERVER_OK);
     assert(mock.pump_calls == 1U);
 
@@ -1718,6 +1789,9 @@ static void test_exit_multipath_listener_lifecycle(void)
         context_request(VMP_OPERATION_STOP_SESSION, 0xa1U);
     assert(dispatch(runtime, &stop).result == VMP_RESULT_OK);
     assert(mock.exit_destroy_calls == 1U);
+    assert(vmp_runtime_interest(runtime, &interest) == VMP_SERVER_OK);
+    assert(interest.count == 0U && interest.next_timer_ms == 60000U);
+    assert(mock.interest_calls == 1U);
     vmp_runtime_destroy(runtime);
     assert(mock.exit_destroy_calls == 1U);
 }
@@ -1738,6 +1812,7 @@ int main(void)
     test_authorization_clock_failures_fail_closed();
     test_authorization_capacity_has_no_eviction();
     test_exit_multipath_listener_lifecycle();
+    test_interest_expiry_and_invalid_session_are_bounded();
     puts("runtime gate tests passed");
     return 0;
 }

@@ -25,6 +25,9 @@
      VMP_STATUS_METRIC_ACKED_TRANSPORT)
 #define VMP_ACTIVE_FAILOVER_GRACE_MS UINT64_C(60000)
 
+_Static_assert(VMP_MAX_WAIT_FDS == VMP_MAX_SESSIONS * VMP_MAX_PATHS,
+               "wait snapshot must cover every owned path");
+
 typedef struct runtime_path {
     bool used;
     int64_t transport_handle;
@@ -341,13 +344,14 @@ static bool valid_transport(const vmp_transport_ops_t *transport)
     return transport != NULL && transport->create != NULL &&
            transport->destroy != NULL && transport->add_path != NULL &&
            transport->remove_path != NULL && transport->pump != NULL &&
+           transport->interest != NULL &&
            transport->snapshot != NULL && transport->send_inner != NULL &&
            transport->receive_inner != NULL &&
            transport->exit_create != NULL &&
            transport->exit_destroy != NULL &&
            transport->exit_add_listener != NULL &&
            transport->exit_start != NULL &&
-           transport->exit_pump != NULL &&
+           transport->exit_pump != NULL && transport->exit_interest != NULL &&
            transport->exit_snapshot != NULL &&
            transport->exit_send_inner != NULL &&
            transport->exit_receive_inner != NULL;
@@ -1148,6 +1152,86 @@ void vmp_runtime_destroy(vmp_runtime_t *runtime)
     destroy_all_sessions(runtime);
     secure_zero(runtime, sizeof(*runtime));
     free(runtime);
+}
+
+static bool merge_interest(vmp_io_interest_t *out,
+                            const vmp_io_interest_t *session)
+{
+    if (session->count > VMP_MAX_PATHS || session->next_timer_ms == 0U ||
+        session->count > VMP_MAX_WAIT_FDS - out->count) return false;
+    for (size_t index = 0U; index < session->count; ++index) {
+        const int fd = session->read_fds[index];
+        if (fd < 0) return false;
+        for (size_t prior = 0U; prior < index; ++prior) {
+            if (session->read_fds[prior] == fd) return false;
+        }
+        for (size_t prior = 0U; prior < out->count; ++prior) {
+            if (out->read_fds[prior] == fd) return false;
+        }
+    }
+    memcpy(out->read_fds + out->count, session->read_fds,
+           session->count * sizeof(session->read_fds[0]));
+    out->count += session->count;
+    if (session->next_timer_ms < out->next_timer_ms) {
+        out->next_timer_ms = session->next_timer_ms;
+    }
+    return true;
+}
+
+vmp_server_error_t vmp_runtime_interest(void *context,
+                                       vmp_io_interest_t *out)
+{
+    vmp_runtime_t *runtime = context;
+    if (runtime == NULL || out == NULL) return VMP_SERVER_BACKEND;
+    memset(out, 0, sizeof(*out));
+    out->next_timer_ms = UINT32_MAX;
+    uint64_t now_ms = 0U;
+    if (!read_boottime(runtime, &now_ms)) {
+        destroy_all_sessions(runtime);
+        return VMP_SERVER_BACKEND;
+    }
+    /* Retire expired owners before borrowing any descriptor, never afterwards. */
+    expire_sessions_at(runtime, now_ms);
+    purge_authorizations_at(runtime, now_ms);
+    for (size_t index = 0U; index < VMP_MAX_AUTHORIZATION_RECORDS; ++index) {
+        const runtime_authorization_t *authorization =
+            &runtime->authorizations[index];
+        if (authorization->state != RUNTIME_AUTHORIZATION_UNUSED &&
+            authorization->deadline_boottime_ms > now_ms) {
+            const uint64_t remaining =
+                authorization->deadline_boottime_ms - now_ms;
+            if (remaining < out->next_timer_ms) {
+                out->next_timer_ms = (uint32_t)remaining;
+            }
+        }
+    }
+    for (size_t index = 0U; index < VMP_MAX_SESSIONS; ++index) {
+        vmp_io_interest_t interest = {.next_timer_ms = UINT32_MAX};
+        runtime_session_t *session = &runtime->sessions[index];
+        if (session->used && !session->failed &&
+            session->transport_session != NULL) {
+            const vmp_transport_error_t error = runtime->transport.interest(
+                session->transport_session, &interest);
+            if (error != VMP_TRANSPORT_OK || !merge_interest(out, &interest)) {
+                if (error == VMP_TRANSPORT_OVERFLOW) {
+                    session->reverse_overflow = true;
+                }
+                session->failed = true;
+                session->started = false;
+            }
+        }
+        runtime_exit_session_t *exit_session = &runtime->exit_sessions[index];
+        interest = (vmp_io_interest_t){.next_timer_ms = UINT32_MAX};
+        if (exit_session->used && !exit_session->failed &&
+            exit_session->started && exit_session->transport_session != NULL &&
+            (runtime->transport.exit_interest(exit_session->transport_session,
+                                               &interest) != VMP_TRANSPORT_OK ||
+             !merge_interest(out, &interest))) {
+            exit_session->failed = true;
+            exit_session->started = false;
+        }
+    }
+    return VMP_SERVER_OK;
 }
 
 vmp_server_error_t vmp_runtime_pump(void *context)

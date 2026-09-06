@@ -723,6 +723,33 @@ static vmp_transport_error_t backend_remove_path(void *session, int64_t handle)
     return VMP_TRANSPORT_OK;
 }
 
+static vmp_transport_error_t backend_interest(void *session,
+                                              vmp_io_interest_t *out)
+{
+    mqvpn_backend_t *backend = session;
+    if (backend == NULL || backend->client == NULL || out == NULL) {
+        return VMP_TRANSPORT_INVALID;
+    }
+    const vmp_transport_error_t terminal = backend_terminal_error(backend);
+    if (terminal != VMP_TRANSPORT_OK) return terminal;
+    mqvpn_interest_t interest = {0};
+    if (mqvpn_client_get_interest(backend->client, &interest) != MQVPN_OK ||
+        interest.next_timer_ms <= 0) return VMP_TRANSPORT_ENGINE;
+    memset(out, 0, sizeof(*out));
+    out->next_timer_ms = (uint32_t)interest.next_timer_ms;
+    /* Match pump backpressure: a readable socket must not spin the waiter
+     * while its decoded reverse queue awaits a control-plane drain. */
+    if (backend->lifecycle.reverse_count < VMP_MQVPN_REVERSE_MAX_PACKETS) {
+        for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+            const mqvpn_backend_path_t *path = &backend->paths[index];
+            if (path->used && path->fd >= 0) {
+                out->read_fds[out->count++] = path->fd;
+            }
+        }
+    }
+    return VMP_TRANSPORT_OK;
+}
+
 static vmp_transport_error_t backend_pump(void *session)
 {
     mqvpn_backend_t *backend = session;
@@ -1371,6 +1398,28 @@ static vmp_transport_error_t exit_backend_start(void *session)
     return backend->started ? VMP_TRANSPORT_OK : VMP_TRANSPORT_ENGINE;
 }
 
+static vmp_transport_error_t exit_backend_interest(void *session,
+                                                   vmp_io_interest_t *out)
+{
+    mqvpn_exit_backend_t *backend = session;
+    if (backend == NULL || backend->server == NULL || !backend->started ||
+        out == NULL) return VMP_TRANSPORT_INVALID;
+    mqvpn_interest_t interest = {0};
+    if (mqvpn_server_get_interest(backend->server, &interest) != MQVPN_OK ||
+        interest.next_timer_ms <= 0) return VMP_TRANSPORT_ENGINE;
+    memset(out, 0, sizeof(*out));
+    out->next_timer_ms = (uint32_t)interest.next_timer_ms;
+    if (backend->lifecycle.queue_count < VMP_MQVPN_EXIT_MAX_PACKETS) {
+        for (size_t index = 0U; index < VMP_MAX_PATHS; ++index) {
+            const mqvpn_exit_path_t *path = &backend->paths[index];
+            if (path->used && path->fd >= 0) {
+                out->read_fds[out->count++] = path->fd;
+            }
+        }
+    }
+    return VMP_TRANSPORT_OK;
+}
+
 static vmp_transport_error_t exit_backend_pump(void *session)
 {
     mqvpn_exit_backend_t *backend = session;
@@ -1524,6 +1573,7 @@ const vmp_transport_ops_t *vmp_mqvpn_transport_ops(void)
         .add_path = backend_add_path,
         .remove_path = backend_remove_path,
         .pump = backend_pump,
+        .interest = backend_interest,
         .snapshot = backend_snapshot,
         .send_inner = backend_send_inner,
         .receive_inner = backend_receive_inner,
@@ -1532,6 +1582,7 @@ const vmp_transport_ops_t *vmp_mqvpn_transport_ops(void)
         .exit_add_listener = exit_backend_add_listener,
         .exit_start = exit_backend_start,
         .exit_pump = exit_backend_pump,
+        .exit_interest = exit_backend_interest,
         .exit_snapshot = exit_backend_snapshot,
         .exit_send_inner = exit_backend_send_inner,
         .exit_receive_inner = exit_backend_receive_inner,

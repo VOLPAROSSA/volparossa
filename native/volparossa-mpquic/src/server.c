@@ -84,34 +84,74 @@ static int remaining_timeout(uint64_t deadline_ms)
     return remaining > (uint64_t)INT32_MAX ? INT32_MAX : (int)remaining;
 }
 
+vmp_server_error_t vmp_wait_control(int control_fd, short events,
+                                    uint32_t maximum_wait_ms,
+                                    const vmp_server_options_t *options,
+                                    short *out_events)
+{
+    if (control_fd < 0 || options == NULL || out_events == NULL ||
+        (events != POLLIN && events != POLLOUT) ||
+        (options->interest != NULL && options->pump == NULL)) {
+        return VMP_SERVER_BACKEND;
+    }
+    *out_events = 0;
+    vmp_io_interest_t interest = {.count = 0U, .next_timer_ms = UINT32_MAX};
+    uint32_t delay = maximum_wait_ms;
+    if (options->interest != NULL) {
+        if (options->interest(options->pump_context, &interest) != VMP_SERVER_OK ||
+            interest.count > VMP_MAX_WAIT_FDS || interest.next_timer_ms == 0U) {
+            return VMP_SERVER_BACKEND;
+        }
+        if (interest.next_timer_ms < delay) delay = interest.next_timer_ms;
+    } else if (options->pump != NULL) {
+        if (options->pump_interval_ms == 0U) return VMP_SERVER_BACKEND;
+        if (options->pump_interval_ms < delay) delay = options->pump_interval_ms;
+    }
+    struct pollfd descriptors[VMP_MAX_WAIT_FDS + 1U];
+    descriptors[0] = (struct pollfd){.fd = control_fd, .events = events};
+    for (size_t index = 0U; index < interest.count; ++index) {
+        const int fd = interest.read_fds[index];
+        if (fd < 0 || fd == control_fd) return VMP_SERVER_BACKEND;
+        for (size_t prior = 0U; prior < index; ++prior) {
+            if (interest.read_fds[prior] == fd) return VMP_SERVER_BACKEND;
+        }
+        descriptors[index + 1U] = (struct pollfd){.fd = fd, .events = POLLIN};
+    }
+    const int timeout = delay > (uint32_t)INT32_MAX ? INT32_MAX : (int)delay;
+    const int ready = poll(descriptors, (nfds_t)(interest.count + 1U), timeout);
+    if (ready < 0) return errno == EINTR ? VMP_SERVER_OK : VMP_SERVER_IO;
+    *out_events = descriptors[0].revents;
+    /* The pump can close any engine fd. Never inspect or reuse those borrowed
+     * entries afterwards, including error readiness: rebuild on the next wait. */
+    if (options->pump != NULL &&
+        options->pump(options->pump_context) != VMP_SERVER_OK) {
+        return VMP_SERVER_BACKEND;
+    }
+    return VMP_SERVER_OK;
+}
+
 static io_result_t wait_fd(int fd, short events, uint64_t deadline_ms,
                            bool deadline_enabled,
                            const vmp_server_options_t *options)
 {
     for (;;) {
-        struct pollfd descriptor = {.fd = fd, .events = events, .revents = 0};
-        int timeout = deadline_enabled ? remaining_timeout(deadline_ms) : INT32_MAX;
+        const int timeout = deadline_enabled
+                                ? remaining_timeout(deadline_ms) : INT32_MAX;
         if (deadline_enabled && timeout == 0) {
             return IO_TIMEOUT;
         }
-        if (options->pump != NULL && timeout > (int)options->pump_interval_ms) {
-            timeout = (int)options->pump_interval_ms;
+        short observed = 0;
+        const vmp_server_error_t result = vmp_wait_control(
+            fd, events, (uint32_t)timeout, options, &observed);
+        if (result != VMP_SERVER_OK) {
+            return result == VMP_SERVER_BACKEND ? IO_BACKEND : IO_ERROR;
         }
-        const int ready = poll(&descriptor, 1, timeout);
-        if (ready > 0) {
-            if ((descriptor.revents & events) != 0) return IO_OK;
-            if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0) return IO_ERROR;
-            if ((descriptor.revents & POLLHUP) != 0) return IO_EOF;
-            continue;
+        if (deadline_enabled && remaining_timeout(deadline_ms) == 0) {
+            return IO_TIMEOUT;
         }
-        if (ready == 0) {
-            if (options->pump == NULL) return IO_TIMEOUT;
-            if (options->pump(options->pump_context) != VMP_SERVER_OK) {
-                return IO_BACKEND;
-            }
-            continue;
-        }
-        if (errno != EINTR) return IO_ERROR;
+        if ((observed & events) != 0) return IO_OK;
+        if ((observed & (POLLERR | POLLNVAL)) != 0) return IO_ERROR;
+        if ((observed & POLLHUP) != 0) return IO_EOF;
     }
 }
 
@@ -293,9 +333,12 @@ static bool options_valid(const vmp_server_options_t *options)
            options->max_requests == VMP_MAX_REQUESTS_PER_CONNECTION &&
            options->request_binding != NULL &&
            options->request_digest != NULL &&
-           ((options->pump == NULL && options->pump_interval_ms == 0) ||
-            (options->pump != NULL && options->pump_interval_ms >= 1 &&
-             options->pump_interval_ms <= 1000));
+           ((options->pump == NULL && options->interest == NULL &&
+             options->pump_interval_ms == 0) ||
+            (options->pump != NULL &&
+             ((options->interest != NULL && options->pump_interval_ms == 0) ||
+              (options->interest == NULL && options->pump_interval_ms >= 1 &&
+               options->pump_interval_ms <= 1000))));
 }
 
 static vmp_server_error_t verify_peer(int fd, uid_t expected_uid)

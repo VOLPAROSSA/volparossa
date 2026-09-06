@@ -80,6 +80,9 @@ typedef struct vmp_transport_ops {
                                       int64_t *out_handle);
     vmp_transport_error_t (*remove_path)(void *session, int64_t handle);
     vmp_transport_error_t (*pump)(void *session);
+    /* At most VMP_MAX_PATHS owned UDP descriptors; exclude reads while the
+     * inner receive queue is full. No mutations during an interest borrow. */
+    vmp_transport_error_t (*interest)(void *session, vmp_io_interest_t *out);
     vmp_transport_error_t (*snapshot)(
         void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
         size_t *out_count, bool *out_tunnel_ready,
@@ -101,6 +104,7 @@ typedef struct vmp_transport_ops {
         int listener_fd, int64_t *out_handle);
     vmp_transport_error_t (*exit_start)(void *session);
     vmp_transport_error_t (*exit_pump)(void *session);
+    vmp_transport_error_t (*exit_interest)(void *session, vmp_io_interest_t *out);
     vmp_transport_error_t (*exit_snapshot)(
         void *session, vmp_exit_transport_snapshot_t *out);
     vmp_transport_error_t (*exit_send_inner)(
@@ -147,6 +151,10 @@ void vmp_runtime_destroy(vmp_runtime_t *runtime);
 /* Drives all live engines once. A failure is retained on only the affected
  * session so subsequent requests receive a structured transport failure. */
 vmp_server_error_t vmp_runtime_pump(void *runtime);
+
+/* Aggregates current role-specific engine interests and BOOTTIME expiry.
+ * Rebuild after every pump/dispatch: either may retire paths and close fds. */
+vmp_server_error_t vmp_runtime_interest(void *runtime, vmp_io_interest_t *out);
 
 /* Dispatcher for vmp_serve_connection. START is idempotent: its first call
  * creates a pending context and returns INSUFFICIENT_PATHS. Repeating the

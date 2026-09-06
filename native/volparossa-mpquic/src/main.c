@@ -154,26 +154,17 @@ static int serve(vmp_runtime_t *runtime, vmp_control_socket_t *control)
         .request_binding_context = NULL,
         .request_digest = vmp_sha256_request_digest,
         .request_digest_context = NULL,
-        .pump_interval_ms = 10U,
         .pump = vmp_runtime_pump,
         .pump_context = runtime,
+        .interest = vmp_runtime_interest,
     };
 
     while (!stop_requested) {
-        struct pollfd descriptor = {
-            .fd = control->listening_fd,
-            .events = POLLIN,
-            .revents = 0,
-        };
-        const int ready = poll(&descriptor, 1U, 10);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            return 1;
-        }
-        if (vmp_runtime_pump(runtime) != VMP_SERVER_OK) return 1;
-        if (ready == 0) continue;
-        if ((descriptor.revents & (POLLERR | POLLNVAL)) != 0) return 1;
-        if ((descriptor.revents & POLLIN) != 0) {
+        short events = 0;
+        if (vmp_wait_control(control->listening_fd, POLLIN, 1000U,
+                             &options, &events) != VMP_SERVER_OK) return 1;
+        if ((events & (POLLERR | POLLHUP | POLLNVAL)) != 0) return 1;
+        if ((events & POLLIN) != 0) {
             /* Every per-connection failure is bounded and isolated. Only
              * same-UID peers can reach this point; malformed frames never
              * terminate other native sessions. */

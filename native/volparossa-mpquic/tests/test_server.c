@@ -9,12 +9,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef IPV6_FREEBIND
@@ -530,12 +532,22 @@ static vmp_transport_error_t reject_exit_snapshot(
     return VMP_TRANSPORT_ENGINE;
 }
 
+static vmp_transport_error_t reject_transport_interest(
+    void *session, vmp_io_interest_t *out)
+{
+    (void)session;
+    (void)out;
+    ++runtime_backend_calls;
+    return VMP_TRANSPORT_ENGINE;
+}
+
 static const vmp_transport_ops_t REJECT_TRANSPORT_OPS = {
     .create = reject_transport_create,
     .destroy = reject_transport_destroy,
     .add_path = reject_transport_add,
     .remove_path = reject_transport_remove,
     .pump = reject_transport_pump,
+    .interest = reject_transport_interest,
     .snapshot = reject_transport_snapshot,
     .send_inner = reject_transport_send,
     .receive_inner = reject_transport_receive,
@@ -544,6 +556,7 @@ static const vmp_transport_ops_t REJECT_TRANSPORT_OPS = {
     .exit_add_listener = reject_exit_add,
     .exit_start = reject_transport_pump,
     .exit_pump = reject_transport_pump,
+    .exit_interest = reject_transport_interest,
     .exit_snapshot = reject_exit_snapshot,
     .exit_send_inner = reject_transport_send,
     .exit_receive_inner = reject_transport_receive,
@@ -1329,6 +1342,127 @@ static void test_oversize_and_partial_frame_are_bounded(void)
     close_pair(sockets);
 }
 
+typedef struct wait_state {
+    vmp_io_interest_t interest;
+    unsigned snapshots;
+    unsigned pumps;
+    bool retire_on_pump;
+} wait_state_t;
+
+static uint64_t test_monotonic_ms(void)
+{
+    struct timespec now;
+    assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+    return (uint64_t)now.tv_sec * UINT64_C(1000) +
+           (uint64_t)now.tv_nsec / UINT64_C(1000000);
+}
+
+static vmp_server_error_t wait_interest(void *context, vmp_io_interest_t *out)
+{
+    wait_state_t *state = context;
+    ++state->snapshots;
+    *out = state->interest;
+    return VMP_SERVER_OK;
+}
+
+static vmp_server_error_t wait_pump(void *context)
+{
+    wait_state_t *state = context;
+    ++state->pumps;
+    if (state->retire_on_pump) {
+        assert(state->interest.count == 1U);
+        assert(close(state->interest.read_fds[0]) == 0);
+        state->interest.count = 0U;
+        state->interest.next_timer_ms = 20U;
+        state->retire_on_pump = false;
+    }
+    return VMP_SERVER_OK;
+}
+
+static void test_owned_readiness_timer_and_snapshot_rebuild(void)
+{
+    int control[2];
+    int datagrams[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, control) == 0);
+    assert(socketpair(AF_UNIX, SOCK_DGRAM, 0, datagrams) == 0);
+    wait_state_t state = {
+        .interest = {.count = 1U, .read_fds = {datagrams[1]},
+                     .next_timer_ms = 2000U},
+    };
+    vmp_server_options_t configuration = options();
+    configuration.pump = wait_pump;
+    configuration.interest = wait_interest;
+    configuration.pump_context = &state;
+    write_exact_test(datagrams[0], (const uint8_t *)"w", 1U);
+    short events = 0;
+    uint64_t before = test_monotonic_ms();
+    assert(vmp_wait_control(control[1], POLLIN, 2000U, &configuration,
+                            &events) == VMP_SERVER_OK);
+    assert(test_monotonic_ms() - before < UINT64_C(1000));
+    assert(events == 0 && state.pumps == 1U && state.snapshots == 1U);
+    assert(fcntl(datagrams[1], F_GETFD) >= 0); /* borrow, not transfer */
+
+    state.retire_on_pump = true;
+    assert(vmp_wait_control(control[1], POLLIN, 2000U, &configuration,
+                            &events) == VMP_SERVER_OK);
+    assert(state.interest.count == 0U && state.pumps == 2U);
+    before = test_monotonic_ms();
+    assert(vmp_wait_control(control[1], POLLIN, 2000U, &configuration,
+                            &events) == VMP_SERVER_OK);
+    const uint64_t elapsed = test_monotonic_ms() - before;
+    assert(elapsed >= UINT64_C(15) && elapsed < UINT64_C(1000));
+    assert(events == 0 && state.pumps == 3U && state.snapshots == 3U);
+    assert(close(datagrams[0]) == 0);
+    close_pair(control);
+}
+
+static void test_interest_limits_and_activity_do_not_extend_frame_deadline(void)
+{
+    int control[2];
+    int datagrams[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, control) == 0);
+    assert(socketpair(AF_UNIX, SOCK_DGRAM, 0, datagrams) == 0);
+    wait_state_t state = {0};
+    vmp_server_options_t configuration = options();
+    configuration.pump = wait_pump;
+    configuration.interest = wait_interest;
+    configuration.pump_context = &state;
+    for (unsigned invalid = 0U; invalid < 5U; ++invalid) {
+        state.interest = (vmp_io_interest_t){
+            .count = 1U, .read_fds = {datagrams[1]}, .next_timer_ms = 2000U,
+        };
+        if (invalid == 0U) state.interest.count = VMP_MAX_WAIT_FDS + 1U;
+        if (invalid == 1U) state.interest.next_timer_ms = 0U;
+        if (invalid == 2U) state.interest.read_fds[0] = -1;
+        if (invalid == 3U) state.interest.read_fds[0] = control[1];
+        if (invalid == 4U) {
+            state.interest.count = 2U;
+            state.interest.read_fds[1] = datagrams[1];
+        }
+        short events = 0;
+        assert(vmp_wait_control(control[1], POLLIN, 2000U, &configuration,
+                                &events) == VMP_SERVER_BACKEND);
+        assert(state.pumps == 0U);
+    }
+    state.interest = (vmp_io_interest_t){
+        .count = 1U, .read_fds = {datagrams[1]}, .next_timer_ms = 2000U,
+    };
+    write_exact_test(datagrams[0], (const uint8_t *)"w", 1U);
+    configuration.frame_timeout_ms = 20U;
+    dispatch_state_t dispatch_state = {0};
+    const uint64_t before = test_monotonic_ms();
+    /* Deliberately leave the engine fd readable on every pump, while a
+     * control peer stalls its frame. Even continuous readiness cannot reset
+     * the frame's absolute deadline or authorize dispatch. */
+    assert(vmp_serve_connection(control[1], &configuration, test_dispatch,
+                                &dispatch_state) == VMP_SERVER_TIMEOUT);
+    const uint64_t elapsed = test_monotonic_ms() - before;
+    assert(elapsed >= UINT64_C(15) && elapsed < UINT64_C(1000));
+    assert(state.pumps > 1U && dispatch_state.calls == 0U);
+    close_pair(datagrams);
+    close_pair(control);
+}
+
 static void test_secret_fd_is_bounded_and_wiped(void)
 {
     int descriptors[2];
@@ -1396,6 +1530,8 @@ int main(void)
     test_truncated_ancillary_and_trailing_request_are_rejected();
     test_wrong_peer_and_non_unix_are_rejected();
     test_oversize_and_partial_frame_are_bounded();
+    test_owned_readiness_timer_and_snapshot_rebuild();
+    test_interest_limits_and_activity_do_not_extend_frame_deadline();
     test_secret_fd_is_bounded_and_wiped();
     puts("server boundary tests passed");
     return 0;

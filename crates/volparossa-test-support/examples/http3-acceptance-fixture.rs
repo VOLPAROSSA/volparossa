@@ -278,6 +278,7 @@ async fn run_server(
             }
         };
 
+        let response_ready_stats = inner_quic_stats(&connection.stats());
         let response = http::Response::builder()
             .status(StatusCode::OK)
             .version(Version::HTTP_3)
@@ -325,6 +326,10 @@ async fn run_server(
             "response_sha256": hex::encode(response_hash.finalize()),
             "release_observed": release_observed,
             "peer_completion_observed": true,
+            "inner_quic": {
+                "response_ready": response_ready_stats,
+                "complete": inner_quic_stats(&connection.stats()),
+            },
         });
         write_json_new(
             &coordination.join(format!("server-{}.json", case.label())),
@@ -428,6 +433,7 @@ async fn run_client(
             );
         }
 
+        let response_ready_stats = inner_quic_stats(&exchange_connection.stats());
         let response_seed = payload_seed(case, run_id, b"response");
         let expected_hash = payload_sha256(&response_seed, case.response_bytes());
         let mut received_hash = Sha256::new();
@@ -472,6 +478,7 @@ async fn run_client(
         if duration.is_zero() {
             return Err("HTTP/3 response duration was zero".into());
         }
+        let complete_stats = inner_quic_stats(&exchange_connection.stats());
         exchange_connection.close(quinn::VarInt::from_u32(0), b"HTTP/3 request complete");
         Ok(json!({
             "schema_version": 1,
@@ -489,6 +496,10 @@ async fn run_client(
             "response_duration_ns": u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
             "transfer_elapsed_ns": u64::try_from(completed.saturating_duration_since(started).as_nanos())
                 .unwrap_or(u64::MAX),
+            "inner_quic": {
+                "response_ready": response_ready_stats,
+                "complete": complete_stats,
+            },
         }))
     };
     let drive = async move {
@@ -569,9 +580,50 @@ fn write_new(path: &Path, bytes: &[u8]) -> FixtureResult<()> {
     Ok(())
 }
 
+// Fixture-only, cumulative application QUIC counters; these are not native
+// MPQUIC path evidence. Project numbers explicitly: never dump connection state.
+fn inner_quic_stats(stats: &quinn::ConnectionStats) -> Value {
+    json!({
+        "udp_tx_datagrams": stats.udp_tx.datagrams,
+        "udp_tx_bytes": stats.udp_tx.bytes,
+        "udp_rx_datagrams": stats.udp_rx.datagrams,
+        "udp_rx_bytes": stats.udp_rx.bytes,
+        "rtt_us": u64::try_from(stats.path.rtt.as_micros()).unwrap_or(u64::MAX),
+        "cwnd_bytes": stats.path.cwnd,
+        "congestion_events": stats.path.congestion_events,
+        "lost_packets": stats.path.lost_packets,
+        "lost_bytes": stats.path.lost_bytes,
+        "sent_packets": stats.path.sent_packets,
+        "current_mtu": stats.path.current_mtu,
+        "tx_data_blocked": stats.frame_tx.data_blocked,
+        "tx_stream_data_blocked": stats.frame_tx.stream_data_blocked,
+        "rx_data_blocked": stats.frame_rx.data_blocked,
+        "rx_stream_data_blocked": stats.frame_rx.stream_data_blocked,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_quic_evidence_is_only_bounded_numeric_counters() {
+        let mut stats = quinn::ConnectionStats::default();
+        stats.path.rtt = Duration::from_micros(1234);
+        stats.path.lost_packets = 17;
+        stats.path.cwnd = 65536;
+        stats.udp_rx.bytes = 1024;
+        stats.frame_rx.stream_data_blocked = 2;
+        let evidence = inner_quic_stats(&stats);
+        assert_eq!(evidence["rtt_us"], 1234);
+        assert_eq!(evidence["lost_packets"], 17);
+        assert_eq!(evidence["cwnd_bytes"], 65536);
+        assert_eq!(evidence["udp_rx_bytes"], 1024);
+        assert_eq!(evidence["rx_stream_data_blocked"], 2);
+        let counters = evidence.as_object().unwrap();
+        assert_eq!(counters.len(), 15);
+        assert!(counters.values().all(Value::is_u64));
+    }
 
     #[test]
     fn mixed_profile_preserves_the_original_acceptance_sequence() {
