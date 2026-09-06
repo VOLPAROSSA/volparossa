@@ -54,7 +54,8 @@ print_plan() {
     elif [ "$scenario" = mixed-link ]; then
         printf '%s\n' \
             'Mixed-link scenario: real HTTP/3 over genuine two-path MPQUIC through LAN/public Relays;' \
-            '  exact hashes, both WireGuard legs, privacy and cleanup; no aggregate bandwidth or packaging claim.'
+            '  compare bounded WAN-only and LAN+WAN HTTP/3 throughput with exact paths, hashes and cleanup;' \
+            '  no physical-radio, arbitrary-link speed or packaging claim.'
     elif [ "$scenario" = sharing ]; then
         printf '%s\n' \
             'Sharing scenario: genuine Exit contribution and owner upload on one shared veth;' \
@@ -271,6 +272,7 @@ KNOWN_HOSTS=$RUN_DIRECTORY/known-hosts
 USER_DATA=$RUN_DIRECTORY/user-data
 META_DATA=$RUN_DIRECTORY/meta-data
 GUEST_DRIVER=$RUN_DIRECTORY/guest-driver.sh
+GUEST_DIAGNOSTICS=$RUN_DIRECTORY/guest-diagnostics.py
 CONSOLE=$RUN_DIRECTORY/console.log
 
 qemu-img create -q -f qcow2 -F qcow2 -b "$image_path" "$OVERLAY" 16G
@@ -310,6 +312,172 @@ printf 'instance-id: volparossa-alpha-%s\nlocal-hostname: volparossa-alpha\n' \
     "$(printf '%.12s' "$expected_commit")" >"$META_DATA"
 cloud-localds "$SEED" "$USER_DATA" "$META_DATA"
 
+cat >"$GUEST_DIAGNOSTICS" <<'GUEST_DIAGNOSTICS_PYTHON'
+#!/usr/bin/env python3
+"""Bounded, incomplete evidence only; never clean up or mutate guest networking."""
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+FILE_LIMIT = 131072
+TOTAL_LIMIT = 8388608
+FILE_COUNT_LIMIT = 64
+NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
+         "relay3", "relay4", "relay5", "exit", "exit2")
+SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
+              "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
+              "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
+              "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json",
+              "uplink-link-smoke.json", "a15-evidence.json"}
+SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
+                  for kind, extension in (("agent", "log"), ("helper", "log"),
+                                           ("logs", "txt"), ("status", "txt"),
+                                           ("peers", "txt"), ("roles", "txt")))
+
+
+def read_tail(path, limit=FILE_LIMIT):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            stream.seek(max(0, info.st_size - limit))
+            return stream.read(limit), info.st_size
+    except OSError:
+        return None
+
+
+def phase_at(path):
+    observed = read_tail(path, 65)
+    if observed is None or observed[1] > 65:
+        return None
+    value = observed[0].strip().decode("ascii", errors="replace")
+    return value if re.fullmatch(r"[a-z0-9-]{1,64}", value) else None
+
+
+def helper_processes(cgroups, proc):
+    processes = []
+    for node in NODES:
+        unit = f"volparossa-alpha-helper@{node}.service"
+        members = read_tail(cgroups / unit / "cgroup.procs", 8192)
+        if members is None:
+            continue
+        for raw_pid in members[0].split()[:64]:
+            if not raw_pid.isdigit() or len(raw_pid) > 10 or len(processes) >= 128:
+                continue
+            pid = raw_pid.decode("ascii")
+            directory = proc / pid
+            identity = read_tail(directory / "cgroup", 8192)
+            if identity is None or f"0::/system.slice/{unit}".encode() not in identity[0].splitlines():
+                continue
+            record = {"node": node, "pid": int(pid)}
+            for field in ("stat", "wchan", "syscall"):
+                observed = read_tail(directory / field, 1024)
+                record[field] = None if observed is None else observed[0].decode("ascii", errors="replace").strip()
+            try:
+                namespace = os.readlink(directory / "ns/net")
+                record["netns"] = namespace if re.fullmatch(r"net:\[[0-9]+\]", namespace) else None
+            except OSError:
+                record["netns"] = None
+            processes.append(record)
+    return processes
+
+
+def collect(home, opt, revision, scenario, guest_status,
+            cgroups=Path("/sys/fs/cgroup/system.slice"), proc=Path("/proc")):
+    target = Path(tempfile.mkdtemp(prefix="alpha-incomplete.", dir=home))
+    entries = []
+    seen_sources = set()
+    total = 0
+    candidates = [(home / name, f"driver/{name}") for name in
+                  ("guest-phase.txt", "cargo-build.log", "egress-netns-test.log",
+                   "package-lifecycle.stdout", "package-lifecycle.stderr")]
+    roots = [(home / "alpha-output", "published")]
+    for path in sorted(opt.glob("va.*"))[:32]:
+        if not path.is_symlink() and path.is_dir() and re.fullmatch(r"va\.[0-9a-f]{32}\.[A-Za-z0-9]{6}", path.name):
+            roots.append((path, f"work-{len(roots)}"))
+            if len(roots) == 5:
+                break
+    for root, label in roots:
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for name in sorted(SAFE_NAMES):
+            candidates.append((root / name, f"{label}/{name}"))
+        candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
+                          if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
+    for path, relative in candidates:
+        if len(entries) >= FILE_COUNT_LIMIT or total >= TOTAL_LIMIT:
+            break
+        if path in seen_sources:
+            continue
+        seen_sources.add(path)
+        observed = read_tail(path, min(FILE_LIMIT, TOTAL_LIMIT - total))
+        if observed is None:
+            continue
+        data, original_size = observed
+        # Retain only the explicitly allowlisted non-secret fixture outputs, never keys/configs.
+        if re.search(br"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", data):
+            continue
+        if original_size > len(data):
+            relative += ".tail"
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("xb") as stream:
+            stream.write(data)
+        entries.append({"file": relative, "original_bytes": original_size,
+                        "captured_bytes": len(data), "truncated": original_size > len(data)})
+        total += len(data)
+    summary = {"schema_version": 1, "report_kind": "volparossa-incomplete-vm-diagnostics",
+               "source_revision": revision, "scenario": scenario, "success": False,
+               "guest_exit_status": guest_status,
+               "observed_blocker": "GUEST_EXECUTION_TIMEOUT" if guest_status in (124, 137)
+                                   else "GUEST_OUTPUT_UNAVAILABLE",
+               "driver_phase": phase_at(home / "guest-phase.txt"),
+               "topology_phase": phase_at(home / "alpha-output/current-phase"),
+               "cleanup": {"complete": False, "verified": False},
+               "host_state": {"unchanged": None, "verified": False},
+               "helper_processes": helper_processes(cgroups, proc),
+               "diagnostics": {"available": True, "partial": True,
+                               "captured_bytes": total, "files": entries}}
+    (target / "vm-incomplete.json").write_text(json.dumps(summary, sort_keys=True) + "\n")
+    archive = target / "snapshot.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        for entry in entries:
+            bundle.add(target / entry["file"], arcname=entry["file"], recursive=False)
+        bundle.add(target / "vm-incomplete.json", arcname="vm-incomplete.json", recursive=False)
+    return archive
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
+        raise SystemExit(64)
+    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link",
+                           "sharing", "wifi-mesh", "wifi-link", "uplink-link"):
+        raise SystemExit(64)
+    status_code = int(sys.argv[3])
+    if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
+        raise SystemExit(77)
+    virtual = subprocess.run(["systemd-detect-virt"], capture_output=True, timeout=2, check=False)
+    if virtual.stdout.strip() != b"kvm" or virtual.returncode != 0:
+        raise SystemExit(77)
+    result = collect(Path("/home/vpci"), Path("/opt"), sys.argv[1], sys.argv[2], status_code)
+    account = pwd.getpwnam("vpci")
+    os.chown(result, account.pw_uid, account.pw_gid)
+    os.chmod(result, 0o600)
+    os.replace(result, "/home/vpci/alpha-incomplete-output.tar.gz")
+    print("bounded incomplete guest diagnostics exported; cleanup remains unverified")
+GUEST_DIAGNOSTICS_PYTHON
+chmod 0700 "$GUEST_DIAGNOSTICS"
+
 cat >"$GUEST_DRIVER" <<'GUEST_DRIVER_SCRIPT'
 #!/bin/sh
 set -eu
@@ -322,8 +490,11 @@ package_sha256=$4
 scenario=$5
 case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link) ;; *) exit 64 ;; esac
 cd /home/vpci
+guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
+guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
 if [ "$scenario" = wifi-mesh ]; then
+    guest_phase wifi-mesh-backend
     test "$(hostname)" = volparossa-alpha
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
@@ -331,6 +502,7 @@ if [ "$scenario" = wifi-mesh ]; then
     exec sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit"
 fi
 if [ "$scenario" = wifi-link ]; then
+    guest_phase wifi-kernel
     tar -xzf source.tar.gz
     (cd source && sh tests/integration/wifi-mesh-vm-guest.sh "$expected_commit" kernel-only)
 fi
@@ -341,6 +513,7 @@ if [ "$scenario" = alpha ]; then
     [ "$(stat -Lc '%s' volparossa.deb)" -le 536870912 ]
 fi
 chmod 0555 volparossa-mpquic
+guest_phase packages
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get update
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
@@ -357,6 +530,7 @@ tar -xzf source.tar.gz
 cd source
 test -x tests/integration/kvm-alpha-topology.sh
 test -x tests/packaging/debian13-package-lifecycle.sh
+guest_phase build
 CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
     -p volparossa --bin volparossa \
     -p volparossa-agent --bin volparossa-agent \
@@ -368,6 +542,17 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
         tail -c 131072 /home/vpci/cargo-build.log >&2
         exit 1
     }
+if [ "$scenario" = uplink-link ]; then
+    guest_phase egress-netns-test
+    if ! VOLPAROSSA_REQUIRE_EGRESS_NETNS_PROOF=1 CARGO_TARGET_DIR=/home/vpci/target \
+        cargo test --locked -p volparossa-linux-uapi --lib \
+        egress::tests::egress_disposable_link_loss_return_and_capless_first_bind \
+        -- --exact --nocapture --test-threads=1 >/home/vpci/egress-netns-test.log 2>&1; then
+        tail -c 131072 /home/vpci/egress-netns-test.log >&2
+        exit 1
+    fi
+    tail -c 131072 /home/vpci/egress-netns-test.log
+fi
 mkdir /home/vpci/alpha-output
 
 # The package lifecycle requires a pristine VM, including an absent
@@ -376,6 +561,7 @@ mkdir /home/vpci/alpha-output
 # or installed binaries that could affect the later datapath evidence.
 package_status=0
 if [ "$scenario" = alpha ]; then
+guest_phase package-lifecycle
 mkdir /home/vpci/alpha-output/package
 package_stdout=/home/vpci/package-lifecycle.stdout
 package_stderr=/home/vpci/package-lifecycle.stderr
@@ -394,6 +580,7 @@ fi
 
 topology_scenario=alpha
 case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link) topology_scenario=$scenario ;; esac
+guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     --execute --yes \
@@ -407,11 +594,13 @@ sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
     2>/home/vpci/alpha-output/runner.stderr
 topology_status=$?
 set -e
+guest_phase archive
 printf '%s\n' "$topology_status" >/home/vpci/alpha-output/guest-exit-status
 sudo -n chown -R vpci:vpci /home/vpci/alpha-output
 find /home/vpci/alpha-output -type d -exec chmod 0700 {} +
 find /home/vpci/alpha-output -type f -exec chmod 0600 {} +
 tar -C /home/vpci/alpha-output -czf /home/vpci/alpha-output.tar.gz .
+guest_phase driver-finished
 if [ "$package_status" -ne 0 ]; then exit "$package_status"; fi
 exit "$topology_status"
 GUEST_DRIVER_SCRIPT
@@ -434,8 +623,10 @@ qemu-system-x86_64 \
     </dev/null >/dev/null 2>&1 &
 QEMU_PID=$!
 
-ssh_base() {
-    timeout --signal=TERM --kill-after=10s 2400s ssh \
+ssh_bounded() {
+    ssh_time_bound=$1
+    shift
+    timeout --signal=TERM --kill-after=10s "$ssh_time_bound" ssh \
         -F /dev/null -i "$SSH_KEY" -p 22223 \
         -o BatchMode=yes -o ConnectTimeout=5 \
         -o ClearAllForwardings=yes -o ControlMaster=no -o ControlPath=none \
@@ -446,6 +637,8 @@ ssh_base() {
         -o RequestTTY=no -o StrictHostKeyChecking=yes -o Tunnel=no \
         -o UserKnownHostsFile="$KNOWN_HOSTS" vpci@127.0.0.1 "$@"
 }
+
+ssh_base() { ssh_bounded 2400s "$@"; }
 
 scp_to() {
     timeout --signal=TERM --kill-after=10s 600s scp \
@@ -460,8 +653,10 @@ scp_to() {
         -o UserKnownHostsFile="$KNOWN_HOSTS" "$1" "vpci@127.0.0.1:$2"
 }
 
-scp_from() {
-    timeout --signal=TERM --kill-after=10s 600s scp \
+scp_from_bounded() {
+    scp_time_bound=$1
+    shift
+    timeout --signal=TERM --kill-after=10s "$scp_time_bound" scp \
         -F /dev/null -i "$SSH_KEY" -P 22223 \
         -o BatchMode=yes -o ConnectTimeout=5 \
         -o ClearAllForwardings=yes -o ControlMaster=no -o ForwardAgent=no \
@@ -471,6 +666,30 @@ scp_from() {
         -o ProxyCommand=none -o ProxyJump=none -o RequestTTY=no \
         -o StrictHostKeyChecking=yes -o Tunnel=no \
         -o UserKnownHostsFile="$KNOWN_HOSTS" "vpci@127.0.0.1:$1" "$2"
+}
+
+scp_from() { scp_from_bounded 600s "$@"; }
+
+retrieve_incomplete_output() {
+    # This record remains even when the guest is unreachable. It is never a success report.
+    jq -cn --arg revision "$expected_commit" --arg scenario "$scenario" \
+        --argjson status "$GUEST_STATUS" \
+        '{schema_version:1,report_kind:"volparossa-incomplete-vm-diagnostics",
+          source_revision:$revision,scenario:$scenario,success:false,guest_exit_status:$status,
+          observed_blocker:(if $status==124 or $status==137 then "GUEST_EXECUTION_TIMEOUT"
+                            else "GUEST_OUTPUT_UNAVAILABLE" end),
+          driver_phase:null,topology_phase:null,cleanup:{complete:false,verified:false},
+          host_state:{unchanged:null,verified:false},diagnostics:{available:false,partial:true}}' \
+        >"$output_directory/vm-incomplete.json"
+    if ssh_bounded 30s sudo -n python3 /home/vpci/guest-diagnostics.py \
+        "$expected_commit" "$scenario" "$GUEST_STATUS" \
+        >"$output_directory/vm-diagnostics.log" 2>"$output_directory/vm-diagnostics.stderr" \
+        && scp_from_bounded 30s /home/vpci/alpha-incomplete-output.tar.gz \
+            "$RUN_DIRECTORY/alpha-incomplete-output.tar.gz"; then
+        [ "$(stat -Lc '%s' "$RUN_DIRECTORY/alpha-incomplete-output.tar.gz")" -le 9437184 ] \
+            || return 1
+        tar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-incomplete-output.tar.gz"
+    fi
 }
 
 ssh_attempt=0
@@ -486,6 +705,7 @@ scp_to "$SOURCE_ARCHIVE" /home/vpci/source.tar.gz
 if [ -n "$mpquic_path" ]; then scp_to "$mpquic_path" /home/vpci/volparossa-mpquic; fi
 if [ -n "$package_path" ]; then scp_to "$package_path" /home/vpci/volparossa.deb; fi
 scp_to "$GUEST_DRIVER" /home/vpci/guest-driver.sh
+scp_to "$GUEST_DIAGNOSTICS" /home/vpci/guest-diagnostics.py
 ssh_base chmod 0700 /home/vpci/guest-driver.sh
 
 set +e
@@ -513,9 +733,13 @@ if { [ "$scenario" = wifi-mesh ] || [ "$scenario" = wifi-link ]; } && [ "$GUEST_
     GUEST_STATUS=$?
     set -e
 fi
-if ! scp_from /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then
+retrieval_bound=600s
+[ "$GUEST_STATUS" -eq 0 ] || retrieval_bound=30s
+if ! scp_from_bounded "$retrieval_bound" /home/vpci/alpha-output.tar.gz "$RUN_DIRECTORY/alpha-output.tar.gz"; then
+    retrieve_incomplete_output || true
     tail -c 131072 "$CONSOLE" >&2
-    exit 1
+    [ "$GUEST_STATUS" -ne 0 ] || GUEST_STATUS=1
+    exit "$GUEST_STATUS"
 fi
 tar -C "$output_directory" -xzf "$RUN_DIRECTORY/alpha-output.tar.gz"
 if grep -aERq -- '-----BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY-----' "$output_directory"; then

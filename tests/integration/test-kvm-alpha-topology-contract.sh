@@ -698,4 +698,5 @@ python3 -B "$HERE/test-benchmark-selection.py"
 python3 -B "$HERE/test-wifi-link-smoke.py"
 sh -n "$HERE/uplink-link-smoke.sh"
 python3 -B "$HERE/test-uplink-link-smoke.py"
+python3 -B "$HERE/test-alpha-vm-diagnostics.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'
