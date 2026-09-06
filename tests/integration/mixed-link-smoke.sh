@@ -131,13 +131,39 @@ mixed_link_bandwidth_privacy_start() {
     done
 }
 
+mixed_link_bandwidth_prepare_route() {
+    case $1 in
+        mixed-single)
+            # A06 left this real two-path route running. Start a new HTTP/3 flow on it;
+            # normal ingress still checks signed route/policy expiry, without renewal.
+            ;;
+        mixed-aggregate)
+            benchmark_disconnect_route "$2" || return 1
+            benchmark_select_route "$2" multipath-quic || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    wait_active_native_mpquic_paths "$2-before" || return 1
+    [ "$1" = mixed-single ] || return 0
+    jq -en --slurpfile initial "$WORK/mixed-link-evidence.json" \
+        --slurpfile current "$WORK/$2-before.json" \
+        --arg r1 "$R1_PEER" --arg r2 "$R2_PEER" --arg exit "$EXIT_PEER" '
+        def identity: {route_context_id, paths:([.paths[] |
+          {path_id,relay_peer_id,exit_peer_id}] | sort_by(.path_id))};
+        def active: (.route_context_id | test("^[0-9a-f]{32}$")) and
+          (.paths|length)==2 and ([.paths[].relay_peer_id]|sort)==([$r1,$r2]|sort) and
+          ([.paths[].path_id]|unique|length)==2 and all(.paths[]; .state==3 and .exit_peer_id==$exit);
+        $initial[0].transfer.native_mpquic as $prior |
+        $initial[0].success==true and ($prior|active) and ($current[0]|active) and
+          ($prior|identity)==($current[0]|identity)
+    ' >/dev/null
+}
+
 mixed_link_bandwidth_case() {
     mixed_case=$1; mixed_port=$2
     mixed_prefix="mixed-link-${mixed_case#mixed-}"
     PHASE="$mixed_prefix-selection"
-    benchmark_disconnect_route "$mixed_prefix" || return 1
-    benchmark_select_route "$mixed_prefix" multipath-quic || return 1
-    wait_active_native_mpquic_paths "$mixed_prefix-before" || return 1
+    mixed_link_bandwidth_prepare_route "$mixed_case" "$mixed_prefix" || return 1
     mixed_link_bandwidth_privacy_start || return 1
     start_http3_observers "$mixed_prefix" "$WORK/$mixed_prefix-response.marker" || return 1
     PHASE="$mixed_prefix-request"
@@ -209,6 +235,7 @@ mixed_link_bandwidth_case() {
 
 mixed_link_bandwidth_validate() {
     jq -S -cn \
+        --slurpfile initial "$WORK/mixed-link-evidence.json" \
         --slurpfile sc "$WORK/mixed-link-single-client.json" --slurpfile sd "$WORK/mixed-link-single-destination.json" \
         --slurpfile ac "$WORK/mixed-link-aggregate-client.json" --slurpfile ad "$WORK/mixed-link-aggregate-destination.json" \
         --slurpfile sb "$WORK/mixed-link-single-before.json" --slurpfile sr "$WORK/mixed-link-single-request-active.json" \
@@ -236,12 +263,16 @@ mixed_link_bandwidth_validate() {
           ([$native.paths[].relay_peer_id]|sort)==([$r1,$r2]|sort) and
           ([$native.paths[].path_id]|unique|length)==2 and
           all($native.paths[]; .state==3 and .exit_peer_id==$exit);
+        def identity: {route_context_id, paths:([.paths[] |
+          {path_id,relay_peer_id,exit_peer_id}] | sort_by(.path_id))};
         def complete($capture): $capture.truncated==false and $capture.packet_socket_drops==0 and
           $capture.observed_frames>0 and $capture.marker_observed;
         def both_payload($capture): $capture.after_marker.relay1_wireguard_data_bytes>1048576 and
           $capture.after_marker.relay2_wireguard_data_bytes>1048576;
         ($sc[0].response_duration_ns / $ac[0].response_duration_ns) as $ratio |
-        (app($sc[0];$sd[0];"mixed-single";52016) and app($ac[0];$ad[0];"mixed-aggregate";52017) and
+        ($initial[0].success==true and two($initial[0].transfer.native_mpquic) and
+          ($initial[0].transfer.native_mpquic|identity)==($sb[0]|identity) and
+          app($sc[0];$sd[0];"mixed-single";52016) and app($ac[0];$ad[0];"mixed-aggregate";52017) and
           $sc[0].response_sha256!=$ac[0].response_sha256 and
           two($sb[0]) and two($sr[0]) and two($ab[0]) and two($ar[0]) and two($aa[0]) and
           $sb[0].route_context_id==$sr[0].route_context_id and $sb[0].route_context_id==$sa[0].route_context_id and
@@ -274,6 +305,7 @@ mixed_link_bandwidth_validate() {
           $ratio>1.25) as $success |
         {success:$success,minimum_ratio_exclusive:1.25,aggregate_to_wan_only_ratio:$ratio,
           single_wan_only:{application:$sc[0],destination:$sd[0],native_before:$sb[0],native_after:$sa[0],
+            reused_a06_route_context_id:$initial[0].transfer.native_mpquic.route_context_id,
             application_response_mbps:($sc[0].response_bytes*8000/$sc[0].response_duration_ns),
             response_qdisc_bytes:$sq[0],client_capture:$spc[0],exit_capture:$spe[0],lan_link_at_release:$slc[0][0]},
           lan_plus_wan:{application:$ac[0],destination:$ad[0],native_before:$ab[0],native_after:$aa[0],
@@ -282,7 +314,7 @@ mixed_link_bandwidth_validate() {
           shape:{relay1_client_egress_mbps:8,relay2_client_egress_mbps:8,
             relay1_qdisc:$shape1[0],relay2_qdisc:$shape2[0]},privacy:$privacy[0],
           ordinary_quic_fallback_allowed:false,application_pacing:false,
-          scope:"same 32MiB HTTP/3 response size on genuine native MPQUIC; WAN-only after deliberate LAN loss versus a fresh LAN+WAN route"}
+          scope:"same 32MiB HTTP/3 response size on genuine native MPQUIC; WAN-only on the verified A06 route after deliberate LAN loss versus a fresh LAN+WAN route"}
     ' >"$WORK/mixed-link-bandwidth.json" || return 1
     jq -e '.success == true' "$WORK/mixed-link-bandwidth.json" >/dev/null
 }

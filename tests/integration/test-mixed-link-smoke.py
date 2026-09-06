@@ -108,6 +108,55 @@ class MixedLinkTests(unittest.TestCase):
                 "mixed-redraw-test", str(benchmark), temporary], capture_output=True, text=True)
             self.assertEqual(unconfirmed.returncode, 1, unconfirmed.stderr)
 
+    def test_baseline_reuses_only_the_still_active_exact_a06_route(self):
+        native = {"route_context_id": "1" * 32, "paths": [
+            {"relay_peer_id": relay, "exit_peer_id": "exit", "state": 3, "path_id": index + 1}
+            for index, relay in enumerate(("lan", "wan"))]}
+        initial = {"success": True, "transfer": {"native_mpquic": native}}
+        command = (
+            '. "$1"; WORK=$2; R1_PEER=lan; R2_PEER=wan; EXIT_PEER=exit; '
+            'benchmark_disconnect_route() { printf "disconnect:%s\\n" "$1"; }; '
+            'benchmark_select_route() { printf "select:%s:%s\\n" "$1" "$2"; }; '
+            'wait_active_native_mpquic_paths() { printf "active:%s\\n" "$1"; '
+            'cp "$WORK/current.json" "$WORK/$1.json"; }; '
+            'mixed_link_bandwidth_prepare_route "$3" "mixed-link-${3#mixed-}"'
+        )
+        with tempfile.TemporaryDirectory(prefix="volparossa-mixed-reuse-") as temporary:
+            work = Path(temporary)
+
+            def prepare(case, prior, current):
+                (work / "mixed-link-evidence.json").write_text(json.dumps(prior), encoding="ascii")
+                (work / "current.json").write_text(json.dumps(current), encoding="ascii")
+                return subprocess.run(["sh", "-c", command, "mixed-reuse-test",
+                    str(HERE / "mixed-link-smoke.sh"), temporary, case], capture_output=True, text=True)
+
+            valid = prepare("mixed-single", initial, native)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(valid.stdout, "active:mixed-link-single-before\n")
+            for defect in ("failed-proof", "context", "path", "relay", "exit", "inactive", "missing"):
+                prior, current = copy.deepcopy(initial), copy.deepcopy(native)
+                if defect == "failed-proof":
+                    prior["success"] = False
+                elif defect == "context":
+                    current["route_context_id"] = "2" * 32
+                elif defect == "missing":
+                    current["paths"].pop()
+                else:
+                    field, value = {"path": ("path_id", 3), "relay": ("relay_peer_id", "other"),
+                                    "exit": ("exit_peer_id", "other"), "inactive": ("state", 1)}[defect]
+                    current["paths"][0][field] = value
+                rejected = prepare("mixed-single", prior, current)
+                self.assertNotEqual(rejected.returncode, 0, defect)
+                # A failed reuse proof must not silently reconnect or select a replacement.
+                self.assertEqual(rejected.stdout, "active:mixed-link-single-before\n", defect)
+            aggregate = prepare("mixed-aggregate", initial, native)
+            self.assertEqual(aggregate.returncode, 0, aggregate.stderr)
+            self.assertEqual(aggregate.stdout, "disconnect:mixed-link-aggregate\n"
+                "select:mixed-link-aggregate:multipath-quic\nactive:mixed-link-aggregate-before\n")
+            unknown = prepare("another-case", initial, native)
+            self.assertNotEqual(unknown.returncode, 0)
+            self.assertEqual(unknown.stdout, "")
+
     def test_bandwidth_comparison_keeps_real_path_payload_and_gain_gates(self):
         def records():
             result = {}
@@ -154,6 +203,8 @@ class MixedLinkTests(unittest.TestCase):
                         "client_public_packets": 0,
                         "expected_link_down_notifications": int(down),
                         "expected_link_down_interfaces": {"r1c": 1} if down else {}})
+            result["mixed-link-evidence.json"] = {"success": True, "transfer": {
+                "native_mpquic": copy.deepcopy(result["mixed-link-single-before.json"])}}
             result["mixed-link-bandwidth-privacy.json"] = privacy
             for interface in ("r1c", "r2c"):
                 result["mixed-link-shape-" + interface + ".json"] = [
@@ -173,6 +224,9 @@ class MixedLinkTests(unittest.TestCase):
         valid = records()
         self.assertEqual(evaluate(valid), (0, ""))
         for mutation in (
+            lambda d: d["mixed-link-evidence.json"].update(success=False),
+            lambda d: d["mixed-link-evidence.json"]["transfer"]["native_mpquic"].update(route_context_id="3" * 32),
+            lambda d: d["mixed-link-evidence.json"]["transfer"]["native_mpquic"]["paths"][0].update(path_id=3),
             lambda d: d["mixed-link-aggregate-client.json"].update(response_duration_ns=32_000_000_000),
             lambda d: d["mixed-link-aggregate-after.json"]["paths"].pop(),
             lambda d: d["mixed-link-aggregate-request-active.json"]["paths"][0].update(state=1),
