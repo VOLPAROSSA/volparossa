@@ -308,6 +308,12 @@ again: the other consumer repeatedly received preselection authority rejection i
 restored route. Its cached forwarded Exit advertisement was not refreshed during the three-minute
 selection window. Recovery remains unproven; all owned objects were removed and guest-state
 hashes matched.
+The scheduler now refreshes still-valid forwarded Exit capabilities every 30 seconds through
+the existing authenticated control Relay. The three-lineage limit, affine capability lifetimes,
+request bounds and replay/cooldown checks remain unchanged; only accepted signed ingest updates
+the refresh clock. The old suppression is reproduced with real signed 120-second capabilities;
+eight focused scheduling/lineage checks and strict agent Clippy pass. The complete live
+restoration sequence still needs a successful rerun.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper

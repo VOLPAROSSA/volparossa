@@ -165,6 +165,9 @@ const MAX_CURRENT_EXIT_CONTROL_CANDIDATES: usize = 3;
 const MAX_RECENT_NATIVE_EVIDENCE: usize = 64;
 pub(crate) const MAX_FORWARD_OPERATION_LIFETIME_MS: u64 = 30_000;
 const AUTOMATIC_EXIT_FETCH_RETRY_BACKOFF_MS: u64 = 1_000;
+// A remote Exit can lose and regain its independent uplink while an older signed capability
+// remains valid. Refresh the existing authenticated pair without shortening affine owners' TTL.
+const AUTOMATIC_EXIT_FETCH_REFRESH_INTERVAL_MS: u64 = 30_000;
 // A provider observation is client-local: a selected control Relay may not have converged on the
 // same DHT record yet. Retire that exact Relay/Exit lineage long enough to rotate through the
 // bounded control set, but retry it well inside the provider observation and A01 liveness windows.
@@ -1713,6 +1716,9 @@ pub struct DiscoveryRuntime {
     exit_control_relays: HashMap<Libp2pPeerId, DirectRelayCapability>,
     local_relay_snapshot: Option<DirectRelayCapability>,
     forwarded_exits: HashMap<ForwardedExitKey, ForwardedExitCapability>,
+    // Scheduling-only timestamps; inserted only by accepted signed capability commits and
+    // removed with their bounded cache entries. Never a substitute for provenance or TTL.
+    forwarded_exit_refreshed_at_ms: HashMap<ForwardedExitKey, u64>,
     forwarded_exit_targets: HashMap<Libp2pPeerId, u64>,
     privacy_conflicts: HashMap<PrivacyConflictKey, u64>,
     forwarded_exit_fail_closed_until_ms: u64,
@@ -1900,6 +1906,7 @@ impl DiscoveryRuntime {
             exit_control_relays: HashMap::new(),
             local_relay_snapshot: None,
             forwarded_exits: HashMap::new(),
+            forwarded_exit_refreshed_at_ms: HashMap::new(),
             forwarded_exit_targets: HashMap::new(),
             privacy_conflicts: HashMap::new(),
             forwarded_exit_fail_closed_until_ms: 0,
@@ -5243,7 +5250,6 @@ impl DiscoveryRuntime {
         exit_peer: Libp2pPeerId,
         now_ms: u64,
     ) -> Option<DirectRelayCapability> {
-        let mut current = 0;
         // Count all currently live pairs, including a control whose own advertisement is too
         // near expiry to start another RPC. It still occupies a snapshot slot until expiry.
         let live_controls = self
@@ -5257,21 +5263,21 @@ impl DiscoveryRuntime {
             .iter()
             .filter(|control| control.peer_id != exit_peer)
         {
-            if self.has_current_forwarded_exit_control(
+            let key = ForwardedExitKey {
+                control_relay_peer: control.peer_id,
+                exit_peer,
+            };
+            if !self.has_current_forwarded_exit_control(
                 control,
                 exit_peer,
                 now_ms.saturating_add(1_000),
-            ) {
-                current += 1;
-                if current >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
-                    return None;
-                }
-            } else {
+            ) || self.forwarded_exit_refresh_is_due(&key, now_ms)
+            {
                 missing.push(control.clone());
             }
         }
-        // A still-live slot with less than the refresh margin must be refreshed in place;
-        // replacing it now could briefly publish a fourth valid lineage in the next snapshot.
+        // Both near-expiry and periodically refreshed live slots must be refreshed in place;
+        // replacing one now could publish a fourth valid lineage in the next snapshot.
         if live_controls.len() >= MAX_CURRENT_EXIT_CONTROL_CANDIDATES {
             missing.retain(|control| live_controls.contains(&control.peer_id));
         }
@@ -5279,6 +5285,14 @@ impl DiscoveryRuntime {
         // current, enroll at most two authenticated alternatives so normal selection can vary
         // control/data roles. Existing affine capabilities and in-flight requests never migrate.
         self.next_untried_exit_control(&missing, exit_peer, now_ms)
+    }
+
+    fn forwarded_exit_refresh_is_due(&self, key: &ForwardedExitKey, now_ms: u64) -> bool {
+        self.forwarded_exit_refreshed_at_ms
+            .get(key)
+            .is_none_or(|refreshed_at_ms| {
+                now_ms.saturating_sub(*refreshed_at_ms) >= AUTOMATIC_EXIT_FETCH_REFRESH_INTERVAL_MS
+            })
     }
 
     /// An older affine capability remains valid for its owner, but cannot suppress an exact
@@ -5393,6 +5407,8 @@ impl DiscoveryRuntime {
         self.automatic_exit_fetches.retain(|key, _| {
             providers.contains_key(&key.exit_peer) && controls.contains_key(&key.control_relay_peer)
         });
+        self.forwarded_exit_refreshed_at_ms
+            .retain(|key, _| self.forwarded_exits.contains_key(key));
     }
 
     fn drive_automatic_exit_fetch_attempts(&mut self, now_ms: u64) {
@@ -5489,7 +5505,6 @@ impl DiscoveryRuntime {
                 .get(&attempt.key.exit_peer)
                 .is_some_and(|expires_at_ms| *expires_at_ms > now_ms.saturating_add(1_000))
             && self.forwarded_exit_peer_is_eligible(attempt.key.exit_peer, now_ms)
-            && !self.forwarded_exits.contains_key(&attempt.key)
             && self
                 .direct_relays
                 .get(&attempt.key.control_relay_peer)
@@ -5498,7 +5513,11 @@ impl DiscoveryRuntime {
                         current,
                         &attempt.authorized_control,
                         request.deadline_unix_ms(),
-                    )
+                    ) && (!self.has_current_forwarded_exit_control(
+                        current,
+                        attempt.key.exit_peer,
+                        now_ms.saturating_add(1_000),
+                    ) || self.forwarded_exit_refresh_is_due(&attempt.key, now_ms))
                 })
     }
 
@@ -12581,6 +12600,13 @@ impl DiscoveryRuntime {
                         expires_at_ms: capability_expiry_ms,
                     },
                 );
+                self.forwarded_exit_refreshed_at_ms.insert(
+                    ForwardedExitKey {
+                        control_relay_peer,
+                        exit_peer,
+                    },
+                    now_ms,
+                );
                 if !self.preferred_exit_controls.contains_key(&exit_peer)
                     && self.preferred_exit_controls.len() < MAX_EXIT_PROVIDER_PEERS
                 {
@@ -12840,6 +12866,8 @@ impl DiscoveryRuntime {
             })
             .max();
         self.forwarded_exits.retain(|key, _| !keys.contains(key));
+        self.forwarded_exit_refreshed_at_ms
+            .retain(|key, _| !keys.contains(key));
 
         let client_ids = self
             .pending_client_forwards
@@ -20208,6 +20236,301 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "signed three-lineage regression separates capability TTL from refresh age"
+    )]
+    async fn automatic_exit_fetch_periodically_refreshes_live_signed_capabilities() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = *exit.peer_id();
+        let expires_at_ms = now_ms + 120_000;
+        let request_deadline_ms = now_ms + 25_000;
+        let mut controls = Vec::new();
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, expires_at_ms);
+        assert!(
+            fixture
+                .runtime
+                .mark_forwarded_exit_target(exit_peer, expires_at_ms)
+        );
+
+        for _ in 0..3 {
+            let identity = Identity::generate();
+            let envelope = long_lived_service_advertisement(
+                &fixture,
+                &identity,
+                RolesConfig {
+                    client: false,
+                    relay: true,
+                    exit: false,
+                },
+                now_ms,
+            );
+            assert!(
+                fixture
+                    .runtime
+                    .stage_advertisement_commit(
+                        PreparedAdvertisementCommit {
+                            peer: *identity.peer_id(),
+                            provenance: AdvertisementProvenance::DirectRelay {
+                                authenticated_peer: *identity.peer_id(),
+                            },
+                            envelope,
+                        },
+                        &fixture.state,
+                    )
+                    .await
+                    .accepted_advertisement()
+                    .is_some()
+            );
+            controls.push(fixture.runtime.direct_relays[identity.peer_id()].clone());
+        }
+        let exit_envelope = long_lived_service_advertisement(
+            &fixture,
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            now_ms,
+        );
+        for control in &controls {
+            assert!(
+                fixture
+                    .runtime
+                    .stage_advertisement_commit(
+                        PreparedAdvertisementCommit {
+                            peer: exit_peer,
+                            provenance: forwarded_provenance(control, &exit, request_deadline_ms),
+                            envelope: exit_envelope.clone(),
+                        },
+                        &fixture.state,
+                    )
+                    .await
+                    .accepted_advertisement()
+                    .is_some()
+            );
+        }
+        let committed_ms = unix_millis();
+        let first_key = ForwardedExitKey {
+            control_relay_peer: controls[0].peer_id,
+            exit_peer,
+        };
+        let first_refresh_ms = fixture.runtime.forwarded_exit_refreshed_at_ms[&first_key];
+        let retained = fixture.runtime.forwarded_exits.clone();
+        assert_eq!(retained.len(), 3);
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, committed_ms)
+                .is_none()
+        );
+        assert!(controls.iter().all(
+            |control| fixture.runtime.has_current_forwarded_exit_control(
+                control,
+                exit_peer,
+                committed_ms + 31_000,
+            )
+        ));
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(
+                    &controls,
+                    exit_peer,
+                    first_refresh_ms + AUTOMATIC_EXIT_FETCH_REFRESH_INTERVAL_MS - 1,
+                )
+                .is_none(),
+            "refresh waits for its full interval"
+        );
+
+        let refreshed = fixture
+            .runtime
+            .next_automatic_exit_control(&controls, exit_peer, committed_ms + 30_000)
+            .expect("still-valid signed Exit capabilities must not suppress periodic refresh");
+        assert_eq!(refreshed.peer_id, controls[0].peer_id);
+        assert_eq!(
+            fixture.runtime.forwarded_exits, retained,
+            "scheduling does not replace affine owners"
+        );
+        fixture
+            .runtime
+            .automatic_exit_fetches
+            .insert(first_key, committed_ms + 40_000);
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(&controls, exit_peer, committed_ms + 30_000,)
+                .is_none(),
+            "periodic refresh respects the exact preferred pair's cooldown"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one refresh transaction checks retry, replay and successful commit"
+    )]
+    async fn automatic_exit_fetch_refresh_retry_retains_exact_authority_until_new_signed_commit() {
+        let mut fixture = fixture(test_client_roles());
+        let now_ms = unix_millis();
+        let exit = Identity::generate();
+        let exit_peer = *exit.peer_id();
+        let control =
+            install_valid_snapshot_route_for(&mut fixture, &Identity::generate(), &exit, now_ms)
+                .await;
+        let key = ForwardedExitKey {
+            control_relay_peer: control.peer_id,
+            exit_peer,
+        };
+        fixture
+            .runtime
+            .exit_provider_peers
+            .insert(exit_peer, now_ms + 25_000);
+        fixture
+            .runtime
+            .forwarded_exit_refreshed_at_ms
+            .insert(key, now_ms - AUTOMATIC_EXIT_FETCH_REFRESH_INTERVAL_MS);
+        let mut attempt = AutomaticExitFetchAttempt {
+            key,
+            authorized_control: control.clone(),
+            request: fetch_request(&control, exit_peer, [74; FORWARD_ID_BYTES], now_ms + 20_000),
+            dispatch_attempts: 1,
+            state: AutomaticExitFetchAttemptState::RetryNotBefore(now_ms + 1_000),
+        };
+        assert!(fixture.runtime.has_current_forwarded_exit_control(
+            &control,
+            exit_peer,
+            now_ms + 1_000
+        ));
+        assert!(
+            fixture
+                .runtime
+                .automatic_exit_fetch_retry_is_current(&attempt, now_ms)
+        );
+        attempt.authorized_control.public_key[0] ^= 1;
+        assert!(
+            !fixture
+                .runtime
+                .automatic_exit_fetch_retry_is_current(&attempt, now_ms)
+        );
+        attempt.authorized_control.public_key[0] ^= 1;
+        fixture.runtime.automatic_exit_fetch_attempts.push(attempt);
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        fixture.runtime.schedule_exit_advertisement_fetches();
+        assert_eq!(fixture.runtime.automatic_exit_fetch_attempts.len(), 1);
+        assert!(
+            fixture.runtime.pending_client_forwards.is_empty(),
+            "backoff must not dispatch early"
+        );
+        let attempt = fixture.runtime.automatic_exit_fetch_attempts.pop().unwrap();
+
+        let envelope = service_advertisement(
+            &exit,
+            RolesConfig {
+                client: false,
+                relay: false,
+                exit: true,
+            },
+            &fixture.policy,
+            2,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        )
+        .signed_envelope()
+        .to_vec();
+        let prepared = || PreparedAdvertisementCommit {
+            peer: exit_peer,
+            provenance: forwarded_provenance(&control, &exit, now_ms + 20_000),
+            envelope: envelope.clone(),
+        };
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(prepared(), &fixture.state)
+                .await
+                .accepted_advertisement()
+                .is_some()
+        );
+        let refreshed_at_ms = fixture.runtime.forwarded_exit_refreshed_at_ms[&key];
+        assert!(refreshed_at_ms >= now_ms);
+        assert!(
+            !fixture
+                .runtime
+                .automatic_exit_fetch_retry_is_current(&attempt, refreshed_at_ms)
+        );
+        assert!(
+            fixture
+                .runtime
+                .next_automatic_exit_control(
+                    std::slice::from_ref(&control),
+                    exit_peer,
+                    refreshed_at_ms,
+                )
+                .is_none(),
+            "new successful signed commit suppresses another refresh"
+        );
+
+        assert!(
+            fixture
+                .runtime
+                .stage_advertisement_commit(prepared(), &fixture.state)
+                .await
+                .accepted_advertisement()
+                .is_none(),
+            "the repeated envelope remains a replay"
+        );
+        assert_eq!(
+            fixture.runtime.forwarded_exit_refreshed_at_ms[&key],
+            refreshed_at_ms
+        );
+        fixture.runtime.revoke_forwarded_keys(&[key], false);
+        assert!(
+            fixture.runtime.forwarded_exit_refreshed_at_ms.is_empty(),
+            "history cannot outlive its bounded capability cache"
+        );
+    }
+
+    fn long_lived_service_advertisement(
+        fixture: &RuntimeFixture,
+        identity: &Identity,
+        roles: RolesConfig,
+        now_ms: u64,
+    ) -> Vec<u8> {
+        let original = service_advertisement(
+            identity,
+            roles,
+            &fixture.policy,
+            1,
+            generate_nonce(),
+            now_ms,
+            &fixture.directory,
+        );
+        let mut wire = verify_control_message::<WireAdvertisement>(
+            original.signed_envelope(),
+            now_ms,
+            TimePolicy::default(),
+            &mut ReplayCache::new(1).unwrap(),
+        )
+        .unwrap()
+        .into_message();
+        wire.expires_at_ms = now_ms + 120_000;
+        sign_with_identity(
+            &wire,
+            identity,
+            now_ms,
+            wire.expires_at_ms,
+            generate_nonce(),
+        )
+    }
+
+    #[tokio::test]
     async fn automatic_exit_fetch_enrolls_an_alternate_without_moving_the_first_owner() {
         let mut fixture = fixture(test_client_roles());
         let now_ms = unix_millis();
@@ -20234,6 +20557,13 @@ mod tests {
                 1,
                 now_ms.saturating_add(25_000),
             ),
+        );
+        fixture.runtime.forwarded_exit_refreshed_at_ms.insert(
+            ForwardedExitKey {
+                control_relay_peer: first_control.peer_id,
+                exit_peer,
+            },
+            now_ms,
         );
 
         fixture.runtime.schedule_exit_advertisement_fetches();
