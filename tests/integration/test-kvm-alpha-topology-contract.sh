@@ -205,8 +205,8 @@ grep -F 'http3-acceptance-fixture" client a07' "$GUEST" >/dev/null
 grep -F '43.159.1.1:52006 47.163.4.2:443' "$GUEST" >/dev/null
 grep -F '43.159.1.1:52007 47.163.4.2:443' "$GUEST" >/dev/null
 grep -F '"$WORK/client-fixtures/http3-cert.der"' "$GUEST" >/dev/null
-grep -F 'connected: false' "$GUEST" >/dev/null
-grep -F 'active contexts: 0' "$GUEST" >/dev/null
+grep -F 'connected: false' "$HERE/benchmark-selection.sh" >/dev/null
+grep -F 'active contexts: 0' "$HERE/benchmark-selection.sh" >/dev/null
 grep -F 'PHASE=a06-preconnect-multipath-route' "$GUEST" >/dev/null
 grep -F 'benchmark_select_route a06 multipath-quic' "$GUEST" >/dev/null
 grep -F 'wait_active_native_mpquic_paths a06-preconnect-native-paths' \
@@ -355,7 +355,7 @@ grep -F 'wait_fresh_advertisement "$R2_PEER"' "$GUEST" >/dev/null
 grep -F 'wait_fresh_advertisement "$R1_PEER"' "$GUEST" >/dev/null
 grep -F 'a01_select_route bootstrap1' "$GUEST" >/dev/null
 grep -F 'a01_select_route bootstrap2' "$GUEST" >/dev/null
-grep -F 'NATIVE_PROBE_PROOF_UNAVAILABLE' "$GUEST" >/dev/null
+grep -F 'NATIVE_PROBE_PROOF_UNAVAILABLE' "$HERE/benchmark-selection.sh" >/dev/null
 grep -F 'acceptance_id:"A01",success:$success' "$GUEST" >/dev/null
 grep -F 'a01_bootstrap_resilience:{requested:$a01_requested' "$GUEST" >/dev/null
 grep -F 'Require successful A01-A15 evidence' "$WORKFLOW" >/dev/null

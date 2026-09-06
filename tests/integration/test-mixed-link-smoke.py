@@ -4,6 +4,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import socket
 import struct
@@ -81,6 +82,32 @@ def capture(name, role, interfaces, frames, local):
 
 
 class MixedLinkTests(unittest.TestCase):
+    def test_standalone_redraw_helpers_do_not_depend_on_the_skipped_alpha_branch(self):
+        benchmark = HERE / "benchmark-selection.sh"
+        self.assertNotIn("\nwait_disconnected() {", SOURCE)
+        self.assertNotIn("\na01_transient_connect_unavailable() {", SOURCE)
+        with tempfile.TemporaryDirectory(prefix="volparossa-mixed-redraw-") as temporary:
+            work = Path(temporary)
+            (work / "bin").mkdir()
+            cli = work / "bin/volparossa"
+            cli.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_STATUS"\n', encoding="ascii")
+            cli.chmod(0o700)
+            error_path = work / "connect.err"
+            error_path.write_text('Error: agent rejected request: PRESELECTION_UNAVAILABLE (Unavailable)\n', encoding="ascii")
+            command = '. "$1"; WORK=$2; binary_directory="$WORK/bin"; sleep() { :; }; '
+            for connected, contexts, expected in ((False, 0, 0), (False, 1, 1), (True, 0, 1)):
+                result = subprocess.run(["sh", "-c", command + 'wait_disconnected', "mixed-redraw-test",
+                    str(benchmark), temporary], capture_output=True, text=True,
+                    env=dict(os.environ, FAKE_STATUS=f"connected: {str(connected).lower()}\nactive contexts: {contexts}"))
+                self.assertEqual(result.returncode, expected, result.stderr)
+            transient = subprocess.run(["sh", "-c", command + 'a01_transient_connect_unavailable "$WORK/connect.err"',
+                "mixed-redraw-test", str(benchmark), temporary], capture_output=True, text=True)
+            self.assertEqual(transient.returncode, 0, transient.stderr)
+            error_path.write_text('Error: agent rejected request: CLIENT_CLEANUP_PENDING (Helper)\n', encoding="ascii")
+            unconfirmed = subprocess.run(["sh", "-c", command + 'a01_transient_connect_unavailable "$WORK/connect.err"',
+                "mixed-redraw-test", str(benchmark), temporary], capture_output=True, text=True)
+            self.assertEqual(unconfirmed.returncode, 1, unconfirmed.stderr)
+
     def test_bandwidth_comparison_keeps_real_path_payload_and_gain_gates(self):
         def records():
             result = {}

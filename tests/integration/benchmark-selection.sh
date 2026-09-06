@@ -3,6 +3,26 @@
 # Sourced by the disposable KVM runner, never changes production selection policy.
 # shellcheck disable=SC2154
 
+wait_disconnected() {
+    idle_attempt=0
+    while [ "$idle_attempt" -lt 300 ]; do
+        "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-client/control/agent.sock" status \
+            >"$WORK/status-client.txt" 2>/dev/null || true
+        if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
+            && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+        idle_attempt=$((idle_attempt + 1))
+    done
+    return 1
+}
+
+a01_transient_connect_unavailable() {
+    grep -Eq '^Error: agent rejected request: (PRESELECTION_UNAVAILABLE|NATIVE_PERMIT_UNAVAILABLE|NATIVE_RELAY_READY_UNAVAILABLE|NATIVE_HELPER_COMMIT_UNAVAILABLE|NATIVE_PROBE_START_UNAVAILABLE|NATIVE_PROBE_PROOF_UNAVAILABLE|ROUTE_ADMISSION_UNAVAILABLE) \(Unavailable\)$' "$1"
+}
+
 benchmark_capture_paths() {
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" paths \
