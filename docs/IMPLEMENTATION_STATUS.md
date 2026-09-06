@@ -6,6 +6,18 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+Direct-LAN reconnection now has two reproduced transport fixes. With two IPv4 QUIC
+listeners, a real authenticated reconnect after LAN down/up previously arrived from the
+public listener's address. Private direct-IP Dialer connections now use a fresh socket so
+the kernel selects the source; four real reconnects retain the LAN source. Public/NAT,
+Circuit and Listener-role options are unchanged; this grants no new address authority.
+Unexpected closure also previously left a configured listener permanently absent. The
+event pump now reopens only its exact original request, with 32-entry and one-second retry
+bounds. Shutdown disables retries before draining and closes endpoints afterwards, retaining
+existing control connections during retirement. Both disposable-network reproductions,
+two focused option/bounds checks and joint strict discovery/agent Clippy pass. This is not
+yet a passing mixed-link aggregation run or physical-radio evidence.
+
 The [v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034165008) at `83264e55`
 passed A01--A05 and A15, but stopped selecting A06's required benchmark pair. Eight established
 MPQUIC contexts used other valid pairs. Both desired native probe legs also completed, followed

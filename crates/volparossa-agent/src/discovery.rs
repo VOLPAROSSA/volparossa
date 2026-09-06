@@ -2100,6 +2100,7 @@ impl DiscoveryRuntime {
                 }
             }
         }
+        self.service.stop_listener_recovery();
         self.drain_exit_runtimes_for_shutdown(&state).await;
         self.destroy_expired_exit_native_attempts(u64::MAX).await;
         Box::pin(self.fail_all_pending_route_sessions()).await;
@@ -2115,6 +2116,7 @@ impl DiscoveryRuntime {
         self.withdraw_local();
         clear_relay_metric(&self.metrics);
         clear_exit_metric(&self.metrics);
+        self.service.stop_listening();
     }
 
     async fn handle_sanitized_event(

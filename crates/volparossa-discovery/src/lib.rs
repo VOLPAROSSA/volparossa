@@ -7,6 +7,7 @@ mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
 mod forwarding;
+mod listener_recovery;
 mod mpquic_session;
 mod mptcp_session;
 mod peerlink;
@@ -14,6 +15,7 @@ mod preselection_forwarder;
 mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
+mod quic_lan;
 mod reservations;
 mod udp_session;
 
@@ -23,7 +25,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::StreamExt;
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, Transport as _, autonat,
     connection_limits,
@@ -61,6 +62,7 @@ use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
     exit_forward_upstream_behaviour,
 };
+use listener_recovery::ConfiguredListeners;
 pub use mpquic_session::{
     ExitMpquicSessionSignal, MpquicSessionFrameError, MpquicSessionPathProof,
     MpquicSessionStartRequest,
@@ -892,6 +894,7 @@ impl AddressAdmissions {
 /// Running decentralised discovery service.
 pub struct DiscoveryService {
     swarm: Swarm<ScopedBehaviour>,
+    configured_listeners: ConfiguredListeners,
     local_advertisement: Option<Vec<u8>>,
     advertisement_budgets: AdvertisementBudgets,
     address_admissions: AddressAdmissions,
@@ -940,7 +943,8 @@ impl DiscoveryService {
                 yamux::Config::default,
             )
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
-            .with_quic()
+            .with_other_transport(quic_lan::transport)
+            .map_err(|never| -> DiscoveryError { match never {} })?
             .with_other_transport(move |_| {
                 MemoryTransport::default()
                     .upgrade(upgrade::Version::V1)
@@ -967,6 +971,7 @@ impl DiscoveryService {
             .build();
         Ok(Self {
             swarm,
+            configured_listeners: ConfiguredListeners::default(),
             protocol_roles,
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
@@ -1006,16 +1011,34 @@ impl DiscoveryService {
         self.protocol_roles
     }
 
-    /// Starts listening on a validated multiaddress.
+    /// Starts and retains one exact, locally configured listener request.
+    ///
+    /// Unexpected listener closure is retried with bounded backoff by the event pump. Repeated
+    /// calls for the same request do not create extra listeners or bypass an existing backoff.
     ///
     /// # Errors
     ///
-    /// Returns an error when libp2p rejects the listen address.
+    /// Returns an error when libp2p rejects the listen address, its bound is exceeded, or listener
+    /// shutdown has begun.
     pub fn listen_on(&mut self, address: Multiaddr) -> Result<(), DiscoveryError> {
-        self.swarm
-            .listen_on(address)
-            .map(|_| ())
-            .map_err(|error| DiscoveryError::Swarm(error.to_string()))
+        self.configured_listeners
+            .listen_on(&mut self.swarm, address)
+    }
+
+    /// Permanently disable listener recovery without interrupting established connections.
+    ///
+    /// Call this before graceful actor retirement, then [`Self::stop_listening`] after draining
+    /// transactions. The latter also closes QUIC endpoints and their established connections.
+    pub fn stop_listener_recovery(&mut self) {
+        self.configured_listeners.stop_recovery();
+    }
+
+    /// Permanently stop configured listeners and cancel every pending listener-recovery retry.
+    ///
+    /// This does not destroy route contexts or mutate the host network. The service's owner
+    /// remains responsible for draining transactions before closing their control connections.
+    pub fn stop_listening(&mut self) {
+        self.configured_listeners.stop(&mut self.swarm);
     }
 
     /// Dials a peerlink whose address is cryptographically bound to its expected Peer ID.
@@ -1764,7 +1787,7 @@ impl DiscoveryService {
     #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
     async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {
-            let event = self.swarm.select_next_some().await;
+            let event = self.configured_listeners.next_event(&mut self.swarm).await;
             match event {
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Advertisements(
                     request_response::Event::Message {
