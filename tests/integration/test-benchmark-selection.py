@@ -51,6 +51,36 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(self.parse(row("R0"), "single-path-udp")[0], 2)
         self.assertEqual(self.parse(row("R1") + row("R2", 2), "single-path-udp")[0], 3)
 
+    def test_mixed_slot1_is_actual_lan_and_wan_only_pair_is_not_accepted(self):
+        for wan in (0, 2):
+            status, selected = paths_module.selected_paths(
+                row(f"R{wan}") + row("R1", 2), "R0", "R1", "R2", "X",
+                "multipath-quic", lan_pair=True)
+            self.assertEqual(status, 0)
+            self.assertEqual([slot["relay_index"] for slot in selected["benchmark_slots"]], [1, wan])
+            self.assertEqual([slot["path_id"] for slot in selected["benchmark_slots"]], [2, 1])
+        self.assertEqual(paths_module.selected_paths(row("R0") + row("R2", 2),
+            "R0", "R1", "R2", "X", "multipath-quic", lan_pair=True)[0], 2)
+
+    def test_native_snapshot_never_rebinds_context_path_exit_or_surviving_slot(self):
+        text = row("R0", state=3) + row("R1", 2, state=3)
+        selected = paths_module.selected_paths(text, "R0", "R1", "R2", "X",
+            "multipath-quic", lan_pair=True)[1]
+        before = paths_module.native_paths(text, selected, "both")
+        self.assertEqual(before["benchmark_slots"][0]["relay_node"], "relay1")
+        after = paths_module.native_paths(row("R0", state=3), selected, "relay2")
+        self.assertEqual(after["benchmark_slots"], before["benchmark_slots"])
+        self.assertEqual(after["paths"][0]["relay"], "relay2")
+        self.assertEqual(after["paths"][0]["relay_node"], "relay0")
+        for bad in (text.replace("exit=X", "exit=Y"), text.replace("R0", "R2"),
+                    text.replace("path=1", "path=3"),
+                    text.replace("11" * 16, "22" * 16), text + row("R0", 3),
+                    row("R1", 2, state=3), ""):
+            with self.assertRaises(ValueError):
+                paths_module.native_paths(bad, selected, "relay2")
+        with self.assertRaises(ValueError):
+            paths_module.native_paths(row("R0", state=3), selected, "both")
+
     def test_any_valid_pair_maps_exact_nodes_without_changing_context(self):
         for first, second in ((0, 1), (0, 2), (1, 2), (2, 0)):
             status, result = paths_module.selected_paths(
@@ -66,6 +96,11 @@ set -eu
 . "$1/benchmark-selection.sh"
 R0=fixed0; R1=fixed1; R2=fixed2
 benchmark_bind_slots "$2"
+native_bind_slots "$2"
+[ "$NATIVE_NS1" = "$BENCH_NS1" ] && [ "$NATIVE_NS2" = "$BENCH_NS2" ]
+[ "$NATIVE_NODE1" = "$BENCH_NODE1" ] && [ "$NATIVE_NODE2" = "$BENCH_NODE2" ]
+[ "$NATIVE_CLIENT_IF1" = "$BENCH_CLIENT_IF1" ] && [ "$NATIVE_CLIENT_IF2" = "$BENCH_CLIENT_IF2" ]
+[ "$NATIVE_CONTEXT" = 11111111111111111111111111111111 ]
 printf '%s\n' "$R0 $R1 $R2" "$BENCH_NS1 $BENCH_NODE1 $BENCH_CLIENT_IF1 $BENCH_RELAY_IF1 $BENCH_EXIT_IF1" "$BENCH_NS2 $BENCH_NODE2 $BENCH_CLIENT_IF2 $BENCH_RELAY_IF2 $BENCH_EXIT_IF2"
 '''
                 outcome = subprocess.run(["sh", "-c", script, "test", str(HERE), str(selection)],
@@ -164,6 +199,28 @@ printf '%s\n' "$R0 $R1 $R2" "$BENCH_NS1 $BENCH_NODE1 $BENCH_CLIENT_IF1 $BENCH_RE
                 self.assertEqual(record["benchmark_relay_nodes"], [f"relay{i}" for i in indexes])
                 self.assertEqual(record["relay1_wireguard_data_datagrams"], 1)
                 self.assertEqual(record["relay2_wireguard_data_datagrams"], 1)
+                self.assertFalse(record["truncated"])
+
+    def test_generated_native_observer_uses_actual_r0_slot_and_direction(self):
+        # Use the existing mixed-observer packet harness, but feed real public R0/R2 tuples.
+        module_spec = importlib.util.spec_from_file_location("mixed_test", HERE / "test-mixed-link-smoke.py")
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        public = {0: "42.158.0.1", 2: "45.161.2.1"}
+        for indexes in ((0, 2), (2, 0)):
+            for role in ("client", "exit"):
+                peer = "43.159.1.1" if role == "client" else "46.162.3.1"
+                frames = [[module.wireguard_frame(peer, public[index]),
+                           module.wireguard_frame(public[index], peer)] for index in indexes]
+                interfaces = ["--benchmark-relays", *(str(index) for index in indexes),
+                              *(f"{'cr' if role == 'client' else 'xr'}{index}" for index in indexes)]
+                record = module.capture("a06-observer.py", role, interfaces, frames, False)
+                self.assertEqual(record["benchmark_relay_nodes"], [f"relay{i}" for i in indexes])
+                for slot in (1, 2):
+                    self.assertEqual(record[f"relay{slot}_wireguard_data_datagrams"], 2)
+                    if role == "client":
+                        self.assertEqual(record[f"relay{slot}_received_wireguard_data_bytes"], 104)
+                self.assertEqual(record["packet_socket_drops"], 0)
                 self.assertFalse(record["truncated"])
 
     def test_shell_redraw_is_bounded_and_precedes_application(self):

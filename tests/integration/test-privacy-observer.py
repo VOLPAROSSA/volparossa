@@ -39,7 +39,7 @@ def environment(role="relay1", marker=True):
     pauses = []
     namespace = {
         "errno": errno, "role": role, "expected_down_marker": "fixture-marker",
-        "output_path": "privacy-capture.json",
+        "output_path": "capture.json",
         "os": SimpleNamespace(path=SimpleNamespace(exists=lambda _: marker,
             basename=os.path.basename, dirname=os.path.dirname, join=os.path.join)),
         "time": SimpleNamespace(sleep=pauses.append),
@@ -181,18 +181,21 @@ class PrivacyObserverTests(unittest.TestCase):
                 self.assertTrue(record["truncated"])
 
     def test_actual_a11_a12_a13_predicates_require_complete_drop_evidence(self):
-        for acceptance, captures in (("A11", ("relay1", "relay2")),
+        for acceptance, captures in (("A11", ("relay0", "relay1", "relay2")),
                                      ("A12", ("exit_capture",)),
                                      ("A13", ("client_capture",))):
             section = SOURCE.rsplit(f"\n{acceptance}_STATUS=1\n", 1)[1]
             expression = section.split("    '", 1)[1].split("' >\"$WORK/", 1)[0]
-            values = {"mptcp": [{"success": True}]}
+            values = {"mptcp": [{"success": True}], "selected": [{"benchmark_slots": [
+                {"relay_node": "relay0", "relay_index": 0},
+                {"relay_node": "relay2", "relay_index": 2}]}]}
             for name in captures:
                 values[name] = [{
                     "capture_role": name.removesuffix("_capture"),
                     "truncated": False, "packet_socket_drops": 0,
                     "client_leg_wireguard_data_datagrams": 1,
                     "exit_leg_wireguard_data_datagrams": 1,
+                    "relay0_wireguard_data_datagrams": 1,
                     "relay1_wireguard_data_datagrams": 1,
                     "relay2_wireguard_data_datagrams": 1,
                     "internet_destination_outer_packets": 0,
@@ -255,16 +258,17 @@ class PrivacyObserverTests(unittest.TestCase):
             self.assertEqual(observer["counters"]["expected_link_down_notifications"], 0)
 
     def test_benchmark_downtime_is_exact_role_interface_and_window(self):
-        for index in range(3):
-            observer, _ = environment(f"relay{index}")
-            observer["output_path"] = f"mptcp-privacy-relay{index}.json"
-            for suffix in ("c", "x"):
-                self.assertIsNone(observer["receive_frame"](
-                    Capture(OSError(errno.ENETDOWN, "planned")), f"r{index}{suffix}"))
-            for unexpected in ("underlay", f"r{(index + 1) % 3}c"):
-                with self.assertRaises(OSError):
-                    observer["receive_frame"](
-                        Capture(OSError(errno.ENETDOWN, "unplanned")), unexpected)
+        for prefix in ("mptcp-privacy", "privacy"):
+            for index in range(3):
+                observer, _ = environment(f"relay{index}")
+                observer["output_path"] = f"{prefix}-relay{index}.json"
+                for suffix in ("c", "x"):
+                    self.assertIsNone(observer["receive_frame"](
+                        Capture(OSError(errno.ENETDOWN, "planned")), f"r{index}{suffix}"))
+                for unexpected in ("underlay", f"r{(index + 1) % 3}c"):
+                    with self.assertRaises(OSError):
+                        observer["receive_frame"](
+                            Capture(OSError(errno.ENETDOWN, "unplanned")), unexpected)
 
     def test_nonblocking_empty_socket_is_not_a_link_down(self):
         observer, pauses = environment()

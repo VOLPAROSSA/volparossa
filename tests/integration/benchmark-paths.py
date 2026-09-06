@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 
-def selected_paths(text, relay0, relay1, relay2, exit_peer, transport, any_pair=False):
+def selected_paths(text, relay0, relay1, relay2, exit_peer, transport, any_pair=False, lan_pair=False):
     if len(text) > 65536 or transport not in {"mptcp", "multipath-quic", "single-path-udp"}:
         return 3, None
     pattern = re.compile(
@@ -40,6 +40,8 @@ def selected_paths(text, relay0, relay1, relay2, exit_peer, transport, any_pair=
     if any(p["state"] not in {1, 2, 3, 4} for p in paths):
         return 3, None
     paths.sort(key=lambda p: p["path_id"])
+    if lan_pair:
+        paths.sort(key=lambda p: p["relay_peer_id"] != relay1)
     indexes = {relay0: 0, relay1: 1, relay2: 2}
     if len(indexes) != 3:
         return 3, None
@@ -53,8 +55,44 @@ def selected_paths(text, relay0, relay1, relay2, exit_peer, transport, any_pair=
                   exact_selected_relays=[p["relay_peer_id"] for p in paths],
                   exact_selected_exit=exit_peer, paths=paths, benchmark_slots=slots,
                   counter_labels=("relay1/relay2 denote ordered benchmark slots, not node names"
-                                  if any_pair else "relay1/relay2 denote physical topology nodes"))
+                                  if any_pair or lan_pair else "relay1/relay2 denote physical topology nodes"))
+    if lan_pair:
+        return (0 if len(paths) == 2 and paths[0]["relay_peer_id"] == relay1 else 2), result
     return (0 if any_pair or {p["relay_peer_id"] for p in paths} <= {relay1, relay2} else 2), result
+
+
+def native_paths(text, selected, requirement):
+    """Project only the exact immutable selected context/path/Exit identities, including removal."""
+    if len(text) > 65536 or requirement not in {"both", "relay2"}:
+        raise ValueError("invalid bounded native path input")
+    slots = selected["benchmark_slots"]
+    if len(slots) != 2 or len({slot["relay_peer_id"] for slot in slots}) != 2:
+        raise ValueError("invalid selected native slots")
+    pattern = re.compile(r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
+                         r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)")
+    records = []
+    for line in text.splitlines():
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise ValueError("malformed native row")
+        context, path, relay, exit_peer, state, rtt, count = match.groups()
+        slot = next((slot for slot in slots if slot["relay_peer_id"] == relay), None)
+        if (context != selected["route_context_id"] or exit_peer != selected["exact_selected_exit"]
+                or slot is None or slot["path_id"] != int(path)
+                or any(record["relay_peer_id"] == relay for record in records)):
+            raise ValueError("native status changed selected identity")
+        # This is the native ACK/accounting counter, not independent unique payload evidence.
+        records.append(dict(path_id=int(path), relay=f"relay{slot['slot']}",
+                            relay_node=slot["relay_node"], relay_peer_id=relay,
+                            exit_peer_id=exit_peer, state=int(state), smoothed_rtt_us=int(rtt),
+                            native_acked_bytes=int(count)))
+    required = {"relay1", "relay2"} if requirement == "both" else {"relay2"}
+    if not required <= {record["relay"] for record in records}:
+        raise ValueError("required selected native path missing")
+    return dict(schema_version=1, source="agent local-control native MPQUIC status",
+                route_context_id=selected["route_context_id"], requirement=requirement,
+                paths=sorted(records, key=lambda record: record["path_id"]),
+                benchmark_slots=slots, counter_labels="relay1/relay2 are selected benchmark slots")
 
 
 def privacy_evidence(captures, selections):
@@ -124,12 +162,23 @@ def write_privacy(work):
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--privacy":
         return write_privacy(Path(sys.argv[2]))
+    if len(sys.argv) == 6 and sys.argv[1] == "--native":
+        source, output, selection, requirement = sys.argv[2:]
+        with open(source, encoding="ascii") as stream:
+            text = stream.read(65537)
+        with open(selection, encoding="ascii") as stream:
+            selected = json.loads(stream.read(65537))
+        result = native_paths(text, selected, requirement)
+        Path(output).write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+                                encoding="ascii")
+        return 0
     source, output, r0, r1, r2, exit_peer, transport, *options = sys.argv[1:]
-    if options not in ([], ["--any-pair"]):
+    if options not in ([], ["--any-pair"], ["--lan-pair"]):
         return 3
     with open(source, encoding="ascii") as stream:
         text = stream.read(65537)
-    status, result = selected_paths(text, r0, r1, r2, exit_peer, transport, bool(options))
+    status, result = selected_paths(text, r0, r1, r2, exit_peer, transport,
+                                    options == ["--any-pair"], options == ["--lan-pair"])
     if result is not None:
         Path(output).write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
                                 encoding="ascii")

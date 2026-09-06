@@ -580,8 +580,8 @@ copy_artifacts() {
         a09-missing-server-name-rejection-events.txt a09-mismatched-destination-rejection-events.txt \
         a09-forbidden-port-rejection-events.txt a10-ech-rejection-events.txt \
         a10-unverifiable-rejection-events.txt \
-        privacy-client.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
-        privacy-client.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
+        privacy-client.json privacy-relay0.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
+        privacy-client.log privacy-relay0.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
         mptcp-privacy-evidence.json \
         mptcp-privacy-client.json mptcp-privacy-exit.json \
         mptcp-privacy-relay0.json mptcp-privacy-relay1.json mptcp-privacy-relay2.json \
@@ -849,7 +849,7 @@ write_report() {
           topology:{ready:$topology,direct_client_exit_adjacency:false,
             client_exit_route_absent:$client_exit_route_absent,
             eligible_control_and_data_relays:["relay0","relay1","relay2"],
-            native_benchmark_data_relays:["relay1","relay2"],
+            native_benchmark_selection:"actual eligible pair; mixed requires LAN relay1 plus WAN",
             relay_pool:["relay0","relay1","relay2","relay3","relay4","relay5"],
             exit_pool:["exit","exit2"],standby_capacity_mbps:1,
             bootstrap_contacts:["bootstrap1","bootstrap2"],
@@ -2409,15 +2409,24 @@ role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
+relay_indexes = [1, 2]
+if interfaces[:1] == ["--benchmark-relays"]:
+    relay_indexes = [int(value) for value in interfaces[1:3]]
+    interfaces = interfaces[3:]
+if len(set(relay_indexes)) != 2 or any(index not in {0, 1, 2} for index in relay_indexes):
+    raise SystemExit("invalid native benchmark relay indexes")
+if direct_lan_relay1 and relay_indexes[0] != 1:
+    raise SystemExit("mixed benchmark slot1 is not the actual LAN Relay")
+relay_public = {0: "42.158.0.1", 1: "44.160.1.1", 2: "45.161.2.1"}
 if role not in {"client", "exit"} or not interfaces:
     raise SystemExit("invalid bounded A06 observer arguments")
 relay1_client_pair = (
     {"10.241.11.1", "10.241.11.2"}
-    if direct_lan_relay1 else {"43.159.1.1", "44.160.1.1"}
+    if direct_lan_relay1 else {"43.159.1.1", relay_public[relay_indexes[0]]}
 )
 relay1_exit_pair = (
     {"10.241.21.1", "10.241.21.2"}
-    if direct_lan_relay1 else {"44.160.1.1", "46.162.3.1"}
+    if direct_lan_relay1 else {relay_public[relay_indexes[0]], "46.162.3.1"}
 )
 
 counters = (
@@ -2526,7 +2535,8 @@ while running and time.monotonic() < deadline:
                 )[0]
             is_wireguard_data = wireguard_message_type == 4 and udp_length > 40
             if role == "client":
-                if interface == "underlay" and source == "43.159.1.1" and destination in {
+                if not interface.startswith("vpih") and source == "43.159.1.1" and destination in {
+                    "10.241.20.2",
                     "10.241.21.2",
                     "10.241.22.2",
                     "10.241.31.1",
@@ -2537,14 +2547,14 @@ while running and time.monotonic() < deadline:
                 }:
                     counters["direct_client_exit_packets"] += 1
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "cr1" and {source, destination} == relay1_client_pair:
+                    if interface == f"cr{relay_indexes[0]}" and {source, destination} == relay1_client_pair:
                         counters["relay1_wireguard_data_datagrams"] += 1
                         counters["relay1_wireguard_data_bytes"] += udp_length - 8
                         if destination == ("10.241.11.1" if direct_lan_relay1 else "43.159.1.1"):
                             counters["relay1_received_wireguard_data_bytes"] += udp_length - 8
-                    if interface == "cr2" and {source, destination} == {
+                    if interface == f"cr{relay_indexes[1]}" and {source, destination} == {
                         "43.159.1.1",
-                        "45.161.2.1",
+                        relay_public[relay_indexes[1]],
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
                         counters["relay2_wireguard_data_bytes"] += udp_length - 8
@@ -2563,11 +2573,11 @@ while running and time.monotonic() < deadline:
                         )
             else:
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "xr1" and {source, destination} == relay1_exit_pair:
+                    if interface == f"xr{relay_indexes[0]}" and {source, destination} == relay1_exit_pair:
                         counters["relay1_wireguard_data_datagrams"] += 1
                         counters["relay1_wireguard_data_bytes"] += udp_length - 8
-                    if interface == "xr2" and {source, destination} == {
-                        "45.161.2.1",
+                    if interface == f"xr{relay_indexes[1]}" and {source, destination} == {
+                        relay_public[relay_indexes[1]],
                         "46.162.3.1",
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
@@ -2597,6 +2607,7 @@ with open(output_path, "x", encoding="ascii") as output:
         {
             "schema_version": 1,
             "capture_role": role,
+            "benchmark_relay_nodes": [f"relay{index}" for index in relay_indexes],
             "interfaces": interfaces,
             "observed_frames": observed_frames,
             "truncated": truncated,
@@ -2684,9 +2695,16 @@ def receive_frame(capture, interface):
             and os.path.exists(os.path.join(os.path.dirname(output_path),
                                            f"benchmark-privacy-{interface}.down"))
         )
+        native_down = (
+            os.path.basename(output_path).startswith("privacy-")
+            and role in {"relay0", "relay1", "relay2"}
+            and interface in {f"r{role[-1]}c", f"r{role[-1]}x"}
+            and os.path.exists(os.path.join(os.path.dirname(output_path),
+                                           f"native-privacy-{interface}.down"))
+        )
         if (
             error.errno != errno.ENETDOWN
-            or not (a07_down or benchmark_down)
+            or not (a07_down or benchmark_down or native_down)
         ):
             raise
         counters["expected_link_down_notifications"] += 1
@@ -3902,71 +3920,8 @@ capture_native_mpquic_paths() {
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" paths \
         >"$native_text" || return 1
-    python3 - "$native_text" "$native_json" "$R1_PEER" "$R2_PEER" \
-        "$native_requirement" <<'PYTHON'
-import json
-import re
-import sys
-
-source_path, output_path, relay1_peer, relay2_peer, requirement = sys.argv[1:]
-if requirement not in {"both", "relay2"}:
-    raise SystemExit("invalid native-path requirement")
-pattern = re.compile(
-    r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
-)
-groups = {}
-for line in open(source_path, encoding="ascii"):
-    match = pattern.fullmatch(line.rstrip("\n"))
-    if match is None:
-        continue
-    context, path_id, relay_peer, exit_peer, state, rtt_us, user_bytes = match.groups()
-    if relay_peer not in {relay1_peer, relay2_peer}:
-        continue
-    relay = "relay1" if relay_peer == relay1_peer else "relay2"
-    record = {
-        "path_id": int(path_id),
-        "relay": relay,
-        "relay_peer_id": relay_peer,
-        "exit_peer_id": exit_peer,
-        "state": int(state),
-        "smoothed_rtt_us": int(rtt_us),
-        # The native daemon exposes an ACK/accounting counter. It proves path
-        # activity, not unique application bytes; packet observers below carry
-        # the independent encrypted outer-byte evidence.
-        "native_acked_bytes": int(user_bytes),
-    }
-    if any(existing["relay"] == relay for existing in groups.setdefault(context, [])):
-        raise SystemExit("duplicate native path for one relay")
-    groups[context].append(record)
-
-required = {"relay1", "relay2"} if requirement == "both" else {"relay2"}
-candidates = [
-    (context, paths)
-    for context, paths in groups.items()
-    if required.issubset({path["relay"] for path in paths})
-]
-if len(candidates) != 1:
-    raise SystemExit("exact active native route context was unavailable")
-context, paths = candidates[0]
-paths.sort(key=lambda path: path["path_id"])
-if len({path["path_id"] for path in paths}) != len(paths):
-    raise SystemExit("native path IDs were not distinct")
-with open(output_path, "w", encoding="ascii") as output:
-    json.dump(
-        {
-            "schema_version": 1,
-            "source": "agent local-control native MPQUIC status",
-            "route_context_id": context,
-            "requirement": requirement,
-            "paths": paths,
-        },
-        output,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    output.write("\n")
-PYTHON
+    python3 -B "$source_directory/tests/integration/benchmark-paths.py" --native \
+        "$native_text" "$native_json" "$NATIVE_SELECTION_FILE" "$native_requirement"
 }
 
 wait_native_mpquic_paths() {
@@ -4007,20 +3962,21 @@ start_http3_observers() {
     http3_marker=$2
     set --
     [ "$scenario" != mixed-link ] || set -- --direct-lan-relay1
+    set -- "$@" --benchmark-relays "$NATIVE_INDEX1" "$NATIVE_INDEX2"
     client_ingress_interface=$(ip -n "$CLIENT" -o link show \
         | awk -F': ' '$2 ~ /^vpih/ {sub(/@.*/, "", $2); print $2; exit}')
     [ -n "$client_ingress_interface" ] || return 1
     ip netns exec "$CLIENT" python3 "$WORK/bin/a06-observer.py" \
         client "$WORK/$http3_prefix-client-capture.json" \
         "$WORK/$http3_prefix-client-capture.ready" "$http3_marker" \
-        "$@" cr1 cr2 underlay "$client_ingress_interface" \
+        "$@" "$NATIVE_CLIENT_IF1" "$NATIVE_CLIENT_IF2" underlay "$client_ingress_interface" \
         >"$WORK/$http3_prefix-client-capture.log" \
         2>"$WORK/$http3_prefix-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a06-observer.py" \
         exit "$WORK/$http3_prefix-exit-capture.json" \
         "$WORK/$http3_prefix-exit-capture.ready" "$http3_marker" \
-        "$@" xr1 xr2 xd >"$WORK/$http3_prefix-exit-capture.log" \
+        "$@" "$NATIVE_EXIT_IF1" "$NATIVE_EXIT_IF2" xd >"$WORK/$http3_prefix-exit-capture.log" \
         2>"$WORK/$http3_prefix-exit-capture.err" &
     EXIT_OBSERVER_PID=$!
     if ! wait_observer "$CLIENT_OBSERVER_PID" \
@@ -4076,13 +4032,11 @@ start_privacy_observers() {
         "$@" xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/$privacy_prefix-exit.log" 2>&1 &
     PRIVACY_EXIT_PID=$!
 
-    if [ "$privacy_prefix" = mptcp-privacy ]; then
-        ip netns exec "$R0" python3 "$WORK/bin/privacy-observer.py" \
-            relay0 "$WORK/$privacy_prefix-relay0.json" "$WORK/$privacy_prefix-relay0.ready" \
-            r0c r0x underlay >"$WORK/$privacy_prefix-relay0.log" 2>&1 &
-        PRIVACY_RELAY0_PID=$!
-        wait_observer "$PRIVACY_RELAY0_PID" "$WORK/$privacy_prefix-relay0.ready" || return 1
-    fi
+    ip netns exec "$R0" python3 "$WORK/bin/privacy-observer.py" \
+        relay0 "$WORK/$privacy_prefix-relay0.json" "$WORK/$privacy_prefix-relay0.ready" \
+        r0c r0x underlay >"$WORK/$privacy_prefix-relay0.log" 2>&1 &
+    PRIVACY_RELAY0_PID=$!
+    wait_observer "$PRIVACY_RELAY0_PID" "$WORK/$privacy_prefix-relay0.ready" || return 1
 
     wait_observer "$PRIVACY_CLIENT_PID" "$WORK/$privacy_prefix-client.ready" \
         && wait_observer "$PRIVACY_RELAY1_PID" "$WORK/$privacy_prefix-relay1.ready" \
@@ -5535,6 +5489,7 @@ if [ "$scenario" = mixed-link ]; then
     mixed_link_select_paths || fail MIXED_LINK_COMPLETE_PATH_SET_UNAVAILABLE
 else
 benchmark_select_route a06 multipath-quic || fail A06_MULTIPATH_ROUTE_CONNECT_FAILED
+native_bind_slots "$WORK/a06-selection.json" || fail A06_NATIVE_BINDING_UNAVAILABLE
 wait_active_native_mpquic_paths a06-preconnect-native-paths \
     || fail A06_MULTIPATH_ROUTE_NOT_ACTIVE
 fi
@@ -5629,7 +5584,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
         --slurpfile preconnect "$WORK/a06-preconnect-native-paths.json" \
         --slurpfile native "$WORK/a06-native-paths.json" \
         --arg fallback_route "$A06_FALLBACK_ROUTE" \
-        --arg relay1_peer "$R1_PEER" --arg relay2_peer "$R2_PEER" \
+        --arg relay1_peer "$NATIVE_PEER1" --arg relay2_peer "$NATIVE_PEER2" \
         '($application[0]) as $app | ($destination[0]) as $destination
         | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
         | ($preconnect[0]) as $preconnect
@@ -5667,6 +5622,9 @@ if [ "$A06_STATUS" -eq 0 ]; then
             and (($preconnect.paths | length) == 2)
             and (all($preconnect.paths[]; .state == 3))
             and ($preconnect.route_context_id == $native.route_context_id)
+            and ($preconnect.benchmark_slots == $native.benchmark_slots)
+            and ($client.benchmark_relay_nodes == ($native.benchmark_slots | map(.relay_node)))
+            and ($exit.benchmark_relay_nodes == $client.benchmark_relay_nodes)
             and ($native_r1.relay_peer_id == $relay1_peer)
             and ($native_r2.relay_peer_id == $relay2_peer)
             and ($native_r1.path_id != $native_r2.path_id)
@@ -5680,6 +5638,7 @@ if [ "$A06_STATUS" -eq 0 ]; then
              client_initial_inspected_before_route:true,
              exit_initial_reverified_before_egress:true},
            native_mpquic:{route_context_id:$native.route_context_id,
+             benchmark_slots:$native.benchmark_slots,
              preestablished_before_http3_client:true,
              preconnect_paths:$preconnect.paths,required_path_count:2,
              paths:$native.paths},
@@ -5733,11 +5692,12 @@ kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null \
     || fail A07_HTTP3_FLOW_ENDED_BEFORE_RELAY_REMOVAL
 wait_native_mpquic_paths a07-native-before both \
     || fail A07_NATIVE_PATH_STATUS_UNAVAILABLE
-install -o root -g root -m 0600 /dev/null "$WORK/a07-privacy-link-down.marker"
-ip -n "$R1" link set r1c down
-ip -n "$R1" link set r1x down
-A07_R1C_STATE=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
-A07_R1X_STATE=$(ip -n "$R1" -j link show dev r1x | jq -er '.[0].operstate')
+: >"$WORK/native-privacy-$NATIVE_RELAY_IF1.down"
+: >"$WORK/native-privacy-$NATIVE_EXIT_LEG1.down"
+ip -n "$NATIVE_NS1" link set "$NATIVE_RELAY_IF1" down
+ip -n "$NATIVE_NS1" link set "$NATIVE_EXIT_LEG1" down
+A07_R1C_STATE=$(ip -n "$NATIVE_NS1" -j link show dev "$NATIVE_RELAY_IF1" | jq -er '.[0].operstate')
+A07_R1X_STATE=$(ip -n "$NATIVE_NS1" -j link show dev "$NATIVE_EXIT_LEG1" | jq -er '.[0].operstate')
 if [ "$A07_R1C_STATE" != DOWN ] || [ "$A07_R1X_STATE" != DOWN ]; then
     fail A07_RELAY_REMOVAL_FAILED
 fi
@@ -5773,16 +5733,18 @@ if [ "$A07_STATUS" -eq 0 ] \
     && ! wait_native_mpquic_paths a07-native-after relay2; then
     A07_STATUS=1
 fi
-ip -n "$R1" link set r1x up
-ip -n "$R1" link set r1c up
-ip -n "$R1" route replace 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
-ip -n "$R1" route replace 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
-ip -n "$R1" route get 43.159.1.1 \
-    | grep -F 'via 10.241.11.1 dev r1c src 44.160.1.1' >/dev/null \
+ip -n "$NATIVE_NS1" link set "$NATIVE_EXIT_LEG1" up
+ip -n "$NATIVE_NS1" link set "$NATIVE_RELAY_IF1" up
+ip -n "$NATIVE_NS1" route replace 43.159.1.1/32 via "$NATIVE_CLIENT_HOP1" dev "$NATIVE_RELAY_IF1" src "$NATIVE_PUBLIC1"
+ip -n "$NATIVE_NS1" route replace 46.162.3.1/32 via "$NATIVE_EXIT_HOP1" dev "$NATIVE_EXIT_LEG1" src "$NATIVE_PUBLIC1"
+ip -n "$NATIVE_NS1" route get 43.159.1.1 \
+    | grep -F "via $NATIVE_CLIENT_HOP1 dev $NATIVE_RELAY_IF1 src $NATIVE_PUBLIC1" >/dev/null \
     || fail A07_RELAY1_CLIENT_ROUTE_NOT_RESTORED
-ip -n "$R1" route get 46.162.3.1 \
-    | grep -F 'via 10.241.21.2 dev r1x src 44.160.1.1' >/dev/null \
+ip -n "$NATIVE_NS1" route get 46.162.3.1 \
+    | grep -F "via $NATIVE_EXIT_HOP1 dev $NATIVE_EXIT_LEG1 src $NATIVE_PUBLIC1" >/dev/null \
     || fail A07_RELAY1_EXIT_ROUTE_NOT_RESTORED
+mv "$WORK/native-privacy-$NATIVE_RELAY_IF1.down" "$WORK/native-privacy-$NATIVE_RELAY_IF1.restored"
+mv "$WORK/native-privacy-$NATIVE_EXIT_LEG1.down" "$WORK/native-privacy-$NATIVE_EXIT_LEG1.restored"
 set +e
 wait "$HTTP3_SERVER_PID"
 HTTP3_SERVER_STATUS=$?
@@ -5798,7 +5760,7 @@ for evidence_file in a07-client.json destination-a07-evidence.json \
         A07_STATUS=1
     fi
 done
-jq -S -c -n --arg relay relay1 \
+jq -S -c -n --arg relay "$NATIVE_NODE1" \
     --arg relay_client_operstate "$A07_R1C_STATE" \
     --arg relay_exit_operstate "$A07_R1X_STATE" \
     '{schema_version:1,removed_relay:$relay,process_active_at_removal:true,
@@ -5834,6 +5796,11 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($destination.release_observed == true)
             and ($destination.source.ip == "47.163.4.1")
             and $removal.process_active_at_removal
+            and ($removal.removed_relay == $before.benchmark_slots[0].relay_node)
+            and ($a06_native.benchmark_slots == $before.benchmark_slots)
+            and ($before.benchmark_slots == $after.benchmark_slots)
+            and ($client.benchmark_relay_nodes == ($before.benchmark_slots | map(.relay_node)))
+            and ($exit.benchmark_relay_nodes == $client.benchmark_relay_nodes)
             and ($removal.removed_links.relay_client_operstate == "DOWN")
             and ($removal.removed_links.relay_exit_operstate == "DOWN")
             and $client.marker_observed and $exit.marker_observed
@@ -5860,6 +5827,7 @@ if [ "$A07_STATUS" -eq 0 ]; then
            transport:"active HTTP/3 flow retained by genuine MPQUIC after Relay removal",
            application:$app,destination:$destination,relay_removal:$removal,
            native_mpquic:{route_context_id:$after.route_context_id,
+             benchmark_slots:$after.benchmark_slots,
              before_removal:$before.paths,after_removal:$after.paths},
            path_evidence:{client_capture:$client,exit_capture:$exit},
            application_flow_completed:true,ordinary_quic_fallback_allowed:false,
@@ -6319,7 +6287,7 @@ install -o root -g root -m 0600 "$WORK/destination/tls-policy.json" \
 
 PHASE=a11-a13-privacy-evidence
 stop_privacy_observers || fail PRIVACY_CAPTURE_INCOMPLETE
-for privacy_evidence in privacy-client.json privacy-relay1.json \
+for privacy_evidence in privacy-client.json privacy-relay0.json privacy-relay1.json \
     privacy-relay2.json privacy-exit.json; do
     if [ ! -s "$WORK/$privacy_evidence" ] \
         || ! jq -e . "$WORK/$privacy_evidence" >/dev/null 2>&1; then
@@ -6346,11 +6314,20 @@ printf 'exit_status=%s\n' "$route_status" \
 A11_STATUS=1
 jq -S -c -n \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile selected "$NATIVE_SELECTION_FILE" \
+    --slurpfile relay0 "$WORK/privacy-relay0.json" \
     --slurpfile relay1 "$WORK/privacy-relay1.json" \
     --slurpfile relay2 "$WORK/privacy-relay2.json" \
-    '($relay1[0]) as $r1 | ($relay2[0]) as $r2
+    '[$relay0[0],$relay1[0],$relay2[0]] as $captures
+    | ($selected[0].benchmark_slots | map(.relay_node)) as $nodes
+    | ($captures | map(select(.capture_role == $nodes[0])) | .[0]) as $r1
+    | ($captures | map(select(.capture_role == $nodes[1])) | .[0]) as $r2
     | (($mptcp[0].success == true)
-        and ($r1.capture_role == "relay1") and ($r2.capture_role == "relay2")
+        and ($nodes | length == 2) and ($nodes | unique | length == 2)
+        and ([$captures[].capture_role] | sort) == ["relay0","relay1","relay2"]
+        and all($captures[]; .truncated == false and .packet_socket_drops == 0
+            and .internet_destination_outer_packets == 0 and .unexpected_outer_packets == 0)
+        and ($r1.capture_role == $nodes[0]) and ($r2.capture_role == $nodes[1])
         and ($r1.truncated == false) and ($r2.truncated == false)
         and ($r1.packet_socket_drops == 0) and ($r2.packet_socket_drops == 0)
         and ($r1.client_leg_wireguard_data_datagrams > 0)
@@ -6364,6 +6341,8 @@ jq -S -c -n \
     | {schema_version:1,acceptance_id:"A11",success:$success,
        scope:"routed IPv4 outer headers on both physical legs of each data Relay",
        internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,mptcp_privacy:$mptcp[0],
+       benchmark_slots:$selected[0].benchmark_slots,all_relay_captures:$captures,
+       counter_labels:"relay1/relay2 are selected native benchmark slots; capture_role is actual node",
        payload_capture_retained:false}' >"$WORK/a11-evidence.json"
 jq -e '.success == true' "$WORK/a11-evidence.json" >/dev/null 2>&1 \
     && A11_STATUS=0
@@ -6377,18 +6356,22 @@ A11_SUCCEEDED=true
 A12_STATUS=1
 jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile selected "$NATIVE_SELECTION_FILE" \
     '($exit_capture[0]) as $exit
+    | ($selected[0].benchmark_slots | map(.relay_node)) as $nodes
     | (($mptcp[0].success == true)
         and ($exit.capture_role == "exit") and ($exit.truncated == false)
         and ($exit.packet_socket_drops == 0)
-        and ($exit.relay1_wireguard_data_datagrams > 0)
-        and ($exit.relay2_wireguard_data_datagrams > 0)
+        and ($exit[($nodes[0] + "_wireguard_data_datagrams")] > 0)
+        and ($exit[($nodes[1] + "_wireguard_data_datagrams")] > 0)
         and ($exit.outbound_client_discovery_attempt_packets == 0)
         and ($exit.client_public_packets == 0)
         and ($exit.direct_client_exit_packets == 0)) as $success
     | {schema_version:1,acceptance_id:"A12",success:$success,
        scope:"Exit physical ingress and destination interfaces",
-       incoming_datapath_sources:["44.160.1.1","45.161.2.1"],
+       benchmark_slots:$selected[0].benchmark_slots,
+       incoming_datapath_sources:($selected[0].benchmark_slots | map(
+         if .relay_index==0 then "42.158.0.1" elif .relay_index==1 then "44.160.1.1" else "45.161.2.1" end)),
        forbidden_client_public_source:"43.159.1.1",capture:$exit,mptcp_privacy:$mptcp[0],
        payload_capture_retained:false}' >"$WORK/a12-evidence.json"
 jq -e '.success == true' "$WORK/a12-evidence.json" >/dev/null 2>&1 \
@@ -6403,6 +6386,7 @@ A12_SUCCEEDED=true
 A13_STATUS=1
 jq -S -c -n \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile selected "$NATIVE_SELECTION_FILE" \
     --slurpfile client_capture "$WORK/privacy-client.json" \
     --slurpfile routes_before "$WORK/a13-client-routes-before.json" \
     --slurpfile routes_after "$WORK/a13-client-routes-after.json" \
@@ -6411,6 +6395,7 @@ jq -S -c -n \
     --rawfile destination_route_before "$WORK/a13-destination-route-before.txt" \
     --rawfile destination_route_after "$WORK/a13-destination-route-after.txt" \
     '($client_capture[0]) as $client
+    | ($selected[0].benchmark_slots | map(.relay_node)) as $nodes
     | ["46.162.3.1/32","47.163.4.1/32","47.163.4.2/32",
        "51.167.7.1/32","52.168.8.1/32","52.168.8.2/32",
        "10.241.20.2/32","10.241.21.2/32","10.241.22.2/32",
@@ -6426,8 +6411,8 @@ jq -S -c -n \
     | (($mptcp[0].success == true)
         and ($client.capture_role == "client") and ($client.truncated == false)
         and ($client.packet_socket_drops == 0)
-        and ($client.relay1_wireguard_data_datagrams > 0)
-        and ($client.relay2_wireguard_data_datagrams > 0)
+        and ($client[($nodes[0] + "_wireguard_data_datagrams")] > 0)
+        and ($client[($nodes[1] + "_wireguard_data_datagrams")] > 0)
         and ($client.direct_client_exit_packets == 0)
         and ($direct_routes | length) == 0
         and ($exit_route_before | test("dev (cr[0-5]|cb[12])( |$)") | not)
@@ -6438,6 +6423,7 @@ jq -S -c -n \
     | {schema_version:1,acceptance_id:"A13",success:$success,
        topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
        client_capture:$client,direct_physical_routes:$direct_routes,mptcp_privacy:$mptcp[0],
+       benchmark_slots:$selected[0].benchmark_slots,
        route_get:{exit_before:$exit_route_before,exit_after:$exit_route_after,
          destination_before:$destination_route_before,
          destination_after:$destination_route_after},

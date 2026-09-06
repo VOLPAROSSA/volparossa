@@ -24,8 +24,9 @@ a01_transient_connect_unavailable() {
 }
 
 benchmark_capture_paths() {
-    case "$1:$2" in
-        a01-*:multipath-quic|*:mptcp) benchmark_pair_option=--any-pair ;;
+    case "${scenario:-alpha}:$2" in
+        mixed-link:multipath-quic) benchmark_pair_option=--lan-pair ;;
+        *:multipath-quic|*:mptcp) benchmark_pair_option=--any-pair ;;
         *) benchmark_pair_option= ;;
     esac
     "$binary_directory/volparossa" \
@@ -35,6 +36,25 @@ benchmark_capture_paths() {
         "$WORK/$1-paths.txt" "$WORK/$1-selection.json" \
         "$R0_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER" "$2" \
         ${benchmark_pair_option:+"$benchmark_pair_option"}
+}
+
+# shellcheck disable=SC2034 # Independent immutable native slots survive later MPTCP draws.
+native_bind_slots() {
+    benchmark_bind_slots "$1" || return 1
+    NATIVE_SELECTION_FILE=$1
+    NATIVE_CONTEXT=$(jq -er '.route_context_id' "$1") || return 1
+    NATIVE_PEER1=$(jq -er '.benchmark_slots[0].relay_peer_id' "$1") || return 1
+    NATIVE_PEER2=$(jq -er '.benchmark_slots[1].relay_peer_id' "$1") || return 1
+    NATIVE_INDEX1=$BENCH_INDEX1; NATIVE_INDEX2=$BENCH_INDEX2
+    NATIVE_NODE1=$BENCH_NODE1; NATIVE_NODE2=$BENCH_NODE2
+    NATIVE_NS1=$BENCH_NS1; NATIVE_NS2=$BENCH_NS2
+    NATIVE_CLIENT_IF1=$BENCH_CLIENT_IF1; NATIVE_CLIENT_IF2=$BENCH_CLIENT_IF2
+    NATIVE_RELAY_IF1=$BENCH_RELAY_IF1; NATIVE_RELAY_IF2=$BENCH_RELAY_IF2
+    NATIVE_EXIT_LEG1=$BENCH_EXIT_LEG1; NATIVE_EXIT_LEG2=$BENCH_EXIT_LEG2
+    NATIVE_EXIT_IF1=$BENCH_EXIT_IF1; NATIVE_EXIT_IF2=$BENCH_EXIT_IF2
+    NATIVE_PUBLIC1=$BENCH_PUBLIC1; NATIVE_PUBLIC2=$BENCH_PUBLIC2
+    NATIVE_CLIENT_HOP1=$BENCH_CLIENT_HOP1; NATIVE_CLIENT_HOP2=$BENCH_CLIENT_HOP2
+    NATIVE_EXIT_HOP1=$BENCH_EXIT_HOP1; NATIVE_EXIT_HOP2=$BENCH_EXIT_HOP2
 }
 
 # Select only from the three immutable disposable topology bindings. Never overwrite R0/R1/R2:

@@ -625,8 +625,14 @@ jobs:
             .privacy.exit.client_public_packets == 0 and
             .privacy.local_relay.internet_destination_outer_packets == 0 and
             .privacy.public_relay.internet_destination_outer_packets == 0 and
-            all(.privacy[]; .truncated == false and .unexpected_outer_packets == 0) and
-            .ordinary_quic_fallback_allowed == false and .bandwidth_aggregation_claimed == false and
+            all(.privacy[]; .truncated == false and .packet_socket_drops == 0 and
+              .unexpected_outer_packets == 0) and
+            .ordinary_quic_fallback_allowed == false and .bandwidth_aggregation_claimed == true and
+            .bandwidth_comparison.success == true and
+            .bandwidth_comparison.minimum_ratio_exclusive == 1.25 and
+            .bandwidth_comparison.aggregate_to_wan_only_ratio > 1.25 and
+            .bandwidth_comparison.ordinary_quic_fallback_allowed == false and
+            .bandwidth_comparison.application_pacing == false and
             .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
             .host_state.unchanged == true
           ' "$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json" >/dev/null
@@ -800,6 +806,11 @@ jobs:
             .a11_relay_outer_privacy.succeeded == true and
             .a11_relay_outer_privacy.evidence.success == true and
             .a11_relay_outer_privacy.evidence.mptcp_privacy.success == true and
+            ([.a11_relay_outer_privacy.evidence.all_relay_captures[].capture_role] | sort) ==
+              ["relay0","relay1","relay2"] and
+            all(.a11_relay_outer_privacy.evidence.all_relay_captures[];
+              .truncated == false and .packet_socket_drops == 0 and
+              .internet_destination_outer_packets == 0 and .unexpected_outer_packets == 0) and
             .a11_relay_outer_privacy.evidence.relay1.internet_destination_outer_packets == 0 and
             .a11_relay_outer_privacy.evidence.relay2.internet_destination_outer_packets == 0 and
             .a12_exit_source_privacy.succeeded == true and

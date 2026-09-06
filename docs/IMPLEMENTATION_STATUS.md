@@ -6,6 +6,22 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The [full v1 run on `760fe823`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044583589)
+passes A01--A05 and A15, including 2.010x measured MPTCP aggregation and actual relay
+failover. A06 never starts its HTTP/3 application: the fixture discards sixteen valid
+two-Active-path routes containing Relay0, then exhausts the fixed-pair redraw deadline.
+Its final preselection-unavailable diagnostic is the normal cooldown between those
+discarded successes, not evidence that native route activation failed. A07--A14 were
+not reached. All owned objects, units and namespaces are gone; guest state is unchanged.
+The dynamic-pair fixture now also covers native HTTP/3: exact context/path/Peer/Exit
+bindings survive relay removal, and all three eligible Relays stay under privacy
+capture. Mixed-link requires local-LAN Relay1 plus an actual public-WAN Relay0 or Relay2;
+each comparison retains its own actual path, capture and equally shaped queue bindings.
+The workflow now requires a successful measured >1.25x bandwidth comparison rather than
+the obsolete no-bandwidth-claim flag. Thirty-one focused fixture checks and the static
+topology contract pass. These fixture changes await their unchanged-build live proof;
+they do not change production selection, timeouts or the required data/gain thresholds.
+
 [Quality passes on `760fe823`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044097752),
 including workspace tests and strict Clippy. Its
 [mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044164480)
