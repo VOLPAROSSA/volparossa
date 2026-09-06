@@ -4279,7 +4279,20 @@ verify_a14_helper_restart_recovery() {
             sleep 0.1
             a14_restart_attempt=$((a14_restart_attempt + 1))
         done
-        [ "$a14_restart_attempt" -lt 450 ] || return 1
+        if [ "$a14_restart_attempt" -ge 450 ]; then
+            # Preserve the observed failed restart before the outer cleanup removes its unit.
+            jq -S -c -n --arg node "$a14_restart_node" --arg unit "$a14_restart_unit" \
+                --argjson old_pid "$a14_old_pid" --arg new_pid "$a14_new_pid" \
+                --arg state "$a14_restart_state" --arg substate "$a14_restart_substate" \
+                --arg fdstore "$a14_fdstore_after" \
+                '{node:$node,unit:$unit,old_pid:$old_pid,new_pid:($new_pid|tonumber? // 0),
+                  restarted:false,active_state:$state,sub_state:$substate,
+                  inherited_fdstore_descriptors_after:($fdstore|tonumber? // null)}' \
+                >>"$a14_restart_rows" || return 1
+            jq -S -c -s '{schema_version:1,all_helpers_restarted:false,helpers:.}' \
+                "$a14_restart_rows" >"$WORK/a14-helper-restarts.json" || return 1
+            return 1
+        fi
         case $a14_new_pid in ''|0|*[!0-9]*) return 1 ;; esac
         jq -S -c -n --arg node "$a14_restart_node" \
             --arg unit "$a14_restart_unit" --argjson old_pid "$a14_old_pid" \
@@ -4423,7 +4436,6 @@ for crash_node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay
         "volparossa-alpha-helper@$crash_node.service" \
         || fail A14_HELPER_CRASH_FAILED
 done
-verify_a14_helper_restart_recovery || fail A14_HELPER_RESTART_RECOVERY_FAILED
 jq -S -c -s . "$WORK"/a14-crash-*.json >"$WORK/a14-crashes.json"
 jq -e '
   length == 25 and
@@ -4432,6 +4444,7 @@ jq -e '
   ([.[].class] | map(select(. == "native")) | length) == 3 and
   all(.[]; .sigkill_delivered and .pid_absent_after)
 ' "$WORK/a14-crashes.json" >/dev/null || fail A14_FORCED_CRASH_INCOMPLETE
+verify_a14_helper_restart_recovery || fail A14_HELPER_RESTART_RECOVERY_FAILED
 PHASE=a14-cleanup-pending
 exit 0
 }

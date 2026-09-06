@@ -31,6 +31,7 @@ assert '[ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ]' in s
 assert sequence.index("refresh_a14_live_custody") < sequence.index("record_a14_owned_inventory")
 assert sequence.index("record_a14_owned_inventory") < sequence.index("force_crash_unit agent")
 assert sequence.index("force_crash_unit helper") < sequence.index("verify_a14_helper_restart_recovery")
+assert sequence.index('>"$WORK/a14-crashes.json"') < sequence.index("verify_a14_helper_restart_recovery")
 assert 'start_mptcp_download a14-custody a14-custody 0 -' in function("refresh_a14_live_custody")
 definitions = "\n".join(function(name) for name in (
     "run_a14_crash_recovery", "refresh_a14_live_custody", "start_mptcp_download",
@@ -118,5 +119,31 @@ with tempfile.TemporaryDirectory(prefix="crash-report-test-", dir=HERE) as raw:
     report(a14, 0, 0)
     (directory / "host-state-after.json").write_bytes(b"changed\n")
     assert not accepted()
+
+    # Exercise only the failed-restart report, with no real systemd call or sleep.
+    (directory / "a14-crash-helper-client.json").write_text('{"pid_before":101}', encoding="ascii")
+    restart_stub = '''
+systemctl() {
+    case $2 in
+        --property=ActiveState) printf '%s\\n' activating ;;
+        --property=SubState) printf '%s\\n' auto-restart ;;
+        --property=MainPID) printf '%s\\n' 202 ;;
+        --property=NFileDescriptorStore) printf '%s\\n' 2 ;;
+        *) return 1 ;;
+    esac
+}
+sleep() { :; }
+verify_a14_helper_restart_recovery
+'''
+    failed_restart = subprocess.run(["sh", "-eu", "-c", definitions + restart_stub],
+                                    env=environment, capture_output=True, text=True, timeout=10)
+    assert failed_restart.returncode != 0
+    preserved = json.loads((directory / "a14-helper-restarts.json").read_text(encoding="ascii"))
+    assert not preserved["all_helpers_restarted"]
+    assert preserved["helpers"] == [{
+        "node": "client", "unit": "volparossa-alpha-helper@client.service", "old_pid": 101,
+        "new_pid": 202, "restarted": False, "active_state": "activating", "sub_state": "auto-restart",
+        "inherited_fdstore_descriptors_after": 2,
+    }]
 
 print("Crash-recovery definitions and scoped positive/failed-cleanup reports PASS (no live networking)")
