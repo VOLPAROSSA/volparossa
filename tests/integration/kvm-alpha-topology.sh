@@ -2679,11 +2679,26 @@ def record_unexpected_outer_tuple(interface, protocol, source, source_port, dest
         counters["unexpected_outer_tuple_overflow_packets"] += 1
 
 
+def configure_capture_buffer(capture):
+    # Only the disposable VM's privileged observer may bypass rmem_max. Ordinary SO_RCVBUF
+    # silently clamped a 1 MiB request to 425984 bytes on the reproduced Linux default.
+    # Bound this per socket, verify the actual size, and never alter a host-wide sysctl.
+    capture.setsockopt(socket.SOL_SOCKET, 33, 4 * 1024 * 1024)  # SO_RCVBUFFORCE.
+    actual = capture.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    if not 4 * 1024 * 1024 <= actual <= 8 * 1024 * 1024:
+        raise ValueError("bounded privacy capture buffer unavailable")
+    return actual
+
+
 sockets = {}
+interface_statistics = {}
 for interface in interfaces:
-    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
-    capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
-    capture.bind((interface, 0))
+    # Protocol zero initially receives nothing: size the queue before starting this exact link.
+    capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0)
+    interface_statistics[interface] = {
+        "receive_buffer_bytes": configure_capture_buffer(capture), "observed_frames": 0,
+    }
+    capture.bind((interface, 0x0003))
     capture.setblocking(False)
     sockets[capture] = interface
 
@@ -2707,14 +2722,32 @@ def is_ipv4_multicast(address):
     return 224 <= int(address.split(".", 1)[0]) <= 239
 
 
-while running and time.monotonic() < deadline:
-    readable, _, _ = select.select(list(sockets), [], [], 0.2)
+def capture_rounds():
+    global truncated
+    stop_deadline = None
+    while not truncated:
+        now = time.monotonic()
+        if not running and stop_deadline is None:
+            stop_deadline = now + 2
+        if now >= deadline or (stop_deadline is not None and now >= stop_deadline):
+            truncated = True
+            return
+        readable, _, _ = select.select(list(sockets), [], [], 0.2 if running else 0)
+        if not readable and not running:
+            return
+        yield readable
+
+
+for readable in capture_rounds():
     for capture in readable:
-        while True:
+        # A busy interface must not starve the other physical legs. On SIGTERM keep draining
+        # all queues in bounded rounds; a drain deadline or unread final packet fails closed.
+        for _ in range(128):
             frame = receive_frame(capture, sockets[capture])
             if frame is None:
                 break
             observed_frames += 1
+            interface_statistics[sockets[capture]]["observed_frames"] += 1
             if observed_frames > 1048576:
                 truncated = True
                 running = False
@@ -2884,8 +2917,12 @@ while running and time.monotonic() < deadline:
                     counters["relay2_wireguard_data_datagrams"] += 1
 
 packet_socket_drops = 0
-for capture in sockets:
-    _, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
+for capture, interface in sockets.items():
+    packets, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
+    statistics = interface_statistics[interface]
+    statistics.update(packet_socket_packets=packets, packet_socket_drops=drops)
+    if packets != statistics["observed_frames"] + drops:
+        truncated = True
     packet_socket_drops += drops
     capture.close()
 with open(output_path, "x", encoding="ascii") as output:
@@ -2894,6 +2931,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "schema_version": 1,
             "capture_role": role,
             "interfaces": interfaces,
+            "interface_statistics": interface_statistics,
             "observed_frames": observed_frames,
             "truncated": truncated,
             "expected_link_down_interfaces": link_down_interfaces,
@@ -6177,6 +6215,7 @@ jq -S -c -n \
     '($relay1[0]) as $r1 | ($relay2[0]) as $r2
     | (($r1.capture_role == "relay1") and ($r2.capture_role == "relay2")
         and ($r1.truncated == false) and ($r2.truncated == false)
+        and ($r1.packet_socket_drops == 0) and ($r2.packet_socket_drops == 0)
         and ($r1.client_leg_wireguard_data_datagrams > 0)
         and ($r1.exit_leg_wireguard_data_datagrams > 0)
         and ($r2.client_leg_wireguard_data_datagrams > 0)
@@ -6202,6 +6241,7 @@ A12_STATUS=1
 jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
     '($exit_capture[0]) as $exit
     | (($exit.capture_role == "exit") and ($exit.truncated == false)
+        and ($exit.packet_socket_drops == 0)
         and ($exit.relay1_wireguard_data_datagrams > 0)
         and ($exit.relay2_wireguard_data_datagrams > 0)
         and ($exit.outbound_client_discovery_attempt_packets == 0)
@@ -6244,6 +6284,7 @@ jq -S -c -n \
             | IN("cr0","cr1","cr2","cr3","cr4","cr5","cb1","cb2","underlay"))))
         as $direct_routes
     | (($client.capture_role == "client") and ($client.truncated == false)
+        and ($client.packet_socket_drops == 0)
         and ($client.relay1_wireguard_data_datagrams > 0)
         and ($client.relay2_wireguard_data_datagrams > 0)
         and ($client.direct_client_exit_packets == 0)

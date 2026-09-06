@@ -36,6 +36,7 @@ def wireguard_frame(source, destination):
 
 class Capture:
     def __init__(self, frames):
+        self.packet_count = len(frames)
         self.frames = iter(frames)
 
     def bind(self, _address):
@@ -47,8 +48,10 @@ class Capture:
     def setsockopt(self, *_args):
         pass
 
-    def getsockopt(self, *_args):
-        return struct.pack("II", 0, 0)
+    def getsockopt(self, _level, _option, size=None):
+        if size is None:
+            return 8 * 1024 * 1024
+        return struct.pack("II", self.packet_count, 0)
 
     def recv(self, _maximum):
         try:

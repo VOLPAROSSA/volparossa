@@ -6,6 +6,38 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The newest [complete v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34036578734)
+at `fc3ec96a` reports A01--A13 and A15 success on one unchanged build, including A06 MPQUIC
+and A08 DNS after the republication fixes. A01--A10 and A15 have passing evidence, but the
+raw A11--A13 privacy captures dropped packets (Client 428, Relay1 786, Exit 434); their
+predicates omitted that completeness check. Those three success flags must not be treated
+as complete privacy proof. A06/A07's separate captures have zero drops. The explicit scenario
+failure is A14 helper restart after forced crashes, not the earlier route-authority join.
+Both restart recovery and complete privacy captures remain acceptance work. Final owned objects,
+namespace references and stored descriptors are zero and guest-state hashes match, but
+`cleanup.complete` remains false because restart recovery failed. The separate
+[crash run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34037176994) at `7a414a78`
+retains all 25 actual SIGKILL records (11 agents, 11 helpers, three native processes).
+All four custody-bearing helpers reach `SettleMayOwn` then reject restart-reaper
+authentication; the new diagnostics narrow the boundary without weakening recovery.
+This is not an all-A01--A15 pass or completion of the local-link/capacity extensions.
+
+The restart sandbox was dropping `CAP_NET_BIND_SERVICE` while the shared parent attestation
+requires it, unlike the ordinary worker's correct pre-identity setup. Restart now retains
+the same bounded capability set; the final identity/capability checks are unchanged. The
+existing restart regression fails before the fix and passes after it. Two focused checks,
+strict helper Clippy and a disposable real-kernel bounding-mask witness pass (`0x1100`
+after the erroneous drop versus required/retained `0x1500`). Full systemd recovery remains
+for the next live crash run; this is not a completed authenticated-reaper proof.
+
+A11--A13 now explicitly reject absent, null or nonzero capture-drop counters. The collector
+also verifies its bounded 4-MiB receive buffer, reads interfaces in fair 128-frame rounds,
+drains queued packets for at most two seconds on stop and reconciles final kernel packet
+totals against read/lost packets. A disposable 500-frame reproduction recorded 185 read and
+315 dropped with the old effective 425,984-byte buffer. Twelve negative predicate cases,
+fair-drain/tail checks, nine mixed-fixture checks and the static KVM contract pass. Only the
+next live v1 run can establish complete zero-drop captures under the full workload.
+
 Direct-LAN reconnection now has two reproduced transport fixes. With two IPv4 QUIC
 listeners, a real authenticated reconnect after LAN down/up previously arrived from the
 public listener's address. Private direct-IP Dialer connections now use a fresh socket so
@@ -23,13 +55,13 @@ passed A01--A05 and A15, but stopped selecting A06's required benchmark pair. Ei
 MPQUIC contexts used other valid pairs. Both desired native probe legs also completed, followed
 by rejection at the post-probe authority join; the exact guard was not logged on this build.
 A07--A14 were not reached. All 169 exact cleanup completions succeeded and no owned objects
-remained. This is not an A06 or full-alpha pass; advertisement-refresh/handoff integration remains open.
+remained. This attempt did not prove A06 or the advertisement-refresh/handoff integration.
 The reproduced republication defects are now fixed at both joins: immutable selected/native
 evidence can continue with a newer live same-Exit/full-policy authority, and ordinary pending
 RPCs survive a verified refresh without losing their original control provenance or deadlines.
 Real signed-refresh and affine-handoff regressions failed before the changes and pass after them;
 targeted withdrawal, policy, expiry, replay and endpoint-substitution checks and joint strict
-agent Clippy pass. New live v1 evidence is still required.
+agent Clippy pass. The later `fc3ec96a` run above confirms A06 and A08 progression with these fixes.
 
 The [uplink transition run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034024459)
 at `83264e55` passed all three phases and six protected application routes without restarting
@@ -74,7 +106,9 @@ failure boundary without logging identities or changing recovery gates. Thirty-t
 server/reaper/custody checks and strict helper Clippy pass; live restart proof remains pending.
 
 The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
-at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
+at `dbb89962` has finalized A01--A13 and A15 success flags on one unchanged build.
+Its older A11--A13 captures did not export `packet_socket_drops`, so their completeness
+cannot be established retrospectively; those flags are not a complete privacy proof.
 It stopped before A14's forced crashes: the inventory counted 18 durable route-worker namespaces
 plus the separate live ingress namespace, but demanded two durable descriptors for all 19.
 The actual 36 descriptors cover the route workers; the ingress worker has a different lifetime
