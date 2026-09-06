@@ -36,7 +36,7 @@ use crate::{
         capture_inherited_custody, classify_startup_custody,
         observe_nonempty_restart_custody_for_refusal, observe_startup_custody_inventory,
         settle_cleanup_confirmed_restart_absence, settle_cleanup_confirmed_restart_present,
-        settle_exact_may_own_restart_present,
+        settle_exact_may_own_restart_present, startup_custody_rejection,
     },
 };
 
@@ -108,6 +108,70 @@ pub enum ServerError {
     RuntimeContextConflict,
 }
 
+/// Closed startup phases, never journal, descriptor, peer or operating-system error strings.
+#[derive(Clone, Copy, Debug)]
+enum StartupFailureStage {
+    RuntimeContext,
+    InheritedCapture,
+    LegacyJournal,
+    RuntimeIdentity,
+    JournalOpen,
+    RuntimeBuild,
+    ManagerInventory,
+    JournalRevalidation,
+    CustodyClassification,
+    EmptyJournalContinuation,
+    SettleAbsent,
+    SettlePresent,
+    SettleMayOwn,
+    UnsupportedClassification,
+    SocketBind,
+}
+
+fn startup_error_projection(error: &ServerError) -> (&'static str, Option<i32>) {
+    match error {
+        ServerError::Io(error) => (
+            "Io",
+            error
+                .raw_os_error()
+                .filter(|errno| (1..=4095).contains(errno)),
+        ),
+        ServerError::CleanupIncomplete => ("CleanupIncomplete", None),
+        ServerError::OwnershipIncomplete => ("OwnershipIncomplete", None),
+        ServerError::InheritedCustody => ("InheritedCustody", None),
+        ServerError::RuntimeContextConflict => ("RuntimeContextConflict", None),
+    }
+}
+
+fn startup_failure(stage: StartupFailureStage, error: ServerError) -> ServerError {
+    let (error_class, errno) = startup_error_projection(&error);
+    tracing::error!(
+        diagnostic_code = "HELPER_STARTUP_FAILED",
+        phase = ?stage,
+        error_class,
+        errno,
+        "helper startup failed at a fixed lifecycle boundary"
+    );
+    error
+}
+
+fn startup_custody_failure(stage: StartupFailureStage, error: &io::Error) -> ServerError {
+    let errno = error
+        .raw_os_error()
+        .filter(|errno| (1..=4095).contains(errno));
+    let reason = startup_custody_rejection(error);
+    tracing::error!(
+        diagnostic_code = "HELPER_STARTUP_FAILED",
+        phase = ?stage,
+        error_class = "InheritedCustody",
+        source_class = ?error.kind(),
+        rejection = ?reason,
+        errno,
+        "helper startup custody failed at a fixed lifecycle boundary"
+    );
+    ServerError::InheritedCustody
+}
+
 /// Own the production Tokio I/O runtime, durable startup boundary, service loop and shutdown.
 ///
 /// Keeping the fallible async listener adoption behind this synchronous entry point makes a
@@ -119,35 +183,60 @@ pub enum ServerError {
 /// Returns an error when inherited custody cannot be recovered, runtime construction, protected
 /// helper startup, service I/O, in-memory cleanup, or durable ownership shutdown cannot be
 /// completed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "startup keeps affine recovery ownership in one ordered boundary"
+)]
 pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), ServerError> {
     if Handle::try_current().is_ok() {
-        return Err(ServerError::RuntimeContextConflict);
+        return Err(startup_failure(
+            StartupFailureStage::RuntimeContext,
+            ServerError::RuntimeContextConflict,
+        ));
     }
-    let inherited =
-        capture_inherited_custody(inherited).map_err(|_| ServerError::InheritedCustody)?;
-    ensure_legacy_journal_absent()?;
-    let prepared_runtime = prepare_production_runtime_identity()?;
+    let inherited = capture_inherited_custody(inherited)
+        .map_err(|error| startup_custody_failure(StartupFailureStage::InheritedCapture, &error))?;
+    ensure_legacy_journal_absent()
+        .map_err(|error| startup_failure(StartupFailureStage::LegacyJournal, error.into()))?;
+    let prepared_runtime = prepare_production_runtime_identity()
+        .map_err(|error| startup_failure(StartupFailureStage::RuntimeIdentity, error.into()))?;
     let ownership_deadline = HardDeadline::after(OWNERSHIP_STARTUP_TIMEOUT)?;
     let mut ownership_startup = ProductionOwnershipRuntime::begin_until(ownership_deadline)
-        .map_err(|_| ServerError::OwnershipIncomplete)?;
-    let runtime = Builder::new_multi_thread().enable_all().build()?;
+        .map_err(|_| {
+            startup_failure(
+                StartupFailureStage::JournalOpen,
+                ServerError::OwnershipIncomplete,
+            )
+        })?;
+    let runtime = Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| startup_failure(StartupFailureStage::RuntimeBuild, error.into()))?;
     let observed_inventory = runtime
         .block_on(observe_startup_custody_inventory(
             &inherited,
             ownership_deadline,
         ))
-        .map_err(|_| ServerError::InheritedCustody)?;
-    let targets = ownership_startup
-        .revalidate_targets()
-        .map_err(|_| ServerError::OwnershipIncomplete)?;
+        .map_err(|error| startup_custody_failure(StartupFailureStage::ManagerInventory, &error))?;
+    let targets = ownership_startup.revalidate_targets().map_err(|_| {
+        startup_failure(
+            StartupFailureStage::JournalRevalidation,
+            ServerError::OwnershipIncomplete,
+        )
+    })?;
     let classification =
         classify_startup_custody(inherited, targets, observed_inventory, ownership_deadline)
-            .map_err(|_| ServerError::InheritedCustody)?;
+            .map_err(|error| {
+                startup_custody_failure(StartupFailureStage::CustodyClassification, &error)
+            })?;
     let ownership_runtime = if classification.is_empty() {
         drop(classification);
-        ownership_startup
-            .continue_empty()
-            .map_err(|_| ServerError::OwnershipIncomplete)?
+        ownership_startup.continue_empty().map_err(|_| {
+            startup_failure(
+                StartupFailureStage::EmptyJournalContinuation,
+                ServerError::OwnershipIncomplete,
+            )
+        })?
     } else if classification.is_cleanup_confirmed_no_stored_custody_only() {
         settle_cleanup_confirmed_restart_absence(
             &runtime,
@@ -155,7 +244,12 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             classification,
             ownership_deadline,
         )
-        .map_err(|_| ServerError::InheritedCustody)?
+        .map_err(|_| {
+            startup_failure(
+                StartupFailureStage::SettleAbsent,
+                ServerError::InheritedCustody,
+            )
+        })?
     } else if classification.is_cleanup_confirmed_with_exact_present() {
         settle_cleanup_confirmed_restart_present(
             &runtime,
@@ -163,7 +257,12 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             classification,
             ownership_deadline,
         )
-        .map_err(|_| ServerError::InheritedCustody)?
+        .map_err(|_| {
+            startup_failure(
+                StartupFailureStage::SettlePresent,
+                ServerError::InheritedCustody,
+            )
+        })?
     } else if classification.is_exact_may_own_restart_set() {
         settle_exact_may_own_restart_present(
             &runtime,
@@ -171,7 +270,12 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             classification,
             ownership_deadline,
         )
-        .map_err(|_| ServerError::InheritedCustody)?
+        .map_err(|_| {
+            startup_failure(
+                StartupFailureStage::SettleMayOwn,
+                ServerError::InheritedCustody,
+            )
+        })?
     } else {
         let _ = observe_nonempty_restart_custody_for_refusal(
             &runtime,
@@ -179,9 +283,13 @@ pub fn run_production_server(inherited: SystemdListenFdSet) -> Result<(), Server
             classification,
             ownership_deadline,
         );
-        return Err(ServerError::InheritedCustody);
+        return Err(startup_failure(
+            StartupFailureStage::UnsupportedClassification,
+            ServerError::InheritedCustody,
+        ));
     };
-    let server = bind_production_socket(prepared_runtime, ownership_runtime)?;
+    let server = bind_production_socket(prepared_runtime, ownership_runtime)
+        .map_err(|error| startup_failure(StartupFailureStage::SocketBind, error))?;
     runtime.block_on(run_server(server))
 }
 
@@ -909,6 +1017,31 @@ mod tests {
     }
 
     #[test]
+    fn startup_failure_projection_never_exposes_io_strings_or_unbounded_errno() {
+        assert_eq!(
+            startup_error_projection(&ServerError::Io(io::Error::other("private fixture path"))),
+            ("Io", None)
+        );
+        assert_eq!(
+            startup_error_projection(&ServerError::Io(io::Error::from_raw_os_error(libc::EACCES))),
+            ("Io", Some(libc::EACCES))
+        );
+        for errno in [0, -1, 4096, i32::MAX] {
+            assert_eq!(
+                startup_error_projection(&ServerError::Io(io::Error::from_raw_os_error(errno))),
+                ("Io", None)
+            );
+        }
+        assert!(matches!(
+            startup_failure(
+                StartupFailureStage::SettleMayOwn,
+                ServerError::InheritedCustody
+            ),
+            ServerError::InheritedCustody
+        ));
+    }
+
+    #[test]
     fn durable_ownership_failure_dominates_every_weaker_server_result() {
         let service_error = Err(ServerError::Io(io::Error::other("fixture")));
         assert!(matches!(
@@ -952,14 +1085,19 @@ mod tests {
             .find("capture_inherited_custody(inherited)")
             .expect("affine inherited custody capture");
         let prepare = entry
-            .find("prepare_production_runtime_identity()?")
+            .find("prepare_production_runtime_identity()")
             .expect("runtime identity before journal open");
         let ownership = entry
             .find("ProductionOwnershipRuntime::begin_until(ownership_deadline)")
             .expect("lock-holding ownership preflight");
         let runtime = entry
-            .find("Builder::new_multi_thread().enable_all().build()?")
+            .find("Builder::new_multi_thread()")
             .expect("owned I/O-enabled Tokio runtime");
+        assert!(
+            entry[runtime..].starts_with(
+                "Builder::new_multi_thread()\n        .enable_all()\n        .build()"
+            )
+        );
         let inventory = entry
             .find("observe_startup_custody_inventory(")
             .expect("barriered manager inventory observation");
@@ -985,7 +1123,7 @@ mod tests {
             .find("continue_empty()")
             .expect("empty-only ownership startup continuation");
         let bind = entry
-            .find("bind_production_socket(prepared_runtime, ownership_runtime)?")
+            .find("bind_production_socket(prepared_runtime, ownership_runtime)")
             .expect("private bind call");
         let drive = entry
             .find("runtime.block_on(run_server(server))")

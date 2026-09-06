@@ -63,6 +63,65 @@ const CUSTODY_FD_NAME_DIGEST_BYTES: usize = 32;
 pub(super) const CUSTODY_FD_NAME_BYTES: usize =
     CUSTODY_FD_NAME_PREFIX.len() + CUSTODY_FD_NAME_DIGEST_BYTES * 2;
 
+/// Identity-free reasons attached at the exact journal/inherited-set rejection site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum StartupCustodyRejection {
+    #[error("startup custody target set is oversized")]
+    TargetBound,
+    #[error("startup journal custody target has an invalid recovery-anchor binding")]
+    RecoveryAnchor,
+    #[error("startup journal custody identity is reused")]
+    ReusedIdentity,
+    #[error("startup journal custody name is duplicated")]
+    DuplicateName,
+    #[error("inherited custody has no exact durable journal target")]
+    MissingJournalTarget,
+    #[error("inherited custody does not match its durable journal binding")]
+    JournalBindingMismatch,
+    #[error("durable journal custody exists under another inherited name")]
+    AliasedBinding,
+    #[error("MayOwnPrepare custody is absent from the inherited and manager sets")]
+    MissingPrepareCustody,
+}
+
+fn rejected_startup_custody(reason: StartupCustodyRejection) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, reason)
+}
+
+pub(crate) fn startup_custody_rejection(error: &io::Error) -> Option<StartupCustodyRejection> {
+    error
+        .get_ref()?
+        .downcast_ref::<StartupCustodyRejection>()
+        .copied()
+}
+
+fn startup_manager_failure(error: &FdStoreError) {
+    // Do not format InvalidInventory's string, a D-Bus response, or any I/O source.
+    let (error_class, errno) = match error {
+        FdStoreError::InvalidCustodyName => ("InvalidCustodyName", None),
+        FdStoreError::DuplicateCustodyDescriptor => ("DuplicateCustodyDescriptor", None),
+        FdStoreError::InvalidNotifySocket => ("InvalidNotifySocket", None),
+        FdStoreError::Io(error) => (
+            "Io",
+            error
+                .raw_os_error()
+                .filter(|errno| (1..=4095).contains(errno)),
+        ),
+        FdStoreError::Dbus(_) => ("Dbus", None),
+        FdStoreError::Deadline => ("Deadline", None),
+        FdStoreError::InvalidInventory(_) => ("InvalidInventory", None),
+        FdStoreError::UnstableInventory => ("UnstableInventory", None),
+        // Publication/removal state-machine errors are never expected in this read-only path.
+        _ => ("UnexpectedLifecycleState", None),
+    };
+    tracing::error!(
+        diagnostic_code = "HELPER_STARTUP_MANAGER_FAILED",
+        error_class,
+        errno,
+        "startup manager inventory observation or exact-set comparison failed"
+    );
+}
+
 #[must_use = "dropping inherited custody releases its exact typed descriptor owners"]
 struct InheritedCustodyBundle {
     pidfd: OwnedFd,
@@ -1371,7 +1430,14 @@ fn observe_exact_worker_exit_and_shared_cgroup(
     let mut pidfd_source = LinuxProcessPidfdExitObserver;
     let observed_target_count =
         observe_exact_inherited_worker_exits_with(&classification, deadline, &mut pidfd_source)
-            .map_err(|_| restart_settlement_incomplete())?;
+            .map_err(|error| {
+                tracing::error!(
+                    diagnostic_code = "HELPER_RESTART_WORKER_EXIT_FAILED",
+                    error_class = ?error,
+                    "exact inherited worker exit observation failed"
+                );
+                restart_settlement_incomplete()
+            })?;
     let exits = ObservedExactInheritedWorkerExitSet {
         classification,
         observed_target_count,
@@ -1382,7 +1448,12 @@ fn observe_exact_worker_exit_and_shared_cgroup(
         SharedServiceCgroupObservationOutcomeState::Observed(observed) => {
             Ok(observed.state.exits.classification)
         }
-        SharedServiceCgroupObservationOutcomeState::Retained { .. } => {
+        SharedServiceCgroupObservationOutcomeState::Retained { error, .. } => {
+            tracing::error!(
+                diagnostic_code = "HELPER_RESTART_CGROUP_FAILED",
+                error_class = ?error,
+                "exact restart cgroup observation failed"
+            );
             Err(restart_settlement_incomplete())
         }
     }
@@ -1446,7 +1517,16 @@ pub(crate) fn settle_exact_may_own_restart_present(
             bundle.network_namespace.as_fd(),
             deadline,
         )
-        .map_err(|_| restart_settlement_incomplete())?;
+        .map_err(|error| {
+            let (error_class, errno) = error.diagnostic_projection();
+            tracing::error!(
+                diagnostic_code = "HELPER_RESTART_REAPER_FAILED",
+                error_class,
+                errno,
+                "exact restart cleanup child failed"
+            );
+            restart_settlement_incomplete()
+        })?;
         if !proof.matches_plan(*plan, cleanup_mode) {
             return Err(restart_settlement_incomplete());
         }
@@ -2293,7 +2373,10 @@ pub(crate) async fn observe_startup_custody_inventory(
     let (manager_before, durable_before) = custody.verify_retained_bindings()?;
     let manager_inventory = observe_current_process_startup_inventory(deadline)
         .await
-        .map_err(|_| invalid_data("systemd startup inventory could not be observed exactly"))?;
+        .map_err(|error| {
+            startup_manager_failure(&error);
+            invalid_data("systemd startup inventory could not be observed exactly")
+        })?;
     let (manager_after, durable_after) = custody.verify_retained_bindings()?;
     if manager_before != manager_after || durable_before != durable_after {
         return Err(invalid_data(
@@ -2302,7 +2385,10 @@ pub(crate) async fn observe_startup_custody_inventory(
     }
     manager_inventory
         .verify_complete_exact_set(&manager_after)
-        .map_err(|_| invalid_data("systemd startup inventory does not match inherited custody"))?;
+        .map_err(|error| {
+            startup_manager_failure(&error);
+            invalid_data("systemd startup inventory does not match inherited custody")
+        })?;
     Ok(VerifiedStartupCustodyInventory {
         manager_inventory,
         manager_bindings: manager_after,
@@ -2833,25 +2919,31 @@ fn classify_journal_targets(
     inherited: &BTreeMap<CustodyFdName, DurableCustodyDescriptorBinding>,
 ) -> Result<Vec<ClassifiedStartupCustodyTarget>, io::Error> {
     if targets.len() > MAX_WORKER_CUSTODY_BUNDLES {
-        return Err(invalid_data("startup custody target set is oversized"));
+        return Err(rejected_startup_custody(
+            StartupCustodyRejection::TargetBound,
+        ));
     }
     let mut named_targets = BTreeMap::<CustodyFdName, &StartupCustodyTarget>::new();
     let mut prior_targets = Vec::<&StartupCustodyTarget>::with_capacity(targets.len());
     for target in targets {
         if !target.has_valid_recovery_binding() {
-            return Err(invalid_data(
-                "startup journal custody target has an invalid recovery-anchor binding",
+            return Err(rejected_startup_custody(
+                StartupCustodyRejection::RecoveryAnchor,
             ));
         }
         if prior_targets
             .iter()
             .any(|prior| prior.overlaps_binding(&target.durable_binding()))
         {
-            return Err(invalid_data("startup journal custody identity is reused"));
+            return Err(rejected_startup_custody(
+                StartupCustodyRejection::ReusedIdentity,
+            ));
         }
         let name = CustodyFdName::from_durable_digest(target.custody_name_digest());
         if named_targets.insert(name, target).is_some() {
-            return Err(invalid_data("startup journal custody name is duplicated"));
+            return Err(rejected_startup_custody(
+                StartupCustodyRejection::DuplicateName,
+            ));
         }
         prior_targets.push(target);
     }
@@ -2859,8 +2951,8 @@ fn classify_journal_targets(
         .keys()
         .any(|name| !named_targets.contains_key(name))
     {
-        return Err(invalid_data(
-            "inherited custody has no exact durable journal target",
+        return Err(rejected_startup_custody(
+            StartupCustodyRejection::MissingJournalTarget,
         ));
     }
 
@@ -2872,16 +2964,16 @@ fn classify_journal_targets(
                 StartupCustodyDisposition::ExactPresent
             }
             Some(_) => {
-                return Err(invalid_data(
-                    "inherited custody does not match its durable journal binding",
+                return Err(rejected_startup_custody(
+                    StartupCustodyRejection::JournalBindingMismatch,
                 ));
             }
             None if inherited
                 .values()
                 .any(|binding| target.overlaps_binding(binding)) =>
             {
-                return Err(invalid_data(
-                    "durable journal custody exists under another inherited name",
+                return Err(rejected_startup_custody(
+                    StartupCustodyRejection::AliasedBinding,
                 ));
             }
             None => match target.phase() {
@@ -2892,8 +2984,8 @@ fn classify_journal_targets(
                     StartupCustodyDisposition::CleanupConfirmedNoStoredCustody
                 }
                 StartupCustodyPhase::MayOwnPrepare => {
-                    return Err(invalid_data(
-                        "MayOwnPrepare custody is absent from the inherited and manager sets",
+                    return Err(rejected_startup_custody(
+                        StartupCustodyRejection::MissingPrepareCustody,
                     ));
                 }
             },
@@ -4261,6 +4353,15 @@ mod tests {
         let error = classify_journal_targets(&[target], &BTreeMap::new())
             .expect_err("MayOwnPrepare requires exact present custody");
         assert!(custody.is_empty());
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            startup_custody_rejection(&error),
+            Some(StartupCustodyRejection::MissingPrepareCustody)
+        );
+        assert_eq!(
+            startup_custody_rejection(&io::Error::other("untrusted error text")),
+            None
+        );
         assert_eq!(
             error.to_string(),
             "MayOwnPrepare custody is absent from the inherited and manager sets"

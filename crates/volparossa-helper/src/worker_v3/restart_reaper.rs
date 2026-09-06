@@ -83,6 +83,23 @@ impl From<WorkerV3Error> for RestartReaperError {
     }
 }
 
+impl RestartReaperError {
+    /// Only closed classes and a bounded Linux errno may cross the private error mapping.
+    pub(crate) fn diagnostic_projection(&self) -> (&'static str, Option<i32>) {
+        match self {
+            Self::Invalid => ("Invalid", None),
+            Self::Authentication => ("Authentication", None),
+            Self::CleanupIncomplete => ("CleanupIncomplete", None),
+            Self::Io(error) => (
+                "Io",
+                error
+                    .raw_os_error()
+                    .filter(|errno| (1..=4095).contains(errno)),
+            ),
+        }
+    }
+}
+
 /// Opaque affine proof that one exact self-exec reaper completed and was reaped.
 #[must_use = "restart cleanup proof must reach the retained startup actor"]
 pub(crate) struct ExactRestartReaperCleanupProof {
@@ -375,6 +392,9 @@ pub(crate) fn execute_single_restart_reaper(
     install_close_range_on_exec(&mut command);
     ensure_worker_deadline(deadline)?;
     let mut child = command.spawn()?;
+    // Command retains the child's stdin owner after spawn. Release that duplicate before any
+    // receive or failure fallback so an exited child yields EOF on the parent's channel.
+    drop(command);
     let child_pid = child.id();
     let exact_pidfd = match acquire_child_pidfd_with_reserve(&mut pidfd_reserve, deadline, || {
         open_child_pidfd(&child)
@@ -647,6 +667,7 @@ fn run_restart_reaper_fail_stop_live_proof() -> Result<(), RestartReaperError> {
         .stderr(Stdio::null());
     install_close_range_on_exec(&mut command);
     let mut child = command.spawn()?;
+    drop(command);
     if !geteuid().is_root() || getegid() != parent_gid {
         drop(parent);
         reap_direct_child_after_channel_close_or_fail_stop(&mut child);
@@ -977,6 +998,37 @@ mod tests {
 
     const DIRECT_CHILD_FAIL_STOP_FIXTURE: &str =
         "VOLPAROSSA_RESTART_REAPER_DIRECT_CHILD_FAIL_STOP_FIXTURE";
+
+    #[test]
+    fn exited_restart_child_releases_protocol_channel_before_deadline() {
+        let (parent, worker) = private_credential_worker_channel().expect("private channel");
+        let inherited: OwnedFd = worker.into();
+        let mut command = Command::new("/proc/self/exe");
+        command
+            .arg("--volparossa-restart-reaper-test-exit-before-ready")
+            .env_clear()
+            .stdin(Stdio::from(inherited))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        install_close_range_on_exec(&mut command);
+        let mut child = command.spawn().expect("spawn immediately rejecting child");
+        drop(command);
+        let child_pid = child.id();
+        assert!(!child.wait().expect("reap exact child").success());
+        let started = std::time::Instant::now();
+        let result = receive_credential_record_with_deadline(
+            &parent,
+            HandshakeRecord::LENGTH,
+            ExpectedUnixCredentials::new(child_pid, geteuid().as_raw(), getegid().as_raw())
+                .expect("exact child credentials"),
+            HardDeadline::after(Duration::from_secs(2)).expect("protocol deadline"),
+        );
+        assert!(result.is_err(), "early exit must not mint a protocol proof");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a rejected child must yield EOF rather than consume the protocol deadline"
+        );
+    }
 
     fn restart_plan(role: volparossa_routing::ContextRole, path_id: u8) -> StartupRestartPlan {
         StartupRestartPlan::for_test(
@@ -1338,6 +1390,10 @@ mod tests {
             .find("acquire_child_pidfd_with_reserve(")
             .map(|offset| spawn + offset)
             .expect("post-spawn pidfd acquisition");
+        let release_spawn_owner = production[spawn..]
+            .find("drop(command);")
+            .map(|offset| spawn + offset)
+            .expect("release duplicate child channel immediately after spawn");
         let close = production[acquire..]
             .find("drop(parent);")
             .map(|offset| acquire + offset)
@@ -1348,6 +1404,7 @@ mod tests {
             .expect("bounded direct-child fail-stop");
         assert!(reserve < lifecycle && lifecycle < waitable);
         assert!(waitable < spawn && spawn < acquire);
+        assert!(spawn < release_spawn_owner && release_spawn_owner < acquire);
         assert!(acquire < close && close < fail_stop);
 
         let child_start = source.find("fn run_child()").expect("child transcript");
