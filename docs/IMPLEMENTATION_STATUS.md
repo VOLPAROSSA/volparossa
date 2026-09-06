@@ -18,6 +18,12 @@ the next build restores the previously failover-capable BBR2 on both endpoints w
 retaining the reactive pump, TLS flush and complete capture windows. This single-variable
 comparison distinguishes the changed congestion controller from the changed event loop;
 it does not yet prove which caused the failover regression.
+Subsequent diagnostics retain one bounded read-only Client path snapshot on HTTP/3
+failure and a fixed role/stage plus numeric errno at a terminal native UDP receive error.
+They log no endpoint, descriptor, identity or payload and do not change error handling.
+The remaining helper CI failure was a source-order test's obsolete literal call marker
+after startup error diagnostics were added; the test now retains its interlock/order/error
+propagation checks across that spelling change. The focused test and strict helper Clippy pass.
 
 The preceding [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038676673)
 at `6b6d3a10` passes A01--A07 and A15 but stops at A08: both DNS transports and the

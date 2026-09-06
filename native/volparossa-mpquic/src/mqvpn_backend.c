@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -784,8 +785,14 @@ static vmp_transport_error_t backend_pump(void *session)
                 recvfrom(path->fd, packet, sizeof(packet), MSG_DONTWAIT,
                          (struct sockaddr *)&peer, &peer_len);
             if (received < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                const int receive_errno = errno;
+                if (receive_errno == EINTR) continue;
+                if (receive_errno == EAGAIN || receive_errno == EWOULDBLOCK) break;
+                if (backend->lifecycle.terminal == VMP_MQVPN_TERMINAL_NONE) {
+                    (void)fprintf(stderr,
+                        "NATIVE_UDP_RECEIVE_FAILED role=client stage=recvfrom errno=%d\n",
+                        receive_errno);
+                }
                 backend_mark_terminal(backend,
                                       VMP_MQVPN_TERMINAL_ENGINE);
                 return VMP_TRANSPORT_ENGINE;
@@ -1436,7 +1443,9 @@ static vmp_transport_error_t exit_backend_pump(void *session)
             const ssize_t length = recvfrom(
                 path->fd, packet, sizeof(packet), 0,
                 (struct sockaddr *)&peer, &peer_len);
-            if (length < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            const int receive_errno = length < 0 ? errno : 0;
+            if (length < 0 &&
+                (receive_errno == EAGAIN || receive_errno == EWOULDBLOCK)) {
                 break;
             }
             if (length <= 0 || peer_len != path->peer_len ||
@@ -1447,6 +1456,12 @@ static vmp_transport_error_t exit_backend_pump(void *session)
                     (const struct sockaddr *)&path->local,
                     path->local_len, (const struct sockaddr *)&peer,
                     peer_len) != MQVPN_OK) {
+                if (length < 0 &&
+                    backend->lifecycle.terminal == VMP_MQVPN_EXIT_TERMINAL_NONE) {
+                    (void)fprintf(stderr,
+                        "NATIVE_UDP_RECEIVE_FAILED role=exit stage=recvfrom errno=%d\n",
+                        receive_errno);
+                }
                 vmp_mqvpn_exit_backend_enter_terminal(
                     &backend->lifecycle,
                     VMP_MQVPN_EXIT_TERMINAL_ENGINE);

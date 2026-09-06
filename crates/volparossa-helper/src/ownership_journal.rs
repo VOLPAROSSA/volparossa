@@ -6909,11 +6909,17 @@ mod tests {
             .find("capture_inherited_custody(inherited)")
             .expect("affine inherited custody capture");
         let legacy = production
-            .find("ensure_legacy_journal_absent()?")
+            .find("ensure_legacy_journal_absent()")
             .expect("legacy interlock");
         let identity = production
-            .find("prepare_production_runtime_identity()?")
+            .find("prepare_production_runtime_identity()")
             .expect("runtime identity preparation");
+        for offset in [legacy, identity] {
+            let (statement, _) = production[offset..]
+                .split_once(';')
+                .expect("fallible startup statement");
+            assert!(statement.trim_end().ends_with('?'));
+        }
         let ownership = production
             .find("ProductionOwnershipRuntime::begin_until")
             .expect("lock-held durable ownership preflight");

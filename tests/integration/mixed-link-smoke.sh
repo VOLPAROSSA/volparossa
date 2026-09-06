@@ -202,6 +202,9 @@ mixed_link_bandwidth_case() {
     mixed_client_status=0
     wait "$HTTP3_CLIENT_PID" || mixed_client_status=$?
     HTTP3_CLIENT_PID=
+    if [ "$mixed_client_status" -ne 0 ]; then
+        capture_failed_native_mpquic_paths "$mixed_prefix"
+    fi
     mixed_after_r1=$(tc_sent_bytes "$R1" r1c) || return 1
     mixed_after_r2=$(tc_sent_bytes "$R2" r2c) || return 1
     stop_observers || return 1

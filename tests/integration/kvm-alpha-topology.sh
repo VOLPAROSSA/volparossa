@@ -3851,6 +3851,14 @@ stop_observers() {
     return "$a05_observer_stop_status"
 }
 
+capture_failed_native_mpquic_paths() {
+    # One read-only snapshot before cleanup, never a retry or an acceptance predicate.
+    # The failed route may no longer satisfy the successful-path JSON parser.
+    timeout --signal=TERM --kill-after=1s 4s "$binary_directory/volparossa" \
+        --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+        >"$WORK/$1-failure-paths.txt" 2>"$WORK/$1-failure-paths.err" || :
+}
+
 capture_native_mpquic_paths() {
     native_prefix=$1
     native_requirement=$2
@@ -5660,6 +5668,9 @@ wait "$HTTP3_CLIENT_PID"
 A07_STATUS=$?
 set -e
 HTTP3_CLIENT_PID=
+if [ "$A07_STATUS" -ne 0 ]; then
+    capture_failed_native_mpquic_paths a07
+fi
 if [ -s "$WORK/client-fixtures/a07-client.json" ]; then
     install -o root -g root -m 0600 "$WORK/client-fixtures/a07-client.json" \
         "$WORK/a07-client.json"
