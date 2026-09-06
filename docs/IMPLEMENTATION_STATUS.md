@@ -6,13 +6,35 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
-The [full v1 run on `760fe823`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044583589)
-passes A01--A05 and A15, including 2.010x measured MPTCP aggregation and actual relay
-failover. A06 never starts its HTTP/3 application: the fixture discards sixteen valid
-two-Active-path routes containing Relay0, then exhausts the fixed-pair redraw deadline.
-Its final preselection-unavailable diagnostic is the normal cooldown between those
-discarded successes, not evidence that native route activation failed. A07--A14 were
-not reached. All owned objects, units and namespaces are gone; guest state is unchanged.
+The [full v1 run on `55168536`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045959350)
+passes A01--A06 and A15, including 2.024x measured MPTCP aggregation, actual MPTCP
+relay failover and the real two-path HTTP/3 exchange. A07's separate 32-MiB response
+also completes after relay removal, in 57.133 seconds with matching endpoint hashes
+and successful bounded QUIC drain. A07 nevertheless fails its pre-removal path-volume
+gate: the surviving path carries only 205,504 bytes before removal, below the retained
+1-MiB requirement, then carries 43.792 MB afterward. Both flow captures are complete
+with zero drops. A08--A14 do not complete, so this is not full v1 acceptance. Teardown
+leaves zero owned objects, namespaces and units, and the guest state is unchanged.
+
+The [same-build mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045957953)
+completes both 32-MiB downloads with matching hashes and successful bounded drain:
+WAN-only takes 54.804 seconds (4.898 Mbps), LAN+WAN 55.144 seconds (4.868 Mbps).
+The ratio is **0.994x**, below the required >1.25x, so useful aggregation remains
+unproved. Both aggregate paths carry data; all four flow and eight privacy captures
+are complete with zero drops/forbidden packets. Cleanup is complete and guest state
+unchanged. [Quality on the same revision](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045922740)
+passes workspace tests and strict Clippy. These results do not establish which runtime
+stage limits throughput or prove later source changes.
+
+The next Client runtime change processes at most one browser-QUIC response per outer
+readiness turn. Already-readable application ingress can run before the next response;
+response continuation remains immediately eligible within its existing 64-operation
+budget, rather than being limited to one packet per timer tick. IPv4/IPv6 input turns
+alternate when both are ready, and each response retains policy, expiry and native
+binding checks. A real AsyncFd/UnixDatagram readiness regression fails under the old
+continuation priority and passes with the new selector; five focused checks and strict
+agent Clippy pass. This proves the local scheduling behavior, not live throughput gain.
+
 The dynamic-pair fixture now also covers native HTTP/3: exact context/path/Peer/Exit
 bindings survive relay removal, and all three eligible Relays stay under privacy
 capture. Mixed-link requires local-LAN Relay1 plus an actual public-WAN Relay0 or Relay2;
@@ -22,26 +44,16 @@ the obsolete no-bandwidth-claim flag. Thirty-one focused fixture checks and the 
 topology contract pass. These fixture changes await their unchanged-build live proof;
 they do not change production selection, timeouts or the required data/gain thresholds.
 
-[Quality passes on `760fe823`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044097752),
-including workspace tests and strict Clippy. Its
-[mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044164480)
-passes A06, then fails the fixture's five-second endpoint-idle wait after the WAN-only
-response length/hash and HTTP/3 driver have already succeeded. The fixture did not export
-that completed response's JSON on its error path: no retained 32-MiB timing, aggregate
-result or speedup can be claimed from this run. All eight retained captures are complete
-with zero drops, and cleanup leaves zero owned objects and unchanged guest state.
-The fixture now reports its bounded five-second protocol-drain outcome separately from
-application completion. Destination evidence requires the exact successful Client close,
-not merely a timeout/reset; failure paths retain available JSON and queue counters. Five
-focused example checks and real disposable 8-/32-MiB HTTP/3 transfers pass with matching
-hashes and peer-completion evidence. These loopback checks are not overlay speed proof.
-
-The next runtime slice removes the redundant display-status RPC after every accepted
+The runtime removes the redundant display-status RPC after every accepted
 MPQUIC datagram. Telemetry is sampled at most once per 250 ms per route owner; initial
 publication, explicit `paths` queries and maintenance still obtain fresh native status.
 Every data operation retains its own live session/path, signed-flow and native response
-checks. Nine focused checks and strict agent Clippy pass; throughput benefit is not yet
-measured.
+checks. Nine focused checks and strict agent Clippy pass. The above live comparison
+completes faster than the earlier `a015f17a` attempt below, but still shows no aggregate
+gain; several changes between those builds prevent attributing that difference solely
+to telemetry sampling. The fixture also retains bounded protocol-drain evidence
+separately from application completion and requires the exact successful Client close,
+not a timeout/reset.
 
 The MPTCP acceptance fixture now measures the actual selected pair among its three
 eligible Relays, rather than waiting for one named pair. Each benchmark slot retains
@@ -50,7 +62,9 @@ have the same configured capacity. A02--A04 have a separate complete privacy win
 covering Client, Exit and all three Relays, including Relay0, and A11--A13 require
 that supplemental evidence. Real payload, both WireGuard legs, aggregation and relay
 removal gates remain. Seventeen focused selection/privacy checks and the static
-topology contract pass; the new dynamic fixture still requires its live run.
+topology contract pass. The `55168536` run above passes A02--A04 and all five complete
+supplemental privacy captures, but selects the Relay1/Relay2 pair throughout; it does
+not independently demonstrate a payload-bearing Relay0 selection.
 
 The [BBR2/reactive mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34043223406)
 at `a015f17a` completes both full 32-MiB responses with independently verified payload

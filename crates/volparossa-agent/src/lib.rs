@@ -9,6 +9,7 @@
 
 mod advertisement;
 mod client_ingress;
+mod client_udp_turns;
 mod control;
 mod discovery;
 mod endpoint_leases;
@@ -55,6 +56,7 @@ use client_ingress::{
     BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
     ClientIngressTcpError, ClientIngressUdpError, PolicyAuthorizedDnsIngress,
 };
+use client_udp_turns::{ClientUdpIoTurn, ClientUdpTurns};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
 use helper::{ClientIngressSocketFamily, HelperClient};
@@ -636,6 +638,7 @@ async fn run_client_udp_ingress(
         return;
     };
     let mut browser_gate = BrowserQuicIngressGate::new();
+    let mut io_turns = ClientUdpTurns::default();
     let mut browser_reverse_poll = tokio::time::interval(BROWSER_QUIC_REVERSE_POLL_INTERVAL);
     browser_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut general_udp_reverse_poll = tokio::time::interval(GENERAL_UDP_REVERSE_POLL_INTERVAL);
@@ -658,45 +661,6 @@ async fn run_client_udp_ingress(
                 general_udp_retirement_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if general_udp_retirement_deadline.is_some() => {
                 routes.retire_expired().await;
-                continue;
-            }
-            _ = browser_reverse_poll.tick(), if browser_flow_active => {
-                let now_ms = unix_millis();
-                let Some(policy) = state.read().await.active_policy(now_ms) else {
-                    routes.disconnect().await;
-                    continue;
-                };
-                for _ in 0..MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK {
-                    match routes.receive_browser_quic_response(&policy, now_ms).await {
-                        Ok(Some(response)) => {
-                            if runtime
-                                .send_udp_response(
-                                    response.application(),
-                                    response.remote(),
-                                    response.payload(),
-                                )
-                                .await
-                                .is_err()
-                            {
-                                state.write().await.log(
-                                    LogLevel::Warn,
-                                    "INGRESS_MPQUIC_REPLY_FAILED",
-                                    unix_millis(),
-                                );
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(_) => {
-                            routes.disconnect().await;
-                            state.write().await.log(
-                                LogLevel::Warn,
-                                "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE",
-                                unix_millis(),
-                            );
-                            break;
-                        }
-                    }
-                }
                 continue;
             }
             _ = general_udp_reverse_poll.tick(), if general_udp_retirement_deadline.is_some() => {
@@ -734,19 +698,38 @@ async fn run_client_udp_ingress(
                 }
                 continue;
             }
-            result = ipv4_poll.readable() => match result {
-                Ok(ready) => (ClientIngressSocketFamily::Ipv4, ready),
-                Err(_) => {
-                    state.write().await.log(
-                        LogLevel::Error,
-                        "INGRESS_UDP_POLL_FAILED",
-                        unix_millis(),
-                    );
-                    return;
+            result = io_turns.next(
+                &ipv4_poll, &ipv6_poll, &mut browser_reverse_poll, browser_flow_active
+            ) => match result {
+                Ok(ClientUdpIoTurn::Ingress(family, ready)) => (family, ready),
+                Ok(ClientUdpIoTurn::BrowserResponse) => {
+                    let now_ms = unix_millis();
+                    let Some(policy) = state.read().await.active_policy(now_ms) else {
+                        io_turns.end_reverse_drain();
+                        routes.disconnect().await;
+                        continue;
+                    };
+                    match routes.receive_browser_quic_response(&policy, now_ms).await {
+                        Ok(Some(response)) => {
+                            if runtime.send_udp_response(
+                                response.application(), response.remote(), response.payload()
+                            ).await.is_err() {
+                                state.write().await.log(
+                                    LogLevel::Warn, "INGRESS_MPQUIC_REPLY_FAILED", unix_millis()
+                                );
+                            }
+                        }
+                        Ok(None) => io_turns.end_reverse_drain(),
+                        Err(_) => {
+                            io_turns.end_reverse_drain();
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn, "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE", unix_millis()
+                            );
+                        }
+                    }
+                    continue;
                 }
-            },
-            result = ipv6_poll.readable() => match result {
-                Ok(ready) => (ClientIngressSocketFamily::Ipv6, ready),
                 Err(_) => {
                     state.write().await.log(
                         LogLevel::Error,
