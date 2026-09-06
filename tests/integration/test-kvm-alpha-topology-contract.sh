@@ -126,7 +126,7 @@ grep -F '/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER' "$GUEST" >/dev/null
 grep -F '/ip4/40.156.1.1/udp/41000/quic-v1/p2p/$B1_PEER' "$GUEST" >/dev/null
 grep -F '/ip4/41.157.2.1/udp/41000/quic-v1/p2p/$B2_PEER' "$GUEST" >/dev/null
 grep -F 'write_config exit acceptance-exit false true 46.162.3.1' "$GUEST" >/dev/null
-grep -F 'exit_control_relay:"relay0",data_relays:["relay1","relay2"]' \
+grep -F 'eligible_control_and_data_relays:["relay0","relay1","relay2"]' \
     "$GUEST" >/dev/null
 grep -F 'bootstrap1|bootstrap2) required_active_peers=7' "$GUEST" >/dev/null
 grep -F 'relay0) required_active_peers=4' "$GUEST" >/dev/null
@@ -151,10 +151,13 @@ grep -F 'ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID"' "$GUEST" >/dev/n
 grep -F 'application.sendto(payload, destination)' "$GUEST" >/dev/null
 grep -F 'response, source = application.recvfrom(2048)' "$GUEST" >/dev/null
 grep -F 'direct_client_exit_packets' "$GUEST" >/dev/null
-if grep -F 'relay0_wireguard_data_datagrams' "$GUEST"; then exit 1; fi
-if grep -E 'is_wireguard_data and interface == "(cr0|xr0)"' "$GUEST"; then exit 1; fi
-grep -F '"$DOWNLOAD_MARKER" cr1 cr2 underlay' "$GUEST" >/dev/null
-grep -F '"$DOWNLOAD_MARKER" xr1 xr2 xd' "$GUEST" >/dev/null
+grep -F 'relay0_wireguard_data_datagrams' "$GUEST" >/dev/null
+grep -F '"$DOWNLOAD_MARKER" --benchmark-relays "$BENCH_INDEX1" "$BENCH_INDEX2"' "$GUEST" >/dev/null
+grep -F '"$BENCH_CLIENT_IF1" "$BENCH_CLIENT_IF2" underlay' "$GUEST" >/dev/null
+grep -F '"$BENCH_EXIT_IF1" "$BENCH_EXIT_IF2" xd' "$GUEST" >/dev/null
+grep -F 'start_privacy_observers mptcp-privacy' "$GUEST" >/dev/null
+grep -F 'relay0 "$WORK/$privacy_prefix-relay0.json"' "$GUEST" >/dev/null
+grep -F 'mptcp_privacy:$mptcp[0]' "$GUEST" >/dev/null
 grep -F 'client "$WORK/a05-client-capture.json" "$WORK/a05-client-capture.ready"' \
     "$GUEST" >/dev/null
 grep -F 'exit "$WORK/a05-exit-capture.json" "$WORK/a05-exit-capture.ready"' \
@@ -189,8 +192,8 @@ grep -F 'measured_throughput_gain_ratio:' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A03",success:$success' "$GUEST" >/dev/null
 grep -F 'a03_mptcp_aggregation:{requested:$a03_requested,succeeded:$a03_succeeded' "$GUEST" \
     >/dev/null
-grep -F 'ip -n "$R1" link set r1c down' "$GUEST" >/dev/null
-grep -F 'ip -n "$R1" link set r1x down' "$GUEST" >/dev/null
+grep -F 'ip -n "$BENCH_NS1" link set "$BENCH_RELAY_IF1" down' "$GUEST" >/dev/null
+grep -F 'ip -n "$BENCH_NS1" link set "$BENCH_EXIT_LEG1" down' "$GUEST" >/dev/null
 grep -F 'process_active_at_removal:$process_active_at_removal' "$GUEST" >/dev/null
 grep -F 'after_marker.relay2_wireguard_data_datagrams > 0' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A04",success:$success' "$GUEST" >/dev/null

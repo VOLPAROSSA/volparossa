@@ -14,6 +14,11 @@ response length/hash and HTTP/3 driver have already succeeded. The fixture did n
 that completed response's JSON on its error path: no retained 32-MiB timing, aggregate
 result or speedup can be claimed from this run. All eight retained captures are complete
 with zero drops, and cleanup leaves zero owned objects and unchanged guest state.
+The fixture now reports its bounded five-second protocol-drain outcome separately from
+application completion. Destination evidence requires the exact successful Client close,
+not merely a timeout/reset; failure paths retain available JSON and queue counters. Five
+focused example checks and real disposable 8-/32-MiB HTTP/3 transfers pass with matching
+hashes and peer-completion evidence. These loopback checks are not overlay speed proof.
 
 The next runtime slice removes the redundant display-status RPC after every accepted
 MPQUIC datagram. Telemetry is sampled at most once per 250 ms per route owner; initial
@@ -21,6 +26,15 @@ publication, explicit `paths` queries and maintenance still obtain fresh native 
 Every data operation retains its own live session/path, signed-flow and native response
 checks. Nine focused checks and strict agent Clippy pass; throughput benefit is not yet
 measured.
+
+The MPTCP acceptance fixture now measures the actual selected pair among its three
+eligible Relays, rather than waiting for one named pair. Each benchmark slot retains
+its exact Peer ID, namespace and interface binding; all three possible Client legs
+have the same configured capacity. A02--A04 have a separate complete privacy window
+covering Client, Exit and all three Relays, including Relay0, and A11--A13 require
+that supplemental evidence. Real payload, both WireGuard legs, aggregation and relay
+removal gates remain. Seventeen focused selection/privacy checks and the static
+topology contract pass; the new dynamic fixture still requires its live run.
 
 The [BBR2/reactive mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34043223406)
 at `a015f17a` completes both full 32-MiB responses with independently verified payload

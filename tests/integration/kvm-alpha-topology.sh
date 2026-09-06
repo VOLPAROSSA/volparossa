@@ -429,6 +429,7 @@ DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
 PRIVACY_CLIENT_PID=
+PRIVACY_RELAY0_PID=
 PRIVACY_RELAY1_PID=
 PRIVACY_RELAY2_PID=
 PRIVACY_EXIT_PID=
@@ -581,6 +582,11 @@ copy_artifacts() {
         a10-unverifiable-rejection-events.txt \
         privacy-client.json privacy-relay1.json privacy-relay2.json privacy-exit.json \
         privacy-client.log privacy-relay1.log privacy-relay2.log privacy-exit.log \
+        mptcp-privacy-evidence.json \
+        mptcp-privacy-client.json mptcp-privacy-exit.json \
+        mptcp-privacy-relay0.json mptcp-privacy-relay1.json mptcp-privacy-relay2.json \
+        mptcp-privacy-client.log mptcp-privacy-exit.log \
+        mptcp-privacy-relay0.log mptcp-privacy-relay1.log mptcp-privacy-relay2.log \
         a11-evidence.json a12-evidence.json a13-evidence.json \
         a13-client-routes-before.json a13-client-routes-after.json \
         a13-exit-route-before.txt a13-exit-route-after.txt \
@@ -842,7 +848,8 @@ write_report() {
           finished_at:$finished_at,environment:$environment,last_phase:$phase,
           topology:{ready:$topology,direct_client_exit_adjacency:false,
             client_exit_route_absent:$client_exit_route_absent,
-            exit_control_relay:"relay0",data_relays:["relay1","relay2"],
+            eligible_control_and_data_relays:["relay0","relay1","relay2"],
+            native_benchmark_data_relays:["relay1","relay2"],
             relay_pool:["relay0","relay1","relay2","relay3","relay4","relay5"],
             exit_pool:["exit","exit2"],standby_capacity_mbps:1,
             bootstrap_contacts:["bootstrap1","bootstrap2"],
@@ -954,7 +961,7 @@ cleanup() {
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
-    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
         "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
@@ -975,7 +982,7 @@ cleanup() {
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
-    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+    for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
         "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
@@ -2232,6 +2239,14 @@ import sys
 import time
 
 role, output_path, ready_path, marker_path, *interfaces = sys.argv[1:]
+# Counter keys describe slot 1/2. The explicit node/index binding is retained in every report.
+relay_indexes = [1, 2]
+if interfaces[:1] == ["--benchmark-relays"]:
+    relay_indexes = [int(value) for value in interfaces[1:3]]
+    interfaces = interfaces[3:]
+if len(set(relay_indexes)) != 2 or any(index not in {0, 1, 2} for index in relay_indexes):
+    raise SystemExit("invalid bounded benchmark relay indexes")
+relay_public = {0: "42.158.0.1", 1: "44.160.1.1", 2: "45.161.2.1"}
 if role not in {"client", "exit"} or not interfaces:
     raise SystemExit("invalid bounded A02 observer arguments")
 
@@ -2328,20 +2343,16 @@ while running and time.monotonic() < deadline:
                 }:
                     counters["direct_client_exit_packets"] += 1
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "cr1" and source == "43.159.1.1" \
-                            and destination == "44.160.1.1":
-                        counters["relay1_wireguard_data_datagrams"] += 1
-                    if interface == "cr2" and source == "43.159.1.1" \
-                            and destination == "45.161.2.1":
-                        counters["relay2_wireguard_data_datagrams"] += 1
+                    for slot, index in enumerate(relay_indexes, 1):
+                        if interface == f"cr{index}" and source == "43.159.1.1" \
+                                and destination == relay_public[index]:
+                            counters[f"relay{slot}_wireguard_data_datagrams"] += 1
             else:
                 if protocol == socket.IPPROTO_UDP and is_wireguard_data:
-                    if interface == "xr1" and source == "44.160.1.1" \
-                            and destination == "46.162.3.1":
-                        counters["relay1_wireguard_data_datagrams"] += 1
-                    if interface == "xr2" and source == "45.161.2.1" \
-                            and destination == "46.162.3.1":
-                        counters["relay2_wireguard_data_datagrams"] += 1
+                    for slot, index in enumerate(relay_indexes, 1):
+                        if interface == f"xr{index}" and source == relay_public[index] \
+                                and destination == "46.162.3.1":
+                            counters[f"relay{slot}_wireguard_data_datagrams"] += 1
                 if interface == "xd" and protocol == socket.IPPROTO_TCP:
                     if destination == "47.163.4.2" and destination_port == 18080:
                         counters["destination_request_segments"] += 1
@@ -2361,6 +2372,7 @@ with open(output_path, "x", encoding="ascii") as output:
         {
             "schema_version": 1,
             "capture_role": role,
+            "benchmark_relay_nodes": [f"relay{index}" for index in relay_indexes],
             "interfaces": interfaces,
             "observed_frames": observed_frames,
             "truncated": truncated,
@@ -2617,7 +2629,7 @@ role, output_path, ready_path, *interfaces = sys.argv[1:]
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
-if role not in {"client", "relay1", "relay2", "exit"} or not interfaces:
+if role not in {"client", "relay0", "relay1", "relay2", "exit"} or not interfaces:
     raise SystemExit("invalid privacy observer arguments")
 client_addresses = {"43.159.1.1"}
 if direct_lan_relay1:
@@ -2644,6 +2656,7 @@ counters = {
     "exit_leg_packets": 0,
     "client_leg_wireguard_data_datagrams": 0,
     "exit_leg_wireguard_data_datagrams": 0,
+    "relay0_wireguard_data_datagrams": 0,
     "relay1_wireguard_data_datagrams": 0,
     "relay2_wireguard_data_datagrams": 0,
     "expected_link_down_notifications": 0,
@@ -2660,13 +2673,20 @@ def receive_frame(capture, interface):
     except BlockingIOError:
         return None
     except OSError as error:
-        # A07 deliberately cycles only these two interfaces. Preserve the packet socket so
+        # Only declared fixture-owned link cycles can suspend this exact interface. Preserve
         # the kernel resumes capture on link-up; this is reported downtime, not packet absence.
+        a07_down = role == "relay1" and interface in {"r1c", "r1x"} \
+            and os.path.exists(expected_down_marker)
+        benchmark_down = (
+            os.path.basename(output_path).startswith("mptcp-privacy-")
+            and role in {"relay0", "relay1", "relay2"}
+            and interface in {f"r{role[-1]}c", f"r{role[-1]}x"}
+            and os.path.exists(os.path.join(os.path.dirname(output_path),
+                                           f"benchmark-privacy-{interface}.down"))
+        )
         if (
             error.errno != errno.ENETDOWN
-            or role != "relay1"
-            or interface not in {"r1c", "r1x"}
-            or not os.path.exists(expected_down_marker)
+            or not (a07_down or benchmark_down)
         ):
             raise
         counters["expected_link_down_notifications"] += 1
@@ -2860,6 +2880,10 @@ for readable in capture_rounds():
                     counters["direct_client_exit_packets"] += 1
                 if interface == "cr0":
                     counters["control_relay_packets"] += 1
+                if is_wireguard_data and interface == "cr0" and {
+                    source, destination,
+                } == {"43.159.1.1", "42.158.0.1"}:
+                    counters["relay0_wireguard_data_datagrams"] += 1
                 if is_wireguard_data and interface == "cr1" and {
                     source,
                     destination,
@@ -2870,7 +2894,7 @@ for readable in capture_rounds():
                     destination,
                 } == {"43.159.1.1", "45.161.2.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
-            elif role in {"relay1", "relay2"}:
+            elif role in {"relay0", "relay1", "relay2"}:
                 # The Relay underlay also carries the fixed discovery topology. These public
                 # addresses are control-plane peers, not the forbidden Internet destination
                 # 47.163.4.2 whose appearance in an outer header is counted separately above.
@@ -2887,7 +2911,14 @@ for readable in capture_rounds():
                     "50.166.6.1",
                     "51.167.7.1",
                 }
-                if role == "relay1":
+                if role == "relay0":
+                    client_interface, exit_interface = "r0c", "r0x"
+                    relay_public = "42.158.0.1"
+                    allowed = topology_control_public | {
+                        "10.241.10.1", "10.241.10.2",
+                        "10.241.20.1", "10.241.20.2",
+                    }
+                elif role == "relay1":
                     client_interface, exit_interface = "r1c", "r1x"
                     relay_public = "44.160.1.1"
                     allowed = topology_control_public | {
@@ -2937,6 +2968,10 @@ for readable in capture_rounds():
             else:
                 if source in client_addresses or destination in client_addresses:
                     counters["direct_client_exit_packets"] += 1
+                if is_wireguard_data and interface == "xr0" and {
+                    source, destination,
+                } == {"42.158.0.1", "46.162.3.1"}:
+                    counters["relay0_wireguard_data_datagrams"] += 1
                 if is_wireguard_data and interface == "xr1" and {
                     source,
                     destination,
@@ -3998,6 +4033,8 @@ start_http3_observers() {
 }
 
 start_privacy_observers() {
+    privacy_prefix=${1:-privacy}
+    case $privacy_prefix in privacy|mptcp-privacy) ;; *) return 1 ;; esac
     set --
     privacy_relay1_underlay=underlay
     if [ "$scenario" = mixed-link ]; then
@@ -4021,43 +4058,52 @@ start_privacy_observers() {
         >>"$WORK/a13-destination-route-before.txt"
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/privacy-observer.py" \
-        client "$WORK/privacy-client.json" "$WORK/privacy-client.ready" \
+        client "$WORK/$privacy_prefix-client.json" "$WORK/$privacy_prefix-client.ready" \
         "$@" cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay \
-        >"$WORK/privacy-client.log" 2>&1 &
+        >"$WORK/$privacy_prefix-client.log" 2>&1 &
     PRIVACY_CLIENT_PID=$!
     ip netns exec "$R1" python3 "$WORK/bin/privacy-observer.py" \
-        relay1 "$WORK/privacy-relay1.json" "$WORK/privacy-relay1.ready" \
+        relay1 "$WORK/$privacy_prefix-relay1.json" "$WORK/$privacy_prefix-relay1.ready" \
         "$@" r1c r1x ${privacy_relay1_underlay:+"$privacy_relay1_underlay"} \
-        >"$WORK/privacy-relay1.log" 2>&1 &
+        >"$WORK/$privacy_prefix-relay1.log" 2>&1 &
     PRIVACY_RELAY1_PID=$!
     ip netns exec "$R2" python3 "$WORK/bin/privacy-observer.py" \
-        relay2 "$WORK/privacy-relay2.json" "$WORK/privacy-relay2.ready" \
-        "$@" r2c r2x underlay >"$WORK/privacy-relay2.log" 2>&1 &
+        relay2 "$WORK/$privacy_prefix-relay2.json" "$WORK/$privacy_prefix-relay2.ready" \
+        "$@" r2c r2x underlay >"$WORK/$privacy_prefix-relay2.log" 2>&1 &
     PRIVACY_RELAY2_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/privacy-observer.py" \
-        exit "$WORK/privacy-exit.json" "$WORK/privacy-exit.ready" \
-        "$@" xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/privacy-exit.log" 2>&1 &
+        exit "$WORK/$privacy_prefix-exit.json" "$WORK/$privacy_prefix-exit.ready" \
+        "$@" xr0 xr1 xr2 xr3 xr4 xr5 xd underlay >"$WORK/$privacy_prefix-exit.log" 2>&1 &
     PRIVACY_EXIT_PID=$!
 
-    wait_observer "$PRIVACY_CLIENT_PID" "$WORK/privacy-client.ready" \
-        && wait_observer "$PRIVACY_RELAY1_PID" "$WORK/privacy-relay1.ready" \
-        && wait_observer "$PRIVACY_RELAY2_PID" "$WORK/privacy-relay2.ready" \
-        && wait_observer "$PRIVACY_EXIT_PID" "$WORK/privacy-exit.ready"
+    if [ "$privacy_prefix" = mptcp-privacy ]; then
+        ip netns exec "$R0" python3 "$WORK/bin/privacy-observer.py" \
+            relay0 "$WORK/$privacy_prefix-relay0.json" "$WORK/$privacy_prefix-relay0.ready" \
+            r0c r0x underlay >"$WORK/$privacy_prefix-relay0.log" 2>&1 &
+        PRIVACY_RELAY0_PID=$!
+        wait_observer "$PRIVACY_RELAY0_PID" "$WORK/$privacy_prefix-relay0.ready" || return 1
+    fi
+
+    wait_observer "$PRIVACY_CLIENT_PID" "$WORK/$privacy_prefix-client.ready" \
+        && wait_observer "$PRIVACY_RELAY1_PID" "$WORK/$privacy_prefix-relay1.ready" \
+        && wait_observer "$PRIVACY_RELAY2_PID" "$WORK/$privacy_prefix-relay2.ready" \
+        && wait_observer "$PRIVACY_EXIT_PID" "$WORK/$privacy_prefix-exit.ready"
 }
 
 stop_privacy_observers() {
     privacy_status=0
-    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
         "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
         [ -z "$privacy_pid" ] || kill -TERM "$privacy_pid" 2>/dev/null || true
     done
-    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY1_PID" \
+    for privacy_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
         "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
         if [ -n "$privacy_pid" ] && ! wait "$privacy_pid"; then
             privacy_status=1
         fi
     done
     PRIVACY_CLIENT_PID=
+    PRIVACY_RELAY0_PID=
     PRIVACY_RELAY1_PID=
     PRIVACY_RELAY2_PID=
     PRIVACY_EXIT_PID=
@@ -4549,8 +4595,16 @@ start_mptcp_download() {
             DOWNLOAD_EXPECTED_CONTEXT=$(jq -er '.route_context_id' \
                 "$WORK/$DOWNLOAD_PREFIX-preconnect-$DOWNLOAD_ATTEMPT-selection.json") \
                 || return 1
+            benchmark_bind_slots "$WORK/$DOWNLOAD_PREFIX-preconnect-$DOWNLOAD_ATTEMPT-selection.json" \
+                || return 1
             ;;
     esac
+    # The crash-only readiness helper has no benchmark selection dependency.
+    if [ -z "$DOWNLOAD_EXPECTED_CONTEXT" ]; then
+        BENCH_INDEX1=1; BENCH_INDEX2=2
+        BENCH_CLIENT_IF1=cr1; BENCH_CLIENT_IF2=cr2
+        BENCH_EXIT_IF1=xr1; BENCH_EXIT_IF2=xr2
+    fi
     DOWNLOAD_CLIENT_OUTPUT="$WORK/$DOWNLOAD_PREFIX-client-$DOWNLOAD_ATTEMPT.json"
     DOWNLOAD_CLIENT_ERROR="$WORK/$DOWNLOAD_PREFIX-client.err"
     DOWNLOAD_CLIENT_CAPTURE="$WORK/$DOWNLOAD_PREFIX-client-capture-$DOWNLOAD_ATTEMPT.json"
@@ -4564,13 +4618,15 @@ start_mptcp_download() {
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
         client "$DOWNLOAD_CLIENT_CAPTURE" "$DOWNLOAD_CLIENT_CAPTURE_READY" \
-        "$DOWNLOAD_MARKER" cr1 cr2 underlay \
+        "$DOWNLOAD_MARKER" --benchmark-relays "$BENCH_INDEX1" "$BENCH_INDEX2" \
+        "$BENCH_CLIENT_IF1" "$BENCH_CLIENT_IF2" underlay \
         >"$WORK/$DOWNLOAD_PREFIX-client-capture.log" \
         2>"$WORK/$DOWNLOAD_PREFIX-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a02-observer.py" \
         exit "$DOWNLOAD_EXIT_CAPTURE" "$DOWNLOAD_EXIT_CAPTURE_READY" \
-        "$DOWNLOAD_MARKER" xr1 xr2 xd \
+        "$DOWNLOAD_MARKER" --benchmark-relays "$BENCH_INDEX1" "$BENCH_INDEX2" \
+        "$BENCH_EXIT_IF1" "$BENCH_EXIT_IF2" xd \
         >"$WORK/$DOWNLOAD_PREFIX-exit-capture.log" \
         2>"$WORK/$DOWNLOAD_PREFIX-exit-capture.err" &
     EXIT_OBSERVER_PID=$!
@@ -4671,6 +4727,7 @@ fi
 
 if [ "$scenario" != mixed-link ]; then
 PHASE=a02-capture
+start_privacy_observers mptcp-privacy || fail MPTCP_PRIVACY_CAPTURE_UNAVAILABLE
 A02_REQUESTED=true
 A02_FALLBACK_ROUTE=$(ip -n "$CLIENT" -o route get "$A02_DESTINATION_IP" | sed -n '1p')
 printf '%s\n' "$A02_FALLBACK_ROUTE" >"$WORK/a02-client-fallback-route.txt"
@@ -4689,6 +4746,7 @@ while [ "$attempt" -lt 45 ]; do
     benchmark_select_route a02 mptcp || fail A02_MPTCP_SELECTION_UNAVAILABLE
     a02_expected_context=$(jq -er '.route_context_id' "$WORK/a02-selection.json") \
         || fail A02_MPTCP_SELECTION_UNAVAILABLE
+    benchmark_bind_slots "$WORK/a02-selection.json" || fail A02_MPTCP_SELECTION_INVALID
     attempt_label=$(printf '%02d' "$attempt")
     client_capture="$WORK/a02-client-capture-$attempt_label.json"
     client_capture_ready="$WORK/a02-client-capture-$attempt_label.ready"
@@ -4698,12 +4756,14 @@ while [ "$attempt" -lt 45 ]; do
 
     ip netns exec "$CLIENT" python3 "$WORK/bin/a02-observer.py" \
         client "$client_capture" "$client_capture_ready" - \
-        cr1 cr2 underlay >"$WORK/a02-client-capture.log" \
+        --benchmark-relays "$BENCH_INDEX1" "$BENCH_INDEX2" \
+        "$BENCH_CLIENT_IF1" "$BENCH_CLIENT_IF2" underlay >"$WORK/a02-client-capture.log" \
         2>"$WORK/a02-client-capture.err" &
     CLIENT_OBSERVER_PID=$!
     ip netns exec "$EXIT_NODE" python3 "$WORK/bin/a02-observer.py" \
         exit "$exit_capture" "$exit_capture_ready" - \
-        xr1 xr2 xd >"$WORK/a02-exit-capture.log" \
+        --benchmark-relays "$BENCH_INDEX1" "$BENCH_INDEX2" \
+        "$BENCH_EXIT_IF1" "$BENCH_EXIT_IF2" xd >"$WORK/a02-exit-capture.log" \
         2>"$WORK/a02-exit-capture.err" &
     EXIT_OBSERVER_PID=$!
     wait_observer "$CLIENT_OBSERVER_PID" "$client_capture_ready" \
@@ -4818,8 +4878,8 @@ log_attempt=0
 while [ "$A02_STATUS" -eq 0 ] && [ "$log_attempt" -lt 300 ]; do
     capture_product_logs
     grep -F 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" >/dev/null \
-        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay1.txt" >/dev/null \
-        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay2.txt" >/dev/null \
+        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-$BENCH_NODE1.txt" >/dev/null \
+        && grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-$BENCH_NODE2.txt" >/dev/null \
         && grep -F 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" >/dev/null \
         && break
     sleep 0.1
@@ -4842,9 +4902,9 @@ if [ "$A02_STATUS" -eq 0 ]; then
     EXIT_MPTCP_EVENT=false
     grep -F 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" >/dev/null \
         && CLIENT_INGRESS_EVENT=true
-    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay1.txt" >/dev/null \
+    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-$BENCH_NODE1.txt" >/dev/null \
         && RELAY1_MPTCP_EVENT=true
-    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-relay2.txt" >/dev/null \
+    grep -F 'event=MPTCP_SESSION_RELAY_COMPLETED' "$WORK/logs-$BENCH_NODE2.txt" >/dev/null \
         && RELAY2_MPTCP_EVENT=true
     grep -F 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" >/dev/null \
         && EXIT_MPTCP_EVENT=true
@@ -4867,6 +4927,8 @@ if [ "$A02_STATUS" -eq 0 ]; then
         | ($exit_capture[0]) as $exit
         | (($app.destination == {ip:"47.163.4.2",port:18080})
             and ($selected[0].transport == "mptcp") and ($selected[0].paths | length == 2)
+            and ($client.benchmark_relay_nodes == ($selected[0].benchmark_slots | map(.relay_node)))
+            and ($exit.benchmark_relay_nodes == $client.benchmark_relay_nodes)
             and ($app.attempt == $destination.attempt)
             and ($app.response_source == $app.destination)
             and ($app.sent_bytes == $app.response_bytes)
@@ -4918,6 +4980,10 @@ PHASE=a02-complete
 
 PHASE=a03-constrain-relay-paths
 A03_REQUESTED=true
+ip netns exec "$R0" tc qdisc replace dev r0c root tbf \
+    rate 8mbit burst 128kb latency 250ms
+ip netns exec "$R0" tc qdisc show dev r0c | grep -F 'qdisc tbf ' >/dev/null \
+    || fail A03_RELAY0_LIMIT_UNAVAILABLE
 ip netns exec "$R1" tc qdisc replace dev r1c root tbf \
     rate 8mbit burst 128kb latency 250ms
 ip netns exec "$R2" tc qdisc replace dev r2c root tbf \
@@ -4932,31 +4998,33 @@ PHASE=a03-single-path-download
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a03-single a03-single "$attempt" -; then
-        single_before_r1=$(tc_sent_bytes "$R1" r1c) \
+        single_before_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
-        single_before_r2=$(tc_sent_bytes "$R2" r2c) \
+        single_before_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
-        ip -n "$R2" link set r2c down
-        [ "$(ip -n "$R2" -j link show dev r2c | jq -er '.[0].operstate')" = DOWN ] \
+        : >"$WORK/benchmark-privacy-$BENCH_RELAY_IF2.down"
+        ip -n "$BENCH_NS2" link set "$BENCH_RELAY_IF2" down
+        [ "$(ip -n "$BENCH_NS2" -j link show dev "$BENCH_RELAY_IF2" | jq -er '.[0].operstate')" = DOWN ] \
             || fail A03_SINGLE_PATH_NOT_ISOLATED
         sleep 2
-        single_release_r1=$(tc_sent_bytes "$R1" r1c) \
+        single_release_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
-        single_release_r2=$(tc_sent_bytes "$R2" r2c) \
+        single_release_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
         if finish_mptcp_download; then
-            single_after_r1=$(tc_sent_bytes "$R1" r1c) \
+            single_after_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
                 || fail A03_RELAY1_COUNTER_UNAVAILABLE
-            single_after_r2=$(tc_sent_bytes "$R2" r2c) \
+            single_after_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
                 || fail A03_RELAY2_COUNTER_UNAVAILABLE
             A03_STATUS=0
         fi
-        ip -n "$R2" link set r2c up
-        ip -n "$R2" route replace 43.159.1.1/32 via 10.241.12.1 dev r2c src 45.161.2.1
-        ip -n "$R2" route get 43.159.1.1 \
-            | grep -F 'via 10.241.12.1 dev r2c src 45.161.2.1' >/dev/null \
+        ip -n "$BENCH_NS2" link set "$BENCH_RELAY_IF2" up
+        ip -n "$BENCH_NS2" route replace 43.159.1.1/32 via "$BENCH_CLIENT_HOP2" dev "$BENCH_RELAY_IF2" src "$BENCH_PUBLIC2"
+        ip -n "$BENCH_NS2" route get 43.159.1.1 \
+            | grep -F "via $BENCH_CLIENT_HOP2 dev $BENCH_RELAY_IF2 src $BENCH_PUBLIC2" >/dev/null \
             || fail A03_RELAY2_CONTROL_ROUTE_NOT_RESTORED
+        mv "$WORK/benchmark-privacy-$BENCH_RELAY_IF2.down" "$WORK/benchmark-privacy-$BENCH_RELAY_IF2.restored"
         break
     fi
     sleep 1
@@ -4974,15 +5042,15 @@ A03_STATUS=1
 attempt=0
 while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a03-aggregate a03-aggregate "$attempt" -; then
-        aggregate_before_r1=$(tc_sent_bytes "$R1" r1c) \
+        aggregate_before_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
             || fail A03_RELAY1_COUNTER_UNAVAILABLE
-        aggregate_before_r2=$(tc_sent_bytes "$R2" r2c) \
+        aggregate_before_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
             || fail A03_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
         if finish_mptcp_download; then
-            aggregate_after_r1=$(tc_sent_bytes "$R1" r1c) \
+            aggregate_after_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
                 || fail A03_RELAY1_COUNTER_UNAVAILABLE
-            aggregate_after_r2=$(tc_sent_bytes "$R2" r2c) \
+            aggregate_after_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
                 || fail A03_RELAY2_COUNTER_UNAVAILABLE
             aggregate_relay1_delta=$((aggregate_after_r1 - aggregate_before_r1))
             aggregate_relay2_delta=$((aggregate_after_r2 - aggregate_before_r2))
@@ -5063,6 +5131,10 @@ jq -S -c -n \
         and ($aggregate_selected[0].transport == "mptcp")
         and ($single_selected[0].paths | length == 2)
         and ($aggregate_selected[0].paths | length == 2)
+        and ($one_client.benchmark_relay_nodes == ($single_selected[0].benchmark_slots | map(.relay_node)))
+        and ($one_exit.benchmark_relay_nodes == $one_client.benchmark_relay_nodes)
+        and ($both_client.benchmark_relay_nodes == ($aggregate_selected[0].benchmark_slots | map(.relay_node)))
+        and ($both_exit.benchmark_relay_nodes == $both_client.benchmark_relay_nodes)
         and ($one.response_bytes == 33554432)
         and ($both.response_bytes == $one.response_bytes)
         and ($both.response_sha256 == $one.response_sha256)
@@ -5121,9 +5193,9 @@ attempt=0
 while [ "$attempt" -lt 30 ]; do
     if start_mptcp_download a04-failover a04 "$attempt" \
         "$WORK/a04-relay-removal.marker"; then
-        a04_start_r1=$(tc_sent_bytes "$R1" r1c) \
+        a04_start_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
             || fail A04_RELAY1_COUNTER_UNAVAILABLE
-        a04_start_r2=$(tc_sent_bytes "$R2" r2c) \
+        a04_start_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
             || fail A04_RELAY2_COUNTER_UNAVAILABLE
         release_mptcp_download
         carrying_attempt=0
@@ -5132,9 +5204,9 @@ while [ "$attempt" -lt 30 ]; do
         while [ "$carrying_attempt" -lt 450 ]; do
             kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
                 || fail A04_FLOW_ENDED_BEFORE_RELAY_REMOVAL
-            a04_active_r1=$(tc_sent_bytes "$R1" r1c) \
+            a04_active_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
                 || fail A04_RELAY1_COUNTER_UNAVAILABLE
-            a04_active_r2=$(tc_sent_bytes "$R2" r2c) \
+            a04_active_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
                 || fail A04_RELAY2_COUNTER_UNAVAILABLE
             if [ $((a04_active_r1 - a04_start_r1)) -gt 2097152 ] \
                 && [ $((a04_active_r2 - a04_start_r2)) -gt 2097152 ]; then
@@ -5146,10 +5218,12 @@ while [ "$attempt" -lt 30 ]; do
         [ "$carrying_attempt" -lt 450 ] || fail A04_TWO_ACTIVE_PATHS_NOT_OBSERVED
         kill -0 "$DOWNLOAD_CLIENT_PID" 2>/dev/null \
             || fail A04_FLOW_ENDED_BEFORE_RELAY_REMOVAL
-        ip -n "$R1" link set r1c down
-        ip -n "$R1" link set r1x down
-        a04_r1c_state=$(ip -n "$R1" -j link show dev r1c | jq -er '.[0].operstate')
-        a04_r1x_state=$(ip -n "$R1" -j link show dev r1x | jq -er '.[0].operstate')
+        : >"$WORK/benchmark-privacy-$BENCH_RELAY_IF1.down"
+        : >"$WORK/benchmark-privacy-$BENCH_EXIT_LEG1.down"
+        ip -n "$BENCH_NS1" link set "$BENCH_RELAY_IF1" down
+        ip -n "$BENCH_NS1" link set "$BENCH_EXIT_LEG1" down
+        a04_r1c_state=$(ip -n "$BENCH_NS1" -j link show dev "$BENCH_RELAY_IF1" | jq -er '.[0].operstate')
+        a04_r1x_state=$(ip -n "$BENCH_NS1" -j link show dev "$BENCH_EXIT_LEG1" | jq -er '.[0].operstate')
         if [ "$a04_r1c_state" != DOWN ] || [ "$a04_r1x_state" != DOWN ]; then
             fail A04_RELAY_REMOVAL_FAILED
         fi
@@ -5157,22 +5231,24 @@ while [ "$attempt" -lt 30 ]; do
             || fail A04_FLOW_ENDED_DURING_RELAY_REMOVAL
         install -o root -g root -m 0600 /dev/null "$WORK/a04-relay-removal.marker"
         if finish_mptcp_download; then
-            a04_after_r1=$(tc_sent_bytes "$R1" r1c) \
+            a04_after_r1=$(tc_sent_bytes "$BENCH_NS1" "$BENCH_RELAY_IF1") \
                 || fail A04_RELAY1_COUNTER_UNAVAILABLE
-            a04_after_r2=$(tc_sent_bytes "$R2" r2c) \
+            a04_after_r2=$(tc_sent_bytes "$BENCH_NS2" "$BENCH_RELAY_IF2") \
                 || fail A04_RELAY2_COUNTER_UNAVAILABLE
             A04_STATUS=0
         fi
-        ip -n "$R1" link set r1x up
-        ip -n "$R1" link set r1c up
-        ip -n "$R1" route replace 43.159.1.1/32 via 10.241.11.1 dev r1c src 44.160.1.1
-        ip -n "$R1" route replace 46.162.3.1/32 via 10.241.21.2 dev r1x src 44.160.1.1
-        ip -n "$R1" route get 43.159.1.1 \
-            | grep -F 'via 10.241.11.1 dev r1c src 44.160.1.1' >/dev/null \
+        ip -n "$BENCH_NS1" link set "$BENCH_EXIT_LEG1" up
+        ip -n "$BENCH_NS1" link set "$BENCH_RELAY_IF1" up
+        ip -n "$BENCH_NS1" route replace 43.159.1.1/32 via "$BENCH_CLIENT_HOP1" dev "$BENCH_RELAY_IF1" src "$BENCH_PUBLIC1"
+        ip -n "$BENCH_NS1" route replace 46.162.3.1/32 via "$BENCH_EXIT_HOP1" dev "$BENCH_EXIT_LEG1" src "$BENCH_PUBLIC1"
+        ip -n "$BENCH_NS1" route get 43.159.1.1 \
+            | grep -F "via $BENCH_CLIENT_HOP1 dev $BENCH_RELAY_IF1 src $BENCH_PUBLIC1" >/dev/null \
             || fail A04_RELAY1_CLIENT_ROUTE_NOT_RESTORED
-        ip -n "$R1" route get 46.162.3.1 \
-            | grep -F 'via 10.241.21.2 dev r1x src 44.160.1.1' >/dev/null \
+        ip -n "$BENCH_NS1" route get 46.162.3.1 \
+            | grep -F "via $BENCH_EXIT_HOP1 dev $BENCH_EXIT_LEG1 src $BENCH_PUBLIC1" >/dev/null \
             || fail A04_RELAY1_EXIT_ROUTE_NOT_RESTORED
+        mv "$WORK/benchmark-privacy-$BENCH_RELAY_IF1.down" "$WORK/benchmark-privacy-$BENCH_RELAY_IF1.restored"
+        mv "$WORK/benchmark-privacy-$BENCH_EXIT_LEG1.down" "$WORK/benchmark-privacy-$BENCH_EXIT_LEG1.restored"
         break
     fi
     sleep 1
@@ -5185,7 +5261,7 @@ if [ "$A04_STATUS" -ne 0 ]; then
 fi
 
 jq -S -c -n \
-    --arg selected_relay relay1 \
+    --arg selected_relay "$BENCH_NODE1" \
     --arg relay_client_operstate "$a04_r1c_state" \
     --arg relay_exit_operstate "$a04_r1x_state" \
     --argjson process_active_at_removal true \
@@ -5217,6 +5293,9 @@ jq -S -c -n \
     | ($removal[0]) as $removal
     | (($app.case == "a04-failover") and ($app.response_bytes == 33554432)
         and ($selected[0].transport == "mptcp") and ($selected[0].paths | length == 2)
+        and ($client.benchmark_relay_nodes == ($selected[0].benchmark_slots | map(.relay_node)))
+        and ($exit.benchmark_relay_nodes == $client.benchmark_relay_nodes)
+        and ($removal.selected_relay == $selected[0].benchmark_slots[0].relay_node)
         and ($app.response_sha256 == $destination.response_sha256)
         and ($app.request_sha256 == $destination.request_sha256)
         and ($destination.source.ip == "47.163.4.1")
@@ -5249,12 +5328,16 @@ if [ "$A04_STATUS" -ne 0 ]; then
     PHASE=a04-blocked
     exit 77
 fi
+ip netns exec "$R0" tc qdisc del dev r0c root
 ip netns exec "$R1" tc qdisc del dev r1c root
 ip netns exec "$R2" tc qdisc del dev r2c root
 sleep 2
 A04_SUCCEEDED=true
 OBSERVED_BLOCKER=NONE
 PHASE=a04-complete
+stop_privacy_observers || fail MPTCP_PRIVACY_CAPTURE_INCOMPLETE
+python3 -B "$source_directory/tests/integration/benchmark-paths.py" --privacy "$WORK" \
+    || fail MPTCP_PRIVACY_NOT_PROVEN
 
 PHASE=client-connect
 CONNECT_REQUESTED=true
@@ -6262,10 +6345,12 @@ printf 'exit_status=%s\n' "$route_status" \
 
 A11_STATUS=1
 jq -S -c -n \
+    --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
     --slurpfile relay1 "$WORK/privacy-relay1.json" \
     --slurpfile relay2 "$WORK/privacy-relay2.json" \
     '($relay1[0]) as $r1 | ($relay2[0]) as $r2
-    | (($r1.capture_role == "relay1") and ($r2.capture_role == "relay2")
+    | (($mptcp[0].success == true)
+        and ($r1.capture_role == "relay1") and ($r2.capture_role == "relay2")
         and ($r1.truncated == false) and ($r2.truncated == false)
         and ($r1.packet_socket_drops == 0) and ($r2.packet_socket_drops == 0)
         and ($r1.client_leg_wireguard_data_datagrams > 0)
@@ -6278,7 +6363,7 @@ jq -S -c -n \
         and ($r2.unexpected_outer_packets == 0)) as $success
     | {schema_version:1,acceptance_id:"A11",success:$success,
        scope:"routed IPv4 outer headers on both physical legs of each data Relay",
-       internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,
+       internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,mptcp_privacy:$mptcp[0],
        payload_capture_retained:false}' >"$WORK/a11-evidence.json"
 jq -e '.success == true' "$WORK/a11-evidence.json" >/dev/null 2>&1 \
     && A11_STATUS=0
@@ -6291,8 +6376,10 @@ A11_SUCCEEDED=true
 
 A12_STATUS=1
 jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
+    --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
     '($exit_capture[0]) as $exit
-    | (($exit.capture_role == "exit") and ($exit.truncated == false)
+    | (($mptcp[0].success == true)
+        and ($exit.capture_role == "exit") and ($exit.truncated == false)
         and ($exit.packet_socket_drops == 0)
         and ($exit.relay1_wireguard_data_datagrams > 0)
         and ($exit.relay2_wireguard_data_datagrams > 0)
@@ -6302,7 +6389,7 @@ jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
     | {schema_version:1,acceptance_id:"A12",success:$success,
        scope:"Exit physical ingress and destination interfaces",
        incoming_datapath_sources:["44.160.1.1","45.161.2.1"],
-       forbidden_client_public_source:"43.159.1.1",capture:$exit,
+       forbidden_client_public_source:"43.159.1.1",capture:$exit,mptcp_privacy:$mptcp[0],
        payload_capture_retained:false}' >"$WORK/a12-evidence.json"
 jq -e '.success == true' "$WORK/a12-evidence.json" >/dev/null 2>&1 \
     && A12_STATUS=0
@@ -6315,6 +6402,7 @@ A12_SUCCEEDED=true
 
 A13_STATUS=1
 jq -S -c -n \
+    --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
     --slurpfile client_capture "$WORK/privacy-client.json" \
     --slurpfile routes_before "$WORK/a13-client-routes-before.json" \
     --slurpfile routes_after "$WORK/a13-client-routes-after.json" \
@@ -6335,7 +6423,8 @@ jq -S -c -n \
         | map(select((.dev // "")
             | IN("cr0","cr1","cr2","cr3","cr4","cr5","cb1","cb2","underlay"))))
         as $direct_routes
-    | (($client.capture_role == "client") and ($client.truncated == false)
+    | (($mptcp[0].success == true)
+        and ($client.capture_role == "client") and ($client.truncated == false)
         and ($client.packet_socket_drops == 0)
         and ($client.relay1_wireguard_data_datagrams > 0)
         and ($client.relay2_wireguard_data_datagrams > 0)
@@ -6348,7 +6437,7 @@ jq -S -c -n \
         and ($destination_route_before | contains("dev underlay"))) as $success
     | {schema_version:1,acceptance_id:"A13",success:$success,
        topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
-       client_capture:$client,direct_physical_routes:$direct_routes,
+       client_capture:$client,direct_physical_routes:$direct_routes,mptcp_privacy:$mptcp[0],
        route_get:{exit_before:$exit_route_before,exit_after:$exit_route_after,
          destination_before:$destination_route_before,
          destination_after:$destination_route_after},

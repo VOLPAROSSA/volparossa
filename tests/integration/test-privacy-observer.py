@@ -39,7 +39,9 @@ def environment(role="relay1", marker=True):
     pauses = []
     namespace = {
         "errno": errno, "role": role, "expected_down_marker": "fixture-marker",
-        "os": SimpleNamespace(path=SimpleNamespace(exists=lambda _: marker)),
+        "output_path": "privacy-capture.json",
+        "os": SimpleNamespace(path=SimpleNamespace(exists=lambda _: marker,
+            basename=os.path.basename, dirname=os.path.dirname, join=os.path.join)),
         "time": SimpleNamespace(sleep=pauses.append),
         "counters": {"expected_link_down_notifications": 0,
                      "unexpected_outer_tuple_overflow_packets": 0},
@@ -61,7 +63,8 @@ class Capture:
         return result
 
 
-def buffered_observer(extra_unread_packet=False, clock=None, idle=False):
+def buffered_observer(extra_unread_packet=False, clock=None, idle=False,
+                      role="relay1", frames=None):
     """Execute the complete generated collector with actual queue semantics, not packet parsing."""
     order = []
 
@@ -97,13 +100,16 @@ def buffered_observer(extra_unread_packet=False, clock=None, idle=False):
                 raise BlockingIOError
             self.remaining -= 1
             order.append(self.interface)
+            if frames is not None:
+                return frames[self.interface][self.remaining]
             return b"counted non-IPv4 frame"
 
         def close(self):
             pass
 
-    captures = [BufferedCapture("r1c", 0 if idle else 300),
-                BufferedCapture("r1x", 0 if idle else 1)]
+    captures = ([BufferedCapture(interface, len(packets)) for interface, packets in frames.items()]
+                if frames is not None else [BufferedCapture("r1c", 0 if idle else 300),
+                                           BufferedCapture("r1x", 0 if idle else 1)])
     namespace = {}
 
     def ready(_read, _write, _exception, _timeout):
@@ -113,8 +119,8 @@ def buffered_observer(extra_unread_packet=False, clock=None, idle=False):
 
     with tempfile.TemporaryDirectory(prefix="volparossa-privacy-drain-") as directory:
         output = Path(directory) / "capture.json"
-        args = ["privacy-observer.py", "relay1", str(output), str(Path(directory) / "ready"),
-                "r1c", "r1x"]
+        args = ["privacy-observer.py", role, str(output), str(Path(directory) / "ready"),
+                *(capture.interface for capture in captures)]
         with (
             patch("sys.argv", args), patch("socket.socket", side_effect=captures),
             patch("signal.signal"), patch("select.select", side_effect=ready),
@@ -125,6 +131,30 @@ def buffered_observer(extra_unread_packet=False, clock=None, idle=False):
 
 
 class PrivacyObserverTests(unittest.TestCase):
+    def test_actual_relay0_collector_observes_both_wg_legs_and_forbidden_destination(self):
+        def frame(source, destination):
+            ipv4 = bytearray(20)
+            ipv4[0] = 0x45
+            ipv4[9] = socket.IPPROTO_UDP
+            ipv4[12:16] = socket.inet_aton(source)
+            ipv4[16:20] = socket.inet_aton(destination)
+            return (b"\0" * 12 + b"\x08\x00" + ipv4
+                    + struct.pack("!HHHH", 20000, 30000, 44, 0)
+                    + struct.pack("<I", 4) + b"\0" * 32)
+
+        frames = {"r0c": [frame("43.159.1.1", "42.158.0.1")],
+                  "r0x": [frame("42.158.0.1", "46.162.3.1")]}
+        record, _ = buffered_observer(role="relay0", frames=frames)
+        self.assertEqual(record["client_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(record["exit_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(record["unexpected_outer_packets"], 0)
+        self.assertEqual(record["packet_socket_drops"], 0)
+        self.assertFalse(record["truncated"])
+        frames["r0x"].append(frame("42.158.0.1", "47.163.4.2"))
+        record, _ = buffered_observer(role="relay0", frames=frames)
+        self.assertEqual(record["internet_destination_outer_packets"], 1)
+        self.assertEqual(record["unexpected_outer_packets"], 1)
+
     def test_idle_signal_during_select_still_stops_intake_before_final_stats(self):
         record, order = buffered_observer(idle=True)
         self.assertFalse(order)
@@ -156,7 +186,7 @@ class PrivacyObserverTests(unittest.TestCase):
                                      ("A13", ("client_capture",))):
             section = SOURCE.rsplit(f"\n{acceptance}_STATUS=1\n", 1)[1]
             expression = section.split("    '", 1)[1].split("' >\"$WORK/", 1)[0]
-            values = {}
+            values = {"mptcp": [{"success": True}]}
             for name in captures:
                 values[name] = [{
                     "capture_role": name.removesuffix("_capture"),
@@ -186,6 +216,10 @@ class PrivacyObserverTests(unittest.TestCase):
                 return json.loads(result.stdout)["success"]
 
             self.assertTrue(evaluate(), acceptance)
+            for invalid in ({}, {"success": False}, {"success": None}):
+                values["mptcp"] = [invalid]
+                self.assertFalse(evaluate(), (acceptance, invalid))
+            values["mptcp"] = [{"success": True}]
             for name in captures:
                 for missing, value in ((False, 1), (False, None), (True, None)):
                     record = values[name][0]
@@ -219,6 +253,18 @@ class PrivacyObserverTests(unittest.TestCase):
                 observer["receive_frame"](Capture(OSError(code, "failed")), interface)
             self.assertFalse(pauses)
             self.assertEqual(observer["counters"]["expected_link_down_notifications"], 0)
+
+    def test_benchmark_downtime_is_exact_role_interface_and_window(self):
+        for index in range(3):
+            observer, _ = environment(f"relay{index}")
+            observer["output_path"] = f"mptcp-privacy-relay{index}.json"
+            for suffix in ("c", "x"):
+                self.assertIsNone(observer["receive_frame"](
+                    Capture(OSError(errno.ENETDOWN, "planned")), f"r{index}{suffix}"))
+            for unexpected in ("underlay", f"r{(index + 1) % 3}c"):
+                with self.assertRaises(OSError):
+                    observer["receive_frame"](
+                        Capture(OSError(errno.ENETDOWN, "unplanned")), unexpected)
 
     def test_nonblocking_empty_socket_is_not_a_link_down(self):
         observer, pauses = environment()

@@ -24,12 +24,51 @@ a01_transient_connect_unavailable() {
 }
 
 benchmark_capture_paths() {
+    case "$1:$2" in
+        a01-*:multipath-quic|*:mptcp) benchmark_pair_option=--any-pair ;;
+        *) benchmark_pair_option= ;;
+    esac
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" paths \
         >"$WORK/$1-paths.txt" || return 3
     python3 -B "$source_directory/tests/integration/benchmark-paths.py" \
         "$WORK/$1-paths.txt" "$WORK/$1-selection.json" \
-        "$R0_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER" "$2"
+        "$R0_PEER" "$R1_PEER" "$R2_PEER" "$EXIT_PEER" "$2" \
+        ${benchmark_pair_option:+"$benchmark_pair_option"}
+}
+
+# Select only from the three immutable disposable topology bindings. Never overwrite R0/R1/R2:
+# those globals also own teardown, discovery contacts, and the later native benchmarks.
+# shellcheck disable=SC2034 # BENCH_* is consumed by the sourcing KVM runner.
+benchmark_bind_slots() {
+    BENCH_INDEX1=$(jq -er '.benchmark_slots[0].relay_index' "$1") || return 1
+    BENCH_INDEX2=$(jq -er '.benchmark_slots[1].relay_index' "$1") || return 1
+    [ "$BENCH_INDEX1" != "$BENCH_INDEX2" ] || return 1
+    for benchmark_slot in 1 2; do
+        if [ "$benchmark_slot" = 1 ]; then benchmark_index=$BENCH_INDEX1
+        else benchmark_index=$BENCH_INDEX2; fi
+        case $benchmark_index in
+            0) benchmark_ns=$R0; benchmark_public=42.158.0.1 ;;
+            1) benchmark_ns=$R1; benchmark_public=44.160.1.1 ;;
+            2) benchmark_ns=$R2; benchmark_public=45.161.2.1 ;;
+            *) return 1 ;;
+        esac
+        if [ "$benchmark_slot" = 1 ]; then
+            BENCH_NS1=$benchmark_ns; BENCH_PUBLIC1=$benchmark_public
+            BENCH_NODE1=relay$benchmark_index; BENCH_CLIENT_IF1=cr$benchmark_index
+            BENCH_RELAY_IF1=r${benchmark_index}c; BENCH_EXIT_LEG1=r${benchmark_index}x
+            BENCH_EXIT_IF1=xr$benchmark_index
+            BENCH_CLIENT_HOP1=10.241.$((10 + benchmark_index)).1
+            BENCH_EXIT_HOP1=10.241.$((20 + benchmark_index)).2
+        else
+            BENCH_NS2=$benchmark_ns; BENCH_PUBLIC2=$benchmark_public
+            BENCH_NODE2=relay$benchmark_index; BENCH_CLIENT_IF2=cr$benchmark_index
+            BENCH_RELAY_IF2=r${benchmark_index}c; BENCH_EXIT_LEG2=r${benchmark_index}x
+            BENCH_EXIT_IF2=xr$benchmark_index
+            BENCH_CLIENT_HOP2=10.241.$((10 + benchmark_index)).1
+            BENCH_EXIT_HOP2=10.241.$((20 + benchmark_index)).2
+        fi
+    done
 }
 
 benchmark_disconnect_route() {

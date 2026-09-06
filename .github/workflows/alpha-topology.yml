@@ -799,13 +799,16 @@ jobs:
             .a10_unverifiable_ech.evidence.destination_egress_connections_for_denials == 0 and
             .a11_relay_outer_privacy.succeeded == true and
             .a11_relay_outer_privacy.evidence.success == true and
+            .a11_relay_outer_privacy.evidence.mptcp_privacy.success == true and
             .a11_relay_outer_privacy.evidence.relay1.internet_destination_outer_packets == 0 and
             .a11_relay_outer_privacy.evidence.relay2.internet_destination_outer_packets == 0 and
             .a12_exit_source_privacy.succeeded == true and
             .a12_exit_source_privacy.evidence.success == true and
+            .a12_exit_source_privacy.evidence.mptcp_privacy.success == true and
             .a12_exit_source_privacy.evidence.capture.client_public_packets == 0 and
             .a13_no_direct_client_exit.succeeded == true and
             .a13_no_direct_client_exit.evidence.success == true and
+            .a13_no_direct_client_exit.evidence.mptcp_privacy.success == true and
             .a13_no_direct_client_exit.evidence.client_capture.direct_client_exit_packets == 0 and
             (.a13_no_direct_client_exit.evidence.direct_physical_routes | length) == 0 and
             .a14_forced_crash_cleanup.succeeded == true and
