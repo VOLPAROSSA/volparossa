@@ -110,8 +110,11 @@ jobs:
       - name: Run workspace tests
         run: cargo test --locked --offline --workspace --all-features
 
-      - name: Report functional QUIC UDP namespace proof outcome
+      - name: Report namespace-backed proof outcomes
         run: |
+          cargo test --locked --offline -p volparossa-linux-uapi --lib \
+            egress::tests::egress_disposable_link_loss_return_and_capless_first_bind \
+            -- --exact --nocapture --test-threads=1
           cargo test --locked --offline -p volparossa-helper --lib --all-features \
             worker_v3::functional_backend::tests::committed_client_and_exit_handoff_one_validated_quic_udp_descriptor \
             -- --exact --nocapture --test-threads=1

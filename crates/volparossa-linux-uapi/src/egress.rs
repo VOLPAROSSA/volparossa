@@ -619,23 +619,36 @@ mod tests {
             );
             let routes = std::fs::read("/proc/net/route").unwrap();
             let dns = std::fs::read("/etc/resolv.conf").unwrap();
-            let status = Command::new("/usr/bin/unshare")
+            let output = Command::new("/usr/bin/timeout")
+                .args(["--kill-after=5s", "30s", "/usr/bin/unshare"])
                 .args(["--user", "--map-root-user", "--net", "--fork"])
                 .arg(std::env::current_exe().unwrap())
                 .args(["--exact", TEST, "--nocapture"])
                 .env(STAGE, "setup")
+                .env("LC_ALL", "C")
                 .env(
                     "VOLPAROSSA_EGRESS_PARENT_NETNS",
                     std::fs::read_link("/proc/self/ns/net").unwrap(),
                 )
-                .status()
+                .output()
                 .unwrap();
             assert_eq!(std::fs::read("/proc/net/route").unwrap(), routes);
             assert_eq!(std::fs::read("/etc/resolv.conf").unwrap(), dns);
+            if egress_namespace_policy_denied(output.status.code(), &output.stdout, &output.stderr)
+                && std::env::var("VOLPAROSSA_REQUIRE_EGRESS_NETNS_PROOF").as_deref() != Ok("1")
+            {
+                eprintln!(
+                    "SKIPPED_EGRESS_NETNS_PROOF: user namespace setup denied before test entry; no live egress proof was obtained"
+                );
+                return;
+            }
             assert!(
-                status.success(),
-                "disposable egress smoke must run, not skip"
+                output.status.success(),
+                "disposable egress smoke failed\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
+            eprintln!("PASSED_EGRESS_NETNS_PROOF: capless bind, loss, return and no fallback");
             return;
         }
         assert_ne!(
@@ -770,5 +783,40 @@ mod tests {
             IndependentEgress::new("fake0").unwrap().observe().unwrap(),
             None
         );
+    }
+
+    fn egress_namespace_policy_denied(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> bool {
+        code == Some(1)
+            && stdout.is_empty()
+            && matches!(
+                stderr,
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            )
+    }
+
+    #[test]
+    fn egress_namespace_skip_cannot_hide_an_entered_child_or_unknown_failure() {
+        let denied = b"unshare: write failed /proc/self/uid_map: Operation not permitted\n";
+        assert!(egress_namespace_policy_denied(Some(1), b"", denied));
+        for code in [None, Some(0), Some(101), Some(124)] {
+            assert!(!egress_namespace_policy_denied(code, b"", denied));
+        }
+        assert!(!egress_namespace_policy_denied(
+            Some(1),
+            b"running 1 test\n",
+            denied
+        ));
+        assert!(!egress_namespace_policy_denied(
+            Some(1),
+            b"",
+            b"unshare: write failed /proc/self/uid_map: Operation not permitted\nextra\n"
+        ));
+        assert!(!egress_namespace_policy_denied(
+            Some(1),
+            b"",
+            b"ip: Operation not permitted\n"
+        ));
     }
 }
