@@ -1,8 +1,9 @@
 # VOLPAROSSA
 
 > **Development status (pre-alpha):** VOLPAROSSA v1 is under construction and is **not yet a
-> usable VPN**.
-> The control-plane foundations in this repository must not be mistaken for a verified dataplane.
+> generally usable VPN**. Real two-leg WireGuard, MPTCP, protected UDP and Multipath QUIC
+> application traffic have run in disposable Debian test networks, but the complete current
+> build has not passed all acceptance cases together.
 > See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
 > installing, or enabling a role.
 
@@ -12,8 +13,8 @@ low-latency path is always:
 ```mermaid
 flowchart LR
     C[Client]
-    R1[Voluntary relay A]
-    R2[Voluntary relay B]
+    R1[Contributing relay A]
+    R2[Contributing relay B]
     E[One policy-enforcing exit]
     D[Allowed destination]
 
@@ -59,11 +60,14 @@ who sees both ends may correlate this low-latency traffic.
 The capability-based reciprocal participation requirement replaces optional client-only use as of
 2026-09-05. `network.uplink` defaults to `independent_internet`; `local_only` permits client + relay
 configuration without a fabricated ASN or public origin, and forbids exit mode. This is an operator
-declaration, not runtime connectivity proof or automatic outage detection. Offline/local-mesh
-discovery and private-endpoint datapaths are not implemented yet; accepting the configuration does
-not make those paths work.
-Combined-role native workers and privacy-preserving discovery are being integrated; a configuration
-switch alone is not evidence that the all-combined-role topology already works.
+declaration, not runtime connectivity proof. Disposable IPv4 tests now demonstrate an offline node
+consuming and relaying concurrently, and native MPQUIC using LAN and Internet paths together.
+An explicitly monitored independent uplink also passed loss/recovery without daemon restarts:
+Exit contribution is withdrawn while unavailable and restored on a fresh route. Agent-created
+802.11s mesh discovery and reciprocal traffic have passed on simulated Linux radios; physical
+Wi-Fi hardware and phone operation remain unverified. See [direct-link scope](docs/LOCAL_LINK_NETWORK.md)
+for the exact evidence and limits, including the still-unproven combined-speed gain and general
+spare-download/airtime sharing. Configuration alone never counts as working-network evidence.
 Bootstrap contacts are replaceable user peers, not mandatory central infrastructure or authorities.
 
 The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md); wire formats are in
@@ -110,22 +114,13 @@ uninstall guidance is in [OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Security warnings and known limitations
 
-- This repository has not yet produced evidence for real MPTCP or Multipath QUIC data carriage.
-- The native mqvpn/xquic component is pinned, source-integrated, and has passed a clean full-graph
-  API-v6 ASan+UBSan run behind a bounded process boundary. API v6 correlates one role/process
-  lifetime and each exact request, binds signed route provenance and request-binds one route socket
-  for `AddPath` or listener-shaped descriptor for `StartExitSession`. Rust and the dormant native
-  runtime validate its current socket flags and tuple before native closes it and fails closed. The
-  runtime converts accepted wall expiry to a BOOTTIME deadline and uses a bounded, no-live-eviction
-  process-local reservation/finalize ledger to reject pair replay and scope collisions. That ledger
-  does not verify the signed bundle, cache general nonces, or survive process restart. The current
-  same-UID socket is not authentication against an untrusted agent and no production caller exists.
-  The native client now retains one immutable assignment with server `10.76.0.1/32`, client
-  `10.76.0.2/32` through `10.76.0.254/32`, and optional client
-  `fd76:6f6c:7062::2/112` through `fd76:6f6c:7062::fe/112`; it caps the MTU at 1280--1420 and
-  independently enforces outbound-source and reverse-destination ownership. Helper origin,
-  server-side allocation uniqueness/lifetime, assigned-address and namespace provenance, the exit
-  backend, and disposable dataplane acceptance remain incomplete.
+- Real MPTCP and Multipath QUIC application/path evidence exists in disposable networks. It does
+  not establish reliable completion of all flows, recovery cases and newer features on the current
+  build; the [implementation status](docs/IMPLEMENTATION_STATUS.md) records the remaining failures.
+- The native mqvpn/xquic component is pinned and source-built behind a bounded process API, and
+  the production agent now drives its real datapaths. A same-UID process socket and descriptor
+  correlation do not by themselves authenticate privileged-helper origin against an untrusted
+  agent. Functional traffic evidence is not a release-security claim.
 - Do not rely on the kill switch, whitelist enforcement, crash cleanup, or privacy properties until
   their acceptance checks are marked complete.
 - Anti-Sybil diversity and local performance history can raise an attacker's cost but cannot

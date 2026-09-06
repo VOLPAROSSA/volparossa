@@ -6,6 +6,19 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The [v1 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034165008) at `83264e55`
+passed A01--A05 and A15, but stopped selecting A06's required benchmark pair. Eight established
+MPQUIC contexts used other valid pairs. Both desired native probe legs also completed, followed
+by rejection at the post-probe authority join; the exact guard was not logged on this build.
+A07--A14 were not reached. All 169 exact cleanup completions succeeded and no owned objects
+remained. This is not an A06 or full-alpha pass; advertisement-refresh/handoff integration remains open.
+The reproduced republication defects are now fixed at both joins: immutable selected/native
+evidence can continue with a newer live same-Exit/full-policy authority, and ordinary pending
+RPCs survive a verified refresh without losing their original control provenance or deadlines.
+Real signed-refresh and affine-handoff regressions failed before the changes and pass after them;
+targeted withdrawal, policy, expiry, replay and endpoint-substitution checks and joint strict
+agent Clippy pass. New live v1 evidence is still required.
+
 The [uplink transition run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34034024459)
 at `83264e55` passed all three phases and six protected application routes without restarting
 the four participant daemons. Independent-uplink loss withdrew Exit authority; the affected
@@ -31,7 +44,14 @@ Final cleanup left zero owned objects, namespace references and stored descripto
 The `crash-recovery` scenario now runs the unchanged A14 held-MPTCP, 25-SIGKILL and
 eleven-helper-restart sequence directly, without waiting behind A01--A13. Its separate
 `crash-recovery.json` reports A14/A15 only and cannot claim complete alpha acceptance.
-Load-only, scoped-report rejection and topology-contract checks pass; live crash proof is pending.
+Load-only, scoped-report rejection and topology-contract checks pass. Its
+[first live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34035285152) at `1150737c`
+proved the held MPTCP request through the exact Exit and correctly inventoried four route workers,
+one ingress worker and eight durable descriptors. It then failed helper restart: the four
+custody-bearing helpers repeatedly stopped unsuccessfully; the seven empty helpers did not.
+Final objects/references/descriptors were zero and A15 passed, but A14 and `cleanup.complete`
+remain false. The fixture now preserves all individual crash results in their aggregate before
+the restart gate and exports a failed restart's observed state, rather than losing that evidence.
 Fixed, identity-free authority-join stage diagnostics also retain the existing rejection behavior.
 
 The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
@@ -280,6 +300,12 @@ No bandwidth ratio was produced. The baseline now reuses only the exact still-ac
 context, paths, Relays and Exit, with normal new-flow expiry checks; the aggregate case still
 requires a fresh selected context. Nine focused fixture checks pass. This removes unnecessary
 baseline reconnection, not the observed kernel failure or the requirement for measured gain.
+The [following comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34035286510)
+at `1150737c` passed A06 and delivered the complete 32-MiB WAN-only baseline response in
+64.469 seconds with matching application/destination hashes. After LAN restoration it could
+not acquire an aggregate route: candidate sampling repeatedly rejected the snapshot before
+the route-authority join. Therefore no aggregate transfer or speed ratio is claimed. Cleanup
+completed with zero owned objects and unchanged guest-state hashes.
 
 The next uplink-transition runtime uses optional `network.independent_egress_interface` for an
 already authorized IndependentInternet Exit. Bounded read-only netlink observations track that
