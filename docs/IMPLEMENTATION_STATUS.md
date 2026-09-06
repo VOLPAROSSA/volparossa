@@ -6,6 +6,21 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+The [full-agent simulated Wi-Fi run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032559440)
+at `4500d602` passed: the offline daemon consumed and relayed application traffic concurrently
+over its agent-created mesh interface, with exact hashes, two-leg packet evidence and complete
+cleanup. This is simulated-radio software integration, not physical-radio or bandwidth evidence.
+The same build's [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032489881)
+passed formatting, strict workspace Clippy, workspace tests, dependency/license checks and the
+non-mutating harness. It explicitly reported that the ordinary runner could not enter the
+egress namespace test; that check is mandatory in the separate KVM uplink scenario.
+The same revision's [v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032557009)
+passed A01--A07 and A15 but stopped at A08; A14 was not reached. This time the DNS route's
+Client Prepare, Activate, native probe and Commit succeeded, and exact Destroy returned in
+169 ms. The later actor-authority join rejected the route. Thus the reproduced helper cleanup
+blockers were passed, but a usable DNS response and the remaining acceptance sequence were not.
+Final cleanup left zero owned objects, namespace references and stored descriptors.
+
 The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
 at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
 It stopped before A14's forced crashes: the inventory counted 18 durable route-worker namespaces
@@ -226,6 +241,7 @@ traffic; spare capacity must be measured and enforced, not inferred from configu
 - [x] Local on-link authenticated discovery and two-leg datapaths without a client default route (IPv4 disposable live proof below).
 - [x] Per-path underlay/interface binding for simultaneous local and Internet paths (genuine MPQUIC transfer below; not a bandwidth-gain claim).
 - [ ] Measured useful throughput gain from combining independent LAN and Internet paths.
+- [x] Full-agent direct mesh discovery, concurrent offline consumption/contribution and teardown on simulated Linux radios.
 - [ ] Driver-supported direct Wi-Fi link setup, teardown and real-radio transfer proof.
 - [ ] Measured spare-capacity sharing with owner-priority enforcement under competing traffic.
 - [ ] Offline participation, uplink arrival/loss and no recursive overlay-as-exit egress.
@@ -237,6 +253,13 @@ session downloads the same size. Both client-facing Relay links are individually
 aggregate paths, exact context/path bindings, zero capture drops/leaks and complete cleanup.
 Two fixture-profile Rust checks, seven focused observer/validator checks and strict example
 Clippy pass. No throughput gain is claimed until the actual comparison passes in the VM.
+The [first comparison attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032560730)
+at `4500d602` stopped before A06: normal route reselection called `wait_disconnected`, but that
+shared function was defined only inside the A01 block omitted by this scenario. It and the
+shared transient-error classifier now load unconditionally from `benchmark-selection.sh`,
+with their behavior unchanged. Eight focused fixture checks and the static topology contract
+pass. The attempted run cleaned all owned objects and preserved its guest-state baseline;
+it produced no new throughput measurement.
 
 The next uplink-transition runtime uses optional `network.independent_egress_interface` for an
 already authorized IndependentInternet Exit. Bounded read-only netlink observations track that
@@ -275,6 +298,16 @@ declared interface transition now permits that error, retaining the same packet 
 requiring the exact ifindex/state sequence in the report. Six focused checks and a real disposable
 AF_PACKET down/recovery test pass, including continued observation of another link and zero
 packet drops. Failed-run cleanup left zero objects and matching guest-state hashes.
+The [following uplink attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032558106)
+at `4500d602` retained complete zero-drop captures through the declared link loss. Exit authority
+was withdrawn 140 ms after the loss baseline, and the same old application socket's challenges
+received no replies. Initial consumption/contribution and both flows during the outage had
+matching application hashes; the uplink-less node could consume through the offline Relay.
+The run stopped only after the independent link returned and its Exit role was advertised
+again: the other consumer repeatedly received preselection authority rejection instead of a
+restored route. Its cached forwarded Exit advertisement was not refreshed during the three-minute
+selection window. Recovery remains unproven; all owned objects were removed and guest-state
+hashes matched.
 
 The first implementation now carries explicitly signed RFC1918/ULA endpoint scope through
 authenticated connection provenance, selection, endpoint leases, reservations and helper
@@ -453,8 +486,8 @@ prove retirement of an active same-node route while sharing; exact scheduler tea
 Download control, automatic available-bandwidth estimation and radio airtime remain unfinished.
 These narrower results do not check the full sharing item above.
 
-The first explicit Debian `wifi_mesh` runtime is implemented and its kernel backend has passed
-the disposable simulated-radio proof below. Full-agent mesh routing and physical radios remain open.
+The first explicit Debian `wifi_mesh` runtime and its full-agent overlay have passed the
+disposable simulated-radio proofs below. Physical-radio transfer remains open.
 The user has no spare Linux devices or Wi-Fi adapters available at present (2026-09-06), so
 physical-radio acceptance is explicitly deferred; simulated-radio results do not fill that gap.
 The helper creates one separately owned open-L2 802.11s interface using nl80211, with a bounded
@@ -522,6 +555,21 @@ helper process diagnostics after a timeout, even when the normal archive is abse
 the original failure status and explicitly records cleanup/host state as unverified. Four focused
 collector/driver tests and the script contract pass. The 2400-second bound is not removed, and a
 partial diagnostic archive cannot count as a successful or fully cleaned topology.
+The [complete mesh run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032559440)
+at `4500d602` now **passes**. Two agent-created interfaces reached kernel ESTAB at 2412 MHz;
+five matching mDNS records and both authenticated peer/mesh-address events preceded the other
+agents, without mutual bootstrap contacts. The same offline Client daemon then consumed over
+mesh through Relay0 to the Exit while relaying Relay0's traffic over mesh and Ethernet to
+Relay2's independent Exit. Both flows delivered 16 exact echoes with matching application and
+destination hashes, correct Exit source addresses, both WireGuard legs and 3.120 seconds of
+overlap. Each mesh direction carried 65 observed WireGuard packets; both station byte counters
+grew. The offline node retained no main default route or Exit role. All four captures were
+complete with zero drops, direct-exit packets or plaintext leaks. Route Disconnect preserved
+mesh, agent shutdown removed both interfaces before helper shutdown, and final cleanup left
+zero interfaces/radios/owned objects with hwsim unloaded and identical guest-state hashes.
+The native delivered-byte metadata remained zero; application and packet measurements provide
+the actual traffic evidence. This proves simulated mesh plus Ethernet, not physical radios,
+Wi-Fi-only operation, MPQUIC aggregation, mobile support or added bandwidth.
 See [local-link scope](LOCAL_LINK_NETWORK.md).
 
 ## Fixed alpha v1 scorecard

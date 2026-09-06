@@ -105,7 +105,15 @@ pure validation and ownership tests are not that evidence. The
 [disposable hwsim backend run](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989125353)
 has now passed real kernel peering, 128-KiB transfers in both directions with matching hashes,
 station counters and normal/crash cleanup on two simulated radios. Full agent/discovery/overlay
-composition on that radio underlay still needs its own functional proof.
+composition on that radio underlay has since passed its
+[separate live run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34032559440) at `4500d602`:
+the offline node consumed and relayed concurrently through its agent-created mesh interface,
+with 16 exact echoes per flow, 3.120 seconds of overlap, both WireGuard legs and growing station
+counters. All captures were complete without drops/direct-exit/plaintext leaks. Route Disconnect
+retained mesh; agent shutdown removed the interfaces, followed by zero remaining radios/objects
+and an unchanged guest-state baseline. An Ethernet contact remained part of this topology;
+it proves neither Wi-Fi-only operation nor added bandwidth. The user has no spare test radios
+or second Linux device available, so physical-radio acceptance is explicitly deferred.
 
 The shipped configuration keeps `wifi_mesh.enabled` false. An operator configuring a disposable
 pair can select the same `mesh_id` and `frequency_mhz` on both peers, distinct `local_address`
