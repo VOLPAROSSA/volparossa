@@ -160,6 +160,17 @@ fn execute(
     network_namespace: BorrowedFd<'_>,
     deadline: HardDeadline,
 ) -> Result<ExactDeadWorkerNamespaceCleanup, DeadWorkerReaperError> {
+    let mut command = Command::new("/proc/self/exe");
+    command.arg(INTERNAL_DEAD_WORKER_REAPER_ARGUMENT);
+    execute_with_command(command, plan, network_namespace, deadline)
+}
+
+fn execute_with_command(
+    mut command: Command,
+    plan: &DeadWorkerCleanupPlan,
+    network_namespace: BorrowedFd<'_>,
+    deadline: HardDeadline,
+) -> Result<ExactDeadWorkerNamespaceCleanup, DeadWorkerReaperError> {
     deadline.ensure_remaining()?;
     if !geteuid().is_root() {
         return Err(DeadWorkerReaperError::Authentication);
@@ -169,9 +180,7 @@ fn execute(
     let descriptor_binding = *blake3::hash(encoded.as_slice()).as_bytes();
     let (parent, child_channel) = private_credential_worker_channel()?;
     let inherited: OwnedFd = child_channel.into();
-    let mut command = Command::new("/proc/self/exe");
     command
-        .arg(INTERNAL_DEAD_WORKER_REAPER_ARGUMENT)
         .env_clear()
         .current_dir("/")
         .stdin(Stdio::from(inherited))
@@ -179,6 +188,9 @@ fn execute(
         .stderr(Stdio::null());
     install_close_range_on_exec(&mut command);
     let mut child = command.spawn()?;
+    // Command retains its configured stdin owner across spawn. Drop that duplicate now so an
+    // early child failure closes the private channel instead of being hidden until the deadline.
+    drop(command);
     let expected_child = ExpectedUnixCredentials::new(child.id(), 0, getegid().as_raw())?;
     let operation = parent_protocol(
         &parent,
@@ -401,6 +413,68 @@ mod tests {
     use crate::internal_protocol::{InternalEndpointRole, InternalIpPrefix, LeasePlan};
     use crate::lease_spec::{DURABLE_WIREGUARD_ALIAS_PREFIX, WireguardLeaseSpec};
     use volparossa_routing::WireguardRole;
+
+    #[test]
+    fn real_reaper_protocol_cleans_pinned_dead_namespace() {
+        use std::os::fd::AsFd as _;
+        let Ok(executable) = std::env::var("VOLPAROSSA_TEST_DEAD_REAPER_EXECUTABLE") else {
+            eprintln!(
+                "skipped self-exec reaper proof: an explicitly built helper executable is required"
+            );
+            return;
+        };
+        if !super::super::functional_backend::tests::run_inside_disposable_user_network_namespace(
+            "worker_v3::dead_worker_reaper::tests::real_reaper_protocol_cleans_pinned_dead_namespace",
+            "VOLPAROSSA_TEST_DEAD_REAPER_NETNS",
+        ) {
+            return;
+        }
+        let parent = std::fs::File::open("/proc/self/ns/net").unwrap();
+        nix::sched::unshare(CloneFlags::CLONE_NEWNET).unwrap();
+        let target = std::fs::File::open("/proc/thread-self/ns/net").unwrap();
+        setns(&parent, CloneFlags::CLONE_NEWNET).unwrap();
+        let mut command = Command::new(executable);
+        command.arg(INTERNAL_DEAD_WORKER_REAPER_ARGUMENT);
+        let result = execute_with_command(
+            command,
+            &plan(),
+            target.as_fd(),
+            HardDeadline::after(std::time::Duration::from_secs(2)).unwrap(),
+        );
+        assert!(
+            result.is_ok(),
+            "real private reaper protocol: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn exited_reaper_does_not_leave_parent_waiting_for_protocol_deadline() {
+        use std::os::fd::AsFd as _;
+        use std::time::{Duration, Instant};
+        if !super::super::functional_backend::tests::run_inside_disposable_user_network_namespace(
+            "worker_v3::dead_worker_reaper::tests::exited_reaper_does_not_leave_parent_waiting_for_protocol_deadline",
+            "VOLPAROSSA_TEST_REAPER_EOF_NETNS",
+        ) {
+            return;
+        }
+        let target = std::fs::File::open("/proc/self/ns/net").unwrap();
+        let mut command = Command::new("/proc/self/exe");
+        // The Rust test executable rejects this unknown selector before entering any test.
+        command.arg("--volparossa-reaper-test-exit-before-ready");
+        let started = Instant::now();
+        let result = execute_with_command(
+            command,
+            &plan(),
+            target.as_fd(),
+            HardDeadline::after(Duration::from_secs(2)).unwrap(),
+        );
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an exited child must report EOF, not consume the complete protocol deadline"
+        );
+    }
 
     fn plan() -> DeadWorkerCleanupPlan {
         let context_id = [0x41; 16];

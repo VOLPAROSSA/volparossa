@@ -77,6 +77,86 @@ fn report_cleanup_state(context: &mut WorkerContext<NamespaceKernel>) {
 }
 
 #[test]
+fn expired_real_relay_fence_can_be_reaped_after_worker_loss() {
+    if !functional_backend::tests::run_inside_disposable_user_network_namespace(
+        "worker_v3::tests::live_relay_cleanup::expired_real_relay_fence_can_be_reaped_after_worker_loss",
+        "VOLPAROSSA_TEST_EXPIRED_RELAY_NETNS",
+    ) {
+        return;
+    }
+    let parent = prepare_disposable_namespace();
+    let context_id = [0x94; 16];
+    let now = current_unix_seconds().unwrap();
+    let mut prepare = worker_relay_prepare(context_id, 1);
+    for lease in &mut prepare.leases {
+        lease.setup_expires_at_unix = now + 5;
+        lease.hard_expires_at_unix = now + 5;
+    }
+    let resources = validate_worker_prepare(&prepare, context_id, RoutingContextRole::Relay)
+        .expect("canonical owned Relay pair");
+    for resource in &resources {
+        ip(&["link", "add", resource.interface(), "type", "wireguard"]);
+        ip(&[
+            "link",
+            "set",
+            "dev",
+            resource.interface(),
+            "alias",
+            resource.ownership_alias(),
+        ]);
+    }
+    let namespace = relay_fence::RelayFenceNamespaceAuthority::new(
+        parent,
+        crate::worker_sandbox::current_network_namespace_identity().unwrap(),
+    )
+    .unwrap();
+    let pristine = relay_fence::observe_pristine_relay_fence(namespace, deadline()).unwrap();
+    let identity = relay_fence::RelayFenceIdentity::derive(context_id, 1).unwrap();
+    let restricted =
+        relay_fence::create_relay_fence_baseline(pristine, identity, deadline()).unwrap();
+    let mut context = WorkerContext::new_bound(
+        context_id,
+        RoutingContextRole::Relay,
+        1,
+        WorkerNetworkBootstrap::RelayRestricted(restricted),
+        NamespaceKernel::connect(deadline()).unwrap(),
+        resources,
+        WorkerMptcpPathManager::prepare(context_id, 1, 1).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        context.prepare(&prepare, &mut OsWorkerKeySource, deadline()),
+        WorkerPrepareOutcome::Prepared(_)
+    ));
+    let mut activate = worker_relay_activate(context_id);
+    let boottime = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    activate.hard_expires_at_boottime_ns = u64::try_from(boottime.tv_sec).unwrap() * 1_000_000_000
+        + u64::try_from(boottime.tv_nsec).unwrap()
+        + 5_000_000_000;
+    for lease in &mut activate.leases {
+        lease.hard_expires_at_unix = now + 5;
+        lease.persistent_keepalive_seconds = 0;
+    }
+    assert!(matches!(
+        context.activate(&activate, deadline()),
+        WorkerActivateOutcome::Activated(_)
+    ));
+    // Losing the in-process journal must not prevent cleanup after the kernel's live gate expires.
+    drop(context);
+    std::thread::sleep(Duration::from_secs(6));
+    let namespace = relay_fence::RelayFenceNamespaceAuthority::new(
+        parent,
+        crate::worker_sandbox::current_network_namespace_identity().unwrap(),
+    )
+    .unwrap();
+    let identity = relay_fence::RelayFenceIdentity::derive(context_id, 1).unwrap();
+    assert!(
+        relay_fence::cleanup_dead_worker_relay_fence(namespace, &identity, deadline()).is_ok(),
+        "the exact expired Relay table must remain recoverably owned"
+    );
+}
+
+#[test]
 fn repeated_real_relay_pair_prepare_activate_destroy() {
     if !functional_backend::tests::run_inside_disposable_user_network_namespace(
         "worker_v3::tests::live_relay_cleanup::repeated_real_relay_pair_prepare_activate_destroy",

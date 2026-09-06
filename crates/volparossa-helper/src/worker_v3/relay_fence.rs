@@ -898,8 +898,9 @@ pub(super) fn observe_pristine_relay_fence(
 /// Remove the exact context-owned Relay table after its worker generation was reaped.
 ///
 /// The dead worker can no longer supply its affine active-policy journal. Recovery therefore
-/// accepts only the two complete states that worker can leave behind: the exact restrictive
-/// baseline or the exact active object cardinality under the context-bound table userdata. The
+/// accepts the exact restrictive baseline or active object cardinality under context-bound table
+/// userdata, including an empty live set after its kernel timeout. No forwarding authority is
+/// reconstructed from that expired set. The
 /// mutation deletes that one table by its observed handle and succeeds only after a fresh stable
 /// observation proves the target namespace completely empty.
 pub(super) fn cleanup_dead_worker_relay_fence(
@@ -1899,8 +1900,18 @@ impl RulesetSnapshot {
         let [set] = self.sets.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
         };
-        let [element] = self.set_elements.as_slice() else {
-            return Err(RelayFenceError::UnexpectedPolicy);
+        // Kernel expiry removes the live element without removing its context-owned table,
+        // chains, set or rules. Post-reap deletion can recover that exact closed successor;
+        // ordinary active-policy observations must still require the live element below.
+        let exact_live_elements = match self.set_elements.as_slice() {
+            [] => true,
+            [element] => {
+                element.family == NFPROTO_INET
+                    && element.table == identity.table_name
+                    && element.set == LIVE_SET_NAME
+                    && element.key == LIVE_SET_KEY
+            }
+            _ => false,
         };
         let [up, down, terminal, client_input, exit_input] = self.rules.as_slice() else {
             return Err(RelayFenceError::UnexpectedPolicy);
@@ -1909,10 +1920,7 @@ impl RulesetSnapshot {
             || set.table != identity.table_name
             || set.name != LIVE_SET_NAME
             || set.handle == 0
-            || element.family != NFPROTO_INET
-            || element.table != identity.table_name
-            || element.set != LIVE_SET_NAME
-            || element.key != LIVE_SET_KEY
+            || !exact_live_elements
             || [up, down, terminal].iter().any(|rule| {
                 rule.family != NFPROTO_INET
                     || rule.table != identity.table_name
@@ -5588,6 +5596,60 @@ mod tests {
         assert_eq!(
             delete_handles(&retirement, NFT_MSG_DELTABLE, NFTA_TABLE_HANDLE),
             vec![BASELINE_HANDLES.table]
+        );
+    }
+
+    #[test]
+    fn dead_worker_cleanup_accepts_only_exact_expired_successor_without_activation_authority() {
+        let specification = fixture_specification();
+        let mut expired = fixture_active_snapshot(&specification);
+        expired.set_elements.clear();
+        assert_eq!(
+            expired
+                .exact_dead_worker_table_handle(&specification.identity)
+                .unwrap(),
+            BASELINE_HANDLES.table
+        );
+        assert!(
+            expired
+                .exact_active_observation(&specification, false)
+                .is_err()
+        );
+        for mutation in 0..5 {
+            let mut foreign = fixture_active_snapshot(&specification);
+            foreign.set_elements.clear();
+            match mutation {
+                0 => foreign.tables[0].userdata = Some(b"foreign".to_vec()),
+                1 => foreign.sets[0].name = b"foreign".to_vec(),
+                2 => foreign.rules[0].chain = INPUT_CHAIN_NAME.to_vec(),
+                3 => foreign
+                    .rules
+                    .push(fixture_active_snapshot(&specification).rules.remove(0)),
+                _ => foreign.chains[0].policy = NF_ACCEPT,
+            }
+            assert!(
+                foreign
+                    .exact_dead_worker_table_handle(&specification.identity)
+                    .is_err()
+            );
+        }
+        let mut extra_elements = fixture_active_snapshot(&specification);
+        extra_elements.set_elements.push(
+            fixture_active_snapshot(&specification)
+                .set_elements
+                .remove(0),
+        );
+        assert!(
+            extra_elements
+                .exact_dead_worker_table_handle(&specification.identity)
+                .is_err()
+        );
+        extra_elements.set_elements.truncate(1);
+        extra_elements.set_elements[0].key = b"foreign".to_vec();
+        assert!(
+            extra_elements
+                .exact_dead_worker_table_handle(&specification.identity)
+                .is_err()
         );
     }
 
