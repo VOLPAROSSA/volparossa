@@ -210,13 +210,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             )
         }
         control_request::Operation::Paths(_) => {
-            let paths = context.state.read().await.path_list();
-            response(
-                request_id,
-                ControlResult::Ok,
-                "OK",
-                control_response::Payload::Paths(paths),
-            )
+            paths_response(request_id, &context.routes, &context.state).await
         }
         control_request::Operation::Sessions(_) => {
             let sessions = context.state.read().await.session_list();
@@ -477,6 +471,28 @@ fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<
     Some(profile)
 }
 
+async fn paths_response(
+    request_id: Vec<u8>,
+    routes: &ClientRouteControl,
+    state: &Arc<RwLock<AgentState>>,
+) -> ControlResponse {
+    if routes.refresh_mpquic_path_summaries().await.is_err() {
+        return response(
+            request_id,
+            ControlResult::Unavailable,
+            "MPQUIC_PATH_STATUS_UNAVAILABLE",
+            control_response::Payload::Ack(Empty {}),
+        );
+    }
+    let paths = state.read().await.path_list();
+    response(
+        request_id,
+        ControlResult::Ok,
+        "OK",
+        control_response::Payload::Paths(paths),
+    )
+}
+
 // Client Disconnect deliberately has no whole-helper authority: the same daemon may be
 // forwarding unrelated Relay/Exit sessions and owning mesh/sharing resources at this moment.
 async fn disconnect_response(
@@ -702,6 +718,40 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn paths_query_without_native_owner_preserves_non_mpquic_display() {
+        let config = Config::default();
+        let state = Arc::new(RwLock::new(
+            AgentState::new(
+                &config,
+                config.roles,
+                None,
+                volparossa_metrics::MetricsRegistry::new(),
+            )
+            .unwrap(),
+        ));
+        let path = volparossa_local_control::PathSummary {
+            route_context_id: vec![2; 16],
+            path_id: 1,
+            relay_peer_id: "relay".to_owned(),
+            exit_peer_id: "exit".to_owned(),
+            state: volparossa_local_control::PathState::Active as i32,
+            ..Default::default()
+        };
+        state
+            .write()
+            .await
+            .replace_single_udp_path(path.clone())
+            .unwrap();
+        let routes = ClientRouteControl::default();
+        let result = paths_response(vec![1; 16], &routes, &state).await;
+        assert_eq!(result.result, ControlResult::Ok as i32);
+        let Some(control_response::Payload::Paths(paths)) = result.payload else {
+            panic!("explicit paths response");
+        };
+        assert_eq!(paths.paths, vec![path]);
+    }
 
     #[tokio::test]
     async fn idle_client_disconnect_needs_no_helper_and_preserves_contribution_roles() {

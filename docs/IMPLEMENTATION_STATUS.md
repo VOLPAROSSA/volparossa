@@ -6,6 +6,31 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
+[Quality passes on `760fe823`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044097752),
+including workspace tests and strict Clippy. Its
+[mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34044164480)
+passes A06, then fails the fixture's five-second endpoint-idle wait after the WAN-only
+response length/hash and HTTP/3 driver have already succeeded. The fixture did not export
+that completed response's JSON on its error path: no retained 32-MiB timing, aggregate
+result or speedup can be claimed from this run. All eight retained captures are complete
+with zero drops, and cleanup leaves zero owned objects and unchanged guest state.
+
+The next runtime slice removes the redundant display-status RPC after every accepted
+MPQUIC datagram. Telemetry is sampled at most once per 250 ms per route owner; initial
+publication, explicit `paths` queries and maintenance still obtain fresh native status.
+Every data operation retains its own live session/path, signed-flow and native response
+checks. Nine focused checks and strict agent Clippy pass; throughput benefit is not yet
+measured.
+
+The [BBR2/reactive mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34043223406)
+at `a015f17a` completes both full 32-MiB responses with independently verified payload
+hashes. WAN-only succeeds after Relay1 removal in 63.976 seconds; LAN+WAN takes 66.488
+seconds (0.962x), so the >25% gain requirement still fails. All four flow captures and
+eight privacy captures are complete with zero drops/forbidden packets; aggregate
+traffic traverses both real paths. Cleanup is complete, no owned objects remain and
+guest-state hashes match. This restores the observed failover progression with BBR2,
+but does not prove the subsequent EDT repair or useful aggregation.
+
 A deterministic reproduction now identifies a separate EDT policy defect: after warm-up,
 a 512-KiB historical byte deficit overrode the measured cost and sent all 32 small data
 packets to a still-active black hole (100-ms RTT, 80% loss) instead of the healthy 1-ms

@@ -11,12 +11,15 @@
     reason = "a future transparent ingress coordinator consumes this boundary"
 )]
 
+mod path_telemetry;
 mod retirement;
 mod selection_bridge;
 
 pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
 };
+
+use path_telemetry::PathTelemetry;
 
 use std::{
     cmp::Reverse,
@@ -255,6 +258,7 @@ struct ActiveProductionMpquicRoute {
     identity: CommittedRelayRouteIdentity,
     health: ProductionMpquicPathHealth,
     browser_flows: Vec<BrowserQuicFlowBinding>,
+    telemetry: PathTelemetry,
 }
 
 #[derive(Clone, Copy)]
@@ -335,8 +339,8 @@ impl EstablishedClientRoute {
         )
     }
 
-    async fn path_projection(&self) -> Result<ClientPathProjection, ClientRouteConnectError> {
-        match &self.transport {
+    async fn path_projection(&mut self) -> Result<ClientPathProjection, ClientRouteConnectError> {
+        match &mut self.transport {
             ClientTransportState::TcpMptcp(_) => self
                 .route
                 .as_ref()
@@ -555,14 +559,27 @@ impl ClientRouteExpiry {
 }
 
 impl ActiveProductionMpquicRoute {
-    async fn path_summaries(&self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
-        let statuses = self
-            .session
-            .path_statuses()
+    async fn path_summaries(&mut self) -> Result<Vec<PathSummary>, ClientRouteConnectError> {
+        self.sample_path_summaries(true)
+            .await?
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    async fn sample_path_summaries(
+        &mut self,
+        force: bool,
+    ) -> Result<Option<Vec<PathSummary>>, ClientRouteConnectError> {
+        let session = &self.session;
+        let identity = &self.identity;
+        self.telemetry
+            .sample(Instant::now(), force, || async {
+                let statuses = session
+                    .path_statuses()
+                    .await
+                    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                identity.project(&statuses, session.warm_path_ids())
+            })
             .await
-            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        self.identity
-            .project(&statuses, self.session.warm_path_ids())
     }
 
     async fn maintain(
@@ -1324,7 +1341,7 @@ impl ClientRouteControl {
 
     async fn publish_established_route(
         &self,
-        established: EstablishedClientRoute,
+        mut established: EstablishedClientRoute,
     ) -> Result<ClientRouteProgress, ClientRouteConnectError> {
         if established.is_expired(crate::unix_millis(), Instant::now()) {
             Box::pin(established.shutdown(self.agent_state.as_ref())).await;
@@ -2150,9 +2167,11 @@ impl ClientRouteControl {
         active.browser_flows[index]
             .record_sent(now_ms)
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        let paths = active.path_summaries().await?;
-        drop(state);
-        self.replace_agent_mpquic_paths(paths).await?;
+        // Native Send independently enforces live session/path authority on every datagram.
+        // This optional second RPC updates the display only, not permission to send data.
+        if let Some(paths) = active.sample_path_summaries(false).await? {
+            self.replace_agent_mpquic_paths(paths).await?;
+        }
         Ok(ClientRouteProgress::TransportActive)
     }
 
@@ -2205,10 +2224,36 @@ impl ClientRouteControl {
             remote: SocketAddr::V4(remote),
             payload,
         };
-        let paths = active.path_summaries().await?;
-        drop(state);
-        self.replace_agent_mpquic_paths(paths).await?;
+        // Receive and exact signed-flow acceptance above never depend on cached telemetry.
+        if let Some(paths) = active.sample_path_summaries(false).await? {
+            self.replace_agent_mpquic_paths(paths).await?;
+        }
         Ok(Some(response))
+    }
+
+    /// Force one exact-owner MPQUIC observation for an explicit local Paths query.
+    ///
+    /// No owner or a different transport is a no-op. Observation errors do not reconnect or
+    /// destroy a route, and the owner lock remains held through publication so a delayed old
+    /// snapshot cannot overwrite a newly established route's display.
+    pub(crate) async fn refresh_mpquic_path_summaries(
+        &self,
+    ) -> Result<(), ClientRouteConnectError> {
+        let mut state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &mut *state else {
+            return Ok(());
+        };
+        if !matches!(established.transport, ClientTransportState::Mpquic(_)) {
+            return Ok(());
+        }
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+        }
+        let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            unreachable!("MPQUIC owner matched while retaining its lock")
+        };
+        let paths = active.path_summaries().await?;
+        self.replace_agent_mpquic_paths(paths).await
     }
 
     /// Whether periodic reverse polling is meaningful for the current route owner.
@@ -2245,8 +2290,8 @@ impl ClientRouteControl {
         };
         let outcome = active.maintain(now_ms).await?;
         let paths = active.path_summaries().await?;
-        drop(state);
         self.replace_agent_mpquic_paths(paths).await?;
+        drop(state);
         Ok(outcome)
     }
 
@@ -2720,6 +2765,7 @@ async fn admit_completed_native_route(
                             identity,
                             health,
                             browser_flows: Vec::new(),
+                            telemetry: PathTelemetry::default(),
                         },
                     )),
                     tcp_flow: None,
