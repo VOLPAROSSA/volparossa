@@ -3702,6 +3702,36 @@ struct RouteSetupAuthorities {
     datapath_relays: Vec<DirectRelayCapability>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RouteAuthorityRejection {
+    ControlLookup,
+    ExitLookup,
+    DataRelayLookup,
+    ForwardedBinding,
+    SelectedBinding,
+    Expiry,
+    DataRelayBinding,
+}
+
+impl RouteAuthorityRejection {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ControlLookup => "control-lookup",
+            Self::ExitLookup => "exit-lookup",
+            Self::DataRelayLookup => "data-relay-lookup",
+            Self::ForwardedBinding => "forwarded-binding",
+            Self::SelectedBinding => "selected-binding",
+            Self::Expiry => "expiry",
+            Self::DataRelayBinding => "data-relay-binding",
+        }
+    }
+
+    fn record(self) -> RouteSetupError {
+        tracing::warn!(stage = self.code(), "current route authority join rejected");
+        RouteSetupError::Capability
+    }
+}
+
 impl RouteSetupAuthorities {
     async fn resolve<R: RouteCapabilityResolver>(
         resolver: &R,
@@ -3710,7 +3740,10 @@ impl RouteSetupAuthorities {
         let control = &request.control.identity;
         let control_capability = resolver
             .resolve_direct_relay(control.wire_node_id, control.peer_id)
-            .await?;
+            .await
+            .inspect_err(|_| {
+                let _ = RouteAuthorityRejection::ControlLookup.record();
+            })?;
         let exit = resolver
             .resolve_forwarded_exit(
                 control.wire_node_id,
@@ -3718,10 +3751,15 @@ impl RouteSetupAuthorities {
                 request.exit.wire_node_id,
                 request.exit.peer_id,
             )
-            .await?;
+            .await
+            .inspect_err(|_| {
+                let _ = RouteAuthorityRejection::ExitLookup.record();
+            })?;
         let mut datapath_relays = Vec::with_capacity(request.paths.len());
         for path in &request.paths {
-            datapath_relays.push(path.proof.resolve(resolver).await?);
+            datapath_relays.push(path.proof.resolve(resolver).await.inspect_err(|_| {
+                let _ = RouteAuthorityRejection::DataRelayLookup.record();
+            })?);
         }
         let authorities = Self {
             control: control_capability,
@@ -3733,14 +3771,19 @@ impl RouteSetupAuthorities {
     }
 
     fn validate(&self, request: &RouteSetupRequest) -> Result<(), RouteSetupError> {
+        self.validate_binding(request)
+            .map_err(RouteAuthorityRejection::record)
+    }
+
+    fn validate_binding(&self, request: &RouteSetupRequest) -> Result<(), RouteAuthorityRejection> {
         let forwarded = ProspectiveForwardedExit::from_capabilities(&self.control, &self.exit)
-            .map_err(|_| RouteSetupError::Capability)?;
+            .map_err(|_| RouteAuthorityRejection::ForwardedBinding)?;
         let route_required_expiry = request.parameters.expires_at_ms;
         let setup_required_expiry = request
             .parameters
             .setup_expires_at_unix
             .checked_mul(1_000)
-            .ok_or(RouteSetupError::Capability)?;
+            .ok_or(RouteAuthorityRejection::Expiry)?;
         let selected_exit_expiry = self
             .exit
             .exit_advertisement_expires_at_ms
@@ -3758,7 +3801,7 @@ impl RouteSetupAuthorities {
             || self.control.policy_hash != request.parameters.policy_hash
             || self.exit.policy_hash != request.parameters.policy_hash
         {
-            return Err(RouteSetupError::Capability);
+            return Err(RouteAuthorityRejection::SelectedBinding);
         }
         if self.control.expires_at_ms < setup_required_expiry
             || self.exit.expires_at_ms < setup_required_expiry
@@ -3767,7 +3810,7 @@ impl RouteSetupAuthorities {
             || self.control.policy_expires_at_ms < route_required_expiry
             || self.exit.policy_expires_at_ms < route_required_expiry
         {
-            return Err(RouteSetupError::Capability);
+            return Err(RouteAuthorityRejection::Expiry);
         }
 
         let mut nodes = BTreeSet::from([self.control.node_id, self.exit.exit_node_id]);
@@ -3786,7 +3829,7 @@ impl RouteSetupAuthorities {
                 || !peers.insert(capability.peer_id.to_bytes())
                 || !public_keys.insert(capability.public_key)
             {
-                return Err(RouteSetupError::Capability);
+                return Err(RouteAuthorityRejection::DataRelayBinding);
             }
         }
         Ok(())
@@ -13637,6 +13680,45 @@ mod tests {
             authorities.validate(&fixture.transaction.transaction.request),
             Err(RouteSetupError::Capability)
         );
+    }
+
+    #[tokio::test]
+    async fn actor_authority_diagnostics_distinguish_changed_binding_and_expiry() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let request = &fixture.transaction.transaction.request;
+        let original = &fixture.transaction.transaction.authorities;
+        assert_eq!(original.validate_binding(request), Ok(()));
+
+        let mut changed = original.clone();
+        changed.exit.exit_advertisement_sequence += 1;
+        assert_eq!(
+            changed.validate_binding(request),
+            Err(RouteAuthorityRejection::SelectedBinding)
+        );
+        assert_eq!(changed.validate(request), Err(RouteSetupError::Capability));
+
+        let mut shortened = original.clone();
+        shortened.exit.expires_at_ms = request.parameters.setup_expires_at_unix * 1_000 - 1;
+        assert_eq!(
+            shortened.validate_binding(request),
+            Err(RouteAuthorityRejection::Expiry)
+        );
+        assert_eq!(
+            shortened.validate(request),
+            Err(RouteSetupError::Capability)
+        );
+
+        let mut wrong_relay = original.clone();
+        wrong_relay.datapath_relays[0] = wrong_relay.control.clone();
+        assert_eq!(
+            wrong_relay.validate_binding(request),
+            Err(RouteAuthorityRejection::DataRelayBinding)
+        );
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("clean diagnostic fixture shutdown");
     }
 
     #[tokio::test]
