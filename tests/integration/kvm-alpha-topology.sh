@@ -68,7 +68,8 @@ print_plan() {
             '  require two native MPQUIC paths through distinct LAN/public Relays to the same Exit;' \
             '  capture actual payload on both WireGuard legs per path and reject direct/privacy leaks;' \
             '  remove every owned object and verify unchanged guest-root host state;' \
-            '  emit mixed-link-smoke.json; no bandwidth aggregation, radio or A01-A15 claim.'
+            '  compare WAN-only and LAN+WAN HTTP/3 downloads with independently capped links;' \
+            '  emit mixed-link-smoke.json; no physical-radio, arbitrary-link speed or A01-A15 claim.'
         return
     fi
     if [ "$scenario" = sharing ]; then
@@ -2372,6 +2373,8 @@ counters = (
         "relay2_wireguard_data_datagrams": 0,
         "relay1_wireguard_data_bytes": 0,
         "relay2_wireguard_data_bytes": 0,
+        "relay1_received_wireguard_data_bytes": 0,
+        "relay2_received_wireguard_data_bytes": 0,
         "direct_client_exit_packets": 0,
     }
     if role == "client"
@@ -2403,6 +2406,8 @@ payload_samples = {
     "destination_requests": [],
     "destination_responses": [],
 }
+for capture in sockets:
+    capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
 
 
 def sample_payload(bucket, frame, transport_offset, udp_length):
@@ -2482,12 +2487,16 @@ while running and time.monotonic() < deadline:
                     if interface == "cr1" and {source, destination} == relay1_client_pair:
                         counters["relay1_wireguard_data_datagrams"] += 1
                         counters["relay1_wireguard_data_bytes"] += udp_length - 8
+                        if destination == ("10.241.11.1" if direct_lan_relay1 else "43.159.1.1"):
+                            counters["relay1_received_wireguard_data_bytes"] += udp_length - 8
                     if interface == "cr2" and {source, destination} == {
                         "43.159.1.1",
                         "45.161.2.1",
                     }:
                         counters["relay2_wireguard_data_datagrams"] += 1
                         counters["relay2_wireguard_data_bytes"] += udp_length - 8
+                        if destination == "43.159.1.1":
+                            counters["relay2_received_wireguard_data_bytes"] += udp_length - 8
                 if interface.startswith("vpih") and protocol == socket.IPPROTO_UDP:
                     if source == "43.159.1.1" and destination == "47.163.4.2" \
                             and destination_port == 443:
@@ -2522,7 +2531,10 @@ while running and time.monotonic() < deadline:
                             "destination_responses", frame, transport_offset, udp_length
                         )
 
+packet_socket_drops = 0
 for capture in sockets:
+    _, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
+    packet_socket_drops += drops
     capture.close()
 after_marker = None
 if before_marker is not None:
@@ -2539,6 +2551,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "before_marker": before_marker,
             "after_marker": after_marker,
             "payload_samples": payload_samples,
+            "packet_socket_drops": packet_socket_drops,
             **counters,
         },
         output,
@@ -2635,6 +2648,7 @@ def record_unexpected_outer_tuple(interface, protocol, source, source_port, dest
 sockets = {}
 for interface in interfaces:
     capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+    capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
     capture.bind((interface, 0))
     capture.setblocking(False)
     sockets[capture] = interface
@@ -2835,7 +2849,10 @@ while running and time.monotonic() < deadline:
                 } == {"45.161.2.1", "46.162.3.1"}:
                     counters["relay2_wireguard_data_datagrams"] += 1
 
+packet_socket_drops = 0
 for capture in sockets:
+    _, drops = struct.unpack("II", capture.getsockopt(263, 6, 8))
+    packet_socket_drops += drops
     capture.close()
 with open(output_path, "x", encoding="ascii") as output:
     json.dump(
@@ -2846,6 +2863,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "observed_frames": observed_frames,
             "truncated": truncated,
             "expected_link_down_interfaces": link_down_interfaces,
+            "packet_socket_drops": packet_socket_drops,
             "unexpected_outer_tuples": [
                 {
                     "interface": key[0], "protocol": key[1], "source": key[2],
@@ -5271,14 +5289,20 @@ wait_active_native_mpquic_paths a06-preconnect-native-paths \
     || fail A06_MULTIPATH_ROUTE_NOT_ACTIVE
 fi
 
-timeout --signal=TERM --kill-after=5s 420s \
+http3_server_timeout=420s
+set --
+if [ "$scenario" = mixed-link ]; then
+    http3_server_timeout=1500s
+    set -- mixed-link
+fi
+timeout --signal=TERM --kill-after=5s "$http3_server_timeout" \
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
     --clear-groups --inh-caps=+net_bind_service \
     --ambient-caps=+net_bind_service --bounding-set=+net_bind_service \
     --no-new-privs -- \
     "$WORK/bin/examples/http3-acceptance-fixture" server \
     47.163.4.2:443 "$WORK/destination/http3-cert.der" \
-    "$WORK/destination/http3-server.ready" "$WORK/destination" "$RUN_ID" \
+    "$WORK/destination/http3-server.ready" "$WORK/destination" "$RUN_ID" "$@" \
     >"$WORK/http3-server.log" 2>&1 &
 HTTP3_SERVER_PID=$!
 attempt=0
@@ -5427,6 +5451,7 @@ PHASE=a06-complete
 if [ "$scenario" = mixed-link ]; then
     stop_privacy_observers || fail MIXED_LINK_PRIVACY_CAPTURE_FAILED
     mixed_link_validate_evidence || fail MIXED_LINK_DATAPATH_NOT_PROVEN
+    mixed_link_bandwidth_run || fail MIXED_LINK_BANDWIDTH_NOT_PROVEN
     PHASE=mixed-link-complete
     OBSERVED_BLOCKER=
     exit 0

@@ -43,6 +43,12 @@ class Capture:
     def setblocking(self, _enabled):
         pass
 
+    def setsockopt(self, *_args):
+        pass
+
+    def getsockopt(self, *_args):
+        return struct.pack("II", 0, 0)
+
     def recv(self, _maximum):
         try:
             return next(self.frames)
@@ -75,6 +81,102 @@ def capture(name, role, interfaces, frames, local):
 
 
 class MixedLinkTests(unittest.TestCase):
+    def test_bandwidth_comparison_keeps_real_path_payload_and_gain_gates(self):
+        def records():
+            result = {}
+            privacy = []
+            for index, case in enumerate(("single", "aggregate")):
+                prefix = "mixed-link-" + case
+                context = str(index + 1) * 32
+                native = {"route_context_id": context, "paths": [
+                    {"relay_peer_id": relay, "exit_peer_id": "exit", "state": 3, "path_id": path + 1}
+                    for path, relay in enumerate(("lan", "wan"))]}
+                app = {"case": "mixed-" + case, "protocol": "HTTP/3", "http_version": "HTTP/3",
+                    "negotiated_alpn": "h3", "application": {"ip": "43.159.1.1", "port": 52016 + index},
+                    "destination": {"ip": "47.163.4.2", "port": 443}, "request_bytes": 4194304,
+                    "response_bytes": 33554432, "request_sha256": "a" * 64,
+                    "response_sha256": str(index + 1) * 64,
+                    "response_duration_ns": 40_000_000_000 if case == "single" else 25_000_000_000}
+                destination = dict(app, source={"ip": "47.163.4.1"}, release_observed=True,
+                                   peer_completion_observed=True)
+                result[prefix + "-client.json"] = app
+                result[prefix + "-destination.json"] = destination
+                for stage in ("before", "request-active", "after"):
+                    result[prefix + "-" + stage + ".json"] = copy.deepcopy(native)
+                for role in ("client", "exit"):
+                    result[prefix + "-" + role + "-capture.json"] = {
+                        "truncated": False, "packet_socket_drops": 0, "observed_frames": 100,
+                        "marker_observed": True, "after_marker": {
+                            "relay1_wireguard_data_bytes": 0 if case == "single" else 16_777_216,
+                            "relay2_wireguard_data_bytes": 34_000_000 if case == "single" else 17_777_216,
+                            "relay1_received_wireguard_data_bytes": 0 if case == "single" else 16_777_216,
+                            "relay2_received_wireguard_data_bytes": 34_000_000 if case == "single" else 17_777_216}}
+                result[prefix + "-response-qdisc-bytes.json"] = {
+                    "relay1": 0 if case == "single" else 16_777_216,
+                    "relay2": 34_000_000 if case == "single" else 17_777_216}
+                for interface in ("r1c", "r1x"):
+                    result[prefix + "-" + interface + "-release.json"] = [{
+                        "ifname": interface, "ifindex": 3 if interface == "r1c" else 4,
+                        "flags": [] if case == "single" and interface == "r1c" else ["UP"]}]
+                for role in ("client", "relay1", "relay2", "exit"):
+                    down = case == "single" and role == "relay1"
+                    privacy.append({"benchmark": "mixed-" + case, "capture_role": role,
+                        "truncated": False, "packet_socket_drops": 0, "observed_frames": 100,
+                        "unexpected_outer_packets": 0, "direct_client_exit_packets": 0,
+                        "internet_destination_outer_packets": 4 if role == "exit" else 0,
+                        "client_public_packets": 0,
+                        "expected_link_down_notifications": int(down),
+                        "expected_link_down_interfaces": {"r1c": 1} if down else {}})
+            result["mixed-link-bandwidth-privacy.json"] = privacy
+            for interface in ("r1c", "r2c"):
+                result["mixed-link-shape-" + interface + ".json"] = [
+                    {"kind": "tbf", "root": True, "options": {"rate": 1_000_000}}]
+            return result
+
+        def evaluate(data):
+            with tempfile.TemporaryDirectory(prefix="volparossa-mixed-bandwidth-") as temporary:
+                work = Path(temporary)
+                for name, record in data.items():
+                    (work / name).write_text(json.dumps(record), encoding="ascii")
+                run = subprocess.run(["sh", "-c", '. "$1"; WORK=$2; R1_PEER=lan; R2_PEER=wan; '
+                    'EXIT_PEER=exit; mixed_link_bandwidth_validate', "mixed-bandwidth-test",
+                    str(HERE / "mixed-link-smoke.sh"), temporary], capture_output=True, text=True)
+                return run.returncode, run.stderr
+
+        valid = records()
+        self.assertEqual(evaluate(valid), (0, ""))
+        for mutation in (
+            lambda d: d["mixed-link-aggregate-client.json"].update(response_duration_ns=32_000_000_000),
+            lambda d: d["mixed-link-aggregate-after.json"]["paths"].pop(),
+            lambda d: d["mixed-link-aggregate-request-active.json"]["paths"][0].update(state=1),
+            lambda d: d["mixed-link-aggregate-before.json"].update(route_context_id="1" * 32),
+            lambda d: d["mixed-link-single-r1c-release.json"][0].update(flags=["UP"]),
+            lambda d: d["mixed-link-single-r1x-release.json"][0].update(flags=[]),
+            lambda d: d["mixed-link-aggregate-r1c-release.json"][0].update(ifindex=9),
+            lambda d: d["mixed-link-single-client-capture.json"]["after_marker"].update(relay1_received_wireguard_data_bytes=1),
+            lambda d: d["mixed-link-aggregate-exit-capture.json"]["after_marker"].update(relay1_wireguard_data_bytes=0),
+            lambda d: d["mixed-link-aggregate-client-capture.json"].update(packet_socket_drops=1),
+            lambda d: d["mixed-link-aggregate-destination.json"].update(response_sha256="bad"),
+            lambda d: d["mixed-link-single-destination.json"]["source"].update(ip="43.159.1.1"),
+            lambda d: d["mixed-link-bandwidth-privacy.json"][0].update(unexpected_outer_packets=1),
+            lambda d: d["mixed-link-bandwidth-privacy.json"][1].update(expected_link_down_interfaces={"r1x": 1}),
+            lambda d: d["mixed-link-bandwidth-privacy.json"].pop(),
+            lambda d: d["mixed-link-shape-r1c.json"][0]["options"].update(rate=8_000_000),
+            lambda d: d["mixed-link-single-after.json"]["paths"][1].update(path_id=3),
+        ):
+            data = records()
+            mutation(data)
+            self.assertNotEqual(evaluate(data)[0], 0)
+
+    def test_directional_received_payload_does_not_count_outbound_path_probes(self):
+        for relay, pair, interface in (("relay1", ("10.241.11.1", "10.241.11.2"), "cr1"),
+                                       ("relay2", ("43.159.1.1", "45.161.2.1"), "cr2")):
+            outgoing = capture("a06-observer.py", "client", [interface], [[wireguard_frame(*pair)]], True)
+            incoming = capture("a06-observer.py", "client", [interface], [[wireguard_frame(*reversed(pair))]], True)
+            self.assertGreater(outgoing[relay + "_wireguard_data_bytes"], 0)
+            self.assertEqual(outgoing[relay + "_received_wireguard_data_bytes"], 0)
+            self.assertGreater(incoming[relay + "_received_wireguard_data_bytes"], 0)
+
     def test_http3_observer_requires_the_explicit_exact_lan_pairs(self):
         for role, interface, endpoints in [
             ("client", "cr1", ("10.241.11.1", "10.241.11.2")),

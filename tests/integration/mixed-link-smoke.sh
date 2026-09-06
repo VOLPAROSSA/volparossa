@@ -105,6 +105,216 @@ mixed_link_select_paths() {
         && wait_active_native_mpquic_paths a06-preconnect-native-paths
 }
 
+# shellcheck disable=SC2034 # Parent cleanup/stop_privacy_observers owns these four process slots.
+mixed_link_bandwidth_privacy_start() {
+    mixed_privacy_dir="$WORK/$mixed_prefix-privacy"
+    install -d -o root -g root -m 0700 "$mixed_privacy_dir"
+    for mixed_capture_node in client relay1 relay2 exit; do
+        case $mixed_capture_node in
+            client) mixed_capture_ns=$CLIENT; set -- cr0 cr1 cr2 cr3 cr4 cr5 cb1 cb2 underlay ;;
+            relay1) mixed_capture_ns=$R1; set -- r1c r1x ;;
+            relay2) mixed_capture_ns=$R2; set -- r2c r2x underlay ;;
+            exit) mixed_capture_ns=$EXIT_NODE; set -- xr0 xr1 xr2 xr3 xr4 xr5 xd underlay ;;
+        esac
+        ip netns exec "$mixed_capture_ns" python3 -B "$WORK/bin/privacy-observer.py" \
+            "$mixed_capture_node" "$mixed_privacy_dir/$mixed_capture_node.json" \
+            "$mixed_privacy_dir/$mixed_capture_node.ready" --direct-lan-relay1 "$@" \
+            >"$mixed_privacy_dir/$mixed_capture_node.log" 2>&1 &
+        mixed_capture_pid=$!
+        case $mixed_capture_node in
+            client) PRIVACY_CLIENT_PID=$mixed_capture_pid ;;
+            relay1) PRIVACY_RELAY1_PID=$mixed_capture_pid ;;
+            relay2) PRIVACY_RELAY2_PID=$mixed_capture_pid ;;
+            exit) PRIVACY_EXIT_PID=$mixed_capture_pid ;;
+        esac
+        wait_observer "$mixed_capture_pid" "$mixed_privacy_dir/$mixed_capture_node.ready" || return 1
+    done
+}
+
+mixed_link_bandwidth_case() {
+    mixed_case=$1; mixed_port=$2
+    mixed_prefix="mixed-link-${mixed_case#mixed-}"
+    PHASE="$mixed_prefix-selection"
+    benchmark_disconnect_route "$mixed_prefix" || return 1
+    benchmark_select_route "$mixed_prefix" multipath-quic || return 1
+    wait_active_native_mpquic_paths "$mixed_prefix-before" || return 1
+    mixed_link_bandwidth_privacy_start || return 1
+    start_http3_observers "$mixed_prefix" "$WORK/$mixed_prefix-response.marker" || return 1
+    PHASE="$mixed_prefix-request"
+    timeout --signal=TERM --kill-after=5s 200s \
+        ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+        --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
+        "$WORK/bin/examples/http3-acceptance-fixture" client "$mixed_case" \
+        "43.159.1.1:$mixed_port" 47.163.4.2:443 "$WORK/client-fixtures/http3-cert.der" \
+        "$RUN_ID" "$WORK/client-fixtures/$mixed_case.json" \
+        >"$WORK/$mixed_prefix-client.log" 2>"$WORK/$mixed_prefix-client.err" &
+    HTTP3_CLIENT_PID=$!
+    mixed_ready_attempt=0
+    while [ "$mixed_ready_attempt" -lt 300 ]; do
+        [ ! -s "$WORK/destination/$mixed_case-active.ready" ] || break
+        kill -0 "$HTTP3_CLIENT_PID" 2>/dev/null || return 1
+        sleep 0.1
+        mixed_ready_attempt=$((mixed_ready_attempt + 1))
+    done
+    [ -s "$WORK/destination/$mixed_case-active.ready" ] || return 1
+    kill -0 "$HTTP3_CLIENT_PID" || return 1
+    wait_active_native_mpquic_paths "$mixed_prefix-request-active" || return 1
+    if [ "$mixed_case" = mixed-single ]; then
+        # Gate the same active application, not a replacement one-path QUIC connection.
+        install -o root -g root -m 0600 /dev/null "$mixed_privacy_dir/a07-privacy-link-down.marker"
+        ip -n "$R1" link set r1c down
+    fi
+    ip -n "$R1" -j link show dev r1c >"$WORK/$mixed_prefix-r1c-release.json"
+    ip -n "$R1" -j link show dev r1x >"$WORK/$mixed_prefix-r1x-release.json"
+    mixed_before_r1=$(tc_sent_bytes "$R1" r1c) || return 1
+    mixed_before_r2=$(tc_sent_bytes "$R2" r2c) || return 1
+    install -o root -g root -m 0600 /dev/null "$WORK/$mixed_prefix-response.marker"
+    # Observers poll at 200ms; open the response gate only after the marker can be consumed.
+    sleep 0.3
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 /dev/null "$WORK/destination/$mixed_case.release"
+    PHASE="$mixed_prefix-response"
+    mixed_client_status=0
+    wait "$HTTP3_CLIENT_PID" || mixed_client_status=$?
+    HTTP3_CLIENT_PID=
+    mixed_after_r1=$(tc_sent_bytes "$R1" r1c) || return 1
+    mixed_after_r2=$(tc_sent_bytes "$R2" r2c) || return 1
+    stop_observers || return 1
+    stop_privacy_observers || return 1
+    [ "$mixed_client_status" -eq 0 ] || return 1
+    mixed_requirement=both
+    [ "$mixed_case" != mixed-single ] || mixed_requirement=relay2
+    wait_native_mpquic_paths "$mixed_prefix-after" "$mixed_requirement" || return 1
+    mixed_server_attempt=0
+    while [ ! -s "$WORK/destination/server-$mixed_case.json" ] && [ "$mixed_server_attempt" -lt 100 ]; do
+        sleep 0.1
+        mixed_server_attempt=$((mixed_server_attempt + 1))
+    done
+    install -o root -g root -m 0600 "$WORK/client-fixtures/$mixed_case.json" \
+        "$WORK/$mixed_prefix-client.json" || return 1
+    install -o root -g root -m 0600 "$WORK/destination/server-$mixed_case.json" \
+        "$WORK/$mixed_prefix-destination.json" || return 1
+    jq -cn --argjson before_r1 "$mixed_before_r1" --argjson after_r1 "$mixed_after_r1" \
+        --argjson before_r2 "$mixed_before_r2" --argjson after_r2 "$mixed_after_r2" \
+        '{relay1:($after_r1-$before_r1),relay2:($after_r2-$before_r2)}' \
+        >"$WORK/$mixed_prefix-response-qdisc-bytes.json" || return 1
+    for mixed_capture_node in client relay1 relay2 exit; do
+        install -o root -g root -m 0600 "$mixed_privacy_dir/$mixed_capture_node.json" \
+            "$WORK/$mixed_prefix-privacy-$mixed_capture_node.json" || return 1
+    done
+    if [ "$mixed_case" = mixed-single ]; then
+        ip -n "$R1" link set r1c up
+        mixed_link_snapshot_local_relay bandwidth-restored
+    fi
+}
+
+mixed_link_bandwidth_validate() {
+    jq -S -cn \
+        --slurpfile sc "$WORK/mixed-link-single-client.json" --slurpfile sd "$WORK/mixed-link-single-destination.json" \
+        --slurpfile ac "$WORK/mixed-link-aggregate-client.json" --slurpfile ad "$WORK/mixed-link-aggregate-destination.json" \
+        --slurpfile sb "$WORK/mixed-link-single-before.json" --slurpfile sr "$WORK/mixed-link-single-request-active.json" \
+        --slurpfile sa "$WORK/mixed-link-single-after.json" --slurpfile ab "$WORK/mixed-link-aggregate-before.json" \
+        --slurpfile ar "$WORK/mixed-link-aggregate-request-active.json" --slurpfile aa "$WORK/mixed-link-aggregate-after.json" \
+        --slurpfile spc "$WORK/mixed-link-single-client-capture.json" --slurpfile spe "$WORK/mixed-link-single-exit-capture.json" \
+        --slurpfile apc "$WORK/mixed-link-aggregate-client-capture.json" --slurpfile ape "$WORK/mixed-link-aggregate-exit-capture.json" \
+        --slurpfile sq "$WORK/mixed-link-single-response-qdisc-bytes.json" --slurpfile aq "$WORK/mixed-link-aggregate-response-qdisc-bytes.json" \
+        --slurpfile slc "$WORK/mixed-link-single-r1c-release.json" --slurpfile slx "$WORK/mixed-link-single-r1x-release.json" \
+        --slurpfile alc "$WORK/mixed-link-aggregate-r1c-release.json" --slurpfile alx "$WORK/mixed-link-aggregate-r1x-release.json" \
+        --slurpfile shape1 "$WORK/mixed-link-shape-r1c.json" --slurpfile shape2 "$WORK/mixed-link-shape-r2c.json" \
+        --slurpfile privacy "$WORK/mixed-link-bandwidth-privacy.json" \
+        --arg r1 "$R1_PEER" --arg r2 "$R2_PEER" --arg exit "$EXIT_PEER" '
+        def app($app;$dest;$case;$port):
+          $app.case == $case and $dest.case == $case and
+          $app.protocol == "HTTP/3" and $app.http_version == "HTTP/3" and $app.negotiated_alpn == "h3" and
+          $app.application == {ip:"43.159.1.1",port:$port} and $app.destination == {ip:"47.163.4.2",port:443} and
+          $app.request_bytes == 4194304 and $dest.request_bytes == 4194304 and
+          $app.response_bytes == 33554432 and $dest.response_bytes == 33554432 and
+          $app.request_sha256 == $dest.request_sha256 and $app.response_sha256 == $dest.response_sha256 and
+          ($app.request_sha256 | test("^[0-9a-f]{64}$")) and ($app.response_sha256 | test("^[0-9a-f]{64}$")) and
+          $dest.source.ip == "47.163.4.1" and $dest.release_observed and $dest.peer_completion_observed and
+          $app.response_duration_ns > 0;
+        def two($native): ($native.paths|length)==2 and
+          ([$native.paths[].relay_peer_id]|sort)==([$r1,$r2]|sort) and
+          ([$native.paths[].path_id]|unique|length)==2 and
+          all($native.paths[]; .state==3 and .exit_peer_id==$exit);
+        def complete($capture): $capture.truncated==false and $capture.packet_socket_drops==0 and
+          $capture.observed_frames>0 and $capture.marker_observed;
+        def both_payload($capture): $capture.after_marker.relay1_wireguard_data_bytes>1048576 and
+          $capture.after_marker.relay2_wireguard_data_bytes>1048576;
+        ($sc[0].response_duration_ns / $ac[0].response_duration_ns) as $ratio |
+        (app($sc[0];$sd[0];"mixed-single";52016) and app($ac[0];$ad[0];"mixed-aggregate";52017) and
+          $sc[0].response_sha256!=$ac[0].response_sha256 and
+          two($sb[0]) and two($sr[0]) and two($ab[0]) and two($ar[0]) and two($aa[0]) and
+          $sb[0].route_context_id==$sr[0].route_context_id and $sb[0].route_context_id==$sa[0].route_context_id and
+          $ab[0].route_context_id==$ar[0].route_context_id and $ab[0].route_context_id==$aa[0].route_context_id and
+          $sb[0].route_context_id!=$ab[0].route_context_id and
+          any($sa[0].paths[]; .relay_peer_id==$r2 and .exit_peer_id==$exit and .state==3) and
+          ([$sb[0].paths[]|select(.relay_peer_id==$r2)|.path_id])==([$sa[0].paths[]|select(.relay_peer_id==$r2)|.path_id]) and
+          all([$shape1[0],$shape2[0]][]; any(.[]; .kind=="tbf" and .root==true and .options.rate==1000000)) and
+          ($slc[0]|length)==1 and ($slx[0]|length)==1 and ($alc[0]|length)==1 and ($alx[0]|length)==1 and
+          $slc[0][0].ifname=="r1c" and ($slc[0][0].flags|index("UP"))==null and
+          ($slx[0][0].flags|index("UP"))!=null and ($alc[0][0].flags|index("UP"))!=null and
+          ($alx[0][0].flags|index("UP"))!=null and $slc[0][0].ifindex==$alc[0][0].ifindex and
+          all([$spc[0],$spe[0],$apc[0],$ape[0]][]; complete(.)) and
+          $spc[0].after_marker.relay1_received_wireguard_data_bytes==0 and
+          $spc[0].after_marker.relay2_received_wireguard_data_bytes>1048576 and
+          $spe[0].after_marker.relay2_wireguard_data_bytes>1048576 and both_payload($apc[0]) and both_payload($ape[0]) and
+          $apc[0].after_marker.relay1_received_wireguard_data_bytes>1048576 and
+          $apc[0].after_marker.relay2_received_wireguard_data_bytes>1048576 and
+          $sq[0].relay1==0 and $sq[0].relay2>33554432 and $aq[0].relay1>1048576 and $aq[0].relay2>1048576 and
+          ($privacy[0]|length)==8 and
+          all(["mixed-single","mixed-aggregate"][]; . as $case |
+            ([$privacy[0][]|select(.benchmark==$case)|.capture_role]|sort)==["client","exit","relay1","relay2"]) and
+          all($privacy[0][]; .truncated==false and .packet_socket_drops==0 and .observed_frames>0 and
+            .unexpected_outer_packets==0 and .direct_client_exit_packets==0) and
+          all($privacy[0][]|select(.capture_role!="exit"); .internet_destination_outer_packets==0) and
+          all($privacy[0][]|select(.capture_role=="exit"); .client_public_packets==0) and
+          all($privacy[0][]|select(.benchmark=="mixed-aggregate"); .expected_link_down_notifications==0) and
+          all($privacy[0][]|select(.expected_link_down_notifications>0);
+            .benchmark=="mixed-single" and .capture_role=="relay1" and (.expected_link_down_interfaces|keys)==["r1c"]) and
+          $ratio>1.25) as $success |
+        {success:$success,minimum_ratio_exclusive:1.25,aggregate_to_wan_only_ratio:$ratio,
+          single_wan_only:{application:$sc[0],destination:$sd[0],native_before:$sb[0],native_after:$sa[0],
+            application_response_mbps:($sc[0].response_bytes*8000/$sc[0].response_duration_ns),
+            response_qdisc_bytes:$sq[0],client_capture:$spc[0],exit_capture:$spe[0],lan_link_at_release:$slc[0][0]},
+          lan_plus_wan:{application:$ac[0],destination:$ad[0],native_before:$ab[0],native_after:$aa[0],
+            application_response_mbps:($ac[0].response_bytes*8000/$ac[0].response_duration_ns),
+            response_qdisc_bytes:$aq[0],client_capture:$apc[0],exit_capture:$ape[0],lan_link_at_release:$alc[0][0]},
+          shape:{relay1_client_egress_mbps:8,relay2_client_egress_mbps:8,
+            relay1_qdisc:$shape1[0],relay2_qdisc:$shape2[0]},privacy:$privacy[0],
+          ordinary_quic_fallback_allowed:false,application_pacing:false,
+          scope:"same 32MiB HTTP/3 response size on genuine native MPQUIC; WAN-only after deliberate LAN loss versus a fresh LAN+WAN route"}
+    ' >"$WORK/mixed-link-bandwidth.json" || return 1
+    jq -e '.success == true' "$WORK/mixed-link-bandwidth.json" >/dev/null
+}
+
+mixed_link_bandwidth_run() {
+    PHASE=mixed-link-bandwidth-shaping
+    for mixed_shape in "$R1:r1c" "$R2:r2c"; do
+        mixed_ns=${mixed_shape%:*}; mixed_interface=${mixed_shape#*:}
+        ip netns exec "$mixed_ns" tc qdisc replace dev "$mixed_interface" root tbf \
+            rate 8mbit burst 128kb latency 250ms
+        ip netns exec "$mixed_ns" tc -j -s qdisc show dev "$mixed_interface" \
+            >"$WORK/mixed-link-shape-$mixed_interface.json"
+        jq -e 'any(.[]; .kind=="tbf" and .root==true and .options.rate==1000000)' \
+            "$WORK/mixed-link-shape-$mixed_interface.json" >/dev/null || return 1
+    done
+    mixed_link_bandwidth_case mixed-single 52016 || return 1
+    mixed_link_bandwidth_case mixed-aggregate 52017 || return 1
+    wait "$HTTP3_SERVER_PID" || return 1
+    HTTP3_SERVER_PID=
+    # Keep the case identity separate from the observer role, without rewriting its counters.
+    jq -s '[to_entries[] | .value + {benchmark:(if .key<4 then "mixed-single" else "mixed-aggregate" end)}]' \
+        "$WORK"/mixed-link-single-privacy-*.json "$WORK"/mixed-link-aggregate-privacy-*.json \
+        >"$WORK/mixed-link-bandwidth-privacy.json"
+    mixed_link_bandwidth_validate || return 1
+    ip netns exec "$R1" tc qdisc del dev r1c root
+    ip netns exec "$R2" tc qdisc del dev r2c root
+    jq -c --slurpfile bandwidth "$WORK/mixed-link-bandwidth.json" \
+        '. + {bandwidth_aggregation_claimed:$bandwidth[0].success,bandwidth_comparison:$bandwidth[0]}' \
+        "$WORK/mixed-link-evidence.json" >"$WORK/mixed-link-combined-evidence.json"
+    # The report reads the combined file only after both independent functional gates passed.
+}
+
 mixed_link_validate_evidence() {
     mixed_link_snapshot_local_relay after
     jq -S -cn --slurpfile transfer "$WORK/a06-evidence.json" \
@@ -160,6 +370,8 @@ mixed_link_finalize_report() {
     mixed_evidence='{"success":false,"paths":[]}'
     [ ! -s "$WORK/mixed-link-evidence.json" ] \
         || mixed_evidence=$(cat "$WORK/mixed-link-evidence.json")
+    [ ! -s "$WORK/mixed-link-combined-evidence.json" ] \
+        || mixed_evidence=$(cat "$WORK/mixed-link-combined-evidence.json")
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
         --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
         --argjson status "$mixed_status" --argjson evidence "$mixed_evidence" \
@@ -172,7 +384,7 @@ mixed_link_finalize_report() {
           observed_blocker:(if $blocker == "" then null else $blocker end),
           cleanup:{complete:$complete,remaining_owned_objects:$remaining},
           host_state:($host[0] | del(.acceptance_id)),
-          scope:"real HTTP/3 over two native MPQUIC paths, one LAN Relay and one public Relay; no bandwidth aggregation, radio or A01-A15 claim"}
+          scope:"real HTTP/3 over LAN+WAN native MPQUIC paths plus bounded 8+8Mbps response comparison; no radio or A01-A15 claim"}
     ' >"$WORK/mixed-link-smoke.json" || return 1
     for mixed_artifact in "$WORK"/mixed-link-*.json "$WORK"/mixed-link-*.txt \
         "$WORK"/mixed-link-*.out "$WORK"/mixed-link-*.err; do

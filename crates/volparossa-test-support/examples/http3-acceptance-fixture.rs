@@ -39,6 +39,8 @@ type FixtureResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 enum AcceptanceCase {
     A06,
     A07,
+    MixedSingle,
+    MixedAggregate,
 }
 
 impl AcceptanceCase {
@@ -46,7 +48,9 @@ impl AcceptanceCase {
         match value {
             "a06" => Ok(Self::A06),
             "a07" => Ok(Self::A07),
-            _ => Err("case must be a06 or a07".into()),
+            "mixed-single" => Ok(Self::MixedSingle),
+            "mixed-aggregate" => Ok(Self::MixedAggregate),
+            _ => Err("unknown bounded HTTP/3 fixture case".into()),
         }
     }
 
@@ -54,14 +58,28 @@ impl AcceptanceCase {
         match self {
             Self::A06 => "a06",
             Self::A07 => "a07",
+            Self::MixedSingle => "mixed-single",
+            Self::MixedAggregate => "mixed-aggregate",
         }
     }
 
     const fn response_bytes(self) -> usize {
         match self {
             Self::A06 => A06_RESPONSE_BYTES,
-            Self::A07 => A07_RESPONSE_BYTES,
+            Self::A07 | Self::MixedSingle | Self::MixedAggregate => A07_RESPONSE_BYTES,
         }
+    }
+}
+
+fn server_cases(profile: Option<&str>) -> FixtureResult<&'static [AcceptanceCase]> {
+    match profile {
+        None => Ok(&[AcceptanceCase::A06, AcceptanceCase::A07]),
+        Some("mixed-link") => Ok(&[
+            AcceptanceCase::A06,
+            AcceptanceCase::MixedSingle,
+            AcceptanceCase::MixedAggregate,
+        ]),
+        Some(_) => Err("unknown HTTP/3 fixture server profile".into()),
     }
 }
 
@@ -76,8 +94,10 @@ async fn main() -> FixtureResult<()> {
             let ready = absolute_path(argument(&mut arguments, "ready path")?)?;
             let coordination = absolute_path(argument(&mut arguments, "coordination directory")?)?;
             let run_id = parse_run_id(&argument(&mut arguments, "run ID")?)?;
+            let profile = arguments.next();
+            let cases = server_cases(profile.as_deref())?;
             reject_extra(arguments)?;
-            run_server(listen, &certificate, &ready, &coordination, run_id).await
+            run_server(listen, &certificate, &ready, &coordination, run_id, cases).await
         }
         Some("client") => {
             let case = AcceptanceCase::parse(&argument(&mut arguments, "case")?)?;
@@ -152,6 +172,7 @@ async fn run_server(
     ready_path: &Path,
     coordination: &Path,
     run_id: [u8; 16],
+    cases: &[AcceptanceCase],
 ) -> FixtureResult<()> {
     let CertifiedKey { cert, key_pair } =
         generate_simple_self_signed(vec![TLS_SERVER_NAME.to_owned()])?;
@@ -172,8 +193,17 @@ async fn run_server(
     write_new(certificate_path, certificate.as_ref())?;
     write_new(ready_path, b"http3=ready\nalpn=h3\n")?;
 
-    for case in [AcceptanceCase::A06, AcceptanceCase::A07] {
-        let incoming = timeout(IO_DEADLINE, endpoint.accept())
+    for &case in cases {
+        // The optional mixed comparison performs bounded ordinary route redraws between flows.
+        let accept_deadline = if matches!(
+            case,
+            AcceptanceCase::MixedSingle | AcceptanceCase::MixedAggregate
+        ) {
+            Duration::from_secs(660)
+        } else {
+            IO_DEADLINE
+        };
+        let incoming = timeout(accept_deadline, endpoint.accept())
             .await
             .map_err(|_| "timed out waiting for HTTP/3 connection")?
             .ok_or("HTTP/3 endpoint closed before both cases")?;
@@ -230,9 +260,11 @@ async fn run_server(
             return Err("HTTP/3 request payload was incomplete or substituted".into());
         }
 
-        let release_observed = if case == AcceptanceCase::A07 {
-            let active_path = coordination.join("a07-active.ready");
-            let release_path = coordination.join("a07.release");
+        let release_observed = if case == AcceptanceCase::A06 {
+            false
+        } else {
+            let active_path = coordination.join(format!("{}-active.ready", case.label()));
+            let release_path = coordination.join(format!("{}.release", case.label()));
             write_new(&active_path, b"request-body-complete\n")?;
             let release_deadline = Instant::now() + RELEASE_DEADLINE;
             loop {
@@ -240,12 +272,10 @@ async fn run_server(
                     break true;
                 }
                 if Instant::now() >= release_deadline {
-                    return Err("A07 relay-removal release was not observed".into());
+                    return Err("HTTP/3 response-release barrier was not observed".into());
                 }
                 sleep(Duration::from_millis(50)).await;
             }
-        } else {
-            false
         };
 
         let response = http::Response::builder()
@@ -537,4 +567,41 @@ fn write_new(path: &Path, bytes: &[u8]) -> FixtureResult<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_profile_preserves_the_original_acceptance_sequence() {
+        assert_eq!(
+            server_cases(None).unwrap(),
+            &[AcceptanceCase::A06, AcceptanceCase::A07]
+        );
+        assert_eq!(
+            server_cases(Some("mixed-link")).unwrap(),
+            &[
+                AcceptanceCase::A06,
+                AcceptanceCase::MixedSingle,
+                AcceptanceCase::MixedAggregate,
+            ]
+        );
+        assert!(server_cases(Some("arbitrary")).is_err());
+    }
+
+    #[test]
+    fn mixed_comparison_has_equal_sizes_and_independent_payload_hashes() {
+        let single = AcceptanceCase::parse("mixed-single").unwrap();
+        let aggregate = AcceptanceCase::parse("mixed-aggregate").unwrap();
+        assert_eq!(single.response_bytes(), 32 * 1024 * 1024);
+        assert_eq!(single.response_bytes(), aggregate.response_bytes());
+        let single_seed = payload_seed(single, [1; 16], b"response");
+        let aggregate_seed = payload_seed(aggregate, [1; 16], b"response");
+        assert_ne!(
+            payload_sha256(&single_seed, CHUNK_BYTES),
+            payload_sha256(&aggregate_seed, CHUNK_BYTES)
+        );
+        assert_ne!(payload_seed(single, [1; 16], b"request"), single_seed);
+    }
 }
