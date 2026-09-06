@@ -159,6 +159,29 @@ mixed_link_bandwidth_prepare_route() {
     ' >/dev/null
 }
 
+mixed_link_bandwidth_export_available() {
+    # Failure must retain already-written evidence without inventing missing records.
+    mixed_export_status=0
+    for mixed_export_record in client destination; do
+        case $mixed_export_record in
+            client) mixed_export_source="$WORK/client-fixtures/$mixed_case.json" ;;
+            destination) mixed_export_source="$WORK/destination/server-$mixed_case.json" ;;
+        esac
+        if [ -f "$mixed_export_source" ] && [ ! -L "$mixed_export_source" ]; then
+            install -o root -g root -m 0600 "$mixed_export_source" \
+                "$WORK/$mixed_prefix-$mixed_export_record.json" || mixed_export_status=1
+        fi
+    done
+    for mixed_capture_node in client relay1 relay2 exit; do
+        mixed_export_source="$mixed_privacy_dir/$mixed_capture_node.json"
+        if [ -f "$mixed_export_source" ] && [ ! -L "$mixed_export_source" ]; then
+            install -o root -g root -m 0600 "$mixed_export_source" \
+                "$WORK/$mixed_prefix-privacy-$mixed_capture_node.json" || mixed_export_status=1
+        fi
+    done
+    return "$mixed_export_status"
+}
+
 mixed_link_bandwidth_case() {
     mixed_case=$1; mixed_port=$2
     mixed_prefix="mixed-link-${mixed_case#mixed-}"
@@ -205,31 +228,34 @@ mixed_link_bandwidth_case() {
     if [ "$mixed_client_status" -ne 0 ]; then
         capture_failed_native_mpquic_paths "$mixed_prefix"
     fi
-    mixed_after_r1=$(tc_sent_bytes "$R1" r1c) || return 1
-    mixed_after_r2=$(tc_sent_bytes "$R2" r2c) || return 1
-    stop_observers || return 1
-    stop_privacy_observers || return 1
-    [ "$mixed_client_status" -eq 0 ] || return 1
-    mixed_requirement=both
-    [ "$mixed_case" != mixed-single ] || mixed_requirement=relay2
-    wait_native_mpquic_paths "$mixed_prefix-after" "$mixed_requirement" || return 1
+    mixed_evidence_status=0
+    mixed_after_r1=$(tc_sent_bytes "$R1" r1c) || mixed_evidence_status=1
+    mixed_after_r2=$(tc_sent_bytes "$R2" r2c) || mixed_evidence_status=1
+    stop_observers || mixed_evidence_status=1
+    stop_privacy_observers || mixed_evidence_status=1
     mixed_server_attempt=0
     while [ ! -s "$WORK/destination/server-$mixed_case.json" ] && [ "$mixed_server_attempt" -lt 100 ]; do
         sleep 0.1
         mixed_server_attempt=$((mixed_server_attempt + 1))
     done
-    install -o root -g root -m 0600 "$WORK/client-fixtures/$mixed_case.json" \
-        "$WORK/$mixed_prefix-client.json" || return 1
-    install -o root -g root -m 0600 "$WORK/destination/server-$mixed_case.json" \
-        "$WORK/$mixed_prefix-destination.json" || return 1
-    jq -cn --argjson before_r1 "$mixed_before_r1" --argjson after_r1 "$mixed_after_r1" \
-        --argjson before_r2 "$mixed_before_r2" --argjson after_r2 "$mixed_after_r2" \
-        '{relay1:($after_r1-$before_r1),relay2:($after_r2-$before_r2)}' \
-        >"$WORK/$mixed_prefix-response-qdisc-bytes.json" || return 1
+    mixed_link_bandwidth_export_available || mixed_evidence_status=1
+    if [ -n "$mixed_after_r1" ] && [ -n "$mixed_after_r2" ]; then
+        jq -cn --argjson before_r1 "$mixed_before_r1" --argjson after_r1 "$mixed_after_r1" \
+            --argjson before_r2 "$mixed_before_r2" --argjson after_r2 "$mixed_after_r2" \
+            '{relay1:($after_r1-$before_r1),relay2:($after_r2-$before_r2)}' \
+            >"$WORK/$mixed_prefix-response-qdisc-bytes.json" || mixed_evidence_status=1
+    fi
+    [ "$mixed_client_status" -eq 0 ] || return 1
+    [ "$mixed_evidence_status" -eq 0 ] || return 1
+    [ -s "$WORK/$mixed_prefix-client.json" ] || return 1
+    [ -s "$WORK/$mixed_prefix-destination.json" ] || return 1
+    [ -s "$WORK/$mixed_prefix-response-qdisc-bytes.json" ] || return 1
     for mixed_capture_node in client relay1 relay2 exit; do
-        install -o root -g root -m 0600 "$mixed_privacy_dir/$mixed_capture_node.json" \
-            "$WORK/$mixed_prefix-privacy-$mixed_capture_node.json" || return 1
+        [ -s "$WORK/$mixed_prefix-privacy-$mixed_capture_node.json" ] || return 1
     done
+    mixed_requirement=both
+    [ "$mixed_case" != mixed-single ] || mixed_requirement=relay2
+    wait_native_mpquic_paths "$mixed_prefix-after" "$mixed_requirement" || return 1
     if [ "$mixed_case" = mixed-single ]; then
         ip -n "$R1" link set r1c up
         mixed_link_snapshot_local_relay bandwidth-restored

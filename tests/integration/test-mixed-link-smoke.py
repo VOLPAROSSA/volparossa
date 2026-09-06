@@ -85,6 +85,45 @@ def capture(name, role, interfaces, frames, local):
 
 
 class MixedLinkTests(unittest.TestCase):
+    def test_failed_client_preserves_available_evidence_without_masking_status(self):
+        script = HERE / "mixed-link-smoke.sh"
+        source = script.read_text(encoding="utf-8")
+        case = source.split("mixed_link_bandwidth_case() {", 1)[1].split(
+            "\nmixed_link_bandwidth_validate() {", 1)[0]
+        gate = '[ "$mixed_client_status" -eq 0 ] || return 1'
+        self.assertLess(case.index("mixed_link_bandwidth_export_available ||"), case.index(gate))
+        self.assertLess(case.index('>"$WORK/$mixed_prefix-response-qdisc-bytes.json"'), case.index(gate))
+        command = (
+            '. "$1"; WORK=$2; mixed_case=mixed-single; mixed_prefix=mixed-link-single; '
+            'mixed_privacy_dir="$WORK/privacy"; mixed_client_status=$3; '
+            'install() { shift 6; command install -m 0600 "$@"; }; '
+            'mixed_link_bandwidth_export_available || exit 2; '
+            '[ "$mixed_client_status" -eq 0 ] || exit 1'
+        )
+        with tempfile.TemporaryDirectory(prefix="volparossa-mixed-export-") as temporary:
+            work = Path(temporary)
+            for directory in ("client-fixtures", "destination", "privacy"):
+                (work / directory).mkdir()
+            records = {
+                "client-fixtures/mixed-single.json": {"endpoint_drain_completed": False},
+                "destination/server-mixed-single.json": {"peer_completion_observed": True},
+                "privacy/client.json": {"truncated": False, "packet_socket_drops": 0},
+            }
+            for name, value in records.items():
+                (work / name).write_text(json.dumps(value), encoding="ascii")
+            for status in (1, 0):
+                run = subprocess.run(["sh", "-c", command, "mixed-export-test", str(script),
+                    temporary, str(status)], capture_output=True, text=True)
+                self.assertEqual(run.returncode, status, run.stderr)
+                for original, exported in (
+                    ("client-fixtures/mixed-single.json", "client"),
+                    ("destination/server-mixed-single.json", "destination"),
+                    ("privacy/client.json", "privacy-client"),
+                ):
+                    self.assertEqual((work / original).read_bytes(),
+                        (work / f"mixed-link-single-{exported}.json").read_bytes())
+                self.assertFalse((work / "mixed-link-single-privacy-relay1.json").exists())
+
     def test_standalone_redraw_helpers_do_not_depend_on_the_skipped_alpha_branch(self):
         benchmark = HERE / "benchmark-selection.sh"
         self.assertNotIn("\nwait_disconnected() {", SOURCE)

@@ -6,6 +6,7 @@ use std::{
     env,
     error::Error,
     fs,
+    future::Future,
     io::Write as _,
     net::SocketAddr,
     os::unix::fs::OpenOptionsExt as _,
@@ -32,6 +33,8 @@ const CHUNK_BYTES: usize = 16 * 1024;
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const IO_DEADLINE: Duration = Duration::from_secs(180);
 const RELEASE_DEADLINE: Duration = Duration::from_secs(90);
+const ENDPOINT_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+const CLIENT_COMPLETION_REASON: &[u8] = b"HTTP/3 request complete";
 
 type FixtureResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -307,9 +310,10 @@ async fn run_server(
         // complete response. Keep the connection alive until the Client, which closes only after
         // validating every response byte, acknowledges completion by closing its QUIC connection.
         // A fixed sleep followed by a server-side close can reset a large response still in flight.
-        let _peer_close = timeout(IO_DEADLINE, connection.closed())
+        let peer_close = timeout(IO_DEADLINE, connection.closed())
             .await
             .map_err(|_| "timed out waiting for HTTP/3 peer completion")?;
+        validate_peer_completion(&peer_close)?;
 
         let evidence = json!({
             "schema_version": 1,
@@ -479,7 +483,7 @@ async fn run_client(
             return Err("HTTP/3 response duration was zero".into());
         }
         let complete_stats = inner_quic_stats(&exchange_connection.stats());
-        exchange_connection.close(quinn::VarInt::from_u32(0), b"HTTP/3 request complete");
+        exchange_connection.close(quinn::VarInt::from_u32(0), CLIENT_COMPLETION_REASON);
         Ok(json!({
             "schema_version": 1,
             "case": case.label(),
@@ -513,13 +517,38 @@ async fn run_client(
         }
     };
     let (exchange_result, drive_result) = tokio::join!(exchange, drive);
-    let evidence = exchange_result?;
+    let mut evidence = exchange_result?;
     drive_result?;
+    drop(connection);
+    endpoint.close(quinn::VarInt::from_u32(0), CLIENT_COMPLETION_REASON);
+    evidence["endpoint_drain_completed"] =
+        bounded_endpoint_drain(endpoint.wait_idle(), ENDPOINT_DRAIN_BUDGET)
+            .await
+            .into();
+    evidence["endpoint_drain_budget_ms"] = 5_000_u64.into();
     write_json_new(output, &evidence)?;
-    timeout(Duration::from_secs(5), endpoint.wait_idle())
-        .await
-        .map_err(|_| "HTTP/3 client endpoint did not become idle")?;
     Ok(())
+}
+
+// Quinn 0.11.11 documents wait_idle as a good-faith opportunity to transmit close,
+// not application-delivery proof. Its pinned protocol keeps closed connections
+// until 3 * PTO, which can exceed this fixed fixture budget after real failover.
+// Preserve the close-transmission opportunity, report a timed-out drain honestly,
+// and leave complete payload/hash and the server's exact peer-close gates intact.
+async fn bounded_endpoint_drain(wait_idle: impl Future<Output = ()>, budget: Duration) -> bool {
+    timeout(budget, wait_idle).await.is_ok()
+}
+
+fn validate_peer_completion(close: &quinn::ConnectionError) -> FixtureResult<()> {
+    match close {
+        quinn::ConnectionError::ApplicationClosed(close)
+            if close.error_code == quinn::VarInt::from_u32(0)
+                && close.reason.as_ref() == CLIENT_COMPLETION_REASON =>
+        {
+            Ok(())
+        }
+        _ => Err("HTTP/3 peer did not confirm validated response completion".into()),
+    }
 }
 
 fn negotiated_alpn(connection: &quinn::Connection) -> FixtureResult<Vec<u8>> {
@@ -605,6 +634,33 @@ fn inner_quic_stats(stats: &quinn::ConnectionStats) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn endpoint_drain_reports_budget_exhaustion_without_claiming_idle() {
+        assert!(bounded_endpoint_drain(std::future::ready(()), Duration::ZERO).await);
+        assert!(!bounded_endpoint_drain(std::future::pending(), Duration::ZERO).await);
+        assert_eq!(ENDPOINT_DRAIN_BUDGET, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn peer_completion_requires_the_exact_validated_response_close() {
+        let close = |code, reason: &'static [u8]| {
+            quinn::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+                error_code: quinn::VarInt::from_u32(code),
+                reason: Bytes::from_static(reason),
+            })
+        };
+        assert!(validate_peer_completion(&close(0, CLIENT_COMPLETION_REASON)).is_ok());
+        for error in [
+            quinn::ConnectionError::TimedOut,
+            quinn::ConnectionError::LocallyClosed,
+            quinn::ConnectionError::Reset,
+            close(1, CLIENT_COMPLETION_REASON),
+            close(0, b"another close"),
+        ] {
+            assert!(validate_peer_completion(&error).is_err());
+        }
+    }
 
     #[test]
     fn inner_quic_evidence_is_only_bounded_numeric_counters() {
