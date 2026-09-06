@@ -6,7 +6,20 @@ Last updated: 2026-09-06
 
 ## Current live integration checkpoint
 
-The latest [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038676673)
+The [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34041368472)
+and [mixed comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34041367509)
+at exact `3bacae04` now retain complete, zero-drop captures: the capture-stop repair is
+confirmed under the live workload. Both complete the real A06 two-path HTTP/3 exchange,
+but QUIC stalls after Relay1 is removed (A07 in v1, WAN-only baseline in mixed). Neither
+32-MiB response completes and no gain ratio exists. V1 passes A01--A06 and A15; A08 and
+the TLS repair were not reached. Both runs clean up completely with zero owned objects
+and unchanged guest state. CUBIC has therefore demonstrated no benefit in this experiment;
+the next build restores the previously failover-capable BBR2 on both endpoints while
+retaining the reactive pump, TLS flush and complete capture windows. This single-variable
+comparison distinguishes the changed congestion controller from the changed event loop;
+it does not yet prove which caused the failover regression.
+
+The preceding [full v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34038676673)
 at `6b6d3a10` passes A01--A07 and A15 but stops at A08: both DNS transports and the
 MPTCP route/descriptor handoff succeeded, then the destination TLS exchange timed out.
 A09--A14 were not reached. All capture buffers were actually 8 MiB with zero drops;

@@ -427,13 +427,7 @@ static vmp_transport_error_t configure_client(
             params->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
                 ? MQVPN_SCHED_VOLPAROSSA_EDT
                 : MQVPN_SCHED_MINRTT) == MQVPN_OK &&
-        /* The pinned xquic scheduler documents BBR multipath app-limit/CWND interaction.
-         * Compare CUBIC on the real multipath workload; the UDP-only mode stays unchanged. */
-        mqvpn_config_set_cc(
-            config,
-            params->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
-                ? MQVPN_CC_CUBIC
-                : MQVPN_CC_BBR2) == MQVPN_OK &&
+        mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
         mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
         mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==
             MQVPN_OK &&
@@ -1306,11 +1300,7 @@ static vmp_transport_error_t exit_backend_create(
             start->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
                 ? MQVPN_SCHED_VOLPAROSSA_EDT
                 : MQVPN_SCHED_MINRTT) == MQVPN_OK &&
-        mqvpn_config_set_cc(
-            config,
-            start->transport_mode == VMP_TRANSPORT_MODE_MULTIPATH_QUIC
-                ? MQVPN_CC_CUBIC
-                : MQVPN_CC_BBR2) == MQVPN_OK &&
+        mqvpn_config_set_cc(config, MQVPN_CC_BBR2) == MQVPN_OK &&
         mqvpn_config_set_reinjection(config, MQVPN_REINJ_OFF) == MQVPN_OK &&
         mqvpn_config_set_reorder_enabled(config, MQVPN_REORDER_OFF) ==
             MQVPN_OK &&
