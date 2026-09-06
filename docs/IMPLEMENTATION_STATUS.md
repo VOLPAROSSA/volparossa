@@ -53,6 +53,13 @@ Final objects/references/descriptors were zero and A15 passed, but A14 and `clea
 remain false. The fixture now preserves all individual crash results in their aggregate before
 the restart gate and exports a failed restart's observed state, rather than losing that evidence.
 Fixed, identity-free authority-join stage diagnostics also retain the existing rejection behavior.
+The restart-reaper parent also retained a duplicate child IPC descriptor in `Command` after
+spawn. An immediately rejected subprocess therefore hid EOF until its deadline: the focused
+reproducer failed at 2.01 seconds before release and completed immediately afterwards. Both
+restart-reaper spawns now release that duplicate. This does not identify the earlier fast A14
+startup rejection. Closed startup/custody phase, reason and errno diagnostics now retain its
+failure boundary without logging identities or changing recovery gates. Thirty-two focused
+server/reaper/custody checks and strict helper Clippy pass; live restart proof remains pending.
 
 The retained [complete v1 attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/33989949727)
 at `dbb89962` has finalized **passing A01--A13 and A15 evidence on one unchanged build**.
