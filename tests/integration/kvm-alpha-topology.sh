@@ -558,6 +558,10 @@ copy_artifacts() {
         a06-client-capture.json a06-client-capture.log a06-client-capture.err \
         a06-exit-capture.json a06-exit-capture.log a06-exit-capture.err \
         a06-native-paths.txt a06-native-paths.json a06-evidence.json \
+        a07-fresh-disconnect.out a07-fresh-disconnect.err \
+        a07-fresh-connect.out a07-fresh-connect.err \
+        a07-fresh-paths.txt a07-fresh-selection.json \
+        a07-native-preconnect.txt a07-native-preconnect.json native-route-windows.json \
         a07-client.json a07-client.err destination-a07-evidence.json \
         a07-client-capture.json a07-client-capture.log a07-client-capture.err \
         a07-exit-capture.json a07-exit-capture.log a07-exit-capture.err \
@@ -3957,6 +3961,22 @@ wait_active_native_mpquic_paths() {
     return 1
 }
 
+# A07 is a separate application flow. Start it on a fresh real route so its request
+# exercises bounded initial path exploration, not A06's historical scheduler state.
+a07_prepare_fresh_native_route() {
+    benchmark_disconnect_route a07-fresh || return 1
+    benchmark_select_route a07-fresh multipath-quic || return 1
+    native_bind_slots "$WORK/a07-fresh-selection.json" || return 1
+    wait_active_native_mpquic_paths a07-native-preconnect || return 1
+    jq -e -S -c -n \
+        --slurpfile a06 "$WORK/a06-native-paths.json" \
+        --slurpfile a07 "$WORK/a07-native-preconnect.json" \
+        'select($a06[0].route_context_id != $a07[0].route_context_id)
+         | {a06:($a06[0] | {route_context_id,benchmark_slots}),
+            a07:($a07[0] | {route_context_id,benchmark_slots})}' \
+        >"$WORK/native-route-windows.json"
+}
+
 start_http3_observers() {
     http3_prefix=$1
     http3_marker=$2
@@ -5666,9 +5686,11 @@ if [ "$scenario" = mixed-link ]; then
     exit 0
 fi
 
-PHASE=a07-active-http3-relay-removal
+PHASE=a07-fresh-native-route
 A07_REQUESTED=true
 A07_STATUS=1
+a07_prepare_fresh_native_route || fail A07_FRESH_NATIVE_ROUTE_UNAVAILABLE
+PHASE=a07-active-http3-relay-removal
 start_http3_observers a07 "$WORK/a07-relay-removal.marker" \
     || fail A07_CAPTURE_UNAVAILABLE
 timeout --signal=TERM --kill-after=5s 200s \
@@ -5753,7 +5775,8 @@ HTTP3_SERVER_PID=
 [ "$HTTP3_SERVER_STATUS" -eq 0 ] || A07_STATUS=1
 for evidence_file in a07-client.json destination-a07-evidence.json \
     a07-client-capture.json a07-exit-capture.json \
-    a07-native-before.json a07-native-after.json; do
+    a07-native-preconnect.json a07-native-before.json a07-native-after.json \
+    native-route-windows.json; do
     if [ "$A07_STATUS" -eq 0 ] \
         && { [ ! -s "$WORK/$evidence_file" ] \
             || ! jq -e . "$WORK/$evidence_file" >/dev/null 2>&1; }; then
@@ -5772,13 +5795,14 @@ if [ "$A07_STATUS" -eq 0 ]; then
         --slurpfile destination "$WORK/destination-a07-evidence.json" \
         --slurpfile client_capture "$WORK/a07-client-capture.json" \
         --slurpfile exit_capture "$WORK/a07-exit-capture.json" \
-        --slurpfile a06_native "$WORK/a06-native-paths.json" \
+        --slurpfile preconnect "$WORK/a07-native-preconnect.json" \
+        --slurpfile native_windows "$WORK/native-route-windows.json" \
         --slurpfile native_before "$WORK/a07-native-before.json" \
         --slurpfile native_after "$WORK/a07-native-after.json" \
         --slurpfile removal "$WORK/a07-removal.json" \
         '($application[0]) as $app | ($destination[0]) as $destination
         | ($client_capture[0]) as $client | ($exit_capture[0]) as $exit
-        | ($a06_native[0]) as $a06_native | ($native_before[0]) as $before
+        | ($preconnect[0]) as $preconnect | ($native_before[0]) as $before
         | ($native_after[0]) as $after | ($removal[0]) as $removal
         | ($before.paths | map(select(.relay == "relay2")) | .[0]) as $before_r2
         | ($after.paths | map(select(.relay == "relay2")) | .[0]) as $after_r2
@@ -5797,7 +5821,7 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($destination.source.ip == "47.163.4.1")
             and $removal.process_active_at_removal
             and ($removal.removed_relay == $before.benchmark_slots[0].relay_node)
-            and ($a06_native.benchmark_slots == $before.benchmark_slots)
+            and ($preconnect.benchmark_slots == $before.benchmark_slots)
             and ($before.benchmark_slots == $after.benchmark_slots)
             and ($client.benchmark_relay_nodes == ($before.benchmark_slots | map(.relay_node)))
             and ($exit.benchmark_relay_nodes == $client.benchmark_relay_nodes)
@@ -5820,14 +5844,16 @@ if [ "$A07_STATUS" -eq 0 ]; then
             and ($client.truncated == false) and ($exit.truncated == false)
             and ($exit.destination_request_datagrams > 0)
             and ($exit.destination_response_datagrams > 0)
-            and ($a06_native.route_context_id == $before.route_context_id)
+            and ($preconnect.route_context_id == $before.route_context_id)
             and ($before.route_context_id == $after.route_context_id)
             and ($after_r2.path_id == $before_r2.path_id)) as $success
         | {schema_version:1,acceptance_id:"A07",success:$success,
            transport:"active HTTP/3 flow retained by genuine MPQUIC after Relay removal",
            application:$app,destination:$destination,relay_removal:$removal,
+           native_route_windows:$native_windows[0],
            native_mpquic:{route_context_id:$after.route_context_id,
              benchmark_slots:$after.benchmark_slots,
+             preestablished_before_http3_client:true,preconnect_paths:$preconnect.paths,
              before_removal:$before.paths,after_removal:$after.paths},
            path_evidence:{client_capture:$client,exit_capture:$exit},
            application_flow_completed:true,ordinary_quic_fallback_allowed:false,
@@ -6314,6 +6340,7 @@ printf 'exit_status=%s\n' "$route_status" \
 A11_STATUS=1
 jq -S -c -n \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile native_windows "$WORK/native-route-windows.json" \
     --slurpfile selected "$NATIVE_SELECTION_FILE" \
     --slurpfile relay0 "$WORK/privacy-relay0.json" \
     --slurpfile relay1 "$WORK/privacy-relay1.json" \
@@ -6342,6 +6369,7 @@ jq -S -c -n \
        scope:"routed IPv4 outer headers on both physical legs of each data Relay",
        internet_destination:"47.163.4.2",relay1:$r1,relay2:$r2,mptcp_privacy:$mptcp[0],
        benchmark_slots:$selected[0].benchmark_slots,all_relay_captures:$captures,
+       native_route_windows:$native_windows[0],
        counter_labels:"relay1/relay2 are selected native benchmark slots; capture_role is actual node",
        payload_capture_retained:false}' >"$WORK/a11-evidence.json"
 jq -e '.success == true' "$WORK/a11-evidence.json" >/dev/null 2>&1 \
@@ -6356,6 +6384,7 @@ A11_SUCCEEDED=true
 A12_STATUS=1
 jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile native_windows "$WORK/native-route-windows.json" \
     --slurpfile selected "$NATIVE_SELECTION_FILE" \
     '($exit_capture[0]) as $exit
     | ($selected[0].benchmark_slots | map(.relay_node)) as $nodes
@@ -6369,6 +6398,7 @@ jq -S -c -n --slurpfile exit_capture "$WORK/privacy-exit.json" \
         and ($exit.direct_client_exit_packets == 0)) as $success
     | {schema_version:1,acceptance_id:"A12",success:$success,
        scope:"Exit physical ingress and destination interfaces",
+       native_route_windows:$native_windows[0],
        benchmark_slots:$selected[0].benchmark_slots,
        incoming_datapath_sources:($selected[0].benchmark_slots | map(
          if .relay_index==0 then "42.158.0.1" elif .relay_index==1 then "44.160.1.1" else "45.161.2.1" end)),
@@ -6386,6 +6416,7 @@ A12_SUCCEEDED=true
 A13_STATUS=1
 jq -S -c -n \
     --slurpfile mptcp "$WORK/mptcp-privacy-evidence.json" \
+    --slurpfile native_windows "$WORK/native-route-windows.json" \
     --slurpfile selected "$NATIVE_SELECTION_FILE" \
     --slurpfile client_capture "$WORK/privacy-client.json" \
     --slurpfile routes_before "$WORK/a13-client-routes-before.json" \
@@ -6422,6 +6453,7 @@ jq -S -c -n \
         and ($destination_route_before | contains("dev underlay"))) as $success
     | {schema_version:1,acceptance_id:"A13",success:$success,
        topology:{direct_client_exit_adjacency:false,peerless_fallback_underlay:true},
+       native_route_windows:$native_windows[0],
        client_capture:$client,direct_physical_routes:$direct_routes,mptcp_privacy:$mptcp[0],
        benchmark_slots:$selected[0].benchmark_slots,
        route_get:{exit_before:$exit_route_before,exit_after:$exit_route_after,

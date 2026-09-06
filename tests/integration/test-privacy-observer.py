@@ -189,6 +189,13 @@ class PrivacyObserverTests(unittest.TestCase):
             values = {"mptcp": [{"success": True}], "selected": [{"benchmark_slots": [
                 {"relay_node": "relay0", "relay_index": 0},
                 {"relay_node": "relay2", "relay_index": 2}]}]}
+            values["native_windows"] = [{
+                "a06": {"route_context_id": "11" * 16, "benchmark_slots": [
+                    {"relay_node": "relay1", "relay_index": 1},
+                    {"relay_node": "relay2", "relay_index": 2}]},
+                "a07": {"route_context_id": "22" * 16,
+                        "benchmark_slots": values["selected"][0]["benchmark_slots"]},
+            }]
             for name in captures:
                 values[name] = [{
                     "capture_role": name.removesuffix("_capture"),
@@ -216,7 +223,9 @@ class PrivacyObserverTests(unittest.TestCase):
                         command.extend(("--arg", name, "47.163.4.2 dev underlay"))
                 command.append(expression)
                 result = subprocess.run(command, capture_output=True, text=True, check=True)
-                return json.loads(result.stdout)["success"]
+                evidence = json.loads(result.stdout)
+                self.assertEqual(evidence["native_route_windows"], values["native_windows"][0])
+                return evidence["success"]
 
             self.assertTrue(evaluate(), acceptance)
             for invalid in ({}, {"success": False}, {"success": None}):

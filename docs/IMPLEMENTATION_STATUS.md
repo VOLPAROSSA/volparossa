@@ -40,9 +40,16 @@ bindings survive relay removal, and all three eligible Relays stay under privacy
 capture. Mixed-link requires local-LAN Relay1 plus an actual public-WAN Relay0 or Relay2;
 each comparison retains its own actual path, capture and equally shaped queue bindings.
 The workflow now requires a successful measured >1.25x bandwidth comparison rather than
-the obsolete no-bandwidth-claim flag. Thirty-one focused fixture checks and the static
+the obsolete no-bandwidth-claim flag. Thirty-four focused fixture checks and the static
 topology contract pass. These fixture changes await their unchanged-build live proof;
 they do not change production selection, timeouts or the required data/gain thresholds.
+A07 now establishes a fresh ordinary native route before its separate HTTP/3 application,
+rather than reusing A06's warm scheduler context. Preconnect, active flow and removal must
+retain that exact new context, paths and relay bindings; all pre-/post-removal byte gates
+remain. A06 and A07 may choose different valid pairs, and both windows remain explicit in
+A07 and A11--A13 evidence. Focused fixture checks reject context reuse, setup failures,
+changed bindings and sub-threshold traffic. No scheduler equalisation or deadline extension
+is introduced, and the change still awaits its live proof.
 
 The runtime removes the redundant display-status RPC after every accepted
 MPQUIC datagram. Telemetry is sampled at most once per 250 ms per route owner; initial

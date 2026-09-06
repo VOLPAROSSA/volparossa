@@ -256,5 +256,132 @@ printf '{"draws":%s,"disconnected":%s}\n' "$draws" "$disconnected"
             self.assertEqual(len(Path(directory, "benchmark-selection-draws.jsonl").read_text().splitlines()), 34)
 
 
+class A07FreshRouteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (HERE / "kvm-alpha-topology.sh").read_text()
+        cls.prepare = "a07_prepare_fresh_native_route() {" + cls.source.split(
+            "a07_prepare_fresh_native_route() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+        block = cls.source.split('if [ "$A07_STATUS" -eq 0 ]; then\n    jq -S -c -n', 1)[1]
+        block = block.split('>"$WORK/a07-evidence.json"', 1)[0]
+        cls.predicate = block[block.index("'($application[0])") + 1:block.rindex("'")]
+
+    def fixtures(self):
+        selected = paths_module.selected_paths(row("R0", context="22" * 16, state=3)
+            + row("R2", 2, "22" * 16, 3), "R0", "R1", "R2", "X",
+            "multipath-quic", any_pair=True)[1]
+        text = row("R0", context="22" * 16, state=3) + row("R2", 2, "22" * 16, 3)
+        before = paths_module.native_paths(text, selected, "both")
+        after = paths_module.native_paths(row("R2", 2, "22" * 16, 3), selected, "relay2")
+        a06 = paths_module.selected_paths(row("R1", state=3) + row("R2", 2, state=3),
+            "R0", "R1", "R2", "X", "multipath-quic", any_pair=True)[1]
+        windows = {label: {key: item[key] for key in ("route_context_id", "benchmark_slots")}
+                   for label, item in (("a06", a06), ("a07", before))}
+        application = dict(protocol="HTTP/3", http_version="HTTP/3", negotiated_alpn="h3",
+            application=dict(ip="43.159.1.1", port=52007), destination=dict(ip="47.163.4.2", port=443),
+            request_bytes=4194304, response_bytes=33554432, request_sha256="a" * 64,
+            response_sha256="b" * 64)
+        destination = dict(protocol="HTTP/3", http_version="HTTP/3", negotiated_alpn="h3",
+            peer_completion_observed=True, release_observed=True, source=dict(ip="47.163.4.1"),
+            request_sha256="a" * 64, response_sha256="b" * 64)
+        capture = dict(benchmark_relay_nodes=["relay0", "relay2"], marker_observed=True,
+            direct_client_exit_packets=0, truncated=False, packet_socket_drops=0,
+            destination_request_datagrams=2, destination_response_datagrams=2,
+            before_marker={f"relay{slot}_wireguard_data_{field}": value
+                           for slot in (1, 2) for field, value in (("bytes", 1048577), ("datagrams", 2))},
+            after_marker=dict(relay2_wireguard_data_bytes=1048577, relay2_wireguard_data_datagrams=2))
+        removal = dict(process_active_at_removal=True, removed_relay="relay0",
+            removed_links=dict(relay_client_operstate="DOWN", relay_exit_operstate="DOWN"))
+        return dict(application=application, destination=destination,
+            client_capture=copy.deepcopy(capture), exit_capture=copy.deepcopy(capture),
+            preconnect=copy.deepcopy(before), native_before=before, native_after=after,
+            native_windows=windows, removal=removal)
+
+    def evaluate(self, data):
+        args = ["jq", "-c", "-n"]
+        for key, value in data.items():
+            args.extend(["--argjson", key, json.dumps([value])])
+        return json.loads(subprocess.run([*args, self.predicate], check=True,
+                                        text=True, capture_output=True).stdout)
+
+    def test_fresh_preconnect_precedes_application_and_fails_closed_in_order(self):
+        invocation = self.source.index("\na07_prepare_fresh_native_route || fail ")
+        observer = self.source.index("\nstart_http3_observers a07 ")
+        application = self.source.index('"$WORK/bin/examples/http3-acceptance-fixture" client a07 ')
+        self.assertLess(invocation, observer)
+        self.assertLess(observer, application)
+        script = self.prepare + r'''
+WORK=$1; fail_step=$2
+step() { printf '%s\n' "$1" >>"$WORK/order"; [ "$fail_step" != "$1" ]; }
+benchmark_disconnect_route() { step disconnect; }
+benchmark_select_route() { [ "$1:$2" = a07-fresh:multipath-quic ] && step select; }
+native_bind_slots() { [ "$1" = "$WORK/a07-fresh-selection.json" ] && step bind; }
+wait_active_native_mpquic_paths() { [ "$1" = a07-native-preconnect ] && step active; }
+a07_prepare_fresh_native_route || exit 1
+'''
+        data = self.fixtures()
+        for failed, expected in (("", ["disconnect", "select", "bind", "active"]),
+                                 ("disconnect", ["disconnect"]),
+                                 ("select", ["disconnect", "select"]),
+                                 ("bind", ["disconnect", "select", "bind"]),
+                                 ("active", ["disconnect", "select", "bind", "active"]),
+                                 ("same-context", ["disconnect", "select", "bind", "active"])):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory(prefix="a07-prepare-") as tmp:
+                work = Path(tmp)
+                old = copy.deepcopy(data["native_windows"]["a06"])
+                if failed == "same-context":
+                    old["route_context_id"] = data["preconnect"]["route_context_id"]
+                (work / "a06-native-paths.json").write_text(json.dumps(old))
+                (work / "a07-native-preconnect.json").write_text(json.dumps(data["preconnect"]))
+                outcome = subprocess.run(["sh", "-c", script, "test", tmp, failed],
+                                         text=True, capture_output=True)
+                self.assertEqual(outcome.returncode, 1 if failed else 0, outcome.stderr)
+                self.assertEqual((work / "order").read_text().splitlines(), expected)
+                if not failed:
+                    self.assertEqual(json.loads((work / "native-route-windows.json").read_text()),
+                                     data["native_windows"])
+
+    def test_actual_a07_predicate_binds_one_flow_to_fresh_context_and_exact_paths(self):
+        data = self.fixtures()
+        result = self.evaluate(data)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["native_route_windows"], data["native_windows"])
+        self.assertNotEqual(data["native_windows"]["a06"]["benchmark_slots"],
+                            data["native_windows"]["a07"]["benchmark_slots"])
+        for stage in ("preconnect", "native_before", "native_after"):
+            for field, value in (("route_context_id", "33" * 16), ("benchmark_slots", [])):
+                bad = copy.deepcopy(data)
+                bad[stage][field] = value
+                self.assertFalse(self.evaluate(bad)["success"], (stage, field))
+        bad = copy.deepcopy(data)
+        bad["native_after"]["paths"][0]["path_id"] = 7
+        self.assertFalse(self.evaluate(bad)["success"])
+        for field in ("peer_completion_observed", "release_observed"):
+            bad = copy.deepcopy(data)
+            bad["destination"][field] = False
+            self.assertFalse(self.evaluate(bad)["success"])
+
+    def test_existing_byte_and_privacy_gates_remain_strict(self):
+        data = self.fixtures()
+        for role in ("client_capture", "exit_capture"):
+            for stage, slots in (("before_marker", (1, 2)), ("after_marker", (2,))):
+                for slot in slots:
+                    bad = copy.deepcopy(data)
+                    bad[role][stage][f"relay{slot}_wireguard_data_bytes"] = 1048576
+                    self.assertFalse(self.evaluate(bad)["success"], (role, stage, slot))
+            bad = copy.deepcopy(data)
+            bad[role]["truncated"] = True
+            self.assertFalse(self.evaluate(bad)["success"])
+        bad = copy.deepcopy(data)
+        bad["client_capture"]["direct_client_exit_packets"] = 1
+        self.assertFalse(self.evaluate(bad)["success"])
+        for acceptance in ("A11", "A12", "A13"):
+            section = self.source.split(f"{acceptance}_STATUS=1\njq", 1)[1].split(
+                f'>"$WORK/{acceptance.lower()}-evidence.json"', 1)[0]
+            self.assertIn('--slurpfile native_windows "$WORK/native-route-windows.json"', section)
+            self.assertIn("native_route_windows:$native_windows[0]", section)
+            self.assertIn(".packet_socket_drops == 0", section)
+
+
 if __name__ == "__main__":
     unittest.main()
