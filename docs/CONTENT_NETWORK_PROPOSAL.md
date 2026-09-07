@@ -116,7 +116,11 @@ two verified offers. With application TLS, `a20efb71` then reconstructs the comp
 through native and HTTPS commands, including partial origin ranges. Its final evidence gate
 uses the wrong fixture Exit interface address; corrected raw-record validation passes, but the
 original scenario still failed before its final explicit service-stop steps. Cleanup completed
-with unchanged host state. The full C02 scenario remains pending; automatic placement,
+with unchanged host state. The `472b6e7a` rerun again completes both two-provider downloads,
+but a subsequent lookup yields no usable peer offer and HTTPS falls back to the complete origin
+body. The same repeated-lookup defect blocks the new C03 sequence after its first real download.
+Its cause is still under investigation, not attributed to expired route or offer authority.
+The full C02 scenario remains pending; automatic placement,
 retention and name lookup are not supplied by this retrieval proof, and C06 remains open.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.

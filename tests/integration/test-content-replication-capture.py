@@ -36,8 +36,12 @@ def classify(current, role, source, destination, protocol=socket.IPPROTO_UDP,
 
 def udp_frame(source, destination, payload):
     transport = struct.pack("!HHHH", 22000, 23000, len(payload) + 8, 0) + payload
+    return ipv4_frame(source, destination, socket.IPPROTO_UDP, transport)
+
+
+def ipv4_frame(source, destination, protocol, transport):
     header = bytearray(20)
-    header[0], header[9] = 0x45, socket.IPPROTO_UDP
+    header[0], header[9] = 0x45, protocol
     header[2:4] = struct.pack("!H", len(header) + len(transport))
     header[12:16], header[16:20] = socket.inet_aton(source), socket.inet_aton(destination)
     return bytes(12) + b"\x08\x00" + header + transport
@@ -139,15 +143,62 @@ class ReplicationCaptureTests(unittest.TestCase):
             record, _ = buffered_capture(extra=extra, drops=drops)
             self.assertFalse(record["complete"])
 
+    def test_fixed_diagnostics_do_not_change_classification_or_record_packet_details(self):
+        for version, protocol, label in ((4, socket.IPPROTO_TCP, "tcp"),
+                                         (4, socket.IPPROTO_UDP, "udp"),
+                                         (4, socket.IPPROTO_ICMP, "icmp"),
+                                         (6, socket.IPPROTO_ICMPV6, "icmpv6"),
+                                         (4, 253, "other_ip")):
+            source, destination = (("203.0.113.1", "203.0.113.2") if version == 4
+                                   else ("fe80::1", "fe80::2"))
+            packet = (version, protocol, source, 54321, destination, 54322, b"private payload")
+            decision = CAPTURE.classify(layout(), "exit", *packet[1:], "physical0")
+            self.assertEqual(decision, {"forbidden_packets": 1})
+            diagnostics = CAPTURE.diagnostic_updates(packet, decision)
+            self.assertEqual(diagnostics, {f"classified_{label}_packets": 1,
+                                          f"forbidden_{label}_packets": 1,
+                                          f"forbidden_ipv{version}_unmatched_packets": 1})
+            self.assertTrue(set(diagnostics).issubset(CAPTURE.DIAGNOSTIC_COUNTERS))
+            self.assertEqual(decision, {"forbidden_packets": 1})
+        self.assertEqual(CAPTURE.diagnostic_updates(None, {"neighbor_packets": 1}),
+                         {"classified_arp_packets": 1})
 
-def buffered_capture(extra=0, drops=0):
+    def test_capture_attributes_forbidden_protocol_and_interface_without_changing_totals(self):
+        marker = b"do-not-record-this-payload"
+        frames = [[udp_frame("49.165.5.1", "42.158.0.1", struct.pack("<I", 4) + bytes(44)),
+                   ipv4_frame("46.162.3.1", "42.158.0.1", socket.IPPROTO_ICMP, b"\x03\x03" + bytes(6)),
+                   udp_frame("49.165.5.1", "203.0.113.1", marker)],
+                  [b"short", udp_frame("49.165.5.1", "46.162.3.1", marker),
+                   udp_frame("49.165.5.1", "50.166.6.1", marker)]]
+        record, _order = buffered_capture(frames=frames)
+        self.assertTrue(record["complete"])
+        expected = {"observed_frames": 6, "ipv4_frames": 5, "packet_socket_drops": 0,
+                    "client_leg_wireguard_data_datagrams": 1, "forbidden_packets": 5,
+                    "direct_client_exit_packets": 1, "direct_provider_packets": 1,
+                    "malformed_packets": 1, "classified_udp_packets": 4,
+                    "classified_icmp_packets": 1, "forbidden_udp_packets": 3,
+                    "forbidden_icmp_packets": 1, "forbidden_unparsed_packets": 1,
+                    "forbidden_ipv4_unmatched_packets": 2}
+        for counter, value in expected.items():
+            self.assertEqual(record[counter], value, counter)
+        self.assertEqual([row["forbidden_packets"] for row in record["interface_statistics"].values()],
+                         [2, 3])
+        self.assertEqual(sum(row["forbidden_packets"] for row in record["interface_statistics"].values()),
+                         record["forbidden_packets"])
+        serialized = json.dumps(record)
+        for detail in (marker.decode(), "49.165.5.1", "46.162.3.1", "203.0.113.1", "22000", "23000"):
+            self.assertNotIn(detail, serialized)
+
+
+def buffered_capture(extra=0, drops=0, frames=None):
     """Exercise the actual collector with finite mock socket queues and a real temporary report."""
     handlers, order = {}, []
     packet = udp_frame("49.165.5.1", "42.158.0.1", struct.pack("<I", 4) + bytes(44))
 
     class Observer:
-        def __init__(self, interface, total):
-            self.interface, self.total, self.remaining = interface, total, total
+        def __init__(self, interface, queued_frames):
+            self.interface, self.total, self.remaining = interface, len(queued_frames), len(queued_frames)
+            self.frames = queued_frames
             self.stopped = False
 
         def setsockopt(self, level, option, value):
@@ -176,12 +227,13 @@ def buffered_capture(extra=0, drops=0):
                 raise BlockingIOError
             self.remaining -= 1
             order.append(self.interface)
-            return packet, [], 0, None
+            return self.frames[self.total - self.remaining - 1], [], 0, None
 
         def close(self):
             pass
 
-    observers = [Observer("physical0", 300), Observer("physical1", 1)]
+    frame_queues = [[packet] * 300, [packet]] if frames is None else frames
+    observers = [Observer(f"physical{index}", queued) for index, queued in enumerate(frame_queues)]
 
     def select_ready(*_args):
         handlers[signal.SIGTERM]()

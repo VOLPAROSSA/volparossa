@@ -132,6 +132,20 @@ The historical run remains **failed**, and its final native-provider stop/status
 reached; no successful final report is invented from the re-evaluation. [Quality on exactly
 `a20efb71`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34163214885) passes in full.
 
+On [`472b6e7a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34164938658), native and
+complete-cache HTTPS again use both providers successfully. The subsequent missing-cache
+lookup verifies one offer at the control Relay but returns no usable provider: HTTPS therefore
+reconstructs the correct object entirely from the origin instead of the expected four missing
+ranges. The origin fixture waits for the remaining expected range requests and times out.
+This is a distinct integration defect, not the corrected Exit-address check. Route identity,
+expiry and offer lifetime do not explain it. All eighteen captures drain with zero drops or
+violations; cleanup leaves zero owned objects and unchanged guest state, but the final service
+stop/report is not reached. Artifact SHA-256:
+`908c0a0ca75c110f4b9661ada2762bf8b62ed9a6e59f6ce22f310210d1ae862c`.
+[Quality on this source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34164918500)
+passes in full. Fixed, detail-free lookup-completion diagnostics are being added to distinguish
+the remaining offer-loss paths without changing timeouts, retries or authority requirements.
+
 The first C03 redistribution library and normal agent hooks are now integrated locally. Five
 duplex tests pass: uptake then re-serving, non-evicting quota, exclusions/duplicates, signed
 expiry/hop bounds, corrupt input and timeout. Existing v1 provider tests remain 4/4 passing.
@@ -158,6 +172,16 @@ The fixture needs a third control-capable relay; the product's route/privacy req
 not lowered. Cleanup completes with zero owned objects and unchanged guest state. Artifact
 SHA-256: `aa35f10306adbb4d275475c0331ffeff386faf4630162d970b8e91b5b89005ea`.
 No uptake, re-serving or C03 completion is established by that failed run.
+
+The [three-candidate rerun on `472b6e7a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34164939638)
+now establishes the route and fetches P (524,609 bytes / three chunks) from the independent
+original provider. The replica service then starts with an empty replication cache, but the
+second foreground P request encounters the same verified-offer loss and fails before Q uptake.
+All five capture windows drain with zero drops. The Exit window nevertheless contains two
+unclassified forbidden packets (no direct-client/Exit or direct-provider packets); that is not
+a privacy pass and is being diagnosed separately without broadening allowed traffic.
+Cleanup leaves zero owned objects and unchanged guest state. Artifact SHA-256:
+`2ee3503a3875b7516ad62a1d9f5a65ed6ae57857ea11151e2c56cfcac9bf528a`.
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and

@@ -34,6 +34,14 @@ COUNTERS = (
     "forbidden_packets", "direct_client_exit_packets", "direct_provider_packets",
     "malformed_packets",
 )
+# Fixed labels only: no packet-derived address, port, type number or payload is persisted.
+PROTOCOL_LABELS = {socket.IPPROTO_TCP: "tcp", socket.IPPROTO_UDP: "udp",
+                   socket.IPPROTO_ICMP: "icmp", socket.IPPROTO_ICMPV6: "icmpv6"}
+DIAGNOSTIC_COUNTERS = (
+    *(f"classified_{label}_packets" for label in (*PROTOCOL_LABELS.values(), "other_ip", "arp")),
+    *(f"forbidden_{label}_packets" for label in (*PROTOCOL_LABELS.values(), "other_ip", "unparsed")),
+    "forbidden_ipv4_unmatched_packets", "forbidden_ipv6_unmatched_packets",
+)
 MAX_FRAMES = 1_048_576
 MAX_FRAME_BYTES = 65_589  # Ethernet + IPv6 header + maximum non-jumbo IPv6 payload.
 MAX_SECONDS = 1800
@@ -191,6 +199,22 @@ def decode_frame(frame):
     return version, protocol, source, sport, destination, dport, payload
 
 
+def diagnostic_updates(packet, classification):
+    """Describe the existing decision with bounded counters, without changing that decision."""
+    if packet is None:
+        return ({"forbidden_unparsed_packets": 1} if classification.get("forbidden_packets")
+                else {"classified_arp_packets": 1})
+    version, protocol, *_unused = packet
+    label = PROTOCOL_LABELS.get(protocol, "other_ip")
+    updates = {f"classified_{label}_packets": 1}
+    if classification.get("forbidden_packets"):
+        updates[f"forbidden_{label}_packets"] = 1
+        if not any(classification.get(reason) for reason in (
+                "direct_client_exit_packets", "direct_provider_packets", "malformed_packets")):
+            updates[f"forbidden_ipv{version}_unmatched_packets"] = 1
+    return updates
+
+
 def stop_capture_intake(observer):
     """Keep the existing queue while atomically rejecting future packet-socket intake."""
     class Instruction(ctypes.Structure):
@@ -213,7 +237,7 @@ def capture(layout, output, ready, role, interfaces):
     record = dict(schema_version=1, phase=layout["phase"], capture_role=role,
                   node=role_node(layout, role), interfaces=interfaces, interface_statistics={},
                   observed_frames=0, packet_socket_drops=0, truncated=False, complete=False,
-                  **dict.fromkeys(COUNTERS, 0))
+                  **dict.fromkeys((*COUNTERS, *DIAGNOSTIC_COUNTERS), 0))
     for relay in layout["relays"]:
         for leg in ("client_leg", "exit_leg"):
             record[f"{relay}_{leg}_wireguard_data_datagrams"] = 0
@@ -234,6 +258,7 @@ def capture(layout, output, ready, role, interfaces):
         if flags & socket.MSG_TRUNC or record["observed_frames"] > MAX_FRAMES:
             record["truncated"] = True
             return
+        packet = None
         try:
             packet = decode_frame(frame)
             if packet is None:
@@ -243,6 +268,10 @@ def capture(layout, output, ready, role, interfaces):
                 updates = classify(layout, role, *packet[1:], sockets[observer])
         except ValueError:
             updates = {"malformed_packets": 1, "forbidden_packets": 1}
+        record["interface_statistics"][sockets[observer]]["forbidden_packets"] += updates.get(
+            "forbidden_packets", 0)
+        for name, count in diagnostic_updates(packet, updates).items():
+            record[name] += count
         for name, count in updates.items():
             record[name] += count
 
@@ -256,7 +285,7 @@ def capture(layout, output, ready, role, interfaces):
                 raise ValueError("bounded capture buffer unavailable")
             record["interface_statistics"][interface] = dict(
                 receive_buffer_bytes=actual, observed_frames=0, intake_stopped=False,
-                drained=False, packet_socket_packets=0, packet_socket_drops=0)
+                drained=False, packet_socket_packets=0, packet_socket_drops=0, forbidden_packets=0)
             observer.bind((interface, 3))
             observer.setblocking(False)
         with Path(ready).open("x", encoding="ascii") as marker:

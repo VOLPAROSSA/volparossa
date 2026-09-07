@@ -267,6 +267,7 @@ impl DiscoveryRuntime {
                     waiter.peer != *peer_id || waiter.connection != *connection_id
                 });
                 if lookup.waiters.is_empty() {
+                    self.content.event("CONTENT_LOOKUP_CONTROL_LOST");
                     self.finish_content_lookup(false);
                 }
             }
@@ -296,12 +297,14 @@ impl DiscoveryRuntime {
                         providers,
                     })) => {
                         if key.as_ref() != capability::CONTENT.as_bytes() {
+                            self.content.event("CONTENT_LOOKUP_DHT_KEY_REJECTED");
                             self.finish_content_lookup(false);
                             return None;
                         }
                         self.dispatch_content_providers(providers);
                     }
                     kad::QueryResult::GetProviders(Err(_)) => {
+                        self.content.event("CONTENT_LOOKUP_DHT_TIMED_OUT");
                         self.finish_content_lookup(false);
                         return None;
                     }
@@ -341,10 +344,24 @@ impl DiscoveryRuntime {
                     };
                     let result =
                         self.accept_content_response(&pending, peer, connection_id, &response);
-                    if result.is_ok() {
-                        self.content.event("CONTENT_DISCOVERY_COMPLETED");
-                    } else {
-                        self.content.event("CONTENT_DISCOVERY_RESPONSE_REJECTED");
+                    match &result {
+                        Ok(offers) => {
+                            self.content.event(if offers.is_empty() {
+                                "CONTENT_DISCOVERY_RECEIVED_EMPTY"
+                            } else {
+                                "CONTENT_DISCOVERY_RECEIVED_OFFERS"
+                            });
+                            self.content.event("CONTENT_DISCOVERY_COMPLETED");
+                        }
+                        Err(error) => {
+                            self.content.event(match error {
+                                ContentDiscoveryError::Invalidated => {
+                                    "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED"
+                                }
+                                _ => "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED",
+                            });
+                            self.content.event("CONTENT_DISCOVERY_RESPONSE_REJECTED");
+                        }
                     }
                     let _ = pending.reply.send(result);
                 }
@@ -582,6 +599,7 @@ impl DiscoveryRuntime {
             .is_some_and(|lookup| lookup.dht_complete)
             && self.content.upstream.is_empty()
         {
+            self.content.event("CONTENT_LOOKUP_DHT_COMPLETE");
             self.finish_content_lookup(true);
         }
     }
@@ -592,18 +610,29 @@ impl DiscoveryRuntime {
         };
         let _ = self.service.finish_content_provider_query(lookup.query);
         self.content.upstream.clear();
-        let valid = accept_collected
-            && lookup.response_deadline > Instant::now()
-            && self.roles.relay
-            && self
-                .local_relay_snapshot
-                .as_ref()
-                .is_some_and(|cap| cap.expires_at_ms > unix_millis());
+        let within_deadline = lookup.response_deadline > Instant::now();
+        let relay_current = self
+            .local_relay_snapshot
+            .as_ref()
+            .is_some_and(|cap| cap.expires_at_ms > unix_millis());
+        let valid = accept_collected && within_deadline && self.roles.relay && relay_current;
+        self.content.event(lookup_authority_event(
+            accept_collected,
+            within_deadline,
+            self.roles.relay,
+            relay_current,
+        ));
+        self.content.event(if lookup.offers.is_empty() {
+            "CONTENT_LOOKUP_COLLECTED_EMPTY"
+        } else {
+            "CONTENT_LOOKUP_COLLECTED_OFFERS"
+        });
         for waiter in std::mem::take(&mut lookup.waiters) {
             if !self
                 .service
                 .content_control_connection_is_current(&waiter.peer, waiter.connection)
             {
+                self.content.event("CONTENT_LOOKUP_REPLY_CONNECTION_LOST");
                 continue;
             }
             let offers = if valid {
@@ -616,10 +645,21 @@ impl DiscoveryRuntime {
             } else {
                 Vec::new()
             };
+            self.content.event(if offers.is_empty() {
+                "CONTENT_LOOKUP_REPLY_EMPTY"
+            } else {
+                "CONTENT_LOOKUP_REPLY_OFFERS"
+            });
             if let Ok(response) = ContentDiscoveryResponse::new(&waiter.request, offers) {
-                let _ = self
+                if self
                     .service
-                    .send_content_discovery_response(waiter.channel, response);
+                    .send_content_discovery_response(waiter.channel, response)
+                    .is_err()
+                {
+                    self.content.event("CONTENT_LOOKUP_REPLY_CHANNEL_FAILED");
+                }
+            } else {
+                self.content.event("CONTENT_LOOKUP_REPLY_ENCODING_REJECTED");
             }
         }
     }
@@ -820,6 +860,7 @@ impl DiscoveryRuntime {
         {
             // This ends bounded collection, not a claim that the DHT walk completed. Every
             // retained offer is reverified within the separate, original response deadline.
+            self.content.event("CONTENT_LOOKUP_COLLECTION_ENDED");
             self.finish_content_lookup(true);
         }
     }
@@ -842,7 +883,34 @@ impl DiscoveryRuntime {
         for (_, pending) in self.content.clients.drain() {
             let _ = pending.reply.send(Err(ContentDiscoveryError::Invalidated));
         }
+        if self.content.relay.is_some() {
+            self.content.event("CONTENT_LOOKUP_INVALIDATED");
+        }
         self.finish_content_lookup(false);
+    }
+}
+
+// Classifies the existing fail-closed decision only; no peer, endpoint or object is logged.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "observe the same four independent authority gates without a new state model"
+)]
+fn lookup_authority_event(
+    accept_collected: bool,
+    within_deadline: bool,
+    relay_enabled: bool,
+    relay_current: bool,
+) -> &'static str {
+    if !accept_collected {
+        "CONTENT_LOOKUP_COLLECTION_REJECTED"
+    } else if !within_deadline {
+        "CONTENT_LOOKUP_RESPONSE_EXPIRED"
+    } else if !relay_enabled {
+        "CONTENT_LOOKUP_RELAY_ROLE_REJECTED"
+    } else if !relay_current {
+        "CONTENT_LOOKUP_RELAY_AUTHORITY_REJECTED"
+    } else {
+        "CONTENT_LOOKUP_RESPONSE_AUTHORIZED"
     }
 }
 
@@ -888,6 +956,39 @@ mod tests {
         )
         .expect("signed offer");
         (peer, signed)
+    }
+
+    #[test]
+    fn lookup_diagnostics_distinguish_empty_reply_authority_without_changing_it() {
+        for accept in [false, true] {
+            for live in [false, true] {
+                for relay in [false, true] {
+                    for authority in [false, true] {
+                        let event = lookup_authority_event(accept, live, relay, authority);
+                        assert_eq!(
+                            event == "CONTENT_LOOKUP_RESPONSE_AUTHORIZED",
+                            accept && live && relay && authority
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            lookup_authority_event(false, true, true, true),
+            "CONTENT_LOOKUP_COLLECTION_REJECTED"
+        );
+        assert_eq!(
+            lookup_authority_event(true, false, true, true),
+            "CONTENT_LOOKUP_RESPONSE_EXPIRED"
+        );
+        assert_eq!(
+            lookup_authority_event(true, true, false, true),
+            "CONTENT_LOOKUP_RELAY_ROLE_REJECTED"
+        );
+        assert_eq!(
+            lookup_authority_event(true, true, true, false),
+            "CONTENT_LOOKUP_RELAY_AUTHORITY_REJECTED"
+        );
     }
 
     #[test]
@@ -958,6 +1059,12 @@ mod tests {
         assert!(
             !lookup.dht_complete,
             "a partial reply is not DHT completion"
+        );
+        assert!(
+            lookup
+                .offers_for_response(provider, 16, started, 1100)
+                .is_empty(),
+            "a verified provider offer is never reflected to that same requester"
         );
         for elapsed in [10, 14] {
             let offers = lookup.offers_for_response(
