@@ -9,8 +9,8 @@
 
 mod content;
 pub use content::{
-    ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest,
-    HttpsContentFetchRequest,
+    ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentReplicationConfig,
+    ContentServeRequest, HttpsContentFetchRequest,
 };
 
 use prost::Message;
@@ -718,36 +718,42 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
                 }
             }
         }
-        control_response::Payload::Content(receipt) => {
-            if receipt.bytes > 256 * 1024 * 1024
-                // Disjoint 206 ranges may precede one valid full 200 response: at most two
-                // object budgets, without falsely dropping the already transferred bytes.
-                || receipt.origin_body_bytes > 512 * 1024 * 1024
-                || receipt.peer_bytes > 256 * 1024 * 1024
-                || receipt.origin_range_requests > 1024
-                || (!receipt.origin_authenticated
-                    && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0))
-                || receipt.chunks > 1024
-                || receipt.providers_used > 16
-                || receipt.publications > 64
-                || receipt.provider_peer_ids.len() != receipt.providers_used as usize
-            {
-                return Err(ControlProtocolError::Invalid("invalid content receipt"));
-            }
-            let mut unique = std::collections::HashSet::new();
-            if !receipt.control_relay_peer_id.is_empty() {
-                peer_id(&receipt.control_relay_peer_id)?;
-            }
-            for provider in &receipt.provider_peer_ids {
-                peer_id(provider)?;
-                if !unique.insert(provider) || *provider == receipt.control_relay_peer_id {
-                    return Err(ControlProtocolError::Invalid("duplicate content provider"));
-                }
-            }
-        }
+        control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_content_receipt(receipt: &ContentReceipt) -> Result<(), ControlProtocolError> {
+    if receipt.bytes > 256 * 1024 * 1024
+        // Disjoint 206 ranges may precede one valid full 200 response: at most two
+        // object budgets, without falsely dropping the already transferred bytes.
+        || receipt.origin_body_bytes > 512 * 1024 * 1024
+        || receipt.peer_bytes > 256 * 1024 * 1024
+        || receipt.origin_range_requests > 1024
+        || (!receipt.origin_authenticated
+            && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0))
+        || receipt.chunks > 1024
+        || receipt.providers_used > 16
+        || receipt.publications > 64
+        || receipt.replica_chunks > 65_536
+        || receipt.replica_bytes > 256 * 1024 * 1024
+        || receipt.replica_publications > 64
+        || receipt.provider_peer_ids.len() != receipt.providers_used as usize
+    {
+        return Err(ControlProtocolError::Invalid("invalid content receipt"));
+    }
+    let mut unique = std::collections::HashSet::new();
+    if !receipt.control_relay_peer_id.is_empty() {
+        peer_id(&receipt.control_relay_peer_id)?;
+    }
+    for provider in &receipt.provider_peer_ids {
+        peer_id(provider)?;
+        if !unique.insert(provider) || *provider == receipt.control_relay_peer_id {
+            return Err(ControlProtocolError::Invalid("duplicate content provider"));
+        }
     }
     Ok(())
 }

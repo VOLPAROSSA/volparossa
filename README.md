@@ -102,7 +102,11 @@ See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and 
 [exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
-A complete mailbox, automatic redistribution, shared DNS and browser integration remain
+A first bounded redistribution path is now wired into the agent: an explicitly configured
+replica cache can pick up other signed chunks from a provider used by a completed download,
+then offer those chunks to independently authorizing consumers. Library uptake/re-serving
+tests pass; the multi-node agent proof and full owner-priority behavior remain unfinished.
+A complete mailbox, durable redistribution, shared DNS and browser integration also remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:

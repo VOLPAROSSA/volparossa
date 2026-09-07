@@ -202,6 +202,38 @@ the normal command's exact protected-route KVM proof remains pending. Prior fixt
 not establish this newer integration or complete C02/C08. There is still no automatic capture
 of arbitrary browser HTTPS, personalized response sharing, or generic unsupported-site adapter.
 
+### Bounded post-download redistribution
+
+The first C03 implementation adds a separate versioned exchange over the existing protected
+content stream. An explicitly shareable publication retains its original signed manifest,
+expiry and chunk hashes. A storage-only replica checks signature self-consistency and bytes;
+it does **not** establish a trusted publisher, web origin or recipient. A later consumer still
+supplies independent native authority or obtains its own origin-authenticated HTTPS descriptor.
+
+An explicitly configured agent replica cache can pick up other chunks from a recently used
+provider after a successful foreground download. No new provider discovery or route is created
+for this job. One job is allowed at a time, with at most four chunks and 1 MiB of actual protocol
+traffic in both directions, including selector, request, metadata and frame overhead. Four full
+256-KiB chunks therefore do not fit that wire budget. The separate private cache has its own
+byte/entry/free-space limits and never evicts existing chunks to admit optional work. Original
+expiry is not renewed; copying increments a locally bounded hop count, not a proof against
+malicious hop rewriting. Exact interests remain inside the protected stream, not in the DHT.
+
+Admission requires fresh read-only traffic samples on the explicitly configured sharing links.
+A new foreground content download or service stop cancels the job. A conservative full-budget
+cooldown bounds its configured average rate; the 30-second overall limit also closes slow jobs.
+This does not yet give per-flow owner isolation, paid-link/radio accounting, a no-slowdown or
+speedup guarantee. Counting the job's own traffic as competing owner traffic would incorrectly
+cancel useful slow transfers, so the idle sample is preflight-only, not such a claimed guarantee.
+Registry metadata remains in memory, and quota exhaustion pauses uptake rather than providing
+retention repair or expiry reclamation. Those parts of C03/C04 remain open.
+
+Five focused duplex tests pass, including actual uptake followed by re-serving, quota without
+eviction, exclusions/duplicates, original expiry/hops, malformed data and a hard deadline.
+Existing v1 provider tests still pass. Agent/CLI integration compiles; a new fixture prepares
+distinct foreground and reserve objects only at the original provider. It is not evidence that
+the new multi-node agent sequence has passed. C03 and C04 therefore remain unchecked.
+
 ## Integrated functional checkpoints
 
 - [x] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection;

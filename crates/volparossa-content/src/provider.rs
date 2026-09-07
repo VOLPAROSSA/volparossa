@@ -5,6 +5,8 @@
 //! provider key and supplies a policy-authorized protected stream. This module never dials,
 //! listens, discovers peers, or adopts a directory named by a network request.
 
+pub mod replication;
+
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -261,6 +263,7 @@ struct RegisteredPublication {
     manifest: VerifiedManifest,
     root: PathBuf,
     limits: CacheLimits,
+    replication: Option<replication::SharedPublication>,
 }
 
 impl PublicationRegistry {
@@ -301,6 +304,7 @@ impl PublicationRegistry {
                 manifest,
                 root,
                 limits,
+                replication: None,
             },
         );
         Ok(())
@@ -342,6 +346,7 @@ where
     let selector = Selector {
         version: VERSION,
         manifest_id: manifest.manifest_id().to_vec(),
+        operation: 0,
     };
     timeout_at(session.deadline, async {
         let reply: SelectorReply = timeout_at(session.selector_deadline, async {
@@ -391,7 +396,13 @@ where
         let selector: Selector = timeout_at(session.selector_deadline, read_frame(stream))
             .await
             .map_err(|_| ProviderError::Timeout)??;
-        if selector.version != VERSION {
+        if selector.version == replication::VERSION
+            && selector.operation == replication::OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            return replication::serve(stream, registry, &session, limits).await;
+        }
+        if selector.version != VERSION || selector.operation != 0 {
             return Err(ProviderError::Protocol);
         }
         let id: [u8; 32] = selector
@@ -591,6 +602,8 @@ struct Selector {
     version: u32,
     #[prost(bytes = "vec", tag = "2")]
     manifest_id: Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    operation: u32,
 }
 #[derive(Clone, PartialEq, Message)]
 struct SelectorReply {

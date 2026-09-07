@@ -350,8 +350,30 @@ those identifiers are not written to a background browsing log.
 Status inspects only retained local state, including `control_relay_peer_id`; it opens no
 network connection or route. Fetch's receipt binds that same control identity. Stop withdraws the offer and
 closes the listener but retains the owned cache files. Registration is in memory, not durable
-publication retention. None of these commands captures browsing, resolves latest publication
-names, redistributes automatically or promises faster retrieval.
+publication retention. Without the explicit replica configuration below, these commands start
+no background copying. They never capture browsing, resolve latest publication names or promise
+faster retrieval.
+
+For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
+to `content serve`. The directory must be new, private to the agent and different from the
+existing publication cache. Optional limits are `--replica-quota-bytes` (default 64 MiB, at most
+256 MiB), `--replica-max-entries` (default 256), `--replica-max-bytes` (64 bytes through 1 MiB,
+default 1 MiB of protocol traffic) and `--replica-max-chunks` (1--4, default 4). Repeated Serve
+registrations use the same replica configuration; changing it requires stopping the service.
+
+The job starts only after a successful native/HTTPS content fetch has actually received verified
+chunks from a provider. Both `sharing` and `download_sharing` must be explicitly configured and
+enabled, with meaningful link capacities and the real carrying interfaces. Unknown/down/overlay
+interfaces or a busy preflight sample cause uptake to pause; no host configuration is changed by
+the sampling itself. New foreground content operations cancel background uptake. This first
+admission/budget mechanism is not yet the full C04 contention/radio fairness implementation.
+
+`content status` reports `replication_enabled` separately from actual retained `replica_chunks`,
+`replica_bytes` and registered `replica_publications`; an enabled job is not evidence of useful
+replication. Busy cache access returns Busy rather than a fabricated count. Stop cancels the job
+and withdraws the service, retaining owned cache files. Replica registration is not yet durable
+across restart; this is not a reliable offline hosting/retention service. Use disposable topology
+probes while the independent-node C02/C03 proofs remain incomplete.
 
 ## Crash and cleanup
 

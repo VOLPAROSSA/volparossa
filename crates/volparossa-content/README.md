@@ -91,6 +91,15 @@ The agent/CLI now integrate explicit provider registration, generic discovery th
 Relay and protected retrieval; their independent-node network proof remains pending. This crate
 still neither dials sockets nor grants route/egress or publisher authority.
 
-No automatic replication, owner-priority I/O scheduling, durable retention, web policy or DNS
-behavior is installed or enabled. Publisher input and output-path selection remain caller-authorized;
-this crate does not authorize sharing captured/private/no-store traffic.
+`provider::replication` adds a distinct v2 selector for small extra-chunk exchanges. Only explicitly
+shareable publications and checked replicas can be exported; existing v1 registered publications
+remain compatible and are not silently exported. `pull_replicas` admits at most four chunks and
+1 MiB of actual protocol bytes into a supplied owned cache, without evicting existing data.
+`Replica` is a storage-only result, not independent publisher or HTTPS authority. Original
+signed expiry is retained, and bounded hop counts are local claims rather than Sybil resistance.
+Five duplex tests prove uptake and re-serving plus quota, validation and deadline behavior.
+
+The agent now wires this into an explicitly configured post-download job; the crate itself
+still schedules nothing and creates no listener. Full owner-priority I/O scheduling, durable
+retention, web policy and DNS remain unfinished. Publisher input and output-path selection remain
+caller-authorized; this crate does not authorize sharing captured/private/no-store traffic.

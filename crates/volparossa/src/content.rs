@@ -55,6 +55,58 @@ pub(crate) struct Serve {
     advertised_hostname: String,
     #[command(flatten)]
     limits: Limits,
+    #[command(flatten)]
+    replication: Replication,
+}
+
+#[derive(Debug, Args)]
+struct Replication {
+    /// Explicitly enable opportunistic uptake/re-serving in a NEW private agent-owned cache.
+    /// Omit this option to start no background replication job.
+    #[arg(long = "replica-cache", id = "replica_cache")]
+    cache: Option<PathBuf>,
+    /// Shared replica-store payload quota, at most 256 MiB (not a quota per publication).
+    #[arg(long = "replica-quota-bytes", id = "replica_quota_bytes", default_value_t = 64 * 1024 * 1024, requires = "replica_cache",
+          value_parser = clap::value_parser!(u64).range(1..=MAX_OBJECT_BYTES))]
+    quota_bytes: u64,
+    /// Shared replica-store maximum indexed chunks (1 through 65536).
+    #[arg(long = "replica-max-entries", id = "replica_max_entries", default_value_t = 256, requires = "replica_cache",
+          value_parser = clap::value_parser!(u32).range(1..=65_536))]
+    max_entries: u32,
+    /// Maximum encoded replication bytes per exchange, from 64 bytes through 1 MiB.
+    #[arg(long = "replica-max-bytes", id = "replica_max_bytes", default_value_t = 1024 * 1024, requires = "replica_cache",
+          value_parser = clap::value_parser!(u64).range(64..=1_048_576))]
+    max_bytes: u64,
+    /// Maximum accepted chunks per exchange (1 through 4).
+    #[arg(long = "replica-max-chunks", id = "replica_max_chunks", default_value_t = 4, requires = "replica_cache",
+          value_parser = clap::value_parser!(u32).range(1..=4))]
+    max_chunks: u32,
+}
+
+impl Replication {
+    fn wire_config(
+        &self,
+        primary_cache: &Path,
+        min_free_bytes: u64,
+    ) -> Result<Option<volparossa_local_control::ContentReplicationConfig>> {
+        let Some(path) = &self.cache else {
+            return Ok(None);
+        };
+        let replica_cache = absolute_path(path)?;
+        if replica_cache == absolute_path(primary_cache)? {
+            bail!("replica cache must differ from the primary publication cache");
+        }
+        Ok(Some(volparossa_local_control::ContentReplicationConfig {
+            replica_cache,
+            limits: Some(volparossa_local_control::ContentCacheLimits {
+                quota_bytes: self.quota_bytes,
+                max_entries: self.max_entries,
+                min_free_bytes,
+            }),
+            max_bytes: self.max_bytes,
+            max_chunks: self.max_chunks,
+        }))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +236,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Publish(args) => publish(&args)?,
         Command::Assemble(args) => assemble(&args)?,
         Command::Serve(args) => {
+            let replication = args
+                .replication
+                .wire_config(&args.cache, args.limits.min_free_bytes)?;
             let operation = Operation::ContentServe(ContentServeRequest {
                 manifest: verified_manifest_bytes(&args.manifest, &args.publisher_key)?,
                 publisher_key: args.publisher_key.to_bytes().to_vec(),
@@ -191,6 +246,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 bind_address: args.bind.to_string(),
                 advertised_hostname: args.advertised_hostname,
                 limits: Some(args.limits.wire_limits()),
+                replication,
             });
             return super::print_response(super::control::request(socket, operation).await?);
         }
@@ -473,6 +529,117 @@ mod tests {
             quota_bytes: 1024 * 1024,
             max_entries: 16,
             min_free_bytes: 0,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One CLI fixture covers opt-in, inherited defaults and bounds.
+    fn content_replication_requires_an_explicit_distinct_cache_and_bounded_options() {
+        let key = hex::encode(
+            SigningKey::generate(&mut rand_core::OsRng)
+                .verifying_key()
+                .to_bytes(),
+        );
+        let base = [
+            "volparossa",
+            "content",
+            "serve",
+            "--manifest",
+            "exact.pb",
+            "--publisher-key",
+            &key,
+            "--cache",
+            "primary",
+            "--bind",
+            "127.0.0.1:18080",
+            "--advertised-hostname",
+            "provider.example",
+        ];
+        let parse = |extra: &[&str]| {
+            let parsed =
+                crate::Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied()))?;
+            let crate::CliCommand::Content { command } = parsed.command else {
+                panic!("content command expected");
+            };
+            let Command::Serve(serve) = *command else {
+                panic!("serve expected")
+            };
+            Ok::<_, clap::Error>(serve)
+        };
+        let inert = parse(&[]).expect("existing serve command remains inert");
+        assert!(
+            inert
+                .replication
+                .wire_config(&inert.cache, inert.limits.min_free_bytes)
+                .unwrap()
+                .is_none()
+        );
+        let enabled = parse(&["--replica-cache", "new-replicas"]).expect("explicit opt-in");
+        let configuration = enabled
+            .replication
+            .wire_config(&enabled.cache, enabled.limits.min_free_bytes)
+            .unwrap()
+            .expect("replication requested");
+        assert_eq!(
+            configuration.replica_cache,
+            absolute_path(Path::new("new-replicas")).unwrap()
+        );
+        assert_eq!(
+            (configuration.max_bytes, configuration.max_chunks),
+            (1024 * 1024, 4)
+        );
+        assert_eq!(
+            configuration.limits.unwrap(),
+            volparossa_local_control::ContentCacheLimits {
+                quota_bytes: 64 * 1024 * 1024,
+                max_entries: 256,
+                min_free_bytes: 64 * 1024 * 1024,
+            }
+        );
+        let same = parse(&["--replica-cache", "primary"]).expect("path checked before dispatch");
+        assert!(same.replication.wire_config(&same.cache, 0).is_err());
+        let floor = parse(&[
+            "--replica-cache",
+            "new-replicas",
+            "--min-free-bytes",
+            "1234",
+        ])
+        .expect("explicit inherited free-space floor");
+        assert_eq!(
+            floor
+                .replication
+                .wire_config(&floor.cache, floor.limits.min_free_bytes)
+                .unwrap()
+                .unwrap()
+                .limits
+                .unwrap()
+                .min_free_bytes,
+            1234
+        );
+        for (name, invalid) in [
+            ("--replica-quota-bytes", "268435457"),
+            ("--replica-max-entries", "65537"),
+            ("--replica-max-bytes", "1048577"),
+            ("--replica-max-chunks", "5"),
+            ("--replica-max-bytes", "0"),
+            ("--replica-max-bytes", "63"),
+            ("--replica-max-chunks", "0"),
+        ] {
+            assert!(
+                parse(&["--replica-cache", "new-replicas", name, invalid]).is_err(),
+                "{name}"
+            );
+        }
+        for option in [
+            "--replica-quota-bytes",
+            "--replica-max-entries",
+            "--replica-max-bytes",
+            "--replica-max-chunks",
+        ] {
+            assert!(
+                parse(&[option, "1"]).is_err(),
+                "limits alone must not silently enable replication"
+            );
         }
     }
 

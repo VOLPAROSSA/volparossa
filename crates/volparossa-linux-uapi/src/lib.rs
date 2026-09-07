@@ -33,7 +33,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod egress;
-pub use egress::{EgressObservation, IndependentEgress};
+pub use egress::{
+    EgressObservation, IndependentEgress, InterfaceTraffic, observe_interface_traffic,
+};
 
 use std::{
     env,

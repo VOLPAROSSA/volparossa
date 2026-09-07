@@ -68,7 +68,26 @@ Cleanup again completed with zero owned objects and unchanged guest-root state; 
 SHA-256 is `f62cd4955a087db1f39ac9019d4d4cb75afaef49bc227324a807991f2cde4d84`.
 Fixed, bounded diagnostic codes now distinguish route/control availability, actor delivery,
 current authority/connection checks and RPC dispatch, without logging peer IDs or resources.
-The remaining early rejection is not yet identified; no admission rule is weakened to pass.
+The [diagnostic run on `e9b5274b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34158695243)
+then records `CONTENT_FETCH_ROUTE_READY`, `CONTENT_DISCOVERY_COMMAND_RECEIVED` and
+`CONTENT_DISCOVERY_CONTROL_CONNECTION_INVALID`. The route/control capability passed; the
+current connection-provenance check rejected the request before dispatch. The underlying
+registry condition is under investigation, not attributed to DHT/HTTPS or bypassed. That run
+again cleaned up all owned objects with unchanged guest state; artifact SHA-256:
+`d93c6f36684a63e237d8e0a30b0936cfe5006802f4dd79cf0f67ac82e81cc997`.
+
+The first C03 redistribution library and normal agent hooks are now integrated locally. Five
+duplex tests pass: uptake then re-serving, non-evicting quota, exclusions/duplicates, signed
+expiry/hop bounds, corrupt input and timeout. Existing v1 provider tests remain 4/4 passing.
+The job reuses a provider that supplied verified foreground bytes, opens a separate existing
+policy-authorized MPTCP/TLS stream, and admits at most four chunks / 1 MiB of total protocol
+traffic into a distinct private cache. Storage-only replica signatures do not become publisher
+or HTTPS trust. Fresh read-only link samples gate starting; foreground content requests and
+service stop cancel uptake. A full-budget cooldown bounds the declared average traffic budget,
+not instantaneous owner/radio contention. Agent/UAPI compilation and strict Clippy pass; three
+focused cache/owner-generation/idle-accounting tests and the UAPI counter test pass. Independent-node C03 uptake/re-serving,
+durable registration/retention and complete C04 owner isolation remain unproven and unchecked.
+See the [bounded redistribution scope](CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and

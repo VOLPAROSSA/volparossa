@@ -645,6 +645,10 @@ fn print_response(response: ControlResponse) -> Result<()> {
                 "origin_body_bytes":receipt.origin_body_bytes,
                 "peer_bytes":receipt.peer_bytes,
                 "origin_range_requests":receipt.origin_range_requests,
+                "replication_enabled":receipt.replication_enabled,
+                "replica_chunks":receipt.replica_chunks,
+                "replica_bytes":receipt.replica_bytes,
+                "replica_publications":receipt.replica_publications,
             })
         ),
         Payload::Status(status) => {

@@ -227,6 +227,40 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Admit an opportunistic chunk without evicting any existing owned data.
+    ///
+    /// Returns `true` for a new insertion and `false` for an already-present verified chunk.
+    /// The ordinary insertion integrity, atomic index and filesystem free-floor checks apply.
+    ///
+    /// # Errors
+    /// Rejects invalid/corrupt bytes or stores, exhausted byte/entry/free-space capacity, and
+    /// filesystem failures. In particular, quota pressure never evicts foreground chunks.
+    pub fn put_verified_if_space(
+        &mut self,
+        expected: ChunkId,
+        bytes: &[u8],
+    ) -> Result<bool, Error> {
+        self.ensure_healthy()?;
+        if bytes.is_empty() || bytes.len() > CHUNK_BYTES {
+            return Err(Error::Limit("chunk length"));
+        }
+        if self.get(&expected)?.is_some() {
+            self.put_verified(expected, bytes)?;
+            return Ok(false);
+        }
+        if self.entries.len() >= self.limits.max_entries
+            || self
+                .bytes
+                .checked_add(bytes.len() as u64)
+                .is_none_or(|total| total > self.limits.max_bytes)
+        {
+            return Err(Error::Quota);
+        }
+        // The exclusively held store cannot change between this capacity check and insertion.
+        self.put_verified(expected, bytes)?;
+        Ok(true)
+    }
+
     /// Load at most one chunk and verify its on-disk length and digest on every access.
     ///
     /// # Errors

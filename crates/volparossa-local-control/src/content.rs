@@ -18,6 +18,23 @@ pub struct ContentCacheLimits {
     pub min_free_bytes: u64,
 }
 
+/// Explicit bounded background uptake and re-serving; absent configuration starts no cache job.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ContentReplicationConfig {
+    /// New private agent-owned replica store, distinct from the primary publication cache.
+    #[prost(string, tag = "1")]
+    pub replica_cache: String,
+    /// One shared byte/entry/free-space budget for the entire replica store.
+    #[prost(message, optional, tag = "2")]
+    pub limits: Option<ContentCacheLimits>,
+    /// Maximum encoded bytes per replication exchange, from 64 bytes through 1 MiB.
+    #[prost(uint64, tag = "3")]
+    pub max_bytes: u64,
+    /// Maximum accepted chunks per exchange, at most four.
+    #[prost(uint32, tag = "4")]
+    pub max_chunks: u32,
+}
+
 /// Register one explicit publication and start/reuse the agent's bounded public content service.
 #[derive(Clone, PartialEq, Message)]
 pub struct ContentServeRequest {
@@ -39,6 +56,9 @@ pub struct ContentServeRequest {
     /// Explicit cache budget.
     #[prost(message, optional, tag = "6")]
     pub limits: Option<ContentCacheLimits>,
+    /// Explicit opt-in to bounded background replication; absence preserves prior behavior.
+    #[prost(message, optional, tag = "7")]
+    pub replication: Option<ContentReplicationConfig>,
 }
 
 /// Discover providers and reconstruct one exact independently authenticated native publication.
@@ -121,6 +141,36 @@ pub struct ContentReceipt {
     /// Actual origin range requests; not a statement about browser integration or speed.
     #[prost(uint32, tag = "11")]
     pub origin_range_requests: u32,
+    /// Whether the explicit opportunistic replica job is enabled.
+    #[prost(bool, tag = "12")]
+    pub replication_enabled: bool,
+    /// Actual currently cached replica chunks, not configured capacity or received hints.
+    #[prost(uint32, tag = "13")]
+    pub replica_chunks: u32,
+    /// Actual payload bytes retained in the shared replica cache.
+    #[prost(uint64, tag = "14")]
+    pub replica_bytes: u64,
+    /// Actual replica publications registered for re-serving.
+    #[prost(uint32, tag = "15")]
+    pub replica_publications: u32,
+}
+
+impl ContentReplicationConfig {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        validate_path(&self.replica_cache)?;
+        validate_limits(self.limits)?;
+        if self
+            .limits
+            .is_none_or(|limits| limits.quota_bytes > 256 * 1024 * 1024)
+            || !(64..=1024 * 1024).contains(&self.max_bytes)
+            || !(1..=4).contains(&self.max_chunks)
+        {
+            return Err(ControlProtocolError::Invalid(
+                "invalid content replication limits",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ContentServeRequest {
@@ -128,6 +178,14 @@ impl ContentServeRequest {
         validate_publication(&self.manifest, &self.publisher_key)?;
         validate_path(&self.cache)?;
         validate_limits(self.limits)?;
+        if let Some(replication) = &self.replication {
+            replication.validate()?;
+            if replication.replica_cache == self.cache {
+                return Err(ControlProtocolError::Invalid(
+                    "replica cache must differ from primary cache",
+                ));
+            }
+        }
         let address: std::net::SocketAddr = self
             .bind_address
             .parse()
@@ -239,6 +297,7 @@ mod tests {
             bind_address: "127.0.0.1:18080".into(),
             advertised_hostname: "provider.example".into(),
             limits: fetch.limits,
+            replication: None,
         };
         for operation in [
             Operation::ContentFetch(fetch.clone()),
@@ -408,5 +467,101 @@ mod tests {
             assert!(encode_response(&response(invalid)).is_err(), "{field}");
         }
         assert!(encode_response(&response(ContentReceipt::default())).is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One opt-in fixture preserves legacy defaults and both budgets.
+    fn content_replication_is_explicit_bounded_and_preserves_absent_field_roundtrip() {
+        let limits = ContentCacheLimits {
+            quota_bytes: 64 * 1024 * 1024,
+            max_entries: 256,
+            min_free_bytes: 64 * 1024 * 1024,
+        };
+        let replication = ContentReplicationConfig {
+            replica_cache: "/private/new-replicas".into(),
+            limits: Some(limits),
+            max_bytes: 1024 * 1024,
+            max_chunks: 4,
+        };
+        let mut serve = ContentServeRequest {
+            manifest: vec![1; 256],
+            publisher_key: vec![2; 32],
+            cache: "/private/primary".into(),
+            bind_address: "127.0.0.1:18080".into(),
+            advertised_hostname: "provider.example".into(),
+            limits: Some(limits),
+            replication: None,
+        };
+        for option in [None, Some(replication.clone())] {
+            serve.replication = option;
+            let request = ControlRequest {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: vec![7; 16],
+                operation: Some(Operation::ContentServe(serve.clone())),
+            };
+            assert_eq!(
+                decode_request(&encode_request(&request).unwrap()).unwrap(),
+                request
+            );
+        }
+        for field in [
+            "path", "same", "quota", "entries", "bytes", "chunks", "zero", "minimum", "limits",
+        ] {
+            let mut invalid = replication.clone();
+            match field {
+                "path" => invalid.replica_cache = "relative".into(),
+                "same" => invalid.replica_cache.clone_from(&serve.cache),
+                "quota" => invalid.limits.as_mut().unwrap().quota_bytes = 256 * 1024 * 1024 + 1,
+                "entries" => invalid.limits.as_mut().unwrap().max_entries = 65_537,
+                "bytes" => invalid.max_bytes = 1024 * 1024 + 1,
+                "chunks" => invalid.max_chunks = 5,
+                "zero" => invalid.max_bytes = 0,
+                "minimum" => invalid.max_bytes = 63,
+                "limits" => invalid.limits = None,
+                _ => unreachable!(),
+            }
+            serve.replication = Some(invalid);
+            assert!(serve.validate().is_err(), "{field}");
+        }
+        let receipt = ContentReceipt {
+            serving: true,
+            replication_enabled: true,
+            replica_chunks: 4,
+            replica_bytes: 1024 * 1024,
+            replica_publications: 1,
+            ..ContentReceipt::default()
+        };
+        let response = |value| ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![8; 16],
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "CONTENT_OK".into(),
+            payload: Some(Payload::Content(value)),
+        };
+        let valid = response(receipt.clone());
+        assert_eq!(
+            decode_response(&encode_response(&valid).unwrap()).unwrap(),
+            valid
+        );
+        for field in ["bytes", "chunks", "publications"] {
+            let mut invalid = receipt.clone();
+            match field {
+                "bytes" => invalid.replica_bytes = 256 * 1024 * 1024 + 1,
+                "chunks" => invalid.replica_chunks = 65_537,
+                "publications" => invalid.replica_publications = 65,
+                _ => unreachable!(),
+            }
+            assert!(encode_response(&response(invalid)).is_err(), "{field}");
+        }
+        let inert = ContentReceipt::default();
+        assert!(!inert.replication_enabled);
+        assert_eq!(
+            (
+                inert.replica_chunks,
+                inert.replica_bytes,
+                inert.replica_publications
+            ),
+            (0, 0, 0)
+        );
     }
 }

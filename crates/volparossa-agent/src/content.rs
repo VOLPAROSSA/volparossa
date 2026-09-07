@@ -4,6 +4,11 @@
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
 mod https;
+mod replication;
+mod replication_budget;
+
+use replication::ReplicationRuntime;
+use replication_budget::Foreground;
 
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
@@ -49,6 +54,7 @@ pub(crate) struct ContentRuntime {
     signer: Arc<SigningKey>,
     service: Arc<Mutex<Option<Service>>>,
     retrieval: Arc<Mutex<()>>,
+    foreground: Arc<Foreground>,
 }
 
 struct Service {
@@ -57,6 +63,7 @@ struct Service {
     bind: SocketAddr,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    replication: Option<Arc<ReplicationRuntime>>,
 }
 
 impl ContentRuntime {
@@ -72,6 +79,7 @@ impl ContentRuntime {
             signer: Arc::new(signer),
             service: Arc::new(Mutex::new(None)),
             retrieval: Arc::new(Mutex::new(())),
+            foreground: Arc::new(Foreground::default()),
         })
     }
 
@@ -113,20 +121,32 @@ impl ContentRuntime {
             if active.bind != bind || active.endpoint != endpoint || active.task.is_finished() {
                 return Err(ContentError::Busy);
             }
+            if !match (&active.replication, &request.replication) {
+                (None, None) => true,
+                (Some(runtime), Some(config)) => runtime.matches(config),
+                _ => false,
+            } {
+                return Err(ContentError::Busy);
+            }
             let mut registry = active.registry.try_lock().map_err(|_| ContentError::Busy)?;
-            registry
-                .register(manifest, PathBuf::from(request.cache), cache_limits, now())
-                .map_err(|_| ContentError::Invalid)?;
-            return Ok(ContentReceipt {
+            register(&mut registry, &request, manifest, cache_limits)?;
+            let mut receipt = ContentReceipt {
                 serving: true,
                 publications: u32::try_from(registry.len()).map_err(|_| ContentError::Invalid)?,
                 ..ContentReceipt::default()
-            });
+            };
+            drop(registry);
+            if let Some(replication) = &active.replication {
+                replication.receipt(&mut receipt).await?;
+            }
+            return Ok(receipt);
         }
         let mut registry = PublicationRegistry::new();
-        registry
-            .register(manifest, PathBuf::from(request.cache), cache_limits, now())
-            .map_err(|_| ContentError::Invalid)?;
+        register(&mut registry, &request, manifest, cache_limits)?;
+        let replication = request
+            .replication
+            .map(ReplicationRuntime::create)
+            .transpose()?;
         let listener = TcpListener::bind(bind)
             .await
             .map_err(|_| ContentError::Unavailable)?;
@@ -153,10 +173,12 @@ impl ContentRuntime {
             bind,
             stop,
             task,
+            replication,
         });
         Ok(ContentReceipt {
             serving: true,
             publications: 1,
+            replication_enabled: service.as_ref().is_some_and(|s| s.replication.is_some()),
             ..ContentReceipt::default()
         })
     }
@@ -210,6 +232,9 @@ impl ContentRuntime {
         let mut current = self.service.lock().await;
         if let Some(service) = current.take() {
             let _ = service.stop.send(true);
+            if let Some(replication) = service.replication {
+                replication.stop().await;
+            }
             let mut task = service.task;
             if timeout(Duration::from_secs(20), &mut task).await.is_err() {
                 task.abort();
@@ -240,7 +265,7 @@ impl ContentRuntime {
         } else {
             (false, 0)
         };
-        Ok(ContentReceipt {
+        let mut receipt = ContentReceipt {
             serving,
             publications,
             control_relay_peer_id: context
@@ -250,7 +275,11 @@ impl ContentRuntime {
                 .map(|peer| peer.to_string())
                 .unwrap_or_default(),
             ..ContentReceipt::default()
-        })
+        };
+        if let Some(replication) = service.as_ref().and_then(|s| s.replication.as_ref()) {
+            replication.receipt(&mut receipt).await?;
+        }
+        Ok(receipt)
     }
 
     pub(crate) async fn fetch(
@@ -258,10 +287,17 @@ impl ContentRuntime {
         request: ContentFetchRequest,
         context: &ControlContext,
     ) -> Result<ContentReceipt, ContentError> {
-        let _retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
-        timeout(OPERATION_TIMEOUT, Self::fetch_inner(request, context))
+        let foreground = self.foreground.enter();
+        let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
+        let result = timeout(OPERATION_TIMEOUT, Self::fetch_inner(request, context))
             .await
-            .map_err(|_| ContentError::Unavailable)?
+            .map_err(|_| ContentError::Unavailable)?;
+        drop(retrieval);
+        drop(foreground);
+        if result.is_ok() {
+            self.start_replication(context).await;
+        }
+        result
     }
 
     pub(crate) async fn fetch_https(
@@ -269,10 +305,51 @@ impl ContentRuntime {
         request: HttpsContentFetchRequest,
         context: &ControlContext,
     ) -> Result<ContentReceipt, ContentError> {
-        let _retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
-        timeout(OPERATION_TIMEOUT, https::fetch(request, context))
+        let foreground = self.foreground.enter();
+        let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
+        let result = timeout(OPERATION_TIMEOUT, https::fetch(request, context))
             .await
-            .map_err(|_| ContentError::Unavailable)?
+            .map_err(|_| ContentError::Unavailable)?;
+        drop(retrieval);
+        drop(foreground);
+        if result.is_ok() {
+            self.start_replication(context).await;
+        }
+        result
+    }
+
+    async fn start_replication(&self, context: &ControlContext) {
+        let Ok(service) = self.service.try_lock() else {
+            return;
+        };
+        let Some(service) = service.as_ref().filter(|s| !s.task.is_finished()) else {
+            return;
+        };
+        let Some(replication) = &service.replication else {
+            return;
+        };
+        replication
+            .start(
+                context.clone(),
+                Arc::clone(&service.registry),
+                Arc::clone(&self.foreground),
+                service.stop.subscribe(),
+            )
+            .await;
+    }
+
+    async fn remember_provider(
+        &self,
+        peer: libp2p::PeerId,
+        offer: volparossa_content::provider::VerifiedProviderOffer,
+        manifest: [u8; 32],
+    ) {
+        let Ok(service) = self.service.try_lock() else {
+            return;
+        };
+        if let Some(replication) = service.as_ref().and_then(|s| s.replication.as_ref()) {
+            replication.remember(peer, offer, manifest).await;
+        }
     }
 
     async fn fetch_inner(
@@ -395,12 +472,39 @@ impl ContentRuntime {
             // A later session error does not undo chunks already authenticated and stored.
             if store.usage().bytes > before {
                 used.insert(provider.peer_id.to_string());
+                context
+                    .content
+                    .remember_provider(provider.peer_id, provider.offer, *manifest.manifest_id())
+                    .await;
             }
         }
         let mut provider_peer_ids: Vec<_> = used.into_iter().collect();
         provider_peer_ids.sort_unstable();
         Ok(provider_peer_ids)
     }
+}
+
+fn register(
+    registry: &mut PublicationRegistry,
+    request: &ContentServeRequest,
+    manifest: VerifiedManifest,
+    cache_limits: CacheLimits,
+) -> Result<(), ContentError> {
+    let root = PathBuf::from(&request.cache);
+    let result = if request.replication.is_some() {
+        let key: [u8; 32] = request
+            .publisher_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ContentError::Invalid)?;
+        let key = VerifyingKey::from_bytes(&key).map_err(|_| ContentError::Invalid)?;
+        let signed =
+            SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
+        registry.register_shareable(signed, &key, root, cache_limits, now())
+    } else {
+        registry.register(manifest, root, cache_limits, now())
+    };
+    result.map_err(|_| ContentError::Invalid)
 }
 
 fn make_offer(

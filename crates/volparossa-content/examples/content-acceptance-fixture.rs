@@ -35,6 +35,9 @@ async fn main() -> Result<()> {
         [mode, root, first, second] if mode == "seed-providers" => {
             seed_replicas(Path::new(root), None, Path::new(first), Path::new(second))
         }
+        [mode, root, foreground, reserve] if mode == "seed-replication" => {
+            seed_replication(Path::new(root), Path::new(foreground), Path::new(reserve))
+        }
         [mode, root, public] if mode == "seed-private" => {
             let public: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| "invalid recipient public key")?;
             seed(Path::new(root), Some(public))
@@ -58,7 +61,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-replication ROOT CACHE_P CACHE_Q | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
     }
 }
 
@@ -170,6 +173,96 @@ fn seed_replicas(
         "recipient_encrypted": recipient.is_some(),
     });
     write_report(&root.join("publication.json"), &report)
+}
+
+// Both final cache paths belong to the sole initial provider. No consumer/replicator path is
+// accepted here: its cache must start empty and acquire Q over the separately tested network.
+fn seed_replication(root: &Path, foreground: &Path, reserve: &Path) -> Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(root)?;
+    let origin = tempfile::tempdir_in(root)?;
+    let origin_path = origin.path().to_path_buf();
+    let mut source = ChunkStore::create(&origin.path().join("publisher"), limits())?;
+    let publisher = SigningKey::generate(&mut rand_core::OsRng);
+    let now = unix_seconds()?;
+    let mut publications = Vec::new();
+    for (label, path, full_chunks, first_byte, tail) in [
+        ("p", foreground, 2, b'1', 321),
+        ("q", reserve, 1, b'q', 123),
+    ] {
+        let mut bytes = Vec::with_capacity(full_chunks * CHUNK_BYTES + tail);
+        for offset in 0..full_chunks {
+            let byte = first_byte + u8::try_from(offset)?;
+            bytes.extend(vec![byte; CHUNK_BYTES]);
+        }
+        bytes.extend(vec![first_byte + u8::try_from(full_chunks)?; tail]);
+        let signed = publish(
+            &mut bytes.as_slice(),
+            Publication {
+                metadata: Metadata {
+                    name: format!("disposable-replication-{label}"),
+                    revision: 1,
+                    content_type: "application/octet-stream".into(),
+                },
+                length: u64::try_from(bytes.len())?,
+                validity: Validity {
+                    created: now,
+                    expires: now + 3600,
+                },
+            },
+            &publisher,
+            &mut source,
+        )?;
+        let manifest = signed.verify(&publisher.verifying_key(), now)?;
+        let mut cache = ChunkStore::create(path, limits())?;
+        for chunk in manifest.chunks() {
+            let chunk_bytes = source.get(chunk.id())?.ok_or("publisher chunk absent")?;
+            cache.put_verified(*chunk.id(), &chunk_bytes)?;
+        }
+        let mut actual = Vec::new();
+        reassemble(&manifest, &mut [&mut cache], now, &mut actual)?;
+        if actual != bytes {
+            return Err("replication publication seed mismatch".into());
+        }
+        let report = json!({
+            "report_kind": "volparossa-replication-publication",
+            "label": label,
+            "publisher_hex": hex::encode(publisher.verifying_key().as_bytes()),
+            "manifest_id": hex::encode(manifest.manifest_id()),
+            "object_sha256": ChunkId::digest(&actual).to_string(),
+            "bytes": manifest.length(),
+            "chunks": manifest.chunks().len(),
+            "seeded_cache_bytes": cache.usage().bytes,
+            "seeded_cache_entries": cache.usage().entries,
+            "publisher_removed": true,
+            "publisher_private_key_persisted": false,
+        });
+        publications.push((label, signed, report));
+    }
+    drop(source);
+    drop(publisher);
+    origin.close()?;
+    if origin_path.exists() {
+        return Err("replication publisher directory survived removal".into());
+    }
+    // Emit success metadata only after the private publisher state has actually gone.
+    for (label, signed, report) in &publications {
+        write_new(
+            &root.join(format!("manifest-{label}.bin")),
+            &signed.encode(),
+        )?;
+        write_report(&root.join(format!("publication-{label}.json")), report)?;
+    }
+    write_report(
+        &root.join("replication.json"),
+        &json!({
+            "report_kind": "volparossa-content-replication-seed",
+            "foreground": publications[0].2,
+            "reserve": publications[1].2,
+            "publisher_removed": true,
+            "publisher_private_key_persisted": false,
+            "replicator_seeded": false,
+        }),
+    )
 }
 
 // Explicit disposable test key material, not the product's recipient-key storage API.
@@ -376,6 +469,74 @@ fn write_report(path: &Path, report: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replication_seed_keeps_distinct_objects_only_in_original_provider_caches() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("public-metadata");
+        let foreground = temporary.path().join("provider-b-p");
+        let reserve = temporary.path().join("provider-b-q");
+        seed_replication(&root, &foreground, &reserve)?;
+        let read_report = |label| -> Result<Value> {
+            Ok(serde_json::from_slice(&read_bounded(
+                &root.join(format!("publication-{label}.json")),
+                4096,
+            )?)?)
+        };
+        let p = read_report("p")?;
+        let q = read_report("q")?;
+        assert_eq!(
+            p["object_sha256"],
+            "507a1f72e20863b91dbd92265ad6d58499cc16fab5a9d753676c56bbe87cb836"
+        );
+        assert_eq!(
+            q["object_sha256"],
+            "b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d"
+        );
+        assert_eq!(p["publisher_hex"], q["publisher_hex"]);
+        assert_ne!(p["manifest_id"], q["manifest_id"]);
+        let mut caches = [
+            ChunkStore::open(&foreground, limits())?,
+            ChunkStore::open(&reserve, limits())?,
+        ];
+        for (index, label, report, length, chunks) in
+            [(0, "p", &p, 524_609, 3), (1, "q", &q, 262_267, 2)]
+        {
+            assert_eq!(report["publisher_removed"], true);
+            assert_eq!(report["publisher_private_key_persisted"], false);
+            assert_eq!(report["bytes"], length);
+            assert_eq!(report["chunks"], chunks);
+            assert_eq!(report["seeded_cache_bytes"], length);
+            assert_eq!(report["seeded_cache_entries"], chunks);
+            let verified = manifest(
+                &root.join(format!("manifest-{label}.bin")),
+                report["publisher_hex"].as_str().ok_or("publisher absent")?,
+            )?;
+            assert_eq!(report["manifest_id"], hex::encode(verified.manifest_id()));
+            for chunk in verified.chunks() {
+                assert!(caches[1 - index].get(chunk.id())?.is_none());
+            }
+            let mut bytes = Vec::new();
+            reassemble(
+                &verified,
+                &mut [&mut caches[index]],
+                unix_seconds()?,
+                &mut bytes,
+            )?;
+            assert_eq!(report["object_sha256"], ChunkId::digest(&bytes).to_string());
+            assert_eq!(bytes.len(), usize::try_from(length)?);
+        }
+        let report: Value =
+            serde_json::from_slice(&read_bounded(&root.join("replication.json"), 4096)?)?;
+        assert_eq!(report["foreground"], p);
+        assert_eq!(report["reserve"], q);
+        assert_eq!(report["replicator_seeded"], false);
+        // Exactly the four public per-object files and combined report remain, no publisher.
+        assert_eq!(fs::read_dir(&root)?.count(), 5);
+        assert_eq!(fs::read_dir(temporary.path())?.count(), 3);
+        assert!(seed_replication(&root, &foreground, &reserve).is_err());
+        Ok(())
+    }
 
     #[test]
     fn provider_seed_reopens_exact_replica_paths_after_publisher_removal() -> Result<()> {

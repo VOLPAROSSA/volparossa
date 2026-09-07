@@ -45,6 +45,76 @@ pub struct EgressObservation {
     pub ipv6: bool,
 }
 
+/// Read-only kernel byte/drop counters for one exact live, non-overlay interface.
+/// These are activity observations, not a measurement of Internet capacity or congestion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterfaceTraffic {
+    /// Kernel index; a replacement interface invalidates an earlier sample.
+    pub ifindex: u32,
+    /// Received bytes from `rtnl_link_stats64`.
+    pub received: u64,
+    /// Transmitted bytes from `rtnl_link_stats64`.
+    pub transmitted: u64,
+    /// Receive drops; increasing drops deny optional background work.
+    pub receive_drops: u64,
+    /// Transmit drops; increasing drops deny optional background work.
+    pub transmit_drops: u64,
+}
+
+/// Read one bounded RTM_GETLINK snapshot in the caller's existing network namespace.
+/// No routes, queues, interface state or host configuration are changed. Unlike an egress
+/// observation this permits a local physical link without requiring an Internet default.
+///
+/// # Errors
+/// Rejects an invalid name, missing/ambiguous 64-bit counters, malformed kernel responses,
+/// excessive messages or the shared 500-ms deadline. An absent/down/overlay link yields `None`.
+pub fn observe_interface_traffic(interface: &str) -> io::Result<Option<InterfaceTraffic>> {
+    IndependentEgress::new(interface)?;
+    let mut reader = Reader::new()?;
+    let mut result = None;
+    let mut seen = false;
+    reader.dump(18, 16, 16, |payload| {
+        let Some(link) = decode_link(payload, interface)? else {
+            return Ok(());
+        };
+        if seen {
+            return Err(invalid("duplicate traffic interface"));
+        }
+        seen = true;
+        if link.usable() {
+            let attributes = attrs(&payload[16..])?;
+            let counters =
+                one(&attributes, 23)? // IFLA_STATS64, never truncated 32-bit stats.
+                    .ok_or_else(|| invalid("missing 64-bit interface counters"))?;
+            result = Some(decode_traffic(link.ifindex, counters)?);
+        }
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+fn decode_traffic(ifindex: u32, bytes: &[u8]) -> io::Result<InterfaceTraffic> {
+    // Stable prefix of Linux <linux/if_link.h> struct rtnl_link_stats64. Later counters
+    // may extend it; a short or unaligned prefix must never become zero activity.
+    if bytes.len() < 64 || bytes.len() > 512 || bytes.len() % 8 != 0 {
+        return Err(invalid("invalid 64-bit interface counters"));
+    }
+    let counter = |at: usize| -> io::Result<u64> {
+        Ok(u64::from_ne_bytes(
+            bytes[at..at + 8]
+                .try_into()
+                .map_err(|_| invalid("interface counter length"))?,
+        ))
+    };
+    Ok(InterfaceTraffic {
+        ifindex,
+        received: counter(16)?,
+        transmitted: counter(24)?,
+        receive_drops: counter(48)?,
+        transmit_drops: counter(56)?,
+    })
+}
+
 impl IndependentEgress {
     /// Validate one explicit interface name without performing I/O or granting participation.
     ///
@@ -521,6 +591,27 @@ fn u32_at(input: &[u8], at: usize) -> io::Result<u32> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn traffic_counters_use_64_bit_kernel_prefix_and_never_short_zero_samples() {
+        let mut wire = vec![0; 200];
+        for (offset, value) in [(16, u64::from(u32::MAX) + 77), (24, 93), (48, 3), (56, 5)] {
+            wire[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+        assert_eq!(
+            decode_traffic(7, &wire).unwrap(),
+            InterfaceTraffic {
+                ifindex: 7,
+                received: u64::from(u32::MAX) + 77,
+                transmitted: 93,
+                receive_drops: 3,
+                transmit_drops: 5,
+            }
+        );
+        for length in [0, 32, 63, 65, 513] {
+            assert!(decode_traffic(7, &vec![0; length]).is_err());
+        }
+    }
 
     fn attribute(kind: u16, value: &[u8]) -> Vec<u8> {
         let mut output = u16::try_from(value.len() + 4)
