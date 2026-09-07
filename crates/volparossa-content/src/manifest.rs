@@ -323,6 +323,7 @@ impl SignedManifest {
             return Err(Error::InvalidManifest);
         }
         Ok(VerifiedManifest {
+            manifest_id: Sha256::digest(self.encode()).into(),
             publisher: self
                 .body
                 .publisher
@@ -351,6 +352,7 @@ fn signing_bytes(body: &Body) -> Vec<u8> {
 /// Exact manifest verified against the expected publisher. Fields cannot be forged by callers.
 #[derive(Clone, Debug)]
 pub struct VerifiedManifest {
+    manifest_id: [u8; 32],
     publisher: [u8; 32],
     metadata: Metadata,
     length: u64,
@@ -360,6 +362,13 @@ pub struct VerifiedManifest {
 }
 
 impl VerifiedManifest {
+    /// SHA-256 of the exact canonical signed envelope, including its signature and nonce.
+    ///
+    /// Distinct publications of identical content remain distinct registered objects.
+    pub fn manifest_id(&self) -> &[u8; 32] {
+        &self.manifest_id
+    }
+
     /// Exact pre-established Ed25519 publisher key that authenticated this native object.
     ///
     /// Names and revisions are scoped to this identity, not an inferred web origin.

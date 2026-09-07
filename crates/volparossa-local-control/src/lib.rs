@@ -7,6 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+mod content;
+pub use content::{ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest};
+
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -34,7 +37,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -43,7 +46,9 @@ pub struct ControlRequest {
 pub mod control_request {
     use prost::Oneof;
 
-    use super::{ConnectRequest, Empty, LogQuery, RoleChange};
+    use super::{
+        ConnectRequest, ContentFetchRequest, ContentServeRequest, Empty, LogQuery, RoleChange,
+    };
 
     /// Exactly one supported CLI-to-agent operation.
     #[derive(Clone, PartialEq, Oneof)]
@@ -78,6 +83,18 @@ pub mod control_request {
         /// Return a bounded recent in-memory log window.
         #[prost(message, tag = "19")]
         Logs(LogQuery),
+        /// Explicitly register a native publication and enable its unprivileged provider service.
+        #[prost(message, tag = "20")]
+        ContentServe(ContentServeRequest),
+        /// Discover providers and fetch one exact publication over protected MPTCP.
+        #[prost(message, tag = "21")]
+        ContentFetch(ContentFetchRequest),
+        /// Withdraw and stop the local content listener without deleting cache data.
+        #[prost(message, tag = "22")]
+        ContentStop(Empty),
+        /// Inspect explicit content service and current route control without network I/O.
+        #[prost(message, tag = "23")]
+        ContentStatus(Empty),
     }
 }
 
@@ -163,7 +180,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -173,8 +190,8 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        Empty, LogList, PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList,
-        StatusSnapshot,
+        ContentReceipt, Empty, LogList, PathList, PeerList, PolicySnapshot, RoleSnapshot,
+        SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -204,6 +221,9 @@ pub mod control_response {
         /// Recent in-memory privacy-safe logs.
         #[prost(message, tag = "17")]
         Logs(LogList),
+        /// Successful explicit native-content work.
+        #[prost(message, tag = "18")]
+        Content(ContentReceipt),
     }
 }
 
@@ -598,6 +618,8 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
                     .map_err(|_| ControlProtocolError::Invalid("connect transport"))?;
             }
         }
+        control_request::Operation::ContentServe(request) => request.validate()?,
+        control_request::Operation::ContentFetch(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
             NodeRole::try_from(change.role).map_err(|_| ControlProtocolError::Invalid("role"))?;
         }
@@ -612,7 +634,9 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         | control_request::Operation::Paths(_)
         | control_request::Operation::Sessions(_)
         | control_request::Operation::PolicyStatus(_)
-        | control_request::Operation::Roles(_) => {}
+        | control_request::Operation::Roles(_)
+        | control_request::Operation::ContentStop(_)
+        | control_request::Operation::ContentStatus(_) => {}
     }
     Ok(())
 }
@@ -683,6 +707,26 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
                 fixed_or_empty(&record.session_id, 16, true)?;
                 if record.path_id.is_some_and(|path| !(1..=8).contains(&path)) {
                     return Err(ControlProtocolError::Invalid("log path ID"));
+                }
+            }
+        }
+        control_response::Payload::Content(receipt) => {
+            if receipt.bytes > 256 * 1024 * 1024
+                || receipt.chunks > 1024
+                || receipt.providers_used > 16
+                || receipt.publications > 64
+                || receipt.provider_peer_ids.len() != receipt.providers_used as usize
+            {
+                return Err(ControlProtocolError::Invalid("invalid content receipt"));
+            }
+            let mut unique = std::collections::HashSet::new();
+            if !receipt.control_relay_peer_id.is_empty() {
+                peer_id(&receipt.control_relay_peer_id)?;
+            }
+            for provider in &receipt.provider_peer_ids {
+                peer_id(provider)?;
+                if !unique.insert(provider) || *provider == receipt.control_relay_peer_id {
+                    return Err(ControlProtocolError::Invalid("duplicate content provider"));
                 }
             }
         }

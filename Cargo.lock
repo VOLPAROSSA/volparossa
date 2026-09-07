@@ -4563,6 +4563,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "volparossa-config",
+ "volparossa-content",
  "volparossa-core",
  "volparossa-discovery",
  "volparossa-exit",

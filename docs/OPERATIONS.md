@@ -306,6 +306,53 @@ hashes, and exposes a new `0600` output atomically only after complete reconstru
 expired manifests, absent/corrupt chunks and an existing output are errors. No peer discovery or
 network retrieval occurs; successful output explicitly reports `network_retrieval: false`.
 
+### Explicit protected content service and retrieval
+
+The development runtime now also has `content serve`, `content fetch`, `content status` and `content stop`.
+Compilation and focused tests pass; the independent-node network acceptance run is pending.
+Use a disposable topology while this integration is under development. These commands talk to
+the already running unprivileged agent (`--control-socket` can select its socket); they neither
+unlock another private key nor install/change the host network.
+
+A provider needs an existing cache created by the **agent account**, an independently trusted
+publisher key, and an explicitly chosen reachable bind address/DNS name. That hostname and TCP
+port must already be allowed by the threshold-signed Exit policy; an offer does not create an
+allowlist entry. Do not copy/chown an owned cache as a provisioning shortcut. Use caller-chosen
+paths accessible inside the agent's service sandbox. For example, after provisioning those
+prerequisites, substitute the actual addresses and paths:
+
+```sh
+volparossa content serve \
+  --manifest /agent-accessible/notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache /agent-owned/replica-cache --bind PROVIDER_BIND_IP:18080 \
+  --advertised-hostname provider.example
+
+volparossa content fetch \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache /agent-owned/new-retrieval-cache --output /agent-owned/restored-notes.pdf
+
+volparossa content status
+volparossa content stop
+```
+
+Serve announces a five-minute node-signed generic service offer and refreshes it while active.
+Repeat it with the same endpoint for up to 64 explicit manifests; a cache may hold only some
+chunks. Fetch asks an authenticated control Relay for at most 16 provider hints, validates their
+signatures and opens policy-authorized MPTCP/TLS streams through the normal Relay/Exit route.
+It does not connect directly to provider endpoints or use ordinary TCP as a fallback. The
+selected route's Exit and Relays are excluded as content suppliers in this initial runtime.
+
+Fetch requires a **new** cache and output path; it verifies every chunk and the whole object
+before publishing output. Missing data causes failure, retaining any verified owned cache data;
+this native command does not yet compose the separate HTTPS-origin fallback API. Its explicit
+JSON receipt includes reconstructed bytes/chunks and the unique supplying `provider_peer_ids`;
+those identifiers are not written to a background browsing log.
+Status inspects only retained local state, including `control_relay_peer_id`; it opens no
+network connection or route. Fetch's receipt binds that same control identity. Stop withdraws the offer and
+closes the listener but retains the owned cache files. Registration is in memory, not durable
+publication retention. None of these commands captures browsing, resolves latest publication
+names, redistributes automatically or promises faster retrieval.
+
 ## Crash and cleanup
 
 Route teardown is Destroy-first. From successful helper `Prepare`, a cancellation-safe supervisor

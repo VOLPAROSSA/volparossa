@@ -63,6 +63,34 @@ misses, 15 seconds per complete exchange and 300 seconds per session. Errors ter
 of that stream. The caller verifies the complete object's hash before publishing output.
 These native frames do not authenticate an HTTPS origin, discover providers or grant egress.
 
+### Explicit native provider discovery and selection (development v1)
+
+The separate generic capability index is `/volparossa/v1/provider/content`. Clients ask a
+current authenticated control Relay over `/volparossa/content-discovery/1`; that Relay queries
+providers and fetches their offers over `/volparossa/content-service/1`. Neither protocol nor
+the DHT carries object IDs, browsing URLs, chunk interests or a publication-key catalogue.
+Requests/replies bind version 1, a fresh 32-byte echoed nonce, peer/request identity and the
+current control connection. At most 16 offers (2048 bytes each), 36 KiB response frames and 32
+pending requests are accepted, with a 15-second deadline. A service hint is not route authority.
+
+The provider's canonical Ed25519-signed offer has envelope tags `1: body`, `2: signature`.
+Body fields are `1: version=1`, `2: provider key`, `3: created`, `4: exclusive expiry`,
+`5: fresh 32-byte nonce`, `6: type=1`, `7: payload SHA-256`, `8: payload`; payload fields are
+`1: canonical DNS hostname`, `2: nonzero TCP port`. The signing domain is
+`VOLPAROSSA/content-provider-offer/v1\0`; maximum lifetime is 300 seconds. The public key must
+derive the authenticated provider Peer ID. It authenticates that node's hint, not hostname
+ownership, publisher authority, available content/capacity or a signed-policy permission.
+
+After independent manifest and destination-policy verification, the consumer opens the normal
+protected MPTCP/TLS application flow. A 64-byte-maximum canonical selector precedes the existing
+chunk exchange: `1: version=1`, `2: SHA-256 of the exact canonical signed manifest`. The reply
+echoes those fields and adds `3: status` (1 accepted, 2 missing, 3 unavailable). The service
+looks up an explicitly registered manifest/cache pair, never a network-supplied filesystem path.
+Selector and transfer share one original session deadline. Normal local-control version 2 adds
+request operation tags 20/21/22/23 for serve/fetch/stop/status and response payload tag 18 for a bounded
+content receipt; unknown operations remain rejected by older agents. This is not a name service,
+automatic replica placement or an HTTPS trust constructor.
+
 ### Recipient-encrypted native message object (development v1)
 
 The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,

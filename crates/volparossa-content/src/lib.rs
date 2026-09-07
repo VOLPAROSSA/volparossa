@@ -9,6 +9,7 @@
 mod manifest;
 pub mod origin_https;
 pub mod private_message;
+pub mod provider;
 mod store;
 pub mod transfer;
 

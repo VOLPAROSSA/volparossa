@@ -32,6 +32,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
 volparossa-config = { path = "../volparossa-config", version = "=0.1.0" }
+volparossa-content = { path = "../volparossa-content", version = "=0.1.0" }
 volparossa-core = { path = "../volparossa-core", version = "=0.1.0" }
 volparossa-discovery = { path = "../volparossa-discovery", version = "=0.1.0" }
 volparossa-exit = { path = "../volparossa-exit", version = "=0.1.0" }

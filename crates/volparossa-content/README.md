@@ -80,11 +80,17 @@ the 206 range/total/length and original chunk hashes. An ignored Range/200 is fu
 counted as a complete origin transfer. A complete cache uses no stream I/O; original validity is
 never renewed. Eleven focused TLS tests and a separate-process proof pass: the partial case now
 receives only four missing chunks / 1,048,576 origin bytes, not the entire 2,097,275-byte object.
-Protected-route KVM passes for full-body fallback on `2de8209f`; the Range version is pending.
+Protected-route KVM passes for full-body fallback on `2de8209f` and Range retrieval on `6cf2394b`.
 Only a cooperative anonymous static binary profile is supported. There is no arbitrary-site,
 browser, witness or automatic-discovery implementation in this slice.
 
-No network discovery, automatic route selection for content, automatic
-replication, owner-priority I/O scheduling, durable retention, web policy or DNS behavior is
-installed or enabled. Publisher input and output-path selection remain caller-authorized;
+`provider` adds canonical five-minute node-signed service offers and an exact-manifest selector
+over supplied streams. A bounded local registry serves up to 64 explicitly verified publications
+from existing owned caches; requests never name filesystem paths. Four focused tests pass.
+The agent/CLI now integrate explicit provider registration, generic discovery through a control
+Relay and protected retrieval; their independent-node network proof remains pending. This crate
+still neither dials sockets nor grants route/egress or publisher authority.
+
+No automatic replication, owner-priority I/O scheduling, durable retention, web policy or DNS
+behavior is installed or enabled. Publisher input and output-path selection remain caller-authorized;
 this crate does not authorize sharing captured/private/no-store traffic.

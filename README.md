@@ -94,8 +94,10 @@ MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authentica
 checkpoint C01, not automatic distributed discovery or a complete offline website service.
 The normal CLI now provides `volparossa content publish` and `volparossa content assemble`:
 explicit local files are signed with the existing encrypted node identity and reconstructed
-from explicitly selected owned caches. These commands do not yet distribute or discover content;
-see the [offline content instructions](docs/OPERATIONS.md#offline-content-commands).
+from explicitly selected owned caches. Those two commands remain offline. New `content serve`,
+`content fetch` and `content stop` commands connect explicit publications to the agent's signed
+provider discovery and protected MPTCP retrieval. Compilation and focused checks pass; the
+independent-node network proof is pending. See the [content instructions](docs/OPERATIONS.md#offline-content-commands).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 A complete mailbox, automatic redistribution, shared DNS and browser integration remain
@@ -106,8 +108,8 @@ authenticated origin metadata, publisher signatures, or an explicitly configured
 witness. The first cooperative-origin HTTPS library and executable now work locally: obtain
 small metadata through actual hostname/CA-verified TLS, retrieve authenticated peer chunks, and
 use same-version origin fallback when chunks are missing. Its full-body-fallback protected-route
-test passes on `2de8209f`. Partial HTTPS fallback now also works locally: request only missing
-chunk ranges and verify them against the same origin manifest; its network proof is pending.
+test passes on `2de8209f`. Partial HTTPS fallback also passes the protected-route test on
+`6cf2394b`: fetch only missing chunk ranges and verify them against the same origin manifest.
 This currently needs publisher cooperation and supports anonymous static binary resources,
 not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
 compulsory central witness is proposed.

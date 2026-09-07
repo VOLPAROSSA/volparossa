@@ -50,6 +50,8 @@ pub struct ControlContext {
     pub helper: HelperClient,
     /// Affine owner of the current client route bootstrap, if any.
     pub routes: ClientRouteControl,
+    /// Explicit unprivileged content publication/retrieval lifecycle.
+    pub(crate) content: crate::content::ContentRuntime,
 }
 
 /// Listener plus an inode-bound cleanup guard.
@@ -169,6 +171,10 @@ async fn process_connection(
         .map_err(|_| ControlServerError::InvalidFrame)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One exhaustive typed local-operation dispatch"
+)]
 async fn handle_request(request: ControlRequest, context: &ControlContext) -> ControlResponse {
     let request_id = request.request_id;
     let Some(operation) = request.operation else {
@@ -180,6 +186,19 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         );
     };
     match operation {
+        control_request::Operation::ContentServe(request) => {
+            content_response(request_id, context.content.serve(request, context).await)
+        }
+        control_request::Operation::ContentFetch(request) => content_response(
+            request_id,
+            Box::pin(context.content.fetch(request, context)).await,
+        ),
+        control_request::Operation::ContentStop(_) => {
+            content_response(request_id, context.content.stop(&context.discovery).await)
+        }
+        control_request::Operation::ContentStatus(_) => {
+            content_response(request_id, context.content.status(context).await)
+        }
         control_request::Operation::Status(_) => {
             let status = context.state.read().await.status();
             response(
@@ -253,6 +272,35 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
                 ControlResult::Ok,
                 "OK",
                 control_response::Payload::Logs(logs),
+            )
+        }
+    }
+}
+
+fn content_response(
+    request_id: Vec<u8>,
+    result: Result<volparossa_local_control::ContentReceipt, crate::content::ContentError>,
+) -> ControlResponse {
+    use crate::content::ContentError;
+    match result {
+        Ok(receipt) => response(
+            request_id,
+            ControlResult::Ok,
+            "CONTENT_OK",
+            control_response::Payload::Content(receipt),
+        ),
+        Err(error) => {
+            let (result, code) = match error {
+                ContentError::Invalid => (ControlResult::InvalidRequest, "CONTENT_INVALID"),
+                ContentError::Unavailable => (ControlResult::Unavailable, "CONTENT_UNAVAILABLE"),
+                ContentError::Busy => (ControlResult::InvalidState, "CONTENT_BUSY"),
+                ContentError::Policy => (ControlResult::Policy, "CONTENT_POLICY"),
+            };
+            response(
+                request_id,
+                result,
+                code,
+                control_response::Payload::Ack(Empty {}),
             )
         }
     }

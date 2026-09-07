@@ -70,7 +70,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: IdentityCommand,
     },
-    /// Explicit offline native-content publishing and reconstruction; no network service.
+    /// Native content publishing, reconstruction and explicit protected network service.
     Content {
         #[command(subcommand)]
         command: Box<content::Command>,
@@ -258,7 +258,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             passphrase_file,
         } => initialize_identity(identity, passphrase_file.as_deref()),
         CliCommand::Identity { command } => maintain_identity_command(command).await,
-        CliCommand::Content { command } => content::run(*command),
+        CliCommand::Content { command } => content::run(*command, &cli.control_socket).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,
@@ -634,6 +634,15 @@ fn print_response(response: ControlResponse) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("agent returned no typed payload"))?
     {
         Payload::Ack(_) => println!("ok"),
+        Payload::Content(receipt) => println!(
+            "{}",
+            serde_json::json!({
+                "operation":"native_content", "bytes":receipt.bytes, "chunks":receipt.chunks,
+                "providers_used":receipt.providers_used, "serving":receipt.serving, "publications":receipt.publications,
+                "provider_peer_ids":receipt.provider_peer_ids,
+                "control_relay_peer_id":receipt.control_relay_peer_id,
+            })
+        ),
         Payload::Status(status) => {
             println!("connected: {}", status.connected);
             println!("active peers: {}", status.active_peers);

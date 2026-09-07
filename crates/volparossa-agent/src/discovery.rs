@@ -1,9 +1,12 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
+mod content;
 mod downlink;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
+
+pub(crate) use content::ContentDiscoveryError;
 
 pub(crate) use preselection_observation::{
     BoundPreselectionFreshnessProofBatch, CompletedPreselectionFreshnessAttempt,
@@ -515,6 +518,7 @@ impl DiscoveryControlHandle {
 
 #[allow(dead_code, reason = "typed route boundary")]
 enum DiscoveryCommand {
+    Content(content::ContentCommand),
     SetRoles {
         expected: RolesConfig,
         candidate: RolesConfig,
@@ -1696,6 +1700,7 @@ pub struct DiscoveryRuntime {
     independent_exit_retiring: bool,
     exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
     downlink: downlink::DownlinkBridge,
+    content: content::ContentBridge,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
@@ -1893,6 +1898,7 @@ impl DiscoveryRuntime {
             independent_exit_retiring: false,
             exit_runtime_retirements: HashMap::new(),
             downlink: downlink::DownlinkBridge::default(),
+            content: content::ContentBridge::default(),
             metrics,
             role_commands,
             client_preselection,
@@ -1988,12 +1994,17 @@ impl DiscoveryRuntime {
         downlink_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             self.maintain_client_preselection();
+            self.maintain_content();
+            let content_deadline = self.content_deadline();
             let responder_policy = {
                 let now_ms = unix_millis();
                 let policy = state.read().await.policy_snapshot(now_ms);
                 preselection_responder_policy(self.roles, &policy, now_ms)
             };
             tokio::select! {
+                () = tokio::time::sleep_until(content_deadline) => {
+                    self.maintain_content();
+                }
                 _ = downlink_maintenance.tick() => {
                     if Box::pin(self.maintain_downlink(&state)).await.is_err() {
                         state.write().await.log(LogLevel::Error, "DOWNLINK_ACCOUNTING_FAILED_CLOSED", unix_millis());
@@ -2124,6 +2135,7 @@ impl DiscoveryRuntime {
             .await;
         self.shutdown_downlink(&state).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
+        self.invalidate_content();
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
         self.withdraw_local();
@@ -2174,6 +2186,7 @@ impl DiscoveryRuntime {
     async fn handle_command(&mut self, command: DiscoveryCommand, state: &Arc<RwLock<AgentState>>) {
         self.maintain_client_preselection();
         match command {
+            DiscoveryCommand::Content(command) => self.handle_content_command(command, state).await,
             DiscoveryCommand::SetRoles {
                 expected,
                 candidate,
@@ -2186,6 +2199,7 @@ impl DiscoveryRuntime {
                 // Policy replacement/revocation invalidates every retained Relay authority input.
                 // Cancel both affine owners before publishing the new actor state.
                 self.cancel_client_preselection(ClientPreselectionError::Invalidated);
+                self.invalidate_content();
                 self.service.cancel_preselection_forwarding();
                 state.write().await.set_policy(policy);
                 self.synchronize_exit_policy(state).await;
@@ -3543,6 +3557,7 @@ impl DiscoveryRuntime {
     fn reject_queued_outbound_commands(&mut self) {
         while let Ok(command) = self.role_commands.try_recv() {
             match command {
+                DiscoveryCommand::Content(command) => command.reject(ContentDiscoveryError::Closed),
                 DiscoveryCommand::RequestExitForward { reply, .. } => {
                     let _ = reply.send(Err(OutboundReservationError::Shutdown));
                 }
@@ -4680,6 +4695,7 @@ impl DiscoveryRuntime {
     }
 
     fn withdraw_local(&mut self) {
+        self.withdraw_content_registration();
         self.served_local_advertisement = None;
         self.local_relay_snapshot = None;
         self.service.clear_local_advertisement();
@@ -4695,6 +4711,7 @@ impl DiscoveryRuntime {
     /// retrying its one or two capability indexes is both bounded and authority-free; withdrawing
     /// the advertisement on that transient query timeout makes startup order observable forever.
     async fn reannounce_local_providers(&mut self, state: &Arc<RwLock<AgentState>>) {
+        self.reannounce_content_registration();
         let keys = self
             .active_provider_keys
             .iter()
@@ -4802,6 +4819,11 @@ impl DiscoveryRuntime {
         event: SwarmEvent<BehaviourEvent>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let event = self.handle_content_swarm_event(event);
+        self.flush_content_events(state).await;
+        let Some(event) = event else {
+            return;
+        };
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 if self.control_addresses.insert(address.to_string()) {

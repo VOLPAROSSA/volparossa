@@ -142,8 +142,16 @@ full size, no I/O on completion, and incorrect/stale/corrupt/truncated responses
 deadline rejection. Its separate-process disposable-loopback proof receives exactly four missing
 chunks / 1,048,576 origin bytes after the 1,048,699-byte partial replica, with the same complete
 output hash. The extended `content-https` scenario now requires six missing-case protected flows
-(metadata, peer and four ranges), plus the three complete-case flows. That newer network proof
-is pending; the retained `2de8209f` report proves only the earlier full-body fallback.
+(metadata, peer and four ranges), plus the three complete-case flows. The
+[newer network proof on `6cf2394b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
+passes; the retained `2de8209f` report still proves only the earlier full-body fallback.
+
+The explicit provider runtime can be checked with focused `volparossa-content --test provider`,
+`volparossa-discovery content_provider`, `volparossa-agent --lib discovery::content::tests`,
+`volparossa-local-control content` and `volparossa content` Cargo tests. Run socket-bearing tests
+only in a disposable namespace/VM. These checks cover signed offers, exact-manifest selection,
+independent partial stores, connection/correlation bounds and typed CLI/control operations;
+they do not substitute for the pending independent-node `content-provider` KVM scenario.
 
 ## Helper-boundary evidence
 

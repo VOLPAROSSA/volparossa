@@ -1488,6 +1488,78 @@ impl ClientRouteControl {
         Ok(ClientRouteProgress::TransportActive)
     }
 
+    /// Open one content application stream through the normal authenticated MPTCP/Exit path.
+    /// A service offer is not policy authority and never supplies a raw destination socket.
+    pub(crate) async fn open_content_stream(
+        &self,
+        policy: &VerifiedManifest,
+        hostname: &str,
+        port: u16,
+        now_ms: u64,
+    ) -> Result<ActiveProductionMptcpClientFlow, ClientRouteConnectError> {
+        policy
+            .authorize_domain(now_ms, hostname, TransportProtocol::Tcp, port)
+            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let destination = ClientTcpDestination::Hostname(hostname.to_owned());
+        let (transport, material) = self
+            .acquire_tcp_flow_transport(policy, &destination, port, now_ms)
+            .await?;
+        activate_production_mptcp_client_flow(
+            transport,
+            &material.route,
+            &material.certificate_sha256,
+            &material.tls_server_name,
+            &material.signed_open_tcp,
+            now_ms,
+        )
+        .await
+        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)
+    }
+
+    /// Retain the carrying route's control identity for generic service lookup.
+    /// The discovery actor must still revalidate its current authenticated connection/authority.
+    pub(crate) async fn content_discovery_control(&self) -> Option<Libp2pPeerId> {
+        let state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &*state else {
+            return None;
+        };
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            return None;
+        }
+        Some(
+            established
+                .route
+                .as_ref()?
+                .established
+                .request
+                .control
+                .identity
+                .peer_id,
+        )
+    }
+
+    /// This first native-content destination must not be any actor on its carrying route.
+    pub(crate) async fn content_provider_is_distinct(&self, peer: &Libp2pPeerId) -> bool {
+        let state = self.state.lock().await;
+        let ClientRouteControlState::Established(established) = &*state else {
+            return false;
+        };
+        let Some(route) = established.route.as_ref() else {
+            return false;
+        };
+        if established.is_expired(crate::unix_millis(), Instant::now()) {
+            return false;
+        }
+        let request = &route.established.request;
+        request.exit.peer_id != *peer
+            && request.control.identity.peer_id != *peer
+            && route
+                .established
+                .relay_authorities
+                .iter()
+                .all(|relay| relay.peer_id != *peer)
+    }
+
     async fn acquire_tcp_flow_transport(
         &self,
         policy: &VerifiedManifest,

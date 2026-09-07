@@ -36,6 +36,17 @@ and reject a wrong publisher, missing chunks and output overwrites. Tests also r
 from two partial stores after removing the original input. These are real local commands,
 not automatic network publication/discovery or a newly verified installed Debian package.
 
+The new explicit `content serve` / `content fetch` / `content stop` runtime now compiles with
+strict agent, CLI and local-control Clippy. Serving registers up to 64 exact verified manifests
+from owned caches and signs a five-minute service offer with the existing node identity.
+Generic provider lookup goes through a current authenticated control Relay; neither object IDs
+nor URLs enter Kademlia. Fetch verifies signed offers, excludes the carrying route's Exit/Relays,
+and uses the existing policy-authorized MPTCP/TLS flow for each provider, never direct TCP.
+Five focused discovery-wire tests, four agent discovery tests, four provider/registry tests,
+three CLI tests and two typed local-control tests pass. The new independent-node KVM scenario
+is pending: this is not yet live provider-discovery evidence or C02/C06 completion. No default
+listener, automatic browser capture, replication/retention or speedup is implied.
+
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
 strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332
@@ -77,8 +88,14 @@ pass. Its separate-process disposable-loopback proof reconstructs the identical 
 1,048,699 peer bytes plus four exact 206 responses totaling **1,048,576 origin body bytes**.
 The complete-cache case still receives no origin body. Range offsets/total/length and every
 chunk are checked against the unchanged origin authority; an ignored Range/200 response is
-fully verified and its full byte cost reported. The extended protected-route scenario is
-pending and now requires nine actual app flows, not six; no throughput gain is inferred.
+fully verified and its full byte cost reported. The extended
+[`content-https` run on `6cf2394b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
+now passes the same exact four-range retrieval with nine protected app flows, real TLS 1.3,
+both WireGuard legs, ten complete zero-drop/zero-violation boundary captures and zero remaining
+owned objects with unchanged guest state. Its artifact SHA-256 is
+`729820100b4a4035eb7e006fe0b5801637d74912a11151f90ec2031d64400d79`.
+[Quality on that exact source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151736141)
+also passes. This reduces origin payload in the fixture, not proof of a throughput gain.
 Publisher cooperation is required. No browser integration,
 generic existing-site compatibility, TLSNotary, distributed discovery or C08 completion is claimed.
 README and the relevant architecture/protocol/privacy/testing summaries are updated together;

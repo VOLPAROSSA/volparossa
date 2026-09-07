@@ -617,6 +617,24 @@ impl ConnectionProvenanceBehaviour {
         }
     }
 
+    /// Transport-only identity binding for a current direct control connection. Multiple
+    /// siblings remain ambiguous: request-response dispatch must not select another lineage.
+    pub(super) fn unique_direct_control_connection(&self, peer_id: PeerId) -> Option<ConnectionId> {
+        if self.registry.poisoned {
+            return None;
+        }
+        let mut records = self
+            .registry
+            .records
+            .iter()
+            .filter(|(_, record)| record.peer_id == peer_id);
+        let (connection_id, record) = records.next()?;
+        if record.relayed || records.next().is_some() {
+            return None;
+        }
+        Some(*connection_id)
+    }
+
     pub(super) fn unique_witness(
         &self,
         peer_id: PeerId,
@@ -1005,6 +1023,37 @@ mod tests {
         );
         assert!(direct_scoped_multiaddr_prefix(peer, relayed.get_remote_address()).is_some());
         assert!(direct_scoped_prefix(peer, &relayed).is_none());
+    }
+
+    #[test]
+    fn content_control_connection_requires_unique_current_direct_lineage() {
+        let peer = PeerId::random();
+        let relay = PeerId::random();
+        let direct = dialer("/ip4/1.1.1.8/udp/41000/quic-v1");
+        let relayed = listener(
+            &format!("/ip4/8.8.8.8/tcp/443/p2p/{relay}/p2p-circuit"),
+            "/ip4/1.1.1.8/udp/41000/quic-v1",
+        );
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        established(&mut behaviour, peer, 1, &direct, 0);
+        assert_eq!(
+            behaviour.unique_direct_control_connection(peer),
+            Some(ConnectionId::new_unchecked(1))
+        );
+        assert!(behaviour.unique_direct_control_connection(relay).is_none());
+        established(&mut behaviour, peer, 2, &relayed, 1);
+        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        closed(&mut behaviour, peer, 1, &direct, 1);
+        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        closed(&mut behaviour, peer, 2, &relayed, 0);
+        established(&mut behaviour, peer, 3, &direct, 0);
+        assert_eq!(
+            behaviour.unique_direct_control_connection(peer),
+            Some(ConnectionId::new_unchecked(3))
+        );
+        behaviour.registry.poison();
+        assert!(behaviour.unique_direct_control_connection(peer).is_none());
     }
 
     #[test]

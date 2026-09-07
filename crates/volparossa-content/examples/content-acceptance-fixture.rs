@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode, root] if mode == "seed" => seed(Path::new(root), None),
+        [mode, root, first, second] if mode == "seed-providers" => {
+            seed_replicas(Path::new(root), None, Path::new(first), Path::new(second))
+        }
         [mode, root, public] if mode == "seed-private" => {
             let public: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| "invalid recipient public key")?;
             seed(Path::new(root), Some(public))
@@ -55,7 +58,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => Err("usage: seed ROOT | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
     }
 }
 
@@ -72,12 +75,28 @@ fn unix_seconds() -> Result<u64> {
 }
 
 fn seed(root: &Path, recipient: Option<[u8; 32]>) -> Result<()> {
+    seed_replicas(
+        root,
+        recipient,
+        &root.join("replica-a"),
+        &root.join("replica-b"),
+    )
+}
+
+// Create caches at their final paths as the current UID. Cache owner markers bind the UID and
+// directory inode, so moving or chowning a pre-seeded store is deliberately not supported.
+fn seed_replicas(
+    root: &Path,
+    recipient: Option<[u8; 32]>,
+    first: &Path,
+    second: &Path,
+) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let origin = tempfile::tempdir_in(root)?;
     let origin_path = origin.path().to_path_buf();
     let mut source = ChunkStore::create(&origin.path().join("source"), limits())?;
-    let mut first = ChunkStore::create(&root.join("replica-a"), limits())?;
-    let mut second = ChunkStore::create(&root.join("replica-b"), limits())?;
+    let mut first = ChunkStore::create(first, limits())?;
+    let mut second = ChunkStore::create(second, limits())?;
     let publisher = SigningKey::generate(&mut rand_core::OsRng);
     let trusted_publisher = publisher.verifying_key();
     let now = unix_seconds()?;
@@ -123,8 +142,8 @@ fn seed(root: &Path, recipient: Option<[u8; 32]>) -> Result<()> {
         };
         target.put_verified(*chunk.id(), &bytes)?;
     }
-    let first_count = first.usage().entries;
-    let second_count = second.usage().entries;
+    let first_usage = first.usage();
+    let second_usage = second.usage();
     drop(source);
     drop(publisher);
     drop(content);
@@ -138,11 +157,14 @@ fn seed(root: &Path, recipient: Option<[u8; 32]>) -> Result<()> {
     let report = json!({
         "report_kind": "volparossa-content-seed",
         "publisher_hex": hex::encode(trusted_publisher.as_bytes()),
+        "manifest_id": hex::encode(manifest.manifest_id()),
         "object_sha256": expected_hash.to_string(),
         "bytes": manifest.length(),
         "chunks": manifest.chunks().len(),
-        "replica_a_chunks": first_count,
-        "replica_b_chunks": second_count,
+        "replica_a_chunks": first_usage.entries,
+        "replica_b_chunks": second_usage.entries,
+        "replica_a_bytes": first_usage.bytes,
+        "replica_b_bytes": second_usage.bytes,
         "publisher_removed": true,
         "publisher_private_key_persisted": false,
         "recipient_encrypted": recipient.is_some(),
@@ -349,4 +371,47 @@ fn write_report(path: &Path, report: &Value) -> Result<()> {
     write_new(path, &bytes)?;
     println!("{report}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_seed_reopens_exact_replica_paths_after_publisher_removal() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("publication");
+        let first = temporary.path().join("provider-a-cache");
+        let second = temporary.path().join("provider-b-cache");
+        seed_replicas(&root, None, &first, &second)?;
+        let report: Value =
+            serde_json::from_slice(&read_bounded(&root.join("publication.json"), 4096)?)?;
+        assert_eq!(report["publisher_removed"], true);
+        assert_eq!(report["publisher_private_key_persisted"], false);
+        assert_eq!(report["replica_a_chunks"], 5);
+        assert_eq!(report["replica_b_chunks"], 4);
+        assert_eq!(report["replica_a_bytes"], 1_048_699);
+        assert_eq!(report["replica_b_bytes"], 1_048_576);
+        assert_eq!(fs::read_dir(&root)?.count(), 2);
+        let manifest = manifest(
+            &root.join("manifest.bin"),
+            report["publisher_hex"].as_str().ok_or("publisher absent")?,
+        )?;
+        assert_eq!(report["manifest_id"], hex::encode(manifest.manifest_id()));
+        let mut first = ChunkStore::open(&first, limits())?;
+        let mut second = ChunkStore::open(&second, limits())?;
+        let mut output = Vec::new();
+        reassemble(
+            &manifest,
+            &mut [&mut first, &mut second],
+            unix_seconds()?,
+            &mut output,
+        )?;
+        assert_eq!(output.len(), 2_097_275);
+        assert_eq!(
+            ChunkId::digest(&output).to_string(),
+            "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767"
+        );
+        Ok(())
+    }
 }

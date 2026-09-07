@@ -60,6 +60,8 @@ use client_ingress::{
 use client_udp_turns::{ClientUdpIoTurn, ClientUdpTurns};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
+
+mod content;
 use downlink_sharing::DownlinkSharingRuntime;
 use helper::{ClientIngressSocketFamily, HelperClient};
 use policy::load_active_policy;
@@ -86,6 +88,7 @@ const DNS_TCP_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
+    content: content::ContentRuntime,
     paths: AgentPaths,
     config: Arc<Config>,
     state: Arc<RwLock<AgentState>>,
@@ -110,6 +113,7 @@ impl Agent {
         let config = Config::from_path(&paths.config)?;
         let passphrase = read_identity_credential(&paths.identity_credential)?;
         let identity = IdentityStore::new(&paths.identity).load(&passphrase)?;
+        let content = content::ContentRuntime::new(&identity).map_err(|_| AgentError::Content)?;
         let role_store = RoleStore::new(paths.roles.clone());
         let roles = role_store.load_or_initialize(config.roles)?;
         let mut effective = config.clone();
@@ -154,6 +158,7 @@ impl Agent {
             Err(()) => state.log(LogLevel::Warn, "MPQUIC_SOCKET_UNSAFE", unix_millis()),
         }
         Ok(Self {
+            content,
             paths,
             config: Arc::new(config),
             state: Arc::new(RwLock::new(state)),
@@ -268,6 +273,7 @@ impl Agent {
         ));
         let routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
+            content: self.content.clone(),
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),
             discovery: self.discovery_control.clone(),
@@ -338,6 +344,8 @@ impl Agent {
             _ = &mut sharing_task => Err(AgentError::UplinkSharing),
             _ = &mut mesh_task => Err(AgentError::WifiMesh),
         };
+        // Withdraw and close explicit application listeners before stopping discovery.
+        let _ = self.content.stop(&self.discovery_control).await;
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
         stop_task(&mut discovery_task).await;
@@ -1564,6 +1572,9 @@ pub enum AgentError {
     /// The process-owned client ingress could not be prepared or activated.
     #[error("client ingress runtime is unavailable")]
     ClientIngress,
+    /// Existing identity could not initialize the explicit content lifecycle.
+    #[error("native content runtime is unavailable")]
+    Content,
     /// The explicitly configured upload scheduler could not be installed or retained.
     #[error("owner-priority upload sharing is unavailable")]
     UplinkSharing,
@@ -1600,6 +1611,7 @@ impl AgentError {
             Self::State(_) => "STATE_INVALID",
             Self::Control(_) => "CONTROL_FAILED",
             Self::ClientIngress => "CLIENT_INGRESS_FAILED",
+            Self::Content => "CONTENT_RUNTIME_FAILED",
             Self::UplinkSharing => "UPLINK_SHARING_FAILED",
             Self::DownlinkSharing => "DOWNLINK_SHARING_FAILED",
             Self::WifiMesh => "WIFI_MESH_FAILED",

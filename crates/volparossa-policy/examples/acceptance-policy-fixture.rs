@@ -1,7 +1,8 @@
 //! Generate one short-lived, threshold-signed development policy for the disposable acceptance
 //! topology. It permits only the topology's exact A02 TCP, A05 UDP echo, A06/A07 HTTP/3 and
-//! A08 visible-name TLS destinations. The fixed keys are test material and are never accepted in
-//! production.
+//! A08 visible-name TLS destinations. The explicit `--content-providers` option additionally
+//! permits three exact provider names on TCP 18080. The fixed keys are test material and are never
+//! accepted in production.
 
 use std::{
     env, fs,
@@ -25,8 +26,15 @@ const ACCEPTANCE_POLICY_LIFETIME_MS: u64 = 60 * 60 * 1_000;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os().skip(1);
     let directory = arguments.next().ok_or("missing fixture directory")?;
+    let content_providers = match arguments.next() {
+        None => false,
+        Some(option) if option == "--content-providers" => true,
+        Some(_) => {
+            return Err("usage: acceptance-policy-fixture ROOT [--content-providers]".into());
+        }
+    };
     if arguments.next().is_some() || !Path::new(&directory).is_absolute() {
-        return Err("invalid fixture directory".into());
+        return Err("usage: acceptance-policy-fixture ROOT [--content-providers]".into());
     }
     let keys = [
         SigningKey::from_bytes(&[0x41; 32]),
@@ -64,6 +72,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ProtocolPort::new(TransportProtocol::Udp, 443)?,
         ],
     )?)?;
+    if content_providers {
+        for hostname in [
+            "provider-a.volparossa.test",
+            "provider-b.volparossa.test",
+            "provider-c.volparossa.test",
+        ] {
+            specification.add_rule(DestinationRule::exact_domain(
+                hostname,
+                [ProtocolPort::new(TransportProtocol::Tcp, 18_080)?],
+            )?)?;
+        }
+    }
     let signers = keys.iter().collect::<Vec<_>>();
     let manifest = sign_manifest(&specification, &trust, &signers)?;
     write_private(

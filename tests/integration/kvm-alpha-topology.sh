@@ -27,10 +27,21 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider]'
 }
 
 print_plan() {
+    if [ "$scenario" = content-provider ]; then
+        printf '%s\n' \
+            'VOLPAROSSA content-provider runtime smoke plan:' \
+            '  register two disjoint stores on two of Relay3/4/5, excluding the current control relay;' \
+            '  permit only their exact fixture DNS names/TCP18080, never unrestricted raw-IP egress;' \
+            '  discover generic services through the control relay and actual private Kademlia;' \
+            '  fetch via genuine MPTCP/TLS/two-leg WireGuard after publisher removal;' \
+            '  deny Client mount access to replica files, require exact bytes and both provider IDs;' \
+            '  retain complete privacy captures/cleanup; no generic NAT, HTTPS or full-C02 claim.'
+        return
+    fi
     if [ "$scenario" = content-https ]; then
         printf '%s\n' \
             'VOLPAROSSA content-https protected native-client smoke plan:' \
@@ -215,7 +226,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https|content-provider) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -328,6 +339,17 @@ if [ "$scenario" = mixed-link ]; then
     [ -f "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = content-provider ]; then
+    for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py; do
+        if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
+            || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
+            printf '%s\n' 'content provider fixture unavailable' >&2
+            exit 69
+        fi
+    done
+    [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
+        || { printf '%s\n' 'content provider executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-https ]; then
     for https_fixture in content-https-smoke.sh content-https-smoke.py content-network-smoke.py; do
@@ -1292,7 +1314,9 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = content-https ]; then
+    if [ "$scenario" = content-provider ]; then
+        content_provider_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content-https ]; then
         content_https_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
         content_network_finalize_report "$original_status" || original_status=1
@@ -1374,6 +1398,10 @@ if [ "$scenario" = content-https ]; then
     # shellcheck source=tests/integration/content-https-smoke.sh
     . "$source_directory/tests/integration/content-https-smoke.sh"
 fi
+if [ "$scenario" = content-provider ]; then
+    # shellcheck source=tests/integration/content-provider-smoke.sh
+    . "$source_directory/tests/integration/content-provider-smoke.sh"
+fi
 
 PHASE=host-state-before
 A15_REQUESTED=true
@@ -1384,6 +1412,12 @@ capture_host_state "$WORK/host-state-before.json" \
 # policy hostname to the one destination address, while cleanup restores the exact guest file.
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
+if [ "$scenario" = content-provider ]; then
+    printf '%s\n' \
+        '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
+        '50.166.6.1 provider-b.volparossa.test provider-b.volparossa.test.' \
+        '48.164.4.1 provider-c.volparossa.test provider-c.volparossa.test.' >>/etc/hosts
+fi
 # The protected Exit resolver uses an absolute DNS name, avoiding search-domain substitution.
 printf '%s\n' '47.163.4.2 destination.volparossa.test destination.volparossa.test.' >>/etc/hosts
 getent ahostsv4 destination.volparossa.test. | awk '{print $1}' | sort -u \
@@ -1427,7 +1461,7 @@ install -o root -g "$AGENT_GID" -m 0555 \
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/tls-policy-acceptance-fixture" \
     "$WORK/bin/examples/tls-policy-acceptance-fixture"
-if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenario" = content-provider ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
@@ -1647,7 +1681,9 @@ jq -S -c -n \
       relay4:$relay4,relay5:$relay5,exit:$exit,exit2:$exit2}' \
     >"$WORK/a01-expected-peers.json"
 
-"$binary_directory/examples/acceptance-policy-fixture" "$WORK"
+set --
+[ "$scenario" != content-provider ] || set -- --content-providers
+"$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
 chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \
     "$WORK/policy-maintainers.json"
 
@@ -2134,6 +2170,12 @@ launch_agent() {
             agent_rust_log=$agent_rust_log,volparossa_discovery::authenticated_link=debug ;;
         esac
     fi
+    set --
+    if [ "$scenario" = content-provider ] && [ "$node" = client ]; then
+        # The identical agent UID must not permit a fixture-local replica file shortcut.
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-provider-seed"
+        set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed"
+    fi
     systemd-run --no-block --unit="$agent_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable alpha agent $node" \
         --service-type=exec \
@@ -2183,6 +2225,7 @@ launch_agent() {
         --property=SetLoginEnvironment=no \
         --property="StandardOutput=append:$agent_log" \
         --property="StandardError=append:$agent_log" \
+        "$@" \
         "$binary_directory/volparossa-agent" >/dev/null
 }
 
@@ -2754,6 +2797,9 @@ import sys
 import time
 
 role, output_path, ready_path, *interfaces = sys.argv[1:]
+content_provider_mode = interfaces[:1] == ["--content-providers"]
+if content_provider_mode:
+    interfaces.pop(0)
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
@@ -2792,7 +2838,31 @@ counters = {
 }
 link_down_interfaces = {}
 unexpected_outer_tuples = {}
+provider_addresses = {"49.165.5.1": "relay4", "50.166.6.1": "relay5", "48.164.4.1": "relay3"}
+provider_application = {node: dict(request_packets=0, response_packets=0, response_payload_bytes=0)
+                        for node in provider_addresses.values()}
+unexpected_provider_application_packets = 0
 expected_down_marker = os.path.join(os.path.dirname(output_path), "a07-privacy-link-down.marker")
+
+
+def record_provider_application(capture_role, protocol, source, source_port,
+                                destination, destination_port, payload_bytes):
+    global unexpected_provider_application_packets
+    if not content_provider_mode or protocol != socket.IPPROTO_TCP:
+        return
+    request = destination in provider_addresses and destination_port == 18080
+    response = source in provider_addresses and source_port == 18080
+    if not (request or response):
+        return
+    endpoint = destination if request else source
+    counterpart = source if request else destination
+    if capture_role != "exit" or counterpart != "46.162.3.1":
+        unexpected_provider_application_packets += 1
+        return
+    counters_for_node = provider_application[provider_addresses[endpoint]]
+    counters_for_node["request_packets" if request else "response_packets"] += 1
+    if response:
+        counters_for_node["response_payload_bytes"] += payload_bytes
 
 
 def receive_frame(capture, interface):
@@ -2971,6 +3041,16 @@ for readable in capture_rounds():
             )
             if is_outbound_client_discovery_attempt:
                 counters["outbound_client_discovery_attempt_packets"] += 1
+            if content_provider_mode and protocol == socket.IPPROTO_TCP:
+                payload_bytes = 0
+                if len(frame) >= transport_offset + 20:
+                    tcp_header = (frame[transport_offset + 12] >> 4) * 4
+                    total_length = min(struct.unpack("!H", frame[offset + 2:offset + 4])[0], len(frame) - offset)
+                    if tcp_header >= 20 and total_length >= header_length + tcp_header:
+                        payload_bytes = total_length - header_length - tcp_header
+                # Keep ordinary UDP41000 discovery distinct from TCP18080 application traffic.
+                record_provider_application(role, protocol, source, source_port,
+                                            destination, destination_port, payload_bytes)
             if protocol in {socket.IPPROTO_TCP, socket.IPPROTO_UDP}:
                 counters["routed_transport_packets"] += 1
             if source == "47.163.4.2" or destination == "47.163.4.2":
@@ -3137,6 +3217,9 @@ with open(output_path, "x", encoding="ascii") as output:
             "observed_frames": observed_frames,
             "truncated": truncated,
             "expected_link_down_interfaces": link_down_interfaces,
+            "content_provider_mode": content_provider_mode,
+            "provider_application": provider_application,
+            "unexpected_provider_application_packets": unexpected_provider_application_packets,
             "packet_socket_drops": packet_socket_drops,
             "unexpected_outer_tuples": [
                 {
@@ -3577,7 +3660,7 @@ fi
 
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
-    && [ "$scenario" != content-https ]; then
+    && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4131,9 +4214,14 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
+        content-provider-privacy)
+            [ "$scenario" = content-provider ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
+    [ "$scenario" != content-provider ] || set -- --content-providers
+    privacy_content_flag=
+    [ "$scenario" != content-provider ] || privacy_content_flag=--content-providers
     privacy_relay1_underlay=underlay
     if [ "$scenario" = mixed-link ]; then
         set -- --direct-lan-relay1
@@ -4176,7 +4264,7 @@ start_privacy_observers() {
 
     ip netns exec "$R0" python3 "$WORK/bin/privacy-observer.py" \
         relay0 "$WORK/$privacy_prefix-relay0.json" "$WORK/$privacy_prefix-relay0.ready" \
-        r0c r0x underlay >"$WORK/$privacy_prefix-relay0.log" 2>&1 &
+        ${privacy_content_flag:+"$privacy_content_flag"} r0c r0x underlay >"$WORK/$privacy_prefix-relay0.log" 2>&1 &
     PRIVACY_RELAY0_PID=$!
     wait_observer "$PRIVACY_RELAY0_PID" "$WORK/$privacy_prefix-relay0.ready" || return 1
 
@@ -4823,6 +4911,10 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
 fi
 if [ "$scenario" = content-https ]; then
     content_https_run
+    exit 0
+fi
+if [ "$scenario" = content-provider ]; then
+    content_provider_run
     exit 0
 fi
 

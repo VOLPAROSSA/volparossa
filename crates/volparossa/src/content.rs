@@ -1,4 +1,4 @@
-//! Explicit offline native-content operations, with no networking or origin-authority claim.
+//! Explicit native-content operations; networking is delegated to the protected agent runtime.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -24,6 +24,53 @@ pub(crate) enum Command {
     Publish(Publish),
     /// Verify and reconstruct from explicitly supplied local caches; no network retrieval.
     Assemble(Assemble),
+    /// Register a publication with the agent and explicitly start its public content service.
+    Serve(Serve),
+    /// Ask the agent to discover providers and retrieve through real protected MPTCP routes.
+    Fetch(Fetch),
+    /// Withdraw and stop the agent's content service, retaining owned cache files.
+    Stop,
+    /// Inspect explicit content service and the current route's control Relay; no network I/O.
+    Status,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Serve {
+    /// Exact canonical signed manifest to serve; never captured browser traffic.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Independently trusted 32-byte publisher public key in hexadecimal.
+    #[arg(long, value_parser = parse_publisher_key)]
+    publisher_key: VerifyingKey,
+    /// Existing cache owned by the agent account, potentially holding only some chunks.
+    #[arg(long)]
+    cache: PathBuf,
+    /// Explicit application bind address; no listener is started without this command.
+    #[arg(long)]
+    bind: std::net::SocketAddr,
+    /// DNS hostname for this service, which must already be allowed by the signed Exit policy.
+    #[arg(long)]
+    advertised_hostname: String,
+    #[command(flatten)]
+    limits: Limits,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Fetch {
+    /// Exact signed manifest; provider discovery does not establish publisher trust.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Independently trusted 32-byte publisher public key in hexadecimal.
+    #[arg(long, value_parser = parse_publisher_key)]
+    publisher_key: VerifyingKey,
+    /// New cache directory created by the agent account; no existing-directory adoption.
+    #[arg(long)]
+    cache: PathBuf,
+    /// New output path writable by the agent account; no existing entry is overwritten.
+    #[arg(long)]
+    output: PathBuf,
+    #[command(flatten)]
+    limits: Limits,
 }
 
 #[derive(Debug, Args)]
@@ -105,13 +152,73 @@ impl Limits {
     }
 }
 
-pub(crate) fn run(command: Command) -> Result<()> {
+pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
+    use volparossa_local_control::{
+        ContentFetchRequest, ContentServeRequest, Empty, control_request::Operation,
+    };
     let report = match command {
         Command::Publish(args) => publish(&args)?,
         Command::Assemble(args) => assemble(&args)?,
+        Command::Serve(args) => {
+            let operation = Operation::ContentServe(ContentServeRequest {
+                manifest: verified_manifest_bytes(&args.manifest, &args.publisher_key)?,
+                publisher_key: args.publisher_key.to_bytes().to_vec(),
+                cache: absolute_path(&args.cache)?,
+                bind_address: args.bind.to_string(),
+                advertised_hostname: args.advertised_hostname,
+                limits: Some(args.limits.wire_limits()),
+            });
+            return super::print_response(super::control::request(socket, operation).await?);
+        }
+        Command::Fetch(args) => {
+            let operation = Operation::ContentFetch(ContentFetchRequest {
+                manifest: verified_manifest_bytes(&args.manifest, &args.publisher_key)?,
+                publisher_key: args.publisher_key.to_bytes().to_vec(),
+                cache: absolute_path(&args.cache)?,
+                output: absolute_path(&args.output)?,
+                limits: Some(args.limits.wire_limits()),
+            });
+            return super::print_response(super::control::request(socket, operation).await?);
+        }
+        Command::Stop => {
+            return super::print_response(
+                super::control::request(socket, Operation::ContentStop(Empty {})).await?,
+            );
+        }
+        Command::Status => {
+            return super::print_response(
+                super::control::request(socket, Operation::ContentStatus(Empty {})).await?,
+            );
+        }
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
+}
+
+impl Limits {
+    fn wire_limits(&self) -> volparossa_local_control::ContentCacheLimits {
+        volparossa_local_control::ContentCacheLimits {
+            quota_bytes: self.quota_bytes,
+            max_entries: self.max_entries,
+            min_free_bytes: self.min_free_bytes,
+        }
+    }
+}
+
+fn absolute_path(path: &Path) -> Result<String> {
+    std::path::absolute(path)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("content path must be UTF-8"))
+}
+
+fn verified_manifest_bytes(path: &Path, publisher: &VerifyingKey) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_regular(path, MAX_MANIFEST_BYTES as u64)?
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    SignedManifest::decode(&bytes)?.verify(publisher, now_seconds()?)?;
+    Ok(bytes)
 }
 
 fn publish(args: &Publish) -> Result<serde_json::Value> {
@@ -437,6 +544,53 @@ mod tests {
         publish_args.identity = Some(root.join("must-not-create-identity.key"));
         assert!(publish(&publish_args).is_err());
         assert!(!publish_args.identity.as_ref().expect("path").exists());
+    }
+
+    #[test]
+    fn network_content_commands_parse_without_unlocking_a_publisher_identity() {
+        let key = hex::encode(SigningKey::from_bytes(&[17; 32]).verifying_key().to_bytes());
+        for action in ["serve", "fetch"] {
+            let mut args = vec![
+                "volparossa",
+                "content",
+                action,
+                "--manifest",
+                "exact.pb",
+                "--publisher-key",
+                &key,
+                "--cache",
+                "owned",
+            ];
+            if action == "serve" {
+                args.extend([
+                    "--bind",
+                    "127.0.0.1:18080",
+                    "--advertised-hostname",
+                    "provider.example",
+                ]);
+            } else {
+                args.extend(["--output", "new.bin"]);
+            }
+            assert!(crate::Cli::try_parse_from(args).is_ok());
+        }
+        assert!(crate::Cli::try_parse_from(["volparossa", "content", "stop"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["volparossa", "content", "status"]).is_ok());
+        assert!(
+            crate::Cli::try_parse_from([
+                "volparossa",
+                "content",
+                "serve",
+                "--manifest",
+                "exact.pb",
+                "--cache",
+                "owned",
+                "--bind",
+                "127.0.0.1:18080",
+                "--advertised-hostname",
+                "provider.example"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

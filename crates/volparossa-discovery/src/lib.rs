@@ -6,6 +6,7 @@ mod advertisement_budget;
 mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
+mod content_provider;
 mod forwarding;
 mod listener_recovery;
 mod mpquic_session;
@@ -51,6 +52,14 @@ pub use connection_provenance::{
     BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
 };
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
+pub use content_provider::{
+    CONTENT_DISCOVERY_PROTOCOL, CONTENT_REQUEST_TIMEOUT, CONTENT_SERVICE_PROTOCOL,
+    ContentDiscoveryRequest, ContentDiscoveryResponse, ContentProviderOffer,
+    ContentProviderRpcError, ContentServiceRequest, ContentServiceResponse,
+    MAX_CONTENT_DISCOVERY_FRAME_BYTES, MAX_CONTENT_OFFER_BYTES, MAX_CONTENT_OFFERS,
+    MAX_PENDING_CONTENT_REQUESTS,
+};
+use content_provider::{ContentDiscoveryCodec, ContentProviderState, ContentServiceCodec};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
@@ -215,6 +224,8 @@ pub mod capability {
     pub const MPTCP: &str = "/volparossa/v1/provider/mptcp";
     /// Genuine Multipath-QUIC-capable providers.
     pub const MPQUIC: &str = "/volparossa/v1/provider/mpquic";
+    /// Explicit public content services, without a content or browser-history index.
+    pub const CONTENT: &str = "/volparossa/v1/provider/content";
 
     /// Builds a bounded region capability key.
     pub fn region(role: &str, region: &str) -> Option<String> {
@@ -286,6 +297,10 @@ pub struct DiscoveryBehaviour {
     pub relay_server: relay::Behaviour,
     /// Direct relay/control-relay advertisement retrieval.
     pub advertisements: request_response::Behaviour<AdvertisementCodec>,
+    /// Control relay to public content provider; content interests are never encoded here.
+    content_service: request_response::Behaviour<ContentServiceCodec>,
+    /// Client to its already authenticated control relay for public service offers.
+    content_discovery: request_response::Behaviour<ContentDiscoveryCodec>,
     /// Client-to-control-relay forwarding hop.
     pub exit_forward: request_response::Behaviour<ExitForwardCodec>,
     /// Control-relay-to-exit forwarding hop.
@@ -364,6 +379,14 @@ impl DiscoveryBehaviour {
             protocol_roles.client(),
             protocol_roles.relay(),
         ));
+        let content_service = content_provider::service_behaviour(protocol_support(
+            protocol_roles.relay(),
+            protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
+        ));
+        let content_discovery = content_provider::discovery_behaviour(protocol_support(
+            protocol_roles.client(),
+            protocol_roles.relay(),
+        ));
         Self {
             connection_limits,
             connection_provenance,
@@ -378,6 +401,8 @@ impl DiscoveryBehaviour {
             relay_client,
             relay_server,
             advertisements,
+            content_service,
+            content_discovery,
             exit_forward,
             exit_forward_upstream,
             datapath_relay,
@@ -419,6 +444,10 @@ pub enum BehaviourEvent {
     RelayServer(relay::Event),
     /// Advertisement protocol event.
     Advertisements(request_response::Event<AdvertisementRequest, AdvertisementResponse>),
+    /// Nonce-checked upstream signed content-service offer or transport failure.
+    ContentService(request_response::Event<ContentServiceRequest, ContentServiceResponse>),
+    /// Inbound client query or exactly correlated forwarded content-service offers.
+    ContentDiscovery(request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>),
     /// Client-hop A1c event; the client-side outbound attempt owner remains absent.
     PreselectionObservation(
         request_response::Event<
@@ -647,6 +676,22 @@ impl From<request_response::Event<AdvertisementRequest, AdvertisementResponse>> 
         Self::Advertisements(value)
     }
 }
+impl From<request_response::Event<ContentServiceRequest, ContentServiceResponse>>
+    for BehaviourEvent
+{
+    fn from(value: request_response::Event<ContentServiceRequest, ContentServiceResponse>) -> Self {
+        Self::ContentService(value)
+    }
+}
+impl From<request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>>
+    for BehaviourEvent
+{
+    fn from(
+        value: request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>,
+    ) -> Self {
+        Self::ContentDiscovery(value)
+    }
+}
 impl
     From<
         request_response::Event<
@@ -725,6 +770,9 @@ pub enum DiscoveryError {
     /// A direct-advertisement frame violates its canonical v4 bounds.
     #[error(transparent)]
     AdvertisementRpc(#[from] AdvertisementRpcError),
+    /// A content-service discovery frame violates its bounds or request correlation.
+    #[error(transparent)]
+    ContentProviderRpc(#[from] ContentProviderRpcError),
     /// A forwarding-hop frame violates its canonical v4 bounds.
     #[error(transparent)]
     ForwardingRpc(#[from] ForwardingRpcError),
@@ -897,6 +945,7 @@ pub struct DiscoveryService {
     configured_listeners: ConfiguredListeners,
     local_advertisement: Option<Vec<u8>>,
     advertisement_budgets: AdvertisementBudgets,
+    content_provider: ContentProviderState,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
     preselection_forwarder: PreselectionForwarderState,
@@ -975,6 +1024,7 @@ impl DiscoveryService {
             protocol_roles,
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
+            content_provider: ContentProviderState::default(),
             address_admissions: AddressAdmissions::default(),
             preselection_forwarder: PreselectionForwarderState::new()
                 .map_err(|error| DiscoveryError::Build(error.to_string()))?,
@@ -1254,14 +1304,19 @@ impl DiscoveryService {
     pub fn find_providers(&mut self, capability_key: &str) -> Result<kad::QueryId, DiscoveryError> {
         validate_capability_key(capability_key)?;
         let swarm = &mut self.swarm;
-        self.advertisement_budgets
+        let id = self
+            .advertisement_budgets
             .provider_query_or_insert(capability_key, || {
                 swarm
                     .behaviour_mut()
                     .kademlia
                     .get_providers(kad::RecordKey::new(&capability_key))
             })
-            .ok_or(DiscoveryError::ResourceLimit)
+            .ok_or(DiscoveryError::ResourceLimit)?;
+        if capability_key == capability::CONTENT {
+            self.content_provider.provider_query = Some(id);
+        }
+        Ok(id)
     }
 
     /// Begins Kademlia bootstrap using every currently known routing peer.
@@ -1788,6 +1843,9 @@ impl DiscoveryService {
     async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {
             let event = self.configured_listeners.next_event(&mut self.swarm).await;
+            let Some(event) = self.handle_content_event(event) else {
+                continue;
+            };
             match event {
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Advertisements(
                     request_response::Event::Message {

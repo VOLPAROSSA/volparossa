@@ -104,6 +104,16 @@ trusted publisher key and explicit local cache paths. Both have real separate-in
 roundtrip evidence, but do not announce a provider, distribute chunks or resolve a public name.
 See the [operational commands](OPERATIONS.md#offline-content-commands).
 
+The next integrated runtime adds explicit `content serve` / `content fetch` / `content stop`.
+A provider signs only a short-lived generic service location. A consumer asks its current
+authenticated control Relay to find services, verifies their node-key signatures, then fetches
+the exact independently trusted manifest over existing policy-authorized MPTCP/TLS routes.
+The DHT and control lookup carry no object IDs, URLs or publication-key catalogue. At most
+16 offers and 64 explicitly registered publications are supported. Compilation and focused
+provider/discovery/control/CLI tests pass; independent-node KVM evidence is pending. C02/C06
+remain open, and this does not implement automatic placement, retention, name lookup or HTTPS
+integration in the normal CLI.
+
 The new stream API pulls only missing chunks from each provider, authenticating bytes before
 storage and bounding requests, bytes and exchange/session time. A real separate-process proof
 in a disposable loopback namespace reconstructs 2,097,275 bytes / nine chunks after the publisher
@@ -165,7 +175,10 @@ and a separate-process disposable-loopback proof pass: five cached chunks supply
 then four 206 responses supply only the missing 1,048,576 bytes. Each range binds the original
 offset, length, total and authenticated chunk hash; wrong/stale/changed responses are rejected.
 An origin that ignores Range can still supply a fully verified 200 response, with its full cost
-reported. Original authorization never renews. The Range protected-route proof is pending.
+reported. Original authorization never renews. The
+[Range protected-route proof on `6cf2394b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
+passes with the exact four missing ranges, nine protected flows, ten complete zero-drop boundary
+captures, zero remaining owned objects and unchanged guest state; exact-source Quality also passes.
 This requires publisher support and proves neither faster total retrieval nor
 browser/generic-web/TLSNotary integration.
 
