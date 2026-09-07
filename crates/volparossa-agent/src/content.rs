@@ -3,6 +3,8 @@
 //! Neither browsing capture nor a default listener is enabled. Provider offers are only
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
+mod https;
+
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -20,6 +22,7 @@ use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, Veri
 use volparossa_identity::Identity;
 use volparossa_local_control::{
     ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest,
+    HttpsContentFetchRequest,
 };
 use zeroize::Zeroizing;
 
@@ -261,6 +264,17 @@ impl ContentRuntime {
             .map_err(|_| ContentError::Unavailable)?
     }
 
+    pub(crate) async fn fetch_https(
+        &self,
+        request: HttpsContentFetchRequest,
+        context: &ControlContext,
+    ) -> Result<ContentReceipt, ContentError> {
+        let _retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
+        timeout(OPERATION_TIMEOUT, https::fetch(request, context))
+            .await
+            .map_err(|_| ContentError::Unavailable)?
+    }
+
     async fn fetch_inner(
         request: ContentFetchRequest,
         context: &ControlContext,
@@ -294,6 +308,36 @@ impl ContentRuntime {
             .content_discovery_control()
             .await
             .ok_or(ContentError::Unavailable)?;
+        let provider_peer_ids =
+            Self::pull_registered_providers(context, &manifest, &mut store, &policy, control_peer)
+                .await?;
+        let bytes =
+            volparossa_content::reassemble_to_file(&manifest, &mut [&mut store], now(), &output)
+                .map_err(|_| ContentError::Unavailable)?;
+        Ok(ContentReceipt {
+            bytes,
+            chunks: u32::try_from(manifest.chunks().len()).map_err(|_| ContentError::Invalid)?,
+            providers_used: u32::try_from(provider_peer_ids.len())
+                .map_err(|_| ContentError::Invalid)?,
+            provider_peer_ids,
+            control_relay_peer_id: control_peer.to_string(),
+            peer_bytes: store.usage().bytes,
+            ..ContentReceipt::default()
+        })
+    }
+
+    /// Shared native/HTTPS chunk retrieval. This borrows only the verified native chunk
+    /// authority; HTTPS callers must retain their separate original origin authorization.
+    async fn pull_registered_providers(
+        context: &ControlContext,
+        manifest: &VerifiedManifest,
+        store: &mut ChunkStore,
+        policy: &volparossa_policy::VerifiedManifest,
+        control_peer: libp2p::PeerId,
+    ) -> Result<Vec<String>, ContentError> {
+        if complete(manifest, store)? {
+            return Ok(Vec::new());
+        }
         let providers = context
             .discovery
             .discover_content_providers(control_peer, 16)
@@ -301,7 +345,7 @@ impl ContentRuntime {
             .map_err(|_| ContentError::Unavailable)?;
         let mut used = HashSet::new();
         for provider in providers {
-            if complete(&manifest, &mut store)? {
+            if complete(manifest, store)? {
                 break;
             }
             if !context
@@ -339,8 +383,8 @@ impl ContentRuntime {
             let before = store.usage().bytes;
             let _progress = pull_publication(
                 flow.stream_mut(),
-                &manifest,
-                &mut store,
+                manifest,
+                store,
                 TransferLimits::default(),
             )
             .await;
@@ -350,20 +394,9 @@ impl ContentRuntime {
                 used.insert(provider.peer_id.to_string());
             }
         }
-        let bytes =
-            volparossa_content::reassemble_to_file(&manifest, &mut [&mut store], now(), &output)
-                .map_err(|_| ContentError::Unavailable)?;
         let mut provider_peer_ids: Vec<_> = used.into_iter().collect();
         provider_peer_ids.sort_unstable();
-        Ok(ContentReceipt {
-            bytes,
-            chunks: u32::try_from(manifest.chunks().len()).map_err(|_| ContentError::Invalid)?,
-            providers_used: u32::try_from(provider_peer_ids.len())
-                .map_err(|_| ContentError::Invalid)?,
-            provider_peer_ids,
-            control_relay_peer_id: control_peer.to_string(),
-            ..ContentReceipt::default()
-        })
+        Ok(provider_peer_ids)
     }
 }
 

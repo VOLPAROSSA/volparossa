@@ -749,7 +749,9 @@ grep -F -- '-p volparossa-content --example https-content-acceptance-fixture' "$
 grep -F 'Require genuine origin-authenticated HTTPS content evidence' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-content-https-smoke.py"
 sh -n "$HERE/content-provider-smoke.sh"
+sh -n "$HERE/content-provider-https-smoke.sh"
 grep -F 'content_provider_run' "$GUEST" >/dev/null
 grep -F 'Require actual native provider discovery and protected fetch' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-content-provider-smoke.py"
+python3 -B "$HERE/test-content-provider-https-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'

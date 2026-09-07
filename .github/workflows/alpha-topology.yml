@@ -79,6 +79,8 @@ jobs:
           python3 -B tests/integration/test-content-https-smoke.py
           sh -n tests/integration/content-provider-smoke.sh
           python3 -B tests/integration/test-content-provider-smoke.py
+          sh -n tests/integration/content-provider-https-smoke.sh
+          python3 -B tests/integration/test-content-provider-https-smoke.py
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -230,6 +232,7 @@ jobs:
             if test -f "$report"; then
               jq -r '"native provider discovery and protected fetch succeeded: \(.success)",
                 "verified bytes: \(.transfer.fetch.bytes)", "payload providers: \(.transfer.fetch.providers_used)",
+                "explicit origin-authenticated HTTPS: \(.explicit_origin_authenticated_https)",
                 "blocker: \(.observed_blocker // "none")", "scope: two explicit authorized providers, not general NAT/full C02"' \
                 "$report" >>"$GITHUB_STEP_SUMMARY"
             else

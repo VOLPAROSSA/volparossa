@@ -37,11 +37,29 @@ def fixture(control_node="relay2"):
             client_public_packets=0, outbound_client_discovery_attempt_packets=0,
             client_leg_wireguard_data_datagrams=900, exit_leg_wireguard_data_datagrams=900,
             provider_application=application)
-    return dict(success=True,
+    control_capture = dict(
+        capture_role="content-control", content_provider_mode=True, truncated=False,
+        observed_frames=40, packet_socket_drops=0, interfaces=["cp0", "cp1"],
+        content_control_pairs={f"cp{i}": [CHECK["PUBLIC_IPS"][control_node], CHECK["PUBLIC_IPS"][node]]
+                               for i, node in enumerate(provider_nodes)},
+        content_control_packets={name: dict(inbound=10, outbound=10) for name in ("cp0", "cp1")},
+        unexpected_provider_control_packets=0, unexpected_provider_application_packets=0,
+        provider_application=copy.deepcopy(privacy["client"]["provider_application"]),
+        interface_statistics={name: dict(intake_stopped=True, observed_frames=20,
+                                         packet_socket_packets=20, packet_socket_drops=0)
+                              for name in ("cp0", "cp1")})
+    control_routes = {node: dict(
+        out=[dict(dst=CHECK["PUBLIC_IPS"][node], prefsrc=CHECK["PUBLIC_IPS"][control_node],
+                  dev=f"cp{i}", gateway=f"10.241.{80+i}.2")],
+        back=[dict(dst=CHECK["PUBLIC_IPS"][control_node], prefsrc=CHECK["PUBLIC_IPS"][node],
+                   dev=f"pc{i}", gateway=f"10.241.{80+i}.1")])
+        for i, node in enumerate(provider_nodes)}
+    evidence = dict(success=True,
+        control_underlay=dict(capture=control_capture, routes=control_routes),
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=peers[control_node]),
         status_before=dict(control_relay_peer_id=peers[control_node]),
         status_after=dict(control_relay_peer_id=peers[control_node]), publication=dict(
-        bytes=CHECK["BYTES"], object_sha256=CHECK["SHA"], chunks=9,
+        bytes=CHECK["BYTES"], object_sha256=CHECK["SHA"], chunks=9, manifest_id="d" * 64,
         replica_a_chunks=5, replica_b_chunks=4, publisher_removed=True,
         publisher_private_key_persisted=False, publisher_hex="1" * 64),
         output=dict(bytes=CHECK["BYTES"], sha256=CHECK["SHA"], client_cache_initially_absent=True,
@@ -56,6 +74,9 @@ def fixture(control_node="relay2"):
         selected_route=dict(transport="mptcp", route_context_id="a" * 32, paths=paths,
                             benchmark_slots=[dict(relay_node=f"relay{i}", relay_peer_id=peers[f"relay{i}"])
                                              for i in range(2)]), privacy=privacy)
+    evidence["https"] = runpy.run_path(str(HERE / "test-content-provider-https-smoke.py"))["fixture"](
+        control_node, evidence["publication"])
+    return evidence
 
 
 class ContentProviderContract(unittest.TestCase):
@@ -68,6 +89,7 @@ class ContentProviderContract(unittest.TestCase):
 
     def test_exact_scoped_report(self):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
+                      explicit_origin_authenticated_https=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})
@@ -75,6 +97,7 @@ class ContentProviderContract(unittest.TestCase):
         for mutate in (
             lambda item: item.update(source_revision="c" * 40),
             lambda item: item.update(full_c02_claimed=True),
+            lambda item: item.update(explicit_origin_authenticated_https=False),
             lambda item: item["cleanup"].update(remaining_owned_objects=1),
             lambda item: item["host_state"].update(after_sha256="c" * 64),
         ):
@@ -91,6 +114,10 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item["fetch"].update(control_relay_peer_id="peer-relay1"),
             lambda item: item["layout"].update(control_relay_peer_id="peer-relay4"),
             lambda item: item["layout"].update(provider_nodes=["relay4", "relay4"]),
+            lambda item: item["control_underlay"]["capture"].update(unexpected_provider_control_packets=1),
+            lambda item: item["control_underlay"]["capture"]["content_control_packets"]["cp1"].update(inbound=0),
+            lambda item: item["control_underlay"]["capture"]["interface_statistics"]["cp0"].update(intake_stopped=False),
+            lambda item: item["control_underlay"]["routes"]["relay4"]["out"][0].update(dev="underlay"),
             lambda item: item["output"].update(generic_dht_queries=0),
             lambda item: item["output"].update(client_forwarded_discovery=0),
             lambda item: item["output"].update(client_mount_cannot_read_replica_stores=False),
@@ -139,6 +166,28 @@ class ContentProviderContract(unittest.TestCase):
         environment["content_provider_mode"] = False
         record("client", socket.IPPROTO_TCP, "43.159.1.1", 32000, "49.165.5.1", 18080, 100)
         self.assertEqual(environment["unexpected_provider_application_packets"], 3)
+
+    def test_actual_control_classifier_rejects_app_traffic_and_wrong_endpoints(self):
+        text = (HERE / "kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        embedded = text.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
+        function = next(node for node in ast.parse(embedded).body if isinstance(node, ast.FunctionDef)
+                        and node.name == "record_provider_control")
+        environment = dict(socket=socket, content_control_pairs={"cp0": ["42.158.0.1", "49.165.5.1"]},
+                           content_control_packets={"cp0": dict(inbound=0, outbound=0)},
+                           unexpected_provider_control_packets=0)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "actual-control-classifier", "exec"), environment)
+        record = environment["record_provider_control"]
+        record("cp0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000)
+        record("cp0", socket.IPPROTO_UDP, "49.165.5.1", 41000, "42.158.0.1", 41000)
+        self.assertEqual(environment["content_control_packets"]["cp0"], dict(inbound=1, outbound=1))
+        for args in (
+            ("cp0", socket.IPPROTO_TCP, "42.158.0.1", 32000, "49.165.5.1", 18080),
+            ("cp0", socket.IPPROTO_UDP, "42.158.0.1", 32000, "49.165.5.1", 51820),
+            ("cp0", socket.IPPROTO_UDP, "43.159.1.1", 41000, "49.165.5.1", 41000),
+            ("cp1", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000),
+        ):
+            record(*args)
+        self.assertEqual(environment["unexpected_provider_control_packets"], 4)
 
 
 if __name__ == "__main__":

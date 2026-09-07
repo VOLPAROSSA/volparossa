@@ -44,12 +44,15 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode, root] if mode == "seed" => seed(Path::new(root)),
-        [mode, root, listen, cert, report, connections] if mode == "origin" => {
+        [mode, root, manifest, publisher] if mode == "seed-from-publication" => {
+            seed_from_publication(Path::new(root), Path::new(manifest), publisher)
+        }
+        [mode, root, listen, cert, report, connections] if mode == "origin" || mode == "origin-pem" => {
             let count = connections.parse()?;
             if !(1..=8).contains(&count) {
                 return Err("origin connection count must be 1..8".into());
             }
-            origin(Path::new(root), listen.parse()?, Path::new(cert), Path::new(report), count).await
+            origin(Path::new(root), listen.parse()?, Path::new(cert), Path::new(report), count, mode == "origin-pem").await
         }
         [mode, root, listen, variant, report] if mode == "peers" => {
             peers(Path::new(root), listen.parse()?, variant, Path::new(report)).await
@@ -57,7 +60,7 @@ async fn main() -> Result<()> {
         [mode, root, origin, cert, peer, variant, report] if mode == "consume" => {
             consume(Path::new(root), origin.parse()?, Path::new(cert), peer.parse()?, variant, Path::new(report)).await
         }
-        _ => Err("usage: seed ROOT | origin ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT".into()),
     }
 }
 
@@ -78,11 +81,7 @@ fn seed(root: &Path) -> Result<()> {
     let mut store = ChunkStore::create(&root.join("origin-cache"), limits())?;
     let mut first = ChunkStore::create(&root.join("replica-a"), limits())?;
     let mut second = ChunkStore::create(&root.join("replica-b"), limits())?;
-    let mut bytes = Vec::with_capacity(OBJECT_BYTES);
-    for index in 0_u8..8 {
-        bytes.extend(vec![b'A' + index; CHUNK_BYTES]);
-    }
-    bytes.extend(vec![b'Z'; 123]);
+    let bytes = fixture_bytes();
     let signing_key = SigningKey::generate(&mut rand_core::OsRng);
     let time = now()?;
     let signed = publish(
@@ -136,12 +135,66 @@ fn seed(root: &Path) -> Result<()> {
     )
 }
 
+fn fixture_bytes() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(OBJECT_BYTES);
+    for index in 0_u8..8 {
+        bytes.extend(vec![b'A' + index; CHUNK_BYTES]);
+    }
+    bytes.extend(vec![b'Z'; 123]);
+    bytes
+}
+
+/// Authorize the exact already-published fixture manifest at this independent HTTPS origin.
+/// The origin receives only the publisher public key; it does not re-sign or substitute objects.
+fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> Result<()> {
+    let public: [u8; 32] = hex::decode(publisher)?
+        .try_into()
+        .map_err(|_| "publisher key length")?;
+    let public = VerifyingKey::from_bytes(&public)?;
+    let signed = SignedManifest::decode(&read_bounded(manifest_path, MAX_MANIFEST_BYTES)?)?;
+    let time = now()?;
+    let manifest = signed.verify(&public, time)?;
+    let bytes = fixture_bytes();
+    if manifest.length() != OBJECT_BYTES as u64
+        || manifest.chunks().len() != 9
+        || manifest
+            .chunks()
+            .iter()
+            .zip(bytes.chunks(CHUNK_BYTES))
+            .any(|(chunk, part)| chunk.id() != &ChunkId::digest(part))
+    {
+        return Err("not the exact shared provider fixture object".into());
+    }
+    let descriptor = encode_origin_descriptor(
+        &OriginRequest::new(RESOURCE, METADATA)?,
+        &signed,
+        &public,
+        time + 300,
+        time,
+    )?;
+    fs::DirBuilder::new().mode(0o700).create(root)?;
+    write_new(&root.join("object.bin"), &bytes)?;
+    write_new(&root.join("manifest.bin"), &signed.encode())?;
+    write_new(&root.join("descriptor.bin"), &descriptor)?;
+    write_report(
+        &root.join("publication.json"),
+        &json!({
+            "report_kind":"volparossa-https-content-seed", "bytes":bytes.len(),
+            "object_sha256":OBJECT_SHA256, "chunks":manifest.chunks().len(),
+            "publisher_hex":hex::encode(public.as_bytes()), "publisher_private_key_persisted":false,
+            "manifest_id":hex::encode(manifest.manifest_id()), "metadata_bytes":descriptor.len(),
+            "existing_publication_reused":true,
+        }),
+    )
+}
+
 async fn origin(
     root: &Path,
     listen: SocketAddr,
     cert_path: &Path,
     report: &Path,
     connections: usize,
+    certificate_pem: bool,
 ) -> Result<()> {
     let generated = generate_simple_self_signed(vec![HOST.to_owned()])?;
     let certificate = generated.cert.der().clone();
@@ -156,7 +209,11 @@ async fn origin(
     let listener = TcpListener::bind(listen).await?;
     let descriptor = read_bounded(&root.join("descriptor.bin"), MAX_MANIFEST_BYTES + 8192)?;
     let object = read_bounded(&root.join("object.bin"), OBJECT_BYTES)?;
-    write_new(cert_path, certificate.as_ref())?;
+    if certificate_pem {
+        write_new(cert_path, generated.cert.pem().as_bytes())?;
+    } else {
+        write_new(cert_path, certificate.as_ref())?;
+    }
     ready(report)?;
     let mut records = Vec::new();
     for _ in 0..connections {
@@ -420,4 +477,42 @@ fn write_report(path: &Path, value: &Value) -> Result<()> {
     write_new(path, &serde_json::to_vec(value)?)?;
     println!("{value}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_fixture_preserves_the_independently_existing_native_manifest() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let publisher = temporary.path().join("publisher");
+        seed(&publisher)?;
+        let report: Value =
+            serde_json::from_slice(&read_bounded(&publisher.join("publication.json"), 8192)?)?;
+        let public = report["publisher_hex"].as_str().ok_or("publisher absent")?;
+        let root = temporary.path().join("independent-origin");
+        seed_from_publication(&root, &publisher.join("manifest.bin"), public)?;
+        assert_eq!(
+            fs::read(root.join("manifest.bin"))?,
+            fs::read(publisher.join("manifest.bin"))?
+        );
+        assert_eq!(
+            ChunkId::digest(&fs::read(root.join("object.bin"))?).to_string(),
+            OBJECT_SHA256
+        );
+        let wrong = SigningKey::generate(&mut rand_core::OsRng).verifying_key();
+        let rejected = temporary.path().join("wrong-publisher");
+        assert!(
+            seed_from_publication(
+                &rejected,
+                &publisher.join("manifest.bin"),
+                &hex::encode(wrong.as_bytes())
+            )
+            .is_err()
+        );
+        assert!(!rejected.exists());
+        assert!(seed_from_publication(&root, &publisher.join("manifest.bin"), public).is_err());
+        Ok(())
+    }
 }

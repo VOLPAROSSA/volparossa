@@ -8,7 +8,10 @@
 #![forbid(unsafe_code)]
 
 mod content;
-pub use content::{ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest};
+pub use content::{
+    ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest,
+    HttpsContentFetchRequest,
+};
 
 use prost::Message;
 use thiserror::Error;
@@ -37,7 +40,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -47,7 +50,8 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ConnectRequest, ContentFetchRequest, ContentServeRequest, Empty, LogQuery, RoleChange,
+        ConnectRequest, ContentFetchRequest, ContentServeRequest, Empty, HttpsContentFetchRequest,
+        LogQuery, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -95,6 +99,9 @@ pub mod control_request {
         /// Inspect explicit content service and current route control without network I/O.
         #[prost(message, tag = "23")]
         ContentStatus(Empty),
+        /// Authenticate origin metadata and retrieve peer chunks with protected origin fallback.
+        #[prost(message, tag = "24")]
+        ContentFetchHttps(HttpsContentFetchRequest),
     }
 }
 
@@ -620,6 +627,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         }
         control_request::Operation::ContentServe(request) => request.validate()?,
         control_request::Operation::ContentFetch(request) => request.validate()?,
+        control_request::Operation::ContentFetchHttps(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
             NodeRole::try_from(change.role).map_err(|_| ControlProtocolError::Invalid("role"))?;
         }
@@ -712,6 +720,13 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         }
         control_response::Payload::Content(receipt) => {
             if receipt.bytes > 256 * 1024 * 1024
+                // Disjoint 206 ranges may precede one valid full 200 response: at most two
+                // object budgets, without falsely dropping the already transferred bytes.
+                || receipt.origin_body_bytes > 512 * 1024 * 1024
+                || receipt.peer_bytes > 256 * 1024 * 1024
+                || receipt.origin_range_requests > 1024
+                || (!receipt.origin_authenticated
+                    && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0))
                 || receipt.chunks > 1024
                 || receipt.providers_used > 16
                 || receipt.publications > 64

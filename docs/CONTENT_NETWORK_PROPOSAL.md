@@ -110,9 +110,12 @@ authenticated control Relay to find services, verifies their node-key signatures
 the exact independently trusted manifest over existing policy-authorized MPTCP/TLS routes.
 The DHT and control lookup carry no object IDs, URLs or publication-key catalogue. At most
 16 offers and 64 explicitly registered publications are supported. Compilation and focused
-provider/discovery/control/CLI tests pass; independent-node KVM evidence is pending. C02/C06
-remain open, and this does not implement automatic placement, retention, name lookup or HTTPS
-integration in the normal CLI.
+provider/discovery/control/CLI tests pass. The first independent-provider KVM attempt on
+`aa634ce1` failed before retrieval; a correction to disposable broker-to-provider control
+connectivity is in progress. Cleanup completed with unchanged host state. C02/C06 remain open:
+automatic placement, retention, name lookup and live independent-node retrieval are not proven.
+The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
+retains the exact failed run and separate passing Quality result.
 
 The new stream API pulls only missing chunks from each provider, authenticating bytes before
 storage and bounding requests, bytes and exchange/session time. A real separate-process proof
@@ -181,6 +184,23 @@ passes with the exact four missing ranges, nine protected flows, ten complete ze
 captures, zero remaining owned objects and unchanged guest state; exact-source Quality also passes.
 This requires publisher support and proves neither faster total retrieval nor
 browser/generic-web/TLSNotary integration.
+
+The normal `volparossa content fetch-https` command now composes these operations in the agent:
+`--url` supplies the exact canonical HTTPS resource, `--metadata-path` its canonical same-origin
+descriptor path, and `--cache` / `--output` name new agent-owned destinations. Unlike native
+`content fetch`, it accepts no independent publisher-key argument: its own authenticated origin
+descriptor supplies that authority. Origin and provider application streams use the existing
+policy-authorized protected MPTCP path; the consumer never takes a direct provider shortcut.
+Peer discovery failure can fall back to the authenticated origin without claiming a peer success.
+Missing chunks use exact ranges; a fully verified 200 response may satisfy an ignored Range,
+with its full transfer cost exposed in the receipt.
+
+Default trust comes from Debian's system certificate bundle. Optional `--ca-file` is a bounded
+explicit public PEM input used only for this operation, not an installed interception CA or a
+certificate/hostname-verification bypass. CLI/agent/control tests and strict Clippy pass locally;
+the normal command's exact protected-route KVM proof remains pending. Prior fixture passes do
+not establish this newer integration or complete C02/C08. There is still no automatic capture
+of arbitrary browser HTTPS, personalized response sharing, or generic unsupported-site adapter.
 
 ## Integrated functional checkpoints
 

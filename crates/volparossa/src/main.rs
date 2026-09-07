@@ -641,6 +641,10 @@ fn print_response(response: ControlResponse) -> Result<()> {
                 "providers_used":receipt.providers_used, "serving":receipt.serving, "publications":receipt.publications,
                 "provider_peer_ids":receipt.provider_peer_ids,
                 "control_relay_peer_id":receipt.control_relay_peer_id,
+                "origin_authenticated":receipt.origin_authenticated,
+                "origin_body_bytes":receipt.origin_body_bytes,
+                "peer_bytes":receipt.peer_bytes,
+                "origin_range_requests":receipt.origin_range_requests,
             })
         ),
         Payload::Status(status) => {

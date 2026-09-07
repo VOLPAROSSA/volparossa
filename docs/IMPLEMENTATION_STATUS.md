@@ -43,9 +43,22 @@ Generic provider lookup goes through a current authenticated control Relay; neit
 nor URLs enter Kademlia. Fetch verifies signed offers, excludes the carrying route's Exit/Relays,
 and uses the existing policy-authorized MPTCP/TLS flow for each provider, never direct TCP.
 Five focused discovery-wire tests, four agent discovery tests, four provider/registry tests,
-three CLI tests and two typed local-control tests pass. The new independent-node KVM scenario
-is pending: this is not yet live provider-discovery evidence or C02/C06 completion. No default
-listener, automatic browser capture, replication/retention or speedup is implied.
+three CLI tests and two typed local-control tests pass. The first
+[independent-provider KVM attempt on `aa634ce1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34155097741)
+**failed before retrieval**: both provider services registered, but the control Relay started its
+query without receiving verified offers or completing discovery; the consumer returned
+`CONTENT_UNAVAILABLE`. The missing broker-to-provider control connectivity in the disposable
+topology is being corrected. Cleanup completed with no remaining owned objects and unchanged
+host state. [Quality on that same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34155036080)
+passed, but does not turn the failed datapath into a pass. There is still no live independent-node
+provider-discovery/fetch proof or C02/C06 completion. No default listener, automatic browser
+capture, replication/retention or speedup is implied.
+
+The next candidate adds the missing two disposable broker/provider control links, restricted
+to UDP 41000 with exact advertised-address routes and separate fully drained captures. It
+also separates the relay's 10-second collection budget from the unchanged 15-second reply
+deadline, so a slow DHT walk need not erase already verified offers. This timeout correction
+does not establish the cause of the earlier zero-offer run or claim complete DHT visibility.
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
@@ -98,6 +111,33 @@ owned objects with unchanged guest state. Its artifact SHA-256 is
 also passes. This reduces origin payload in the fixture, not proof of a throughput gain.
 Publisher cooperation is required. No browser integration,
 generic existing-site compatibility, TLSNotary, distributed discovery or C08 completion is claimed.
+
+The next local checkpoint composes this API in the normal **`content fetch-https`** command and
+typed agent operation 24. A canonical HTTPS URL and exact same-origin metadata path select an
+explicit public resource; the agent obtains the descriptor through real hostname/CA-verified
+TLS 1.3 over its policy-authorized MPTCP stream before asking the carrying route's authenticated
+control Relay for generic provider offers. Cached chunks are verified against that in-memory
+origin authority; missing chunks use authenticated origin ranges. An ignored Range/200 response
+is still fully verified, and actual overlapping transfer bytes are counted rather than hidden.
+The receipt reports `origin_authenticated`, `peer_bytes`, `origin_body_bytes` and
+`origin_range_requests`. New cache/output paths are explicit; no object URL is added to DHT or
+background browsing logs. Debian system roots are used by default; optional `--ca-file` supplies
+at most 128 KiB of explicit public certificate PEM for this request only, without installation,
+interception CA, private-key loading or TLS-verification bypass.
+
+Three focused agent CA/request tests, two CLI parsing/file-bound tests and two typed local-control
+tests pass, together with strict agent/CLI/local-control Clippy. Receipt checks retain the
+256-MiB object/peer budget, at most 1,024 origin ranges, and a 512-MiB origin-byte ceiling for
+disjoint ranges followed by one fully verified 200 body. These are local integration checks,
+not a normal-CLI network success: its exact KVM proof is still pending, the failed provider run
+above remains failed, and **C02/C06/C08 stay incomplete**. The earlier `2de8209f` and `6cf2394b`
+HTTPS passes belong to their executable-fixture builds and do not certify this newer command.
+The combined provider scenario now invokes the normal CLI against the exact same signed
+publication: two-provider HTTPS retrieval, then a fresh-cache request after withdrawing one
+provider, requiring the four missing origin ranges. Its source-bound evidence requires actual
+peer/origin byte accounting, TLS 1.3, the same protected MPTCP route and complete cleanup.
+Both focused checker groups and the non-network KVM contract pass; the real VM result remains
+pending and is not inferred from those checks.
 README and the relevant architecture/protocol/privacy/testing summaries are updated together;
 detailed changing results remain centralized here and in the content proposal.
 

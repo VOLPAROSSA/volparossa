@@ -10,6 +10,96 @@ content_provider_event_count() {
     ' "$WORK/logs-$1.txt"
 }
 
+content_provider_node() {
+    case $1 in
+        relay0) provider_ns=$R0; provider_ip=42.158.0.1 ;;
+        relay1) provider_ns=$R1; provider_ip=44.160.1.1 ;;
+        relay2) provider_ns=$R2; provider_ip=45.161.2.1 ;;
+        relay3) provider_ns=$R3; provider_ip=48.164.4.1 ;;
+        relay4) provider_ns=$R4; provider_ip=49.165.5.1 ;;
+        relay5) provider_ns=$R5; provider_ip=50.166.6.1 ;;
+        *) return 1 ;;
+    esac
+}
+
+content_provider_filter_link() {
+    # This fixture-only physical link models Internet reachability for the generic
+    # authenticated control RPC. It cannot carry TCP content, WG, or forwarding.
+    ip netns exec "$1" nft -f - <<RULES
+table inet vpa_content_control_$2 {
+    chain input {
+        type filter hook input priority -20; policy accept;
+        iifname "$3" ip saddr $5 ip daddr $4 udp dport 41000 accept
+        iifname "$3" ip saddr $5 ip daddr $4 udp sport 41000 accept
+        iifname "$3" drop
+    }
+    chain output {
+        type filter hook output priority -20; policy accept;
+        oifname "$3" ip saddr $4 ip daddr $5 udp dport 41000 accept
+        oifname "$3" ip saddr $4 ip daddr $5 udp sport 41000 accept
+        oifname "$3" drop
+    }
+    chain forward {
+        type filter hook forward priority -20; policy accept;
+        iifname "$3" drop
+        oifname "$3" drop
+    }
+}
+RULES
+}
+
+content_provider_control_underlay() {
+    provider_control_node=$(jq -er --arg peer "$provider_control_peer" \
+        'to_entries[] | select(.value == $peer) | .key' "$WORK/a01-expected-peers.json") \
+        || fail CONTENT_PROVIDER_CONTROL_NODE_INVALID
+    content_provider_node "$provider_control_node" || fail CONTENT_PROVIDER_CONTROL_NODE_INVALID
+    provider_control_ns=$provider_ns
+    provider_control_ip=$provider_ip
+    provider_control_ips=$provider_ip
+    provider_slot=0
+    for provider_node in "$provider_node_a" "$provider_node_b"; do
+        content_provider_node "$provider_node" || fail CONTENT_PROVIDER_NODE_INVALID
+        provider_segment=$((80 + provider_slot))
+        link_nodes "$provider_control_ns" "cp$provider_slot" "10.241.$provider_segment.1/30" \
+            "$provider_ns" "pc$provider_slot" "10.241.$provider_segment.2/30"
+        content_provider_filter_link "$provider_control_ns" "$provider_slot" "cp$provider_slot" \
+            "$provider_control_ip" "$provider_ip" || fail CONTENT_PROVIDER_CONTROL_FILTER_FAILED
+        content_provider_filter_link "$provider_ns" "$provider_slot" "pc$provider_slot" \
+            "$provider_ip" "$provider_control_ip" || fail CONTENT_PROVIDER_CONTROL_FILTER_FAILED
+        ip -n "$provider_control_ns" route add "$provider_ip/32" \
+            via "10.241.$provider_segment.2" dev "cp$provider_slot" src "$provider_control_ip"
+        ip -n "$provider_ns" route add "$provider_control_ip/32" \
+            via "10.241.$provider_segment.1" dev "pc$provider_slot" src "$provider_ip"
+        # Retain actual kernel-selected routes, not only the intended commands.
+        ip -n "$provider_control_ns" -j route get "$provider_ip" \
+            >"$WORK/content-provider-control-$provider_node-out.json"
+        ip -n "$provider_ns" -j route get "$provider_control_ip" \
+            >"$WORK/content-provider-control-$provider_node-back.json"
+        provider_control_ips=$provider_control_ips,$provider_ip
+        provider_slot=$((provider_slot + 1))
+    done
+}
+
+content_provider_start_control_observer() {
+    provider_control_prefix=$1
+    case $provider_control_prefix in content-provider-*) ;; *) return 1 ;; esac
+    [ -z "$PROVIDER_CONTROL_PID" ] || return 1
+    ip netns exec "$provider_control_ns" python3 "$WORK/bin/privacy-observer.py" \
+        content-control "$WORK/$provider_control_prefix.json" \
+        "$WORK/$provider_control_prefix.ready" --content-providers \
+        "--content-control=$provider_control_ips" cp0 cp1 \
+        >"$WORK/$provider_control_prefix.log" 2>&1 &
+    PROVIDER_CONTROL_PID=$!
+    wait_observer "$PROVIDER_CONTROL_PID" "$WORK/$provider_control_prefix.ready"
+}
+
+content_provider_stop_control_observer() {
+    [ -n "$PROVIDER_CONTROL_PID" ] || return 1
+    kill -TERM "$PROVIDER_CONTROL_PID" || return 1
+    wait "$PROVIDER_CONTROL_PID" || return 1
+    PROVIDER_CONTROL_PID=
+}
+
 content_provider_run() {
     PHASE=content-provider-selection
     benchmark_select_route content-provider mptcp || fail CONTENT_PROVIDER_MPTCP_SELECTION_UNAVAILABLE
@@ -30,6 +120,8 @@ content_provider_run() {
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
     jq -n --argjson nodes "$provider_nodes" --arg control "$provider_control_peer" \
         '{provider_nodes:$nodes,control_relay_peer_id:$control}' >"$WORK/content-provider-layout.json"
+    PHASE=content-provider-control-underlay
+    content_provider_control_underlay
 
     PHASE=content-provider-seed
     provider_root=$WORK/content-provider-seed/publication
@@ -98,6 +190,8 @@ content_provider_run() {
 
     PHASE=content-provider-capture
     start_privacy_observers content-provider-privacy || fail CONTENT_PROVIDER_PRIVACY_CAPTURE_UNAVAILABLE
+    content_provider_start_control_observer content-provider-control-privacy \
+        || fail CONTENT_PROVIDER_CONTROL_CAPTURE_UNAVAILABLE
     PHASE=content-provider-fetch
     timeout --signal=TERM --kill-after=5s 120s "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-client/control/agent.sock" \
@@ -116,6 +210,7 @@ content_provider_run() {
             "$provider_control_receipt" >/dev/null || fail CONTENT_PROVIDER_CONTROL_RELAY_CHANGED
     done
     stop_privacy_observers || fail CONTENT_PROVIDER_PRIVACY_CAPTURE_INCOMPLETE
+    content_provider_stop_control_observer || fail CONTENT_PROVIDER_CONTROL_CAPTURE_INCOMPLETE
     capture_product_logs
     provider_query_events=0
     provider_offer_events=0
@@ -133,6 +228,11 @@ content_provider_run() {
           event_baseline_unix_ms:$baseline,generic_dht_queries:$queries,
           authenticated_upstream_offers:$verified,client_forwarded_discovery:$discovered}' \
         >"$WORK/content-provider-object.json"
+    # The exact same explicit native publication also supports the independently
+    # origin-authenticated HTTPS case; its checker owns those additional claims.
+    # shellcheck source=tests/integration/content-provider-https-smoke.sh
+    . "$source_directory/tests/integration/content-provider-https-smoke.sh"
+    content_provider_https_run
     PHASE=content-provider-stop
     for provider_node in "$provider_node_a" "$provider_node_b"; do
         "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node/control/agent.sock" \
@@ -163,9 +263,10 @@ content_provider_finalize_report() {
          $remaining == 0 and $host.unchanged == true),transfer:$evidence,
        runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host | del(.acceptance_id)),
-       scope:"explicit native publication, two independently advertised policy-authorized providers, generic DHT and control-relay metadata, protected MPTCP/TLS/WireGuard fetch",
+       scope:"explicit native publication and cooperative-origin HTTPS for the same object, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges",
        general_nat_reachability_claimed:false,full_c02_claimed:false,
-       browser_integration_claimed:false,https_authentication_claimed:false,
+       explicit_origin_authenticated_https:($evidence.https.success == true),
+       browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1
     for provider_artifact in "$WORK"/content-provider-*.json "$WORK"/content-provider-*.txt \

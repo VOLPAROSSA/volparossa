@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Normal CLI HTTPS/provider evidence, not browser, speed or full C02 acceptance.
+
+The enclosing native-provider report owns exact-source and final host/guest cleanup checks.
+This checker requires both HTTPS phases and their independently drained physical captures.
+"""
+
+import json
+from pathlib import Path
+import re
+import runpy
+import sys
+
+COMMON = runpy.run_path(str(Path(__file__).with_name("content-network-smoke.py")))
+read, require, ROLES = COMMON["read"], COMMON["require"], COMMON["ROLES"]
+BYTES, SHA = COMMON["OBJECT_BYTES"], COMMON["FIXTURE_PLAINTEXT_SHA256"]
+CANDIDATES = ("relay4", "relay5", "relay3")
+PUBLIC_IPS = dict(relay0="42.158.0.1", relay1="44.160.1.1", relay2="45.161.2.1",
+                  relay3="48.164.4.1", relay4="49.165.5.1", relay5="50.166.6.1")
+RANGES = ((262144, 524287), (786432, 1048575),
+          (1310720, 1572863), (1835008, 2097151))
+RANGE_BYTES = 262144
+
+
+def exit_source(source):
+    return isinstance(source, str) and bool(re.fullmatch(r"46\.162\.3\.1:[0-9]{1,5}", source)) \
+        and 0 < int(source.rsplit(":", 1)[1]) <= 65535
+
+
+def validate_drained(capture):
+    statistics = capture["interface_statistics"]
+    require(capture["truncated"] is False and capture["observed_frames"] > 0
+            and capture["packet_socket_drops"] == 0 and len(capture["interfaces"]) > 0
+            and len(set(capture["interfaces"])) == len(capture["interfaces"])
+            and set(statistics) == set(capture["interfaces"])
+            and sum(s["observed_frames"] for s in statistics.values()) == capture["observed_frames"]
+            and all(s["intake_stopped"] is True and s["packet_socket_drops"] == 0
+                    and s["packet_socket_packets"] == s["observed_frames"]
+                    for s in statistics.values()),
+            "capture truncated, dropped, still accepting intake or not completely drained")
+
+
+def validate_control(capture, control_node, provider_nodes, missing):
+    pairs = {f"cp{i}": [PUBLIC_IPS[control_node], PUBLIC_IPS[node]]
+             for i, node in enumerate(provider_nodes)}
+    require(capture["capture_role"] == "content-control"
+            and capture["content_provider_mode"] is True
+            and capture["content_control_pairs"] == pairs
+            and set(capture["interfaces"]) == set(pairs)
+            and set(capture["content_control_packets"]) == set(pairs)
+            and capture["unexpected_provider_control_packets"] == 0
+            and capture["unexpected_provider_application_packets"] == 0
+            and set(capture["provider_application"]) == set(CANDIDATES)
+            and all(value == 0 for counters in capture["provider_application"].values()
+                    for value in counters.values()),
+            "exact generic-control links carried unexpected control or application traffic")
+    validate_drained(capture)
+    # The withdrawn provider may legitimately receive no second-phase service query.
+    for interface in ("cp0",) if missing else ("cp0", "cp1"):
+        counters = capture["content_control_packets"][interface]
+        require(counters["inbound"] > 0 and counters["outbound"] > 0,
+                "active provider lacks bidirectional authenticated-control traffic")
+
+
+def validate_path(phase, peers, provider_nodes, missing):
+    selected = phase["selected_route"]
+    paths, slots = selected["paths"], selected["benchmark_slots"]
+    provider_peers = {peers[node] for node in provider_nodes}
+    require(selected["transport"] == "mptcp" and len(paths) == len(slots) == 2
+            and re.fullmatch(r"[0-9a-f]{32}", selected["route_context_id"])
+            and len({p["relay_peer_id"] for p in paths}) == 2
+            and {p["exit_peer_id"] for p in paths} == {peers["exit"]}
+            and all(p["route_context_id"] == selected["route_context_id"] for p in paths)
+            and [s["relay_peer_id"] for s in slots] == [p["relay_peer_id"] for p in paths]
+            and not provider_peers.intersection({peers["client"], peers["exit"]}
+                                               | {p["relay_peer_id"] for p in paths}),
+            "same-Exit two-Relay MPTCP route or independent provider nodes not proven")
+    nodes = [s["relay_node"] for s in slots]
+    require(len(set(nodes)) == 2 and all(node in ROLES[1:4] for node in nodes)
+            and all(peers[s["relay_node"]] == s["relay_peer_id"] for s in slots),
+            "selected relay node identity does not match its captured WireGuard legs")
+    privacy = phase["privacy"]
+    require(set(privacy) == set(ROLES), "five-role physical privacy coverage incomplete")
+    for role, capture in privacy.items():
+        require(capture["capture_role"] == role and capture["content_provider_mode"] is True
+                and capture["unexpected_outer_packets"] == 0
+                and capture["expected_link_down_notifications"] == 0
+                and capture["unexpected_provider_application_packets"] == 0,
+                "physical capture observed unexpected outer or provider traffic")
+        validate_drained(capture)
+        require(set(capture["provider_application"]) == set(CANDIDATES),
+                "provider application capture coverage incomplete")
+    require(privacy["client"]["direct_client_exit_packets"] == 0
+            and privacy["client"]["internet_destination_outer_packets"] == 0
+            and privacy["exit"]["direct_client_exit_packets"] == 0
+            and privacy["exit"]["client_public_packets"] == 0
+            and privacy["exit"]["outbound_client_discovery_attempt_packets"] == 0
+            and all(privacy[r]["internet_destination_outer_packets"] == 0 for r in ROLES[1:4]),
+            "original Client/Relay/Exit privacy boundary violated")
+    for node in nodes:
+        require(privacy[node]["client_leg_wireguard_data_datagrams"] > 16
+                and privacy[node]["exit_leg_wireguard_data_datagrams"] > 16,
+                "selected physical WireGuard legs did not both carry genuine data")
+    active = provider_nodes[:1] if missing else provider_nodes
+    for node in CANDIDATES:
+        application = privacy["exit"]["provider_application"][node]
+        if node in active:
+            require(application["request_packets"] > 0 and application["response_packets"] > 0
+                    and application["response_payload_bytes"] >= (1048699 if missing else 1048576),
+                    "active independent provider did not return its useful payload to the Exit")
+        else:
+            require(all(value == 0 for value in application.values()),
+                    "withdrawn or unselected provider received application traffic")
+        for role in ROLES[:-1]:
+            require(all(value == 0 for value in privacy[role]["provider_application"][node].values()),
+                    "provider application data escaped its protected path")
+
+
+def validate_evidence(evidence):
+    publication, original = evidence["publication"], evidence["native_publication"]
+    require(evidence["success"] is True
+            and publication["bytes"] == original["bytes"] == BYTES
+            and publication["object_sha256"] == original["object_sha256"] == SHA
+            and publication["chunks"] == original["chunks"] == 9
+            and publication["publisher_hex"] == original["publisher_hex"]
+            and re.fullmatch(r"[0-9a-f]{64}", publication["publisher_hex"])
+            and publication["manifest_id"] == original["manifest_id"]
+            and re.fullmatch(r"[0-9a-f]{64}", publication["manifest_id"])
+            and publication["existing_publication_reused"] is True
+            and publication["publisher_private_key_persisted"] is False
+            and original["publisher_private_key_persisted"] is False
+            and original["publisher_removed"] is True
+            and original["replica_a_chunks"] == 5 and original["replica_b_chunks"] == 4
+            and 0 < publication["metadata_bytes"] <= 81920,
+            "origin did not authorize the exact independently existing publisher-offline object")
+    peers, layout = evidence["expected_peers"], evidence["layout"]
+    control, provider_nodes = layout["control_relay_peer_id"], layout["provider_nodes"]
+    require(control in {peers[node] for node in PUBLIC_IPS}
+            and provider_nodes == [node for node in CANDIDATES if peers[node] != control][:2]
+            and len({peers[node] for node in provider_nodes}) == 2,
+            "provider layout or distinct current control Relay invalid")
+    control_node = next(node for node in PUBLIC_IPS if peers[node] == control)
+    withdrawal, stop = evidence["withdrawal"], evidence["missing_provider_stop"]
+    require(withdrawal["provider_node"] == provider_nodes[1]
+            and withdrawal["provider_peer_id"] == peers[provider_nodes[1]]
+            and stop["serving"] is False and stop["publications"] == 0,
+            "the second actual provider was not explicitly withdrawn before missing retrieval")
+    origin, records = evidence["origin"], evidence["origin"]["connections"]
+    require(origin["pid"] > 0 and len(records) == 6
+            and [r["kind"] for r in records] == ["metadata"] * 2 + ["body_range"] * 4
+            and [r["payload_bytes"] for r in records]
+                == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4
+            and all(r["tls13"] is True and r["alpn_http11"] is True
+                    and exit_source(r["source"]) for r in records),
+            "two genuine origin HTTPS metadata sessions and four body ranges not proven")
+    require(all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
+                and r["range_total"] is None for r in records[:2])
+            and all(r["status"] == 206 and r["range_start"] == start and r["range_end"] == end
+                    and r["range_total"] == BYTES
+                    for r, (start, end) in zip(records[2:], RANGES, strict=True)),
+            "origin returned wrong missing-chunk ranges or a forbidden full-body substitute")
+    cases = evidence["cases"]
+    require(set(cases) == {"complete", "missing"}, "both fresh-cache HTTPS retrieval cases required")
+    for name, phase in cases.items():
+        missing = name == "missing"
+        fetch, output = phase["fetch"], phase["output"]
+        active = provider_nodes[:1] if missing else provider_nodes
+        require(fetch["bytes"] == output["bytes"] == BYTES and output["sha256"] == SHA
+                and fetch["chunks"] == 9 and fetch["origin_authenticated"] is True
+                and fetch["peer_bytes"] == (1048699 if missing else BYTES)
+                and fetch["origin_body_bytes"] == (1048576 if missing else 0)
+                and fetch["origin_range_requests"] == (4 if missing else 0)
+                and fetch["providers_used"] == len(active)
+                and len(fetch["provider_peer_ids"]) == len(active)
+                and set(fetch["provider_peer_ids"]) == {peers[node] for node in active}
+                and fetch["control_relay_peer_id"] == control and fetch["serving"] is False
+                and output["client_cache_initially_absent"] is True
+                and output["client_mount_cannot_read_origin"] is True,
+                "normal CLI did not authenticate/reconstruct the expected peer-plus-origin bytes")
+        validate_path(phase, peers, provider_nodes, missing)
+        validate_control(phase["control"], control_node, provider_nodes, missing)
+    require(cases["complete"]["selected_route"]["route_context_id"]
+                == cases["missing"]["selected_route"]["route_context_id"],
+            "HTTPS cases changed the carrying route context")
+
+
+def build_evidence(work):
+    cases = {}
+    for name in ("complete", "missing"):
+        prefix = f"content-provider-https-{name}"
+        cases[name] = dict(
+            fetch=read(work / f"{prefix}-fetch.json"),
+            output=read(work / f"{prefix}-output.json"),
+            selected_route=read(work / f"{prefix}-live-selection.json"),
+            privacy={role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES},
+            control=read(work / f"{prefix}-control.json"))
+    evidence = dict(success=True, cases=cases,
+        publication=read(work / "content-provider-https-publication.json"),
+        native_publication=read(work / "content-provider-publication.json"),
+        layout=read(work / "content-provider-layout.json"),
+        expected_peers=read(work / "a01-expected-peers.json"),
+        origin=read(work / "content-provider-https-origin.json"),
+        missing_provider_stop=read(work / "content-provider-https-provider-stop.json"),
+        withdrawal=read(work / "content-provider-https-withdrawal.json"))
+    validate_evidence(evidence)
+    return evidence
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) != 4 or sys.argv[1] != "evidence":
+            raise ValueError("usage: content-provider-https-smoke.py evidence WORK OUTPUT")
+        evidence = build_evidence(Path(sys.argv[2]))
+        with Path(sys.argv[3]).open("x", encoding="ascii") as target:
+            json.dump(evidence, target, sort_keys=True, separators=(",", ":"))
+    except (KeyError, TypeError, ValueError, OSError) as error:
+        raise SystemExit(f"HTTPS provider evidence rejected: {error}") from error

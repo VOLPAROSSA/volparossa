@@ -193,6 +193,10 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             request_id,
             Box::pin(context.content.fetch(request, context)).await,
         ),
+        control_request::Operation::ContentFetchHttps(request) => content_response(
+            request_id,
+            Box::pin(context.content.fetch_https(request, context)).await,
+        ),
         control_request::Operation::ContentStop(_) => {
             content_response(request_id, context.content.stop(&context.discovery).await)
         }

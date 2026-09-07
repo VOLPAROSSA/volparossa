@@ -42,9 +42,10 @@ print_plan() {
     if [ "$scenario" = content-provider ]; then
         printf '%s\n' \
             'Content-provider scenario: two of Relay3/4/5 serve disjoint caches, excluding the current control relay;' \
+            '  two disposable UDP41000-only broker-provider links with exact route and drained capture evidence;' \
             '  actual generic DHT/control-relay discovery and protected MPTCP reconstruction after publisher removal;' \
             '  exact policy-only DNS destinations, isolated Client files, both provider PeerIds and complete privacy/cleanup;' \
-            '  no general NAT, HTTPS or full-C02 claim.'
+            '  cooperative-origin HTTPS same-object complete/missing-ranges cases; no general NAT/browser HTTPS/full-C02 claim.'
     elif [ "$scenario" = content-https ]; then
         printf '%s\n' \
             'Content-https scenario: genuine application TLS origin metadata, partial peer chunks and origin fallback;' \
@@ -585,7 +586,7 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenari
             exit 1
         }
 fi
-if [ "$scenario" = content-https ]; then
+if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
     CARGO_TARGET_DIR=/home/vpci/target cargo build --locked \
         -p volparossa-content --example https-content-acceptance-fixture \
         >>/home/vpci/cargo-build.log 2>&1 || {

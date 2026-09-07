@@ -82,6 +82,19 @@ impl OriginRequest {
             metadata_path: metadata_path.into(),
         })
     }
+
+    /// Canonical HTTPS hostname for the caller's independent destination-policy check.
+    /// This is an endpoint hint, not permission to dial or trust origin content.
+    #[must_use]
+    pub fn hostname(&self) -> &str {
+        self.resource.host_str().unwrap_or_default()
+    }
+
+    /// Exact HTTPS destination port, including the implicit standard port 443.
+    #[must_use]
+    pub fn port(&self) -> u16 {
+        self.resource.port().unwrap_or(443)
+    }
 }
 
 /// Bounded TLS handshakes and complete HTTP operations, never reset by byte trickling.

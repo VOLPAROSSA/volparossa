@@ -35,11 +35,13 @@ print_plan() {
         printf '%s\n' \
             'VOLPAROSSA content-provider runtime smoke plan:' \
             '  register two disjoint stores on two of Relay3/4/5, excluding the current control relay;' \
+            '  add exactly two disposable broker-provider links restricted to UDP41000 control traffic;' \
             '  permit only their exact fixture DNS names/TCP18080, never unrestricted raw-IP egress;' \
             '  discover generic services through the control relay and actual private Kademlia;' \
             '  fetch via genuine MPTCP/TLS/two-leg WireGuard after publisher removal;' \
             '  deny Client mount access to replica files, require exact bytes and both provider IDs;' \
-            '  retain complete privacy captures/cleanup; no generic NAT, HTTPS or full-C02 claim.'
+            '  fetch the same cooperative-origin HTTPS object from complete peers and missing origin ranges;' \
+            '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
     if [ "$scenario" = content-https ]; then
@@ -341,7 +343,8 @@ if [ "$scenario" = mixed-link ]; then
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-provider ]; then
-    for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py; do
+    for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
+        content-provider-https-smoke.sh content-provider-https-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -350,6 +353,8 @@ if [ "$scenario" = content-provider ]; then
     done
     [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
         || { printf '%s\n' 'content provider executable unavailable' >&2; exit 69; }
+    [ -x "$binary_directory/examples/https-content-acceptance-fixture" ] \
+        || { printf '%s\n' 'content provider HTTPS executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-https ]; then
     for https_fixture in content-https-smoke.sh content-https-smoke.py content-network-smoke.py; do
@@ -518,6 +523,7 @@ DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
 EXIT_OBSERVER_PID=
 PRIVACY_CLIENT_PID=
+PROVIDER_CONTROL_PID=
 PRIVACY_RELAY0_PID=
 PRIVACY_RELAY1_PID=
 PRIVACY_RELAY2_PID=
@@ -1056,7 +1062,7 @@ cleanup() {
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
     for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
-        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
     if [ -n "$HTTP3_SERVER_PID" ]; then
@@ -1077,7 +1083,7 @@ cleanup() {
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
     for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
-        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID"; do
+        "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID"; do
         [ -z "$observer_pid" ] || wait "$observer_pid" 2>/dev/null || true
     done
     if [ -n "$DESTINATION_PID" ]; then
@@ -1466,7 +1472,7 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenari
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
 fi
-if [ "$scenario" = content-https ]; then
+if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/https-content-acceptance-fixture" \
         "$WORK/bin/examples/https-content-acceptance-fixture"
@@ -2800,10 +2806,22 @@ role, output_path, ready_path, *interfaces = sys.argv[1:]
 content_provider_mode = interfaces[:1] == ["--content-providers"]
 if content_provider_mode:
     interfaces.pop(0)
+content_control_pairs = {}
+if role == "content-control" and content_provider_mode:
+    control_argument = interfaces.pop(0) if interfaces else ""
+    control_addresses = control_argument.removeprefix("--content-control=").split(",")
+    if not control_argument.startswith("--content-control=") or len(control_addresses) != 3 \
+            or len(set(control_addresses)) != 3 or interfaces != ["cp0", "cp1"]:
+        raise SystemExit("invalid provider control capture")
+    for address in control_addresses:
+        socket.inet_pton(socket.AF_INET, address)
+    content_control_pairs = {"cp0": control_addresses[:2],
+                             "cp1": [control_addresses[0], control_addresses[2]]}
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
-if role not in {"client", "relay0", "relay1", "relay2", "exit"} or not interfaces:
+if (role not in {"client", "relay0", "relay1", "relay2", "exit"}
+        and not (role == "content-control" and content_control_pairs)) or not interfaces:
     raise SystemExit("invalid privacy observer arguments")
 client_addresses = {"43.159.1.1"}
 if direct_lan_relay1:
@@ -2842,6 +2860,8 @@ provider_addresses = {"49.165.5.1": "relay4", "50.166.6.1": "relay5", "48.164.4.
 provider_application = {node: dict(request_packets=0, response_packets=0, response_payload_bytes=0)
                         for node in provider_addresses.values()}
 unexpected_provider_application_packets = 0
+content_control_packets = {interface: dict(outbound=0, inbound=0) for interface in content_control_pairs}
+unexpected_provider_control_packets = 0
 expected_down_marker = os.path.join(os.path.dirname(output_path), "a07-privacy-link-down.marker")
 
 
@@ -2863,6 +2883,17 @@ def record_provider_application(capture_role, protocol, source, source_port,
     counters_for_node["request_packets" if request else "response_packets"] += 1
     if response:
         counters_for_node["response_payload_bytes"] += payload_bytes
+
+
+def record_provider_control(interface, protocol, source, source_port, destination, destination_port):
+    global unexpected_provider_control_packets
+    pair = content_control_pairs.get(interface)
+    if pair is None or protocol != socket.IPPROTO_UDP \
+            or 41000 not in (source_port, destination_port) or {source, destination} != set(pair):
+        unexpected_provider_control_packets += 1
+        return
+    direction = "outbound" if source == pair[0] else "inbound"
+    content_control_packets[interface][direction] += 1
 
 
 def receive_frame(capture, interface):
@@ -3180,6 +3211,9 @@ for readable in capture_rounds():
                     counters[f"{role}_wireguard_data_datagrams"] += 1
                     if interface == exit_interface:
                         counters["exit_leg_wireguard_data_datagrams"] += 1
+            elif role == "content-control":
+                record_provider_control(interface, protocol, source, source_port,
+                                        destination, destination_port)
             else:
                 if source in client_addresses or destination in client_addresses:
                     counters["direct_client_exit_packets"] += 1
@@ -3220,6 +3254,9 @@ with open(output_path, "x", encoding="ascii") as output:
             "content_provider_mode": content_provider_mode,
             "provider_application": provider_application,
             "unexpected_provider_application_packets": unexpected_provider_application_packets,
+            "content_control_pairs": content_control_pairs,
+            "content_control_packets": content_control_packets,
+            "unexpected_provider_control_packets": unexpected_provider_control_packets,
             "packet_socket_drops": packet_socket_drops,
             "unexpected_outer_tuples": [
                 {
@@ -4214,7 +4251,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy)
+        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         *) return 1 ;;
     esac

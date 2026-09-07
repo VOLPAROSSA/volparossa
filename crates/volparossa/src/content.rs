@@ -28,6 +28,8 @@ pub(crate) enum Command {
     Serve(Serve),
     /// Ask the agent to discover providers and retrieve through real protected MPTCP routes.
     Fetch(Fetch),
+    /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
+    FetchHttps(FetchHttps),
     /// Withdraw and stop the agent's content service, retaining owned cache files.
     Stop,
     /// Inspect explicit content service and the current route's control Relay; no network I/O.
@@ -69,6 +71,28 @@ pub(crate) struct Fetch {
     /// New output path writable by the agent account; no existing entry is overwritten.
     #[arg(long)]
     output: PathBuf,
+    #[command(flatten)]
+    limits: Limits,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FetchHttps {
+    /// Exact canonical HTTPS resource URL; credentials and fragments are rejected.
+    #[arg(long, value_parser = parse_origin_url)]
+    url: String,
+    /// Explicit canonical metadata path on the same HTTPS origin.
+    #[arg(long, value_parser = parse_metadata_path)]
+    metadata_path: String,
+    /// New cache directory created by the agent account; no existing-directory adoption.
+    #[arg(long)]
+    cache: PathBuf,
+    /// New output path writable by the agent account; no existing entry is overwritten.
+    #[arg(long)]
+    output: PathBuf,
+    /// Explicit public PEM trust roots (at most 128 KiB); otherwise Debian system roots.
+    /// Used only for this request: no installation, interception CA, or TLS bypass.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
     #[command(flatten)]
     limits: Limits,
 }
@@ -180,6 +204,10 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             });
             return super::print_response(super::control::request(socket, operation).await?);
         }
+        Command::FetchHttps(args) => {
+            let operation = Operation::ContentFetchHttps(https_fetch_request(&args)?);
+            return super::print_response(super::control::request(socket, operation).await?);
+        }
         Command::Stop => {
             return super::print_response(
                 super::control::request(socket, Operation::ContentStop(Empty {})).await?,
@@ -192,6 +220,64 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
     };
     println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn parse_origin_url(value: &str) -> Result<String, String> {
+    volparossa_content::origin_https::OriginRequest::new(value, "/")
+        .map_err(|_| "expected a canonical HTTPS URL without credentials or fragment".to_owned())?;
+    Ok(value.to_owned())
+}
+
+fn parse_metadata_path(value: &str) -> Result<String, String> {
+    volparossa_content::origin_https::OriginRequest::new("https://metadata.invalid/", value)
+        .map_err(|_| "expected an exact canonical same-origin metadata path".to_owned())?;
+    Ok(value.to_owned())
+}
+
+fn https_fetch_request(
+    args: &FetchHttps,
+) -> Result<volparossa_local_control::HttpsContentFetchRequest> {
+    const MAX_CA_BYTES: u64 = 128 * 1024;
+    volparossa_content::origin_https::OriginRequest::new(&args.url, &args.metadata_path)
+        .context("invalid canonical HTTPS resource or same-origin metadata path")?;
+    let mut ca_certificates_pem = Vec::new();
+    if let Some(path) = args.ca_file.as_deref() {
+        open_regular(path, MAX_CA_BYTES)?
+            .take(MAX_CA_BYTES + 1)
+            .read_to_end(&mut ca_certificates_pem)?;
+        if ca_certificates_pem.is_empty() || ca_certificates_pem.len() > 128 * 1024 {
+            bail!("explicit CA file must contain 1 through 131072 bytes of public PEM roots");
+        }
+        validate_public_ca_pem(&ca_certificates_pem)?;
+    }
+    Ok(volparossa_local_control::HttpsContentFetchRequest {
+        resource_url: args.url.clone(),
+        metadata_path: args.metadata_path.clone(),
+        cache: absolute_path(&args.cache)?,
+        output: absolute_path(&args.output)?,
+        limits: Some(args.limits.wire_limits()),
+        ca_certificates_pem,
+    })
+}
+
+fn validate_public_ca_pem(bytes: &[u8]) -> Result<()> {
+    let text = std::str::from_utf8(bytes).context("public CA PEM must be UTF-8")?;
+    let mut found_certificate = false;
+    for line in text.lines().map(str::trim) {
+        if line.contains("-----BEGIN") || line.contains("-----END") {
+            match line {
+                "-----BEGIN CERTIFICATE-----" => found_certificate = true,
+                "-----END CERTIFICATE-----" => {}
+                _ => bail!("CA file may contain only public CERTIFICATE PEM blocks"),
+            }
+        }
+    }
+    if !found_certificate {
+        bail!("CA file contains no public CERTIFICATE PEM block");
+    }
+    // The agent independently parses certificate DER and checks TLS trust; this is only a
+    // bounded local-file preflight so an accidentally selected private-key PEM is not sent.
     Ok(())
 }
 
@@ -388,6 +474,98 @@ mod tests {
             max_entries: 16,
             min_free_bytes: 0,
         }
+    }
+
+    #[test]
+    fn https_fetch_cli_parses_canonical_origin_without_a_publisher_key() {
+        let args = [
+            "volparossa",
+            "content",
+            "fetch-https",
+            "--url",
+            "https://origin.example/object.bin",
+            "--metadata-path",
+            "/.well-known/volparossa/object",
+            "--cache",
+            "new-cache",
+            "--output",
+            "new.bin",
+        ];
+        assert!(crate::Cli::try_parse_from(args).is_ok());
+        let mut explicit_ca = args.to_vec();
+        explicit_ca.extend(["--ca-file", "explicit-public-roots.pem"]);
+        assert!(crate::Cli::try_parse_from(explicit_ca).is_ok());
+        for url in [
+            "http://origin.example/object.bin",
+            "https://user:pass@origin.example/object.bin",
+            "https://origin.example/object.bin#fragment",
+            "https://127.0.0.1/object.bin",
+            "https://ORIGIN.example/object.bin",
+            "https://origin.example/a/../object.bin",
+        ] {
+            let mut invalid = args;
+            invalid[4] = url;
+            assert!(crate::Cli::try_parse_from(invalid).is_err(), "{url}");
+        }
+        for metadata in [
+            "//elsewhere.example/metadata",
+            "/a/../metadata",
+            "/metadata#fragment",
+            "/metadata\r\n",
+        ] {
+            let mut invalid = args;
+            invalid[6] = metadata;
+            assert!(crate::Cli::try_parse_from(invalid).is_err());
+        }
+        let mut independent_key = args.to_vec();
+        independent_key.extend(["--publisher-key", "not-origin-authority"]);
+        assert!(crate::Cli::try_parse_from(independent_key).is_err());
+    }
+
+    #[test]
+    fn https_fetch_request_uses_explicit_bounded_regular_ca_file_without_creating_outputs() {
+        let directory = tempfile::tempdir().expect("private fixture directory");
+        let root = directory.path();
+        let mut args = FetchHttps {
+            url: "https://origin.example/object.bin".into(),
+            metadata_path: "/metadata".into(),
+            cache: root.join("new-cache"),
+            output: root.join("new.bin"),
+            ca_file: None,
+            limits: limits(),
+        };
+        let default = https_fetch_request(&args).expect("Debian system roots selection");
+        assert!(default.ca_certificates_pem.is_empty());
+        assert_eq!(default.resource_url, args.url);
+        assert_eq!(default.metadata_path, args.metadata_path);
+        assert!(!args.cache.exists() && !args.output.exists());
+        let pem = b"-----BEGIN CERTIFICATE-----\nZmFrZSBwdWJsaWMgdGVzdCBjZXJ0\n-----END CERTIFICATE-----\n";
+        let path = root.join("roots.pem");
+        fs::write(&path, pem).expect("public parser fixture only, not a TLS test");
+        args.ca_file = Some(path.clone());
+        assert_eq!(
+            https_fetch_request(&args)
+                .expect("bounded PEM")
+                .ca_certificates_pem,
+            pem
+        );
+        fs::write(&path, []).expect("empty explicit roots");
+        assert!(https_fetch_request(&args).is_err());
+        fs::write(
+            &path,
+            b"-----BEGIN PRIVATE KEY-----\nfixture-only\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("non-secret invalid PEM fixture");
+        assert!(https_fetch_request(&args).is_err());
+        fs::write(&path, vec![0; 128 * 1024 + 1]).expect("oversized explicit roots");
+        assert!(https_fetch_request(&args).is_err());
+        let symlink = root.join("linked.pem");
+        std::os::unix::fs::symlink(&path, &symlink).expect("fixture symlink");
+        args.ca_file = Some(symlink);
+        assert!(https_fetch_request(&args).is_err());
+        args.ca_file = Some(root.into());
+        assert!(https_fetch_request(&args).is_err());
+        assert!(!args.cache.exists() && !args.output.exists());
     }
 
     #[test]

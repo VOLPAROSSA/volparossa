@@ -22,6 +22,9 @@ const MAX_OFFERS: usize = 16;
 const MAX_PENDING: usize = 32;
 const MAX_REPLAY: usize = 256;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+// Leave a response window inside the unchanged client/RPC deadline. A slow DHT walk must
+// not erase independently verified offers merely because collection reached its own bound.
+const COLLECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const REPLAY_RETENTION: Duration = Duration::from_secs(60);
 type OutboundId = request_response::OutboundRequestId;
 type DiscoveryReply =
@@ -168,11 +171,34 @@ struct RelayWaiter {
 
 struct RelayLookup {
     query: kad::QueryId,
-    deadline: Instant,
+    collection_deadline: Instant,
+    response_deadline: Instant,
     dht_complete: bool,
     candidates: HashSet<Libp2pPeerId>,
     offers: BTreeMap<Libp2pPeerId, Vec<u8>>,
     waiters: Vec<RelayWaiter>,
+}
+
+impl RelayLookup {
+    fn offers_for_response(
+        &self,
+        recipient: Libp2pPeerId,
+        maximum: usize,
+        at: Instant,
+        now_unix: u64,
+    ) -> Vec<ContentProviderOffer> {
+        if at >= self.response_deadline {
+            return Vec::new();
+        }
+        self.offers
+            .iter()
+            .filter(|(peer, bytes)| {
+                **peer != recipient && verify_provider(**peer, bytes, now_unix).is_ok()
+            })
+            .take(maximum)
+            .filter_map(|(peer, bytes)| ContentProviderOffer::new(*peer, bytes.clone()).ok())
+            .collect()
+    }
 }
 
 impl ContentBridge {
@@ -191,7 +217,7 @@ impl ContentBridge {
         self.clients
             .values()
             .map(|p| p.deadline)
-            .chain(self.relay.iter().map(|r| r.deadline))
+            .chain(self.relay.iter().map(|r| r.collection_deadline))
             .chain(self.local.iter().map(|local| local.deadline))
             .min()
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))
@@ -387,6 +413,7 @@ impl DiscoveryRuntime {
         request: ContentDiscoveryRequest,
         channel: request_response::ResponseChannel<ContentDiscoveryResponse>,
     ) {
+        let started = Instant::now();
         let Ok(nonce) = <[u8; 32]>::try_from(request.nonce()) else {
             return;
         };
@@ -424,7 +451,8 @@ impl DiscoveryRuntime {
         };
         self.content.relay = Some(RelayLookup {
             query,
-            deadline: Instant::now() + REQUEST_TIMEOUT,
+            collection_deadline: started + COLLECTION_TIMEOUT,
+            response_deadline: started + REQUEST_TIMEOUT,
             dht_complete: false,
             candidates: HashSet::new(),
             offers: BTreeMap::new(),
@@ -485,7 +513,7 @@ impl DiscoveryRuntime {
                             .content
                             .relay
                             .as_mut()
-                            .filter(|lookup| lookup.deadline > Instant::now())
+                            .filter(|lookup| lookup.collection_deadline > Instant::now())
                         {
                             lookup.offers.insert(peer, offer.to_vec());
                             self.content.event("CONTENT_PROVIDER_OFFER_VERIFIED");
@@ -515,37 +543,31 @@ impl DiscoveryRuntime {
         }
     }
 
-    fn finish_content_lookup(&mut self, successful: bool) {
-        let Some(lookup) = self.content.relay.take() else {
+    fn finish_content_lookup(&mut self, accept_collected: bool) {
+        let Some(mut lookup) = self.content.relay.take() else {
             return;
         };
         let _ = self.service.finish_content_provider_query(lookup.query);
         self.content.upstream.clear();
-        let valid = successful
-            && lookup.deadline > Instant::now()
+        let valid = accept_collected
+            && lookup.response_deadline > Instant::now()
             && self.roles.relay
             && self
                 .local_relay_snapshot
                 .as_ref()
                 .is_some_and(|cap| cap.expires_at_ms > unix_millis());
-        for waiter in lookup.waiters {
+        for waiter in std::mem::take(&mut lookup.waiters) {
             if self.service.content_control_connection(&waiter.peer).ok() != Some(waiter.connection)
             {
                 continue;
             }
             let offers = if valid {
-                lookup
-                    .offers
-                    .iter()
-                    .filter(|(peer, bytes)| {
-                        **peer != waiter.peer
-                            && verify_provider(**peer, bytes, unix_seconds()).is_ok()
-                    })
-                    .take(waiter.request.maximum_offers())
-                    .filter_map(|(peer, bytes)| {
-                        ContentProviderOffer::new(*peer, bytes.clone()).ok()
-                    })
-                    .collect()
+                lookup.offers_for_response(
+                    waiter.peer,
+                    waiter.request.maximum_offers(),
+                    Instant::now(),
+                    unix_seconds(),
+                )
             } else {
                 Vec::new()
             };
@@ -712,9 +734,11 @@ impl DiscoveryRuntime {
             .content
             .relay
             .as_ref()
-            .is_some_and(|lookup| lookup.deadline <= now)
+            .is_some_and(|lookup| lookup.collection_deadline <= now)
         {
-            self.finish_content_lookup(false);
+            // This ends bounded collection, not a claim that the DHT walk completed. Every
+            // retained offer is reverified within the separate, original response deadline.
+            self.finish_content_lookup(true);
         }
     }
 
@@ -826,6 +850,61 @@ mod tests {
         assert_eq!(
             verify_provider(peer, &bytes, 1100).unwrap_err(),
             ContentDiscoveryError::Invalid
+        );
+    }
+
+    #[test]
+    fn partial_offers_survive_collection_end_only_within_original_response_authority() {
+        let (provider, signed) = fixture();
+        let recipient = Libp2pPeerId::random();
+        let started = Instant::now();
+        let mut kademlia = kad::Behaviour::new(recipient, kad::store::MemoryStore::new(recipient));
+        let lookup = RelayLookup {
+            query: kademlia.get_providers(kad::RecordKey::new(&capability::CONTENT)),
+            collection_deadline: started + COLLECTION_TIMEOUT,
+            response_deadline: started + REQUEST_TIMEOUT,
+            dht_complete: false,
+            candidates: HashSet::from([provider]),
+            offers: BTreeMap::from([(provider, signed.encode())]),
+            waiters: Vec::new(),
+        };
+        assert_eq!(
+            lookup.collection_deadline - started,
+            Duration::from_secs(10)
+        );
+        assert_eq!(lookup.response_deadline - started, Duration::from_secs(15));
+        assert!(
+            !lookup.dht_complete,
+            "a partial reply is not DHT completion"
+        );
+        for elapsed in [10, 14] {
+            let offers = lookup.offers_for_response(
+                recipient,
+                16,
+                started + Duration::from_secs(elapsed),
+                1100,
+            );
+            assert_eq!(offers.len(), 1);
+            assert_eq!(offers[0].peer_id().unwrap(), provider);
+            assert_eq!(offers[0].signed_offer(), signed.encode());
+        }
+        for elapsed in [15, 16] {
+            assert!(
+                lookup
+                    .offers_for_response(
+                        recipient,
+                        16,
+                        started + Duration::from_secs(elapsed),
+                        1100,
+                    )
+                    .is_empty()
+            );
+        }
+        assert!(
+            lookup
+                .offers_for_response(recipient, 16, lookup.collection_deadline, 1300,)
+                .is_empty(),
+            "collection never extends signed offer expiry"
         );
     }
 

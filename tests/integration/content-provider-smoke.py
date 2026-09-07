@@ -13,8 +13,10 @@ read, require = COMMON["read"], COMMON["require"]
 ROLES = COMMON["ROLES"]
 BYTES, SHA = COMMON["OBJECT_BYTES"], COMMON["FIXTURE_PLAINTEXT_SHA256"]
 CANDIDATES = ("relay4", "relay5", "relay3")
+PUBLIC_IPS = dict(relay0="42.158.0.1", relay1="44.160.1.1", relay2="45.161.2.1",
+                  relay3="48.164.4.1", relay4="49.165.5.1", relay5="50.166.6.1")
 SCOPE = ("general_nat_reachability_claimed", "full_c02_claimed", "browser_integration_claimed",
-         "https_authentication_claimed", "speed_improvement_claimed", "full_alpha_acceptance_claimed")
+         "arbitrary_https_integration_claimed", "speed_improvement_claimed", "full_alpha_acceptance_claimed")
 
 
 def validate_transfer(evidence):
@@ -39,6 +41,8 @@ def validate_transfer(evidence):
             and fetch["control_relay_peer_id"] == control,
             "provider selection or unchanged actual control-relay lineage not proven")
     provider_peers = {peers[node] for node in provider_nodes}
+    control_node = next(node for node in PUBLIC_IPS if peers[node] == control)
+    validate_control_underlay(evidence["control_underlay"], control_node, provider_nodes)
     require(len(provider_peers) == 2 and fetch["providers_used"] == 2
             and len(fetch["provider_peer_ids"]) == 2
             and set(fetch["provider_peer_ids"]) == provider_peers
@@ -112,6 +116,14 @@ def validate_transfer(evidence):
         for role in ROLES[:-1]:
             require(all(value == 0 for value in privacy[role]["provider_application"][node].values()),
                     "provider application data escaped its protected path")
+    https_check = runpy.run_path(str(Path(__file__).with_name("content-provider-https-smoke.py")))
+    https_check["validate_evidence"](evidence["https"])
+    require(evidence["https"]["native_publication"] == publication
+            and evidence["https"]["layout"] == layout
+            and evidence["https"]["expected_peers"] == peers
+            and all(case["selected_route"]["route_context_id"] == selected["route_context_id"]
+                    for case in evidence["https"]["cases"].values()),
+            "HTTPS proof does not retain the exact native publication and provider identities")
 
 
 def build_evidence(work):
@@ -120,8 +132,14 @@ def build_evidence(work):
                     layout=layout,
                     status_before=read(work / "content-provider-status-before.json"),
                     status_after=read(work / "content-provider-status-after.json"),
+                    control_underlay=dict(
+                        capture=read(work / "content-provider-control-privacy.json"),
+                        routes={node: dict(out=read(work / f"content-provider-control-{node}-out.json"),
+                                           back=read(work / f"content-provider-control-{node}-back.json"))
+                                for node in CANDIDATES if node in layout["provider_nodes"]}),
                     output=read(work / "content-provider-object.json"),
                     fetch=read(work / "content-provider-fetch.json"),
+                    https=read(work / "content-provider-https-evidence.json"),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -132,10 +150,47 @@ def build_evidence(work):
     return evidence
 
 
+def validate_control_underlay(evidence, control_node, provider_nodes):
+    capture = evidence["capture"]
+    pairs = {f"cp{i}": [PUBLIC_IPS[control_node], PUBLIC_IPS[node]]
+             for i, node in enumerate(provider_nodes)}
+    require(capture["capture_role"] == "content-control" and capture["content_provider_mode"] is True
+            and capture["content_control_pairs"] == pairs
+            and set(capture["interfaces"]) == set(pairs)
+            and set(capture["content_control_packets"]) == set(pairs)
+            and capture["truncated"] is False and capture["observed_frames"] > 0
+            and capture["packet_socket_drops"] == 0
+            and capture["unexpected_provider_control_packets"] == 0
+            and capture["unexpected_provider_application_packets"] == 0
+            and all(value == 0 for counters in capture["provider_application"].values()
+                    for value in counters.values()),
+            "dedicated broker/provider links carried forbidden traffic or lack exact coverage")
+    stats = capture["interface_statistics"]
+    require(set(stats) == set(pairs)
+            and sum(s["observed_frames"] for s in stats.values()) == capture["observed_frames"]
+            and all(s["intake_stopped"] is True and s["packet_socket_drops"] == 0
+                    and s["packet_socket_packets"] == s["observed_frames"] for s in stats.values())
+            and all(c["inbound"] > 0 and c["outbound"] > 0
+                    for c in capture["content_control_packets"].values()),
+            "both UDP control links were not live, stopped, and fully drained")
+    require(set(evidence["routes"]) == set(provider_nodes), "control route coverage incomplete")
+    for i, node in enumerate(provider_nodes):
+        for direction, source, destination, device, gateway in (
+            ("out", PUBLIC_IPS[control_node], PUBLIC_IPS[node], f"cp{i}", f"10.241.{80+i}.2"),
+            ("back", PUBLIC_IPS[node], PUBLIC_IPS[control_node], f"pc{i}", f"10.241.{80+i}.1"),
+        ):
+            routes = evidence["routes"][node][direction]
+            require(len(routes) == 1 and routes[0]["dst"] == destination
+                    and routes[0]["prefsrc"] == source and routes[0]["dev"] == device
+                    and routes[0]["gateway"] == gateway,
+                    "actual kernel route does not bind the two advertised public endpoints")
+
+
 def validate_report(report, revision):
     require(report["report_kind"] == "volparossa-native-content-providers"
             and report["source_revision"] == revision and report["success"] is True
             and report["runner_exit_status"] == 0
+            and report["explicit_origin_authenticated_https"] is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]

@@ -97,7 +97,9 @@ explicit local files are signed with the existing encrypted node identity and re
 from explicitly selected owned caches. Those two commands remain offline. New `content serve`,
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. Compilation and focused checks pass; the
-independent-node network proof is pending. See the [content instructions](docs/OPERATIONS.md#offline-content-commands).
+first independent-node network attempt failed before retrieval, so that proof remains pending.
+See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
+[exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 A complete mailbox, automatic redistribution, shared DNS and browser integration remain
@@ -113,6 +115,25 @@ test passes on `2de8209f`. Partial HTTPS fallback also passes the protected-rout
 This currently needs publisher cooperation and supports anonymous static binary resources,
 not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
 compulsory central witness is proposed.
+
+The normal CLI now exposes `content fetch-https`: authenticate the cooperative origin's canonical
+metadata over hostname/CA-verified TLS 1.3 through the protected MPTCP route, try peer chunks,
+then fetch missing ranges from that same authenticated origin. For a configured agent and
+provisioned, policy-allowed origin/provider endpoints, substitute the actual URL and new
+agent-writable paths:
+
+```sh
+volparossa content fetch-https \
+  --url https://origin.example/object.bin --metadata-path /.well-known/volparossa/object \
+  --cache /agent-owned/new-https-cache --output /agent-owned/object.bin
+```
+
+Debian system trust is the default. Optional `--ca-file public-roots.pem` selects bounded public
+PEM roots for this request only; it installs nothing and does not disable certificate or hostname
+verification. No separately supplied publisher key can replace origin authentication. Focused
+CLI/agent/control checks pass; the exact normal-CLI KVM proof is still pending, and C02/C08 remain
+incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
+distinguish this command from the earlier executable-fixture passes.
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
 [implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
