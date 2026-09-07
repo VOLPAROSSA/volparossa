@@ -1,4 +1,10 @@
-//! Conservative admission for optional cache work, not proof of spare ISP/radio capacity.
+//! Quiet admission and chunk-boundary yielding for optional cache work.
+//!
+//! Sample only before a transfer or while the provider awaits its next chunk credit.
+//! Total interface bytes are not per-flow owner accounting: sampling during our own payload
+//! would cancel useful work because of itself. Residual packets can conservatively close a
+//! credit window. One already credited chunk may overlap new owner demand; neither these
+//! samples nor the configured cooldown prove spare ISP/radio capacity or no slowdown.
 
 use std::{
     sync::{
@@ -106,6 +112,8 @@ impl IdleBudget {
         .flatten()
     }
 
+    /// A fresh decision on the explicitly configured interfaces, never all route interfaces.
+    /// False at a credit boundary ends this optional exchange; it does not extend its deadline.
     pub(super) async fn quiet(&self) -> bool {
         let Some(before) = self.sample().await else {
             return false;

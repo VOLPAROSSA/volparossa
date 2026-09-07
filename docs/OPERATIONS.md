@@ -424,8 +424,13 @@ The job starts only after a successful native/HTTPS content fetch has actually r
 chunks from a provider. Both `sharing` and `download_sharing` must be explicitly configured and
 enabled, with meaningful link capacities and the real carrying interfaces. Unknown/down/overlay
 interfaces or a busy preflight sample cause uptake to pause; no host configuration is changed by
-the sampling itself. New foreground content operations cancel background uptake. This first
-admission/budget mechanism is not yet the full C04 contention/radio fairness implementation.
+the sampling itself. The receiver uses protocol v3: after each received chunk the provider must
+wait for a new one-chunk credit. A fresh sample of the configured links precedes that credit;
+a busy or unavailable sample sends stop and retains verified partial chunks for re-serving.
+Credit, stop and finish framing share the original protocol budget/deadline. There is no silent
+fallback to the unsolicited v2 exchange. New foreground content operations cancel background
+uptake. One already credited chunk can still overlap new demand; unmeasured links, per-flow
+owner accounting and radio contention are not covered. This is not the full C04 fairness proof.
 
 `content status` reports `replication_enabled` separately from actual retained `replica_chunks`,
 `replica_bytes` and registered `replica_publications`; an enabled job is not evidence of useful

@@ -173,8 +173,10 @@ does not upgrade the older test-only-key network evidence into a normal-CLI netw
 The network harness now provisions its disposable encrypted identities through normal `init`,
 exports only `recipient-key`, and uses `open-message` on the retrieved cache. Its six local
 checker/cleanup/process tests pass, including real CLI compatibility with the existing fixture
-publisher. A fresh network run must establish that expanded recipient scope; the sender remains
-a fixture, and neither automatic key discovery nor a mailbox is introduced.
+publisher. The [fresh network run on `4c4c8954`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170523962)
+now passes with normal recipient CLI decryption of the retrieved ciphertext, exact bytes,
+wrong-recipient/no-clobber checks, ten complete zero-drop captures and unchanged-host cleanup.
+The sender remains a fixture; neither automatic key discovery nor a mailbox is introduced.
 
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
 proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
@@ -267,11 +269,18 @@ expiry is not renewed; copying increments a locally bounded hop count, not a pro
 malicious hop rewriting. Exact interests remain inside the protected stream, not in the DHT.
 
 Admission requires fresh read-only traffic samples on the explicitly configured sharing links.
+The agent now uses a distinct v3 exchange with one receiver credit per chunk, never a silent
+v2 fallback. While the provider waits for its next credit, the receiver takes another fresh
+sample; a busy sample stops the exchange and preserves verified partial uptake. Credits, stop
+and finish remain inside the original protocol-byte limit and deadline. Waiting holds neither
+the provider's registry mutex nor an open provider cache. The older v1/v2 protocols remain
+available to existing explicit callers, without inheriting this new pacing claim.
 A new foreground content download or service stop cancels the job. A conservative full-budget
 cooldown bounds its configured average rate; the 30-second overall limit also closes slow jobs.
-This does not yet give per-flow owner isolation, paid-link/radio accounting, a no-slowdown or
-speedup guarantee. Counting the job's own traffic as competing owner traffic would incorrectly
-cancel useful slow transfers, so the idle sample is preflight-only, not such a claimed guarantee.
+One already credited chunk may overlap new owner demand. These configured-interface samples
+are not all-link/per-flow accounting, radio fairness or a no-slowdown/speedup guarantee. The job
+does not subtract its own estimated bytes from counters; samples run at quiet credit boundaries,
+where residual packets may conservatively reject the next credit rather than renew any budget.
 Registry metadata remains in memory, and quota exhaustion pauses uptake rather than providing
 retention repair or expiry reclamation. Those parts of C03/C04 remain open.
 

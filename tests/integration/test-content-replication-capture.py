@@ -80,9 +80,15 @@ class ReplicationCaptureTests(unittest.TestCase):
             for endpoint in (client, *current["relays"].values()):
                 self.assertEqual(classify(current, "provider", endpoint, provider,
                                           socket.IPPROTO_TCP, dport=18080)["direct_provider_packets"], 1)
-            for port in (41000, 22000):
-                self.assertEqual(classify(current, "exit", client, exit_ip, dport=port)[
+            self.assertEqual(classify(current, "exit", client, exit_ip, dport=41000),
+                             {"control_packets": 1})
+            self.assertEqual(classify(current, "exit", exit_ip, client, sport=41000),
+                             {"control_packets": 1})
+            for protocol in (socket.IPPROTO_UDP, socket.IPPROTO_TCP):
+                self.assertEqual(classify(current, "exit", client, exit_ip, protocol, dport=22000)[
                     "direct_client_exit_packets"], 1)
+            self.assertEqual(classify(current, "exit", client, exit_ip, socket.IPPROTO_TCP,
+                                      dport=41000)["direct_client_exit_packets"], 1)
             self.assertEqual(classify(current, "exit", exit_ip, provider, socket.IPPROTO_TCP,
                                       dport=18081), {"forbidden_packets": 1})
 
@@ -96,7 +102,15 @@ class ReplicationCaptureTests(unittest.TestCase):
                          {"forbidden_packets": 1})
         self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=5353, dport=5353),
                          {"mdns_packets": 1, "control_packets": 1})
+        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=45678, dport=5353),
+                         {"mdns_packets": 1, "control_packets": 1})
+        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=0, dport=5353),
+                         {"forbidden_packets": 1})
+        self.assertEqual(classify(current, "relay4", "203.0.113.1", "224.0.0.251", sport=45678, dport=5353),
+                         {"forbidden_packets": 1})
         self.assertEqual(classify(current, "relay4", "fe80::1", "ff02::fb", sport=5353, dport=5353),
+                         {"mdns_packets": 1, "control_packets": 1})
+        self.assertEqual(classify(current, "relay4", "fe80::1", "ff02::fb", sport=45678, dport=5353),
                          {"mdns_packets": 1, "control_packets": 1})
         for destination in ("ff02::1", "fe80::2"):
             self.assertEqual(classify(current, "relay4", "fe80::1", destination,
@@ -108,6 +122,22 @@ class ReplicationCaptureTests(unittest.TestCase):
                                  (struct.pack("<I", 1) + bytes(144), "wireguard_handshake_packets")):
             self.assertEqual(classify(current, "relay4", "49.165.5.1", "42.158.0.1", payload=payload),
                              {counter: 1})
+
+    def test_wireguard_mtu_clamped_data_is_legal_but_not_arbitrary_or_oversized_udp(self):
+        current = layout()
+        # Linux pads only up to MTU1420: 1420 plaintext +32 authenticated overhead =1452.
+        payload = struct.pack("<I", 4) + bytes(1448)
+        result = classify(current, "relay4", "49.165.5.1", "42.158.0.1", payload=payload)
+        self.assertEqual(result["client_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(result["client_leg_wireguard_data_bytes"], 1452)
+        for length in (31, 47, 1451, 1453, 1456, 65504):
+            self.assertEqual(classify(current, "relay4", "49.165.5.1", "42.158.0.1",
+                                      payload=struct.pack("<I", 4) + bytes(length - 4)),
+                             {"forbidden_packets": 1})
+        self.assertEqual(classify(current, "relay4", "49.165.5.1", "42.158.0.1", payload=bytes(1452)),
+                         {"forbidden_packets": 1})
+        self.assertEqual(classify(current, "exit", "49.165.5.1", "46.162.3.1", payload=payload)[
+            "direct_client_exit_packets"], 1)
 
     def test_layout_and_frame_bounds_reject_substitution_fragments_and_truncation(self):
         current = layout()
@@ -155,13 +185,34 @@ class ReplicationCaptureTests(unittest.TestCase):
             decision = CAPTURE.classify(layout(), "exit", *packet[1:], "physical0")
             self.assertEqual(decision, {"forbidden_packets": 1})
             diagnostics = CAPTURE.diagnostic_updates(packet, decision)
-            self.assertEqual(diagnostics, {f"classified_{label}_packets": 1,
-                                          f"forbidden_{label}_packets": 1,
-                                          f"forbidden_ipv{version}_unmatched_packets": 1})
+            expected = {f"classified_{label}_packets": 1, f"forbidden_{label}_packets": 1,
+                        f"forbidden_ipv{version}_unmatched_packets": 1}
+            if protocol == socket.IPPROTO_UDP:
+                expected["forbidden_udp_outside_fixture_packets"] = 1
+            elif protocol == socket.IPPROTO_ICMP:
+                expected.update(forbidden_icmp_other_packets=1, forbidden_icmp_unparsed_quote_packets=1)
+            self.assertEqual(diagnostics, expected)
             self.assertTrue(set(diagnostics).issubset(CAPTURE.DIAGNOSTIC_COUNTERS))
             self.assertEqual(decision, {"forbidden_packets": 1})
         self.assertEqual(CAPTURE.diagnostic_updates(None, {"neighbor_packets": 1}),
                          {"classified_arp_packets": 1})
+
+    def test_fixed_icmp_quote_diagnostics_never_admit_unreachable_or_persist_tuple(self):
+        current = layout()
+        for kind, code, label in ((3, 3, "port_unreachable"), (3, 4, "fragmentation_needed"),
+                                  (3, 1, "destination_unreachable"), (11, 0, "time_exceeded")):
+            udp = struct.pack("!HHHH", 41000, 45678, 1234, 0)
+            quoted_ip = ipv4_frame("46.162.3.1", "48.164.4.1", socket.IPPROTO_UDP, udp)[14:]
+            packet = (4, socket.IPPROTO_ICMP, "48.164.4.1", 0, "46.162.3.1", 0,
+                      bytes((kind, code)) + bytes(6) + quoted_ip)
+            decision = CAPTURE.classify(current, "exit", *packet[1:], "xr3")
+            self.assertEqual(decision, {"forbidden_packets": 1})
+            diagnostics = CAPTURE.diagnostic_updates(packet, decision)
+            self.assertEqual(diagnostics[f"forbidden_icmp_{label}_packets"], 1)
+            self.assertEqual(diagnostics["forbidden_icmp_quoted_udp_control_port_packets"], 1)
+            self.assertTrue(set(diagnostics).issubset(CAPTURE.DIAGNOSTIC_COUNTERS))
+            for value in ("46.162.3.1", "48.164.4.1", "41000", "45678"):
+                self.assertNotIn(value, json.dumps(diagnostics))
 
     def test_capture_attributes_forbidden_protocol_and_interface_without_changing_totals(self):
         marker = b"do-not-record-this-payload"
@@ -185,6 +236,10 @@ class ReplicationCaptureTests(unittest.TestCase):
                          [2, 3])
         self.assertEqual(sum(row["forbidden_packets"] for row in record["interface_statistics"].values()),
                          record["forbidden_packets"])
+        self.assertEqual(record["interface_statistics"]["physical0"]["forbidden_icmp_port_unreachable_packets"], 1)
+        self.assertEqual(record["interface_statistics"]["physical1"]["forbidden_icmp_port_unreachable_packets"], 0)
+        for counter in CAPTURE.DIAGNOSTIC_COUNTERS:
+            self.assertEqual(sum(row[counter] for row in record["interface_statistics"].values()), record[counter])
         serialized = json.dumps(record)
         for detail in (marker.decode(), "49.165.5.1", "46.162.3.1", "203.0.113.1", "22000", "23000"):
             self.assertNotIn(detail, serialized)

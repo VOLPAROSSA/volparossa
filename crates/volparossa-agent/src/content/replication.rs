@@ -13,7 +13,7 @@ use tokio::{
     task::JoinHandle,
 };
 use volparossa_content::provider::replication::{
-    ReplicationExclusions, ReplicationLimits, pull_replicas,
+    ReplicationExclusions, ReplicationLimits, pull_replicas_with_admission,
 };
 use volparossa_content::provider::{PublicationRegistry, VerifiedProviderOffer};
 use volparossa_content::{CacheLimits, CacheUsage, ChunkId, ChunkStore};
@@ -187,7 +187,7 @@ impl ReplicationRuntime {
                 _ = stop.changed() => {},
                 _ = owner_change.changed() => {},
                 () = tokio::time::sleep_until(deadline) => {},
-                () = runtime.exchange(&context, &registry, contact, &exclusions) => {},
+                () = runtime.exchange(&context, &registry, contact, &exclusions, &budget) => {},
             }
             // Cancellation can retain independently verified chunks. Count the owned store,
             // not only the last complete protocol receipt; metadata is not invented for them.
@@ -203,6 +203,7 @@ impl ReplicationRuntime {
         registry: &Mutex<PublicationRegistry>,
         contact: Contact,
         exclusions: &ReplicationExclusions,
+        budget: &IdleBudget,
     ) {
         if !context
             .routes
@@ -243,7 +244,7 @@ impl ReplicationRuntime {
             let Ok(mut store) = ChunkStore::open(&self.root, self.limits) else {
                 return;
             };
-            let progress = pull_replicas(
+            let progress = pull_replicas_with_admission(
                 &mut stream,
                 &mut store,
                 ReplicationLimits {
@@ -252,6 +253,10 @@ impl ReplicationRuntime {
                     ..ReplicationLimits::default()
                 },
                 exclusions,
+                // No next chunk is in flight while this sample runs: the provider must
+                // await our next credit. Busy ends the exchange with verified partials;
+                // it never relabels our actively received payload as owner demand.
+                || budget.quiet(),
             )
             .await
             .ok();

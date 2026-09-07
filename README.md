@@ -104,7 +104,9 @@ Relay/Exit advertisement withdrawal incorrectly also withdrew that independent c
 The ownership correction passes a real actor regression. The next multi-node run exposed a
 second cause: reloading an unchanged policy every 30 seconds also withdrew content. That reload
 now preserves active registrations, in-flight offers and original deadlines; a new real actor
-regression passes, while the next full multi-node rerun remains pending.
+regression passes. The next multi-node run (`4c4c8954`) completes native and both HTTPS downloads,
+then fails in the final checker because it reads kernel route arrays as objects. That checker
+is corrected and accepts the original records; the historical CI run remains failed.
 Both `content fetch` and `content fetch-https` support explicit `--reuse-cache` to resume from
 an existing owned cache, retrieving only missing chunks. HTTPS still obtains fresh origin
 authorization; cached bytes do not renew expiry or count as newly received peer traffic.
@@ -118,12 +120,16 @@ encrypted identity, cache only ciphertext, and write plaintext only to an explic
 new private file. Identity rotation also changes the message-recipient key; retain the old
 encrypted identity if old messages must remain readable. See the
 [message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands). The updated network
-harness now uses these normal recipient commands and encrypted identities; its local process
-compatibility test passes, but a new network run is needed to establish that expanded scope.
+run on `4c4c8954` also passes with these normal recipient commands and encrypted identities,
+including ciphertext retrieval after publisher removal, private output and complete cleanup.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
-tests pass; the multi-node agent proof and full owner-priority behavior remain unfinished.
+tests pass. Optional uptake now requests one chunk at a time, checking the configured links
+before granting the next chunk; a busy sample ends the exchange with verified partial data.
+Actual multi-node uptake and re-serving after original-provider shutdown now work on `4c4c8954`;
+its final capture report is still rejected and being corrected. Full owner-priority behavior
+remains unfinished, and that run predates the new one-chunk-credit mechanism.
 A complete mailbox, durable redistribution, shared DNS and browser integration also remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
 

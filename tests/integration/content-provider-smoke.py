@@ -19,6 +19,17 @@ SCOPE = ("general_nat_reachability_claimed", "full_c02_claimed", "browser_integr
          "arbitrary_https_integration_claimed", "speed_improvement_claimed", "full_alpha_acceptance_claimed")
 
 
+def read_route(path):
+    require(not path.is_symlink(), "symlink route evidence is not accepted")
+    with path.open(encoding="ascii") as source:
+        text = source.read(65537)
+    require(len(text) <= 65536, "route evidence exceeds its bound")
+    rows = json.loads(text)
+    require(isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict),
+            "kernel route evidence must contain exactly one route object")
+    return rows
+
+
 def validate_transfer(evidence):
     publication, output, fetch = evidence["publication"], evidence["output"], evidence["fetch"]
     require(publication["bytes"] == output["bytes"] == fetch["bytes"] == BYTES
@@ -134,8 +145,8 @@ def build_evidence(work):
                     status_after=read(work / "content-provider-status-after.json"),
                     control_underlay=dict(
                         capture=read(work / "content-provider-control-privacy.json"),
-                        routes={node: dict(out=read(work / f"content-provider-control-{node}-out.json"),
-                                           back=read(work / f"content-provider-control-{node}-back.json"))
+                        routes={node: dict(out=read_route(work / f"content-provider-control-{node}-out.json"),
+                                           back=read_route(work / f"content-provider-control-{node}-back.json"))
                                 for node in CANDIDATES if node in layout["provider_nodes"]}),
                     output=read(work / "content-provider-object.json"),
                     fetch=read(work / "content-provider-fetch.json"),

@@ -257,10 +257,12 @@ impl VerifiedProviderOffer {
 }
 
 /// Bounded, explicit local publication allowlist. No path comes from a network selector.
-#[derive(Default)]
+/// Cloning snapshots metadata only (at most 64 entries), never open cache handles or locks.
+#[derive(Clone, Default)]
 pub struct PublicationRegistry {
     entries: BTreeMap<[u8; 32], RegisteredPublication>,
 }
+#[derive(Clone)]
 struct RegisteredPublication {
     manifest: VerifiedManifest,
     root: PathBuf,
@@ -435,6 +437,12 @@ where
             && selector.manifest_id.is_empty()
         {
             return replication::serve(stream, registry, &session, limits).await;
+        }
+        if selector.version == replication::CREDIT_VERSION
+            && selector.operation == replication::OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            return replication::serve_with_credit(stream, registry, &session, limits).await;
         }
         if selector.version != VERSION || selector.operation != 0 {
             return Err(ProviderError::Protocol);

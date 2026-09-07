@@ -54,8 +54,15 @@ UID must be unable to read either identity or the passphrase. The checker requir
 recipient rejection, new 0600 plaintext output, no overwrite, unchanged encrypted identities
 and exact secret-file cleanup. Five checker/cleanup tests and a real separate-process CLI/fixture
 compatibility test pass; shell syntax, the changed hook's ShellCheck and plan preview also pass.
-The live network rerun remains pending. The publisher is still the existing encrypted-message
-fixture; normal publisher CLI networking, key discovery, mailbox and full C07 are not claimed.
+The [exact `4c4c8954` network rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170523962)
+now passes: nine ciphertext chunks (five plus four) reconstruct the exact 2,097,275-byte message
+through normal recipient CLI commands. Wrong-recipient/no-clobber/identity-preservation checks
+pass; both MPTCP flows and both WireGuard relay paths carry data. Ten boundary captures drain
+with zero drops or unexpected packets. Secret fixtures are removed, cleanup leaves zero owned
+objects, and raw before/after guest state is identical. Artifact SHA-256:
+`19e8b4587c5b44f52112b135c3f864d47de2e64e0b8fdca7a3d4ea924d26898e`.
+The publisher is still the existing encrypted-message fixture; normal publisher CLI networking,
+key discovery, mailbox and full C07 are not claimed.
 
 The new explicit `content serve` / `content fetch` / `content stop` runtime now compiles with
 strict agent, CLI and local-control Clippy. Serving registers up to 64 exact verified manifests
@@ -180,6 +187,19 @@ focused cache/owner-generation/idle-accounting tests and the UAPI counter test p
 durable registration/retention and complete C04 owner isolation remain unproven and unchecked.
 See the [bounded redistribution scope](CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
 
+The next local owner-priority slice uses explicit replication v3, with one receiver credit per
+chunk and a fresh configured-interface quiet sample before each credit. Busy ends the exchange
+with its independently verified partial uptake; the original expiry, byte budget, hop ceiling
+and deadlines are unchanged. The provider snapshots bounded registration metadata and releases
+cache handles before waiting for credit or writing a chunk, allowing a foreground retrieval to
+proceed. Four real duplex tests pass: no unsolicited next chunk, a concurrent foreground pull,
+busy-stop preserving verified partial data, exact credit/framing byte accounting, fixed deadlines
+and refusal of a v2 response. Five existing v2 tests, three agent budget/lifecycle tests and
+strict content/agent Clippy also pass.
+This is not a live all-interface contention/no-slowdown proof: one credited chunk may overlap
+new owner demand, only configured interfaces are sampled, and full C04 remains unchecked.
+The network attempts on `4c4c8954` predate this v3 slice and cannot establish its live behavior.
+
 The separate `content-replication` KVM scenario now drives normal agents through foreground P,
 uptake of previously absent Q, original-provider agent shutdown, and a new consumer's protected
 Q retrieval from the replica. Five-role physical captures cover both phases and all fixture
@@ -245,6 +265,42 @@ all original offer/query deadlines remain unchanged. An actual ApplyPolicy regre
 without the correction and passes with it, including real policy replacement invalidation.
 All nine discovery-content tests and strict agent Clippy pass. No retries, longer timeouts,
 weaker authority checks or completed C02/C03 claim are introduced; live verification is pending.
+
+The [redistribution run on `4c4c8954`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170522891)
+now completes the actual four-flow sequence. R4 fetches foreground P (524,609 bytes), then after
+another P fetch takes up previously absent Q (262,267 bytes / two chunks / one publication).
+R5's original agent is stopped, PID zero and its listener absent, before a fresh Client cache
+fetches Q from R4 with exact SHA-256
+`b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d`.
+The four Exit MPTCP flows complete, and cleanup leaves zero owned objects with byte-identical
+guest state. The run nevertheless remains **failed**: full physical captures contain packets
+the classifier rejects. WireGuard padding/MTU, control/dataplane ordering and mDNS source-port
+assumptions are being corrected; additional ICMP observations remain unresolved rather than
+being allowed speculatively. This establishes actual uptake/re-serving, not a successful final
+privacy report or full C03/C04. It predates the new receiver-credit protocol above.
+
+The [provider run on the same `4c4c8954` source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170521790)
+also completes native, complete-cache HTTPS and missing-cache HTTPS, with the exact 2,097,275-byte
+object hash in every case. The latter combines 1,048,699 verified peer bytes with four exact
+206 ranges totaling 1,048,576 origin bytes. Eleven Exit MPTCP flows complete and both provider
+services stop. Only final report assembly fails: its object-only reader rejects the actual
+one-element kernel-route JSON arrays. The corrected bounded array reader preserves all exact
+peer/address/gateway/interface/capture checks; seven checker tests and re-evaluation of the
+unchanged raw evidence pass. Cleanup is complete with unchanged guest state. The historical
+workflow remains **failed**, not retroactively repaired. Exact-source
+[Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170509341) and
+[CodeQL analysis](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170507762) pass; the separate
+CodeQL PR gate still reports 117 alerts relative to its older base and is not described as green.
+
+The next capture checker corrects three source-established assumptions: Linux's observed
+1420-byte WireGuard MTU permits a 1452-byte padded data message; normal authenticated-control
+traffic on the fixture's UDP 41000 is not a direct Exit dataplane; and the pinned mDNS sender
+uses an ephemeral source port toward the same bounded local multicast destination. Direct
+dataplane traffic, oversized/other malformed data and all unexplained ICMP remain rejected.
+Fixed per-interface ICMP/quoted-UDP categories will distinguish the remaining observations
+without recording packet bodies or tuples. Nine capture tests and three replication-evidence
+tests pass. The old capture summaries cannot be reclassified into new observed packet evidence;
+a fresh source-bound run is still required.
 
 Native and HTTPS fetch now support explicit `--reuse-cache` across CLI, typed local control and
 the agent. Default creation still rejects existing directories; reuse opens only a validated

@@ -231,8 +231,13 @@ impl ContentRuntime {
                     let tls = tls.clone();
                     sessions.spawn(async move {
                         let Ok(mut stream) = tls.accept(stream).await else { return; };
-                        // One owned-cache session at a time; no unbounded queue or lock wait.
-                        let Ok(registry) = registry.try_lock() else { return; };
+                        // Snapshot at most 64 explicit registrations; never hold the metadata
+                        // lock while a background receiver waits before requesting a chunk.
+                        // Cache handles retain their own exclusive ownership checks.
+                        let registry = {
+                            let Ok(current) = registry.try_lock() else { return; };
+                            current.clone()
+                        };
                         if serve_publication(&mut stream, &registry, TransferLimits::default()).await.is_ok() {
                             let _ = tls::finish(&mut stream).await;
                         }

@@ -37,11 +37,23 @@ COUNTERS = (
 # Fixed labels only: no packet-derived address, port, type number or payload is persisted.
 PROTOCOL_LABELS = {socket.IPPROTO_TCP: "tcp", socket.IPPROTO_UDP: "udp",
                    socket.IPPROTO_ICMP: "icmp", socket.IPPROTO_ICMPV6: "icmpv6"}
+UDP_LABELS = ("control_port", "mdns_multicast", "wireguard_header", "fixture_pair_other", "outside_fixture")
+ICMP_LABELS = ("port_unreachable", "fragmentation_needed", "destination_unreachable", "time_exceeded", "other")
 DIAGNOSTIC_COUNTERS = (
     *(f"classified_{label}_packets" for label in (*PROTOCOL_LABELS.values(), "other_ip", "arp")),
     *(f"forbidden_{label}_packets" for label in (*PROTOCOL_LABELS.values(), "other_ip", "unparsed")),
     "forbidden_ipv4_unmatched_packets", "forbidden_ipv6_unmatched_packets",
+    *(f"forbidden_udp_{label}_packets" for label in UDP_LABELS),
+    *(f"forbidden_icmp_{label}_packets" for label in ICMP_LABELS),
+    *(f"forbidden_icmp_quoted_udp_{label}_packets" for label in UDP_LABELS),
+    "forbidden_icmp_unparsed_quote_packets",
 )
+# This disposable topology's observed WireGuard MTU is 1420. Linux v6.12 send.c
+# calculate_skb_padding() clamps alignment padding to that MTU; full data messages
+# therefore contain 1420 plaintext + 16 header + 16 tag = 1452, not a multiple of 16.
+# https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/net/wireguard/send.c
+WIREGUARD_MTU = 1420
+MAX_WIREGUARD_DATA_BYTES = WIREGUARD_MTU + 32
 MAX_FRAMES = 1_048_576
 MAX_FRAME_BYTES = 65_589  # Ethernet + IPv6 header + maximum non-jumbo IPv6 payload.
 MAX_SECONDS = 1800
@@ -82,8 +94,6 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
         raise ValueError("missing physical capture interface")
     client, exit_ip, provider = (layout[name]["ip"] for name in ("client", "exit", "provider"))
     pair = {src, dst}
-    if pair == {client, exit_ip}:
-        return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
     source, destination = ipaddress.ip_address(src), ipaddress.ip_address(dst)
     if source.version != destination.version:
         return {"forbidden_packets": 1, "malformed_packets": 1}
@@ -94,13 +104,17 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
                 130, 131, 132, 133, 134, 135, 136, 143):
             return {"neighbor_packets": 1}
         if source.is_link_local and dst == "ff02::fb" and protocol == socket.IPPROTO_UDP \
-                and sport == 5353 and dport == 5353:
+                and sport != 0 and dport == 5353:
             return {"mdns_packets": 1, "control_packets": 1}
         return {"forbidden_packets": 1}
     if protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
             and src in CONTROL_PEERS and dst in CONTROL_PEERS and src != dst:
         return {"control_packets": 1}
-    if protocol == socket.IPPROTO_UDP and sport == 5353 and dport == 5353 \
+    # Control connectivity is distinct from directly reaching an Exit dataplane.
+    if pair == {client, exit_ip}:
+        return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
+    # Pinned libp2p-mdns uses a separate ephemeral-port send socket, not source5353.
+    if protocol == socket.IPPROTO_UDP and sport != 0 and dport == 5353 \
             and dst == "224.0.0.251" and (src in CONTROL_PEERS or source in FIXTURE_LINKS):
         return {"mdns_packets": 1, "control_packets": 1}
     if protocol == socket.IPPROTO_TCP and pair == {exit_ip, provider} and node in (
@@ -123,7 +137,8 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
             message_type = struct.unpack("<I", payload[:4])[0]
             if message_type in (1, 2, 3) and len(payload) == {1: 148, 2: 92, 3: 64}[message_type]:
                 return {"wireguard_handshake_packets": 1}
-            if message_type == 4 and len(payload) >= 32 and len(payload) % 16 == 0:
+            if message_type == 4 and 32 <= len(payload) <= MAX_WIREGUARD_DATA_BYTES \
+                    and (len(payload) % 16 == 0 or len(payload) == MAX_WIREGUARD_DATA_BYTES):
                 if len(payload) == 32:
                     return {"wireguard_keepalive_packets": 1}
                 return {f"{leg}_wireguard_data_datagrams": 1,
@@ -199,12 +214,55 @@ def decode_frame(frame):
     return version, protocol, source, sport, destination, dport, payload
 
 
+def udp_diagnostic_label(source, sport, destination, dport, payload):
+    """One fixed explanatory class; never a packet admission or an authority decision."""
+    src, dst = ipaddress.ip_address(source), ipaddress.ip_address(destination)
+    fixture_pair = (source in CONTROL_PEERS or src in FIXTURE_LINKS) and (
+        destination in CONTROL_PEERS or dst in FIXTURE_LINKS)
+    if fixture_pair and 41000 in (sport, dport):
+        return "control_port"
+    if dport == 5353 and destination in ("224.0.0.251", "ff02::fb"):
+        return "mdns_multicast"
+    if fixture_pair and len(payload) >= 4 and payload[:4] in (
+            b"\x01\x00\x00\x00", b"\x02\x00\x00\x00", b"\x03\x00\x00\x00", b"\x04\x00\x00\x00"):
+        return "wireguard_header"
+    return "fixture_pair_other" if fixture_pair else "outside_fixture"
+
+
+def icmp_diagnostics(payload):
+    """Fixed ICMPv4 type/code and quoted UDP class, with no allowlist exception."""
+    kind = payload[0] if payload else None
+    code = payload[1] if len(payload) >= 2 else None
+    label = ("port_unreachable" if (kind, code) == (3, 3) else
+             "fragmentation_needed" if (kind, code) == (3, 4) else
+             "destination_unreachable" if kind == 3 else
+             "time_exceeded" if kind == 11 else "other")
+    result = {f"forbidden_icmp_{label}_packets": 1}
+    quote = payload[8:]
+    offset = (quote[0] & 15) * 4 if quote else 0
+    # ICMP normally quotes only the original IP header and first eight UDP bytes.
+    # Its original total length can legitimately exceed the quoted bounded prefix.
+    if kind not in (3, 11) or len(quote) < 20 or quote[0] >> 4 != 4 \
+            or not 20 <= offset <= 60 or len(quote) < offset + 8 \
+            or quote[9] != socket.IPPROTO_UDP or struct.unpack("!H", quote[6:8])[0] & 0x3fff:
+        result["forbidden_icmp_unparsed_quote_packets"] = 1
+        return result
+    source, destination = socket.inet_ntoa(quote[12:16]), socket.inet_ntoa(quote[16:20])
+    sport, dport, length = struct.unpack("!HHH", quote[offset:offset + 6])
+    if length < 8:
+        result["forbidden_icmp_unparsed_quote_packets"] = 1
+        return result
+    label = udp_diagnostic_label(source, sport, destination, dport, quote[offset + 8:offset + length])
+    result[f"forbidden_icmp_quoted_udp_{label}_packets"] = 1
+    return result
+
+
 def diagnostic_updates(packet, classification):
     """Describe the existing decision with bounded counters, without changing that decision."""
     if packet is None:
         return ({"forbidden_unparsed_packets": 1} if classification.get("forbidden_packets")
                 else {"classified_arp_packets": 1})
-    version, protocol, *_unused = packet
+    version, protocol, source, sport, destination, dport, payload = packet
     label = PROTOCOL_LABELS.get(protocol, "other_ip")
     updates = {f"classified_{label}_packets": 1}
     if classification.get("forbidden_packets"):
@@ -212,6 +270,11 @@ def diagnostic_updates(packet, classification):
         if not any(classification.get(reason) for reason in (
                 "direct_client_exit_packets", "direct_provider_packets", "malformed_packets")):
             updates[f"forbidden_ipv{version}_unmatched_packets"] = 1
+        if protocol == socket.IPPROTO_UDP:
+            detail = udp_diagnostic_label(source, sport, destination, dport, payload)
+            updates[f"forbidden_udp_{detail}_packets"] = 1
+        elif version == 4 and protocol == socket.IPPROTO_ICMP:
+            updates.update(icmp_diagnostics(payload))
     return updates
 
 
@@ -272,6 +335,7 @@ def capture(layout, output, ready, role, interfaces):
             "forbidden_packets", 0)
         for name, count in diagnostic_updates(packet, updates).items():
             record[name] += count
+            record["interface_statistics"][sockets[observer]][name] += count
         for name, count in updates.items():
             record[name] += count
 
@@ -285,7 +349,8 @@ def capture(layout, output, ready, role, interfaces):
                 raise ValueError("bounded capture buffer unavailable")
             record["interface_statistics"][interface] = dict(
                 receive_buffer_bytes=actual, observed_frames=0, intake_stopped=False,
-                drained=False, packet_socket_packets=0, packet_socket_drops=0, forbidden_packets=0)
+                drained=False, packet_socket_packets=0, packet_socket_drops=0, forbidden_packets=0,
+                **dict.fromkeys(DIAGNOSTIC_COUNTERS, 0))
             observer.bind((interface, 3))
             observer.setblocking(False)
         with Path(ready).open("x", encoding="ascii") as marker:

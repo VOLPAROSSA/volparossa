@@ -4,9 +4,11 @@
 
 import ast
 import copy
+import json
 from pathlib import Path
 import runpy
 import socket
+import tempfile
 import unittest
 
 HERE = Path(__file__).parent
@@ -80,6 +82,53 @@ def fixture(control_node="relay2"):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_actual_kernel_route_array_files_are_read_and_bound(self):
+        evidence = fixture()
+        names = {
+            "layout": "layout", "publication": "publication", "status_before": "status-before",
+            "status_after": "status-after", "output": "object", "fetch": "fetch",
+            "https": "https-evidence", "selected_route": "live-selection",
+        }
+        files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
+        files["a01-expected-peers.json"] = evidence["expected_peers"]
+        files["content-provider-control-privacy.json"] = evidence["control_underlay"]["capture"]
+        for node, routes in evidence["control_underlay"]["routes"].items():
+            for direction, rows in routes.items():
+                files[f"content-provider-control-{node}-{direction}.json"] = rows
+        for role, capture in evidence["privacy"].items():
+            files[f"content-provider-privacy-{role}.json"] = capture
+        for node, states in evidence["providers"].items():
+            for operation, state in states.items():
+                files[f"content-provider-{node}-{operation}.json"] = state
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name, value in files.items():
+                (work / name).write_text(json.dumps(value), encoding="ascii")
+            self.assertEqual(CHECK["build_evidence"](work), evidence)
+            # Keep every existing exact source/destination/gateway/device check after decoding.
+            wrong = copy.deepcopy(files["content-provider-control-relay4-out.json"])
+            wrong[0]["dev"] = "underlay"
+            (work / "content-provider-control-relay4-out.json").write_text(
+                json.dumps(wrong), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+
+    def test_route_reader_rejects_wrong_shape_size_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            route = Path(directory) / "route.json"
+            for value in ({}, [], [{}, {}], ["not a route"]):
+                with self.subTest(value=value):
+                    route.write_text(json.dumps(value), encoding="ascii")
+                    with self.assertRaises(ValueError):
+                        CHECK["read_route"](route)
+            route.write_text(" " * 65537, encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["read_route"](route)
+            alias = Path(directory) / "alias.json"
+            alias.symlink_to(route)
+            with self.assertRaises(ValueError):
+                CHECK["read_route"](alias)
+
     def test_current_control_relay_is_excluded_without_changing_roles(self):
         for control in ("relay0", "relay1", "relay2", "relay3", "relay4", "relay5"):
             evidence = fixture(control)
