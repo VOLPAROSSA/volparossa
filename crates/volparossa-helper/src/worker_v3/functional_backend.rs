@@ -3069,7 +3069,7 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
     }
 }
 
-fn current_boottime_nanos() -> Result<u64, BackendError> {
+pub(super) fn current_boottime_nanos() -> Result<u64, BackendError> {
     const NANOS_PER_SECOND: u64 = 1_000_000_000;
     let now = clock_gettime(ClockId::Boottime);
     let seconds = u64::try_from(now.tv_sec).map_err(|_| BackendError::Unavailable)?;

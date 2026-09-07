@@ -111,6 +111,7 @@ use zeroize::Zeroizing;
 
 mod client_ingress_policy;
 mod dead_worker_reaper;
+mod downlink_replay;
 mod downlink_sender;
 mod forwarding_bootstrap;
 mod functional_backend;
@@ -5228,12 +5229,14 @@ struct TombstoneKey {
 struct Tombstone {
     request_digest: [u8; 32],
     expires_at: Instant,
+    budget: bool,
 }
 
 #[derive(Clone)]
 struct CacheEntry {
     response: InternalWorkerResponse,
     expires_at: Instant,
+    budget: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7074,10 +7077,6 @@ impl WorkerRegistry {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "tombstone, phase, transport ownership and reconciliation planning are one atomic audit unit"
-    )]
     fn plan_until(
         &mut self,
         context_id: ContextId,
@@ -7085,6 +7084,30 @@ impl WorkerRegistry {
         request: &InternalWorkerRequest,
         now: Instant,
         deadline: HardDeadline,
+    ) -> Result<RegistryPlan, WorkerV3Error> {
+        let budget_clock = downlink_replay::BudgetReplayClock::for_request(request)?;
+        self.plan_until_with_budget_clock(
+            context_id,
+            generation,
+            request,
+            now,
+            deadline,
+            budget_clock,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "tombstone, phase, transport ownership and reconciliation planning are one atomic audit unit"
+    )]
+    fn plan_until_with_budget_clock(
+        &mut self,
+        context_id: ContextId,
+        generation: u64,
+        request: &InternalWorkerRequest,
+        now: Instant,
+        deadline: HardDeadline,
+        budget_clock: Option<downlink_replay::BudgetReplayClock>,
     ) -> Result<RegistryPlan, WorkerV3Error> {
         ensure_worker_deadline(deadline)?;
         self.reject_pending_durable_handoff_dispatch(context_id, generation)?;
@@ -7125,6 +7148,13 @@ impl WorkerRegistry {
             self.quarantine(context_id, generation)?;
             return Err(WorkerV3Error::Dead);
         }
+        let (replay_expiry, deadline, budget) = downlink_replay::bounded_replay_expiry(
+            request,
+            budget_clock,
+            now,
+            expires_at,
+            deadline,
+        )?;
 
         if let Some(existing) = self.tombstones.get(&tombstone_key) {
             if existing.request_digest != key.request_digest {
@@ -7160,10 +7190,19 @@ impl WorkerRegistry {
         // fill the non-evictable generation-lifetime tombstone ledger and make the only terminal
         // cleanup operation impossible to dispatch.
         let (success_phase, terminal) = transition(phase, request)?;
-        let admission_limit = self
-            .maximum_cache_entries
-            .saturating_sub(usize::from(!terminal));
-        if self.tombstones.len() >= admission_limit {
+        let admission_limit = if budget {
+            downlink_replay::MAX_BUDGET_REPLAY_ENTRIES
+        } else {
+            self.maximum_cache_entries
+                .saturating_sub(usize::from(!terminal))
+        };
+        if self
+            .tombstones
+            .values()
+            .filter(|entry| entry.budget == budget)
+            .count()
+            >= admission_limit
+        {
             return Err(WorkerV3Error::Capacity);
         }
 
@@ -7182,7 +7221,8 @@ impl WorkerRegistry {
             tombstone_key,
             Tombstone {
                 request_digest: key.request_digest,
-                expires_at,
+                expires_at: replay_expiry,
+                budget,
             },
         );
         self.tombstone_order.push_back(tombstone_key);
@@ -7235,6 +7275,14 @@ impl WorkerRegistry {
             hook.release.wait();
         }
         let shutting_down = self.shutting_down;
+        let replay_expiry = self
+            .tombstones
+            .get(&TombstoneKey {
+                context_id: token.context_id,
+                generation: token.generation,
+                request_id: token.in_flight.key.request_id,
+            })
+            .map_or(now, |entry| entry.expires_at);
         let mut should_cache = false;
         let mut cache_expiry = now;
         let outcome = {
@@ -7322,7 +7370,7 @@ impl WorkerRegistry {
                                 | internal_worker_request::Operation::AcquireClientIngressReplySocket(_)
                         )
                     );
-                    cache_expiry = record.expires_at;
+                    cache_expiry = record.expires_at.min(replay_expiry);
                     FinishOutcome::Committed
                 }
             } else {
@@ -7745,16 +7793,44 @@ impl WorkerRegistry {
         response: InternalWorkerResponse,
         expires_at: Instant,
     ) {
+        let budget = self
+            .tombstones
+            .get(&TombstoneKey {
+                context_id: key.context_id,
+                generation: key.generation,
+                request_id: key.request_id,
+            })
+            .is_some_and(|entry| entry.budget);
         self.cache.insert(
             key,
             CacheEntry {
                 response,
                 expires_at,
+                budget,
             },
         );
         self.cache_order.push_back(key);
-        while self.cache.len() > self.maximum_cache_entries {
-            if let Some(oldest) = self.cache_order.pop_front() {
+        let limit = if budget {
+            downlink_replay::MAX_BUDGET_REPLAY_ENTRIES
+        } else {
+            self.maximum_cache_entries
+        };
+        while self
+            .cache
+            .values()
+            .filter(|entry| entry.budget == budget)
+            .count()
+            > limit
+        {
+            if let Some(position) = self.cache_order.iter().position(|key| {
+                self.cache
+                    .get(key)
+                    .is_some_and(|entry| entry.budget == budget)
+            }) {
+                let oldest = self
+                    .cache_order
+                    .remove(position)
+                    .expect("located cache entry");
                 self.cache.remove(&oldest);
             } else {
                 break;
@@ -7768,7 +7844,16 @@ impl WorkerRegistry {
     }
 
     fn expire_tombstones(&mut self, now: Instant) {
-        self.tombstones.retain(|_, entry| now < entry.expires_at);
+        self.tombstones.retain(|key, entry| {
+            now < entry.expires_at
+                || (entry.budget
+                    && self.records.get(&key.context_id).is_some_and(|record| {
+                        record.generation == key.generation
+                            && record
+                                .in_flight
+                                .is_some_and(|flight| flight.key.request_id == key.request_id)
+                    }))
+        });
         self.tombstone_order
             .retain(|key| self.tombstones.contains_key(key));
     }
@@ -16324,6 +16409,7 @@ mod tests {
                         CacheEntry {
                             response: initialised_response(&initialise(context_id, 90), context_id),
                             expires_at,
+                            budget: false,
                         },
                     );
                 }
@@ -16334,6 +16420,7 @@ mod tests {
                         Tombstone {
                             request_digest: [4; 32],
                             expires_at,
+                            budget: false,
                         },
                     );
                 }
@@ -24119,22 +24206,50 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn downlink_budget_registry_admits_activated_and_committed_without_advancing_phase() {
-        let context = [0x92; 16];
-        let update = request(
+    fn downlink_update(
+        context: ContextId,
+        sequence: u64,
+        clock: downlink_replay::BudgetReplayClock,
+    ) -> InternalWorkerRequest {
+        let mut update = request(
             4,
             internal_worker_request::Operation::ApplyDownlinkBudget(
                 crate::internal_protocol::ApplyWorkerDownlinkBudget {
                     route_context_id: context.to_vec(),
                     path_id: 1,
-                    sequence: 1,
+                    sequence,
                     rate_bytes_per_second: 32_000,
                     burst_bytes: 2048,
-                    expires_at_ms: 1000,
-                    expires_at_boottime_ns: 1000,
+                    expires_at_ms: clock.unix_ms + 5000,
+                    expires_at_boottime_ns: clock.boottime_ns + 5_000_000_000,
                 },
             ),
+        );
+        update.request_id = (u128::from(sequence) + 256).to_be_bytes().to_vec();
+        update
+    }
+
+    fn downlink_applied(update: &InternalWorkerRequest, sequence: u64) -> InternalWorkerResponse {
+        correlated_response(
+            update,
+            InternalWorkerResult::Ok,
+            Some(internal_worker_response::Outcome::DownlinkBudgetApplied(
+                crate::internal_protocol::WorkerDownlinkBudgetApplied {
+                    sequence,
+                    maximum_queued_bytes: 4096,
+                },
+            )),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn downlink_budget_registry_admits_activated_and_committed_without_advancing_phase() {
+        let context = [0x92; 16];
+        let update = downlink_update(
+            context,
+            1,
+            downlink_replay::BudgetReplayClock::now().unwrap(),
         );
         for phase in [StablePhase::Activated, StablePhase::Committed] {
             let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
@@ -24181,6 +24296,238 @@ mod tests {
                 Err(WorkerV3Error::Conflict)
             ));
         }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one sustained 128-leg replay lifecycle including expiry, critical replay and terminal cleanup"
+    )]
+    fn downlink_replay_expiry_sustains_128_legs_and_ten_minutes_without_erasing_critical_ids() {
+        use downlink_replay::{BudgetReplayClock, MAX_BUDGET_REPLAY_ENTRIES};
+        let base = Instant::now();
+        let mut registry = WorkerRegistry::new(64, 2, Duration::from_secs(900));
+        let mut owners = Vec::new();
+        for index in 0..64 {
+            let mut context = [0x93; 16];
+            context[15] = index;
+            let (process, peer, _) = fake_process(Duration::from_secs(1));
+            let generation = registry
+                .register(context, process, Duration::from_secs(899), base)
+                .unwrap();
+            owners.push((context, generation, peer));
+        }
+        let context = owners[0].0;
+        let generation = owners[0].1;
+        let critical = initialise(context, 1);
+        let RegistryPlan::Call(call) = registry.plan(context, generation, &critical, base).unwrap()
+        else {
+            panic!("initialise dispatch")
+        };
+        let critical_response = initialised_response(&critical, context);
+        assert!(matches!(
+            registry.finish(call.token, &critical, &critical_response, base, true),
+            FinishOutcome::Committed
+        ));
+        for (context, _, _) in &owners {
+            registry.records.get_mut(context).unwrap().stable_phase = StablePhase::Committed;
+        }
+        let clock_at = |tick: u64| BudgetReplayClock {
+            unix_ms: 100_000 + tick * 500,
+            boottime_ns: 100_000_000_000 + tick * 500_000_000,
+        };
+        let expired = downlink_update(context, 1, clock_at(0));
+        let mut sequence = 0;
+        let mut peak = 0;
+        // Twelve rounds fill the complete five-second 128-leg window. Keep one real registry
+        // lineage refreshing thereafter until ten minutes have elapsed on the virtual clock.
+        for tick in 0..1200 {
+            let now = base + Duration::from_millis(tick * 500);
+            let clock = clock_at(tick);
+            let slots = if tick < 12 { 128 } else { 1 };
+            for slot in 0..slots {
+                sequence += 1;
+                let (context, generation, _) = &owners[slot / 2];
+                let mut update = downlink_update(*context, sequence, clock);
+                if let Some(internal_worker_request::Operation::ApplyDownlinkBudget(value)) =
+                    &mut update.operation
+                {
+                    value.path_id = u32::try_from(slot % 2 + 1).unwrap();
+                }
+                let RegistryPlan::Call(call) = registry
+                    .plan_until_with_budget_clock(
+                        *context,
+                        *generation,
+                        &update,
+                        now,
+                        HardDeadline::after(Duration::from_secs(1)).unwrap(),
+                        Some(clock),
+                    )
+                    .expect("fresh budget must not exhaust lifetime records")
+                else {
+                    panic!("fresh dispatch")
+                };
+                assert!(matches!(
+                    registry.finish(
+                        call.token,
+                        &update,
+                        &downlink_applied(&update, sequence),
+                        now,
+                        true
+                    ),
+                    FinishOutcome::Committed
+                ));
+                assert!(matches!(
+                    registry.plan_until_with_budget_clock(
+                        *context,
+                        *generation,
+                        &update,
+                        now,
+                        HardDeadline::after(Duration::from_secs(1)).unwrap(),
+                        Some(clock),
+                    ),
+                    Ok(RegistryPlan::Cached(_))
+                ));
+                let live = registry
+                    .tombstones
+                    .values()
+                    .filter(|entry| entry.budget)
+                    .count();
+                peak = peak.max(live);
+                assert!(live <= MAX_BUDGET_REPLAY_ENTRIES);
+                assert_eq!(
+                    registry
+                        .tombstones
+                        .values()
+                        .filter(|entry| !entry.budget)
+                        .count(),
+                    1
+                );
+                assert!(registry.cache.len() <= MAX_BUDGET_REPLAY_ENTRIES + 2);
+            }
+        }
+        assert_eq!(sequence, 2724);
+        assert_eq!(peak, 1280);
+        let now = base + Duration::from_secs(600);
+        let clock = clock_at(1200);
+        assert!(matches!(
+            registry.plan_until_with_budget_clock(
+                context,
+                generation,
+                &expired,
+                now,
+                HardDeadline::after(Duration::from_secs(1)).unwrap(),
+                Some(clock),
+            ),
+            Err(WorkerV3Error::Deadline)
+        ));
+        let mut renamed_expired = expired.clone();
+        renamed_expired.request_id = vec![0x71; 16];
+        assert!(matches!(
+            registry.plan_until_with_budget_clock(
+                context,
+                generation,
+                &renamed_expired,
+                now,
+                HardDeadline::after(Duration::from_secs(1)).unwrap(),
+                Some(clock),
+            ),
+            Err(WorkerV3Error::Deadline)
+        ));
+        let RegistryPlan::Cached(cached) =
+            registry.plan(context, generation, &critical, now).unwrap()
+        else {
+            panic!("critical lifetime replay retained")
+        };
+        assert_eq!(cached.response, critical_response);
+        // Even with only two lifetime slots, the reserved terminal operation remains available.
+        for (context, generation, _peer) in owners {
+            let terminal = destroy(context, 2);
+            let RegistryPlan::Call(call) =
+                registry.plan(context, generation, &terminal, now).unwrap()
+            else {
+                panic!("terminal reserve")
+            };
+            let response = correlated_response(
+                &terminal,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::Destroyed(
+                    ContextDestroyed {},
+                )),
+            )
+            .unwrap();
+            let FinishOutcome::Terminal(detached) =
+                registry.finish(call.token, &terminal, &response, now, true)
+            else {
+                panic!("terminal settlement")
+            };
+            stop_and_purge(&mut registry, detached);
+        }
+        assert!(
+            registry.records.is_empty()
+                && registry.cache.is_empty()
+                && registry.tombstones.is_empty()
+        );
+    }
+
+    #[test]
+    fn downlink_replay_expiry_retains_inflight_and_rejects_either_expired_clock() {
+        use downlink_replay::BudgetReplayClock;
+        let context = [0x94; 16];
+        let now = Instant::now();
+        let clock = BudgetReplayClock {
+            unix_ms: 1000,
+            boottime_ns: 1_000_000_000,
+        };
+        let update = downlink_update(context, 1, clock);
+        let mut registry = WorkerRegistry::new(1, 2, Duration::from_secs(30));
+        let (process, _peer, _) = fake_process(Duration::from_secs(1));
+        let generation = registry
+            .register(context, process, Duration::from_secs(30), now)
+            .unwrap();
+        registry.records.get_mut(&context).unwrap().stable_phase = StablePhase::Activated;
+        let RegistryPlan::Call(call) = registry
+            .plan_until_with_budget_clock(
+                context,
+                generation,
+                &update,
+                now,
+                HardDeadline::after(Duration::from_secs(1)).unwrap(),
+                Some(clock),
+            )
+            .unwrap()
+        else {
+            panic!("in-flight budget")
+        };
+        registry.expire_tombstones(now + Duration::from_secs(6));
+        assert_eq!(
+            registry.tombstones.len(),
+            1,
+            "in-flight ownership outlives cache expiry"
+        );
+        for expired in [
+            BudgetReplayClock {
+                unix_ms: 6000,
+                ..clock
+            },
+            BudgetReplayClock {
+                boottime_ns: 6_000_000_000,
+                ..clock
+            },
+        ] {
+            let Some(internal_worker_request::Operation::ApplyDownlinkBudget(value)) =
+                &update.operation
+            else {
+                unreachable!()
+            };
+            assert!(matches!(
+                expired.expiry(value, now),
+                Err(WorkerV3Error::Deadline)
+            ));
+        }
+        let detached = registry.mark_ambiguous(call.token).unwrap().unwrap();
+        stop_and_purge(&mut registry, detached);
+        assert!(registry.tombstones.is_empty());
     }
 
     #[test]
