@@ -90,6 +90,23 @@ with the repair; the real WireGuard sender/GSO/expiry/cleanup check and exact sc
 also pass, as does strict helper Clippy. Complete owner-priority operation still awaits the
 next disposable KVM run; these local results do not replace it.
 
+The [next download attempt on `c7379ca2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34139656825)
+still withholds Start, but the helper rejection advances from InvalidRequest to Unavailable:
+the operation-generation repair is effective and a later dispatch boundary remains unresolved.
+The full contention/expiry scenario is still incomplete. General cleanup again leaves zero
+owned objects and unchanged guest state.
+
+A new local `run-warm-failover-probe.sh` isolates the real pinned/patched mqvpn/xquic SDK
+without WireGuard or agent RPC. One retained session completes 4+8 MiB of warm traffic, a
+new 4-MiB request and a 32-MiB response after one of two UDP paths is unexpectedly blackholed
+with its descriptor still open. Both removal directions pass in 15--18 seconds. The final
+runner check takes 16.269 seconds with all four expected/received payload hashes matching.
+The source-built SDK, linked libraries, source and executable hashes are retained. This uses
+explicit diagnostic application ACK/retry framing and test-only loopback TLS trust inside
+a disposable user/network namespace; it is not HTTP/3, WireGuard, production TLS or alpha
+acceptance. Its near-zero-RTT, continuously pumped loop does not reproduce the integrated
+warm-path stall, but provides a fast real-transport basis for testing the differences.
+
 ### Earlier checkpoints and source-change evidence
 
 The [full v1 run on `55168536`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045959350)
