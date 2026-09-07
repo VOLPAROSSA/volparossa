@@ -300,6 +300,306 @@ async fn expiry_includes_monotonic_elapsed_time_and_complete_request_deadlines()
     ));
 }
 
+#[tokio::test]
+async fn origin_range_fetches_disjoint_missing_runs_without_retrieving_present_chunks() {
+    let fixture = Fixture::new();
+    let authorized = fixture.authenticate().await;
+    let mut store = fixture.store("ranged");
+    store
+        .put_verified(
+            *authorized.manifest().chunks()[1].id(),
+            &fixture.content[CHUNK_BYTES..2 * CHUNK_BYTES],
+        )
+        .expect("middle chunk from replica");
+    for (start, end, complete) in [
+        (0, CHUNK_BYTES - 1, false),
+        (2 * CHUNK_BYTES, fixture.content.len() - 1, true),
+    ] {
+        let expected = authorized
+            .next_missing_range(&mut store, NOW)
+            .expect("cache scan")
+            .expect("missing range");
+        assert_eq!(
+            (expected.start(), expected.end_inclusive(), expected.total()),
+            (start as u64, end as u64, fixture.content.len() as u64)
+        );
+        let (stream, server) = fixture.origin.respond(range_response(
+            &fixture.content[start..=end],
+            start,
+            end,
+            fixture.content.len(),
+        ));
+        let progress = fixture
+            .client()
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+            .await
+            .expect("exact authenticated 206");
+        assert_eq!(progress.requested, Some(expected));
+        assert_eq!(progress.bytes_received, (end - start + 1) as u64);
+        assert_eq!(progress.chunks_verified, 1);
+        assert_eq!(progress.complete, complete);
+        assert!(!progress.full_response);
+        let request = String::from_utf8(server.await.expect("range server")).expect("request");
+        assert!(request.contains(&format!("\r\nRange: bytes={start}-{end}\r\n")));
+        assert!(!request.contains("If-Range"));
+    }
+    assert!(
+        authorized
+            .next_missing_range(&mut store, NOW)
+            .expect("complete scan")
+            .is_none()
+    );
+    let (stream, mut untouched) = duplex(4096);
+    let progress = fixture
+        .client()
+        .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+        .await
+        .expect("complete cache does not use stream");
+    assert!(progress.complete);
+    assert_eq!(
+        (
+            progress.bytes_received,
+            progress.chunks_verified,
+            progress.requested
+        ),
+        (0, 0, None)
+    );
+    assert_eq!(
+        untouched
+            .read(&mut [0; 1])
+            .await
+            .expect("no TLS or request bytes"),
+        0
+    );
+    let output = fixture.root.path().join("range-output.bin");
+    authorized
+        .reassemble_to_file(&mut [&mut store], NOW, &output)
+        .expect("complete origin-authorized output");
+    assert_eq!(fs::read(output).expect("output bytes"), fixture.content);
+}
+
+#[tokio::test]
+async fn origin_range_groups_adjacent_missing_chunks_and_counts_ignored_range_full_response() {
+    let fixture = Fixture::new();
+    let authorized = fixture.authenticate().await;
+    for full in [false, true] {
+        let mut store = fixture.store(if full {
+            "range-ignored"
+        } else {
+            "adjacent-range"
+        });
+        store
+            .put_verified(
+                *authorized.manifest().chunks()[2].id(),
+                &fixture.content[2 * CHUNK_BYTES..],
+            )
+            .expect("last chunk from replica");
+        let expected = authorized
+            .next_missing_range(&mut store, NOW)
+            .expect("scan")
+            .expect("missing");
+        assert_eq!(
+            (
+                expected.start(),
+                expected.end_inclusive(),
+                expected.length()
+            ),
+            (0, 2 * CHUNK_BYTES as u64 - 1, 2 * CHUNK_BYTES as u64)
+        );
+        let bytes = if full {
+            response(&fixture.content, "application/octet-stream")
+        } else {
+            range_response(
+                &fixture.content[..2 * CHUNK_BYTES],
+                0,
+                2 * CHUNK_BYTES - 1,
+                fixture.content.len(),
+            )
+        };
+        let (stream, server) = fixture.origin.respond(bytes);
+        let progress = fixture
+            .client()
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+            .await
+            .expect("range or verified complete response");
+        server.await.expect("server");
+        assert_eq!(progress.requested, Some(expected));
+        assert_eq!(progress.full_response, full);
+        assert_eq!(progress.chunks_verified, if full { 3 } else { 2 });
+        assert_eq!(
+            progress.bytes_received,
+            if full {
+                fixture.content.len() as u64
+            } else {
+                expected.length()
+            }
+        );
+        assert!(progress.complete);
+    }
+}
+
+#[tokio::test]
+async fn origin_range_rejects_wrong_offsets_total_framing_freshness_corruption_and_truncation() {
+    let fixture = Fixture::new();
+    let authorized = fixture.authenticate().await;
+    let start = CHUNK_BYTES;
+    let end = 2 * CHUNK_BYTES - 1;
+    let total = fixture.content.len();
+    let valid = range_response(&fixture.content[start..=end], start, end, total);
+    let split = valid
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .expect("headers")
+        + 4;
+    let head = std::str::from_utf8(&valid[..split]).expect("headers");
+    let content_range = format!("Content-Range: bytes {start}-{end}/{total}\r\n");
+    let headers = [
+        head.replace(
+            &content_range,
+            &format!("Content-Range: bytes {}-{end}/{total}\r\n", start + 1),
+        ),
+        head.replace(
+            &content_range,
+            &format!("Content-Range: bytes {start}-{}/{total}\r\n", end - 1),
+        ),
+        head.replace(
+            &content_range,
+            &format!("Content-Range: bytes {start}-{end}/{}\r\n", total + 1),
+        ),
+        head.replace(
+            &content_range,
+            &format!("Content-Range: bytes {start}-{end}/*\r\n"),
+        ),
+        head.replace(&content_range, ""),
+        head.replace("206 Partial Content", "200 OK"),
+        head.replace(
+            "application/octet-stream",
+            "multipart/byteranges;boundary=x",
+        ),
+        head.replace(
+            &format!("Content-Length: {CHUNK_BYTES}"),
+            "Content-Length: 1",
+        ),
+        head.replace(
+            &format_http_date(NOW).expect("Date"),
+            &format_http_date(NOW - 400).expect("stale Date"),
+        ),
+    ];
+    let mut cases: Vec<Vec<u8>> = headers
+        .into_iter()
+        .map(|header| {
+            let mut bytes = header.into_bytes();
+            bytes.extend_from_slice(&valid[split..]);
+            bytes
+        })
+        .collect();
+    let mut corrupt = valid.clone();
+    *corrupt.last_mut().expect("payload") ^= 1;
+    cases.push(corrupt);
+    cases.push(valid[..valid.len() - 1].to_vec());
+    for (index, bytes) in cases.into_iter().enumerate() {
+        let mut store = fixture.store(&format!("bad-range-{index}"));
+        put_outer_chunks(&fixture, &authorized, &mut store);
+        let (stream, server) = fixture.origin.respond(bytes);
+        assert!(
+            fixture
+                .client()
+                .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+                .await
+                .is_err()
+        );
+        server.await.expect("rejected range stopped");
+        assert_eq!(store.usage().entries, 2);
+        let output = fixture
+            .root
+            .path()
+            .join(format!("bad-range-output-{index}"));
+        assert!(
+            authorized
+                .reassemble_to_file(&mut [&mut store], NOW, &output)
+                .is_err()
+        );
+        assert!(!output.exists());
+    }
+    let mut store = fixture.store("full-request-rejects-partial");
+    let (stream, server) = fixture.origin.respond(valid);
+    assert!(matches!(
+        fixture
+            .client()
+            .fill_from_origin(stream, &authorized, &mut store, NOW)
+            .await,
+        Err(OriginError::Response)
+    ));
+    server.await.expect("full request does not accept 206");
+}
+
+#[tokio::test]
+async fn origin_range_rejects_unfit_quota_expiry_and_silent_stream_without_false_completion() {
+    let fixture = Fixture::new();
+    let authorized = fixture.authenticate().await;
+    let mut small = ChunkStore::create(
+        &fixture.root.path().join("too-small"),
+        CacheLimits {
+            max_bytes: CHUNK_BYTES as u64,
+            max_entries: 1,
+            min_free_bytes: 0,
+        },
+    )
+    .expect("small cache");
+    assert!(matches!(
+        authorized.next_missing_range(&mut small, NOW),
+        Err(OriginError::Content(Error::Quota))
+    ));
+    let (stream, mut untouched) = duplex(4096);
+    assert!(matches!(
+        fixture
+            .client()
+            .fill_next_missing_from_origin(stream, &authorized, &mut small, NOW)
+            .await,
+        Err(OriginError::Content(Error::Quota))
+    ));
+    assert_eq!(
+        untouched
+            .read(&mut [0; 1])
+            .await
+            .expect("no network for impossible quota"),
+        0
+    );
+    let mut store = fixture.store("expired-range");
+    let (stream, mut untouched) = duplex(4096);
+    assert!(matches!(
+        fixture
+            .client()
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW + 200)
+            .await,
+        Err(OriginError::Expired)
+    ));
+    assert_eq!(
+        untouched
+            .read(&mut [0; 1])
+            .await
+            .expect("no network after expiry"),
+        0
+    );
+    let client = OriginClient::new(
+        fixture.origin.roots(),
+        OriginLimits {
+            handshake_timeout: Duration::from_millis(20),
+            session_timeout: Duration::from_millis(30),
+            ..OriginLimits::default()
+        },
+    )
+    .expect("deadline client");
+    let (stream, _silent_peer) = duplex(4096);
+    assert!(matches!(
+        client
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+            .await,
+        Err(OriginError::Timeout)
+    ));
+    assert_eq!(store.usage().entries, 0);
+}
+
 #[test]
 fn noncanonical_cross_origin_and_credentialed_resource_requests_are_not_supported() {
     for resource in [
@@ -466,4 +766,28 @@ fn response(body: &[u8], content_type: &str) -> Vec<u8> {
     let mut bytes = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nDate: {date}\r\nCache-Control: public, max-age=300\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
     bytes.extend_from_slice(body);
     bytes
+}
+
+fn range_response(body: &[u8], start: usize, end: usize, total: usize) -> Vec<u8> {
+    let date = format_http_date(NOW).expect("HTTP Date");
+    let mut bytes = format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nDate: {date}\r\nCache-Control: public, max-age=300\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+fn put_outer_chunks(
+    fixture: &Fixture,
+    authorized: &OriginAuthorizedManifest,
+    store: &mut ChunkStore,
+) {
+    for index in [0, 2] {
+        let start = index * CHUNK_BYTES;
+        let end = (start + CHUNK_BYTES).min(fixture.content.len());
+        store
+            .put_verified(
+                *authorized.manifest().chunks()[index].id(),
+                &fixture.content[start..end],
+            )
+            .expect("valid outer cached chunks");
+    }
 }

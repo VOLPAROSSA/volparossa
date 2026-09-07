@@ -36,7 +36,7 @@ print_plan() {
             'VOLPAROSSA content-https protected native-client smoke plan:' \
             '  authenticate origin metadata using app TLS13 and an isolated fixture certificate;' \
             '  fetch complete bytes from two partial stores, then prove missing-peer HTTPS origin fallback;' \
-            '  keep all six app streams on genuine MPTCP/TLS/two-leg WireGuard with privacy captures;' \
+            '  keep all nine app streams on genuine MPTCP/TLS/two-leg WireGuard with privacy captures;' \
             '  copy no authority metadata or private TLS key to clients; install no interception CA;' \
             '  emit content-https-smoke.json with exact cleanup; no browser/DHT/speed/full-C08 claim.'
         return

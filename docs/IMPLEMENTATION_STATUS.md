@@ -71,6 +71,14 @@ and all origin/provider connections observe the Exit source address. Ten boundar
 are complete with zero drops/violations; four application summaries make no drop-counter claim.
 Cleanup leaves zero owned objects and unchanged guest state. Retained artifact SHA-256:
 `27059f12ecadc952ae7d86d4e0fd0ec32fa01345600d776b12a377c0533d96c8`.
+The next implemented API/example requests only the first contiguous missing chunk range over
+each verified origin TLS stream. Eleven focused TLS tests, strict content Clippy and a build
+pass. Its separate-process disposable-loopback proof reconstructs the identical object using
+1,048,699 peer bytes plus four exact 206 responses totaling **1,048,576 origin body bytes**.
+The complete-cache case still receives no origin body. Range offsets/total/length and every
+chunk are checked against the unchanged origin authority; an ignored Range/200 response is
+fully verified and its full byte cost reported. The extended protected-route scenario is
+pending and now requires nine actual app flows, not six; no throughput gain is inferred.
 Publisher cooperation is required. No browser integration,
 generic existing-site compatibility, TLSNotary, distributed discovery or C08 completion is claimed.
 README and the relevant architecture/protocol/privacy/testing summaries are updated together;

@@ -74,11 +74,15 @@ secrecy after recipient-key compromise, anonymous metadata or complete C07.
 real TLS 1.3 hostname/CA check before a canonical descriptor authorizes an exact binary HTTPS
 resource and native manifest. The non-deserializable HTTP wrapper preserves origin validity
 while ordinary native manifests retain their original, narrower meaning. Strict public HTTP
-Date/max-age and descriptor/signature lifetimes apply. Missing chunks can be filled by one
-complete origin download, rejected if it differs from the original manifest. Seven focused
-TLS tests and a separate-process HTTPS/peer/fallback proof pass; protected-route KVM passes on `2de8209f`.
+Date/max-age and descriptor/signature lifetimes apply. `next_missing_range` identifies the first
+contiguous missing run; `fill_next_missing_from_origin` requests precisely those bytes and verifies
+the 206 range/total/length and original chunk hashes. An ignored Range/200 is fully verified and
+counted as a complete origin transfer. A complete cache uses no stream I/O; original validity is
+never renewed. Eleven focused TLS tests and a separate-process proof pass: the partial case now
+receives only four missing chunks / 1,048,576 origin bytes, not the entire 2,097,275-byte object.
+Protected-route KVM passes for full-body fallback on `2de8209f`; the Range version is pending.
 Only a cooperative anonymous static binary profile is supported. There is no arbitrary-site,
-browser, partial-range, witness or automatic-discovery implementation in this slice.
+browser, witness or automatic-discovery implementation in this slice.
 
 No network discovery, automatic route selection for content, automatic
 replication, owner-priority I/O scheduling, durable retention, web policy or DNS behavior is

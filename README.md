@@ -105,7 +105,9 @@ Existing HTTPS reuse needs genuine origin authentication through an application 
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental
 witness. The first cooperative-origin HTTPS library and executable now work locally: obtain
 small metadata through actual hostname/CA-verified TLS, retrieve authenticated peer chunks, and
-use same-version origin fallback when chunks are missing. Its protected-route test passes on `2de8209f`.
+use same-version origin fallback when chunks are missing. Its full-body-fallback protected-route
+test passes on `2de8209f`. Partial HTTPS fallback now also works locally: request only missing
+chunk ranges and verify them against the same origin manifest; its network proof is pending.
 This currently needs publisher cooperation and supports anonymous static binary resources,
 not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
 compulsory central witness is proposed.

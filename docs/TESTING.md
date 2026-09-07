@@ -136,6 +136,15 @@ authorized HTTPS (18443) and peer (18080) flows; its
 passes with ten complete zero-drop boundary captures and unchanged guest state. No system
 CA is installed, and generic browser compatibility or C08 completion is not claimed.
 
+The newer Range version has eleven focused real-TLS tests (the original seven plus four range
+cases): disjoint/contiguous missing runs, exact 206 responses, an ignored Range/200 counted at
+full size, no I/O on completion, and incorrect/stale/corrupt/truncated responses, quota and
+deadline rejection. Its separate-process disposable-loopback proof receives exactly four missing
+chunks / 1,048,576 origin bytes after the 1,048,699-byte partial replica, with the same complete
+output hash. The extended `content-https` scenario now requires six missing-case protected flows
+(metadata, peer and four ranges), plus the three complete-case flows. That newer network proof
+is pending; the retained `2de8209f` report proves only the earlier full-body fallback.
+
 ## Helper-boundary evidence
 
 The helper identity and production IPC boundary has a separate, narrower live gate:

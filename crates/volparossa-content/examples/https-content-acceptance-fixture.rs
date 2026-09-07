@@ -177,20 +177,24 @@ async fn origin(
                 && !request.contains("\r\nhost: destination.volparossa.test:18443\r\n") {
                 return Err("fixture request has wrong Host".into());
             }
-            let (kind, content_type, payload) = if request.starts_with(&format!("GET {METADATA} HTTP/1.1\r\n")) {
-                ("metadata", "application/vnd.volparossa.origin-manifest.v1", descriptor.as_slice())
-            } else if request.starts_with("GET /asset.bin HTTP/1.1\r\n") {
-                ("body", "application/octet-stream", object.as_slice())
-            } else { return Err("fixture request has wrong resource".into()); };
+            let payload = origin_payload(request, &descriptor, &object)?;
+            let status = if payload.range.is_some() { 206 } else { 200 };
+            let status_line = if status == 206 { "206 Partial Content" } else { "200 OK" };
+            let range_header = payload.range.map_or_else(String::new, |(start, end)| {
+                format!("Content-Range: bytes {start}-{end}/{}\r\n", object.len())
+            });
             let date = format_http_date(now()?)?;
-            let response = format!("HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nCache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.len());
+            let response = format!("HTTP/1.1 {status_line}\r\nDate: {date}\r\nContent-Length: {}\r\nContent-Type: {}\r\n{range_header}Cache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.bytes.len(), payload.content_type);
             stream.write_all(response.as_bytes()).await?;
-            stream.write_all(payload).await?;
+            stream.write_all(payload.bytes).await?;
             stream.flush().await?;
             stream.shutdown().await?;
             Ok::<_, Box<dyn std::error::Error>>(json!({
-                "kind": kind, "payload_bytes": payload.len(), "source": source.to_string(),
-                "tls13": true, "alpn_http11": true,
+                "kind": payload.kind, "payload_bytes": payload.bytes.len(), "source": source.to_string(),
+                "tls13": true, "alpn_http11": true, "status":status,
+                "range_start":payload.range.map(|range| range.0),
+                "range_end":payload.range.map(|range| range.1),
+                "range_total":payload.range.map(|_| object.len()),
             }))
         }).await??;
         records.push(record);
@@ -199,6 +203,62 @@ async fn origin(
         report,
         &json!({"report_kind":"volparossa-https-content-origin", "pid":std::process::id(), "connections":records}),
     )
+}
+
+struct OriginPayload<'a> {
+    kind: &'static str,
+    content_type: &'static str,
+    bytes: &'a [u8],
+    range: Option<(usize, usize)>,
+}
+
+fn origin_payload<'a>(
+    request: &str,
+    descriptor: &'a [u8],
+    object: &'a [u8],
+) -> Result<OriginPayload<'a>> {
+    let ranges: Vec<_> = request
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("range"))
+        .map(|(_, value)| value.trim())
+        .collect();
+    if request.starts_with(&format!("GET {METADATA} HTTP/1.1\r\n")) && ranges.is_empty() {
+        return Ok(OriginPayload {
+            kind: "metadata",
+            content_type: "application/vnd.volparossa.origin-manifest.v1",
+            bytes: descriptor,
+            range: None,
+        });
+    }
+    if !request.starts_with("GET /asset.bin HTTP/1.1\r\n") || ranges.len() > 1 {
+        return Err("fixture request has wrong resource or repeated Range".into());
+    }
+    let range = ranges
+        .first()
+        .map(|value| -> Result<_> {
+            let (start, end) = value
+                .strip_prefix("bytes=")
+                .and_then(|value| value.split_once('-'))
+                .ok_or("fixture expects one explicit byte range")?;
+            let start: usize = start.parse()?;
+            let end: usize = end.parse()?;
+            if start > end || end >= object.len() {
+                return Err("fixture byte range outside object".into());
+            }
+            Ok((start, end))
+        })
+        .transpose()?;
+    Ok(OriginPayload {
+        kind: if range.is_some() {
+            "body_range"
+        } else {
+            "body"
+        },
+        content_type: "application/octet-stream",
+        bytes: range.map_or(object, |(start, end)| &object[start..=end]),
+        range,
+    })
 }
 
 fn provider_manifest(root: &Path) -> Result<VerifiedManifest> {
@@ -286,20 +346,30 @@ async fn consume(
         peer_bytes += progress.bytes;
         peer_chunks += progress.chunks;
     }
-    let mut missing = false;
-    for chunk in authorized.manifest().chunks() {
-        if store.get(chunk.id())?.is_none() {
-            missing = true;
+    let missing = authorized.next_missing_range(&mut store, now()?)?.is_some();
+    let mut origin_body_bytes = 0;
+    let mut range_requests = Vec::new();
+    while authorized.next_missing_range(&mut store, now()?)?.is_some() {
+        if range_requests.len() >= authorized.manifest().chunks().len() {
+            return Err("origin fallback did not complete within chunk bound".into());
         }
-    }
-    let origin_body_bytes = if missing {
         let stream = timeout(DEADLINE, TcpStream::connect(origin)).await??;
-        client
-            .fill_from_origin(stream, &authorized, &mut store, now()?)
-            .await?
-    } else {
-        0
-    };
+        let progress = client
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, now()?)
+            .await?;
+        let range = progress
+            .requested
+            .ok_or("missing chunk produced no origin request")?;
+        if progress.chunks_verified == 0 {
+            return Err("origin fallback made no verified progress".into());
+        }
+        origin_body_bytes += progress.bytes_received;
+        range_requests.push(json!({
+            "start":range.start(),"end":range.end_inclusive(),"total":range.total(),
+            "bytes_received":progress.bytes_received,"chunks_verified":progress.chunks_verified,
+            "full_response":progress.full_response,
+        }));
+    }
     let output = root.join("object.bin");
     let bytes = authorized.reassemble_to_file(&mut [&mut store], now()?, &output)?;
     let digest = ChunkId::digest(&read_bounded(&output, OBJECT_BYTES)?).to_string();
@@ -313,6 +383,7 @@ async fn consume(
             "report_kind":"volparossa-https-content-consumer","pid":std::process::id(),
             "variant":variant,"bytes":bytes,"object_sha256":digest,"peer_bytes":peer_bytes,
             "peer_chunks":peer_chunks,"origin_body_bytes":origin_body_bytes,"fallback_used":missing,
+            "range_requests":range_requests,
             "metadata_elapsed_ms":metadata_elapsed,"total_elapsed_ms":start.elapsed().as_millis(),
             "origin_authenticated_before_peers":true,"tls_interception_ca_installed":false,
             "origin_authority_persisted":false,"browser_integration_claimed":false,

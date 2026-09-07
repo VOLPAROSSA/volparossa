@@ -13,6 +13,9 @@ read, require = COMMON["read"], COMMON["require"]
 ROLES = COMMON["ROLES"]
 BYTES = COMMON["OBJECT_BYTES"]
 SHA = COMMON["FIXTURE_PLAINTEXT_SHA256"]
+RANGES = ((262144, 524287), (786432, 1048575),
+          (1310720, 1572863), (1835008, 2097151))
+RANGE_BYTES = 262144
 SCOPE = ("browser_integration_claimed", "provider_discovery_claimed",
          "distinct_provider_nodes_claimed", "speed_improvement_claimed",
          "full_c08_claimed", "full_alpha_acceptance_claimed")
@@ -83,12 +86,18 @@ def validate_transfer(evidence):
             and 0 < publication["metadata_bytes"] <= 1048576,
             "origin fixture or disjoint replicas invalid")
     records = origin["connections"]
-    require(origin["pid"] > 0 and len(records) == 3
-            and [r["kind"] for r in records] == ["metadata", "metadata", "body"]
-            and [r["payload_bytes"] for r in records] == [publication["metadata_bytes"]] * 2 + [BYTES]
+    require(origin["pid"] > 0 and len(records) == 6
+            and [r["kind"] for r in records] == ["metadata"] * 2 + ["body_range"] * 4
+            and [r["payload_bytes"] for r in records] == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4
             and all(r["tls13"] is True and r["alpn_http11"] is True
                     and exit_source(r["source"]) for r in records),
-            "two genuine origin metadata fetches plus one exact HTTPS fallback not proven")
+            "two genuine origin metadata fetches plus four exact HTTPS ranges not proven")
+    require(all(r["status"] == 200 and r["range_start"] is None
+                and r["range_end"] is None and r["range_total"] is None for r in records[:2])
+            and all(r["status"] == 206 and r["range_start"] == start
+                    and r["range_end"] == end and r["range_total"] == BYTES
+                    for r, (start, end) in zip(records[2:], RANGES, strict=True)),
+            "origin did not return exact missing-chunk 206 ranges")
     phases = evidence["phases"]
     require(len(phases) == 2, "complete and missing cases required")
     for index, phase in enumerate(phases):
@@ -100,13 +109,22 @@ def validate_transfer(evidence):
                 and consumer["object_sha256"] == gates["object_sha256"] == SHA
                 and consumer["peer_chunks"] == (9, 5)[index]
                 and consumer["peer_bytes"] == (BYTES, 1048699)[index]
-                and consumer["origin_body_bytes"] == (0, BYTES)[index]
+                and consumer["origin_body_bytes"] == (0, RANGE_BYTES * 4)[index]
                 and consumer["fallback_used"] is bool(index)
                 and consumer["origin_authenticated_before_peers"] is True
                 and consumer["tls_interception_ca_installed"] is False
                 and consumer["origin_authority_persisted"] is False
                 and consumer["browser_integration_claimed"] is False,
                 "authenticated peer completion or actual origin fallback not proven")
+        ranges = consumer["range_requests"]
+        expected_ranges = RANGES if index else ()
+        require(len(ranges) == len(expected_ranges)
+                and all(r["start"] == start and r["end"] == end and r["total"] == BYTES
+                        and r["bytes_received"] == RANGE_BYTES and r["chunks_verified"] == 1
+                        and r["full_response"] is False
+                        for r, (start, end) in zip(ranges, expected_ranges, strict=True))
+                and sum(r["bytes_received"] for r in ranges) == consumer["origin_body_bytes"],
+                "consumer did not verify only the exact missing ranges")
         sessions = peers["sessions"]
         require(len(sessions) == len(expected_sessions)
                 and [s["replica"] for s in sessions] == ["replica-a", "replica-b"][:2-index]
@@ -114,11 +132,11 @@ def validate_transfer(evidence):
                 and all(exit_source(s["source"]) for s in sessions)
                 and sum(s["bytes"] for s in sessions) == consumer["peer_bytes"],
                 "actual partial peer sessions or Exit-only sources not proven")
-        require(gates["event_baseline_unix_ms"] > 0 and gates["ingress_completed"] >= 3
-                and gates["exit_mptcp_tls_open_completed"] >= 3
+        require(gates["event_baseline_unix_ms"] > 0 and gates["ingress_completed"] >= (3, 6)[index]
+                and gates["exit_mptcp_tls_open_completed"] >= (3, 6)[index]
                 and gates["client_cache_initially_absent"] is True
                 and gates["client_cannot_read_origin_or_replica_files"] is True,
-                "three fresh protected streams or source isolation missing")
+                "fresh protected origin/peer/range streams or source isolation missing")
         validate_path(phase)
     require(phases[0]["consumer"]["pid"] != phases[1]["consumer"]["pid"]
             and phases[0]["peers"]["pid"] != phases[1]["peers"]["pid"]

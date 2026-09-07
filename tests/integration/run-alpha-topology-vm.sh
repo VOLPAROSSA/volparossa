@@ -42,7 +42,7 @@ print_plan() {
     if [ "$scenario" = content-https ]; then
         printf '%s\n' \
             'Content-https scenario: genuine application TLS origin metadata, partial peer chunks and origin fallback;' \
-            '  all six streams traverse existing MPTCP/TLS/WireGuard; fixture-only app trust, no interception CA;' \
+            '  all nine streams traverse existing MPTCP/TLS/WireGuard; fixture-only app trust, no interception CA;' \
             '  exact captures/cleanup, no browser, peer-discovery, speed or full-C08 claim.'
     elif [ "$scenario" = content-message ]; then
         printf '%s\n' \

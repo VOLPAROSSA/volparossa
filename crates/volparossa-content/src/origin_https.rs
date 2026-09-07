@@ -2,7 +2,7 @@
 //!
 //! Every consumer authenticates the origin itself over TLS before accepting its manifest.
 //! Peers cannot construct origin authority. This first profile supports only anonymous GET,
-//! 200, identity encoding, `application/octet-stream`, explicit public freshness and no
+//! 200 or exact single-range 206, identity encoding, `application/octet-stream`, explicit public freshness and no
 //! variants, cookies, redirects or authentication. Unsupported web responses are not admitted
 //! to shared storage. This is not a browser adapter, generic web proof or offline origin trust.
 //! URLs and HTTP metadata remain in the caller's in-memory authorization, not the chunk store.
@@ -17,7 +17,7 @@ use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::{Instant, timeout},
+    time::{Instant, timeout, timeout_at},
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use url::Url;
@@ -89,7 +89,7 @@ impl OriginRequest {
 pub struct OriginLimits {
     /// Maximum TLS handshake time, at most 60 seconds.
     pub handshake_timeout: Duration,
-    /// Maximum complete metadata or full-body operation, at most 15 minutes.
+    /// Maximum complete metadata, full-body or single-range operation, at most 15 minutes.
     pub session_timeout: Duration,
     /// Maximum authenticated object length, at most the native object limit.
     pub max_object_bytes: u64,
@@ -166,10 +166,12 @@ impl OriginClient {
                 request,
                 &request.metadata_path,
                 ORIGIN_DESCRIPTOR_CONTENT_TYPE,
+                None,
             )
             .await?;
             let response = read_response(&mut tls).await?;
-            if response.content_type != ORIGIN_DESCRIPTOR_CONTENT_TYPE
+            if response.status != 200
+                || response.content_type != ORIGIN_DESCRIPTOR_CONTENT_TYPE
                 || response.length > MAX_DESCRIPTOR_BYTES as u64
             {
                 return Err(OriginError::Response);
@@ -237,31 +239,119 @@ impl OriginClient {
                 &authorized.request,
                 &target(&authorized.request.resource),
                 BINARY_TYPE,
+                None,
             )
             .await?;
             let response = read_response(&mut tls).await?;
             authorized.check_time(now_unix)?;
-            if response.content_type != BINARY_TYPE
+            if response.status != 200
+                || response.content_type != BINARY_TYPE
                 || response.length != authorized.manifest.length()
                 || response.deadline(request_started)? < authorized.expires
                 || response.length > self.limits.max_object_bytes
             {
                 return Err(OriginError::Response);
             }
-            let mut buffer = vec![0; CHUNK_BYTES];
-            let mut whole = Sha256::new();
-            for chunk in authorized.manifest.chunks() {
-                authorized.check_time(now_unix)?;
-                let length = usize::try_from(chunk.length()).map_err(|_| OriginError::Limit)?;
-                tls.read_exact(&mut buffer[..length]).await?;
-                whole.update(&buffer[..length]);
-                store.put_verified(*chunk.id(), &buffer[..length])?;
-            }
-            if <[u8; 32]>::from(whole.finalize()) != authorized.manifest.whole_hash {
-                return Err(OriginError::Descriptor);
-            }
+            receive_chunks(
+                &mut tls,
+                authorized,
+                0..authorized.manifest.chunks().len(),
+                store,
+                now_unix,
+            )
+            .await?;
             authorized.check_time(now_unix)?;
             Ok(response.length)
+        })
+        .await
+        .map_err(|_| OriginError::Timeout)?
+    }
+
+    /// Fetch exactly the first contiguous run of missing authenticated chunks.
+    ///
+    /// A 206 response must identify precisely the requested range and original total length.
+    /// A server that ignores Range may return 200, but then the entire original object is
+    /// verified and its actual full payload cost is reported. No `ETag` or `If-Range` is trusted
+    /// as byte integrity. Call [`OriginAuthorizedManifest::next_missing_range`] before opening
+    /// a stream to avoid connecting for a complete cache. If already complete here, this call
+    /// performs no stream I/O. Cache scans, TLS, body verification and final presence checks
+    /// share one deadline. Partial success never exposes an incomplete output file.
+    ///
+    /// # Errors
+    /// Rejects wrong ranges/versions, stale authority/HTTP, corruption, timeouts and a cache
+    /// unable to hold the complete declared object. Failed calls may retain verified chunks.
+    pub async fn fill_next_missing_from_origin<S>(
+        &self,
+        stream: S,
+        authorized: &OriginAuthorizedManifest,
+        store: &mut ChunkStore,
+        now_unix: u64,
+    ) -> Result<OriginRangeProgress, OriginError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let started = Instant::now();
+        let now = authorized.check_time(now_unix)?;
+        let deadline = started
+            + self
+                .limits
+                .session_timeout
+                .min(Duration::from_secs(authorized.expires - now));
+        if authorized.manifest.length() > self.limits.max_object_bytes {
+            return Err(OriginError::Limit);
+        }
+        let missing = authorized.missing_run(store, now_unix)?;
+        if Instant::now() >= deadline {
+            return Err(OriginError::Timeout);
+        }
+        let Some(missing) = missing else {
+            return Ok(OriginRangeProgress {
+                complete: true,
+                ..OriginRangeProgress::default()
+            });
+        };
+        timeout_at(deadline, async {
+            let mut tls = self.connect(stream, &authorized.request).await?;
+            send_request(
+                &mut tls,
+                &authorized.request,
+                &target(&authorized.request.resource),
+                BINARY_TYPE,
+                Some(missing.bytes),
+            )
+            .await?;
+            let response = read_response(&mut tls).await?;
+            authorized.check_time(now_unix)?;
+            if response.content_type != BINARY_TYPE
+                || response.deadline(now)? < authorized.expires
+                || response.length > self.limits.max_object_bytes
+            {
+                return Err(OriginError::Response);
+            }
+            let chunks = match response.status {
+                206 if response.content_range == Some(missing.bytes)
+                    && response.length == missing.bytes.length() =>
+                {
+                    missing.chunks
+                }
+                200 if response.length == authorized.manifest.length() => {
+                    0..authorized.manifest.chunks().len()
+                }
+                _ => return Err(OriginError::Response),
+            };
+            let chunks_verified = chunks.len();
+            receive_chunks(&mut tls, authorized, chunks, store, now_unix).await?;
+            let complete = authorized.next_missing_range(store, now_unix)?.is_none();
+            if Instant::now() >= deadline {
+                return Err(OriginError::Timeout);
+            }
+            Ok(OriginRangeProgress {
+                requested: Some(missing.bytes),
+                bytes_received: response.length,
+                chunks_verified,
+                complete,
+                full_response: response.status == 200,
+            })
         })
         .await
         .map_err(|_| OriginError::Timeout)?
@@ -317,6 +407,68 @@ impl OriginAuthorizedManifest {
         &self.manifest
     }
 
+    /// Find the first consecutive missing-chunk range without any network connection.
+    ///
+    /// Present chunks are checked through the existing bounded store API; this scan can read
+    /// cached bytes but buffers only one chunk at a time. `None` means all ordered chunks are
+    /// present and individually valid, not that HTTP output has already been reconstructed.
+    /// This is a range hint, not a transferable origin authorization or permission to dial.
+    ///
+    /// # Errors
+    /// Rejects expired authority, corrupt cached chunks or insufficient complete-object quota.
+    pub fn next_missing_range(
+        &self,
+        store: &mut ChunkStore,
+        now_unix: u64,
+    ) -> Result<Option<OriginByteRange>, OriginError> {
+        Ok(self.missing_run(store, now_unix)?.map(|run| run.bytes))
+    }
+
+    fn missing_run(
+        &self,
+        store: &mut ChunkStore,
+        now_unix: u64,
+    ) -> Result<Option<MissingRun>, OriginError> {
+        self.check_time(now_unix)?;
+        store.require_object_capacity(self.manifest.length())?;
+        let mut offset = 0;
+        let mut first = None;
+        for (index, chunk) in self.manifest.chunks().iter().enumerate() {
+            self.check_time(now_unix)?;
+            match store.get(chunk.id())? {
+                Some(bytes) => {
+                    if bytes.len() as u64 != u64::from(chunk.length()) {
+                        return Err(crate::Error::Integrity(*chunk.id()).into());
+                    }
+                    if let Some((start_index, start)) = first {
+                        self.check_time(now_unix)?;
+                        return Ok(Some(MissingRun {
+                            bytes: OriginByteRange {
+                                start,
+                                end_inclusive: offset - 1,
+                                total: self.manifest.length(),
+                            },
+                            chunks: start_index..index,
+                        }));
+                    }
+                }
+                None => {
+                    first.get_or_insert((index, offset));
+                }
+            }
+            offset += u64::from(chunk.length());
+        }
+        self.check_time(now_unix)?;
+        Ok(first.map(|(index, start)| MissingRun {
+            bytes: OriginByteRange {
+                start,
+                end_inclusive: offset - 1,
+                total: self.manifest.length(),
+            },
+            chunks: index..self.manifest.chunks().len(),
+        }))
+    }
+
     /// Atomically expose the complete verified resource while origin authority is still valid.
     ///
     /// # Errors
@@ -350,6 +502,81 @@ impl OriginAuthorizedManifest {
         self.manifest.check_time(now)?;
         Ok(now)
     }
+}
+
+/// Exact inclusive byte offsets derived from the already authorized object.
+///
+/// This value is an inspection/reporting hint. Network APIs derive their range again from
+/// the retained origin authority and cache; callers cannot submit an arbitrary range token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OriginByteRange {
+    start: u64,
+    end_inclusive: u64,
+    total: u64,
+}
+
+impl OriginByteRange {
+    /// First requested byte offset.
+    pub const fn start(self) -> u64 {
+        self.start
+    }
+    /// Last requested byte offset, inclusive.
+    pub const fn end_inclusive(self) -> u64 {
+        self.end_inclusive
+    }
+    /// Complete original representation length, not the response body length.
+    pub const fn total(self) -> u64 {
+        self.total
+    }
+    /// Number of requested payload bytes.
+    pub const fn length(self) -> u64 {
+        self.end_inclusive - self.start + 1
+    }
+}
+
+/// Actual successful same-version fallback work; bytes exclude HTTP/TLS framing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OriginRangeProgress {
+    /// Requested inclusive range, or None when no stream I/O was needed.
+    pub requested: Option<OriginByteRange>,
+    /// Actual origin body bytes verified, including a full 200 response if Range was ignored.
+    pub bytes_received: u64,
+    /// Ordered chunk positions verified during this response, not newly allocated disk entries.
+    pub chunks_verified: usize,
+    /// All ordered chunks are now present and individually valid; final reconstruction remains.
+    pub complete: bool,
+    /// True only when the origin returned and verified a full 200 response to the Range request.
+    pub full_response: bool,
+}
+
+struct MissingRun {
+    bytes: OriginByteRange,
+    chunks: std::ops::Range<usize>,
+}
+
+async fn receive_chunks<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    authorized: &OriginAuthorizedManifest,
+    chunks: std::ops::Range<usize>,
+    store: &mut ChunkStore,
+    now_unix: u64,
+) -> Result<(), OriginError> {
+    let complete = chunks.start == 0 && chunks.end == authorized.manifest.chunks().len();
+    let mut buffer = vec![0; CHUNK_BYTES];
+    let mut whole = Sha256::new();
+    for chunk in &authorized.manifest.chunks()[chunks] {
+        authorized.check_time(now_unix)?;
+        let length = usize::try_from(chunk.length()).map_err(|_| OriginError::Limit)?;
+        stream.read_exact(&mut buffer[..length]).await?;
+        authorized.check_time(now_unix)?;
+        whole.update(&buffer[..length]);
+        store.put_verified(*chunk.id(), &buffer[..length])?;
+    }
+    if complete && <[u8; 32]>::from(whole.finalize()) != authorized.manifest.whole_hash {
+        return Err(OriginError::Descriptor);
+    }
+    authorized.check_time(now_unix)?;
+    Ok(())
 }
 
 /// Encode a cooperative origin's exact resource-to-manifest authorization document.
@@ -460,14 +687,18 @@ async fn send_request<S: AsyncWrite + Unpin>(
     request: &OriginRequest,
     path: &str,
     accept: &str,
+    range: Option<OriginByteRange>,
 ) -> Result<(), OriginError> {
     let host = request.resource.domain().ok_or(OriginError::Request)?;
     let authority = match request.resource.port() {
         Some(port) => format!("{host}:{port}"),
         None => host.into(),
     };
+    let range = range.map_or_else(String::new, |range| {
+        format!("Range: bytes={}-{}\r\n", range.start, range.end_inclusive)
+    });
     let bytes = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\n{range}Connection: close\r\n\r\n"
     );
     stream.write_all(bytes.as_bytes()).await?;
     stream.flush().await?;
@@ -475,6 +706,8 @@ async fn send_request<S: AsyncWrite + Unpin>(
 }
 
 struct Response {
+    status: u16,
+    content_range: Option<OriginByteRange>,
     length: u64,
     content_type: String,
     max_age: u64,
@@ -506,9 +739,16 @@ async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Response,
     }
     let mut lines = text[..text.len() - 4].split("\r\n");
     let status = lines.next().ok_or(OriginError::Response)?;
-    if !status.starts_with("HTTP/1.1 200 ") || status.bytes().any(|byte| byte.is_ascii_control()) {
+    if status.bytes().any(|byte| byte.is_ascii_control()) {
         return Err(OriginError::Response);
     }
+    let status = if status.starts_with("HTTP/1.1 200 ") {
+        200
+    } else if status.starts_with("HTTP/1.1 206 ") {
+        206
+    } else {
+        return Err(OriginError::Response);
+    };
     let mut headers = HeaderMap::new();
     for line in lines {
         if headers.len() == MAX_HEADERS {
@@ -529,7 +769,6 @@ async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Response,
         "www-authenticate",
         "proxy-authenticate",
         "location",
-        "content-range",
         "trailer",
         "expires",
     ] {
@@ -541,6 +780,13 @@ async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Response,
         return Err(OriginError::Response);
     }
     let length = decimal(header(&headers, "content-length")?)?;
+    let content_range = headers
+        .get("content-range")
+        .map(|value| parse_content_range(value.to_str().map_err(|_| OriginError::Response)?))
+        .transpose()?;
+    if (status == 206) != content_range.is_some() {
+        return Err(OriginError::Response);
+    }
     let date_unix = parse_http_date(header(&headers, "date")?)?;
     let content_type = header(&headers, "content-type")?.to_owned();
     let mut public = false;
@@ -563,11 +809,31 @@ async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Response,
         return Err(OriginError::Response);
     }
     Ok(Response {
+        status,
+        content_range,
         length,
         content_type,
         max_age,
         date_unix,
     })
+}
+
+fn parse_content_range(value: &str) -> Result<OriginByteRange, OriginError> {
+    let value = value.strip_prefix("bytes ").ok_or(OriginError::Response)?;
+    let (range, total) = value.split_once('/').ok_or(OriginError::Response)?;
+    let (start, end) = range.split_once('-').ok_or(OriginError::Response)?;
+    let range = OriginByteRange {
+        start: decimal(start)?,
+        end_inclusive: decimal(end)?,
+        total: decimal(total)?,
+    };
+    if range.start > range.end_inclusive
+        || range.end_inclusive >= range.total
+        || range.total > MAX_OBJECT_BYTES
+    {
+        return Err(OriginError::Response);
+    }
+    Ok(range)
 }
 
 /// Format a cooperative origin's HTTP `Date` using standard IMF-fixdate in GMT.

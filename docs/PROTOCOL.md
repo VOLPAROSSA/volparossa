@@ -95,9 +95,15 @@ max-age and canonical IMF-fixdate Date. Duplicate/ambiguous fields, redirects, e
 cookies, variants, Transfer-Encoding, Expires or nonzero Age are refused. Reuse is bounded by
 descriptor/signed expiry, issued+max-age, conservative Date/request-start freshness and elapsed
 monotonic time; replication does not refresh it. The HTTP wrapper stays in memory and only it
-publishes output as origin-authorized content. Missing peer pieces can trigger a full body GET
-over another verified origin TLS connection, checked against the same chunks/whole hash.
-No Range optimization, general-browser semantics, reusable TLS proof or peer discovery is implied.
+publishes output as origin-authorized content. Missing peer pieces trigger a single explicit
+`Range: bytes=start-end` for the first contiguous missing chunk run over another verified origin
+TLS connection. A 206 must carry exactly matching Content-Range, original total length and
+Content-Length; each returned chunk must match the retained authenticated manifest. Unknown
+totals, multipart responses or mismatched offsets are rejected. A server ignoring Range may
+return 200 only as a complete original representation, checked against all chunks/whole hash
+and counted at its full payload cost. No ETag is treated as cryptographic integrity, and neither
+partial nor full fallback renews origin authority. A complete cache needs no fallback connection.
+No general-browser semantics, reusable TLS proof or peer discovery is implied.
 
 ## Signed control envelope
 

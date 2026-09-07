@@ -17,24 +17,31 @@ def fixture():
     publication.update(object_sha256=CHECK["SHA"], metadata_bytes=1024)
     value.pop("reconstructed_object")
     value["origin"] = dict(pid=300, connections=[
-        dict(kind=kind, payload_bytes=size, tls13=True, alpn_http11=True, source="47.163.4.1:12345")
-        for kind, size in [("metadata", 1024), ("metadata", 1024), ("body", CHECK["BYTES"])]] )
+        dict(kind="metadata", payload_bytes=1024, tls13=True, alpn_http11=True,
+             source="47.163.4.1:12345", status=200, range_start=None, range_end=None, range_total=None)
+        for _ in range(2)] + [dict(kind="body_range", payload_bytes=CHECK["RANGE_BYTES"],
+             tls13=True, alpn_http11=True, source="47.163.4.1:12345", status=206,
+             range_start=start, range_end=end, range_total=CHECK["BYTES"])
+        for start, end in CHECK["RANGES"]])
     route = copy.deepcopy(value["phases"][0]["selected_route"])
     for index, phase in enumerate(value["phases"]):
         phase.pop("provider")
         phase["selected_route"] = copy.deepcopy(route)
         phase["consumer"] = dict(pid=200 + index, variant=("complete", "missing")[index],
             bytes=CHECK["BYTES"], object_sha256=CHECK["SHA"], peer_chunks=(9, 5)[index],
-            peer_bytes=(CHECK["BYTES"], 1048699)[index], origin_body_bytes=(0, CHECK["BYTES"])[index],
+            peer_bytes=(CHECK["BYTES"], 1048699)[index], origin_body_bytes=(0, 1048576)[index],
             fallback_used=bool(index), origin_authenticated_before_peers=True,
             tls_interception_ca_installed=False, origin_authority_persisted=False,
             browser_integration_claimed=False)
+        phase["consumer"]["range_requests"] = [dict(start=start, end=end, total=CHECK["BYTES"],
+            bytes_received=CHECK["RANGE_BYTES"], chunks_verified=1, full_response=False)
+            for start, end in (CHECK["RANGES"] if index else ())]
         phase["peers"] = dict(pid=100 + index, sessions=[
             dict(replica="replica-" + replica, chunks=chunks, bytes=size, missing=missing,
                  source="47.163.4.1:23456") for replica, chunks, size, missing in
             [("a", 5, 1048699, 4), ("b", 4, 1048576, 0)][:2-index]])
         phase["protected_gates"] = dict(peer_pid=100 + index, event_baseline_unix_ms=1000,
-            ingress_completed=3, exit_mptcp_tls_open_completed=3, object_sha256=CHECK["SHA"],
+            ingress_completed=(3, 6)[index], exit_mptcp_tls_open_completed=(3, 6)[index], object_sha256=CHECK["SHA"],
             bytes=CHECK["BYTES"], client_cache_initially_absent=True,
             client_cannot_read_origin_or_replica_files=True)
         for capture in phase["privacy"].values():
@@ -51,6 +58,17 @@ class HttpsEvidence(unittest.TestCase):
             (("origin", "connections", 0, "tls13"), False),
             (("origin", "connections", 1, "source"), "46.162.0.1:12345"),
             (("origin", "connections", 2, "payload_bytes"), 0),
+            (("origin", "connections", 2, "status"), 200),
+            (("origin", "connections", 3, "range_start"), 0),
+            (("origin", "connections", 4, "range_end"), 1572864),
+            (("origin", "connections", 5, "range_total"), CHECK["BYTES"] - 1),
+            (("phases", 1, "consumer", "range_requests", 0, "full_response"), True),
+            (("phases", 1, "consumer", "range_requests", 1, "chunks_verified"), 0),
+            (("phases", 1, "consumer", "range_requests", 2, "bytes_received"), CHECK["BYTES"]),
+            (("phases", 1, "consumer", "range_requests", 3, "end"), 2097152),
+            (("phases", 0, "consumer", "range_requests"), [dict(start=0)]),
+            (("phases", 1, "protected_gates", "ingress_completed"), 5),
+            (("phases", 1, "protected_gates", "exit_mptcp_tls_open_completed"), 5),
             (("phases", 0, "consumer", "origin_authenticated_before_peers"), False),
             (("phases", 0, "consumer", "origin_body_bytes"), CHECK["BYTES"]),
             (("phases", 1, "consumer", "origin_body_bytes"), 0),

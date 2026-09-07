@@ -13,6 +13,8 @@ content_https_event_count() {
 content_https_phase() {
     https_variant=$1
     https_prefix=content-https-$https_variant
+    https_expected_streams=3
+    [ "$https_variant" != missing ] || https_expected_streams=6
     PHASE=$https_prefix-provider
     https_peer_report=$WORK/destination/$https_prefix-peers.json
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -73,11 +75,13 @@ content_https_phase() {
         capture_product_logs
         https_ingress_count=$(content_https_event_count client INGRESS_TCP_STREAM_COMPLETED)
         https_exit_count=$(content_https_event_count exit MPTCP_EXIT_FLOW_COMPLETED)
-        [ "$https_ingress_count" -lt 3 ] || [ "$https_exit_count" -lt 3 ] || break
+        [ "$https_ingress_count" -lt "$https_expected_streams" ] \
+            || [ "$https_exit_count" -lt "$https_expected_streams" ] || break
         sleep 0.1
     done
-    if [ "$https_ingress_count" -lt 3 ] || [ "$https_exit_count" -lt 3 ]; then
-        fail HTTPS_THREE_PROTECTED_FLOWS_NOT_PROVEN
+    if [ "$https_ingress_count" -lt "$https_expected_streams" ] \
+        || [ "$https_exit_count" -lt "$https_expected_streams" ]; then
+        fail HTTPS_EXPECTED_PROTECTED_FLOWS_NOT_PROVEN
     fi
     install -o root -g root -m 0600 "$https_client_report" "$WORK/$https_prefix-consumer.json"
     install -o root -g root -m 0600 "$https_peer_report" "$WORK/$https_prefix-peers.json"
@@ -95,7 +99,7 @@ content_https_run() {
     PHASE=content-https-selection
     https_binary=$binary_directory/examples/https-content-acceptance-fixture
     # Select before starting bounded origin/metadata lifetimes. The existing route is reused;
-    # each of the six app connections still gets its own genuine MPTCP/TLS/OPEN_TCP flow.
+    # each of the nine app connections still gets its own genuine MPTCP/TLS/OPEN_TCP flow.
     benchmark_select_route content-https mptcp || fail HTTPS_MPTCP_SELECTION_UNAVAILABLE
     benchmark_bind_slots "$WORK/content-https-selection.json" || fail HTTPS_MPTCP_SELECTION_INVALID
     https_context=$(jq -er '.route_context_id' "$WORK/content-https-selection.json")
@@ -122,7 +126,7 @@ content_https_run() {
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
         --no-new-privs -- "$https_binary" origin "$https_root" 47.163.4.2:18443 \
-        "$WORK/destination/content-https-origin.der" "$https_origin_report" 3 \
+        "$WORK/destination/content-https-origin.der" "$https_origin_report" 6 \
         >"$WORK/content-https-origin.log" 2>&1 &
     TLS_POLICY_SERVER_PID=$!
     wait_observer "$TLS_POLICY_SERVER_PID" "$https_origin_report.ready" || fail HTTPS_ORIGIN_NOT_READY
@@ -157,7 +161,7 @@ content_https_finalize_report() {
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0
          and $host.unchanged == true),observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host|del(.acceptance_id)),
-       scope:"origin-cooperating native HTTPS client; fixture-only app trust, two partial stores at one peer endpoint",
+       scope:"origin-cooperating native HTTPS client; exact missing-chunk ranges, fixture-only app trust, two partial stores at one peer endpoint",
        browser_integration_claimed:false,provider_discovery_claimed:false,
        distinct_provider_nodes_claimed:false,speed_improvement_claimed:false,
        full_c08_claimed:false,full_alpha_acceptance_claimed:false}

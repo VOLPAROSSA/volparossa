@@ -158,8 +158,16 @@ manifest; changed bytes, wrong CA/name, stale metadata and partial publication a
 No new authority is imported from peers or persisted by the consumer. The
 [`content-https` KVM scenario on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
 passes the same full-body-fallback sequence over protected routes, with ten complete zero-drop
-boundary captures and unchanged guest state. This requires publisher support, does not yet use Range fallback,
-and proves neither faster total retrieval nor browser/generic-web/TLSNotary integration.
+boundary captures and unchanged guest state.
+
+The next implemented version adds exact missing-chunk Range fallback. Eleven real-TLS tests
+and a separate-process disposable-loopback proof pass: five cached chunks supply 1,048,699 bytes,
+then four 206 responses supply only the missing 1,048,576 bytes. Each range binds the original
+offset, length, total and authenticated chunk hash; wrong/stale/changed responses are rejected.
+An origin that ignores Range can still supply a fully verified 200 response, with its full cost
+reported. Original authorization never renews. The Range protected-route proof is pending.
+This requires publisher support and proves neither faster total retrieval nor
+browser/generic-web/TLSNotary integration.
 
 ## Integrated functional checkpoints
 
