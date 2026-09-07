@@ -1977,7 +1977,16 @@ mod tests {
 
     #[tokio::test]
     async fn production_entropy_entrypoint_preserves_the_exact_slate_shape() {
-        let snapshot = preselection_snapshot_fixture(1, false).await.snapshot;
+        // The generic one-exit fixture derives network hints from random nonce[0] values,
+        // which can collide with its only other relay. The multi-exit fixture deliberately
+        // assigns distinct hints, so every production entropy draw has a valid diverse slate.
+        let snapshot = preselection_multi_exit_snapshot_fixture(
+            2,
+            1,
+            None,
+            PreselectionTestCapabilities::default(),
+        )
+        .await;
         let narrowed = expect_narrowed(
             narrow_route_candidate_snapshot(
                 snapshot,
@@ -1988,6 +1997,70 @@ mod tests {
         assert_eq!(narrowed.forwarded_exits.len(), 1);
         assert_eq!(narrowed.direct_relays.len(), 2);
         assert_eq!(narrowed.preselection_subjects.forwarded_pairs, [(0, 2)]);
+        assert!(output_diversity_is_strict(&narrowed, IpFamily::Ipv4));
+    }
+
+    #[tokio::test]
+    async fn colliding_nonce_derived_network_hints_reject_the_only_other_relay() {
+        let snapshot = preselection_multi_exit_snapshot_fixture(
+            2,
+            1,
+            None,
+            PreselectionTestCapabilities::default(),
+        )
+        .await;
+        let (control_index, exit_subject) = snapshot.preselection_subjects.forwarded_pairs[0];
+        let exit_index = exit_subject - snapshot.direct_relays.len();
+        let other_index = (0..snapshot.direct_relays.len())
+            .find(|index| {
+                snapshot
+                    .preselection_subjects
+                    .forwarded_pairs
+                    .iter()
+                    .all(|(control, _)| control != index)
+            })
+            .expect("ordinary relay distinct from both exit controls");
+        let mut snapshot =
+            materialize_narrowed_snapshot(snapshot, control_index, exit_index, &[other_index]);
+        assert!(output_diversity_is_strict(&snapshot, IpFamily::Ipv4));
+        let collisions = [
+            snapshot.direct_relays[0]
+                .advertisement
+                .advertisement
+                .network
+                .clone(),
+            snapshot.forwarded_exits[0]
+                .advertisement
+                .advertisement
+                .network
+                .clone(),
+        ];
+        for network in collisions {
+            // Reproduce exactly the diversity projection produced when the generic fixture's
+            // random control/exit nonce[0] equals its sole other relay's network discriminator.
+            snapshot.direct_relays[1]
+                .advertisement
+                .advertisement
+                .network = network;
+            let storage = snapshot_storage_identity(&snapshot);
+            let value = snapshot_value_identity(&snapshot);
+            let sampled_at_ms = snapshot.captured_at_ms;
+            let failure = expect_sampling_failure(
+                narrow_route_candidate_snapshot_at(
+                    snapshot,
+                    sampling_scope(ObservationAddressFamily::Ipv4, 1, 1),
+                    sampled_at_ms,
+                    &mut SeededRng::new(7),
+                ),
+                "one available relay shares control or exit network origin",
+            );
+            assert_eq!(
+                failure.error,
+                PreselectionSamplingError::InsufficientDiverseRelays
+            );
+            assert_snapshot_identity(&failure.snapshot, &storage, &value);
+            snapshot = *failure.snapshot;
+        }
     }
 
     #[tokio::test]
