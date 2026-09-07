@@ -92,6 +92,10 @@ application-supplied stream. Its protected-route VM test passed on `f0a906ca`: t
 processes reconstruct a 2.1-MB object after its publisher copy is removed, through real
 MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authenticated-transfer
 checkpoint C01, not automatic distributed discovery or a complete offline website service.
+The normal CLI now provides `volparossa content publish` and `volparossa content assemble`:
+explicit local files are signed with the existing encrypted node identity and reconstructed
+from explicitly selected owned caches. These commands do not yet distribute or discover content;
+see the [offline content instructions](docs/OPERATIONS.md#offline-content-commands).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 A complete mailbox, automatic redistribution, shared DNS and browser integration remain
@@ -101,7 +105,7 @@ Existing HTTPS reuse needs genuine origin authentication through an application 
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental
 witness. The first cooperative-origin HTTPS library and executable now work locally: obtain
 small metadata through actual hostname/CA-verified TLS, retrieve authenticated peer chunks, and
-use same-version origin fallback when chunks are missing. Its protected-route test is pending.
+use same-version origin fallback when chunks are missing. Its protected-route test passes on `2de8209f`.
 This currently needs publisher cooperation and supports anonymous static binary resources,
 not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
 compulsory central witness is proposed.

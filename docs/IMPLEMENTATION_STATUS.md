@@ -27,6 +27,15 @@ Together with the existing integrity/quota/missing-part tests, this establishes 
 processes at one policy-authorized destination do not establish independent provider nodes,
 discovery, automatic redistribution, initial distributed publishing/retention, HTTPS or DNS.
 
+The normal `volparossa` executable now exposes offline `content publish` / `content assemble`.
+Publication unlocks the existing encrypted node identity without creating or exporting another
+permanent private key. Reconstruction requires an independently trusted publisher key and
+1--16 explicitly selected owned caches. Two focused CLI tests, strict CLI Clippy and a build
+pass. Separate CLI invocations reconstruct an identical 18,742-byte file, reuse an owned cache,
+and reject a wrong publisher, missing chunks and output overwrites. Tests also reconstruct
+from two partial stores after removing the original input. These are real local commands,
+not automatic network publication/discovery or a newly verified installed Debian package.
+
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
 strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332
@@ -54,8 +63,15 @@ origin and reconstructs 2,097,275 bytes from two partial caches, with zero origi
 In a separate empty-cache case, one partial replica supplies 1,048,699 bytes; missing chunks
 trigger a complete 2,097,275-byte origin response checked against the same manifest. Changed
 origin bytes fail the focused test instead of being mixed into a successful object. This is
-full-body fallback, not optimized Range retrieval or a speed comparison. The new `content-https`
-protected-route scenario is pending; publisher cooperation is required. No browser integration,
+full-body fallback, not optimized Range retrieval or a speed comparison. The
+[`content-https` protected-route run on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
+passes: both independent consumers reconstruct the exact object, origin metadata/body use real
+TLS 1.3, all six application streams traverse protected MPTCP/TLS and both WireGuard legs,
+and all origin/provider connections observe the Exit source address. Ten boundary captures
+are complete with zero drops/violations; four application summaries make no drop-counter claim.
+Cleanup leaves zero owned objects and unchanged guest state. Retained artifact SHA-256:
+`27059f12ecadc952ae7d86d4e0fd0ec32fa01345600d776b12a377c0533d96c8`.
+Publisher cooperation is required. No browser integration,
 generic existing-site compatibility, TLSNotary, distributed discovery or C08 completion is claimed.
 README and the relevant architecture/protocol/privacy/testing summaries are updated together;
 detailed changing results remain centralized here and in the content proposal.
@@ -91,7 +107,7 @@ the scheduler. Native tuning is paused for this functional checkpoint.
 [Quality on `b1082645`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149000752) passes
 workspace tests and strict Clippy. It includes `9e2cab8`'s guaranteed-diverse sampler success
 fixture and deterministic rejection coverage, without changing production selection. It does
-cover the encrypted-message/diagnostic slice, but not the subsequent HTTPS work. Download evidence below does not
+cover the encrypted-message/diagnostic slice, but not the subsequent HTTPS/CLI work. Download evidence below does not
 establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
 
 ## Current live integration checkpoint

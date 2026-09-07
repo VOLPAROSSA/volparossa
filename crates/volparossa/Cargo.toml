@@ -23,19 +23,18 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 socket2.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 volparossa-config = { path = "../volparossa-config", version = "=0.1.0" }
+volparossa-content = { path = "../volparossa-content", version = "=0.1.0" }
 volparossa-identity = { path = "../volparossa-identity", version = "=0.1.0" }
 volparossa-local-control = { path = "../volparossa-local-control", version = "=0.1.0" }
 volparossa-mptcp = { path = "../volparossa-mptcp", version = "=0.1.0" }
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-quic = { path = "../volparossa-quic", version = "=0.1.0" }
 zeroize.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

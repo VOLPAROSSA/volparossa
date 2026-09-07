@@ -4528,6 +4528,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "volparossa-config",
+ "volparossa-content",
  "volparossa-identity",
  "volparossa-local-control",
  "volparossa-mptcp",

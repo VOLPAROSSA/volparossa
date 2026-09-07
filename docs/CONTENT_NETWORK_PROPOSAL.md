@@ -98,6 +98,12 @@ Fourteen focused tests and strict crate Clippy pass. Owned caches now reopen aft
 their UID/directory-bound marker, exclusive lock and bounded persisted index prevent arbitrary
 directory adoption. Corrupt/incomplete mutations are refused without a recovery sweep.
 
+The normal CLI now exposes explicit offline publication and reconstruction: `content publish`
+uses the existing encrypted node identity, and `content assemble` requires an independently
+trusted publisher key and explicit local cache paths. Both have real separate-invocation
+roundtrip evidence, but do not announce a provider, distribute chunks or resolve a public name.
+See the [operational commands](OPERATIONS.md#offline-content-commands).
+
 The new stream API pulls only missing chunks from each provider, authenticating bytes before
 storage and bounding requests, bytes and exchange/session time. A real separate-process proof
 in a disposable loopback namespace reconstructs 2,097,275 bytes / nine chunks after the publisher
@@ -149,8 +155,10 @@ Seven real-TLS tests and a disposable separate-process demonstration pass. A 777
 descriptor authorizes 2,097,275 payload bytes reconstructed from two partial caches, with no
 origin body transfer. Missing chunks invoke one full origin download checked against the same
 manifest; changed bytes, wrong CA/name, stale metadata and partial publication are rejected.
-No new authority is imported from peers or persisted by the consumer. The `content-https` KVM
-scenario remains pending. This requires publisher support, does not yet use Range fallback,
+No new authority is imported from peers or persisted by the consumer. The
+[`content-https` KVM scenario on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
+passes the same full-body-fallback sequence over protected routes, with ten complete zero-drop
+boundary captures and unchanged guest state. This requires publisher support, does not yet use Range fallback,
 and proves neither faster total retrieval nor browser/generic-web/TLSNotary integration.
 
 ## Integrated functional checkpoints

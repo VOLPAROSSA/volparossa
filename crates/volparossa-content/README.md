@@ -2,8 +2,9 @@
 
 This crate implements real local disk caching and reconstruction for **explicit native
 publications**. C01's bounded-storage/authenticated-transfer checkpoint has passed a real
-protected-route test; this is not C02/C06 completion, a browser cache, an HTTPS-origin verifier,
-or an automatic distributed retrieval service.
+protected-route test; this is not C02/C06 completion, a browser cache or an automatic
+distributed retrieval service. Native signatures alone do not confer HTTPS-origin authority;
+the separate `origin_https` module establishes its explicitly limited authority as described below.
 
 - SHA-256-addressed chunks, each at most 256 KiB; at most 1,024 chunks / 256 MiB per object.
 - Canonical protobuf manifest, at most 64 KiB. Ed25519 authenticates version, publisher,
@@ -34,6 +35,14 @@ Run the actual temporary-disk example:
 cargo run -p volparossa-content --example offline_publication
 cargo test -p volparossa-content
 ```
+
+The normal `volparossa` executable also exposes this library through offline commands:
+`content publish` signs an explicit file with the existing encrypted node identity, and
+`content assemble` verifies an independently trusted publisher key and rebuilds from one or
+more explicit local caches. Neither command starts a network service. New manifest/output
+files never overwrite existing entries; `--reuse-cache` must explicitly select an existing
+owned cache and can evict older chunks under its quotas. See the
+[CLI usage and defaults](../../docs/OPERATIONS.md#offline-content-commands).
 
 The example publishes three chunks, copies alternating chunks into two separate disk stores,
 deletes the publisher's directory and drops its signing key, then reconstructs the exact
@@ -67,7 +76,7 @@ resource and native manifest. The non-deserializable HTTP wrapper preserves orig
 while ordinary native manifests retain their original, narrower meaning. Strict public HTTP
 Date/max-age and descriptor/signature lifetimes apply. Missing chunks can be filled by one
 complete origin download, rejected if it differs from the original manifest. Seven focused
-TLS tests and a separate-process HTTPS/peer/fallback proof pass; protected-route KVM is pending.
+TLS tests and a separate-process HTTPS/peer/fallback proof pass; protected-route KVM passes on `2de8209f`.
 Only a cooperative anonymous static binary profile is supported. There is no arbitrary-site,
 browser, partial-range, witness or automatic-discovery implementation in this slice.
 

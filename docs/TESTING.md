@@ -81,8 +81,16 @@ its chunks over two separate disk stores, removes the publisher store and recons
 object from those remaining stores. This is real local storage, not multiple network peers or
 offline website availability. Focused tests cover integrity, independently trusted publisher keys,
 expiry, missing pieces, bounded storage and output publication. There is no automatic browsing
-capture, HTTPS/browser integration, DNS sharing or origin fallback in this crate. The
+capture, browser integration or DNS sharing. The separate cooperative-origin HTTPS slice is
+described below; it is not generic existing-site compatibility. The
 [content proposal](CONTENT_NETWORK_PROPOSAL.md) separates verified C01 from incomplete C02--C08.
+
+The normal CLI's offline publish/assemble integration can be checked narrowly with
+`cargo test --locked -p volparossa content::tests --bin volparossa`. Its two tests exercise
+the existing encrypted identity, reconstruction from two partial stores after input deletion,
+explicit owned-cache reuse, missing/wrong-publisher rejection and no-clobber output. Separate
+CLI invocations also pass for an 18,742-byte exact-hash file. These commands open no sockets;
+their verification is not package installation or automatic content distribution evidence.
 
 Fourteen crate tests now include persistent reopen/ownership/quota checks and real bounded
 stream transfers from two partial stores, corruption rejection, oversized-prefix refusal and
@@ -123,7 +131,9 @@ performs actual socket exchanges inside a disposable namespace. Its `complete` c
 `missing` gets one partial cache then one complete, manifest-checked origin response. Both
 outputs match the fixed test hash. This is not a speed test or a production certificate setup.
 The new `content-https` workflow scenario uses the existing protected ingress and independently
-authorized HTTPS (18443) and peer (18080) flows; live verification remains pending. No system
+authorized HTTPS (18443) and peer (18080) flows; its
+[live full-body-fallback run on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
+passes with ten complete zero-drop boundary captures and unchanged guest state. No system
 CA is installed, and generic browser compatibility or C08 completion is not claimed.
 
 ## Helper-boundary evidence

@@ -4,6 +4,11 @@ This guide targets Debian 13 (Trixie) amd64 with systemd, nftables, kernel WireG
 MPTCP. It is not a release announcement. Do not enable services or route sensitive traffic until
 the relevant checks in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) are complete.
 
+The original v1 datapaths and A01--A15 passed together on the unchanged `482e33d0` build in
+[the retained Debian 13 KVM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913).
+That functional checkpoint does not certify an arbitrary host installation, every later extension,
+or release readiness. Consult the current status and each feature's scoped evidence separately.
+
 ## Read-only prerequisites
 
 Run the checker as an ordinary user:
@@ -114,9 +119,10 @@ Production client participation always requires `roles.relay` and positive relay
 consumers configure client + relay and must keep exit disabled in production and development:
 Internet access obtained through the overlay must never be offered back as an independent exit.
 The uplink setting is an operator declaration of available capability, not runtime connectivity
-proof, an uptime measurement, or automatic outage detection. Offline/local-mesh discovery and
-private-endpoint routing are not implemented yet; validation of a local-only configuration proves
-intent, not a working offline datapath.
+proof, an uptime measurement, or automatic outage detection. Offline consumption and simultaneous
+relay contribution have separate disposable Ethernet and simulated-radio proofs; see
+[local-link scope](LOCAL_LINK_NETWORK.md). Configuration validation alone is still not datapath
+evidence, and simulated radios do not establish compatibility or performance on physical Wi-Fi.
 
 Installing or initializing the package does not consent to Internet egress. Configure those
 responsibilities in `/etc/volparossa/config.yaml`, run `volparossa config validate`, then start the services or
@@ -142,7 +148,7 @@ capacity and policy remain active. Publication does not claim helper preparation
 route usability. The agent never substitutes a static or placeholder WireGuard key, listen port,
 probe, or activation receipt.
 
-The intended client chooses a directly verified control relay before any exit. Direct
+The client chooses a directly verified control relay before any exit. Direct
 `/volparossa/advertisement/4` retrieval may establish relay/control-relay provenance only. A
 combined-role node may be an exit only from exclusively forwarded provenance:
 direct-then-forwarded is rejected, while forwarded-then-direct withdraws and quarantines exit
@@ -163,10 +169,9 @@ Candidate units are installed as:
   descriptors for at most 64 pidfd/network-namespace custody pairs. Production seals, duplicates
   and structurally validates inherited activation groups before Tokio. Durable Prepare publication
   uses `FDPOLL=0`, a manager barrier and complete post-barrier store-inventory attestation before
-  arming. Startup normally retires already durable `CleanupConfirmed` custody; it also supports the
-  one exact-singleton single-path `MayOwnCustody` or active `MayOwnPrepare` reaper case documented
-  below. Every other
-  inherited `MayOwn` shape refuses before socket bind;
+  arming. Startup correlates the durable journal with inherited custody and settles supported
+  exact recovery states before socket bind. Ambiguous or unsupported custody still fails closed;
+  do not remove journal entries or stored descriptors to force startup;
 - `volparossa-agent.service`: user/group `volparossa`, no capabilities, persistent state/config,
   control-plane network access, the helper socket, and an agent-owned mode-0660 socket under a
   non-group-writable `/run/volparossa/control`; the unit loads only the named encrypted identity
@@ -177,8 +182,8 @@ Candidate units are installed as:
   base64url client auth and TLS names only in bounded, signed-scope route-session messages; the
   native commitment check proves bearer equality, not generator entropy or binary attestation.
   `AddPath` consumes exactly one request-bound UDP descriptor and native never creates or binds a
-  path socket. The agent calls the role-specific native socket, but production helper acquisition
-  does not provide independently authenticated descriptor provenance. Combined roles have
+  path socket. The agent passes helper-prepared descriptors through the role-specific native
+  socket. Combined roles have
   separate native workers and sockets under one same-UID service; separate service identities
   remain required before an untrusted agent can use this as an authenticated boundary.
   `StartExitSession` carries bounded, unparsed in-memory TLS candidate material and consumes exactly
@@ -187,14 +192,15 @@ Candidate units are installed as:
   state. Native converts the supplied wall expiry to a BOOTTIME deadline and keeps a bounded,
   process-local reservation/finalize ledger with no live eviction; it rejects pair replay and
   one-ID scope collisions, but does not independently verify the reservation signature or general
-  nonce freshness, and restart clears the ledger. The dormant exit runtime consumes a valid pair,
-  closes the descriptor, and fails closed because no reviewed exit backend exists. This blocks
-  service enablement and package release;
-  the unit must not be treated as operational.
+  nonce freshness, and restart clears the ledger. The Exit backend now runs the pinned mqvpn/xquic
+  server, accepts authorized path listeners and exchanges protected datagrams with the agent's
+  policy-controlled egress. The original v1 KVM checkpoint exercised this real backend; it is no
+  longer a dormant descriptor-closing stub. This does not independently certify the installed
+  service's security boundary or make the package release-ready.
 
 Review `systemd-analyze verify`, `systemd-analyze security`, and functional tests in an installed
-Debian 13 package root. Do not enable the service set while the native launch contract above is
-unresolved:
+Debian 13 package root before operational deployment; passing the disposable topology does not
+replace those checks on the actual installation:
 
 ```sh
 systemd-analyze verify volparossa-helper.service volparossa-agent.service volparossa-mpquic.service
@@ -219,6 +225,7 @@ volparossa role show            volparossa role enable|disable relay
 volparossa role enable|disable client|exit
 volparossa config validate      volparossa logs
 volparossa cleanup              volparossa demo
+volparossa content publish      volparossa content assemble
 ```
 
 Role commands validate the proposed change but effective changes require editing configuration
@@ -232,97 +239,117 @@ identity described above.
 `paths`, and `sessions` distinguish configured, validated, active, and real data-carrying paths and
 separate user bytes from tunnel bytes. Output never contains private keys.
 
-At present, a production `connect` cannot complete. It now starts an operator-profile-bound A1
-preselection attempt and can dispatch the first endpoint-free native Permit only through the exact
-selected control Relay, then dispatches the endpoint-free Permit pair only to its selected data
-Relay and verifies exact signed readiness. It returns `Unavailable` before helper `Prepare`.
-The helper endpoint/result state seam exists and refuses activation without an exact standard
-Exit/Relay-signed reservation for the prepared Client key. The Relay-side Ready/Start provider,
-post-Prepare reservation exchange, client dataplane challenge injection, complete native probe
-orchestration, route admission, and client ingress remain unavailable or blocked. Operators must
-not interpret a prepared Permit, successful
-configuration, v4 peer-codec tests, or service role state as an active route.
+With valid participation, policy, discovery and helper configuration, `connect` can complete the
+signed reservation, helper preparation/activation, native transport and ingress chain. Select the
+intended transport explicitly:
+
+```sh
+volparossa connect --transport mptcp
+volparossa connect --transport single-path-udp
+volparossa connect --transport multipath-quic
+```
+
+These are alternative route requests, not instructions to run all three simultaneously. The default
+is `single-path-udp`; MPTCP and required Multipath QUIC do not silently fall back to ordinary TCP or
+single-path QUIC. The original v1 checkpoint exercised the real client--relay--exit datapaths.
+Unavailable peers, policy, capacity or required paths still cause explicit failure. Do not interpret
+a Permit, valid configuration, signed advertisement or role state alone as a usable route.
+
+## Offline content commands
+
+`content publish` and `content assemble` work locally without starting services, opening network
+listeners or contacting peers. Run them as the existing identity/cache owner in caller-chosen local
+directories. Publishing unlocks the existing encrypted Ed25519 identity; it neither generates a new
+permanent identity nor exports a private key. These commands authenticate native publisher content,
+not an HTTPS origin, a latest-version name lookup or network distribution.
+
+For an explicit regular input file, choose a new cache directory and new manifest path:
+
+```sh
+volparossa content publish \
+  --identity /path/to/existing/identity.key \
+  --input ./notes.pdf --cache ./content-cache --manifest ./notes.v1.pb \
+  --name notes --revision 1 --content-type application/pdf
+```
+
+The command prompts for the existing passphrase without echo. Alternatively, `--passphrase-file`
+may name an already provisioned strict `0600` regular file; never put the secret itself in arguments
+or environment variables. Omitting `--identity` uses the normal node identity path. Successful JSON
+output includes the publisher's public key, byte/chunk count and expiry, with
+`network_publication: false`.
+
+Defaults are a 24-hour signed lifetime (`--lifetime-seconds`, maximum 31 days), a 256-MiB payload
+quota per cache (`--quota-bytes`), 4096 indexed chunks (`--max-entries`, maximum 65536), and a 64-MiB
+free-space floor (`--min-free-bytes`). Each object is limited to 256 MiB, in chunks of at most
+256 KiB. Cache hits do not renew a manifest's validity. A failed publish may leave owned,
+quota-accounted chunks, but never a successful final manifest for an incomplete operation.
+
+For another publication in that same cache, explicitly add `--reuse-cache` and choose a new manifest
+path and revision. Reuse accepts only a verified owned `ChunkStore`; it never adopts an arbitrary
+directory. Applying its byte/entry quotas may evict older **owned** chunks. Without this flag,
+an existing cache directory is rejected. Existing manifest files are never overwritten.
+
+To reconstruct, obtain the publisher's 64-character hexadecimal public key through an independently
+trusted channel. Replace `TRUSTED_PUBLISHER_PUBLIC_KEY_HEX` below; do not trust a key merely because
+the supplied manifest or a provider contains it:
+
+```sh
+volparossa content assemble \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache ./content-cache --output ./restored-notes.pdf
+```
+
+Repeat `--cache` for up to 16 explicitly owned local caches when chunks are split between them.
+The same quota options apply when opening each cache; an oversized existing cache is rejected,
+not silently evicted to fit. The command verifies the exact manifest, publisher, expiry and chunk
+hashes, and exposes a new `0600` output atomically only after complete reconstruction. Wrong keys,
+expired manifests, absent/corrupt chunks and an existing output are errors. No peer discovery or
+network retrieval occurs; successful output explicitly reports `network_retrieval: false`.
 
 ## Crash and cleanup
 
-The target behavior is Destroy-first. From successful helper `Prepare`, a cancellation-safe
-supervisor retains the exact opaque cleanup authority. On rejection, expiry, cancellation, received
-backend `Unavailable`, disconnect, or crash, helper Destroy must succeed or prove absence before
-the client releases coordinator state, endpoint leases, or remote reservation authority. An
-ambiguous or failed Destroy keeps the authority quarantined for retry. Expiry blocks new flows but
-does not authorize forgetting host state.
+Route teardown is Destroy-first. From successful helper `Prepare`, a cancellation-safe supervisor
+retains the exact opaque cleanup authority. Rejection, expiry, cancellation, disconnect and failure
+must settle helper-owned state before coordinator resources or remote reservation authority are
+released. Ambiguous or failed destruction keeps the route quarantined; expiry is not permission to
+forget network state.
 
-The current helper v3 does not yet provide complete crash recovery or restart cleanup.
-Before rotating its cleanup token or touching its socket, it rejects every object at the retired
-`/run/volparossa/helper.ownership-v1` path and starts the canonical v3 journal actor. That actor may
-durably settle a never-dispatched `Intent`. It may also retire a complete set of already durable
-`CleanupConfirmed` records. Exact-present pairs are removed one name at a time in canonical order;
-each descriptorless removal must prove a stable complete inventory equal to its predecessor minus
-only that pair. Mixed already-absent/present state resumes after a crash. A final revalidated fresh
-manager barrier plus two stable snapshots must prove the complete descriptor store remains exactly
-empty before any journal transition. A
-Absent/no-store `MayOwn`, multiple targets and multiple paths remain byte-identical and block
-startup because production has no exact recovery proof for them. Never remove a journal object
-merely to bypass this interlock: unsupported shapes require operator inspection.
+The helper's boot-scoped v3 ownership journal and systemd descriptor custody are live. Startup
+revalidates the journal and complete inherited inventory before serving requests; supported recovery
+uses the authenticated restart reaper and exact namespace/descriptor ownership rather than names
+or prefixes. Durable cleanup confirmation and descriptor-store settlement precede reuse.
+Unsupported or inconsistent recovery states still refuse startup. Never delete a journal, remove
+custody descriptors or rotate a cleanup token merely to bypass that refusal.
 
-One `MayOwnCustody + ExactPresent` target may proceed only when its durable plan is exactly one
-Client lease, one Exit lease, or the same-path RelayClient/RelayExit pair; its boot ID and helper
-executable inode must still match. After proving the old process pidfd exited and the shared service
-cgroup is quiescent, the parent runs only
-`/proc/self/exe --internal-restart-reaper-v1`. A credential-authenticated bounded
-`SOCK_SEQPACKET` transcript transfers exactly one matching network-namespace FD. The child joins it
-once, installs the fixed worker sandbox, drops to the worker account with only `CAP_NET_ADMIN` and
-`CAP_NET_BIND_SERVICE`, and is independently attested before cleanup. Client/Exit accept only
-derived-link absence, down
-loopback, empty nftables and disabled IPv6 forwarding. Relay additionally requires IPv6 forwarding
-to remain enabled and removes only its exact restricted DROP fence, accepting exact-empty solely as
-the committed-deletion retry successor. It never deletes WireGuard links or changes forwarding.
-Only an authenticated terminal reply, exact pidfd reap and a second cgroup sample authorize the
-single journal CAS; the existing exact FD-store removal/absence chain finishes before socket bind.
-Before spawning this child the helper reserves one descriptor and requires waitable default
-`SIGCHLD` plus default `SIGHUP`, `SIGINT` and `SIGTERM`. It retries interrupted pidfd acquisition
-and can spend that reserve on one
-`EMFILE`/`ENFILE` retry. If pidfd acquisition still fails, no cleanup request is sent: the channel
-is closed and the direct child receives only a fixed interval to exit and be reaped. A stopped or
-stuck child invokes fixed non-coredumping `exit_group(70)` instead of continuing with an unpinned
-privileged process. This branch runs no cleanup handlers, publishes no socket and authorizes no
-journal transition or cleanup claim. The startup bookends must already have observed exact
-`Type=simple`, `RemainAfterExit=false`, `ExitType=main`, `KillMode=control-group`,
-no additional success statuses, `Restart=on-failure`, `RestartMode=normal`,
-`RestartUSec=3s`, no forced-restart statuses, exact status-only
-`RestartPreventExitStatus={70,71}`, `SendSIGKILL=true`, `FinalKillSignal=SIGKILL`,
-`TimeoutStopUSec=45s` and
-`TimeoutStopFailureMode=terminate`; the packaged unit pins the same values. Systemd therefore
-enters bounded complete-service-cgroup retirement when the main helper fail-stops and does not
-automatically restart either fixed fail-stop status. Operators should treat status 70 as a terminal
-startup failure and inspect the journal and service logs; do not remove the journal or restart in a
-loop to bypass it. Status 71 is reserved for a diagnostic live-proof setup ambiguity and is likewise
-excluded from automatic restart.
+Crash recovery is no longer an untested placeholder: the retained A14/A15 evidence on
+[`482e33d0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
+includes 25 forced crashes, helper restart recovery, zero remaining owned objects, namespace
+references and descriptors, and unchanged guest state. This is evidence for the exercised Debian 13
+topology and build, not every possible disk corruption, boot transition or installed-package
+recovery scenario. `doctor` prerequisites and a missing journal are not independent cleanup proof.
 
-The boot-scoped v3 module has a canonical, bounded, secret-free codec/CAS store with
-file-sync/rename/directory-sync ordering and failpoint tests. Production owns its startup/shutdown
-actor but exposes no complete general recovery backend or cross-runtime tag-28 proof. The narrow
-singleton reaper still has no retained live forced-crash/KVM recovery evidence. The acceptance
-runner now contains a separate real-image transient-unit test of the pre-handshake stopped-child
-fail-stop and systemd retirement composition, but that is not a successful recovery datapath. A
-restart removal error is terminal for that process and permits no blind retry;
-journal absence is not cleanup evidence, and the bounded manager proof applies only after durable
-`CleanupConfirmed`. The current `doctor`
-also has no helper-v3 crash-ownership readiness check, so other passing checks do not make cleanup
-ready.
+Keep the service fail-stop contract intact. Helper exit status 70 marks a terminal startup
+fail-stop; status 71 marks diagnostic live-proof setup ambiguity. The packaged unit excludes both
+from automatic restart. Inspect the journal and service logs rather than repeatedly restarting or
+loosening systemd's cgroup retirement settings to hide the failure.
 
-A future explicit cleanup must preview generated namespaces, interfaces, route tables, marks, and
-nftables objects without secrets and ask before a root action. Re-running it must be safe.
+Use the normal scoped cleanup lifecycle while the helper is still installed:
 
-The acceptance topology has no standalone cleanup mode: a later supervisor may delete only an
-exact object recorded by its current run and only after the current namespace mount still matches
-the recorded device and inode. A name or prefix match is never ownership proof. Its inner worker is
-fixed repository code reached through inherited IPC and cannot be replaced with an environment or
-command-line supplied program.
+```sh
+volparossa cleanup
+volparossa cleanup --execute
+```
 
-Do not manually run broad `ip netns delete`, nftables flush, route flush, or interface wildcard
-commands. If verified cleanup is unavailable, stop and inspect with read-only commands rather than
-risk unrelated host state.
+The first command previews the service/resource scope. The explicit execution requests agent
+Disconnect, stops the VOLPAROSSA service set and triggers helper shutdown cleanup. It is not a
+generic repair tool for an unrecognized journal or unrelated host resources. Check the resulting
+status and cleanup evidence before declaring resources absent.
+
+Acceptance networking remains confined to disposable namespaces. A later supervisor may delete
+only an exact object recorded by its current run, after checking its namespace device/inode;
+a name or prefix alone is not ownership proof. Do not manually run broad `ip netns delete`,
+nftables flush, route flush or interface wildcard commands. When exact cleanup cannot be verified,
+stop and inspect read-only instead of risking unrelated host state.
 
 ## Uninstall and data removal
 

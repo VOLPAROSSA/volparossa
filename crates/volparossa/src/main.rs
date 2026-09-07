@@ -1,5 +1,6 @@
 //! VOLPAROSSA user-facing command-line interface.
 
+mod content;
 mod control;
 mod doctor;
 mod policy_bootstrap;
@@ -69,6 +70,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: IdentityCommand,
     },
+    /// Explicit offline native-content publishing and reconstruction; no network service.
+    Content {
+        #[command(subcommand)]
+        command: Box<content::Command>,
+    },
     /// Run read-only prerequisite and safety checks.
     Doctor {
         /// Emit a machine-readable JSON report.
@@ -100,7 +106,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: PolicyCommand,
     },
-    /// Independently inspect or change voluntary roles.
+    /// Inspect or change roles subject to capability-based contribution requirements.
     Role {
         #[command(subcommand)]
         command: RoleCommand,
@@ -252,6 +258,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
             passphrase_file,
         } => initialize_identity(identity, passphrase_file.as_deref()),
         CliCommand::Identity { command } => maintain_identity_command(command).await,
+        CliCommand::Content { command } => content::run(*command),
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,
