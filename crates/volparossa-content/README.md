@@ -1,8 +1,9 @@
 # Native content storage and stream transfer
 
 This crate implements real local disk caching and reconstruction for **explicit native
-publications**. It is not a completed content-network checkpoint (C01, C02 or C06), a
-browser cache, an HTTPS-origin verifier, or an integrated distributed retrieval service.
+publications**. C01's bounded-storage/authenticated-transfer checkpoint has passed a real
+protected-route test; this is not C02/C06 completion, a browser cache, an HTTPS-origin verifier,
+or an automatic distributed retrieval service.
 
 - SHA-256-addressed chunks, each at most 256 KiB; at most 1,024 chunks / 256 MiB per object.
 - Canonical protobuf manifest, at most 64 KiB. Ed25519 authenticates version, publisher,
@@ -46,9 +47,19 @@ replicas, removes its publisher store/key, then serves and fetches in separate p
 A disposable-loopback run reconstructs 2,097,275 bytes across two consumer invocations; the
 second reopens its cache and requests only the four missing chunks. The `content` KVM scenario
 connects these ordinary application sockets through the existing transparent MPTCP/TLS ingress
-and two WireGuard legs to the exact policy-authorized destination. Its live result is pending;
+and two WireGuard legs to the exact policy-authorized destination. That test passed on `f0a906ca`;
 two processes on that one destination do not prove independent provider nodes or discovery.
 Do not run the fixture's sockets outside a disposable network namespace/VM.
+
+`private_message` encrypts native messages before storing their chunks, using the existing
+RFC 9180 HPKE dependency/profile plus the sender-signed native manifest. Callers must already
+authenticate recipient encryption and sender signing keys. Messages are bounded to 4 MiB;
+opening verifies all ciphertext before returning plaintext in zeroizing memory. The library
+does not persist recipient keys or plaintext. Five focused message tests and a separate-process
+disposable-loopback proof pass; the `content-message` protected-route VM test remains pending.
+That fixture alone creates an explicit temporary recipient key and plaintext output, excluded
+from artifacts and removed afterward. This is not a mailbox/key-discovery service, forward
+secrecy after recipient-key compromise, anonymous metadata or complete C07.
 
 No network discovery, automatic route selection for content, origin fallback, automatic
 replication, owner-priority I/O scheduling, durable retention, web policy or DNS behavior is

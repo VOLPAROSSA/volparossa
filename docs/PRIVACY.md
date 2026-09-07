@@ -68,10 +68,17 @@ shareability requires its own evidence: missing cookies are insufficient, and en
 not authorize retaining a `no-store` response. Shared DNS objects retain validation and remaining
 TTL, never query history or another user's private DNS view.
 
+The current native-message library encrypts before storage and keeps recipient keys and returned
+plaintext in zeroizing memory. Public manifest metadata still exposes sender, opaque name, size
+and lifetime. It does not provide forward secrecy after recipient-key compromise, key discovery,
+mailbox metadata privacy or delivery guarantees. Only an explicit disposable acceptance fixture
+writes a temporary recipient key and known test plaintext; those files are private, excluded
+from artifacts and explicitly cleaned up. This does not enable default browsing/message capture.
+
 HTTPS adapters must preserve origin authentication, browser isolation, credentials and cache
 semantics without an interception CA or TLS bypass. An optional HTTPS witness would introduce
 explicit additional trust, not an automatic public/default service. These are design boundaries;
-local content-store evidence is not a verified distributed or browser runtime.
+the scoped protected-route content proof is not automatic distributed discovery or a browser runtime.
 
 ## Logs
 

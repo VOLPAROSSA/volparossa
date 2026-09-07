@@ -5,6 +5,7 @@
 //! peer discovery, network retrieval, or an accepted content-network milestone.
 
 mod manifest;
+pub mod private_message;
 mod store;
 pub mod transfer;
 

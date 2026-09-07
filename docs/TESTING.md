@@ -81,8 +81,8 @@ its chunks over two separate disk stores, removes the publisher store and recons
 object from those remaining stores. This is real local storage, not multiple network peers or
 offline website availability. Focused tests cover integrity, independently trusted publisher keys,
 expiry, missing pieces, bounded storage and output publication. There is no automatic browsing
-capture, HTTPS/browser integration, DNS sharing or origin fallback in this crate. C01--C08 remain
-separate functional checkpoints in the [content proposal](CONTENT_NETWORK_PROPOSAL.md).
+capture, HTTPS/browser integration, DNS sharing or origin fallback in this crate. The
+[content proposal](CONTENT_NETWORK_PROPOSAL.md) separates verified C01 from incomplete C02--C08.
 
 Fourteen crate tests now include persistent reopen/ownership/quota checks and real bounded
 stream transfers from two partial stores, corruption rejection, oversized-prefix refusal and
@@ -97,9 +97,21 @@ application through existing transparent ingress inside the Debian 13 guest. Its
 two distinct provider processes, a partial first fetch, exact complete second reconstruction,
 both WireGuard legs, complete privacy captures, exact cleanup and unchanged guest state.
 It retains the ordinary destination policy and does not add a direct-peer egress exception.
-Live verification is pending. Providers share one authorized destination in this first scenario;
+The [live run on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
+passes. Providers share one authorized destination in this first scenario;
 the test does not claim provider-node diversity, distributed discovery, HTTPS authentication,
 automatic redistribution or durable retention. Run socket fixtures only in disposable namespaces.
+
+Five additional `private_message` tests cover encrypted offline reconstruction, wrong keys,
+tampering/rebinding, expiry, fresh encapsulation and 4-MiB limits. The fixture's `recipient-init`,
+`seed-private` and `open-message` modes reuse the same two-process transfer with ciphertext.
+Its disposable-loopback proof passes; this is not yet protected-route evidence. The separate
+`content-message` workflow choice adds recipient decryption, wrong-recipient rejection, recipient
+UID/mode isolation and independent plaintext hash/length checks to the existing network gate.
+Only this explicit fixture persists a temporary recipient key (0600 in a 0700 directory) and
+known test plaintext; both are removed on success and through the interruption/error cleanup.
+Artifacts contain neither file. The library has no private-key persistence or mailbox service.
+Live verification of this new scenario is pending; it does not mark C07 or all alpha complete.
 
 ## Helper-boundary evidence
 

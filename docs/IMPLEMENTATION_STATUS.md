@@ -7,34 +7,60 @@ Last updated: 2026-09-07
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 The proposal records the full idea and a researched HTTPS integration design: authenticated
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
-experiment, through an application/browser boundary. None of C01--C08 is counted as complete;
+experiment, through an application/browser boundary. C01 now passes; C02--C08 remain incomplete;
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Current downlink/mixed-link work continues alongside the first bounded content-store slice.
 
-The content slice now persists/reopens bounded owned caches and pulls missing authenticated
-chunks over caller-supplied streams. Fourteen focused tests and strict crate Clippy pass.
-A separate-process demonstration in a disposable loopback namespace rebuilds 2,097,275 bytes /
-nine chunks after removing the publisher directory/key. The first provider supplies five pieces;
-the consumer restarts, reopens its cache and downloads only four missing pieces from the second.
-The exact output SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
-The new `content` KVM scenario routes the application through existing genuine MPTCP/TLS and
-both WireGuard legs; its live verification is pending. The local process proof is not overlay
-evidence, provider-node diversity, distributed discovery, automatic redistribution, HTTPS/browser
-integration, DNS sharing or recipient messaging. No C01--C08 integrated checkpoint is marked done.
-README and the architecture/privacy/threat/testing summaries are updated as one checkpoint;
+The [content KVM run on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
+passes through existing genuine MPTCP/TLS and both WireGuard legs. Bounded owned caches rebuild
+2,097,275 bytes / nine signed chunks after removing the publisher directory/key. The first
+provider supplies five pieces; the consumer restarts, reopens its cache and downloads only four
+missing pieces from the second. Exact output SHA-256:
+`add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+Both provider processes observe the Exit address, and both selected relay paths carry real
+WireGuard datagrams. All ten boundary privacy captures have stopped intake, reconciled packet
+counts, zero drops and no direct/boundary-violating packets. Four separate application-capture
+summaries do not contain drop counters; they are not included in that ten-window claim.
+Cleanup leaves zero owned objects and unchanged guest state. Retained artifact SHA-256:
+`760c90457c835c6ca4392168f06c9f701f98b092a07af778127aa6e35c826fbd`.
+Together with the existing integrity/quota/missing-part tests, this establishes C01. Two replica
+processes at one policy-authorized destination do not establish independent provider nodes,
+discovery, automatic redistribution, initial distributed publishing/retention, HTTPS or DNS.
+
+The next slice encrypts native messages to an independently authenticated recipient key before
+chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
+strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332
+ciphertext bytes / nine chunks from two replicas after publisher removal and reconstructs the
+original 2,097,275-byte plaintext only for the recipient; a wrong recipient is rejected. Its
+explicit temporary fixture key and plaintext file are removed afterward. The library persists
+neither and returns plaintext in zeroizing memory. The new `content-message` KVM scenario is
+awaiting live verification. This is not a complete mailbox, recipient-key discovery/storage,
+forward secrecy after key compromise, anonymous metadata or C07 completion.
+README and the relevant architecture/protocol/privacy/testing summaries are updated together;
 detailed changing results remain centralized here and in the content proposal.
 
 The complete cooperative `download-sharing` run on unchanged `efc35ac9` is now green.
-Mixed-link now completes warm failover and both downloads, but its 1.052x speed ratio misses
-the required >1.25x gain. Native `76f907fc` preserves all FIFO checks while replacing bytewise
-zero scanning with aligned-safe full-range word reduction. The local lifecycle/FIFO CPU sample
-falls from 3.22--3.29 s to 0.358--0.360 s, but that is not measured network gain. The
+Mixed-link completes warm failover and both downloads, but useful aggregate gain remains unproved.
+Native `76f907fc` preserves all FIFO checks while replacing bytewise zero scanning with
+aligned-safe full-range word reduction. The
 [exact-source mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146021889)
-is pending. Quality on `8d76e3e0` fails a different random network-hint collision in the sampler
-success fixture; `9e2cab8` gives that fixture guaranteed diversity and adds deterministic rejection
-coverage without changing production selection. All 18 sampler tests and strict agent Clippy pass;
-broad CI confirmation is pending. The scoped download evidence is below; it does
-not establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
+completes both hash-matching 32-MiB responses: WAN-only 6.209 Mbps versus LAN+WAN 6.081 Mbps,
+a **0.979x** ratio below the unchanged >1.25x gate. Steady Exit Send/Receive dispatch means fall
+from 567.6/308.5 us to 208.2/97.6 us, but only about 7.25% of aggregate response WireGuard bytes
+use LAN. Baseline and aggregate also select different WAN relays; this is not an isolated A/B
+control. Eight native captures are complete without drops or boundary violations, cleanup is
+complete and guest state unchanged. Artifact SHA-256:
+`59e6fc94f7f00875d4c2ff9c96c323f45853c506cd262d59611ee65e043f1ca0`.
+The next candidate adds a default-off Exit EDT diagnostic: at most 64 sparse metric-only samples
+in seconds 10--20 after first non-startup application scheduling, not after an HTTP response.
+Pinned callback tests and focused ASan/UBSan pass; no scheduler selection, congestion control
+or traffic policy changes. Its integrated measurements remain pending.
+
+[Quality on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146890825) passes
+workspace tests and strict Clippy. It includes `9e2cab8`'s guaranteed-diverse sampler success
+fixture and deterministic rejection coverage, without changing production selection. It does
+not cover the subsequent encrypted-message/diagnostic slice. Download evidence below does not
+establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
 
 ## Current live integration checkpoint
 

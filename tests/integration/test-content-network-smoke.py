@@ -3,8 +3,12 @@
 """Pure evidence-checker tests; these synthetic records do not prove a network transfer."""
 
 import copy
+import json
+import os
 from pathlib import Path
 import runpy
+import subprocess
+import tempfile
 import unittest
 
 CHECK = runpy.run_path(str(Path(__file__).with_name("content-network-smoke.py")))
@@ -58,7 +62,73 @@ def fixture():
                                   publisher_process_exited_before_fetch=True))
 
 
+def private_fixture():
+    value = fixture()
+    # Synthetic envelope overhead, not a cryptographic or live network proof.
+    value["publication"]["bytes"] += 80
+    value["publication"]["recipient_encrypted"] = True
+    value["reconstructed_object"]["bytes"] += 80
+    value["phases"][0]["provider"]["bytes_sent"] += 80
+    value["phases"][0]["consumer"]["bytes_received"] += 80
+    value["phases"][1]["consumer"]["output_bytes"] += 80
+    value["private_message"] = dict(
+        recipient=dict(recipient_public_hex="3" * 64, recipient_private_key_persisted_for_fixture_only=True),
+        recipient_isolation=dict(recipient_uid=1001, provider_uid=1002,
+                                 private_directory_mode="0700", recipient_key_mode="0600",
+                                 key_owned_by_recipient=True, key_unreadable_by_provider=True),
+        decryption=dict(plaintext_bytes=2097275, plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"],
+                        wrong_recipient_rejected=True,
+                        recipient_private_key_persisted_for_fixture_only=True),
+        plaintext_output=dict(plaintext_bytes=2097275, plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"],
+                              private_output_mode="0600", private_output_owned_by_recipient=True),
+        temporary_cleanup=dict(recipient_key_removed=True, plaintext_removed=True, private_directory_removed=True))
+    return value
+
+
 class EvidenceContract(unittest.TestCase):
+    def test_private_transfer_is_distinct_from_public_content(self):
+        value = private_fixture()
+        CHECK["validate_transfer"](value, True)
+        with self.assertRaises(ValueError):
+            CHECK["validate_transfer"](value)
+        with self.assertRaises(ValueError):
+            CHECK["validate_transfer"](fixture(), True)
+        report = dict(report_kind="volparossa-native-private-content-network", source_revision="a" * 40,
+                      success=True, runner_exit_status=0, transfer=value,
+                      cleanup=dict(complete=True, remaining_owned_objects=0),
+                      host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
+                      full_alpha_acceptance_claimed=False, distinct_provider_nodes_claimed=False,
+                      provider_discovery_claimed=False, https_authentication_claimed=False,
+                      product_recipient_key_storage_claimed=False, mailbox_runtime_claimed=False,
+                      full_c07_claimed=False)
+        CHECK["validate_report"](report, "a" * 40, True)
+        for claim in ("product_recipient_key_storage_claimed", "mailbox_runtime_claimed", "full_c07_claimed"):
+            wrong = copy.deepcopy(report)
+            wrong[claim] = True
+            with self.assertRaises(ValueError):
+                CHECK["validate_report"](wrong, "a" * 40, True)
+
+    def test_private_isolation_decryption_and_cleanup_are_required(self):
+        for label, mutation in (
+            ("plaintext stored as ciphertext", lambda value: value["publication"].update(bytes=2097275)),
+            ("oversized envelope", lambda value: value["publication"].update(bytes=2098300)),
+            ("unsealed publication", lambda value: value["publication"].update(recipient_encrypted=False)),
+            ("provider can read key", lambda value: value["private_message"]["recipient_isolation"].update(key_unreadable_by_provider=False)),
+            ("public key file mode", lambda value: value["private_message"]["recipient_isolation"].update(recipient_key_mode="0644")),
+            ("shared UID", lambda value: value["private_message"]["recipient_isolation"].update(provider_uid=1001)),
+            ("wrong recipient succeeds", lambda value: value["private_message"]["decryption"].update(wrong_recipient_rejected=False)),
+            ("wrong plaintext", lambda value: value["private_message"]["plaintext_output"].update(plaintext_sha256="f" * 64)),
+            ("plaintext world-readable", lambda value: value["private_message"]["plaintext_output"].update(private_output_mode="0644")),
+            ("test key persistence hidden", lambda value: value["private_message"]["decryption"].update(recipient_private_key_persisted_for_fixture_only=False)),
+            ("key retained", lambda value: value["private_message"]["temporary_cleanup"].update(recipient_key_removed=False)),
+            ("plaintext retained", lambda value: value["private_message"]["temporary_cleanup"].update(plaintext_removed=False)),
+        ):
+            with self.subTest(label=label):
+                wrong = private_fixture()
+                mutation(wrong)
+                with self.assertRaises(ValueError):
+                    CHECK["validate_transfer"](wrong, True)
+
     def test_scoped_good_report(self):
         report = dict(report_kind="volparossa-native-content-network", source_revision="a" * 40,
                       success=True, runner_exit_status=0, transfer=fixture(),
@@ -105,6 +175,28 @@ class EvidenceContract(unittest.TestCase):
                 mutation(wrong)
                 with self.assertRaises(ValueError):
                     CHECK["validate_transfer"](wrong)
+
+    def test_private_cleanup_is_exact_and_idempotent(self):
+        script = str(Path(__file__).with_name("content-network-smoke.sh").resolve())
+        with tempfile.TemporaryDirectory(prefix="volparossa-content-private-cleanup-") as temporary:
+            work = Path(temporary)
+            private = work / "client-fixtures/content/private"
+            private.mkdir(parents=True, mode=0o700)
+            for name in ("recipient.key", "message.bin"):
+                path = private / name
+                path.write_bytes(b"public non-secret cleanup fixture")
+                path.chmod(0o600)
+            unrelated = work / "unrelated.txt"
+            unrelated.write_text("preserve", encoding="ascii")
+            environment = dict(os.environ, WORK=str(work), WORKER_UID=str(os.getuid()),
+                               WORKER_GID=str(os.getgid()))
+            for _ in range(2):
+                subprocess.run(["sh", "-eu", "-c", '. "$1"; content_network_private_cleanup', "sh", script],
+                               env=environment, check=True, timeout=5, capture_output=True)
+            self.assertFalse(private.exists())
+            self.assertEqual(unrelated.read_text(encoding="ascii"), "preserve")
+            self.assertEqual(json.loads((work / "content-private-cleanup.json").read_text()),
+                             dict(recipient_key_removed=True, plaintext_removed=True, private_directory_removed=True))
 
 
 if __name__ == "__main__":

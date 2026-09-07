@@ -10,6 +10,7 @@ import sys
 ROLES = ("client", "relay0", "relay1", "relay2", "exit")
 DESTINATION = {"ip": "47.163.4.2", "port": 18080}
 OBJECT_BYTES = 2 * 1024 * 1024 + 123
+FIXTURE_PLAINTEXT_SHA256 = "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767"
 
 
 def read(path):
@@ -30,17 +31,21 @@ def require(condition, reason):
         raise ValueError(reason)
 
 
-def validate_transfer(evidence):
+def validate_transfer(evidence, private=False):
     publication = evidence["publication"]
     result = evidence["reconstructed_object"]
+    object_bytes = publication["bytes"]
+    require((OBJECT_BYTES + 16 <= object_bytes <= OBJECT_BYTES + 1024)
+            if private else object_bytes == OBJECT_BYTES,
+            "wrong public object or bounded private ciphertext length")
     require(publication["publisher_removed"] is True
             and publication["publisher_private_key_persisted"] is False
-            and publication["bytes"] == OBJECT_BYTES and publication["chunks"] == 9
+            and publication["chunks"] == 9
             and publication["replica_a_chunks"] == 5 and publication["replica_b_chunks"] == 4
             and re.fullmatch(r"[0-9a-f]{64}", publication["publisher_hex"])
             and re.fullmatch(r"[0-9a-f]{64}", publication["object_sha256"]),
             "publisher or disjoint replica seed not proven")
-    require(result["bytes"] == OBJECT_BYTES and result["sha256"] == publication["object_sha256"]
+    require(result["bytes"] == object_bytes and result["sha256"] == publication["object_sha256"]
             and result["client_cache_initially_absent"] is True
             and result["client_cannot_read_replica_stores"] is True
             and result["publisher_process_exited_before_fetch"] is True,
@@ -51,7 +56,7 @@ def validate_transfer(evidence):
     for index, phase in enumerate(evidence["phases"]):
         replica = "ab"[index]
         received_chunks = (5, 4)[index]
-        received_bytes = (1048699, 1048576)[index]
+        received_bytes = (object_bytes - 1048576, 1048576)[index]
         provider, consumer = phase["provider"], phase["consumer"]
         selected, gates = phase["selected_route"], phase["protected_gates"]
         providers.append(provider["pid"])
@@ -67,7 +72,7 @@ def validate_transfer(evidence):
                 and provider["missing"] == consumer["missing"] == (4, 0)[index]
                 and consumer["cached_chunks"] == (5, 9)[index]
                 and consumer["complete"] is bool(index)
-                and consumer["output_bytes"] == (0, OBJECT_BYTES)[index]
+                and consumer["output_bytes"] == (0, object_bytes)[index]
                 and consumer["object_sha256"] == (None, publication["object_sha256"])[index],
                 "partial then complete chunk retrieval not proven")
         paths, slots = selected["paths"], selected["benchmark_slots"]
@@ -123,9 +128,38 @@ def validate_transfer(evidence):
                 "actual authorized destination transfer not observed")
     require(len(set(providers)) == len(set(consumers)) == 2,
             "two separate provider/client process lifetimes required")
+    if private:
+        validate_private_message(evidence)
 
 
-def build_evidence(work):
+def validate_private_message(evidence):
+    message = evidence["private_message"]
+    recipient, isolation = message["recipient"], message["recipient_isolation"]
+    opened, output = message["decryption"], message["plaintext_output"]
+    require(evidence["publication"]["recipient_encrypted"] is True
+            and re.fullmatch(r"[0-9a-f]{64}", recipient["recipient_public_hex"])
+            and recipient["recipient_private_key_persisted_for_fixture_only"] is True
+            and isolation["recipient_uid"] > 0 and isolation["provider_uid"] > 0
+            and isolation["recipient_uid"] != isolation["provider_uid"]
+            and isolation["private_directory_mode"] == "0700"
+            and isolation["recipient_key_mode"] == "0600"
+            and isolation["key_owned_by_recipient"] is True
+            and isolation["key_unreadable_by_provider"] is True,
+            "recipient key isolation from the publisher/providers not proven")
+    require(opened["plaintext_bytes"] == output["plaintext_bytes"] == OBJECT_BYTES
+            and opened["plaintext_sha256"] == output["plaintext_sha256"] == FIXTURE_PLAINTEXT_SHA256
+            and opened["wrong_recipient_rejected"] is True
+            and opened["recipient_private_key_persisted_for_fixture_only"] is True
+            and output["private_output_mode"] == "0600"
+            and output["private_output_owned_by_recipient"] is True
+            and evidence["publication"]["object_sha256"] != FIXTURE_PLAINTEXT_SHA256,
+            "intended-recipient decryption or wrong-recipient rejection not proven")
+    require(message["temporary_cleanup"] == {
+        "recipient_key_removed": True, "plaintext_removed": True, "private_directory_removed": True},
+        "temporary recipient key or plaintext was not removed")
+
+
+def build_evidence(work, private=False):
     phases = []
     for replica in "ab":
         prefix = f"content-{replica}"
@@ -140,12 +174,22 @@ def build_evidence(work):
         })
     evidence = {"publication": read(work / "content-publication.json"), "phases": phases,
                 "reconstructed_object": read(work / "content-object.json")}
-    validate_transfer(evidence)
+    if private:
+        evidence["private_message"] = {
+            "recipient": read(work / "content-recipient.json"),
+            "recipient_isolation": read(work / "content-recipient-isolation.json"),
+            "decryption": read(work / "content-message-open.json"),
+            "plaintext_output": read(work / "content-message-object.json"),
+            "temporary_cleanup": read(work / "content-private-cleanup.json"),
+        }
+    validate_transfer(evidence, private)
     return {"success": True, **evidence}
 
 
-def validate_report(report, revision):
-    require(report["report_kind"] == "volparossa-native-content-network"
+def validate_report(report, revision, private=False):
+    expected_kind = ("volparossa-native-private-content-network" if private
+                     else "volparossa-native-content-network")
+    require(report["report_kind"] == expected_kind
             and report["source_revision"] == revision and report["success"] is True
             and report["runner_exit_status"] == 0
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
@@ -157,19 +201,23 @@ def validate_report(report, revision):
             and report["provider_discovery_claimed"] is False
             and report["https_authentication_claimed"] is False,
             "exact source, cleanup or honest proof scope not established")
-    validate_transfer(report["transfer"])
+    if private:
+        require(report["product_recipient_key_storage_claimed"] is False
+                and report["mailbox_runtime_claimed"] is False and report["full_c07_claimed"] is False,
+                "private fixture must not claim product recipient storage or a complete mailbox")
+    validate_transfer(report["transfer"], private)
 
 
 if __name__ == "__main__":
     try:
         if len(sys.argv) != 4:
-            raise ValueError("usage: evidence WORK OUTPUT | report REPORT EXPECTED_REVISION")
-        if sys.argv[1] == "evidence":
-            value = build_evidence(Path(sys.argv[2]))
+            raise ValueError("usage: evidence|message-evidence WORK OUTPUT | report|message-report REPORT EXPECTED_REVISION")
+        if sys.argv[1] in {"evidence", "message-evidence"}:
+            value = build_evidence(Path(sys.argv[2]), sys.argv[1] == "message-evidence")
             with Path(sys.argv[3]).open("x", encoding="ascii") as output:
                 output.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
-        elif sys.argv[1] == "report":
-            validate_report(read(Path(sys.argv[2])), sys.argv[3])
+        elif sys.argv[1] in {"report", "message-report"}:
+            validate_report(read(Path(sys.argv[2])), sys.argv[3], sys.argv[1] == "message-report")
         else:
             raise ValueError("unknown evidence mode")
     except (ValueError, KeyError, TypeError, OSError) as error:

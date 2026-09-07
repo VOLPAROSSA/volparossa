@@ -63,6 +63,23 @@ misses, 15 seconds per complete exchange and 300 seconds per session. Errors ter
 of that stream. The caller verifies the complete object's hash before publishing output.
 These native frames do not authenticate an HTTPS origin, discover providers or grant egress.
 
+### Recipient-encrypted native message object (development v1)
+
+The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,
+`2: 32-byte HPKE encapsulated key`, `3: ciphertext including authentication tag`. The fixed
+RFC 9180 base-mode suite is DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, with info
+`volparossa/private-native-message/rfc9180/v1`. Plaintext is bounded to 4 MiB; the envelope adds
+fewer than 64 bytes. Native content type is `application/vnd.volparossa.private-message.v1`,
+revision 1, and each publication has a fresh opaque 32-byte lowercase-hex name.
+
+Canonical associated-data protobuf fields are `1: version`, `2: sender Ed25519 public key`,
+`3: name`, `4: revision`, `5: content type`, `6: created`, `7: expires`, `8: envelope length`.
+The signed native manifest authenticates sender and ordered ciphertext chunks; all chunk and
+whole-object checks precede decryption. HPKE base mode alone is not sender authentication.
+The caller independently authenticates recipient encryption and sender signing keys. These
+objects define neither discovery, private-key persistence, mailbox replay/acknowledgements,
+forward secrecy after recipient-key compromise nor HTTPS-origin authority.
+
 ## Signed control envelope
 
 `SignedEnvelope` commits:

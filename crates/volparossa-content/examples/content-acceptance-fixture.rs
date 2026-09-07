@@ -15,11 +15,15 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use volparossa_content::private_message::{
+    RecipientKeyPair, open_private_message, publish_private_message,
+};
 use volparossa_content::transfer::{TransferLimits, pull_from_peer, serve_peer};
 use volparossa_content::{
     CHUNK_BYTES, CacheLimits, ChunkId, ChunkStore, MAX_MANIFEST_BYTES, Metadata, Publication,
-    SignedManifest, Validity, VerifiedManifest, publish, reassemble_to_file,
+    SignedManifest, Validity, VerifiedManifest, publish, reassemble, reassemble_to_file,
 };
+use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -27,7 +31,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
-        [mode, root] if mode == "seed" => seed(Path::new(root)),
+        [mode, root] if mode == "seed" => seed(Path::new(root), None),
+        [mode, root, public] if mode == "seed-private" => {
+            let public: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| "invalid recipient public key")?;
+            seed(Path::new(root), Some(public))
+        }
+        [mode, root, report] if mode == "recipient-init" => {
+            recipient_init(Path::new(root), Path::new(report))
+        }
+        [mode, root, manifest, publisher, report] if mode == "open-message" => {
+            open_message(Path::new(root), Path::new(manifest), publisher, Path::new(report))
+        }
         [mode, root, replica, listen, report] if mode == "serve" => {
             serve(Path::new(root), replica, listen.parse()?, Path::new(report)).await
         }
@@ -41,7 +55,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => Err("usage: seed ROOT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
     }
 }
 
@@ -57,7 +71,7 @@ fn unix_seconds() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
-fn seed(root: &Path) -> Result<()> {
+fn seed(root: &Path, recipient: Option<[u8; 32]>) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let origin = tempfile::tempdir_in(root)?;
     let origin_path = origin.path().to_path_buf();
@@ -73,25 +87,33 @@ fn seed(root: &Path) -> Result<()> {
         content.extend(vec![b'A' + index; CHUNK_BYTES]);
     }
     content.extend(vec![b'Z'; 123]);
-    let expected_hash = ChunkId::digest(&content);
-    let signed = publish(
-        &mut content.as_slice(),
-        Publication {
-            metadata: Metadata {
-                name: "disposable-native-network-publication".into(),
-                revision: 1,
-                content_type: "application/octet-stream".into(),
+    let validity = Validity {
+        created: now,
+        expires: now + 3600,
+    };
+    let signed = if let Some(recipient) = recipient {
+        publish_private_message(&content, &recipient, &publisher, validity, &mut source)?
+    } else {
+        publish(
+            &mut content.as_slice(),
+            Publication {
+                metadata: Metadata {
+                    name: "disposable-native-network-publication".into(),
+                    revision: 1,
+                    content_type: "application/octet-stream".into(),
+                },
+                length: content.len() as u64,
+                validity,
             },
-            length: content.len() as u64,
-            validity: Validity {
-                created: now,
-                expires: now + 3600,
-            },
-        },
-        &publisher,
-        &mut source,
-    )?;
+            &publisher,
+            &mut source,
+        )?
+    };
     let manifest = signed.verify(&trusted_publisher, now)?;
+    let mut published_bytes = Vec::new();
+    reassemble(&manifest, &mut [&mut source], now, &mut published_bytes)?;
+    let expected_hash = ChunkId::digest(&published_bytes);
+    drop(published_bytes);
     for (index, chunk) in manifest.chunks().iter().enumerate() {
         let bytes = source.get(chunk.id())?.ok_or("publisher chunk missing")?;
         let target = if index % 2 == 0 {
@@ -123,8 +145,78 @@ fn seed(root: &Path) -> Result<()> {
         "replica_b_chunks": second_count,
         "publisher_removed": true,
         "publisher_private_key_persisted": false,
+        "recipient_encrypted": recipient.is_some(),
     });
     write_report(&root.join("publication.json"), &report)
+}
+
+// Explicit disposable test key material, not the product's recipient-key storage API.
+// No key bytes appear in arguments, environment, stdout or retained CI artifacts.
+fn recipient_init(root: &Path, report: &Path) -> Result<()> {
+    let private = root.join("private");
+    fs::DirBuilder::new().mode(0o700).create(&private)?;
+    let mut key = Zeroizing::new([0_u8; 32]);
+    getrandom::fill(&mut *key).map_err(|_| "recipient entropy unavailable")?;
+    let recipient = RecipientKeyPair::from_private_key(Zeroizing::new(*key))?;
+    write_new(&private.join("recipient.key"), key.as_slice())?;
+    write_report(
+        report,
+        &json!({
+            "report_kind": "volparossa-disposable-recipient",
+            "recipient_public_hex": hex::encode(recipient.public_key()),
+            "recipient_private_key_persisted_for_fixture_only": true,
+        }),
+    )
+}
+
+fn open_message(root: &Path, manifest_path: &Path, publisher: &str, report: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let key_path = root.join("private/recipient.key");
+    let metadata = fs::symlink_metadata(&key_path)?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.len() != 32
+    {
+        return Err("invalid private fixture key ownership or format".into());
+    }
+    let bytes = Zeroizing::new(read_bounded(&key_path, 32)?);
+    let key = Zeroizing::new(
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| "invalid private key length")?,
+    );
+    let recipient = RecipientKeyPair::from_private_key(key)?;
+    let manifest = manifest(manifest_path, publisher)?;
+    let mut store = ChunkStore::open(&root.join("cache"), limits())?;
+    let wrong = RecipientKeyPair::generate()?;
+    if open_private_message(&manifest, &mut [&mut store], unix_seconds()?, &wrong).is_ok() {
+        return Err("wrong recipient unexpectedly decrypted the message".into());
+    }
+    let plaintext =
+        open_private_message(&manifest, &mut [&mut store], unix_seconds()?, &recipient)?;
+    let length = plaintext.len();
+    let digest = ChunkId::digest(&plaintext).to_string();
+    // This fixed public test vector is the only plaintext accepted by this fixture.
+    // The real library accepts arbitrary caller-authorized bytes and does not log them.
+    if length != 2 * 1024 * 1024 + 123
+        || digest != "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767"
+    {
+        return Err("private fixture plaintext mismatch".into());
+    }
+    write_new(&root.join("private/message.bin"), &plaintext)?;
+    write_report(
+        report,
+        &json!({
+            "report_kind": "volparossa-private-content-recipient",
+            "plaintext_bytes": length,
+            "plaintext_sha256": digest,
+            "wrong_recipient_rejected": true,
+            "recipient_private_key_persisted_for_fixture_only": true,
+        }),
+    )
 }
 
 async fn serve(root: &Path, replica: &str, listen: SocketAddr, report: &Path) -> Result<()> {

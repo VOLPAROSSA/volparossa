@@ -87,10 +87,14 @@ The next [content-network extension](docs/CONTENT_NETWORK_PROPOSAL.md) adds boun
 storage: verifiable chunks fetched from useful peers, spare-resource redistribution, validated
 DNS sharing, signed public websites/content and recipient-encrypted offline messages. The local
 `volparossa-content` foundation now reopens persistent caches and pulls verified chunks over an
-application-supplied stream. Two separate replica processes reconstruct a 2.1-MB object after its
-publisher copy is removed; that process proof uses disposable loopback, not the overlay. The
-protected-route VM scenario is awaiting verification. Distributed discovery, an offline website/
-message service and an HTTPS browser adapter remain unfinished; see the proposal's C01--C08 scope.
+application-supplied stream. Its protected-route VM test passed on `f0a906ca`: two separate replica
+processes reconstruct a 2.1-MB object after its publisher copy is removed, through real
+MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authenticated-transfer
+checkpoint C01, not automatic distributed discovery or a complete offline website service.
+Recipient-encrypted messages now use the same chunk storage and transfer API; a separate-process
+disposable-loopback proof passes, while their protected-route VM test is still pending. A complete
+mailbox, automatic redistribution, shared DNS and the HTTPS adapter remain unfinished; see the
+proposal's C02--C08 scope. Neither these fixtures nor more replicas establish a general speedup.
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental

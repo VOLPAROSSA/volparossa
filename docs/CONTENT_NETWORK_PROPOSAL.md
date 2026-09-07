@@ -1,7 +1,8 @@
 # Distributed content, publishing and offline delivery
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
-storage and bounded stream transfer. **Distributed discovery and HTTPS integration remain absent.**
+storage, protected-route transfer and a recipient-encrypted message library.
+**Distributed discovery and HTTPS integration remain absent.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Finish the current downlink and mixed-link repairs while resolving the application boundary.
 
@@ -104,16 +105,37 @@ directory/key are removed: the first replica supplies five chunks / 1,048,699 by
 restarts and the second supplies only the remaining four / 1,048,576 bytes. The reconstructed
 SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
 
-The dedicated `content` KVM scenario now connects that application through the existing real
-MPTCP/TLS ingress, two WireGuard legs and exact policy-authorized destination; live verification
-is pending. Neither the local proof nor two replica processes on the same destination establish
+The dedicated [`content` KVM scenario on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
+passes through the existing real MPTCP/TLS ingress, two WireGuard legs and exact policy-authorized
+destination. Both providers observe the Exit address; ten complete, zero-drop boundary privacy
+captures and cleanup with unchanged guest state pass. This completes C01. Two replica processes
+on the same destination do not establish
 distributed provider discovery, independent provider nodes, durable offline availability,
 HTTPS authenticity or speed gain. No browsing capture is enabled. [Testing instructions](TESTING.md#native-content-storage-foundation)
 and crate documentation record these limits. Only existing workspace dependencies are reused.
 
-## Integrated functional checkpoints (all pending)
+### Recipient-encrypted native messages
 
-- [ ] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection.
+The next implemented library slice uses the existing RFC 9180 HPKE profile
+(X25519/HKDF-SHA256/ChaCha20-Poly1305), plus the native sender-signed manifest. The sender must
+already trust the recipient's encryption key; the recipient must already trust the sender's
+signing key. Neither association comes from the storage peer. Up to 4 MiB of plaintext is
+encrypted before chunking; associated data binds sender, opaque name, type, revision, lifetime
+and envelope length. Caches contain only ciphertext. The library keeps recipient keys in memory
+and returns verified plaintext in zeroizing memory; it does not implement a key store.
+
+Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
+proof pass. The `content-message` protected-route KVM scenario remains pending. Its disposable
+test-only recipient key and cleartext output have explicit ownership checks and cleanup; they
+are not an example of production private-key persistence. Public sender identity, length and
+lifetime remain visible. Key discovery, a mailbox, anti-spam/acknowledgements, retention, forward
+secrecy after key compromise and email interoperability are not supplied by this slice. C07
+therefore stays open rather than counting the configured fixture as a complete messaging service.
+
+## Integrated functional checkpoints
+
+- [x] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection;
+  protected-route transfer verified on `f0a906ca` (source-scoped evidence above).
 - [ ] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback.
 - [ ] C03: bounded opportunistic redistribution improving reachable chunk diversity.
 - [ ] C04: owner-priority network/storage behavior and fair bounded contribution under contention.

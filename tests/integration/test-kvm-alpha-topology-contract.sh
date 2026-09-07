@@ -25,6 +25,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
     "$script" --preview --scenario content | grep -Fi 'content' >/dev/null
+    "$script" --preview --scenario content-message | grep -Fi 'content-message' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?

@@ -4603,7 +4603,9 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
+ "hpke",
  "prost",
+ "rand_chacha 0.10.0",
  "rand_core 0.6.4",
  "rustix",
  "serde_json",
@@ -4611,6 +4613,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

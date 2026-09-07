@@ -27,10 +27,21 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message]'
 }
 
 print_plan() {
+    if [ "$scenario" = content-message ]; then
+        printf '%s\n' \
+            'VOLPAROSSA private content-message replica-transfer smoke plan:' \
+            '  create an explicit disposable recipient key under the application UID, directory 0700/file 0600;' \
+            '  give the publisher only the public recipient key and encrypt before chunking;' \
+            '  remove the publisher, fetch ciphertext from two separate replica processes via protected MPTCP;' \
+            '  require recipient-only decryption, wrong-key rejection, exact bytes and complete privacy captures;' \
+            '  remove the temporary key/plaintext, clean owned networking and compare guest-root host state;' \
+            '  emit content-message-smoke.json; no real mailbox, product key storage, C07 or A01-A15 claim.'
+        return
+    fi
     if [ "$scenario" = content ]; then
         printf '%s\n' \
             'VOLPAROSSA native content replica-transfer smoke plan:' \
@@ -194,7 +205,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -308,7 +319,7 @@ if [ "$scenario" = mixed-link ]; then
         && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
 fi
-if [ "$scenario" = content ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     if [ ! -f "$source_directory/tests/integration/content-network-smoke.sh" ] \
         || [ -L "$source_directory/tests/integration/content-network-smoke.sh" ] \
         || [ ! -f "$source_directory/tests/integration/content-network-smoke.py" ] \
@@ -1042,6 +1053,9 @@ cleanup() {
         wait "$DESTINATION_PID" 2>/dev/null || true
     fi
 
+    if [ "$scenario" = content-message ]; then
+        content_network_private_cleanup || original_status=1
+    fi
     capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
@@ -1259,7 +1273,7 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = content ]; then
+    if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
         content_network_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = crash-recovery ]; then
         crash_recovery_finalize_report "$original_status" || original_status=1
@@ -1331,7 +1345,7 @@ if [ "$scenario" = mixed-link ]; then
     # shellcheck source=tests/integration/mixed-link-smoke.sh
     . "$source_directory/tests/integration/mixed-link-smoke.sh"
 fi
-if [ "$scenario" = content ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     # shellcheck source=tests/integration/content-network-smoke.sh
     . "$source_directory/tests/integration/content-network-smoke.sh"
 fi
@@ -1388,7 +1402,7 @@ install -o root -g "$AGENT_GID" -m 0555 \
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/tls-policy-acceptance-fixture" \
     "$WORK/bin/examples/tls-policy-acceptance-fixture"
-if [ "$scenario" = content ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
@@ -1953,6 +1967,10 @@ launch_mpquic() {
     # packet content or browsing identifiers. All normal scenarios leave the probe disabled.
     set --
     [ "$scenario" != mixed-link ] || set -- --property=Environment=VMP_RPC_TIMING=1
+    if [ "$scenario" = mixed-link ] && [ "$native_mode" = exit ]; then
+        # Bounded, sparse scheduler fields only; no general DEBUG logs or payload logging.
+        set -- '--property=Environment=VMP_RPC_TIMING=1 VMP_DEV_EDT_TRACE=1'
+    fi
     systemd-run --no-block --unit="$mpquic_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable native MPQUIC $node" \
         --service-type=exec \
@@ -3528,7 +3546,7 @@ elif [ "$scenario" = reciprocity ]; then
 fi
 
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
-    && [ "$scenario" != content ]; then
+    && [ "$scenario" != content ] && [ "$scenario" != content-message ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4078,7 +4096,8 @@ start_privacy_observers() {
     privacy_prefix=${1:-privacy}
     case $privacy_prefix in
         privacy|mptcp-privacy) ;;
-        content-a-privacy|content-b-privacy) [ "$scenario" = content ] || return 1 ;;
+        content-a-privacy|content-b-privacy)
+            [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
@@ -4765,7 +4784,7 @@ finish_mptcp_download() {
     return "$download_status"
 }
 
-if [ "$scenario" = content ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     content_network_run
     exit 0
 fi

@@ -13,12 +13,15 @@ publish = false
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+hpke.workspace = true
 prost.workspace = true
+rand_chacha_10.workspace = true
 rustix.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 rand_core.workspace = true

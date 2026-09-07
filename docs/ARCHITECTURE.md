@@ -36,8 +36,10 @@ automatically provide additive throughput.
 The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the single design reference for
 bounded contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
 DNS sharing, signed public publication and recipient-encrypted offline delivery. The local
-`volparossa-content` foundation has disk-storage and authenticated reconstruction evidence;
-distributed runtime, browser integration and the complete C01--C08 scope remain unfinished.
+`volparossa-content` foundation has bounded persistent storage and protected-route retrieval
+evidence (C01). Recipient-encrypted messages reuse that storage/transfer layer, with caller-trusted
+keys and no implicit key store or mailbox. Distributed discovery, browser integration and the
+remaining C02--C08 scope are unfinished; exact test revisions are in the implementation status.
 
 This is an application layer, not an HTTPS-decrypting property of the VPN. Reconstructed bytes
 need authenticated origin/publisher authority as well as chunk integrity, and must retain

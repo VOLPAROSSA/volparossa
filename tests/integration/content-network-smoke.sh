@@ -10,6 +10,84 @@ content_network_event_after() {
     ' "$WORK/logs-$1.txt"
 }
 
+content_network_recipient_init() {
+    PHASE=content-recipient-init
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$content_binary" recipient-init "$content_client_root" \
+        "$WORK/client-fixtures/content-recipient.json" \
+        >"$WORK/content-recipient.log" 2>&1 || fail CONTENT_RECIPIENT_INIT_FAILED
+    content_private=$content_client_root/private
+    if [ -L "$content_private" ] || [ ! -d "$content_private" ] \
+        || [ -L "$content_private/recipient.key" ] || [ ! -f "$content_private/recipient.key" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_private")" != "700:$WORKER_UID:$WORKER_GID" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_private/recipient.key")" != "600:$WORKER_UID:$WORKER_GID" ]; then
+        fail CONTENT_RECIPIENT_KEY_PERMISSIONS_INVALID
+    fi
+    if setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$content_private/recipient.key"; then
+        fail CONTENT_PROVIDER_CAN_READ_RECIPIENT_KEY
+    fi
+    # This report contains only the public recipient key, never its private serialization.
+    install -o root -g root -m 0600 "$WORK/client-fixtures/content-recipient.json" \
+        "$WORK/content-recipient.json"
+    content_recipient_public=$(jq -er '.recipient_public_hex | select(test("^[0-9a-f]{64}$"))' \
+        "$WORK/content-recipient.json") || fail CONTENT_RECIPIENT_PUBLIC_KEY_INVALID
+    jq -n --argjson recipient_uid "$WORKER_UID" --argjson provider_uid "$AGENT_UID" \
+        '{recipient_uid:$recipient_uid,provider_uid:$provider_uid,
+          private_directory_mode:"0700",recipient_key_mode:"0600",
+          key_owned_by_recipient:true,key_unreadable_by_provider:true}' \
+        >"$WORK/content-recipient-isolation.json"
+}
+
+content_network_private_cleanup() {
+    # Exact fixture-owned paths only, including after interruption; no recursive removal.
+    content_private=$WORK/client-fixtures/content/private
+    if [ -L "$content_private" ]; then return 1; fi
+    if [ -e "$content_private" ]; then
+        [ -d "$content_private" ] || return 1
+        [ "$(stat -Lc '%a:%u:%g' "$content_private")" = "700:$WORKER_UID:$WORKER_GID" ] \
+            || return 1
+        for content_secret in "$content_private/recipient.key" "$content_private/message.bin"; do
+            [ ! -L "$content_secret" ] || return 1
+            if [ -e "$content_secret" ]; then
+                [ -f "$content_secret" ] || return 1
+                [ "$(stat -Lc '%a:%u:%g' "$content_secret")" = "600:$WORKER_UID:$WORKER_GID" ] \
+                    || return 1
+                rm -f -- "$content_secret" || return 1
+            fi
+        done
+        # Unexpected leftover files are a failed fixture cleanup, never silently ignored.
+        rmdir -- "$content_private" || return 1
+    fi
+    jq -n '{recipient_key_removed:true,plaintext_removed:true,private_directory_removed:true}' \
+        >"$WORK/content-private-cleanup.json"
+}
+
+content_network_open_message() {
+    PHASE=content-recipient-decryption
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$content_binary" open-message "$content_client_root" \
+        "$WORK/client-fixtures/content-manifest.bin" "$content_publisher" \
+        "$WORK/client-fixtures/content-message-open.json" \
+        >"$WORK/content-message-open.log" 2>&1 || fail CONTENT_RECIPIENT_DECRYPTION_FAILED
+    content_plaintext=$content_client_root/private/message.bin
+    if [ -L "$content_plaintext" ] || [ ! -f "$content_plaintext" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_plaintext")" != "600:$WORKER_UID:$WORKER_GID" ]; then
+        fail CONTENT_PRIVATE_OUTPUT_PERMISSIONS_INVALID
+    fi
+    install -o root -g root -m 0600 "$WORK/client-fixtures/content-message-open.json" \
+        "$WORK/content-message-open.json"
+    # Only the hash/length of known public test bytes are exported, never the plaintext file.
+    jq -n --arg sha256 "$(sha256sum "$content_plaintext" | awk '{print $1}')" \
+        --argjson bytes "$(stat -Lc '%s' "$content_plaintext")" \
+        '{plaintext_sha256:$sha256,plaintext_bytes:$bytes,private_output_mode:"0600",
+          private_output_owned_by_recipient:true}' >"$WORK/content-message-object.json"
+    content_network_private_cleanup || fail CONTENT_PRIVATE_FIXTURE_CLEANUP_FAILED
+}
+
 content_network_phase() {
     content_replica=$1
     content_prefix=content-$content_replica
@@ -104,19 +182,28 @@ content_network_run() {
     content_root=$WORK/content-seed/publication
     content_client_root=$WORK/client-fixtures/content
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-seed"
+    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$content_client_root"
+    set -- seed "$content_root"
+    if [ "$scenario" = content-message ]; then
+        content_network_recipient_init
+        set -- seed-private "$content_root" "$content_recipient_public"
+    fi
+    PHASE=content-seed
     # Persistent cache markers bind their creator UID and inode: do not chown a seeded store.
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
-        --no-new-privs -- "$content_binary" seed "$content_root" \
+        --no-new-privs -- "$content_binary" "$@" \
         >"$WORK/content-seed.log" 2>&1 || fail CONTENT_SEED_FAILED
     install -o root -g root -m 0600 "$content_root/publication.json" "$WORK/content-publication.json"
-    jq -e '.publisher_removed == true and .publisher_private_key_persisted == false
-        and .chunks == 9 and .bytes == 2097275 and .replica_a_chunks == 5 and .replica_b_chunks == 4
+    jq -e --arg scenario "$scenario" '.publisher_removed == true and .publisher_private_key_persisted == false
+        and .chunks == 9 and .replica_a_chunks == 5 and .replica_b_chunks == 4
+        and (if $scenario == "content-message" then .recipient_encrypted == true
+                and .bytes >= 2097291 and .bytes <= 2098299
+             else .bytes == 2097275 end)
         and (.publisher_hex | test("^[0-9a-f]{64}$"))
         and (.object_sha256 | test("^[0-9a-f]{64}$"))' \
         "$WORK/content-publication.json" >/dev/null || fail CONTENT_PUBLICATION_INVALID
     content_publisher=$(jq -er '.publisher_hex' "$WORK/content-publication.json")
-    install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$content_client_root"
     install -o "$WORKER_UID" -g "$WORKER_GID" -m 0400 "$content_root/manifest.bin" \
         "$WORK/client-fixtures/content-manifest.bin"
     if [ -e "$content_client_root/cache" ] || [ -e "$content_client_root/object.bin" ]; then
@@ -143,8 +230,13 @@ content_network_run() {
         '{sha256:$sha256,bytes:$bytes,client_cache_initially_absent:true,
           client_cannot_read_replica_stores:true,publisher_process_exited_before_fetch:true}' \
         >"$WORK/content-object.json"
+    content_evidence_mode=evidence
+    if [ "$scenario" = content-message ]; then
+        content_network_open_message
+        content_evidence_mode=message-evidence
+    fi
     python3 -B "$source_directory/tests/integration/content-network-smoke.py" \
-        evidence "$WORK" "$WORK/content-evidence.json" || fail CONTENT_NETWORK_EVIDENCE_INVALID
+        "$content_evidence_mode" "$WORK" "$WORK/content-evidence.json" || fail CONTENT_NETWORK_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
     PHASE=content-complete
 }
@@ -153,12 +245,23 @@ content_network_finalize_report() {
     content_status=$1
     content_evidence=$(optional_json_evidence "$WORK/content-evidence.json")
     content_host=$(optional_json_evidence "$WORK/a15-evidence.json")
+    content_report_name=content-network-smoke.json
+    content_report_kind=volparossa-native-content-network
+    content_report_mode=report
+    content_scope='two separate replica processes at one authorized destination through actual MPTCP/TLS/WireGuard; native signatures, not HTTPS origin authentication'
+    if [ "$scenario" = content-message ]; then
+        content_report_name=content-message-smoke.json
+        content_report_kind=volparossa-native-private-content-network
+        content_report_mode=message-report
+        content_scope='ciphertext-only native replicas over protected MPTCP, publisher offline, intended-recipient decryption; explicit temporary test key, not product key storage or mailbox runtime'
+    fi
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
         --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
+        --arg kind "$content_report_kind" --arg scope "$content_scope" --arg scenario "$scenario" \
         --argjson status "$content_status" --argjson evidence "$content_evidence" \
         --argjson host "$content_host" --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
-      {schema_version:1,report_kind:"volparossa-native-content-network",
+      {schema_version:1,report_kind:$kind,
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and $complete and
          $remaining == 0 and $host.unchanged == true),
@@ -166,10 +269,13 @@ content_network_finalize_report() {
        observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},
        host_state:($host | del(.acceptance_id)),
-       scope:"two separate replica processes at one authorized destination through actual MPTCP/TLS/WireGuard; native signatures, not HTTPS origin authentication",
+       scope:$scope,
        distinct_provider_nodes_claimed:false,provider_discovery_claimed:false,
        full_alpha_acceptance_claimed:false,https_authentication_claimed:false}
-    ' >"$WORK/content-network-smoke.json" || return 1
+      + (if $scenario == "content-message" then
+          {product_recipient_key_storage_claimed:false,mailbox_runtime_claimed:false,full_c07_claimed:false}
+         else {} end)
+    ' >"$WORK/$content_report_name" || return 1
     for content_artifact in "$WORK"/content-*.json "$WORK"/content-*.txt \
         "$WORK"/content-*.log "$WORK"/content-*.out "$WORK"/content-*.err; do
         [ ! -f "$content_artifact" ] || [ -L "$content_artifact" ] || \
@@ -177,5 +283,5 @@ content_network_finalize_report() {
                 "$output_directory/$(basename -- "$content_artifact")"
     done
     python3 -B "$source_directory/tests/integration/content-network-smoke.py" \
-        report "$WORK/content-network-smoke.json" "$expected_commit"
+        "$content_report_mode" "$WORK/$content_report_name" "$expected_commit"
 }

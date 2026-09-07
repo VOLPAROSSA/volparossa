@@ -22,6 +22,7 @@ on:
           - wifi-link
           - uplink-link
           - content
+          - content-message
   pull_request:
     branches:
       - main
@@ -218,8 +219,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if test "$VOLPAROSSA_ALPHA_SCENARIO" = content; then
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = content || test "$VOLPAROSSA_ALPHA_SCENARIO" = content-message; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/content-network-smoke.json"
+            if test "$VOLPAROSSA_ALPHA_SCENARIO" = content-message; then
+              report="$VOLPAROSSA_ALPHA_OUTPUT/content-message-smoke.json"
+            fi
             if test -f "$report"; then
               jq -r '"native replica network retrieval succeeded: \(.success)",
                 "replica processes: \(.transfer.phases | length)/2",
@@ -227,6 +231,13 @@ jobs:
                 "blocker: \(.observed_blocker // "none")",
                 "scope: native signed chunks, not HTTPS or independent provider nodes"' \
                 "$report" >>"$GITHUB_STEP_SUMMARY"
+              if test "$VOLPAROSSA_ALPHA_SCENARIO" = content-message; then
+                jq -r '"recipient plaintext bytes: \(.transfer.private_message.decryption.plaintext_bytes)",
+                  "wrong recipient rejected: \(.transfer.private_message.decryption.wrong_recipient_rejected)",
+                  "temporary key removed: \(.transfer.private_message.temporary_cleanup.recipient_key_removed)",
+                  "scope: explicit disposable recipient fixture, not a complete mailbox or product key storage"' \
+                  "$report" >>"$GITHUB_STEP_SUMMARY"
+              fi
             else
               printf '%s\n' 'The VM did not publish native content network evidence.' >>"$GITHUB_STEP_SUMMARY"
             fi
@@ -421,7 +432,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -465,14 +476,19 @@ jobs:
           ' "$report" >/dev/null
 
       - name: Require real native content replica transfer evidence
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content'
+        if: always() && (env.VOLPAROSSA_ALPHA_SCENARIO == 'content' || env.VOLPAROSSA_ALPHA_SCENARIO == 'content-message')
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
           set -euo pipefail
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-network-smoke.json"
-          python3 -B tests/integration/content-network-smoke.py report "$report" "$GITHUB_SHA"
+          check_mode=report
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = content-message; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/content-message-smoke.json"
+            check_mode=message-report
+          fi
+          python3 -B tests/integration/content-network-smoke.py "$check_mode" "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -806,7 +822,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
