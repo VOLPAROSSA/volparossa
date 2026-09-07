@@ -112,9 +112,12 @@ The DHT and control lookup carry no object IDs, URLs or publication-key catalogu
 16 offers and 64 explicitly registered publications are supported. Compilation and focused
 provider/discovery/control/CLI tests pass. The first independent-provider KVM attempt on
 `aa634ce1` failed before retrieval. The later `fdcb64d3` run now completes live discovery with
-two verified offers; retrieval still fails at the missing provider application-TLS boundary.
-Cleanup completed with unchanged host state. C02/C06 remain open:
-automatic placement, retention, name lookup and live independent-node retrieval are not proven.
+two verified offers. With application TLS, `a20efb71` then reconstructs the complete object
+through native and HTTPS commands, including partial origin ranges. Its final evidence gate
+uses the wrong fixture Exit interface address; corrected raw-record validation passes, but the
+original scenario still failed before its final explicit service-stop steps. Cleanup completed
+with unchanged host state. The full C02 scenario remains pending; automatic placement,
+retention and name lookup are not supplied by this retrieval proof, and C06 remains open.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.
 

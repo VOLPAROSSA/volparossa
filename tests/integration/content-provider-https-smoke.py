@@ -23,8 +23,9 @@ RANGES = ((262144, 524287), (786432, 1048575),
 RANGE_BYTES = 262144
 
 
-def exit_source(source):
-    return isinstance(source, str) and bool(re.fullmatch(r"46\.162\.3\.1:[0-9]{1,5}", source)) \
+def origin_exit_source(source):
+    # The destination-facing xd link differs from the Exit's provider/relay underlay.
+    return isinstance(source, str) and bool(re.fullmatch(r"47\.163\.4\.1:[0-9]{1,5}", source)) \
         and 0 < int(source.rsplit(":", 1)[1]) <= 65535
 
 
@@ -152,7 +153,7 @@ def validate_evidence(evidence):
             and [r["payload_bytes"] for r in records]
                 == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4
             and all(r["tls13"] is True and r["alpn_http11"] is True
-                    and exit_source(r["source"]) for r in records),
+                    and origin_exit_source(r["source"]) for r in records),
             "two genuine origin HTTPS metadata sessions and four body ranges not proven")
     require(all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
                 and r["range_total"] is None for r in records[:2])

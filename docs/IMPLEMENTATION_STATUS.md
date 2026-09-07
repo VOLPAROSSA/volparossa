@@ -114,6 +114,24 @@ formatter checks also pass. HTTPS closes only after the existing exact-body/orig
 does not confuse a complete HTTP body with clean carrying-transport EOF; the agent separately
 requires outer TLS completion. The independent-node KVM rerun is still pending.
 
+The [next run on `a20efb71`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34163225687)
+does complete all three real downloads: native and origin-authenticated complete-cache retrieval
+each receive 2,097,275 bytes from two independent nodes; the missing-cache case combines
+1,048,699 peer bytes with four exact HTTPS ranges totaling 1,048,576 bytes. All three outputs have
+SHA-256 `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`, and all eleven
+protected Exit flows complete normally. The final HTTPS evidence check nevertheless fails:
+it incorrectly expects the Exit's provider-facing address `46.162.3.1`, rather than the
+destination-facing `xd` address `47.163.4.1` configured by the unchanged topology. The checker
+now requires that exact destination-facing address and explicitly rejects the other one.
+Its two tests and five combined-provider checker tests pass. Re-evaluation of the unchanged
+raw HTTPS records with the corrected checker passes both cases; all eighteen physical/control
+captures drain completely with zero drops/violations. Cleanup leaves zero owned objects and
+byte-identical guest state. Artifact SHA-256:
+`be976de3e8d44098ac799518624b89ad9a4a5233e5ae4396d5969005e7d1b7ce`.
+The historical run remains **failed**, and its final native-provider stop/status steps were not
+reached; no successful final report is invented from the re-evaluation. [Quality on exactly
+`a20efb71`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34163214885) passes in full.
+
 The first C03 redistribution library and normal agent hooks are now integrated locally. Five
 duplex tests pass: uptake then re-serving, non-evicting quota, exclusions/duplicates, signed
 expiry/hop bounds, corrupt input and timeout. Existing v1 provider tests remain 4/4 passing.
@@ -132,7 +150,14 @@ uptake of previously absent Q, original-provider agent shutdown, and a new consu
 Q retrieval from the replica. Five-role physical captures cover both phases and all fixture
 interfaces, with actual object hashes, fresh-cache isolation and unchanged-host cleanup gates.
 The two evidence-checker tests, five capture tests, thirteen existing benchmark tests and narrow
-shell/runner checks pass. The live sequence has not run yet; it is not counted as C03 completion.
+shell/runner checks pass. Its [first live run on `a20efb71`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34163227425)
+fails before the first download: the fixture leaves only two reachable relays, while normal
+preselection requires a separate control relay plus two data relays. Both original publications
+register, but the replica's route remains unavailable with `PRESELECTION_SAMPLE_INVALID_SNAPSHOT`.
+The fixture needs a third control-capable relay; the product's route/privacy requirements are
+not lowered. Cleanup completes with zero owned objects and unchanged guest state. Artifact
+SHA-256: `aa35f10306adbb4d275475c0331ffeff386faf4630162d970b8e91b5b89005ea`.
+No uptake, re-serving or C03 completion is established by that failed run.
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and

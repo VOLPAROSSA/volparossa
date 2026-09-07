@@ -68,9 +68,9 @@ def fixture(control_node="relay2", native_publication=None):
             selected_route=copy.deepcopy(route), privacy=privacy, control=control)
     origin = dict(pid=300, connections=[
         dict(kind="metadata", payload_bytes=1024, tls13=True, alpn_http11=True,
-             source="46.162.3.1:32100", status=200, range_start=None, range_end=None, range_total=None)
+             source="47.163.4.1:32100", status=200, range_start=None, range_end=None, range_total=None)
         for _ in range(2)] + [dict(kind="body_range", payload_bytes=CHECK["RANGE_BYTES"],
-             tls13=True, alpn_http11=True, source="46.162.3.1:32100", status=206,
+             tls13=True, alpn_http11=True, source="47.163.4.1:32100", status=206,
              range_start=start, range_end=end, range_total=CHECK["BYTES"])
         for start, end in CHECK["RANGES"]])
     return dict(success=True, publication=publication, native_publication=original,
@@ -103,6 +103,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
             (("missing_provider_stop", "serving"), True),
             (("origin", "connections", 0, "tls13"), False),
             (("origin", "connections", 1, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 1, "source"), "46.162.3.1:32100"),
             (("origin", "connections", 2, "status"), 200),
             (("origin", "connections", 3, "range_start"), 0),
             (("origin", "connections", 4, "range_end"), 1572864),
