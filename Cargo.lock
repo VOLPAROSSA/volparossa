@@ -4597,6 +4597,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "volparossa-content"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hex",
+ "prost",
+ "rand_core 0.6.4",
+ "rustix",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "volparossa-core"
 version = "0.1.0"
 dependencies = [
