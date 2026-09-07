@@ -67,6 +67,11 @@ so native RPC saturation is not its cause. The response barrier was released, bu
 WAN-only response or useful aggregation ratio exists. Cleanup leaves zero owned objects and
 unchanged guest state. No scheduler, congestion-control or timeout change is inferred from
 the empty-runtime timing or from the later telemetry error alone.
+The next diagnostic adds fixed first-rejection labels and ten-second bounded owned-path
+counter/state snapshots under the same explicit opt-in. It reads the already sampled path
+records, makes no extra RPC or state transition, and logs no endpoints, peer or route IDs.
+Strict native compilation, five focused native checks and the opt-in RPC probe pass; these
+diagnostics do not themselves repair the warm-path stall.
 
 The [first complete download-sharing attempt on `5d3ca8ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34137603326)
 fails before application traffic starts: signed adjacent budgets reach the activated Exit,

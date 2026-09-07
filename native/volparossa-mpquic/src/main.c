@@ -164,7 +164,33 @@ typedef struct daemon_timing {
     uint64_t operation_calls[19];
     uint64_t operation_ns[19];
     uint64_t operation_results[19][10];
+    bool reported_rejection[19][10];
 } daemon_timing_t;
+
+static const char *timing_failure_code(const vmp_response_t *response)
+{
+    /* Return our fixed enum labels, never a runtime/peer-supplied string. */
+    static const struct { const char *wire; const char *label; } codes[] = {
+        {"path_metrics_unavailable", "PATH_METRICS_UNAVAILABLE"},
+        {"native_transport_failed", "NATIVE_TRANSPORT_FAILED"},
+        {"required_paths_not_active", "REQUIRED_PATHS_NOT_ACTIVE"},
+        {"reverse_queue_overflow", "REVERSE_QUEUE_OVERFLOW"},
+        {"session_expired", "SESSION_EXPIRED"},
+        {"session_not_found", "SESSION_NOT_FOUND"},
+        {"send_backpressure", "SEND_BACKPRESSURE"},
+        {"stale_instance", "STALE_INSTANCE"},
+        {"exit_session_not_connected", "EXIT_SESSION_NOT_CONNECTED"},
+    };
+    for (size_t index = 0U; index < sizeof(codes) / sizeof(codes[0]); ++index) {
+        const size_t length = strlen(codes[index].wire);
+        if (response->diagnostic_code != NULL &&
+            response->diagnostic_code_len == length &&
+            memcmp(response->diagnostic_code, codes[index].wire, length) == 0) {
+            return codes[index].label;
+        }
+    }
+    return "OTHER_NATIVE_REJECTION";
+}
 
 static uint64_t timing_now_ns(clockid_t clock_id)
 {
@@ -221,6 +247,14 @@ static vmp_server_error_t timed_dispatch(void *context,
         timing->operation_ns[operation] += timing_elapsed(started);
         if (result == VMP_SERVER_OK && (unsigned)response->result < 10U) {
             ++timing->operation_results[operation][(unsigned)response->result];
+            const unsigned rejected = (unsigned)response->result;
+            if (rejected != VMP_RESULT_OK && rejected != VMP_RESULT_NO_DATAGRAM &&
+                !timing->reported_rejection[operation][rejected]) {
+                timing->reported_rejection[operation][rejected] = true;
+                (void)fprintf(stderr,
+                    "NATIVE_RPC_REJECT op=%u result=%u cause=%s\n",
+                    operation, rejected, timing_failure_code(response));
+            }
         }
     }
     return result;

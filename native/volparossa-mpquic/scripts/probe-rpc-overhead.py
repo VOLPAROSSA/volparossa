@@ -140,6 +140,8 @@ def probe(binary, parent, count, enabled):
             raise RuntimeError("daemon did not stop and clean its owned socket")
         reports = []
         for line in stderr.decode().splitlines():
+            if enabled and line == "NATIVE_RPC_REJECT op=14 result=3 cause=SESSION_NOT_FOUND":
+                continue
             if not line.startswith("NATIVE_RPC_TIMING "):
                 raise RuntimeError("unexpected daemon diagnostic")
             reports.append(json.loads(line.removeprefix("NATIVE_RPC_TIMING ")))

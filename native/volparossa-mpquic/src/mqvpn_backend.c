@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define VMP_OUTER_PACKET_CAPACITY 65536U
@@ -43,6 +45,10 @@ typedef struct mqvpn_backend {
 
     bool connected;
     mqvpn_client_state_t state;
+    bool diagnostic_enabled;
+    uint64_t diagnostic_last_ns;
+    uint64_t diagnostic_accepted_packets;
+    uint64_t diagnostic_accepted_bytes;
 } mqvpn_backend_t;
 
 typedef struct mqvpn_exit_path {
@@ -499,6 +505,8 @@ static vmp_transport_error_t backend_create(
     *out_session = NULL;
     mqvpn_backend_t *backend = calloc(1U, sizeof(*backend));
     if (backend == NULL) return VMP_TRANSPORT_RESOURCE;
+    const char *diagnostic = getenv("VMP_RPC_TIMING");
+    backend->diagnostic_enabled = diagnostic != NULL && strcmp(diagnostic, "1") == 0;
     backend->masque_context_id = params->masque_context_id;
     backend->transport_mode = params->transport_mode;
     backend->state = MQVPN_STATE_IDLE;
@@ -877,6 +885,51 @@ static bool publish_path_state(vmp_mqvpn_path_state_t state,
     }
 }
 
+static void diagnostic_client_paths(mqvpn_backend_t *backend,
+                                     const mqvpn_path_info_t *info, int count)
+{
+    if (!backend->diagnostic_enabled) return;
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0) return;
+    const uint64_t now_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+                           (uint64_t)now.tv_nsec;
+    if (now_ns < backend->diagnostic_last_ns ||
+        now_ns - backend->diagnostic_last_ns < UINT64_C(10000000000)) return;
+    backend->diagnostic_last_ns = now_ns;
+    /* Observe the already-sampled owned path records, with no extra native
+     * query or state transition. Slot is local array position, not a Peer ID,
+     * address, route ID, descriptor, or persistent node/session identifier. */
+    (void)fprintf(stderr,
+        "NATIVE_PATH_TIMING {\"monotonic_ns\":%" PRIu64
+        ",\"client_state\":%u,\"accepted_api_packets\":%" PRIu64
+        ",\"accepted_api_bytes\":%" PRIu64 ",\"paths\":[",
+        now_ns, (unsigned)backend->state,
+        backend->diagnostic_accepted_packets, backend->diagnostic_accepted_bytes);
+    bool first = true;
+    for (size_t slot = 0U; slot < VMP_MAX_PATHS; ++slot) {
+        if (!backend->paths[slot].used) continue;
+        for (int index = 0; index < count; ++index) {
+            const mqvpn_path_info_t *path = &info[index];
+            if (path->handle != backend->paths[slot].handle ||
+                path->struct_size != sizeof(*path)) continue;
+            (void)fprintf(stderr,
+                "%s{\"slot\":%zu,\"state\":%u,\"xquic_state\":%u,"
+                "\"metrics_valid\":%" PRIu64 ",\"srtt_us\":%" PRIu64
+                ",\"cwnd\":%" PRIu64 ",\"inflight\":%" PRIu64
+                ",\"rate_bytes_sec\":%" PRIu64 ",\"tx_bytes\":%" PRIu64
+                ",\"rx_bytes\":%" PRIu64 ",\"acked_transport_bytes\":%" PRIu64
+                ",\"lost_packets\":%" PRIu64 "}",
+                first ? "" : ",", slot, (unsigned)path->status,
+                (unsigned)path->xquic_path_state, path->metrics_valid, path->srtt_us,
+                path->congestion_window_bytes, path->bytes_in_flight,
+                path->estimated_rate_bytes_per_sec, path->bytes_tx, path->bytes_rx,
+                path->acked_transport_bytes, path->packets_lost);
+            first = false;
+        }
+    }
+    (void)fputs("]}\n", stderr);
+}
+
 static vmp_transport_error_t backend_snapshot(
     void *session, vmp_transport_path_snapshot_t *out, size_t capacity,
     size_t *out_count, bool *out_tunnel_ready, bool *out_has_assignment,
@@ -912,6 +965,7 @@ static vmp_transport_error_t backend_snapshot(
         backend_mark_terminal(backend, VMP_MQVPN_TERMINAL_ENGINE);
         return VMP_TRANSPORT_ENGINE;
     }
+    diagnostic_client_paths(backend, info, info_count);
     const uint64_t supported_metric_flags =
         (uint64_t)MQVPN_PATH_METRIC_SRTT |
         (uint64_t)MQVPN_PATH_METRIC_LOSS |
@@ -1068,6 +1122,10 @@ static vmp_transport_error_t backend_send_inner(void *session,
     const vmp_transport_error_t after = backend_terminal_error(backend);
     if (after != VMP_TRANSPORT_OK) return after;
     if (result == MQVPN_ERR_AGAIN) return VMP_TRANSPORT_RESOURCE;
+    if (backend->diagnostic_enabled) {
+        ++backend->diagnostic_accepted_packets;
+        backend->diagnostic_accepted_bytes += (uint64_t)packet_len;
+    }
     return VMP_TRANSPORT_OK;
 }
 
