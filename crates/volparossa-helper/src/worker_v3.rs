@@ -5157,12 +5157,29 @@ impl WorkerProcess {
             termination_delay: delays.termination,
             probe_delay: delays.probe,
         });
+        Self::fake_with_lifetime_and_retirement_permit(
+            channel,
+            child_pid,
+            alive,
+            lifetime,
+            acquire_retirement_permit().expect("test process retirement permit"),
+        )
+    }
+
+    #[cfg(test)]
+    fn fake_with_lifetime_and_retirement_permit(
+        channel: Socket,
+        child_pid: u32,
+        alive: Arc<AtomicBool>,
+        lifetime: Arc<WorkerLifetime>,
+        retirement_permit: ReaperPermit,
+    ) -> Self {
         let retirement = ProcessRetirement {
             liveness: WorkerLiveness {
                 lifetime: Arc::clone(&lifetime),
                 alive_hint: Arc::clone(&alive),
             },
-            permit: Some(acquire_retirement_permit().expect("test process retirement permit")),
+            permit: Some(retirement_permit),
             kernel_pins: Some(crate::worker_sandbox::WorkerKernelPins::fixture()),
             armed: true,
         };
@@ -15844,6 +15861,28 @@ mod tests {
         fake_process_with_termination(read_timeout, true)
     }
 
+    fn fake_process_with_retirement_permit(permit: ReaperPermit) -> (WorkerProcess, Socket) {
+        let (parent, peer) = private_credential_worker_channel().expect("private channel");
+        let alive = Arc::new(AtomicBool::new(true));
+        let lifetime = Arc::new(WorkerLifetime::Fake {
+            termination_results: Mutex::new(VecDeque::new()),
+            default_result: TerminationOutcome::Reaped,
+            attempts: Arc::new(AtomicUsize::new(0)),
+            termination_delay: Duration::ZERO,
+            probe_delay: Duration::ZERO,
+        });
+        (
+            WorkerProcess::fake_with_lifetime_and_retirement_permit(
+                parent,
+                process::id(),
+                alive,
+                lifetime,
+                permit,
+            ),
+            peer,
+        )
+    }
+
     fn wait_for_termination_attempts(attempts: &AtomicUsize, minimum: usize) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while attempts.load(Ordering::SeqCst) < minimum {
@@ -24306,17 +24345,28 @@ mod tests {
     fn downlink_replay_expiry_sustains_128_legs_and_ten_minutes_without_erasing_critical_ids() {
         use downlink_replay::{BudgetReplayClock, MAX_BUDGET_REPLAY_ENTRIES};
         let base = Instant::now();
+        // This test owns a complete 64-worker pool; it must not exhaust the process-global
+        // retirement pool used by unrelated tests running concurrently.
+        let retirement = RetirementEscalation::state();
         let mut registry = WorkerRegistry::new(64, 2, Duration::from_secs(900));
         let mut owners = Vec::new();
         for index in 0..64 {
             let mut context = [0x93; 16];
             context[15] = index;
-            let (process, peer, _) = fake_process(Duration::from_secs(1));
+            let (process, peer) = fake_process_with_retirement_permit(
+                retirement
+                    .try_acquire()
+                    .expect("isolated test owner permit"),
+            );
             let generation = registry
                 .register(context, process, Duration::from_secs(899), base)
                 .unwrap();
             owners.push((context, generation, peer));
         }
+        assert!(
+            retirement.try_acquire().is_none(),
+            "the unchanged local pool is full"
+        );
         let context = owners[0].0;
         let generation = owners[0].1;
         let critical = initialise(context, 1);
@@ -24467,6 +24517,14 @@ mod tests {
             registry.records.is_empty()
                 && registry.cache.is_empty()
                 && registry.tombstones.is_empty()
+        );
+        assert_eq!(
+            *retirement
+                .available_permits
+                .lock()
+                .expect("local retirement permits"),
+            MAX_PROCESS_OWNERS,
+            "all 64 owners release their exact permit after terminal cleanup"
         );
     }
 
