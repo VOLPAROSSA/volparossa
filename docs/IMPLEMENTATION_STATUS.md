@@ -55,6 +55,13 @@ deletion is idempotent. A separate disposable socket test checks actual capture 
 and echoed fixture payloads; it does not claim the VM-only forced capture-buffer capability
 or substitute for the complete protected owner-contention scenario.
 
+The mixed-link diagnostic now enables aggregate-only native RPC timing explicitly; normal
+scenarios and product startup leave it disabled. A local empty-runtime probe completes 5,000
+correlated Unix RPCs at 7,861 RPC/s without instrumentation and 6,979 with it, with exact socket
+cleanup. Thus connection/framing overhead alone is not a demonstrated hard 513-packet/second
+limit on this host. Live transport and VM costs remain unmeasured until the next mixed run;
+no scheduler, congestion-control or timeout change is inferred from this empty-runtime result.
+
 ### Earlier checkpoints and source-change evidence
 
 The [full v1 run on `55168536`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045959350)

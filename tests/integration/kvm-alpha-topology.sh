@@ -1917,6 +1917,10 @@ launch_mpquic() {
     [ "$(unit_load_state "$mpquic_unit")" = not-found ] \
         || fail MPQUIC_UNIT_COLLISION
     MPQUIC_UNITS="$MPQUIC_UNITS $mpquic_unit"
+    # This one disposable diagnostic scenario records aggregate native RPC cost, not peers,
+    # packet content or browsing identifiers. All normal scenarios leave the probe disabled.
+    set --
+    [ "$scenario" != mixed-link ] || set -- --property=Environment=VMP_RPC_TIMING=1
     systemd-run --no-block --unit="$mpquic_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable native MPQUIC $node" \
         --service-type=exec \
@@ -1962,6 +1966,7 @@ launch_mpquic() {
         --property=SetLoginEnvironment=no \
         --property="StandardOutput=append:$mpquic_log" \
         --property="StandardError=append:$mpquic_log" \
+        "$@" \
         "$mpquic_binary" --mode "$native_mode" \
         --socket "$native_socket" >/dev/null
 }
