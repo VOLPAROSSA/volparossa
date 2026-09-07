@@ -18,10 +18,18 @@ use volparossa_content::{
 use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
+mod private_message;
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     /// Chunk and sign an explicit local file; does NOT distribute it to any network.
     Publish(Publish),
+    /// Show the public message-recipient key of an existing encrypted node identity.
+    RecipientKey(private_message::Unlock),
+    /// Encrypt and sign an explicit message into a local cache; use serve to distribute it.
+    PublishMessage(private_message::PublishMessage),
+    /// Verify and decrypt cached message chunks to a new private output file.
+    OpenMessage(private_message::OpenMessage),
     /// Verify and reconstruct from explicitly supplied local caches; no network retrieval.
     Assemble(Assemble),
     /// Register a publication with the agent and explicitly start its public content service.
@@ -234,6 +242,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     };
     let report = match command {
         Command::Publish(args) => publish(&args)?,
+        Command::RecipientKey(args) => private_message::recipient_key(&args)?,
+        Command::PublishMessage(args) => private_message::publish_message(&args)?,
+        Command::OpenMessage(args) => private_message::open_message(&args)?,
         Command::Assemble(args) => assemble(&args)?,
         Command::Serve(args) => {
             let replication = args
@@ -371,29 +382,8 @@ fn publish(args: &Publish) -> Result<serde_json::Value> {
     let expires = now
         .checked_add(args.lifetime_seconds)
         .context("content expiry overflows its timestamp")?;
-    let identity_path = args
-        .identity
-        .clone()
-        .unwrap_or_else(super::default_identity_path);
-    let passphrase = super::secret::read_passphrase(args.passphrase_file.as_deref(), false)?;
-    let identity = IdentityStore::new(identity_path)
-        .load(&passphrase)
-        .context("cannot unlock existing publisher identity; content publish never creates one")?;
-    drop(passphrase);
-    let expected_public = identity.ed25519_public_key_bytes()?;
-    // libp2p-identity 0.2.14 documents this exact 64-byte encoding as dalek's
-    // keypair format. Consume the unlocked keypair, keep the only encoded
-    // intermediate zeroizing and in memory, and never call secret(). Both
-    // keypair wrappers use dalek SigningKey with its zeroize-on-drop feature.
-    let keypair = identity.into_keypair().try_into_ed25519()?;
-    let encoded = Zeroizing::new(keypair.to_bytes());
-    let signer = SigningKey::from_keypair_bytes(&encoded)
-        .context("existing publisher keypair has invalid Ed25519 encoding")?;
-    drop(encoded);
-    drop(keypair);
-    if signer.verifying_key().to_bytes() != expected_public {
-        bail!("publisher public key changed during signing-key conversion");
-    }
+    let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
+    let expected_public = signer.verifying_key().to_bytes();
     let mut manifest_output = tempfile::NamedTempFile::new_in(output_parent(&args.manifest))?;
     let limits = args.limits.cache_limits()?;
     let mut cache = if args.reuse_cache {
@@ -437,6 +427,33 @@ fn publish(args: &Publish) -> Result<serde_json::Value> {
         "chunks": verified.chunks().len(),
         "expires_unix_seconds": expires,
     }))
+}
+
+fn unlock_signer(
+    identity_path: Option<&Path>,
+    passphrase_file: Option<&Path>,
+) -> Result<SigningKey> {
+    let identity_path = identity_path.map_or_else(super::default_identity_path, Path::to_path_buf);
+    let passphrase = super::secret::read_passphrase(passphrase_file, false)?;
+    let identity = IdentityStore::new(identity_path)
+        .load(&passphrase)
+        .context("cannot unlock existing node identity; content commands never create one")?;
+    drop(passphrase);
+    let expected_public = identity.ed25519_public_key_bytes()?;
+    // libp2p-identity 0.2.14 documents this exact 64-byte encoding as dalek's
+    // keypair format. Consume the unlocked keypair, keep the only encoded
+    // intermediate zeroizing and in memory, and never call secret(). Both
+    // keypair wrappers use dalek SigningKey with its zeroize-on-drop feature.
+    let keypair = identity.into_keypair().try_into_ed25519()?;
+    let encoded = Zeroizing::new(keypair.to_bytes());
+    let signer = SigningKey::from_keypair_bytes(&encoded)
+        .context("existing publisher keypair has invalid Ed25519 encoding")?;
+    drop(encoded);
+    drop(keypair);
+    if signer.verifying_key().to_bytes() != expected_public {
+        bail!("publisher public key changed during signing-key conversion");
+    }
+    Ok(signer)
 }
 
 fn assemble(args: &Assemble) -> Result<serde_json::Value> {

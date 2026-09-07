@@ -207,6 +207,7 @@ enum ConfigCommand {
 #[derive(Debug, Subcommand)]
 enum IdentityCommand {
     /// Replace the permanent Ed25519 identity while all services are stopped.
+    /// Also replaces the message-recipient key: old messages require a retained old identity.
     Rotate {
         /// Exact encrypted identity file path; defaults below the state directory.
         #[arg(long)]
@@ -448,6 +449,12 @@ async fn maintain_identity(
     // Check both before and after interactive input so a service start while the
     // operator is at a prompt cannot silently produce a split-brain identity.
     ensure_identity_services_stopped().await?;
+
+    if matches!(mutation, IdentityMutation::Rotate) {
+        eprintln!(
+            "Warning: identity rotation also replaces the message-recipient key. Without a retained encrypted copy of the old identity, messages encrypted to the old key cannot be reopened."
+        );
+    }
     let current_passphrase = secret::read_passphrase_with_prompts(
         current_passphrase_file,
         "Current VOLPAROSSA identity passphrase: ",

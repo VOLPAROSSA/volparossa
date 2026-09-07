@@ -25,6 +25,7 @@ type MessageAead = ChaCha20Poly1305;
 const VERSION: u32 = 1;
 const INFO: &[u8] = b"volparossa/private-native-message/rfc9180/v1";
 const KEY_BYTES: usize = 32;
+const IDENTITY_KEY_DOMAIN: &[u8] = b"volparossa/message-recipient/v1\0";
 const TAG_BYTES: usize = 16;
 const MAX_ENVELOPE_BYTES: usize = MAX_PRIVATE_MESSAGE_BYTES + 64;
 
@@ -33,7 +34,7 @@ pub const MAX_PRIVATE_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// The only public content type accepted by this private-message format.
 pub const PRIVATE_MESSAGE_CONTENT_TYPE: &str = "application/vnd.volparossa.private-message.v1";
 
-/// Explicit recipient encryption key, unrelated to a permanent Ed25519 identity.
+/// Explicit recipient encryption key, separate from an Ed25519 signing key.
 ///
 /// The private key is zeroized on drop and is never persisted by this module. Provisioning
 /// and securely retaining it across application restarts are the caller's responsibility.
@@ -43,6 +44,30 @@ pub struct RecipientKeyPair {
 }
 
 impl RecipientKeyPair {
+    /// Reproduce a recipient key from an unlocked, securely generated node identity.
+    ///
+    /// This application profile supplies `"volparossa/message-recipient/v1\0" || seed`
+    /// to the existing DHKEM `DeriveKeyPair` implementation from RFC 9180 section 7.1.3.
+    /// It is not an Ed25519-to-X25519 key conversion. The fixed domain separates this use
+    /// from signing and other derivations. Only the existing encrypted identity needs
+    /// persistence; changing its passphrase preserves this key, rotating it does not.
+    /// Compromise of that identity also compromises messages encrypted to this key;
+    /// this profile provides neither forward secrecy nor recipient-key discovery.
+    ///
+    /// # Errors
+    /// Returns an error if HPKE rejects the derived private-key serialization.
+    pub fn from_node_identity(identity: &SigningKey) -> Result<Self, PrivateMessageError> {
+        let mut ikm = Zeroizing::new([0; IDENTITY_KEY_DOMAIN.len() + KEY_BYTES]);
+        ikm[..IDENTITY_KEY_DOMAIN.len()].copy_from_slice(IDENTITY_KEY_DOMAIN);
+        ikm[IDENTITY_KEY_DOMAIN.len()..].copy_from_slice(identity.as_bytes());
+        let (secret, _) = MessageKem::derive_keypair(ikm.as_slice());
+        let mut serialized = secret.to_bytes();
+        let mut private_key = Zeroizing::new([0; KEY_BYTES]);
+        private_key.copy_from_slice(serialized.as_slice());
+        serialized.as_mut_slice().zeroize();
+        Self::from_private_key(private_key)
+    }
+
     /// Generate a fresh DHKEM(X25519, HKDF-SHA256) recipient keypair.
     ///
     /// # Errors

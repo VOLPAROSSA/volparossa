@@ -158,6 +158,19 @@ encrypted before chunking; associated data binds sender, opaque name, type, revi
 and envelope length. Caches contain only ciphertext. The library keeps recipient keys in memory
 and returns verified plaintext in zeroizing memory; it does not implement a key store.
 
+The normal CLI now supplies `content recipient-key`, `content publish-message` and
+`content open-message`. Its versioned recipient profile uses the pinned HPKE implementation's
+[RFC 9180 section 7.1.3 DeriveKeyPair](https://www.rfc-editor.org/rfc/rfc9180.html#section-7.1.3)
+with input `"volparossa/message-recipient/v1\0" || Ed25519 secret seed`. This is a
+domain-separated derivation, not raw Ed25519-to-X25519 conversion. Only the existing encrypted
+identity is stored; no additional plaintext private-key file is provisioned. Passphrase changes
+preserve the recipient key, identity rotation replaces it, and compromise of the identity also
+compromises messages addressed to that key. One node identity means one recipient key across
+local profiles, not profile isolation. Public keys still need independent authentication.
+The local CLI smoke reconstructs from two partial ciphertext stores across identity reloads,
+rejects a wrong recipient/sender and overwrites, and preserves a 0600 plaintext output. This
+does not upgrade the older test-only-key network evidence into a normal-CLI network proof.
+
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
 proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
 also passes on `b1082645`, including actual recipient decryption, ten complete zero-drop boundary

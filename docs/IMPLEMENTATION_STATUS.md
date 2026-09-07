@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-07
+Last updated: 2026-09-08
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 The proposal records the full idea and a researched HTTPS integration design: authenticated
@@ -35,6 +35,18 @@ pass. Separate CLI invocations reconstruct an identical 18,742-byte file, reuse 
 and reject a wrong publisher, missing chunks and output overwrites. Tests also reconstruct
 from two partial stores after removing the original input. These are real local commands,
 not automatic network publication/discovery or a newly verified installed Debian package.
+
+Normal private-message commands now extend that executable: `content recipient-key`,
+`content publish-message` and `content open-message`. The recipient key is derived in memory
+with the pinned RFC 9180 DHKEM implementation and an exclusive versioned domain from the existing
+encrypted identity, not written as another plaintext secret. Seven targeted content CLI tests
+pass, including identity reload, two partial ciphertext caches, wrong sender/recipient rejection,
+atomic 0600 plaintext output, no overwrite, unchanged identity and passphrase-change continuity.
+A separate-process CLI smoke also passes: the actual executable publishes and opens a binary
+message across fresh processes, rejects a wrong recipient and output overwrite, and leaves both
+encrypted identities byte-identical. Strict CLI/content Clippy passes, including the new test.
+Identity rotation changes the recipient key and is explicitly warned about; there is no forward
+secrecy, profile-specific key separation, mailbox, key discovery or C07 completion claim.
 
 The new explicit `content serve` / `content fetch` / `content stop` runtime now compiles with
 strict agent, CLI and local-control Clippy. Serving registers up to 64 exact verified manifests
@@ -182,6 +194,18 @@ unclassified forbidden packets (no direct-client/Exit or direct-provider packets
 a privacy pass and is being diagnosed separately without broadening allowed traffic.
 Cleanup leaves zero owned objects and unchanged guest state. Artifact SHA-256:
 `2ee3503a3875b7516ad62a1d9f5a65ed6ae57857ea11151e2c56cfcac9bf528a`.
+
+The [diagnostic run on `9f0afbb6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34166433232)
+fails earlier, during the first P fetch. Control Relay R2 completes its DHT lookup with a valid
+reply authority but an empty offer collection; unlike the previous run, no verified-offer event
+precedes that result. The actor already waits for in-flight offer requests after DHT completion,
+so no premature-join or expired-authority fix is justified by these events. More specific bounded
+request-outcome diagnostics and a local real-Kademlia reproduction are being developed. This
+run never reaches the uptake captures, so it does not identify or clear the two earlier forbidden
+packets. Cleanup is complete with unchanged guest state. Artifact SHA-256:
+`b95524d9b54cdcc2dec387859075c1f4010817ccd83b3a268e4bef2e42297e3a`.
+[Quality on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34166413926)
+passes in full; that does not make the failed functional scenario a pass.
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and

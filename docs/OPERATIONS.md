@@ -226,6 +226,8 @@ volparossa role enable|disable client|exit
 volparossa config validate      volparossa logs
 volparossa cleanup              volparossa demo
 volparossa content publish      volparossa content assemble
+volparossa content recipient-key
+volparossa content publish-message    volparossa content open-message
 ```
 
 Role commands validate the proposed change but effective changes require editing configuration
@@ -305,6 +307,55 @@ not silently evicted to fit. The command verifies the exact manifest, publisher,
 hashes, and exposes a new `0600` output atomically only after complete reconstruction. Wrong keys,
 expired manifests, absent/corrupt chunks and an existing output are errors. No peer discovery or
 network retrieval occurs; successful output explicitly reports `network_retrieval: false`.
+
+### Recipient-encrypted message commands
+
+These commands use the existing encrypted node identity; they do not create a separate plaintext
+recipient key file, start networking, or capture application messages. First, the recipient runs:
+
+```sh
+volparossa content recipient-key --identity /path/to/recipient/identity.key
+```
+
+Share `recipient_public_key_hex` with the sender through an independently authenticated channel.
+This X25519 encryption key is **not** the Ed25519 signing key. The JSON also identifies the node's
+public signing key, but does not itself authenticate that association for a remote party.
+The sender encrypts an explicit regular file of at most 4 MiB before caching any bytes:
+
+```sh
+volparossa content publish-message \
+  --identity /path/to/sender/identity.key \
+  --recipient-key TRUSTED_RECIPIENT_PUBLIC_KEY_HEX \
+  --input ./message.txt --cache ./encrypted-message-cache --manifest ./message.pb
+```
+
+The signed manifest uses a random opaque name and contains no subject or recipient identifier.
+Sender identity, ciphertext length and expiry remain public. The existing lifetime/cache limits
+and explicit `--reuse-cache` option apply. Publishing is local: use the existing `content serve`
+command with this manifest/cache and the sender's signing key to make ciphertext available.
+Recipients must receive the exact manifest and authenticate the sender key independently; there
+is no mailbox or automatic name/key lookup. `content fetch` can retrieve the ciphertext through
+the existing protected route into a new owned cache/output. That fetched output is still encrypted.
+Once the needed chunks are present in owned caches, the recipient opens the message:
+
+```sh
+volparossa content open-message \
+  --identity /path/to/recipient/identity.key \
+  --manifest ./message.pb --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --cache ./retrieved-ciphertext-cache --output ./received-message.txt
+```
+
+Repeat `--cache` for partial stores. The command checks the sender, validity, every chunk and the
+encrypted envelope before writing plaintext to a new `0600` output. It never emits plaintext on
+stdout or writes it back to the shared cache. Existing outputs are never overwritten. All three
+commands support the same strict `--passphrase-file` option as `content publish`.
+
+The recipient key is reproducible from the existing encrypted identity using a versioned,
+domain-separated RFC 9180 derivation. Changing its passphrase preserves the key; **rotating or
+losing the identity loses access to old messages unless the old encrypted identity is retained**.
+Use `--identity` to select such a retained copy explicitly. One identity has one recipient key,
+not one per local profile. Identity compromise also compromises these messages; there is no
+ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or email interoperability.
 
 ### Explicit protected content service and retrieval
 

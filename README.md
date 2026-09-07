@@ -105,6 +105,12 @@ See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and 
 [exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
+Normal `content recipient-key`, `content publish-message` and `content open-message` commands
+now expose that encryption/decryption without test-only key files. They unlock the existing
+encrypted identity, cache only ciphertext, and write plaintext only to an explicitly requested
+new private file. Identity rotation also changes the message-recipient key; retain the old
+encrypted identity if old messages must remain readable. See the
+[message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands).
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
