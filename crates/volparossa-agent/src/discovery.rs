@@ -25152,7 +25152,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            [60; 32],
+            generate_nonce(),
             now_ms,
             &fixture.directory,
             PreselectionTestCapabilities::all(),

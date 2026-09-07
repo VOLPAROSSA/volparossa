@@ -1497,7 +1497,7 @@ mod tests {
         use volparossa_protocol::{
             AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork,
             AdvertisementPolicy, AdvertisementQuality, AdvertisementRoles, TimePolicy,
-            sign_control_message_with,
+            generate_nonce, sign_control_message_with,
         };
 
         let key = identity::Keypair::generate_ed25519();
@@ -1554,7 +1554,7 @@ mod tests {
             public,
             1,
             2,
-            [1; 32],
+            generate_nonce(),
             TimePolicy::default(),
             |message| key.sign(message).ok()?.try_into().ok(),
         )
