@@ -13,8 +13,8 @@ use ed25519_dalek::VerifyingKey;
 use std::{collections::BTreeMap, time::Duration};
 use volparossa_content::provider::{SignedProviderOffer, VerifiedProviderOffer};
 use volparossa_discovery::{
-    ContentDiscoveryRequest, ContentDiscoveryResponse, ContentProviderOffer, ContentServiceRequest,
-    ContentServiceResponse,
+    ContentControlConnectionState, ContentDiscoveryRequest, ContentDiscoveryResponse,
+    ContentProviderOffer, ContentServiceRequest, ContentServiceResponse,
 };
 use volparossa_policy::TransportProtocol;
 
@@ -387,7 +387,9 @@ impl DiscoveryRuntime {
         if Instant::now() >= pending.deadline
             || peer != pending.control.peer_id
             || connection != pending.connection
-            || self.service.content_control_connection(&peer).ok() != Some(connection)
+            || !self
+                .service
+                .content_control_connection_is_current(&peer, connection)
             || !self.direct_relays.get(&peer).is_some_and(|current| {
                 direct_relay_authority_lineage_matches(
                     current,
@@ -452,7 +454,10 @@ impl DiscoveryRuntime {
             Some("CONTENT_DISCOVERY_RELAY_AUTHORITY_UNAVAILABLE")
         } else if peer == *self.service.local_peer_id() {
             Some("CONTENT_DISCOVERY_RELAY_SELF_REJECTED")
-        } else if self.service.content_control_connection(&peer).ok() != Some(connection) {
+        } else if !self
+            .service
+            .content_control_connection_is_current(&peer, connection)
+        {
             Some("CONTENT_DISCOVERY_RELAY_CONNECTION_INVALID")
         } else if self.content.pending() >= MAX_PENDING {
             Some("CONTENT_DISCOVERY_RELAY_QUEUE_FULL")
@@ -595,7 +600,9 @@ impl DiscoveryRuntime {
                 .as_ref()
                 .is_some_and(|cap| cap.expires_at_ms > unix_millis());
         for waiter in std::mem::take(&mut lookup.waiters) {
-            if self.service.content_control_connection(&waiter.peer).ok() != Some(waiter.connection)
+            if !self
+                .service
+                .content_control_connection_is_current(&waiter.peer, waiter.connection)
             {
                 continue;
             }
@@ -733,33 +740,43 @@ impl DiscoveryRuntime {
             let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
             return;
         }
-        let Ok(connection) = self.service.content_control_connection(&control.peer_id) else {
-            self.content
-                .event("CONTENT_DISCOVERY_CONTROL_CONNECTION_INVALID");
+        let connection_state = self
+            .service
+            .content_control_connection_state(&control.peer_id);
+        self.content.event(match connection_state {
+            ContentControlConnectionState::Poisoned => {
+                "CONTENT_DISCOVERY_CONNECTION_REGISTRY_POISONED"
+            }
+            ContentControlConnectionState::Missing => "CONTENT_DISCOVERY_CONNECTION_ABSENT",
+            ContentControlConnectionState::NoDirect => "CONTENT_DISCOVERY_CONNECTION_NO_DIRECT",
+            ContentControlConnectionState::Unique => "CONTENT_DISCOVERY_CONNECTION_UNIQUE",
+            ContentControlConnectionState::Multiple => "CONTENT_DISCOVERY_CONNECTION_MULTIPLE",
+        });
+        if !matches!(
+            connection_state,
+            ContentControlConnectionState::Unique | ContentControlConnectionState::Multiple
+        ) {
             let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
             return;
-        };
-        match self
+        }
+        if let Ok((id, connection)) = self
             .service
-            .request_content_discovery(&control.peer_id, connection, request)
+            .request_content_discovery(&control.peer_id, request)
         {
-            Ok(id) => {
-                self.content.event("CONTENT_DISCOVERY_REQUEST_DISPATCHED");
-                self.content.clients.insert(
-                    id,
-                    PendingClient {
-                        control,
-                        connection,
-                        maximum,
-                        reply,
-                        deadline: Instant::now() + REQUEST_TIMEOUT,
-                    },
-                );
-            }
-            Err(_) => {
-                self.content.event("CONTENT_DISCOVERY_REQUEST_REJECTED");
-                let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
-            }
+            self.content.event("CONTENT_DISCOVERY_REQUEST_DISPATCHED");
+            self.content.clients.insert(
+                id,
+                PendingClient {
+                    control,
+                    connection,
+                    maximum,
+                    reply,
+                    deadline: Instant::now() + REQUEST_TIMEOUT,
+                },
+            );
+        } else {
+            self.content.event("CONTENT_DISCOVERY_REQUEST_REJECTED");
+            let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
         }
     }
 

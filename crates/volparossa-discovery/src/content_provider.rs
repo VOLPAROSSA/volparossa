@@ -22,7 +22,8 @@ use thiserror::Error;
 use volparossa_protocol::{decode_canonical, encode_canonical};
 
 use crate::{
-    BehaviourEvent, DiscoveryError, DiscoveryService, advertisement_budget::AdvertisementBudgets,
+    BehaviourEvent, ContentControlConnectionState, DiscoveryError, DiscoveryService,
+    advertisement_budget::AdvertisementBudgets,
 };
 
 /// Control relay to individual content provider, without an object identifier.
@@ -535,23 +536,29 @@ impl DiscoveryService {
         )
     }
 
-    /// Resolve one unambiguous current authenticated direct control connection.
-    /// This verifies transport lineage only; the agent must hold current direct-relay authority.
-    ///
-    /// # Errors
-    /// Rejects a self peer, a poisoned registry, absent/directly relayed connections or siblings.
-    pub fn content_control_connection(
-        &self,
-        peer: &PeerId,
-    ) -> Result<ConnectionId, DiscoveryError> {
-        if peer == self.local_peer_id() {
-            return Err(DiscoveryError::ProtocolPeer);
-        }
+    /// Detail-free registry state; this never selects a connection or confers relay authority.
+    #[must_use]
+    pub fn content_control_connection_state(&self, peer: &PeerId) -> ContentControlConnectionState {
         self.swarm
             .behaviour()
             .connection_provenance
-            .unique_direct_control_connection(*peer)
-            .ok_or(DiscoveryError::ProtocolPeer)
+            .content_control_state(*peer)
+    }
+
+    /// Validate an exact current authenticated direct connection, including when siblings exist.
+    /// The agent must independently hold the current direct-relay authority.
+    #[must_use]
+    pub fn content_control_connection_is_current(
+        &self,
+        peer: &PeerId,
+        connection: ConnectionId,
+    ) -> bool {
+        peer != self.local_peer_id()
+            && self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .content_control_connection_is_current(*peer, connection)
     }
 
     /// Register or withdraw the bounded local public service offer, without announcing in DHT.
@@ -615,22 +622,26 @@ impl DiscoveryService {
     pub fn request_content_discovery(
         &mut self,
         control_relay: &PeerId,
-        connection: ConnectionId,
         request: ContentDiscoveryRequest,
-    ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
+    ) -> Result<(request_response::OutboundRequestId, ConnectionId), DiscoveryError> {
         if !self.protocol_roles.client() {
             return Err(DiscoveryError::ProtocolRole);
         }
-        if self.content_control_connection(control_relay)? != connection {
+        if control_relay == self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
         }
         request.validate()?;
         self.content_provider.reserve()?;
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .content_discovery
-            .send_request(control_relay, request.clone());
+        let behaviour = &mut self.swarm.behaviour_mut().0;
+        let (id, connection) = behaviour.content_discovery.send_bound_request(
+            control_relay,
+            request.clone(),
+            |connection| {
+                behaviour
+                    .connection_provenance
+                    .content_control_connection_is_current(*control_relay, connection)
+            },
+        )?;
         self.content_provider.discovery.insert(
             id,
             Pending {
@@ -640,7 +651,7 @@ impl DiscoveryService {
                 deadline: Instant::now() + CONTENT_REQUEST_TIMEOUT,
             },
         );
-        Ok(id)
+        Ok((id, connection))
     }
 
     /// Reply over the inbound client's existing authenticated request-response channel.
@@ -730,9 +741,7 @@ impl DiscoveryService {
                                     && pending.deadline > Instant::now()
                                     && response.validate_for(&pending.request).is_ok()
                             })
-                            && self
-                                .content_control_connection(peer)
-                                .is_ok_and(|current| current == *connection_id)
+                            && self.content_control_connection_is_current(peer, *connection_id)
                     }
                     SwarmEvent::Behaviour(BehaviourEvent::ContentService(
                         request_response::Event::OutboundFailure { request_id, .. },
@@ -741,11 +750,19 @@ impl DiscoveryService {
                         true
                     }
                     SwarmEvent::Behaviour(BehaviourEvent::ContentDiscovery(
-                        request_response::Event::OutboundFailure { request_id, .. },
-                    )) => {
-                        self.content_provider.discovery.remove(request_id);
-                        true
-                    }
+                        request_response::Event::OutboundFailure {
+                            request_id,
+                            peer,
+                            connection_id,
+                            ..
+                        },
+                    )) => self
+                        .content_provider
+                        .discovery
+                        .remove(request_id)
+                        .is_some_and(|pending| {
+                            pending.peer == *peer && pending.connection == Some(*connection_id)
+                        }),
                     _ => true,
                 };
                 valid.then_some(event)

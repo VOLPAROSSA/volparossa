@@ -26,6 +26,21 @@ use crate::{
 /// Impossible output of the passive connection-provenance behaviour.
 pub enum ConnectionProvenanceEvent {}
 
+/// Detail-free state of the authenticated control peer's current connection registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentControlConnectionState {
+    /// The lineage registry detected inconsistent lifecycle evidence.
+    Poisoned,
+    /// No established connection exists for this peer.
+    Missing,
+    /// Connections exist, but none is a direct authenticated connection.
+    NoDirect,
+    /// One current direct connection exists without siblings.
+    Unique,
+    /// At least one direct connection exists alongside authenticated siblings.
+    Multiple,
+}
+
 enum NativePrefixBytes {
     Ipv4([u8; 3]),
     Ipv6([u8; 6]),
@@ -617,22 +632,37 @@ impl ConnectionProvenanceBehaviour {
         }
     }
 
-    /// Transport-only identity binding for a current direct control connection. Multiple
-    /// siblings remain ambiguous: request-response dispatch must not select another lineage.
-    pub(super) fn unique_direct_control_connection(&self, peer_id: PeerId) -> Option<ConnectionId> {
+    pub(super) fn content_control_state(&self, peer_id: PeerId) -> ContentControlConnectionState {
         if self.registry.poisoned {
-            return None;
+            return ContentControlConnectionState::Poisoned;
         }
-        let mut records = self
+        let (total, direct) = self
             .registry
             .records
-            .iter()
-            .filter(|(_, record)| record.peer_id == peer_id);
-        let (connection_id, record) = records.next()?;
-        if record.relayed || records.next().is_some() {
-            return None;
+            .values()
+            .filter(|record| record.peer_id == peer_id)
+            .fold((0_usize, 0_usize), |(total, direct), record| {
+                (total + 1, direct + usize::from(!record.relayed))
+            });
+        if total == 0 {
+            ContentControlConnectionState::Missing
+        } else if direct == 0 {
+            ContentControlConnectionState::NoDirect
+        } else if total == 1 {
+            ContentControlConnectionState::Unique
+        } else {
+            ContentControlConnectionState::Multiple
         }
-        Some(*connection_id)
+    }
+
+    /// Validate the actual dispatch/inbound connection, never select one from its siblings.
+    pub(super) fn content_control_connection_is_current(
+        &self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+    ) -> bool {
+        self.registry
+            .allows_identify_address_import(peer_id, connection_id)
     }
 
     pub(super) fn unique_witness(
@@ -1026,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn content_control_connection_requires_unique_current_direct_lineage() {
+    fn content_control_connection_checks_exact_lineage_not_sibling_uniqueness() {
         let peer = PeerId::random();
         let relay = PeerId::random();
         let direct = dialer("/ip4/1.1.1.8/udp/41000/quic-v1");
@@ -1035,25 +1065,42 @@ mod tests {
             "/ip4/1.1.1.8/udp/41000/quic-v1",
         );
         let mut behaviour = ConnectionProvenanceBehaviour::new();
-        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        let id = ConnectionId::new_unchecked;
+        assert_eq!(
+            behaviour.content_control_state(peer),
+            ContentControlConnectionState::Missing
+        );
+        assert!(!behaviour.content_control_connection_is_current(peer, id(1)));
         established(&mut behaviour, peer, 1, &direct, 0);
         assert_eq!(
-            behaviour.unique_direct_control_connection(peer),
-            Some(ConnectionId::new_unchecked(1))
+            behaviour.content_control_state(peer),
+            ContentControlConnectionState::Unique
         );
-        assert!(behaviour.unique_direct_control_connection(relay).is_none());
+        assert!(behaviour.content_control_connection_is_current(peer, id(1)));
+        assert!(!behaviour.content_control_connection_is_current(relay, id(1)));
         established(&mut behaviour, peer, 2, &relayed, 1);
-        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        assert_eq!(
+            behaviour.content_control_state(peer),
+            ContentControlConnectionState::Multiple
+        );
+        assert!(behaviour.content_control_connection_is_current(peer, id(1)));
+        assert!(!behaviour.content_control_connection_is_current(peer, id(2)));
         closed(&mut behaviour, peer, 1, &direct, 1);
-        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        assert_eq!(
+            behaviour.content_control_state(peer),
+            ContentControlConnectionState::NoDirect
+        );
+        assert!(!behaviour.content_control_connection_is_current(peer, id(1)));
         closed(&mut behaviour, peer, 2, &relayed, 0);
         established(&mut behaviour, peer, 3, &direct, 0);
-        assert_eq!(
-            behaviour.unique_direct_control_connection(peer),
-            Some(ConnectionId::new_unchecked(3))
-        );
+        assert!(behaviour.content_control_connection_is_current(peer, id(3)));
+        assert!(!behaviour.content_control_connection_is_current(peer, id(1)));
         behaviour.registry.poison();
-        assert!(behaviour.unique_direct_control_connection(peer).is_none());
+        assert_eq!(
+            behaviour.content_control_state(peer),
+            ContentControlConnectionState::Poisoned
+        );
+        assert!(!behaviour.content_control_connection_is_current(peer, id(3)));
     }
 
     #[test]

@@ -76,6 +76,16 @@ registry condition is under investigation, not attributed to DHT/HTTPS or bypass
 again cleaned up all owned objects with unchanged guest state; artifact SHA-256:
 `d93c6f36684a63e237d8e0a30b0936cfe5006802f4dd79cf0f67ac82e81cc997`.
 
+The next candidate fixes the content-specific dispatch contract: it observes the existing
+request-response behaviour's actual `NotifyHandler::One` choice, validates that exact current
+authenticated direct connection before forwarding it, and binds the reply to the same ID.
+Multiple authenticated sibling connections are not themselves an error; there is no arbitrary
+registry-first choice, autodial, sibling retargeting or change to native-prefix witnesses.
+Fixed codes distinguish absent, poisoned, non-direct and multiple-connection registry states.
+Nine focused discovery tests (including a two-connection Noise/Yamux MemoryTransport roundtrip)
+and five agent discovery tests pass. These establish the bounded dispatch mechanism, not the
+cause among the old undifferentiated registry states or a passing independent-node KVM result.
+
 The first C03 redistribution library and normal agent hooks are now integrated locally. Five
 duplex tests pass: uptake then re-serving, non-evicting quota, exclusions/duplicates, signed
 expiry/hop bounds, corrupt input and timeout. Existing v1 provider tests remain 4/4 passing.

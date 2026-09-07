@@ -6,6 +6,7 @@ mod advertisement_budget;
 mod advertisement_tests;
 mod advertisements;
 mod connection_provenance;
+mod content_connection;
 mod content_provider;
 mod forwarding;
 mod listener_recovery;
@@ -50,8 +51,10 @@ pub use advertisements::{
 use advertisements::{AdvertisementCodec, advertisement_behaviour};
 pub use connection_provenance::{
     BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
+    ContentControlConnectionState,
 };
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
+use content_connection::ContentConnectionBehaviour;
 pub use content_provider::{
     CONTENT_DISCOVERY_PROTOCOL, CONTENT_REQUEST_TIMEOUT, CONTENT_SERVICE_PROTOCOL,
     ContentDiscoveryRequest, ContentDiscoveryResponse, ContentProviderOffer,
@@ -59,7 +62,7 @@ pub use content_provider::{
     MAX_CONTENT_DISCOVERY_FRAME_BYTES, MAX_CONTENT_OFFER_BYTES, MAX_CONTENT_OFFERS,
     MAX_PENDING_CONTENT_REQUESTS,
 };
-use content_provider::{ContentDiscoveryCodec, ContentProviderState, ContentServiceCodec};
+use content_provider::{ContentProviderState, ContentServiceCodec};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
@@ -300,7 +303,7 @@ pub struct DiscoveryBehaviour {
     /// Control relay to public content provider; content interests are never encoded here.
     content_service: request_response::Behaviour<ContentServiceCodec>,
     /// Client to its already authenticated control relay for public service offers.
-    content_discovery: request_response::Behaviour<ContentDiscoveryCodec>,
+    content_discovery: ContentConnectionBehaviour,
     /// Client-to-control-relay forwarding hop.
     pub exit_forward: request_response::Behaviour<ExitForwardCodec>,
     /// Control-relay-to-exit forwarding hop.
@@ -383,10 +386,10 @@ impl DiscoveryBehaviour {
             protocol_roles.relay(),
             protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
         ));
-        let content_discovery = content_provider::discovery_behaviour(protocol_support(
-            protocol_roles.client(),
-            protocol_roles.relay(),
-        ));
+        let content_discovery =
+            ContentConnectionBehaviour::new(content_provider::discovery_behaviour(
+                protocol_support(protocol_roles.client(), protocol_roles.relay()),
+            ));
         Self {
             connection_limits,
             connection_provenance,
