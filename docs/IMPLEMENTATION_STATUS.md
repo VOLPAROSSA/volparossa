@@ -224,6 +224,16 @@ failed reports or clear their packet findings. Separately, the real Kad/RPC char
 confirms that an unadmitted provider-record address alone cannot be used for redial; the product
 already has authenticated Identify address admission, and no speculative addressbook change was made.
 
+Native and HTTPS fetch now support explicit `--reuse-cache` across CLI, typed local control and
+the agent. Default creation still rejects existing directories; reuse opens only a validated
+owned store and output remains no-clobber. Already verified chunks skip requests, while HTTPS
+obtains fresh origin authorization and preserves its original authenticated expiry. Six targeted
+tests and strict CLI/local-control/agent/content Clippy pass. These include a real interrupted TLS
+body followed by close/reopen, fresh metadata authentication and exactly the remaining Range;
+native partial retrieval resumes similarly. A partial-progress API records verified received
+payload even when eviction leaves zero net cache growth, without counting cache hits as traffic.
+This local resumption proof is separate from the pending full independent-node integration run.
+
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
 strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332

@@ -181,10 +181,33 @@ pub async fn pull_from_peer<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut progress = TransferProgress::default();
+    pull_from_peer_with_progress(stream, manifest, store, limits, &mut progress).await?;
+    Ok(progress)
+}
+
+/// Pull chunks while retaining verified payload progress even if a later exchange fails.
+///
+/// Resets `progress` before starting and updates it only after successful verified inserts.
+/// Existing cache hits and cache eviction do not contribute to these per-session counts.
+/// Dropping this future preserves progress already recorded, but does not make it complete.
+///
+/// # Errors
+/// Same failures and stream-close requirement as [`pull_from_peer`].
+pub async fn pull_from_peer_with_progress<S>(
+    stream: &mut S,
+    manifest: &VerifiedManifest,
+    store: &mut ChunkStore,
+    limits: TransferLimits,
+    progress: &mut TransferProgress,
+) -> Result<(), TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    *progress = TransferProgress::default();
     let mut session = Session::new(limits)?;
     check_time(manifest)?;
     store.require_object_capacity(manifest.length())?;
-    let mut progress = TransferProgress::default();
     for chunk in manifest.chunks() {
         session.check_deadline()?;
         check_time(manifest)?;
@@ -236,7 +259,7 @@ where
     .map_err(|_| TransferError::Timeout)??;
     session.check_deadline()?;
     check_time(manifest)?;
-    Ok(progress)
+    Ok(())
 }
 
 /// Serve only pieces named by one explicitly approved, verified native publication.

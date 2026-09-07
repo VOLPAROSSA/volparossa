@@ -15,7 +15,7 @@ use volparossa_content::origin_https::{
 use volparossa_local_control::{ContentReceipt, HttpsContentFetchRequest};
 use volparossa_policy::{TransportProtocol, VerifiedManifest as VerifiedPolicy};
 
-use super::{ContentError, ContentRuntime, limits, now};
+use super::{ContentError, ContentRuntime, download_cache, limits, now};
 use crate::{
     control::ControlContext, mptcp_flow_runtime::ActiveProductionMptcpClientFlow, unix_millis,
 };
@@ -73,13 +73,12 @@ pub(super) async fn fetch(
     }
     flow.shutdown();
     let authorized = authenticated.map_err(|_| ContentError::Unavailable)?;
-    let mut store = ChunkStore::create(&PathBuf::from(request.cache), cache_limits)
-        .map_err(|_| ContentError::Invalid)?;
+    let mut store = download_cache(&request.cache, cache_limits, request.reuse_cache)?;
     // Check full-object cache capacity and HTTPS freshness before contacting any peers.
     authorized
         .next_missing_range(&mut store, now())
         .map_err(|_| ContentError::Invalid)?;
-    let providers = match ContentRuntime::pull_registered_providers(
+    let (providers, peer_bytes) = match ContentRuntime::pull_registered_providers(
         context,
         authorized.manifest(),
         &mut store,
@@ -89,10 +88,9 @@ pub(super) async fn fetch(
     .await
     {
         Ok(providers) => providers,
-        Err(ContentError::Unavailable) => Vec::new(),
+        Err(ContentError::Unavailable) => (Vec::new(), 0),
         Err(error) => return Err(error),
     };
-    let peer_bytes = store.usage().bytes;
     let (origin_body_bytes, origin_range_requests) =
         fill_missing(context, &client, &origin, &authorized, &policy, &mut store).await?;
     checked_policy(context, &origin, &policy).await?;

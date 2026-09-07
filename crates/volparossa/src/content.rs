@@ -125,9 +125,12 @@ pub(crate) struct Fetch {
     /// Independently trusted 32-byte publisher public key in hexadecimal.
     #[arg(long, value_parser = parse_publisher_key)]
     publisher_key: VerifyingKey,
-    /// New cache directory created by the agent account; no existing-directory adoption.
+    /// New agent-owned cache directory, or an existing owned cache with --reuse-cache.
     #[arg(long)]
     cache: PathBuf,
+    /// Resume from verified owned chunks; only missing chunks are fetched, never directory adoption.
+    #[arg(long)]
+    reuse_cache: bool,
     /// New output path writable by the agent account; no existing entry is overwritten.
     #[arg(long)]
     output: PathBuf,
@@ -143,9 +146,12 @@ pub(crate) struct FetchHttps {
     /// Explicit canonical metadata path on the same HTTPS origin.
     #[arg(long, value_parser = parse_metadata_path)]
     metadata_path: String,
-    /// New cache directory created by the agent account; no existing-directory adoption.
+    /// New agent-owned cache directory, or an existing owned cache with --reuse-cache.
     #[arg(long)]
     cache: PathBuf,
+    /// Resume owned chunks after fresh HTTPS origin authorization; never extend cached validity.
+    #[arg(long)]
+    reuse_cache: bool,
     /// New output path writable by the agent account; no existing entry is overwritten.
     #[arg(long)]
     output: PathBuf,
@@ -268,6 +274,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 cache: absolute_path(&args.cache)?,
                 output: absolute_path(&args.output)?,
                 limits: Some(args.limits.wire_limits()),
+                reuse_cache: args.reuse_cache,
             });
             return super::print_response(super::control::request(socket, operation).await?);
         }
@@ -325,6 +332,7 @@ fn https_fetch_request(
         output: absolute_path(&args.output)?,
         limits: Some(args.limits.wire_limits()),
         ca_certificates_pem,
+        reuse_cache: args.reuse_cache,
     })
 }
 
@@ -707,10 +715,65 @@ mod tests {
     }
 
     #[test]
+    fn content_resume_cli_is_explicit_for_native_and_https_fetch() {
+        let key = hex::encode(
+            SigningKey::generate(&mut rand_core::OsRng)
+                .verifying_key()
+                .to_bytes(),
+        );
+        for reuse in [false, true] {
+            for kind in ["fetch", "fetch-https"] {
+                let mut arguments = vec![
+                    "volparossa",
+                    "content",
+                    kind,
+                    "--cache",
+                    "cache",
+                    "--output",
+                    "new.bin",
+                ];
+                if kind == "fetch" {
+                    arguments.extend(["--manifest", "exact.pb", "--publisher-key", &key]);
+                } else {
+                    arguments.extend([
+                        "--url",
+                        "https://origin.example/object",
+                        "--metadata-path",
+                        "/metadata",
+                    ]);
+                }
+                if reuse {
+                    arguments.push("--reuse-cache");
+                }
+                let crate::CliCommand::Content { command } = crate::Cli::try_parse_from(arguments)
+                    .expect("explicit fetch command")
+                    .command
+                else {
+                    panic!("content command");
+                };
+                match *command {
+                    Command::Fetch(args) => assert_eq!(args.reuse_cache, reuse),
+                    Command::FetchHttps(args) => {
+                        assert_eq!(args.reuse_cache, reuse);
+                        assert_eq!(
+                            https_fetch_request(&args)
+                                .expect("typed HTTPS request")
+                                .reuse_cache,
+                            reuse
+                        );
+                    }
+                    _ => panic!("fetch command"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn https_fetch_request_uses_explicit_bounded_regular_ca_file_without_creating_outputs() {
         let directory = tempfile::tempdir().expect("private fixture directory");
         let root = directory.path();
         let mut args = FetchHttps {
+            reuse_cache: false,
             url: "https://origin.example/object.bin".into(),
             metadata_path: "/metadata".into(),
             cache: root.join("new-cache"),

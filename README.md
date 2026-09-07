@@ -102,6 +102,9 @@ origin ranges. Lookup reliability remains under integration: the latest live fai
 a provider whose offer was withdrawn although its cache listener had been registered. A native
 Relay/Exit advertisement withdrawal incorrectly also withdrew that independent content offer.
 The ownership correction passes a real actor regression; the full multi-node rerun is pending.
+Both `content fetch` and `content fetch-https` support explicit `--reuse-cache` to resume from
+an existing owned cache, retrieving only missing chunks. HTTPS still obtains fresh origin
+authorization; cached bytes do not renew expiry or count as newly received peer traffic.
 See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
 [exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route

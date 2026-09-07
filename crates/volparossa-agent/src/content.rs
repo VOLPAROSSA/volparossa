@@ -6,6 +6,8 @@
 mod https;
 mod replication;
 mod replication_budget;
+#[cfg(test)]
+mod resume_tests;
 mod tls;
 
 use replication::ReplicationRuntime;
@@ -22,9 +24,10 @@ use tokio::{
     time::{interval, timeout},
 };
 use volparossa_content::provider::{
-    ProviderEndpoint, PublicationRegistry, SignedProviderOffer, pull_publication, serve_publication,
+    ProviderEndpoint, PublicationRegistry, SignedProviderOffer, pull_publication_with_progress,
+    serve_publication,
 };
-use volparossa_content::transfer::TransferLimits;
+use volparossa_content::transfer::{TransferLimits, TransferProgress};
 use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest};
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_identity::Identity;
@@ -380,8 +383,8 @@ impl ContentRuntime {
         if output.try_exists().map_err(|_| ContentError::Invalid)? {
             return Err(ContentError::Invalid);
         }
-        let mut store = ChunkStore::create(&PathBuf::from(request.cache), limits(request.limits)?)
-            .map_err(|_| ContentError::Invalid)?;
+        let mut store =
+            download_cache(&request.cache, limits(request.limits)?, request.reuse_cache)?;
         let policy = {
             let state = context.state.read().await;
             if !state.roles().client {
@@ -407,7 +410,7 @@ impl ContentRuntime {
             return Err(ContentError::Unavailable);
         };
         content_event(context, "CONTENT_FETCH_ROUTE_READY").await;
-        let provider_peer_ids =
+        let (provider_peer_ids, peer_bytes) =
             Self::pull_registered_providers(context, &manifest, &mut store, &policy, control_peer)
                 .await?;
         let bytes =
@@ -420,7 +423,7 @@ impl ContentRuntime {
                 .map_err(|_| ContentError::Invalid)?,
             provider_peer_ids,
             control_relay_peer_id: control_peer.to_string(),
-            peer_bytes: store.usage().bytes,
+            peer_bytes,
             ..ContentReceipt::default()
         })
     }
@@ -433,9 +436,9 @@ impl ContentRuntime {
         store: &mut ChunkStore,
         policy: &volparossa_policy::VerifiedManifest,
         control_peer: libp2p::PeerId,
-    ) -> Result<Vec<String>, ContentError> {
+    ) -> Result<(Vec<String>, u64), ContentError> {
         if complete(manifest, store)? {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let providers = context
             .discovery
@@ -443,6 +446,7 @@ impl ContentRuntime {
             .await
             .map_err(|_| ContentError::Unavailable)?;
         let mut used = HashSet::new();
+        let mut peer_bytes = 0_u64;
         for provider in providers {
             if complete(manifest, store)? {
                 break;
@@ -486,24 +490,34 @@ impl ContentRuntime {
                 content_event(context, "CONTENT_PROVIDER_TLS_FAILED").await;
                 continue;
             };
-            let before = store.usage().bytes;
-            let progress =
-                pull_publication(&mut stream, manifest, store, TransferLimits::default()).await;
-            if progress.is_ok() && tls::finish(&mut stream).await.is_err() {
+            let mut progress = TransferProgress::default();
+            let pulled = pull_publication_with_progress(
+                &mut stream,
+                manifest,
+                store,
+                TransferLimits::default(),
+                &mut progress,
+            )
+            .await;
+            if pulled.is_ok() && tls::finish(&mut stream).await.is_err() {
                 content_event(context, "CONTENT_PROVIDER_TLS_CLOSE_FAILED").await;
                 return Err(ContentError::Unavailable);
             }
             drop(stream);
-            if progress.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
+            if pulled.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
                 content_event(context, "CONTENT_PROVIDER_ROUTE_CLOSE_FAILED").await;
                 return Err(ContentError::Unavailable);
             }
             flow.shutdown();
-            if progress.is_err() {
+            if pulled.is_err() {
                 content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
             }
-            // A later session error does not undo chunks already authenticated and stored.
-            if store.usage().bytes > before {
+            // Includes verified inserts before a later failure, excluding old cache hits.
+            let received = progress.bytes;
+            peer_bytes = peer_bytes
+                .checked_add(received)
+                .ok_or(ContentError::Invalid)?;
+            if received > 0 {
                 used.insert(provider.peer_id.to_string());
                 context
                     .content
@@ -513,7 +527,7 @@ impl ContentRuntime {
         }
         let mut provider_peer_ids: Vec<_> = used.into_iter().collect();
         provider_peer_ids.sort_unstable();
-        Ok(provider_peer_ids)
+        Ok((provider_peer_ids, peer_bytes))
     }
 }
 
@@ -583,6 +597,20 @@ fn limits(value: Option<ContentCacheLimits>) -> Result<CacheLimits, ContentError
         max_entries: value.max_entries as usize,
         min_free_bytes: value.min_free_bytes,
     })
+}
+
+fn download_cache(
+    path: &str,
+    limits: CacheLimits,
+    reuse: bool,
+) -> Result<ChunkStore, ContentError> {
+    let root = PathBuf::from(path);
+    if reuse {
+        ChunkStore::open(&root, limits)
+    } else {
+        ChunkStore::create(&root, limits)
+    }
+    .map_err(|_| ContentError::Invalid)
 }
 
 fn complete(manifest: &VerifiedManifest, store: &mut ChunkStore) -> Result<bool, ContentError> {

@@ -439,6 +439,88 @@ async fn origin_range_groups_adjacent_missing_chunks_and_counts_ignored_range_fu
 }
 
 #[tokio::test]
+async fn https_resume_reopens_partial_tls_download_and_reauthenticates_original_expiry() {
+    let fixture = Fixture::new();
+    let authorized = fixture.authenticate().await;
+    let cache_path = fixture.root.path().join("resume");
+    let mut store = fixture.store("resume");
+    let mut truncated = response(&fixture.content, "application/octet-stream");
+    truncated.truncate(truncated.len() - fixture.content.len() + CHUNK_BYTES);
+    let (stream, server) = fixture.origin.respond(truncated);
+    assert!(
+        fixture
+            .client()
+            .fill_next_missing_from_origin(stream, &authorized, &mut store, NOW)
+            .await
+            .is_err()
+    );
+    server.await.expect("truncated TLS response finished");
+    assert_eq!(
+        store.usage().entries,
+        1,
+        "the verified prefix survives the transfer error"
+    );
+    let output = fixture.root.path().join("resumed.bin");
+    assert!(
+        authorized
+            .reassemble_to_file(&mut [&mut store], NOW, &output)
+            .is_err()
+    );
+    assert!(!output.exists());
+    drop((store, authorized));
+
+    let later = NOW + 10;
+    let (stream, server) = fixture.origin.respond(fixture.metadata_response());
+    let authorized = fixture
+        .client()
+        .authenticate_manifest(stream, &fixture.request, later)
+        .await
+        .expect("fresh origin TLS, not authority from persisted chunks");
+    assert!(
+        server
+            .await
+            .unwrap()
+            .starts_with(format!("GET {METADATA} HTTP/1.1\r\n").as_bytes())
+    );
+    let mut store = ChunkStore::open(&cache_path, limits()).expect("owned persisted cache");
+    let missing = authorized
+        .next_missing_range(&mut store, later)
+        .unwrap()
+        .unwrap();
+    assert_eq!(missing.start(), CHUNK_BYTES as u64);
+    let end = fixture.content.len() - 1;
+    let (stream, server) = fixture.origin.respond(range_response(
+        &fixture.content[CHUNK_BYTES..],
+        CHUNK_BYTES,
+        end,
+        fixture.content.len(),
+    ));
+    let progress = fixture
+        .client()
+        .fill_next_missing_from_origin(stream, &authorized, &mut store, later)
+        .await
+        .expect("resume only the missing exact range");
+    let request = String::from_utf8(server.await.unwrap()).unwrap();
+    assert!(request.contains(&format!("\r\nRange: bytes={CHUNK_BYTES}-{end}\r\n")));
+    assert_eq!(
+        progress.bytes_received,
+        (fixture.content.len() - CHUNK_BYTES) as u64
+    );
+    assert_eq!(progress.chunks_verified, 2);
+    assert!(progress.complete);
+    authorized
+        .reassemble_to_file(&mut [&mut store], later, &output)
+        .unwrap();
+    assert_eq!(fs::read(output).unwrap(), fixture.content);
+    assert!(
+        authorized
+            .next_missing_range(&mut store, NOW + 200)
+            .is_err(),
+        "cache reopening and a second metadata request must not renew original expiry"
+    );
+}
+
+#[tokio::test]
 async fn origin_range_rejects_wrong_offsets_total_framing_freshness_corruption_and_truncation() {
     let fixture = Fixture::new();
     let authorized = fixture.authenticate().await;

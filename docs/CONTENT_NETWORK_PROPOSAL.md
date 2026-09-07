@@ -229,6 +229,13 @@ advertisement withdrawal; the corrected actor preserves the independent offer wi
 its deadline. Explicit service stop, policy replacement, shutdown and original offer/policy expiry
 still invalidate it. The local regression passes; a complete multi-node rerun remains necessary.
 
+Both normal fetch commands also accept explicit `--reuse-cache` for an existing owned store.
+Resumption skips verified chunks, never adopts an unrelated directory, overwrites an output,
+or substitutes cached metadata for fresh HTTPS-origin authorization. Real native partial-transfer
+and interrupted-TLS-body tests pass; the latter requests only the remaining Range after reopen
+and keeps the original authenticated expiry. Per-session verified byte counts survive failures
+and eviction, so old cache hits are not reported as new network delivery.
+
 Default trust comes from Debian's system certificate bundle. Optional `--ca-file` is a bounded
 explicit public PEM input used only for this operation, not an installed interception CA or a
 certificate/hostname-verification bypass. CLI/agent/control tests and strict Clippy pass locally;

@@ -23,7 +23,9 @@ use tokio::{
 
 use crate::{
     CacheLimits, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, Validity, VerifiedManifest,
-    transfer::{TransferError, TransferLimits, TransferProgress, pull_from_peer, serve_peer},
+    transfer::{
+        TransferError, TransferLimits, TransferProgress, pull_from_peer_with_progress, serve_peer,
+    },
 };
 
 const VERSION: u32 = 1;
@@ -340,6 +342,31 @@ pub async fn pull_publication<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut progress = TransferProgress::default();
+    pull_publication_with_progress(stream, manifest, store, limits, &mut progress).await?;
+    Ok(progress)
+}
+
+/// Pull an exact publication while retaining its verified progress on partial failure.
+///
+/// Resets `progress` before selector exchange. A later timeout, EOF or malformed frame
+/// preserves successfully verified and stored payload counts, never old cache hits or
+/// unverified bytes. Success is still determined only by the returned result and eventual
+/// full independently authenticated reassembly, not a nonzero progress count.
+///
+/// # Errors
+/// Same failures and stream-close requirement as [`pull_publication`].
+pub async fn pull_publication_with_progress<S>(
+    stream: &mut S,
+    manifest: &VerifiedManifest,
+    store: &mut ChunkStore,
+    limits: TransferLimits,
+    progress: &mut TransferProgress,
+) -> Result<(), ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    *progress = TransferProgress::default();
     let session = SelectorSession::new(limits)?;
     manifest.check_time(now()?)?;
     store.require_object_capacity(manifest.length())?;
@@ -367,9 +394,16 @@ where
             UNAVAILABLE => return Err(ProviderError::Unavailable),
             _ => return Err(ProviderError::Protocol),
         }
-        let result = pull_from_peer(stream, manifest, store, session.remaining(limits)?).await?;
+        pull_from_peer_with_progress(
+            stream,
+            manifest,
+            store,
+            session.remaining(limits)?,
+            progress,
+        )
+        .await?;
         session.check_deadline()?;
-        Ok(result)
+        Ok(())
     })
     .await
     .map_err(|_| ProviderError::Timeout)?

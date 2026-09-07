@@ -70,7 +70,7 @@ pub struct ContentFetchRequest {
     /// Publisher key already trusted by the local operator.
     #[prost(bytes = "vec", tag = "2")]
     pub publisher_key: Vec<u8>,
-    /// New private cache directory created by the agent; no arbitrary directory adoption.
+    /// Private cache directory created by default; explicit reuse opens only an owned cache.
     #[prost(string, tag = "3")]
     pub cache: String,
     /// New output path exposed only after complete verification; never overwritten.
@@ -79,6 +79,9 @@ pub struct ContentFetchRequest {
     /// Explicit cache budget.
     #[prost(message, optional, tag = "5")]
     pub limits: Option<ContentCacheLimits>,
+    /// Explicitly reopen a previously created agent-owned cache; never adopt another directory.
+    #[prost(bool, tag = "6")]
+    pub reuse_cache: bool,
 }
 
 /// Fetch public chunks authorized by the requested resource's own authenticated HTTPS origin.
@@ -90,7 +93,7 @@ pub struct HttpsContentFetchRequest {
     /// Explicit metadata path on that same origin; never an independently trusted manifest.
     #[prost(string, tag = "2")]
     pub metadata_path: String,
-    /// New private cache directory created by the unprivileged agent account.
+    /// Private cache directory created by default; explicit reuse opens only an owned cache.
     #[prost(string, tag = "3")]
     pub cache: String,
     /// New verified output path; existing entries are never overwritten.
@@ -103,6 +106,9 @@ pub struct HttpsContentFetchRequest {
     /// Empty means the agent uses Debian system roots; no certificates are installed.
     #[prost(bytes = "vec", tag = "6")]
     pub ca_certificates_pem: Vec<u8>,
+    /// Reopen only an owned cache; cached chunks never replace fresh HTTPS origin authorization.
+    #[prost(bool, tag = "7")]
+    pub reuse_cache: bool,
 }
 
 /// Actual successful content work, separate from route or generic alpha readiness.
@@ -280,6 +286,7 @@ mod tests {
     #[test]
     fn content_requests_are_typed_bounded_and_require_explicit_trust_and_paths() {
         let mut fetch = ContentFetchRequest {
+            reuse_cache: false,
             manifest: vec![1; 256],
             publisher_key: vec![2; 32],
             cache: "/private/new-cache".into(),
@@ -362,6 +369,7 @@ mod tests {
 
     fn https_request() -> HttpsContentFetchRequest {
         HttpsContentFetchRequest {
+            reuse_cache: false,
             resource_url: "https://origin.example/object.bin".into(),
             metadata_path: "/.well-known/volparossa/object".into(),
             cache: "/private/new-cache".into(),
@@ -372,6 +380,39 @@ mod tests {
                 min_free_bytes: 0,
             }),
             ca_certificates_pem: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn content_resume_flag_is_explicit_and_roundtrips_for_both_fetch_types() {
+        for reuse_cache in [false, true] {
+            let mut https = https_request();
+            https.reuse_cache = reuse_cache;
+            let native = ContentFetchRequest {
+                manifest: vec![1; 256],
+                publisher_key: vec![2; 32],
+                cache: https.cache.clone(),
+                output: https.output.clone(),
+                limits: https.limits,
+                reuse_cache,
+            };
+            assert!(!ContentFetchRequest::default().reuse_cache);
+            assert!(!HttpsContentFetchRequest::default().reuse_cache);
+            for operation in [
+                Operation::ContentFetch(native),
+                Operation::ContentFetchHttps(https),
+            ] {
+                let request = ControlRequest {
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    request_id: vec![8; 16],
+                    operation: Some(operation),
+                };
+                assert_eq!(
+                    decode_request(&encode_request(&request).expect("encode resume request"))
+                        .expect("decode resume request"),
+                    request
+                );
+            }
         }
     }
 

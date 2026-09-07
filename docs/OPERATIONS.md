@@ -393,8 +393,16 @@ signatures and opens policy-authorized MPTCP/TLS streams through the normal Rela
 It does not connect directly to provider endpoints or use ordinary TCP as a fallback. The
 selected route's Exit and Relays are excluded as content suppliers in this initial runtime.
 
-Fetch requires a **new** cache and output path; it verifies every chunk and the whole object
-before publishing output. Missing data causes failure, retaining any verified owned cache data;
+Fetch requires a **new** cache by default and always a **new** output path; it verifies every chunk
+and the whole object before publishing output. To resume an interrupted `content fetch` or
+`content fetch-https`, repeat the same command with `--reuse-cache`, the original agent-owned cache
+path and an output path that does not exist. Only missing chunks are requested; already verified
+chunks are reopened with the original ownership/index checks, not copied, chowned or adopted from
+an arbitrary directory. Reuse does not overwrite output or authorize a publisher: native fetch
+reverifies the supplied manifest/key, and HTTPS fetch authenticates fresh same-origin metadata
+before using any cached chunks. The original signed/HTTP expiry is never extended by cache reuse.
+Normal quota enforcement still applies and can evict unrelated older cached chunks.
+Missing data causes failure, retaining any verified owned cache data;
 this native command does not yet compose the separate HTTPS-origin fallback API. Its explicit
 JSON receipt includes reconstructed bytes/chunks and the unique supplying `provider_peer_ids`;
 those identifiers are not written to a background browsing log.
