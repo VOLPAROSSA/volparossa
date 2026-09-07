@@ -7,7 +7,7 @@ wait_disconnected() {
     idle_attempt=0
     while [ "$idle_attempt" -lt 300 ]; do
         "$binary_directory/volparossa" \
-            --control-socket "$WORK/runtime-client/control/agent.sock" status \
+            --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" status \
             >"$WORK/status-client.txt" 2>/dev/null || true
         if grep -Fx 'connected: false' "$WORK/status-client.txt" >/dev/null \
             && grep -Fx 'active contexts: 0' "$WORK/status-client.txt" >/dev/null; then
@@ -30,7 +30,7 @@ benchmark_capture_paths() {
         *) benchmark_pair_option= ;;
     esac
     "$binary_directory/volparossa" \
-        --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+        --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" paths \
         >"$WORK/$1-paths.txt" || return 3
     python3 -B "$source_directory/tests/integration/benchmark-paths.py" \
         "$WORK/$1-paths.txt" "$WORK/$1-selection.json" \
@@ -93,7 +93,7 @@ benchmark_bind_slots() {
 
 benchmark_disconnect_route() {
     "$binary_directory/volparossa" \
-        --control-socket "$WORK/runtime-client/control/agent.sock" disconnect \
+        --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" disconnect \
         >"$WORK/$1-disconnect.out" 2>"$WORK/$1-disconnect.err" || return 1
     wait_disconnected
 }
@@ -109,7 +109,7 @@ benchmark_select_route() {
         [ "$benchmark_remaining" -gt 0 ] || return 1
         if timeout --signal=TERM --kill-after=5s "${benchmark_remaining}s" \
             "$binary_directory/volparossa" \
-            --control-socket "$WORK/runtime-client/control/agent.sock" connect \
+            --control-socket "$WORK/runtime-${BENCHMARK_NODE:-client}/control/agent.sock" connect \
             --transport "$benchmark_transport" >"$WORK/$benchmark_label-connect.out" \
             2>"$WORK/$benchmark_label-connect.err"; then
             benchmark_poll=0

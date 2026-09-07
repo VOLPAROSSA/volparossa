@@ -153,6 +153,16 @@ only in a disposable namespace/VM. These checks cover signed offers, exact-manif
 independent partial stores, connection/correlation bounds and typed CLI/control operations;
 they do not substitute for the pending independent-node `content-provider` KVM scenario.
 
+The separate `content-replication` scenario uses the normal agents and CLI: only Relay5 starts
+with public objects P and Q; Relay4 fetches P and picks up Q into a new replica cache after a
+second foreground fetch. Relay5's agent is then stopped, and a separate Client fetches Q from
+Relay4 over its own two-relay MPTCP route. The runner checks independent publisher trust, actual
+new cache bytes, exact output hashes, full five-role captures for both phases, original-agent
+shutdown and complete cleanup. Run it through the same guarded KVM runner with
+`--scenario content-replication`; `--preview` performs no network changes. The evidence checker
+and capture classifier have focused tests; the first live run is still pending. This one chain
+does not establish full C03/C04, durable retention, generic browser support or a speed gain.
+
 ## Helper-boundary evidence
 
 The helper identity and production IPC boundary has a separate, narrower live gate:

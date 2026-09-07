@@ -27,11 +27,20 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication]'
 }
 
 print_plan() {
-    if [ "$scenario" = content-provider ]; then
+    if [ "$scenario" = content-replication ]; then
+        printf '%s\n' \
+            'VOLPAROSSA content-replication runtime smoke plan:' \
+            '  give Relay4 a client role and two disposable WireGuard/control underlays to Relay0/2;' \
+            '  seed foreground P and reserve Q only in Relay5; remove publisher source/key;' \
+            '  fetch P normally, then bounded opportunistic Q uptake in a new private cache;' \
+            '  stop Relay5, retrieve Q from Relay4 through original Client and two protected relay paths;' \
+            '  exact role-specific packet captures, policy-only DNS, no source-file shortcut;' \
+            '  remove all fixture units/links/namespaces and verify unchanged guest host state.'
+    elif [ "$scenario" = content-provider ]; then
         printf '%s\n' \
             'VOLPAROSSA content-provider runtime smoke plan:' \
             '  register two disjoint stores on two of Relay3/4/5, excluding the current control relay;' \
@@ -228,7 +237,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https|content-provider) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -341,6 +350,17 @@ if [ "$scenario" = mixed-link ]; then
     [ -f "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = content-replication ]; then
+    for replication_fixture in content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+        if [ ! -f "$source_directory/tests/integration/$replication_fixture" ] \
+            || [ -L "$source_directory/tests/integration/$replication_fixture" ]; then
+            printf '%s\n' 'content replication fixture unavailable' >&2
+            exit 69
+        fi
+    done
+    [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
+        || { printf '%s\n' 'content replication executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
@@ -1320,7 +1340,9 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = content-provider ]; then
+    if [ "$scenario" = content-replication ]; then
+        content_replication_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content-provider ]; then
         content_provider_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-https ]; then
         content_https_finalize_report "$original_status" || original_status=1
@@ -1408,6 +1430,10 @@ if [ "$scenario" = content-provider ]; then
     # shellcheck source=tests/integration/content-provider-smoke.sh
     . "$source_directory/tests/integration/content-provider-smoke.sh"
 fi
+if [ "$scenario" = content-replication ]; then
+    # shellcheck source=tests/integration/content-replication-smoke.sh
+    . "$source_directory/tests/integration/content-replication-smoke.sh"
+fi
 
 PHASE=host-state-before
 A15_REQUESTED=true
@@ -1418,7 +1444,7 @@ capture_host_state "$WORK/host-state-before.json" \
 # policy hostname to the one destination address, while cleanup restores the exact guest file.
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
-if [ "$scenario" = content-provider ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ]; then
     printf '%s\n' \
         '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
         '50.166.6.1 provider-b.volparossa.test provider-b.volparossa.test.' \
@@ -1467,7 +1493,8 @@ install -o root -g "$AGENT_GID" -m 0555 \
 install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/tls-policy-acceptance-fixture" \
     "$WORK/bin/examples/tls-policy-acceptance-fixture"
-if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenario" = content-provider ]; then
+if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] \
+    || [ "$scenario" = content-replication ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
@@ -1627,7 +1654,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = mixed-link ]; then
+if [ "$scenario" = content-replication ]; then
+    content_replication_extend_network
+elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
 elif [ "$scenario" = sharing ]; then
     sharing_extend_network
@@ -1688,7 +1717,9 @@ jq -S -c -n \
     >"$WORK/a01-expected-peers.json"
 
 set --
-[ "$scenario" != content-provider ] || set -- --content-providers
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ]; then
+    set -- --content-providers
+fi
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
 chown "$AGENT_UID:$AGENT_GID" "$WORK/development-policy.manifest" \
     "$WORK/policy-maintainers.json"
@@ -1764,6 +1795,9 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
+    if [ "$scenario" = content-replication ]; then
+        content_replication_configure_node
+    fi
     if [ "$wifi_link" = yes ]; then
         # Only the absent, not-yet-started Ethernet/WAN contacts remain configured. Neither
         # mesh peer is preconfigured on the other; the first association must be mDNS-driven.
@@ -1810,6 +1844,12 @@ write_config() {
                 printf '  total_download_mbps: 12\n  contribution_download_ceiling_mbps: 10\n'
                 ;;
             esac
+        fi
+        if [ "$scenario" = content-replication ] && [ "$node" = relay4 ]; then
+            printf 'sharing:\n  enabled: true\n  interface: ar0\n'
+            printf '  total_upload_mbps: 100\n  contribution_upload_ceiling_mbps: 1\n'
+            printf 'download_sharing:\n  enabled: true\n  interface: ar2\n'
+            printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
         fi
         [ "$wifi_link" != yes ] || wifi_link_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
@@ -2156,6 +2196,10 @@ else
     verify_mpquic client "$CLIENT" client
     verify_mpquic exit "$EXIT_NODE" exit
     verify_mpquic exit2 "$EXIT2_NODE" exit
+    if [ "$scenario" = content-replication ]; then
+        launch_mpquic relay4 "$R4" client
+        verify_mpquic relay4 "$R4" client
+    fi
 fi
 jq -S -c -s . "$WORK"/mpquic-record-*.json >"$WORK/mpquic-units.json"
 MPQUIC_READY=true
@@ -2181,6 +2225,13 @@ launch_agent() {
         # The identical agent UID must not permit a fixture-local replica file shortcut.
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-provider-seed"
         set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed"
+    fi
+    if [ "$scenario" = content-replication ]; then
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-replication-seed"
+        case $node in
+            client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed" ;;
+            relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed" ;;
+        esac
     fi
     systemd-run --no-block --unit="$agent_unit" --slice=system.slice \
         --description="VOLPAROSSA disposable alpha agent $node" \
@@ -3697,7 +3748,8 @@ fi
 
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
-    && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ]; then
+    && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
+    && [ "$scenario" != content-replication ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4952,6 +5004,10 @@ if [ "$scenario" = content-https ]; then
 fi
 if [ "$scenario" = content-provider ]; then
     content_provider_run
+    exit 0
+fi
+if [ "$scenario" = content-replication ]; then
+    content_replication_run
     exit 0
 fi
 
