@@ -1,0 +1,217 @@
+# Distributed content, publishing and offline delivery
+
+Status: user idea received 2026-09-07; architecture proposal, **not implemented**.
+This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
+Finish the current downlink and mixed-link repairs while resolving the application boundary.
+
+## Requested result
+
+Every capable participant contributes bounded local storage as well as its agreed network
+roles. Reusable content is split into verifiable chunks, fetched from several useful peers,
+retained and redistributed. Ordinary exchanges may carry a small additional selection of
+chunks to improve availability and diversity, but only within genuinely spare resources.
+Missing, expired or slower-to-fetch parts can come from the original source instead. The
+same substrate should support shared DNS records, publishing a user's own website/content,
+and delivering encrypted messages while the sender is offline.
+
+## Common substrate
+
+- Content-addressed chunks and a versioned authenticated manifest bind ordering, total length,
+  chunk hashes, content type, publisher authority and expiry. Hashes establish byte integrity;
+  they do not by themselves establish an Internet origin or legitimate publisher.
+- Bounded distributed provider discovery indexes available chunks, not a central catalogue
+  of users or their browsing. Availability advertisements expire and are verified by actual
+  bounded retrieval. A hash of a known URL is not a browsing-privacy mechanism.
+- Retrieval selects sources using measured latency, delivery progress, congestion and costs.
+  It must not wait indefinitely for cache discovery before trying an authorized origin.
+  Missing ranges may be fetched from the origin only with matching representation/version
+  validation; stale and current chunks must not be combined into one object.
+- Opportunistic replication is separate application-level content replication, not transport
+  packet duplication, cover traffic or FEC. It has a bounded hop/expiry/replica target and
+  favors useful scarce chunks and diverse holders rather than uncontrolled gossip of every
+  object. Self-declared popularity or free space is not trusted as proof.
+- Explicit disk quotas, a free-space floor, bounded memory/CPU/IO and separate foreground,
+  retrieval-serving and background-replication budgets protect the owner. Background copying
+  pauses under owner demand, uncertainty or congestion; scarce paid/mobile bandwidth, battery
+  and shared radio airtime also matter. Spare disk is not permission to fill the whole SSD.
+- Content-protocol authorization and privacy must be designed explicitly. A direct peer
+  download must not silently bypass the existing route/privacy boundaries or Internet egress
+  policy. Serving an overlay object is not advertising an independent Internet Exit uplink.
+
+## Different objects need different rules
+
+### Existing web content
+
+Generic TLS traffic is session-encrypted. An overlay cannot turn arbitrary recorded HTTPS
+packets into reusable cross-client HTTP responses. Existing-web integration therefore needs
+an application/browser boundary or publisher cooperation; installing an interception CA,
+breaking TLS, bypassing login/DRM or extracting application secrets is not part of this design.
+
+Shareable HTTP responses must preserve cache semantics, including no-store/private,
+authorization, freshness, Vary, validators and range identity. Neither another peer's claim
+nor its signature proves that bytes came from the claimed web origin. The design needs an
+authentic origin/publisher binding before peer content can stand in for that origin.
+Personalized/private responses must not become public shared objects. Generic automatic
+YouTube caching is not promised by the existence of a chunk store.
+
+### Native public publishing and websites
+
+Publishers explicitly publish signed, versioned objects. A stable name resolves to an
+authenticated current manifest; updates and stale versions have defined lifetimes.
+Static site assets can remain available while the original machine is offline only if all
+needed chunks still have reachable replicas. Dynamic application execution is a separate
+capability; caching HTML does not provide an offline database, login service or checkout.
+
+Best-effort cache eviction alone cannot provide durable publishing. Retention commitments,
+replica receipts, repair and an honest availability status are needed. No permanent-availability
+or deletion-of-all-remote-copies guarantee is implied.
+
+### Private messages and optional mail interoperability
+
+Encrypt for the intended recipient before chunking/replication. Storage peers must not need
+plaintext or recipient decryption keys. A recipient's authenticated mailbox/discovery scheme,
+anti-spam quotas, retention/expiry and delivery acknowledgement are distinct from public caching.
+Offline delivery requires sufficient reachable replicas before the sender disconnects.
+Network-native messaging does not automatically interoperate with existing email; SMTP/DNS
+delivery or gateways for ordinary email are separate integration work.
+
+### DNS
+
+Share validated DNS RRsets with their original authentication and remaining TTL, never query
+history. DNSSEC material can be independently validated; unsigned data from an arbitrary peer
+must not become trusted merely because the peer signed it. Use the established trusted
+resolution path where independent validation is unavailable. Replication must not renew TTL
+or signature lifetime, mix private/split-horizon views, override policy or redirect arbitrary
+destinations. A DNS record is a typed object with DNS-specific validation, not generic web data.
+
+## Functional checkpoints (all pending)
+
+- [ ] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection.
+- [ ] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback.
+- [ ] C03: bounded opportunistic redistribution improving reachable chunk diversity.
+- [ ] C04: owner-priority network/storage behavior and fair bounded contribution under contention.
+- [ ] C05: independent DNS validation, correct expiry and no peer-induced policy bypass.
+- [ ] C06: signed public publication remains retrievable after its publisher goes offline.
+- [ ] C07: an intended recipient retrieves and decrypts a replicated message after sender exit.
+- [ ] C08: agreed existing-web application integration and measured benefit over origin retrieval.
+
+Start with the common chunk/manifest/provider substrate and a real publish/retrieve/offline
+example, then reuse it for redistribution, DNS and messages. This is implementation ordering,
+not removal of the requested existing-web integration or other checkpoints.
+
+## HTTPS integration decision: separate retrieval from origin authentication
+
+The user asked on 2026-09-07 to find/build a safe and fast way to share existing HTTPS
+content too. The proposed implementation uses an explicit application integration with
+three authentication routes into the same chunk store. It does not decrypt another user's
+TLS records or replace the browser's certificate authority. This is a design decision,
+not a claim that a browser adapter or these proof verifiers already exists.
+
+| Route | Authentication before using peer bytes | Intended use |
+| --- | --- | --- |
+| Origin metadata | The consumer obtains a cryptographic representation digest or chunk manifest over its own authenticated origin HTTPS connection. | Small origin validation transfer, large peer payload transfer, where the origin actually supplies suitable metadata. |
+| Publisher signature | Verify a manifest/exchange against a key independently authenticated for that origin, including identity, representation and validity. | Publisher-supported resources and native VOLPAROSSA publications; reusable without contacting the publisher for each copy while valid. |
+| Witnessed HTTPS | Verify a reusable TLSNotary attestation against an explicitly trusted witness that participated in the original fetch. | Experimental public-resource compatibility where a publisher supplies no reusable proof; additional trust and performance costs remain visible. |
+
+A peer-supplied digest, certificate, key or signature is not an origin trust anchor. An ETag
+is an opaque validator, not a guaranteed cryptographic content hash. HEAD or range sampling
+does not prove the bytes of a complete object. The first route works only when authenticated
+metadata binds the exact expected representation; otherwise it falls back, not guesses.
+If only a whole-object digest exists, verify the complete object before exposing its bytes;
+independently usable streaming chunks require an authenticated chunk-hash manifest.
+
+The proof binds the HTTPS origin and resource, request variant, response status, security
+and representation metadata, encoded-byte identity, total length and freshness authority.
+Content-Type, encoding, redirects, CSP/CORS and credential rules must survive reconstruction.
+Expiry is the earliest applicable HTTP/proof/publisher validity boundary. Replication does
+not restart Age, freshness, signature expiry or authorization. Origin fallback retrieves
+only the same authorized version; an origin change requires a new manifest/version.
+
+### Fast path and fallback
+
+1. The local application identifies eligible public reusable content. Public shareability
+   is not inferred merely from absent cookies. Private/no-store, authenticated or ambiguous
+   personalized content is not admitted to the public pool; encryption is not permission to
+   persist a no-store response.
+2. Fetch/validate small origin metadata or a reusable proof and discover candidate holders
+   within a bounded foreground budget. Local verified chunks are reused immediately when
+   their object authority is still valid.
+3. Request disjoint authenticated chunks from useful peers, verify before delivery, and
+   assemble the exact representation. Missing/corrupt/stale pieces select another authorized
+   source or the origin; unverified bytes never become a successful cache hit.
+4. Estimate end-to-end completion including discovery, proof validation, disk access and
+   transfer. Prefer the origin when it is faster, the resource is small, or evidence is
+   unavailable. Any bounded source race must cancel losers and account for its wasted bytes;
+   it is not permission for continuous duplicate downloads.
+5. Share retained chunks and small scarce extras only through the common owner-priority
+   storage/network budgets. Proof creation and replication must not stall owner traffic.
+
+Measure cold origin retrieval, first proof creation, warm proof verification and warm peer
+retrieval separately. Proof-generation cost can be amortized over subsequent eligible hits,
+but no universal speedup or origin-load reduction is promised before measured results.
+
+### Browser/application boundary
+
+Start with a native content consumer and publisher-origin fixture. Then connect a supported
+browser/application adapter to the same verifier/store rather than duplicating its trust logic.
+Firefox exposes a response-body filter; it supplies access to bytes, not origin evidence.
+Ordinary Chromium extension request rules do not supply an equivalent body-replacement API.
+Chromium's explicit debugger/CDP interception can support a restricted experiment but brings
+strong permissions and target-lifecycle constraints; it is not a universal invisible solution.
+
+A publisher-installed service worker can serve verified resources inside its own origin/scope;
+a VOLPAROSSA worker cannot take over unrelated HTTPS sites. The Cache API does not enforce HTTP
+expiry automatically. Signed Exchanges provide another publisher-supported path but require
+appropriate signing certificates and browser support. A localhost page or isolated web app
+must not silently acquire another website's origin, cookies or script privileges.
+
+### Existing websites without publisher changes: bounded TLSNotary experiment
+
+The researched TLSNotary release is `v0.1.0-alpha.15`, commit
+`47aee45b53e06648c1b2ad3689b367b8c923fdec` (MIT OR Apache-2.0). It has an attestation crate and
+reusable presentation examples. It is **not vendored, integrated, or an approved default trust
+service** here; importing it requires the normal pinned-source/license/dependency workflow.
+
+The witness must be online during the fetch; a previous ordinary HTTPS recording cannot be
+notarized retroactively. Later consumers trust that witness not to collude with the uploader.
+An arbitrary peer majority, self-selected verification key or the term "zero knowledge" does
+not remove this assumption. No central compulsory witness service is proposed. Locally chosen
+trust anchors could allow independent operators, but node identity alone does not confer trust.
+Until explicitly configured, this route remains disabled and ordinary origin retrieval works.
+
+The current implementation supports TLS 1.2, not a general TLS 1.3/HTTP3 proof path. There is
+no silent downgrade of normal traffic or the required overlay datapaths. MPC and faster Proxy
+mode also have different assumptions: Proxy additionally requires an uncompromised
+verifier-to-origin network path. Treating an untrusted overlay exit as satisfying that
+assumption would be an unsupported security claim.
+
+The upstream full-response reveal optimization avoids per-byte ZK response proving when the
+entire response direction is disclosed. Its published 1--51 KB test measured roughly 14.5 s
+for MPC and 1.6 s for Proxy. That is not evidence of constant-time large-video processing.
+The first experiment should use an anonymous public resource, complete authenticated HTTP
+semantics and separate creation/reuse measurements. It must not publish request secrets or
+make public discovery a user's URL/history index. Without a suitable proof or configured
+witness, use the origin. This keeps unsupported sites working without pretending all HTTPS
+resources, authenticated streaming services or DRM media are publicly reusable.
+
+## Primary references
+
+- [TLS 1.3, RFC 8446](https://www.rfc-editor.org/rfc/rfc8446.html)
+- [HTTP caching, RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html)
+- [Digest fields and their authentication limits, RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html)
+- [HTTP Message Signatures, RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html)
+- [Firefox response-body filtering](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/filterResponseData)
+- [Chromium declarative request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest)
+- [Chromium debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)
+- [CDP Fetch interception](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/)
+- [Service-worker registration and scope](https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorkerContainer/register)
+- [Cache API semantics](https://developer.mozilla.org/en-US/docs/Web/API/Cache)
+- [Signed Exchange loading and validation](https://wicg.github.io/webpackage/loading.html)
+- [TLSNotary alpha.15 source release](https://github.com/tlsnotary/tlsn/releases/tag/v0.1.0-alpha.15)
+- [TLSNotary reusable attestation verification example](https://raw.githubusercontent.com/tlsnotary/tlsn/v0.1.0-alpha.15/crates/examples/attestation/verify.rs)
+- [TLSNotary public verifiability and witness trust](https://tlsnotary.org/blog/2026/06/17/public-verifiability/)
+- [TLSNotary full-reveal measurements](https://tlsnotary.org/blog/2026/05/19/fast-reveal/)
+- [TLSNotary supported TLS versions](https://tlsnotary.org/docs/faq/)
+- [TLSNotary Proxy mode assumptions](https://tlsnotary.org/docs/protocol/proxy-mode/)
+- [DNSSEC overview, RFC 4033](https://www.rfc-editor.org/rfc/rfc4033.html)
+- [DNSSEC protocol validation, RFC 4035](https://www.rfc-editor.org/rfc/rfc4035.html)

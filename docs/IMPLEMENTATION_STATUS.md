@@ -4,6 +4,13 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-07
 
+New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
+The proposal records the full idea and a researched HTTPS integration design: authenticated
+origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
+experiment, through an application/browser boundary. None of C01--C08 is counted as complete;
+ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
+Current downlink/mixed-link work continues alongside the first bounded content-store slice.
+
 ## Current live integration checkpoint
 
 The [full v1 run on `482e33d0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
@@ -99,8 +106,18 @@ That next boundary is now reproduced locally: the worker coordinator omitted the
 operation from its Activated/Committed transition table. Its new same-phase transition fixes
 the registry regression without changing correlation or Start acknowledgement requirements.
 All three focused downlink checks, including the real sender kernel proof, and strict helper
-Clippy pass. Sustained refresh also needs bounded expiry of budget-only replay records: the
-existing 1,024 lifetime record limit would otherwise eventually prevent further updates.
+Clippy pass. Budget-only replay records now expire with the shorter signed wall/boottime
+authority; an expired request is rejected before cached responses can be used. The separate
+2,048-record bound does not consume lifetime replay records or the terminal Destroy reserve,
+and exact in-flight tombstones remain retained. The targeted proof performs 2,724 refreshes
+over a 128-leg burst and ten virtual minutes, peaking at 1,280 live budget records while
+preserving critical replay and cleanup. Five downlink checks, six existing tombstone checks
+and strict helper library/test Clippy pass. This is not yet a live download-sharing pass.
+
+[Quality on `c7379ca2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34139609186)
+passes, including workspace tests and strict Clippy; the same revision's CodeQL analyses
+also pass after generated fixture nonces replace repeated literal signed-control nonces.
+These results precede the following scheduler and budget-record changes.
 
 A new local `run-warm-failover-probe.sh` isolates the real pinned/patched mqvpn/xquic SDK
 without WireGuard or agent RPC. One retained session completes 4+8 MiB of warm traffic, a
@@ -112,6 +129,26 @@ explicit diagnostic application ACK/retry framing and test-only loopback TLS tru
 a disposable user/network namespace; it is not HTTP/3, WireGuard, production TLS or alpha
 acceptance. Its near-zero-RTT, continuously pumped loop does not reproduce the integrated
 warm-path stall, but provides a fast real-transport basis for testing the differences.
+
+The [profiled mixed-link run on `c7379ca2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34139658819)
+identifies a concrete difference: the blackholed LAN path remains Active with its old 1,762-us
+RTT and a large congestion window, while the healthy WAN is writable but has a much higher
+measured RTT. Small two-per-second packets cannot fill the dead path's window, and absent ACK
+progress leaves its old delivery estimate winning indefinitely. No WAN-only response or gain
+ratio completes; cleanup leaves zero owned objects and unchanged guest state.
+
+The repaired EDT estimate includes bounded overdue outstanding-ACK time after the normal
+RTT/variance/peer-ACK-delay allowance, using xquic's real ACK-progress clock. It does not
+change congestion control, force equal path bytes, duplicate packets or remove/reconnect a
+path. The exact measured-state callback regression fails before and passes after the repair.
+The real warm-session loopback probe now independently reproduces the problem with synthetic
+9/19-ms one-way delays and low-rate traffic: the prior SDK delivers 0/60 small datagrams after
+the fast path is blackholed; the repaired SDK delivers 59/60 with the same session and no
+application retries. Its normal 4+8+4+32-MiB burst probe also passes in 6.396 seconds with all
+payload hashes matching. Strict native build and shell checks pass. The retained patch hash
+is `8b0a5d5aff8360f390325e618693f78e480fde116d33e58729bc6ab9aa17fa50`.
+This is real transport diagnostic evidence, not the integrated HTTP/3/WireGuard bandwidth
+comparison; that scenario must still pass on the new unchanged candidate.
 
 ### Earlier checkpoints and source-change evidence
 
