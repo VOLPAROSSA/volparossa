@@ -7840,6 +7840,10 @@ fn transition(
         (StablePhase::Activated, Some(Operation::ProbeCommitLeases(_))) => {
             Ok((StablePhase::Committed, false))
         }
+        (
+            phase @ (StablePhase::Activated | StablePhase::Committed),
+            Some(Operation::ApplyDownlinkBudget(_)),
+        ) => Ok((phase, false)),
         (StablePhase::Activated, Some(Operation::AcquireClientIngressReplySocket(_))) => {
             Ok((StablePhase::Activated, false))
         }
@@ -24113,6 +24117,70 @@ mod tests {
             coordinator.phase(context_id, generation),
             Err(WorkerV3Error::Stale)
         ));
+    }
+
+    #[test]
+    fn downlink_budget_registry_admits_activated_and_committed_without_advancing_phase() {
+        let context = [0x92; 16];
+        let update = request(
+            4,
+            internal_worker_request::Operation::ApplyDownlinkBudget(
+                crate::internal_protocol::ApplyWorkerDownlinkBudget {
+                    route_context_id: context.to_vec(),
+                    path_id: 1,
+                    sequence: 1,
+                    rate_bytes_per_second: 32_000,
+                    burst_bytes: 2048,
+                    expires_at_ms: 1000,
+                    expires_at_boottime_ns: 1000,
+                },
+            ),
+        );
+        for phase in [StablePhase::Activated, StablePhase::Committed] {
+            let mut registry = WorkerRegistry::new(1, 8, Duration::from_secs(10));
+            let (process, _peer, _alive) = fake_process(Duration::from_secs(1));
+            let generation = registry
+                .register(context, process, Duration::from_secs(5), Instant::now())
+                .unwrap();
+            registry.records.get_mut(&context).unwrap().stable_phase = phase;
+            let RegistryPlan::Call(call) = registry
+                .plan(context, generation, &update, Instant::now())
+                .expect("exact live budget reaches worker dispatch")
+            else {
+                panic!("first budget must be dispatched");
+            };
+            let response = correlated_response(
+                &update,
+                InternalWorkerResult::Ok,
+                Some(internal_worker_response::Outcome::DownlinkBudgetApplied(
+                    crate::internal_protocol::WorkerDownlinkBudgetApplied {
+                        sequence: 1,
+                        maximum_queued_bytes: 4096,
+                    },
+                )),
+            )
+            .unwrap();
+            assert!(matches!(
+                registry.finish(call.token, &update, &response, Instant::now(), true),
+                FinishOutcome::Committed
+            ));
+            assert_eq!(registry.records[&context].stable_phase, phase);
+            assert!(matches!(
+                registry.plan(context, generation, &update, Instant::now()),
+                Ok(RegistryPlan::Cached(_))
+            ));
+        }
+        for phase in [
+            StablePhase::Starting,
+            StablePhase::Initialised,
+            StablePhase::Prepared,
+            StablePhase::InitialiseCleanupPending,
+        ] {
+            assert!(matches!(
+                transition(phase, &update),
+                Err(WorkerV3Error::Conflict)
+            ));
+        }
     }
 
     #[test]

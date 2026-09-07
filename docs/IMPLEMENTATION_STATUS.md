@@ -95,6 +95,12 @@ still withholds Start, but the helper rejection advances from InvalidRequest to 
 the operation-generation repair is effective and a later dispatch boundary remains unresolved.
 The full contention/expiry scenario is still incomplete. General cleanup again leaves zero
 owned objects and unchanged guest state.
+That next boundary is now reproduced locally: the worker coordinator omitted the typed budget
+operation from its Activated/Committed transition table. Its new same-phase transition fixes
+the registry regression without changing correlation or Start acknowledgement requirements.
+All three focused downlink checks, including the real sender kernel proof, and strict helper
+Clippy pass. Sustained refresh also needs bounded expiry of budget-only replay records: the
+existing 1,024 lifetime record limit would otherwise eventually prevent further updates.
 
 A new local `run-warm-failover-probe.sh` isolates the real pinned/patched mqvpn/xquic SDK
 without WireGuard or agent RPC. One retained session completes 4+8 MiB of warm traffic, a
