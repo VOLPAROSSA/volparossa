@@ -13,7 +13,7 @@ publish = false
 ed25519-dalek.workspace = true
 hex.workspace = true
 libc.workspace = true
-libp2p.workspace = true
+libp2p = { workspace = true, features = ["tls"] }
 nix.workspace = true
 pem.workspace = true
 quinn.workspace = true
@@ -28,6 +28,7 @@ serde_json.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true

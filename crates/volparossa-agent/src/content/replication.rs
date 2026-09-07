@@ -235,11 +235,16 @@ impl ReplicationRuntime {
             return;
         };
         async {
+            let Ok(mut stream) =
+                super::tls::connect(flow.stream_mut(), contact.peer, &contact.offer).await
+            else {
+                return;
+            };
             let Ok(mut store) = ChunkStore::open(&self.root, self.limits) else {
                 return;
             };
             let progress = pull_replicas(
-                flow.stream_mut(),
+                &mut stream,
                 &mut store,
                 ReplicationLimits {
                     max_chunks: self.config.max_chunks as usize,
@@ -250,6 +255,13 @@ impl ReplicationRuntime {
             )
             .await
             .ok();
+            if progress.is_some() && super::tls::finish(&mut stream).await.is_err() {
+                return;
+            }
+            drop(stream);
+            if progress.is_some() && super::tls::finish(flow.stream_mut()).await.is_err() {
+                return;
+            }
             let usage = store.usage();
             drop(store); // Registration must independently reopen and verify the owned cache.
             self.state.lock().await.usage = usage;

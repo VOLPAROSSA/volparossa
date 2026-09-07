@@ -67,6 +67,10 @@ pub(super) async fn fetch(
     let authenticated = client
         .authenticate_manifest(flow.stream_mut(), &origin, now())
         .await;
+    if authenticated.is_ok() && super::tls::finish(flow.stream_mut()).await.is_err() {
+        super::content_event(context, "CONTENT_ORIGIN_ROUTE_CLOSE_FAILED").await;
+        return Err(ContentError::Unavailable);
+    }
     flow.shutdown();
     let authorized = authenticated.map_err(|_| ContentError::Unavailable)?;
     let mut store = ChunkStore::create(&PathBuf::from(request.cache), cache_limits)
@@ -168,6 +172,10 @@ async fn fill_missing(
         let progress = client
             .fill_next_missing_from_origin(flow.stream_mut(), authorized, store, now())
             .await;
+        if progress.is_ok() && super::tls::finish(flow.stream_mut()).await.is_err() {
+            super::content_event(context, "CONTENT_ORIGIN_ROUTE_CLOSE_FAILED").await;
+            return Err(ContentError::Unavailable);
+        }
         flow.shutdown();
         let progress = progress.map_err(|_| ContentError::Unavailable)?;
         if progress.requested.is_none()

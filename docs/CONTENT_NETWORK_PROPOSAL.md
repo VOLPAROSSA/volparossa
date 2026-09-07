@@ -2,7 +2,7 @@
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
 storage, protected-route public/encrypted transfer and a cooperative-origin HTTPS consumer.
-**Distributed discovery, browser integration and generic existing-site reuse remain absent.**
+**Integrated multi-peer retrieval, browser integration and generic existing-site reuse remain incomplete.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Continue from the scoped downlink/mixed-link passes into the application/content runtime.
 
@@ -111,11 +111,19 @@ the exact independently trusted manifest over existing policy-authorized MPTCP/T
 The DHT and control lookup carry no object IDs, URLs or publication-key catalogue. At most
 16 offers and 64 explicitly registered publications are supported. Compilation and focused
 provider/discovery/control/CLI tests pass. The first independent-provider KVM attempt on
-`aa634ce1` failed before retrieval; a correction to disposable broker-to-provider control
-connectivity is in progress. Cleanup completed with unchanged host state. C02/C06 remain open:
+`aa634ce1` failed before retrieval. The later `fdcb64d3` run now completes live discovery with
+two verified offers; retrieval still fails at the missing provider application-TLS boundary.
+Cleanup completed with unchanged host state. C02/C06 remain open:
 automatic placement, retention, name lookup and live independent-node retrieval are not proven.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
-retains the exact failed run and separate passing Quality result.
+retains the source-specific network and Quality results.
+
+The next runtime uses a real provider application-TLS layer inside the protected path. The
+existing libp2p TLS identity proof pins the endpoint to its verified signed offer; exact SNI and
+content ALPN are required. A new temporary consumer identity is used per TLS session, not the
+permanent Client key. This provider authentication does not replace the separately trusted
+publisher or origin descriptor. The normal flow also performs bounded TLS shutdown instead
+of dropping a successful session as an aborted transport.
 
 The new stream API pulls only missing chunks from each provider, authenticating bytes before
 storage and bounding requests, bytes and exchange/session time. A real separate-process proof
@@ -212,8 +220,9 @@ supplies independent native authority or obtains its own origin-authenticated HT
 
 An explicitly configured agent replica cache can pick up other chunks from a recently used
 provider after a successful foreground download. No new provider discovery or route is created
-for this job. One job is allowed at a time, with at most four chunks and 1 MiB of actual protocol
-traffic in both directions, including selector, request, metadata and frame overhead. Four full
+for this job. One job is allowed at a time, with at most four chunks and 1 MiB of content-protocol
+bytes in both directions, including selector, request, metadata and frame overhead. TLS,
+WireGuard and lower-layer overhead are additional, not counted as useful content. Four full
 256-KiB chunks therefore do not fit that wire budget. The separate private cache has its own
 byte/entry/free-space limits and never evicts existing chunks to admit optional work. Original
 expiry is not renewed; copying increments a locally bounded hop count, not a proof against

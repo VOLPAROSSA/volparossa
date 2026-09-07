@@ -86,6 +86,34 @@ Nine focused discovery tests (including a two-connection Noise/Yamux MemoryTrans
 and five agent discovery tests pass. These establish the bounded dispatch mechanism, not the
 cause among the old undifferentiated registry states or a passing independent-node KVM result.
 
+The [exact `fdcb64d3` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34160670839)
+now proves that fix on the live topology: `CONNECTION_MULTIPLE` proceeds to actual dispatch,
+two provider offers are verified, and discovery completes. Retrieval still fails afterward:
+the native selector is written without application TLS, while the unchanged Exit policy
+requires a real ClientHello matching the authorized provider hostname before opening egress.
+Both flows are rejected before any provider TCP connection. A provider-authenticated TLS layer
+is being integrated; neither a policy bypass nor a completed download is claimed. All five
+boundary captures and both broker-link captures drain completely with zero drops or violations;
+cleanup leaves zero objects and identical guest state. Artifact SHA-256:
+`e1d62ea06f4b0cb3364482d24f40e6f02ac9dff4e8b79dc115b5949c260df896`.
+Exact-source Quality passes strict Clippy but fails one discovery source-surface test: its
+old one-enum assertion omitted the new fieldless diagnostic enum. The assertion is updated to
+allow exactly those two named enums; the registry/authority restrictions remain unchanged.
+
+The provider runtime now adds actual TLS 1.3 inside the protected flow, reusing the pinned
+libp2p certificate identity proof. The server identity must match the verified service offer;
+the exact advertised SNI and content ALPN are required. Each consumer session uses a fresh
+temporary TLS identity, never its permanent Client key. This authenticates only the provider,
+not a publisher or HTTPS origin. Foreground native/HTTPS peer pulls and replica uptake share
+the same connector. Three focused tests pass: real independently authorized chunk transfer,
+wrong-provider/SNI rejection, and nested TLS through the actual bidirectional proxy with clean
+half-closes and different ephemeral Client identities. Provider sockets now use the existing
+contribution priority; actual owner-contention behavior still needs its own live proof.
+The eleven existing HTTPS tests, the corrected registry test, strict agent/content Clippy and
+formatter checks also pass. HTTPS closes only after the existing exact-body/origin checks and
+does not confuse a complete HTTP body with clean carrying-transport EOF; the agent separately
+requires outer TLS completion. The independent-node KVM rerun is still pending.
+
 The first C03 redistribution library and normal agent hooks are now integrated locally. Five
 duplex tests pass: uptake then re-serving, non-evicting quota, exclusions/duplicates, signed
 expiry/hop bounds, corrupt input and timeout. Existing v1 provider tests remain 4/4 passing.
@@ -98,6 +126,13 @@ not instantaneous owner/radio contention. Agent/UAPI compilation and strict Clip
 focused cache/owner-generation/idle-accounting tests and the UAPI counter test pass. Independent-node C03 uptake/re-serving,
 durable registration/retention and complete C04 owner isolation remain unproven and unchecked.
 See the [bounded redistribution scope](CONTENT_NETWORK_PROPOSAL.md#bounded-post-download-redistribution).
+
+The separate `content-replication` KVM scenario now drives normal agents through foreground P,
+uptake of previously absent Q, original-provider agent shutdown, and a new consumer's protected
+Q retrieval from the replica. Five-role physical captures cover both phases and all fixture
+interfaces, with actual object hashes, fresh-cache isolation and unchanged-host cleanup gates.
+The two evidence-checker tests, five capture tests, thirteen existing benchmark tests and narrow
+shell/runner checks pass. The live sequence has not run yet; it is not counted as C03 completion.
 
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and

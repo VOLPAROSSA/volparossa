@@ -6,6 +6,7 @@
 mod https;
 mod replication;
 mod replication_budget;
+mod tls;
 
 use replication::ReplicationRuntime;
 use replication_budget::Foreground;
@@ -13,6 +14,7 @@ use replication_budget::Foreground;
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use socket2::SockRef;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, watch},
@@ -24,6 +26,7 @@ use volparossa_content::provider::{
 };
 use volparossa_content::transfer::TransferLimits;
 use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest};
+use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_identity::Identity;
 use volparossa_local_control::{
     ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest,
@@ -52,6 +55,7 @@ pub(crate) enum ContentError {
 #[derive(Clone)]
 pub(crate) struct ContentRuntime {
     signer: Arc<SigningKey>,
+    tls_identity: Arc<libp2p::identity::Keypair>,
     service: Arc<Mutex<Option<Service>>>,
     retrieval: Arc<Mutex<()>>,
     foreground: Arc<Foreground>,
@@ -77,6 +81,7 @@ impl ContentRuntime {
         let signer = SigningKey::from_keypair_bytes(&bytes).map_err(|_| ContentError::Invalid)?;
         Ok(Self {
             signer: Arc::new(signer),
+            tls_identity: Arc::new(identity.keypair().clone()),
             service: Arc::new(Mutex::new(None)),
             retrieval: Arc::new(Mutex::new(())),
             foreground: Arc::new(Foreground::default()),
@@ -147,8 +152,13 @@ impl ContentRuntime {
             .replication
             .map(ReplicationRuntime::create)
             .transpose()?;
+        let tls = tls::ContentTlsServer::new(&self.tls_identity, endpoint.hostname())
+            .map_err(|_| ContentError::Unavailable)?;
         let listener = TcpListener::bind(bind)
             .await
+            .map_err(|_| ContentError::Unavailable)?;
+        SockRef::from(&listener)
+            .set_priority(CONTRIBUTION_SOCKET_PRIORITY)
             .map_err(|_| ContentError::Unavailable)?;
         let offer = self.offer(endpoint.clone())?;
         // The listener and a verified registration exist before announcing service availability.
@@ -161,6 +171,7 @@ impl ContentRuntime {
         let (stop, receiver) = watch::channel(false);
         let task = tokio::spawn(Self::serve_loop(
             listener,
+            tls,
             Arc::clone(&registry),
             Arc::clone(&self.signer),
             endpoint.clone(),
@@ -189,6 +200,7 @@ impl ContentRuntime {
 
     async fn serve_loop(
         listener: TcpListener,
+        tls: tls::ContentTlsServer,
         registry: Arc<Mutex<PublicationRegistry>>,
         signer: Arc<SigningKey>,
         endpoint: ProviderEndpoint,
@@ -208,12 +220,19 @@ impl ContentRuntime {
                     if discovery.register_content_offer(offer).await.is_err() { break; }
                 }
                 accepted = listener.accept(), if sessions.len() < 4 => {
-                    let Ok((mut stream, _source)) = accepted else { break; };
+                    let Ok((stream, _source)) = accepted else { break; };
+                    if SockRef::from(&stream).set_priority(CONTRIBUTION_SOCKET_PRIORITY).is_err() {
+                        continue;
+                    }
                     let registry = Arc::clone(&registry);
+                    let tls = tls.clone();
                     sessions.spawn(async move {
+                        let Ok(mut stream) = tls.accept(stream).await else { return; };
                         // One owned-cache session at a time; no unbounded queue or lock wait.
                         let Ok(registry) = registry.try_lock() else { return; };
-                        let _ = serve_publication(&mut stream, &registry, TransferLimits::default()).await;
+                        if serve_publication(&mut stream, &registry, TransferLimits::default()).await.is_ok() {
+                            let _ = tls::finish(&mut stream).await;
+                        }
                     });
                 }
                 Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
@@ -458,17 +477,31 @@ impl ContentRuntime {
                 )
                 .await
             else {
+                content_event(context, "CONTENT_PROVIDER_ROUTE_FLOW_FAILED").await;
+                continue;
+            };
+            let Ok(mut stream) =
+                tls::connect(flow.stream_mut(), provider.peer_id, &provider.offer).await
+            else {
+                content_event(context, "CONTENT_PROVIDER_TLS_FAILED").await;
                 continue;
             };
             let before = store.usage().bytes;
-            let _progress = pull_publication(
-                flow.stream_mut(),
-                manifest,
-                store,
-                TransferLimits::default(),
-            )
-            .await;
+            let progress =
+                pull_publication(&mut stream, manifest, store, TransferLimits::default()).await;
+            if progress.is_ok() && tls::finish(&mut stream).await.is_err() {
+                content_event(context, "CONTENT_PROVIDER_TLS_CLOSE_FAILED").await;
+                return Err(ContentError::Unavailable);
+            }
+            drop(stream);
+            if progress.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
+                content_event(context, "CONTENT_PROVIDER_ROUTE_CLOSE_FAILED").await;
+                return Err(ContentError::Unavailable);
+            }
             flow.shutdown();
+            if progress.is_err() {
+                content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
+            }
             // A later session error does not undo chunks already authenticated and stored.
             if store.usage().bytes > before {
                 used.insert(provider.peer_id.to_string());

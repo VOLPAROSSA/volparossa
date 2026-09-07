@@ -96,8 +96,9 @@ The normal CLI now provides `volparossa content publish` and `volparossa content
 explicit local files are signed with the existing encrypted node identity and reconstructed
 from explicitly selected owned caches. Those two commands remain offline. New `content serve`,
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
-provider discovery and protected MPTCP retrieval. Compilation and focused checks pass; the
-first independent-node network attempt failed before retrieval, so that proof remains pending.
+provider discovery and protected MPTCP retrieval. Independent-node discovery now passes its
+live lookup, but the latest download still fails at the provider application-TLS boundary;
+the complete retrieval proof remains pending.
 See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
 [exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route

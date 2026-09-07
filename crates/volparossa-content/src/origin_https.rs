@@ -212,6 +212,10 @@ impl OriginClient {
             if now >= expires {
                 return Err(OriginError::Expired);
             }
+            finish_http_tls(&mut tls).await?;
+            if clock.now(now_unix)? >= expires {
+                return Err(OriginError::Expired);
+            }
             Ok(OriginAuthorizedManifest {
                 request: request.clone(),
                 manifest,
@@ -273,6 +277,7 @@ impl OriginClient {
                 now_unix,
             )
             .await?;
+            finish_http_tls(&mut tls).await?;
             authorized.check_time(now_unix)?;
             Ok(response.length)
         })
@@ -354,6 +359,7 @@ impl OriginClient {
             };
             let chunks_verified = chunks.len();
             receive_chunks(&mut tls, authorized, chunks, store, now_unix).await?;
+            finish_http_tls(&mut tls).await?;
             let complete = authorized.next_missing_range(store, now_unix)?.is_none();
             if Instant::now() >= deadline {
                 return Err(OriginError::Timeout);
@@ -397,6 +403,30 @@ impl OriginClient {
             return Err(OriginError::Tls);
         }
         Ok(tls)
+    }
+}
+
+/// Finish the single HTTP response only after its exact declared body was authenticated.
+/// This runs inside the existing operation deadline. A peer may close HTTP transport without
+/// TLS `close_notify` after a complete Content-Length body; that is not new content authority,
+/// nor proof of a clean carrying transport. Callers using nested TLS must independently finish
+/// the outer stream before counting their protected route as successfully completed.
+async fn finish_http_tls<S>(tls: &mut TlsStream<S>) -> Result<(), OriginError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match tls.shutdown().await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(error) => return Err(error.into()),
+    }
+    match tls.read(&mut [0_u8; 1]).await {
+        Ok(0) => Ok(()),
+        // rustls distinguishes transport EOF without close_notify from clean TLS EOF.
+        // The already verified HTTP body remains complete in either case.
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(OriginError::Response),
     }
 }
 
