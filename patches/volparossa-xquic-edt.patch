@@ -58,10 +58,10 @@ index c89a751..fe0e084 100644
          xqc_conn_send_ping;
 diff --git a/src/transport/scheduler/xqc_scheduler_volparossa_edt.c b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
 new file mode 100644
-index 0000000..6b5f076
+index 0000000..d1f5eb7
 --- /dev/null
 +++ b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,494 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -98,6 +98,9 @@ index 0000000..6b5f076
 +#include "src/transport/xqc_send_ctl.h"
 +
 +#include <limits.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <stdlib.h>
 +#include <string.h>
 +
 +#define VOLPAROSSA_EDT_QUEUE_LIMIT_US (60ULL * 1000000ULL)
@@ -105,6 +108,11 @@ index 0000000..6b5f076
 +#define VOLPAROSSA_EDT_EXPLORATION_FLOOR_BYTES (2ULL * 1024ULL * 1024ULL)
 +#define VOLPAROSSA_EDT_EXPLORATION_ATTEMPT_CAP_BYTES \
 +    (8ULL * 1024ULL * 1024ULL)
++#define VOLPAROSSA_EDT_TRACE_START_US 10000000ULL
++#define VOLPAROSSA_EDT_TRACE_END_US 20000000ULL
++#define VOLPAROSSA_EDT_TRACE_INTERVAL_US 156250ULL
++#define VOLPAROSSA_EDT_TRACE_SAMPLE_CAP 64U
++#define VOLPAROSSA_EDT_TRACE_PATH_CAP 8U
 +
 +typedef struct volparossa_edt_path_window_s {
 +    uint64_t path_id;
@@ -115,7 +123,18 @@ index 0000000..6b5f076
 +
 +typedef struct volparossa_edt_scheduler_s {
 +    volparossa_edt_path_window_t windows[XQC_PATH_HARD_CAP];
++    xqc_bool_t trace_enabled;
++    xqc_bool_t trace_started;
++    xqc_usec_t trace_start_us;
++    uint64_t trace_next_elapsed_us;
++    unsigned trace_samples;
 +} volparossa_edt_scheduler_t;
++
++typedef struct volparossa_edt_trace_path_s {
++    xqc_path_ctx_t *path;
++    uint64_t cost_us;
++    xqc_bool_t sendable;
++} volparossa_edt_trace_path_t;
 +
 +static uint64_t
 +volparossa_edt_saturating_add(uint64_t left, uint64_t right)
@@ -309,11 +328,77 @@ index 0000000..6b5f076
 +    return sizeof(volparossa_edt_scheduler_t);
 +}
 +
++/* Disposable-fixture diagnostic only: no addresses, connection identities or
++ * payloads, and no general xquic debug logging. The 10..20 second window is
++ * relative to the first non-startup application selection, NOT an HTTP
++ * response boundary. At most eight eligible candidates and 64 sparse samples
++ * per connection are printed; selection and its metric inputs are untouched.
++ * Metrics are read only on sampled calls. This never requests a new packet. */
++static void
++volparossa_edt_trace_emit(volparossa_edt_scheduler_t *scheduler,
++                          uint64_t elapsed_us, xqc_usec_t now,
++                          xqc_path_ctx_t *selected, xqc_bool_t startup,
++                          volparossa_edt_trace_path_t *paths,
++                          size_t path_count, size_t eligible_count)
++{
++    scheduler->trace_samples++;
++    scheduler->trace_next_elapsed_us = elapsed_us
++        + VOLPAROSSA_EDT_TRACE_INTERVAL_US;
++    char line[4096];
++    int used = snprintf(line, sizeof(line),
++        "NATIVE_EDT_SAMPLE {\"sample\":%u,\"elapsed_us\":%" PRIu64
++        ",\"selected_path\":%" PRIu64 ",\"has_selected\":%u,"
++        "\"startup\":%u,\"eligible_count\":%zu,\"candidates\":[",
++        scheduler->trace_samples, elapsed_us,
++        selected != NULL ? (uint64_t)selected->path_id : 0,
++        selected != NULL, (unsigned)startup, eligible_count);
++    if (used < 0 || (size_t)used >= sizeof(line)) return;
++    for (size_t i = 0; i < path_count; ++i) {
++        xqc_path_ctx_t *path = paths[i].path;
++        xqc_send_ctl_t *ctl = path->path_send_ctl;
++        uint64_t srtt_us = xqc_send_ctl_get_srtt(ctl);
++        uint64_t cwnd_bytes = 0;
++        uint64_t rate_bytes_per_second = 0;
++        if (ctl->ctl_cong != NULL && ctl->ctl_cong_callback != NULL) {
++            if (ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd != NULL) {
++                cwnd_bytes = ctl->ctl_cong_callback
++                    ->xqc_cong_ctl_get_cwnd(ctl->ctl_cong);
++            }
++            if (srtt_us != 0) {
++                rate_bytes_per_second = xqc_send_ctl_get_est_bw(ctl);
++            }
++        }
++        int added = snprintf(line + used, sizeof(line) - (size_t)used,
++            "%s{\"path\":%" PRIu64 ",\"sendable\":%u,"
++            "\"cost_us\":%" PRIu64 ",\"srtt_us\":%" PRIu64
++            ",\"rate_Bps\":%" PRIu64 ",\"cwnd_bytes\":%" PRIu64
++            ",\"inflight_bytes\":%" PRIu64 ",\"scheduled_bytes\":%" PRIu64
++            ",\"overdue_ack_us\":%" PRIu64 ",\"loss_percent\":%u}",
++            i == 0 ? "" : ",", (uint64_t)path->path_id,
++            (unsigned)paths[i].sendable, paths[i].cost_us, srtt_us,
++            rate_bytes_per_second, cwnd_bytes,
++            (uint64_t)ctl->ctl_bytes_in_flight,
++            (uint64_t)path->path_schedule_bytes,
++            volparossa_edt_overdue_ack_us(ctl, now),
++            (unsigned)xqc_path_recent_loss_rate(path));
++        if (added < 0 || (size_t)added >= sizeof(line) - (size_t)used) return;
++        used += added;
++    }
++    if (sizeof(line) - (size_t)used < 4) return;
++    memcpy(line + used, "]}\n", 3);
++    (void)fwrite(line, 1, (size_t)used + 3, stderr);
++}
++
 +static void
 +volparossa_edt_scheduler_init(void *scheduler, xqc_log_t *log,
 +                              xqc_scheduler_params_t *params)
 +{
 +    memset(scheduler, 0, sizeof(volparossa_edt_scheduler_t));
++    volparossa_edt_scheduler_t *edt = scheduler;
++    const char *trace_option = getenv("VMP_DEV_EDT_TRACE");
++    edt->trace_enabled = trace_option != NULL
++        && strcmp(trace_option, "1") == 0;
++    edt->trace_next_elapsed_us = VOLPAROSSA_EDT_TRACE_START_US;
 +    (void)log;
 +    (void)params;
 +}
@@ -344,6 +429,20 @@ index 0000000..6b5f076
 +    xqc_bool_t application_packet =
 +        (packet_out->po_frame_types
 +         & (XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_DATAGRAM)) != 0;
++    uint64_t trace_elapsed_us = 0;
++    xqc_bool_t trace_due = XQC_FALSE;
++    if (edt_scheduler != NULL && edt_scheduler->trace_enabled
++        && edt_scheduler->trace_started && application_packet
++        && edt_scheduler->trace_samples < VOLPAROSSA_EDT_TRACE_SAMPLE_CAP
++        && now >= edt_scheduler->trace_start_us)
++    {
++        trace_elapsed_us = now - edt_scheduler->trace_start_us;
++        trace_due = trace_elapsed_us >= edt_scheduler->trace_next_elapsed_us
++            && trace_elapsed_us < VOLPAROSSA_EDT_TRACE_END_US;
++    }
++    volparossa_edt_trace_path_t trace_paths[VOLPAROSSA_EDT_TRACE_PATH_CAP];
++    size_t trace_path_count = 0;
++    size_t trace_eligible_count = 0;
 +    size_t visited = 0;
 +    xqc_list_head_t *position;
 +    xqc_list_head_t *next;
@@ -360,6 +459,16 @@ index 0000000..6b5f076
 +            || path->path_send_ctl == NULL)
 +        {
 +            continue;
++        }
++        volparossa_edt_trace_path_t *trace_path = NULL;
++        if (trace_due) {
++            trace_eligible_count++;
++            if (trace_path_count < VOLPAROSSA_EDT_TRACE_PATH_CAP) {
++                trace_path = &trace_paths[trace_path_count++];
++                trace_path->path = path;
++                trace_path->cost_us = UINT64_MAX;
++                trace_path->sendable = XQC_FALSE;
++            }
 +        }
 +        xqc_bool_t path_needs_exploration =
 +            path->path_send_ctl->ctl_delivered
@@ -392,6 +501,10 @@ index 0000000..6b5f076
 +        }
 +
 +        uint64_t cost = volparossa_edt_cost_us(path, packet_out->po_used_size, now);
++        if (trace_path != NULL) {
++            trace_path->sendable = XQC_TRUE;
++            trace_path->cost_us = cost;
++        }
 +        if (cost == UINT64_MAX) {
 +            continue;
 +        }
@@ -413,6 +526,19 @@ index 0000000..6b5f076
 +    }
 +    if (cc_blocked != NULL && reached_congestion_check && best == NULL) {
 +        *cc_blocked = XQC_TRUE;
++    }
++    if (edt_scheduler != NULL && edt_scheduler->trace_enabled) {
++        if (!edt_scheduler->trace_started && application_packet
++            && best != NULL && !startup_selected)
++        {
++            edt_scheduler->trace_started = XQC_TRUE;
++            edt_scheduler->trace_start_us = now;
++        }
++        if (trace_due) {
++            volparossa_edt_trace_emit(edt_scheduler, trace_elapsed_us, now,
++                best, startup_selected, trace_paths, trace_path_count,
++                trace_eligible_count);
++        }
 +    }
 +    if (best != NULL) {
 +        xqc_log(conn->log, XQC_LOG_DEBUG,
@@ -453,10 +579,10 @@ index 0000000..5e516a6
 +#endif /* _XQC_SCHEDULER_VOLPAROSSA_EDT_H_INCLUDED_ */
 diff --git a/tests/xqc_volparossa_edt_contract.c b/tests/xqc_volparossa_edt_contract.c
 new file mode 100644
-index 0000000..02a92c8
+index 0000000..66882d1
 --- /dev/null
 +++ b/tests/xqc_volparossa_edt_contract.c
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,519 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -466,10 +592,14 @@ index 0000000..02a92c8
 + * production mqvpn sessions.
 + */
 +
++#define _GNU_SOURCE
++#include <inttypes.h>
 +#include <stdint.h>
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
 +
 +#include "xquic/xquic.h"
 +#include "src/transport/xqc_conn.h"
@@ -712,6 +842,110 @@ index 0000000..02a92c8
 +    return failed;
 +}
 +
++static int
++edt_bounded_fixture_trace(const char *option)
++{
++    edt_test_fixture_t fixture;
++    memset(&fixture, 0, sizeof(fixture));
++    fixture.log.log_level = XQC_LOG_FATAL;
++    fixture.conn.log = &fixture.log;
++    xqc_init_list_head(&fixture.conn.conn_paths_list);
++    fixture.scheduler =
++        calloc(1, xqc_volparossa_edt_scheduler_cb.xqc_scheduler_size());
++    if (fixture.scheduler == NULL) return 1;
++    int failed = 1;
++    int capture = -1;
++    int saved_stderr = -1;
++    xqc_timestamp_pt saved_clock = xqc_monotonic_timestamp;
++    if (option == NULL ? unsetenv("VMP_DEV_EDT_TRACE") != 0
++                       : setenv("VMP_DEV_EDT_TRACE", option, 1) != 0)
++    {
++        goto done;
++    }
++    xqc_volparossa_edt_scheduler_cb.xqc_scheduler_init(
++        fixture.scheduler, &fixture.log, NULL);
++    /* The option is sampled once at initialization, never per packet. */
++    if (unsetenv("VMP_DEV_EDT_TRACE") != 0) goto done;
++    edt_add_path(&fixture, 0, 10, 12000, 20000000, 128000, 2000, 0, 100);
++    edt_add_path(&fixture, 1, 20, 18000, 40000000, 128000, 1000, 0, 100);
++    edt_add_path(&fixture, 2, 30, 1000, 40000000, 500, 0, 0, 100);
++    capture = memfd_create("edt-fixture-trace", MFD_CLOEXEC);
++    saved_stderr = dup(STDERR_FILENO);
++    if (capture < 0 || saved_stderr < 0) goto done;
++    if (fflush(stderr) != 0 || dup2(capture, STDERR_FILENO) < 0) goto done;
++    xqc_monotonic_timestamp = edt_ack_age_test_clock;
++    edt_ack_age_test_now = 100000000;
++    /* Startup exploration and control-only scheduling do not start the
++     * diagnostic clock. All calls still choose their ordinary real winner. */
++    if (edt_select(&fixture, NULL) != 20) goto done;
++    for (size_t i = 0; i < 3; ++i) {
++        fixture.send_ctls[i].ctl_delivered = 2ULL * 1024ULL * 1024ULL;
++        fixture.send_ctls[i].ctl_bytes_send = fixture.send_ctls[i].ctl_delivered;
++    }
++    edt_ack_age_test_now = 105000000;
++    xqc_packet_out_t control;
++    memset(&control, 0, sizeof(control));
++    control.po_frame_types = XQC_FRAME_BIT_PING;
++    control.po_used_size = 1200;
++    if (xqc_volparossa_edt_scheduler_cb.xqc_scheduler_get_path(
++        fixture.scheduler, &fixture.conn, &control, 1, 0, NULL)
++        != &fixture.paths[0]) goto done;
++    const xqc_usec_t start = 106000000;
++    edt_ack_age_test_now = start;
++    if (edt_select(&fixture, NULL) != 10) goto done;
++    edt_ack_age_test_now = start + 9999999;
++    if (edt_select(&fixture, NULL) != 10) goto done;
++    for (unsigned i = 0; i < 68; ++i) {
++        edt_ack_age_test_now = start + 10000000 + (uint64_t)i * 156250;
++        if (edt_select(&fixture, NULL) != 10) goto done;
++        edt_ack_age_test_now++;
++        if (edt_select(&fixture, NULL) != 10) goto done;
++    }
++    if (fflush(stderr) != 0 || lseek(capture, 0, SEEK_SET) < 0) goto done;
++    char output[65536];
++    ssize_t length = read(capture, output, sizeof(output) - 1);
++    if (length < 0 || (size_t)length == sizeof(output) - 1) goto done;
++    output[length] = '\0';
++    if (option == NULL || strcmp(option, "1") != 0) {
++        failed = length != 0;
++        goto done;
++    }
++    unsigned count = 0;
++    char *save = NULL;
++    for (char *line = strtok_r(output, "\n", &save); line != NULL;
++         line = strtok_r(NULL, "\n", &save))
++    {
++        unsigned sample = 0;
++        uint64_t elapsed = 0;
++        if (sscanf(line, "NATIVE_EDT_SAMPLE {\"sample\":%u,"
++                   "\"elapsed_us\":%" SCNu64, &sample, &elapsed) != 2
++            || sample != count + 1
++            || elapsed != 10000000 + (uint64_t)count * 156250
++            || strstr(line, "\"selected_path\":10,\"has_selected\":1,"
++                      "\"startup\":0,\"eligible_count\":3,") == NULL
++            || strstr(line, "\"path\":10,\"sendable\":1,\"cost_us\":6348,") == NULL
++            || strstr(line, "\"path\":20,\"sendable\":1,\"cost_us\":9196,") == NULL
++            || strstr(line, "\"path\":30,\"sendable\":0,"
++                      "\"cost_us\":18446744073709551615,") == NULL)
++        {
++            goto done;
++        }
++        count++;
++    }
++    failed = count != 64;
++done:
++    (void)fflush(stderr);
++    if (saved_stderr >= 0) {
++        if (dup2(saved_stderr, STDERR_FILENO) < 0) failed = 1;
++        close(saved_stderr);
++    }
++    if (capture >= 0) close(capture);
++    xqc_monotonic_timestamp = saved_clock;
++    free(fixture.scheduler);
++    if (failed) fputs("bounded EDT fixture diagnostic contract failed\n", stderr);
++    return failed;
++}
++
 +int
 +main(void)
 +{
@@ -863,5 +1097,8 @@ index 0000000..02a92c8
 +    }
 +    free(fixture.scheduler);
 +    if (edt_blackhole_small_retransmission_budget() != 0) return 1;
-+    return edt_warm_stale_fast_path_ack_age();
++    if (edt_warm_stale_fast_path_ack_age() != 0) return 1;
++    if (edt_bounded_fixture_trace(NULL) != 0) return 1;
++    if (edt_bounded_fixture_trace("true") != 0) return 1;
++    return edt_bounded_fixture_trace("1");
 +}

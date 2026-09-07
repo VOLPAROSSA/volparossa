@@ -62,7 +62,7 @@ existing Apache-2.0 upstream files preserve their upstream license and
 notices.
 
 The additional GPL-3.0-only `patches/volparossa-xquic-edt.patch`
-(`8b0a5d5aff8360f390325e618693f78e480fde116d33e58729bc6ab9aa17fa50`)
+(`21472637e2b8e48c16af835a10137a67f450e07b565bb87241aa3f8895452a80`)
 retains bounded initial exploration (2 MiB ACKed per path, at most 8 MiB attempt
 debt plus one packet), then selects by live delivery cost and congestion.
 It does not continuously equalise historical path bytes. Outstanding bytes
@@ -76,6 +76,16 @@ selections use the live slower WAN, real ACK progress restores fast-path
 selection, and idle or sole-writable paths remain usable. The new regression
 fails with the previous patch and passes with this patch. This is deterministic
 scheduler evidence, not a live failover or bandwidth acceptance claim.
+The explicit, default-off `VMP_DEV_EDT_TRACE=1` fixture option emits at most
+64 sparse `NATIVE_EDT_SAMPLE` lines per connection, from 10 seconds inclusive
+to 20 seconds exclusive after the first non-startup application selection.
+This is a scheduling-relative window, not an HTTP-response marker. Each line
+contains at most eight eligible local path numbers, their existing EDT costs
+and sendability, bounded-counter metric snapshots, and the selected path;
+the total eligible count makes truncation visible. There are no endpoints,
+connection identities, payloads, general debug logs, or selection changes.
+The callback test covers default-off and exact option parsing, the window,
+sample spacing/cap, unchanged costs/winner and a congestion-blocked candidate.
 Upstream revisions and original licenses are unchanged.
 
 No local patch is applied to lwIP or BoringSSL. The builder checks all patch
