@@ -301,6 +301,11 @@ impl DiscoveryRuntime {
                             self.finish_content_lookup(false);
                             return None;
                         }
+                        self.content.event(if providers.is_empty() {
+                            "CONTENT_LOOKUP_DHT_FOUND_EMPTY"
+                        } else {
+                            "CONTENT_LOOKUP_DHT_FOUND_PROVIDERS"
+                        });
                         self.dispatch_content_providers(providers);
                     }
                     kad::QueryResult::GetProviders(Err(_)) => {
@@ -536,6 +541,7 @@ impl DiscoveryRuntime {
                 || lookup.waiters.iter().any(|waiter| waiter.peer == peer)
                 || !lookup.candidates.insert(peer)
             {
+                self.content.event("CONTENT_PROVIDER_TARGET_SKIPPED");
                 continue;
             }
             if let Ok(id) = self
@@ -543,6 +549,9 @@ impl DiscoveryRuntime {
                 .request_content_service(&peer, ContentServiceRequest::new())
             {
                 self.content.upstream.insert(id, peer);
+                self.content.event("CONTENT_PROVIDER_REQUEST_DISPATCHED");
+            } else {
+                self.content.event("CONTENT_PROVIDER_REQUEST_REJECTED");
             }
         }
     }
@@ -565,11 +574,10 @@ impl DiscoveryRuntime {
                     return;
                 };
                 if peer == expected {
-                    if let Some(offer) = response
-                        .offer()
-                        .filter(|bytes| verify_provider(peer, bytes, unix_seconds()).is_ok())
-                    {
-                        if let Some(lookup) = self
+                    if let Some(offer) = response.offer() {
+                        if verify_provider(peer, offer, unix_seconds()).is_err() {
+                            self.content.event("CONTENT_PROVIDER_OFFER_REJECTED");
+                        } else if let Some(lookup) = self
                             .content
                             .relay
                             .as_mut()
@@ -577,13 +585,40 @@ impl DiscoveryRuntime {
                         {
                             lookup.offers.insert(peer, offer.to_vec());
                             self.content.event("CONTENT_PROVIDER_OFFER_VERIFIED");
+                        } else {
+                            self.content.event("CONTENT_PROVIDER_OFFER_LATE");
                         }
+                    } else {
+                        self.content.event("CONTENT_PROVIDER_SERVICE_EMPTY");
                     }
+                } else {
+                    self.content
+                        .event("CONTENT_PROVIDER_RESPONSE_PEER_REJECTED");
                 }
                 self.maybe_finish_content_lookup();
             }
-            request_response::Event::OutboundFailure { request_id, .. } => {
-                self.content.upstream.remove(&request_id);
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
+                if self.content.upstream.remove(&request_id).is_some() {
+                    self.content.event(match error {
+                        request_response::OutboundFailure::DialFailure => {
+                            "CONTENT_PROVIDER_REQUEST_DIAL_FAILED"
+                        }
+                        request_response::OutboundFailure::Timeout => {
+                            "CONTENT_PROVIDER_REQUEST_TIMED_OUT"
+                        }
+                        request_response::OutboundFailure::ConnectionClosed => {
+                            "CONTENT_PROVIDER_REQUEST_CONNECTION_CLOSED"
+                        }
+                        request_response::OutboundFailure::UnsupportedProtocols => {
+                            "CONTENT_PROVIDER_REQUEST_PROTOCOL_UNSUPPORTED"
+                        }
+                        request_response::OutboundFailure::Io(_) => {
+                            "CONTENT_PROVIDER_REQUEST_IO_FAILED"
+                        }
+                    });
+                }
                 self.maybe_finish_content_lookup();
             }
             // Inbound generic service requests are auto-answered by the libdiscovery pump.
@@ -592,15 +627,16 @@ impl DiscoveryRuntime {
     }
 
     fn maybe_finish_content_lookup(&mut self) {
-        if self
+        let query_done = self
             .content
             .relay
             .as_ref()
-            .is_some_and(|lookup| lookup.dht_complete)
-            && self.content.upstream.is_empty()
-        {
+            .is_some_and(|lookup| lookup.dht_complete);
+        if query_done && self.content.upstream.is_empty() {
             self.content.event("CONTENT_LOOKUP_DHT_COMPLETE");
             self.finish_content_lookup(true);
+        } else if query_done {
+            self.content.event("CONTENT_LOOKUP_WAITING_OFFERS");
         }
     }
 
