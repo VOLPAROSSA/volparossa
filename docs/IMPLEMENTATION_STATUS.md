@@ -60,6 +60,16 @@ also separates the relay's 10-second collection budget from the unchanged 15-sec
 deadline, so a slow DHT walk need not erase already verified offers. This timeout correction
 does not establish the cause of the earlier zero-offer run or claim complete DHT visibility.
 
+The [combined provider/HTTPS attempt on `3d8e4827`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34157126112)
+also failed in native fetch, before either HTTPS case ran. Its actual kernel route receipts
+confirm both new control links, but the Client capture contains no control-Relay request and
+neither broker link carries frames. This is not evidence of a DHT lookup or HTTPS success.
+Cleanup again completed with zero owned objects and unchanged guest-root state; the artifact
+SHA-256 is `f62cd4955a087db1f39ac9019d4d4cb75afaef49bc227324a807991f2cde4d84`.
+Fixed, bounded diagnostic codes now distinguish route/control availability, actor delivery,
+current authority/connection checks and RPC dispatch, without logging peer IDs or resources.
+The remaining early rejection is not yet identified; no admission rule is weakened to pass.
+
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
 strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332

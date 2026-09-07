@@ -257,6 +257,8 @@ impl DiscoveryRuntime {
                 .collect();
             for id in lost {
                 if let Some(pending) = self.content.clients.remove(&id) {
+                    self.content
+                        .event("CONTENT_DISCOVERY_CONTROL_CONNECTION_LOST");
                     let _ = pending.reply.send(Err(ContentDiscoveryError::Invalidated));
                 }
             }
@@ -341,12 +343,33 @@ impl DiscoveryRuntime {
                         self.accept_content_response(&pending, peer, connection_id, &response);
                     if result.is_ok() {
                         self.content.event("CONTENT_DISCOVERY_COMPLETED");
+                    } else {
+                        self.content.event("CONTENT_DISCOVERY_RESPONSE_REJECTED");
                     }
                     let _ = pending.reply.send(result);
                 }
             },
-            request_response::Event::OutboundFailure { request_id, .. } => {
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
                 if let Some(pending) = self.content.clients.remove(&request_id) {
+                    self.content.event(match error {
+                        request_response::OutboundFailure::DialFailure => {
+                            "CONTENT_DISCOVERY_DIAL_FAILED"
+                        }
+                        request_response::OutboundFailure::Timeout => {
+                            "CONTENT_DISCOVERY_RPC_TIMED_OUT"
+                        }
+                        request_response::OutboundFailure::ConnectionClosed => {
+                            "CONTENT_DISCOVERY_CONNECTION_CLOSED"
+                        }
+                        request_response::OutboundFailure::UnsupportedProtocols => {
+                            "CONTENT_DISCOVERY_PROTOCOL_UNSUPPORTED"
+                        }
+                        request_response::OutboundFailure::Io(_) => {
+                            "CONTENT_DISCOVERY_RPC_IO_FAILED"
+                        }
+                    });
                     let _ = pending.reply.send(Err(ContentDiscoveryError::Unavailable));
                 }
             }
@@ -414,21 +437,34 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<ContentDiscoveryResponse>,
     ) {
         let started = Instant::now();
+        self.content.event("CONTENT_DISCOVERY_RELAY_RECEIVED");
         let Ok(nonce) = <[u8; 32]>::try_from(request.nonce()) else {
+            self.content.event("CONTENT_DISCOVERY_RELAY_NONCE_INVALID");
             return;
         };
-        if !self.roles.relay
-            || self.relay_service.is_none()
-            || self
-                .local_relay_snapshot
-                .as_ref()
-                .is_none_or(|cap| cap.expires_at_ms <= unix_millis().saturating_add(15_000))
-            || peer == *self.service.local_peer_id()
-            || self.service.content_control_connection(&peer).ok() != Some(connection)
-            || self.content.pending() >= MAX_PENDING
-            || self.content.replay.len() >= MAX_REPLAY
-            || self.content.replay.contains_key(&(peer, nonce))
+        let rejection = if !self.roles.relay || self.relay_service.is_none() {
+            Some("CONTENT_DISCOVERY_RELAY_SERVICE_UNAVAILABLE")
+        } else if self
+            .local_relay_snapshot
+            .as_ref()
+            .is_none_or(|cap| cap.expires_at_ms <= unix_millis().saturating_add(15_000))
         {
+            Some("CONTENT_DISCOVERY_RELAY_AUTHORITY_UNAVAILABLE")
+        } else if peer == *self.service.local_peer_id() {
+            Some("CONTENT_DISCOVERY_RELAY_SELF_REJECTED")
+        } else if self.service.content_control_connection(&peer).ok() != Some(connection) {
+            Some("CONTENT_DISCOVERY_RELAY_CONNECTION_INVALID")
+        } else if self.content.pending() >= MAX_PENDING {
+            Some("CONTENT_DISCOVERY_RELAY_QUEUE_FULL")
+        } else if self.content.replay.len() >= MAX_REPLAY {
+            Some("CONTENT_DISCOVERY_RELAY_REPLAY_FULL")
+        } else if self.content.replay.contains_key(&(peer, nonce)) {
+            Some("CONTENT_DISCOVERY_RELAY_REPLAY_REJECTED")
+        } else {
+            None
+        };
+        if let Some(event) = rejection {
+            self.content.event(event);
             self.send_empty_content_response(&request, channel);
             return;
         }
@@ -443,9 +479,11 @@ impl DiscoveryRuntime {
         };
         if let Some(lookup) = self.content.relay.as_mut() {
             lookup.waiters.push(waiter);
+            self.content.event("CONTENT_DISCOVERY_RELAY_QUERY_JOINED");
             return;
         }
         let Ok(query) = self.service.find_providers(capability::CONTENT) else {
+            self.content.event("CONTENT_DISCOVERY_RELAY_QUERY_REJECTED");
             self.send_empty_content_response(&waiter.request, waiter.channel);
             return;
         };
@@ -655,29 +693,49 @@ impl DiscoveryRuntime {
         maximum: usize,
         reply: DiscoveryReply,
     ) {
+        self.content.event("CONTENT_DISCOVERY_COMMAND_RECEIVED");
         if reply.is_closed() {
+            self.content.event("CONTENT_DISCOVERY_CALLER_CLOSED");
             return;
         }
         let Ok(request) = ContentDiscoveryRequest::new(maximum) else {
+            self.content.event("CONTENT_DISCOVERY_LIMIT_INVALID");
             let _ = reply.send(Err(ContentDiscoveryError::Invalid));
             return;
         };
-        if !self.roles.client || self.content.pending() >= MAX_PENDING {
+        if !self.roles.client {
+            self.content.event("CONTENT_DISCOVERY_CLIENT_ROLE_REJECTED");
             let _ = reply.send(Err(ContentDiscoveryError::Busy));
             return;
         }
-        let until = unix_millis().saturating_add(15_000);
-        let control = self
-            .direct_relays
-            .get(&control_peer)
-            .filter(|c| c.expires_at_ms > until && c.peer_id != *self.service.local_peer_id())
-            .and_then(|c| {
-                self.service
-                    .content_control_connection(&c.peer_id)
-                    .ok()
-                    .map(|id| (c.clone(), id))
-            });
-        let Some((control, connection)) = control else {
+        if self.content.pending() >= MAX_PENDING {
+            self.content.event("CONTENT_DISCOVERY_CLIENT_QUEUE_FULL");
+            let _ = reply.send(Err(ContentDiscoveryError::Busy));
+            return;
+        }
+        let now_ms = unix_millis();
+        let Some(control) = self.direct_relays.get(&control_peer).cloned() else {
+            self.content.event("CONTENT_DISCOVERY_CONTROL_MISSING");
+            let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
+            return;
+        };
+        let rejection = if control.peer_id == *self.service.local_peer_id() {
+            Some("CONTENT_DISCOVERY_CONTROL_SELF_REJECTED")
+        } else if control.expires_at_ms <= now_ms {
+            Some("CONTENT_DISCOVERY_CONTROL_EXPIRED")
+        } else if control.expires_at_ms <= now_ms.saturating_add(15_000) {
+            Some("CONTENT_DISCOVERY_CONTROL_LIFETIME_SHORT")
+        } else {
+            None
+        };
+        if let Some(event) = rejection {
+            self.content.event(event);
+            let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
+            return;
+        }
+        let Ok(connection) = self.service.content_control_connection(&control.peer_id) else {
+            self.content
+                .event("CONTENT_DISCOVERY_CONTROL_CONNECTION_INVALID");
             let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
             return;
         };
@@ -686,6 +744,7 @@ impl DiscoveryRuntime {
             .request_content_discovery(&control.peer_id, connection, request)
         {
             Ok(id) => {
+                self.content.event("CONTENT_DISCOVERY_REQUEST_DISPATCHED");
                 self.content.clients.insert(
                     id,
                     PendingClient {
@@ -698,6 +757,7 @@ impl DiscoveryRuntime {
                 );
             }
             Err(_) => {
+                self.content.event("CONTENT_DISCOVERY_REQUEST_REJECTED");
                 let _ = reply.send(Err(ContentDiscoveryError::Unavailable));
             }
         }
@@ -727,6 +787,11 @@ impl DiscoveryRuntime {
             .collect();
         for id in expired {
             if let Some(pending) = self.content.clients.remove(&id) {
+                self.content.event(if pending.reply.is_closed() {
+                    "CONTENT_DISCOVERY_CALLER_CLOSED"
+                } else {
+                    "CONTENT_DISCOVERY_LOCAL_DEADLINE"
+                });
                 let _ = pending.reply.send(Err(ContentDiscoveryError::Timeout));
             }
         }

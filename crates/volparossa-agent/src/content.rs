@@ -296,18 +296,21 @@ impl ContentRuntime {
                 .ok_or(ContentError::Policy)?
         };
         // No plain-TCP, single-path or direct-provider fallback exists here.
-        Box::pin(
-            context
-                .routes
-                .connect_tcp(&context.config, &context.discovery, &context.helper),
-        )
-        .await
-        .map_err(|_| ContentError::Unavailable)?;
-        let control_peer = context
-            .routes
-            .content_discovery_control()
-            .await
-            .ok_or(ContentError::Unavailable)?;
+        let connected = Box::pin(context.routes.connect_tcp(
+            &context.config,
+            &context.discovery,
+            &context.helper,
+        ))
+        .await;
+        if connected.is_err() {
+            content_event(context, "CONTENT_FETCH_ROUTE_UNAVAILABLE").await;
+            return Err(ContentError::Unavailable);
+        }
+        let Some(control_peer) = context.routes.content_discovery_control().await else {
+            content_event(context, "CONTENT_FETCH_CONTROL_UNAVAILABLE").await;
+            return Err(ContentError::Unavailable);
+        };
+        content_event(context, "CONTENT_FETCH_ROUTE_READY").await;
         let provider_peer_ids =
             Self::pull_registered_providers(context, &manifest, &mut store, &policy, control_peer)
                 .await?;
@@ -418,6 +421,14 @@ fn make_offer(
 
 fn now() -> u64 {
     unix_millis() / 1000
+}
+
+async fn content_event(context: &ControlContext, code: &'static str) {
+    context.state.write().await.log(
+        volparossa_local_control::LogLevel::Info,
+        code,
+        unix_millis(),
+    );
 }
 
 fn verified(bytes: &[u8], key: &[u8]) -> Result<VerifiedManifest, ContentError> {
