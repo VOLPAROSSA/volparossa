@@ -552,6 +552,7 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -4600,19 +4601,25 @@ dependencies = [
 name = "volparossa-content"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hex",
  "hpke",
+ "http",
  "prost",
  "rand_chacha 0.10.0",
  "rand_core 0.6.4",
+ "rcgen",
  "rustix",
+ "rustls",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-rustls",
+ "url",
  "zeroize",
 ]
 

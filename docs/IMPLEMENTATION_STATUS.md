@@ -9,7 +9,7 @@ The proposal records the full idea and a researched HTTPS integration design: au
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
 experiment, through an application/browser boundary. C01 now passes; C02--C08 remain incomplete;
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
-Current downlink/mixed-link work continues alongside the first bounded content-store slice.
+Scoped downlink and mixed-link runs now pass; content/application integration continues.
 
 The [content KVM run on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
 passes through existing genuine MPTCP/TLS and both WireGuard legs. Bounded owned caches rebuild
@@ -33,14 +33,35 @@ strict content Clippy pass. A separate-process disposable-loopback proof transfe
 ciphertext bytes / nine chunks from two replicas after publisher removal and reconstructs the
 original 2,097,275-byte plaintext only for the recipient; a wrong recipient is rejected. Its
 explicit temporary fixture key and plaintext file are removed afterward. The library persists
-neither and returns plaintext in zeroizing memory. The new `content-message` KVM scenario is
-awaiting live verification. This is not a complete mailbox, recipient-key discovery/storage,
-forward secrecy after key compromise, anonymous metadata or C07 completion.
+neither and returns plaintext in zeroizing memory. The
+[`content-message` KVM run on `b1082645`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
+now passes that encrypted offline-retrieval sequence over real protected MPTCP/TLS and both
+WireGuard legs. The recipient's UID-985 0600 key in its 0700 directory is unreadable to UID-987
+providers; key, plaintext and private directory are removed. Ten boundary captures are fully
+drained with zero drops/violations; four separate application captures make no drop-counter
+claim. Cleanup leaves zero owned objects and byte-identical guest state. Retained artifact:
+`873a5248f679e03e4a702b6fbedeafbf13f06d75ac67e9d48fb57c011754457a`.
+This proves the configured encrypted-transfer substep, not a complete mailbox, recipient-key
+discovery/storage, forward secrecy after key compromise, anonymous metadata or complete C07.
+
+The cooperative-origin HTTPS slice now uses real TLS 1.3 hostname/CA verification to obtain a
+bounded canonical resource descriptor, then supplies its independently origin-authorized native
+manifest to the same chunk-transfer API. Only anonymous GET/200 identity-encoded binary content
+with explicit public freshness is admitted. HTTP Date/max-age, descriptor/signed expiry and
+monotonic elapsed time bound reuse. Seven focused real-TLS tests and strict content Clippy pass.
+A separate-process disposable-loopback proof fetches just 777 metadata payload bytes from the
+origin and reconstructs 2,097,275 bytes from two partial caches, with zero origin body bytes.
+In a separate empty-cache case, one partial replica supplies 1,048,699 bytes; missing chunks
+trigger a complete 2,097,275-byte origin response checked against the same manifest. Changed
+origin bytes fail the focused test instead of being mixed into a successful object. This is
+full-body fallback, not optimized Range retrieval or a speed comparison. The new `content-https`
+protected-route scenario is pending; publisher cooperation is required. No browser integration,
+generic existing-site compatibility, TLSNotary, distributed discovery or C08 completion is claimed.
 README and the relevant architecture/protocol/privacy/testing summaries are updated together;
 detailed changing results remain centralized here and in the content proposal.
 
 The complete cooperative `download-sharing` run on unchanged `efc35ac9` is now green.
-Mixed-link completes warm failover and both downloads, but useful aggregate gain remains unproved.
+Mixed-link now has one scoped passing gain comparison, following the failed attempt below.
 Native `76f907fc` preserves all FIFO checks while replacing bytewise zero scanning with
 aligned-safe full-range word reduction. The
 [exact-source mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146021889)
@@ -54,12 +75,23 @@ complete and guest state unchanged. Artifact SHA-256:
 The next candidate adds a default-off Exit EDT diagnostic: at most 64 sparse metric-only samples
 in seconds 10--20 after first non-startup application scheduling, not after an HTTP response.
 Pinned callback tests and focused ASan/UBSan pass; no scheduler selection, congestion control
-or traffic policy changes. Its integrated measurements remain pending.
+or traffic policy changes. The
+[`b1082645` mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149010127)
+passes: WAN-only 32 MiB in 41.221 s (6.512 Mbps), LAN+WAN in 32.841 s (8.174 Mbps), ratio
+**1.25517x**, only 0.414% above the unchanged 1.25x gate. Both cases use WAN Relay0, though
+their contexts are warm/fresh. Matching endpoint hashes, warm-context failover, eight complete
+zero-drop privacy captures, zero remaining objects and unchanged guest state pass. Artifact:
+`09af5558df8225a7bf4b50404234757ad2555993e4f5d2cae0ef0ccf712800dc`.
+The fresh connection's 64 sparse response-window samples select LAN 50 times, consistent with
+78.54% of received response WireGuard bytes using LAN; all follow the lowest existing EDT cost.
+The prior attempt had different path ordering/baseline relay and execution costs. This is one
+passing configured topology, not repeatable/general gain or evidence that diagnostics repaired
+the scheduler. Native tuning is paused for this functional checkpoint.
 
-[Quality on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146890825) passes
+[Quality on `b1082645`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149000752) passes
 workspace tests and strict Clippy. It includes `9e2cab8`'s guaranteed-diverse sampler success
 fixture and deterministic rejection coverage, without changing production selection. It does
-not cover the subsequent encrypted-message/diagnostic slice. Download evidence below does not
+cover the encrypted-message/diagnostic slice, but not the subsequent HTTPS work. Download evidence below does not
 establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
 
 ## Current live integration checkpoint

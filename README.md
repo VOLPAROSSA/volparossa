@@ -80,8 +80,9 @@ an available uplink through other participants. Nodes with an uplink can use use
 Internet paths together. Sharing must give the owner priority and use genuinely spare capacity;
 more paths do not automatically add bandwidth, especially on a shared uplink or radio channel.
 Cooperative owner-priority downloads now pass a scoped disposable contention/recovery/expiry
-scenario on `efc35ac9`. Useful combined-speed gain, automatic spare-capacity estimation and
-general radio-airtime sharing remain unproved; see the [current evidence](docs/IMPLEMENTATION_STATUS.md).
+scenario on `efc35ac9`. One configured LAN+WAN MPQUIC comparison on `b1082645` also passes,
+at 1.255x WAN-only throughput. That narrow result does not establish repeatable gain, automatic
+spare-capacity estimation or general radio-airtime sharing; see the [current evidence](docs/IMPLEMENTATION_STATUS.md).
 
 The next [content-network extension](docs/CONTENT_NETWORK_PROPOSAL.md) adds bounded contributed
 storage: verifiable chunks fetched from useful peers, spare-resource redistribution, validated
@@ -91,14 +92,19 @@ application-supplied stream. Its protected-route VM test passed on `f0a906ca`: t
 processes reconstruct a 2.1-MB object after its publisher copy is removed, through real
 MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authenticated-transfer
 checkpoint C01, not automatic distributed discovery or a complete offline website service.
-Recipient-encrypted messages now use the same chunk storage and transfer API; a separate-process
-disposable-loopback proof passes, while their protected-route VM test is still pending. A complete
-mailbox, automatic redistribution, shared DNS and the HTTPS adapter remain unfinished; see the
-proposal's C02--C08 scope. Neither these fixtures nor more replicas establish a general speedup.
+Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
+VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
+A complete mailbox, automatic redistribution, shared DNS and browser integration remain
+unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental
-witness. Arbitrary peers are not trust anchors, and no compulsory central witness is proposed.
+witness. The first cooperative-origin HTTPS library and executable now work locally: obtain
+small metadata through actual hostname/CA-verified TLS, retrieve authenticated peer chunks, and
+use same-version origin fallback when chunks are missing. Its protected-route test is pending.
+This currently needs publisher cooperation and supports anonymous static binary resources,
+not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
+compulsory central witness is proposed.
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
 [implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.

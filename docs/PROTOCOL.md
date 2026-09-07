@@ -80,6 +80,25 @@ The caller independently authenticates recipient encryption and sender signing k
 objects define neither discovery, private-key persistence, mailbox replay/acknowledgements,
 forward secrecy after recipient-key compromise nor HTTPS-origin authority.
 
+### Cooperative-origin HTTPS descriptor (development v1)
+
+The consumer obtains this descriptor through its own hostname/CA-verified TLS 1.3 connection
+with `http/1.1` ALPN, never from a peer-authority constructor. Canonical protobuf fields are
+`1: version=1`, `2: exact canonical HTTPS resource URL`, `3: request profile=1`, `4: status=200`,
+`5: content type`, `6: content length`, `7: issued Unix time`, `8: exclusive expiry`,
+`9: origin-authorized Ed25519 publisher key`, `10: signed native manifest`. Profile 1 is
+anonymous GET, binary `application/octet-stream`, identity encoding, no credentials/variant.
+The descriptor media type is `application/vnd.volparossa.origin-manifest.v1`.
+
+This cooperative profile requires bounded Content-Length HTTP/1.1 responses, explicit public
+max-age and canonical IMF-fixdate Date. Duplicate/ambiguous fields, redirects, encodings,
+cookies, variants, Transfer-Encoding, Expires or nonzero Age are refused. Reuse is bounded by
+descriptor/signed expiry, issued+max-age, conservative Date/request-start freshness and elapsed
+monotonic time; replication does not refresh it. The HTTP wrapper stays in memory and only it
+publishes output as origin-authorized content. Missing peer pieces can trigger a full body GET
+over another verified origin TLS connection, checked against the same chunks/whole hash.
+No Range optimization, general-browser semantics, reusable TLS proof or peer discovery is implied.
+
 ## Signed control envelope
 
 `SignedEnvelope` commits:

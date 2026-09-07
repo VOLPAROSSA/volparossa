@@ -26,6 +26,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
     "$script" --preview --scenario content | grep -Fi 'content' >/dev/null
     "$script" --preview --scenario content-message | grep -Fi 'content-message' >/dev/null
+    "$script" --preview --scenario content-https | grep -Fi 'content-https' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -741,4 +742,9 @@ grep -F 'content_network_run' "$GUEST" >/dev/null
 grep -F -- '-p volparossa-content --example content-acceptance-fixture' "$HOST" >/dev/null
 grep -F 'Require real native content replica transfer evidence' "$WORKFLOW" >/dev/null
 python3 -B "$HERE/test-content-network-smoke.py"
+sh -n "$HERE/content-https-smoke.sh"
+grep -F 'content_https_run' "$GUEST" >/dev/null
+grep -F -- '-p volparossa-content --example https-content-acceptance-fixture' "$HOST" >/dev/null
+grep -F 'Require genuine origin-authenticated HTTPS content evidence' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/test-content-https-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'

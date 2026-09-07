@@ -1,10 +1,10 @@
 # Distributed content, publishing and offline delivery
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
-storage, protected-route transfer and a recipient-encrypted message library.
-**Distributed discovery and HTTPS integration remain absent.**
+storage, protected-route public/encrypted transfer and a cooperative-origin HTTPS consumer.
+**Distributed discovery, browser integration and generic existing-site reuse remain absent.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
-Finish the current downlink and mixed-link repairs while resolving the application boundary.
+Continue from the scoped downlink/mixed-link passes into the application/content runtime.
 
 ## Requested result
 
@@ -125,12 +125,33 @@ and envelope length. Caches contain only ciphertext. The library keeps recipient
 and returns verified plaintext in zeroizing memory; it does not implement a key store.
 
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
-proof pass. The `content-message` protected-route KVM scenario remains pending. Its disposable
+proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
+also passes on `b1082645`, including actual recipient decryption, ten complete zero-drop boundary
+captures and unchanged guest state. Its disposable
 test-only recipient key and cleartext output have explicit ownership checks and cleanup; they
 are not an example of production private-key persistence. Public sender identity, length and
 lifetime remain visible. Key discovery, a mailbox, anti-spam/acknowledgements, retention, forward
 secrecy after key compromise and email interoperability are not supplied by this slice. C07
 therefore stays open rather than counting the configured fixture as a complete messaging service.
+
+### Cooperative-origin HTTPS retrieval
+
+The first HTTPS route is implemented in `origin_https`: every consumer performs its own real
+TLS 1.3 hostname/CA verification before obtaining a canonical origin descriptor. A separate
+in-memory `OriginAuthorizedManifest` binds the exact resource and HTTP validity; ordinary native
+manifests do not acquire implicit HTTPS authority. The current explicit profile is anonymous
+GET, status 200, identity encoding, `application/octet-stream`, public/max-age, canonical HTTP
+Date and no cookies, credentials, variants, redirects or nonzero Age. Unsupported responses
+are rejected by this adapter, not silently declared shareable; a general application fallback
+for unsupported sites still needs integration.
+
+Seven real-TLS tests and a disposable separate-process demonstration pass. A 777-byte origin
+descriptor authorizes 2,097,275 payload bytes reconstructed from two partial caches, with no
+origin body transfer. Missing chunks invoke one full origin download checked against the same
+manifest; changed bytes, wrong CA/name, stale metadata and partial publication are rejected.
+No new authority is imported from peers or persisted by the consumer. The `content-https` KVM
+scenario remains pending. This requires publisher support, does not yet use Range fallback,
+and proves neither faster total retrieval nor browser/generic-web/TLSNotary integration.
 
 ## Integrated functional checkpoints
 
@@ -153,8 +174,9 @@ not removal of the requested existing-web integration or other checkpoints.
 The user asked on 2026-09-07 to find/build a safe and fast way to share existing HTTPS
 content too. The proposed implementation uses an explicit application integration with
 three authentication routes into the same chunk store. It does not decrypt another user's
-TLS records or replace the browser's certificate authority. This is a design decision,
-not a claim that a browser adapter or these proof verifiers already exists.
+TLS records or replace the browser's certificate authority. The first cooperative-origin
+route is implemented above; browser integration and the other existing-web proof routes are
+still design work, not delivered compatibility.
 
 | Route | Authentication before using peer bytes | Intended use |
 | --- | --- | --- |

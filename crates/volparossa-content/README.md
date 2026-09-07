@@ -56,12 +56,22 @@ RFC 9180 HPKE dependency/profile plus the sender-signed native manifest. Callers
 authenticate recipient encryption and sender signing keys. Messages are bounded to 4 MiB;
 opening verifies all ciphertext before returning plaintext in zeroizing memory. The library
 does not persist recipient keys or plaintext. Five focused message tests and a separate-process
-disposable-loopback proof pass; the `content-message` protected-route VM test remains pending.
+disposable-loopback proof pass; the `content-message` protected-route VM test passes on `b1082645`.
 That fixture alone creates an explicit temporary recipient key and plaintext output, excluded
 from artifacts and removed afterward. This is not a mailbox/key-discovery service, forward
 secrecy after recipient-key compromise, anonymous metadata or complete C07.
 
-No network discovery, automatic route selection for content, origin fallback, automatic
+`origin_https` adds cooperative-origin authentication: a caller-supplied stream gets its own
+real TLS 1.3 hostname/CA check before a canonical descriptor authorizes an exact binary HTTPS
+resource and native manifest. The non-deserializable HTTP wrapper preserves origin validity
+while ordinary native manifests retain their original, narrower meaning. Strict public HTTP
+Date/max-age and descriptor/signature lifetimes apply. Missing chunks can be filled by one
+complete origin download, rejected if it differs from the original manifest. Seven focused
+TLS tests and a separate-process HTTPS/peer/fallback proof pass; protected-route KVM is pending.
+Only a cooperative anonymous static binary profile is supported. There is no arbitrary-site,
+browser, partial-range, witness or automatic-discovery implementation in this slice.
+
+No network discovery, automatic route selection for content, automatic
 replication, owner-priority I/O scheduling, durable retention, web policy or DNS behavior is
 installed or enabled. Publisher input and output-path selection remain caller-authorized;
 this crate does not authorize sharing captured/private/no-store traffic.

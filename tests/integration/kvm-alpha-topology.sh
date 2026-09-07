@@ -27,10 +27,20 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https]'
 }
 
 print_plan() {
+    if [ "$scenario" = content-https ]; then
+        printf '%s\n' \
+            'VOLPAROSSA content-https protected native-client smoke plan:' \
+            '  authenticate origin metadata using app TLS13 and an isolated fixture certificate;' \
+            '  fetch complete bytes from two partial stores, then prove missing-peer HTTPS origin fallback;' \
+            '  keep all six app streams on genuine MPTCP/TLS/two-leg WireGuard with privacy captures;' \
+            '  copy no authority metadata or private TLS key to clients; install no interception CA;' \
+            '  emit content-https-smoke.json with exact cleanup; no browser/DHT/speed/full-C08 claim.'
+        return
+    fi
     if [ "$scenario" = content-message ]; then
         printf '%s\n' \
             'VOLPAROSSA private content-message replica-transfer smoke plan:' \
@@ -205,7 +215,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -318,6 +328,15 @@ if [ "$scenario" = mixed-link ]; then
     [ -f "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = content-https ]; then
+    for https_fixture in content-https-smoke.sh content-https-smoke.py content-network-smoke.py; do
+        [ -f "$source_directory/tests/integration/$https_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$https_fixture" ] \
+            || { printf '%s\n' 'HTTPS content fixture unavailable' >&2; exit 69; }
+    done
+    [ -x "$binary_directory/examples/https-content-acceptance-fixture" ] \
+        || { printf '%s\n' 'HTTPS content executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     if [ ! -f "$source_directory/tests/integration/content-network-smoke.sh" ] \
@@ -1273,7 +1292,9 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
+    if [ "$scenario" = content-https ]; then
+        content_https_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
         content_network_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = crash-recovery ]; then
         crash_recovery_finalize_report "$original_status" || original_status=1
@@ -1349,6 +1370,10 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     # shellcheck source=tests/integration/content-network-smoke.sh
     . "$source_directory/tests/integration/content-network-smoke.sh"
 fi
+if [ "$scenario" = content-https ]; then
+    # shellcheck source=tests/integration/content-https-smoke.sh
+    . "$source_directory/tests/integration/content-https-smoke.sh"
+fi
 
 PHASE=host-state-before
 A15_REQUESTED=true
@@ -1406,6 +1431,11 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
+fi
+if [ "$scenario" = content-https ]; then
+    install -o root -g "$AGENT_GID" -m 0555 \
+        "$binary_directory/examples/https-content-acceptance-fixture" \
+        "$WORK/bin/examples/https-content-acceptance-fixture"
 fi
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/client-fixtures"
 binary_directory=$WORK/bin
@@ -3546,7 +3576,8 @@ elif [ "$scenario" = reciprocity ]; then
 fi
 
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
-    && [ "$scenario" != content ] && [ "$scenario" != content-message ]; then
+    && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
+    && [ "$scenario" != content-https ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4098,6 +4129,8 @@ start_privacy_observers() {
         privacy|mptcp-privacy) ;;
         content-a-privacy|content-b-privacy)
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
+        content-https-complete-privacy|content-https-missing-privacy)
+            [ "$scenario" = content-https ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
@@ -4786,6 +4819,10 @@ finish_mptcp_download() {
 
 if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     content_network_run
+    exit 0
+fi
+if [ "$scenario" = content-https ]; then
+    content_https_run
     exit 0
 fi
 

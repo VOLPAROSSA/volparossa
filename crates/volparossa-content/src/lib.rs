@@ -3,8 +3,11 @@
 //! A manifest authenticates a publisher only against a caller's independently established
 //! key. It is **not** proof of an HTTPS origin, current-name resolution, durable retention,
 //! peer discovery, network retrieval, or an accepted content-network milestone.
+//! The separate [`origin_https`] wrapper obtains narrowly scoped HTTPS resource authority
+//! through the consumer's own authenticated origin connection, not from a native signature.
 
 mod manifest;
+pub mod origin_https;
 pub mod private_message;
 mod store;
 pub mod transfer;

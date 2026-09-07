@@ -105,13 +105,26 @@ automatic redistribution or durable retention. Run socket fixtures only in dispo
 Five additional `private_message` tests cover encrypted offline reconstruction, wrong keys,
 tampering/rebinding, expiry, fresh encapsulation and 4-MiB limits. The fixture's `recipient-init`,
 `seed-private` and `open-message` modes reuse the same two-process transfer with ciphertext.
-Its disposable-loopback proof passes; this is not yet protected-route evidence. The separate
+Its disposable-loopback proof passes. The separate
 `content-message` workflow choice adds recipient decryption, wrong-recipient rejection, recipient
 UID/mode isolation and independent plaintext hash/length checks to the existing network gate.
 Only this explicit fixture persists a temporary recipient key (0600 in a 0700 directory) and
 known test plaintext; both are removed on success and through the interruption/error cleanup.
 Artifacts contain neither file. The library has no private-key persistence or mailbox service.
-Live verification of this new scenario is pending; it does not mark C07 or all alpha complete.
+The [live run on `b1082645`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
+passes; this is configured encrypted-transfer evidence, not a complete mailbox or all alpha.
+
+Seven `origin_https` tests perform real TLS over bounded in-memory duplex streams: correct
+origin authority and reconstruction, full same-version fallback, wrong CA/name/plain peer
+bytes, changed signatures/resources, HTTP sharing/freshness/framing rejection, changed origin
+bytes and monotonic expiry/deadlines. The separate `https-content-acceptance-fixture` executable
+performs actual socket exchanges inside a disposable namespace. Its `complete` case fetches
+777 metadata payload bytes via HTTPS and all 2,097,275 body bytes from two partial caches;
+`missing` gets one partial cache then one complete, manifest-checked origin response. Both
+outputs match the fixed test hash. This is not a speed test or a production certificate setup.
+The new `content-https` workflow scenario uses the existing protected ingress and independently
+authorized HTTPS (18443) and peer (18080) flows; live verification remains pending. No system
+CA is installed, and generic browser compatibility or C08 completion is not claimed.
 
 ## Helper-boundary evidence
 

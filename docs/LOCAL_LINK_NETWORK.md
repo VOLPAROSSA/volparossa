@@ -48,8 +48,13 @@ WireGuard data. This proves the underlay composition, not higher aggregate bandw
 The extended mixed-link fixture now compares a held 32-MiB HTTP/3 response over the surviving
 WAN path with a fresh LAN+WAN native MPQUIC session, using two independent 8-Mbps link caps.
 It requires actual received traffic on both aggregate paths, more than 25% improvement, matching
-payloads, zero observer drops/leaks and complete cleanup. That live comparison has not yet passed;
-the fixture's focused checks are not measured network-speed evidence.
+payloads, zero observer drops/leaks and complete cleanup. The
+[`b1082645` comparison](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149010127) passes
+at 6.512 Mbps WAN-only versus 8.174 Mbps LAN+WAN (1.25517x), with data on both aggregate paths,
+complete captures and unchanged guest state. Earlier attempts failed, and this margin is narrow:
+one configured passing topology does not establish repeatable gain or a general speed guarantee.
+The diagnostic-only change does not prove a causal scheduler repair; detailed source-scoped
+results are centralized in [implementation status](IMPLEMENTATION_STATUS.md).
 ULA classification and kernel route parsing have focused coverage, not live IPv6 transfer
 evidence. Automatic radio selection/address allocation also remains unfinished; no hidden
 public-IP fallback is used.
