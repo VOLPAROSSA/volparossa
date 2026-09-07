@@ -11,6 +11,23 @@ experiment, through an application/browser boundary. None of C01--C08 is counted
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Current downlink/mixed-link work continues alongside the first bounded content-store slice.
 
+That first local slice now works: `volparossa-content` stores SHA-256 chunks under explicit
+byte/entry limits and a free-space check, authenticates native manifests against a pre-established
+publisher key, and reconstructs an exact object from separate stores. Six targeted tests, strict
+crate Clippy and the executable example pass. The example rebuilds 524,349 bytes / three chunks
+from two stores after removing the publisher directory; its SHA-256 is
+`179680e549de7daceded73549b00ca004ac5c6d37459d4fa29bae52a79581501`.
+This is local disk evidence only: no remote provider transport, cache reopening, automatic
+redistribution, HTTPS/browser integration, DNS sharing or recipient messaging is claimed.
+README and the architecture/privacy/threat/testing summaries are updated as one checkpoint;
+detailed changing results remain centralized here and in the content proposal.
+
+The complete cooperative `download-sharing` run on unchanged `efc35ac9` is now green.
+Mixed-link now completes warm failover and both downloads, but its 1.052x speed ratio misses
+the required >1.25x gain. Quality finds test-fixture retirement-pool exhaustion in the new
+128-leg replay test; the isolated-fixture repair passes targeted checks and awaits CI. The scoped download evidence is below; it does
+not establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
+
 ## Current live integration checkpoint
 
 The [full v1 run on `482e33d0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
@@ -35,11 +52,27 @@ no completed 32-MiB baseline or new gain ratio exists. Cleanup completes with un
 guest state. The cause is still being investigated; the successful fresh-route A07
 above does not prove this distinct warm-context case or useful LAN+WAN speedup.
 
-Owner-priority cooperative downloads are now being integrated across signed adjacent
-budgets, the actual route actor, a helper-owned sender queue and same-hook receive
-counters. They remain **in progress**, not a passed datapath. Physical-radio testing
-is explicitly deferred until hardware is available; simulated Linux Wi-Fi evidence
-below is not substituted for physical-device testing.
+Owner-priority cooperative downloads now have a
+[complete live pass on `efc35ac9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34142685975)
+through signed adjacent budgets, the route actor, helper-owned sender queues and same-hook
+receive accounting. This is one manually configured IPv4 bottleneck, not automatic capacity
+detection, arbitrary ISP guarantees or Wi-Fi airtime control. Physical-radio testing remains
+explicitly deferred until hardware is available; simulated Linux Wi-Fi evidence below is not
+substituted for physical-device testing.
+
+The retained download artifact SHA-256 is
+`e96e533711558ee5f05cf28e5b65d9ae129fa1fa0be5508100d67b71f410eb4b`.
+Application-goodput windows show contributed download at 2.273 Mbps while idle, zero while
+the owner's traffic receives 11.636 Mbps (owner-only baseline 11.626 Mbps), and 2.339 Mbps
+after owner traffic stops. Sender-queue counters independently go to zero during owner demand.
+Pausing budget refresh produces a bounded 2,564,059-byte tail; the post-grace window admits no
+contribution. The exact protected context and both WireGuard legs are retained. Captures are
+complete with zero drops, both receiver-accounting owners are removed, no owned objects remain
+and the disposable guest state is unchanged. Native reported-delivered metadata stays zero;
+these throughput claims come from actual application and kernel evidence, not that counter.
+
+The following paragraphs retain the preceding repairs and their narrower local evidence;
+their pending-download statements describe those earlier checkpoints, not the above live pass.
 
 The download candidate now connects the signed-grant/receipt actor to real helper accounting
 and sender ownership. Six focused actor/controller checks, the signed Relay issuer check,
@@ -149,6 +182,29 @@ payload hashes matching. Strict native build and shell checks pass. The retained
 is `8b0a5d5aff8360f390325e618693f78e480fde116d33e58729bc6ab9aa17fa50`.
 This is real transport diagnostic evidence, not the integrated HTTP/3/WireGuard bandwidth
 comparison; that scenario must still pass on the new unchanged candidate.
+
+The subsequent [mixed-link run on `efc35ac9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34142687607)
+now completes the formerly stalled warm-context case: the unchanged A06 context survives LAN
+loss and its real WAN-only 32-MiB HTTP/3 response completes in 53.166 seconds. The fresh LAN+WAN
+32-MiB comparison also completes with the correct payload, in 50.539 seconds. Its measured
+ratio is **1.052x**, below the unchanged >1.25x threshold, so useful aggregate gain remains
+unproved. This is actual integrated warm-failover progress, not another standalone-probe claim.
+Both aggregate paths carry response data (about 3.17 MB LAN and 36.32 MB WAN, including
+WireGuard overhead). All eight bandwidth-privacy captures are complete without capture drops,
+direct-exit packets or unexpected outer traffic; cleanup leaves zero owned objects and unchanged
+guest state. The artifact SHA-256 is
+`1f8c69fb764429fb7331a32860753cd2b27fa07a2124dcbd9a04f163d904e2b1`.
+WAN-only uses Relay0 while the fresh aggregate selects Relay2 for its WAN leg, both separately
+capped at 8 Mbps; this is not an otherwise identical warm-versus-fresh control experiment.
+The same revision's [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34142639337)
+passes strict Clippy but fails one helper test (831 passed, one failed, two ignored): the new
+128-leg replay test's 64 fake process owners exhaust a shared test retirement pool when run
+with other tests. Its isolated-target pass did not expose this fixture contention; production
+capacity and terminal cleanup guarantees are not being relaxed to make CI green.
+The repaired test uses a separate existing 64-permit retirement pool, asserts exact saturation
+and complete permit return, and retains every 128-leg/replay/terminal assertion. Two parallel
+replay tests, the existing bounded-pool test and strict helper library/test Clippy pass.
+Only test code changes; the complete updated workspace CI result is still pending.
 
 ### Earlier checkpoints and source-change evidence
 

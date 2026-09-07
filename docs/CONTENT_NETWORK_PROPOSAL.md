@@ -1,6 +1,7 @@
 # Distributed content, publishing and offline delivery
 
-Status: user idea received 2026-09-07; architecture proposal, **not implemented**.
+Status: user idea received 2026-09-07; architecture proposal with a working local native-storage
+foundation. **The distributed network and HTTPS integrations are not implemented.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Finish the current downlink and mixed-link repairs while resolving the application boundary.
 
@@ -84,7 +85,23 @@ resolution path where independent validation is unavailable. Replication must no
 or signature lifetime, mix private/split-horizon views, override policy or redirect arbitrary
 destinations. A DNS record is a typed object with DNS-specific validation, not generic web data.
 
-## Functional checkpoints (all pending)
+## First delivered foundation (2026-09-07)
+
+[`volparossa-content`](../crates/volparossa-content/README.md) now has real, bounded local
+SHA-256 chunk stores, canonical Ed25519-signed native manifests and verified reconstruction.
+The caller supplies an independently trusted publisher key; the verified result retains that
+publisher identity. Byte/entry quotas, a free-space check and LRU eviction bound each fresh
+private cache. Reconstruction can publish an output file atomically without overwriting it.
+
+Six focused tests and strict crate Clippy pass. The executable temporary-disk example rebuilds
+524,349 bytes / three chunks from two separate stores after removing the publisher's directory
+and dropping its signing key, with matching SHA-256. This proves local disk storage and signed
+reassembly, not remote peers, durable offline availability, HTTPS authenticity or speed gain.
+The first store API does not reopen/index a previous process's cache, and does not enable
+capturing or sharing browsing traffic. [Testing instructions](TESTING.md#native-content-storage-foundation)
+and crate documentation record these limits. No new external dependency was introduced.
+
+## Integrated functional checkpoints (all pending)
 
 - [ ] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection.
 - [ ] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback.
@@ -119,6 +136,12 @@ does not prove the bytes of a complete object. The first route works only when a
 metadata binds the exact expected representation; otherwise it falls back, not guesses.
 If only a whole-object digest exists, verify the complete object before exposing its bytes;
 independently usable streaming chunks require an authenticated chunk-hash manifest.
+
+Existing integrity metadata can sometimes supply the first route without a new publisher
+service: for example, an SRI hash in an authentically obtained page binds the exact script or
+stylesheet it authorizes. It does not authenticate arbitrary response headers, grant a new
+origin or override cache/CORS rules. Do not reinterpret opaque hashed-looking filenames as
+SRI, or claim that this covers arbitrary video pages.
 
 The proof binds the HTTPS origin and resource, request variant, response status, security
 and representation metadata, encoded-byte identity, total length and freshness authority.
@@ -200,6 +223,7 @@ resources, authenticated streaming services or DRM media are publicly reusable.
 - [HTTP caching, RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html)
 - [Digest fields and their authentication limits, RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html)
 - [HTTP Message Signatures, RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html)
+- [W3C Subresource Integrity](https://www.w3.org/TR/sri/)
 - [Firefox response-body filtering](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/filterResponseData)
 - [Chromium declarative request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest)
 - [Chromium debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger)

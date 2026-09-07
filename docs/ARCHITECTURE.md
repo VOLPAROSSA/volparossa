@@ -4,6 +4,10 @@ This document distinguishes the **required v1 design** from verified implementat
 claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
 
+The original v1 sequence A01--A15 passed together on unchanged `482e33d0` in the disposable
+Debian 13 topology. Later direct-link/sharing changes and the content extension require their
+own evidence; the earlier pass is not a claim that the current candidate is complete.
+
 ## Reciprocal peer participation (revised 2026-09-05)
 
 All network nodes run the same software. A production node consuming client service must also
@@ -26,6 +30,24 @@ The [direct-link extension](LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi und
 same route model. Local links do not authorize a direct Client--Exit datapath. Independence
 and spare capacity must be measured: two relays sharing one uplink or radio channel do not
 automatically provide additive throughput.
+
+## Content-network extension (in development)
+
+The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the single design reference for
+bounded contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
+DNS sharing, signed public publication and recipient-encrypted offline delivery. The local
+`volparossa-content` foundation has disk-storage and authenticated reconstruction evidence;
+distributed runtime, browser integration and the complete C01--C08 scope remain unfinished.
+
+This is an application layer, not an HTTPS-decrypting property of the VPN. Reconstructed bytes
+need authenticated origin/publisher authority as well as chunk integrity, and must retain
+representation, freshness, policy and browser-origin boundaries. Origin metadata, publisher
+signatures and an optional explicitly trusted witnessed-HTTPS experiment have different trust
+requirements. Neither arbitrary peers nor a mandatory central service become origin authorities.
+Content/DNS discovery is not a browsing catalogue; publication and encrypted messaging have
+different authorization and retention rules. Overlay content service does not confer Internet
+Exit capability or bypass route privacy. Owner-priority resource bounds apply to storage and
+replication as well as network contribution.
 
 ## Trust and process boundaries
 
@@ -161,12 +183,12 @@ upstream without an internal retry, and reveals only its own authenticated conne
 The exit verifies that relay plus the signed client-session scope. A datapath relay separately
 authenticates only its direct, explicitly authorized v4 request.
 
-The wire codecs and services have bounded unit and in-memory transport evidence, but the production
-agent does not yet orchestrate this complete state machine. `ExecuteProbe`, helper-backed endpoint
-preparation, and client ingress remain fail-closed `Unavailable`. The agent therefore withdraws
-every local relay/exit advertisement and provider record while either serving role is enabled. It
-never fabricates a probe, endpoint, listen port, or activation receipt. Live advertised service
-capacity remains incomplete until authenticated helper and dataplane handles exist.
+The production agent now orchestrates real probes, helper-backed endpoint preparation, ingress
+and advertised service in the disposable v1 topology; these participate in the unchanged
+`482e33d0` A01--A15 pass. Missing or expired service authority must still withdraw usable capacity
+and fail closed, never fabricate a probe, endpoint, listen port or activation receipt. Combined
+roles, local-only operation and newer sharing scenarios retain separately scoped evidence in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 Target lifecycle states are cold, reachable, warm, active, backup, degraded, and dead.
 
 ## WireGuard route construction
@@ -251,9 +273,11 @@ flowchart LR
     E --> H3[Allowed HTTP/3 destination]
 ```
 
-The Rust crate currently defines a bounded API and scheduler model; it is not evidence of an
-integrated native transport. Required-multipath mode fails closed if fewer than two data-carrying
-paths exist.
+The agent drives a pinned, source-built mqvpn/xquic process through the bounded API. Real
+HTTP/3-over-Multipath-QUIC and relay-loss evidence is included in the `482e33d0` v1 checkpoint.
+The later `efc35ac9` mixed-link run also completes warm-route failover, but its useful LAN+WAN
+gain threshold remains unmet. Required-multipath setup fails closed when required paths are unavailable; an
+established route's tested failover behavior is not permission for a silent single-path setup.
 
 ## Policy enforcement
 

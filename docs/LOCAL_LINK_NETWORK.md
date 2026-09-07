@@ -1,7 +1,7 @@
 # Direct local links and capability-based contribution
 
-Agreed functional-development scope, 2026-09-05. This document describes work to integrate,
-not completed functionality. The initial executable target remains Debian 13 amd64.
+Agreed functional-development scope, 2026-09-05. This document separates delivered scoped
+demonstrations from remaining integration work. The initial executable target is Debian 13 amd64.
 
 Every consuming node contributes what its available connections can provide. A node with an
 independent usable Internet uplink offers policy-limited exit service as well as relay service.
@@ -96,10 +96,11 @@ under the unchanged owner-priority and rate caps. Supported software
 unsupported/offloaded geometry are refused before mutation. It is not automatic bandwidth estimation, download-bottleneck control,
 Wi-Fi airtime management or local/WAN throughput aggregation.
 
-The new **cooperative download candidate** uses separate `download_sharing` configuration:
+The **cooperative download implementation** uses separate `download_sharing` configuration:
 `enabled`, one physical `interface`, operator-known `total_download_mbps`, and
-`contribution_download_ceiling_mbps`. It remains disabled by default and awaits the complete
-`download-sharing` VM proof. TOTAL and helper-derived WireGuard receive tuples are counted on
+`contribution_download_ceiling_mbps`. It remains disabled by default and now has a complete
+[`download-sharing` VM pass](https://github.com/VOLPAROSSA/volparossa/actions/runs/34142685975)
+on unchanged `efc35ac9`. TOTAL and helper-derived WireGuard receive tuples are counted on
 the same NETDEV ingress hook. Only live, controlled Relay-from-Exit contribution is subtracted;
 own Client traffic and unclassified traffic retain owner priority. Substantial owner activity
 requests zero contribution, followed by a quiet hold before recovery. This is not automatic
@@ -112,9 +113,15 @@ positive receipt. Expiry stops new admission in the kernel without needing anoth
 Already admitted queue contents form a bounded tail. Unacknowledged old rate allowances remain
 reserved, preventing sustained-rate double allocation. Individual queues and current-window
 burst allocation are bounded; older burst allowances may briefly overlap during redistribution.
-Receiver ingress is counted, not policed after capacity has already been consumed. Complete
-owner/contribution application-goodput, recovery, expiry, privacy and cleanup evidence is still
-required before calling this combined production path working.
+Receiver ingress is counted, not policed after capacity has already been consumed. The live
+proof retains the same protected UDP context and both WireGuard legs: contributed application
+traffic stops during owner demand and resumes afterward, while owner goodput matches its
+owner-only baseline. Refresh expiry closes contribution after a bounded tail; complete captures,
+both receive-accounting owners' removal and unchanged guest state are retained. Exact rates and
+artifact identity are centralized in [implementation status](IMPLEMENTATION_STATUS.md). This
+fixed-bottleneck UDP proof is not an HTTPS-file transfer, lossless delivery guarantee, arbitrary
+ISP-capacity detector or radio-airtime scheduler. The planned [content layer](CONTENT_NETWORK_PROPOSAL.md)
+must use these owner-priority boundaries; its cache traffic is not integrated yet.
 
 ## Explicit Debian Wi-Fi mesh runtime
 

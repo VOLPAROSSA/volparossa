@@ -1,14 +1,16 @@
 # VOLPAROSSA
 
-> **Development status (pre-alpha):** VOLPAROSSA v1 is under construction and is **not yet a
-> generally usable VPN**. Real two-leg WireGuard, MPTCP, protected UDP and Multipath QUIC
-> application traffic have run in disposable Debian test networks, but the complete current
-> build has not passed all acceptance cases together.
+> **Functional-development status:** The original v1 **A01--A15 acceptance sequence passed on
+> one unchanged build, `482e33d0`**, in a disposable Debian 13 topology. This includes real
+> two-leg WireGuard, MPTCP, protected UDP, Multipath QUIC, privacy captures and crash cleanup.
+> Newer network/content extensions are still incomplete; that result does not certify the
+> current candidate or make VOLPAROSSA a release-ready, generally supported network.
 > See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
 > installing, or enabling a role.
 
-VOLPAROSSA is an open-source, decentralised VPN overlay designed for Debian 13 amd64. Its target
-low-latency path is always:
+VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
+Its v1 VPN overlay is the foundation for direct local links and the planned content network.
+The normal low-latency Internet path is always:
 
 ```mermaid
 flowchart LR
@@ -26,21 +28,22 @@ flowchart LR
 ```
 
 Every parallel path uses exactly one distinct relay between the same client and exit. The normal
-client dataplane never connects directly to an exit. TCP is intended to use real Linux MPTCP over
-the selected relay paths; ordinary UDP uses a protected single-path MASQUE association; browser
-QUIC is intended to use genuine Multipath QUIC carrying MASQUE CONNECT-IP traffic over at least two
-data-carrying paths.
+client dataplane never connects directly to an exit. The v1 design uses real Linux MPTCP over
+selected relay paths for TCP, a protected single-path MASQUE association for ordinary UDP, and
+genuine Multipath QUIC carrying MASQUE CONNECT-IP over at least two data-carrying paths for
+browser QUIC. The tested checkpoint above includes these real transports.
 
 ## What it is—and is not
 
-VOLPAROSSA is intended to be a volunteer-operated overlay with local peer reputation,
+VOLPAROSSA is intended to be a user-operated overlay with local peer reputation,
 capability-indexed libp2p discovery, short-lived reservations, ephemeral WireGuard links, and a
 threshold-signed destination whitelist enforced at every exit.
 
 It is not an anonymity guarantee, a Tor replacement, a generic open proxy, a commercial VPN, or a
-way to bypass the whitelist. It deliberately has no payment system, token, blockchain, GUI, cover
-traffic, artificial delay, packet duplication, FEC, or automatic exit enablement. A global observer
-who sees both ends may correlate this low-latency traffic.
+way to bypass the whitelist. It has no payment system, token, blockchain, GUI or automatic exit
+enablement. The v1 transports use no cover traffic, artificial delay, packet duplication or FEC;
+planned content replication is a separate application feature. A global observer who sees both
+ends may correlate this low-latency traffic.
 
 ## Components and roles
 
@@ -60,18 +63,39 @@ who sees both ends may correlate this low-latency traffic.
 The capability-based reciprocal participation requirement replaces optional client-only use as of
 2026-09-05. `network.uplink` defaults to `independent_internet`; `local_only` permits client + relay
 configuration without a fabricated ASN or public origin, and forbids exit mode. This is an operator
-declaration, not runtime connectivity proof. Disposable IPv4 tests now demonstrate an offline node
-consuming and relaying concurrently, and native MPQUIC using LAN and Internet paths together.
-An explicitly monitored independent uplink also passed loss/recovery without daemon restarts:
-Exit contribution is withdrawn while unavailable and restored on a fresh route. Agent-created
-802.11s mesh discovery and reciprocal traffic have passed on simulated Linux radios; physical
-Wi-Fi hardware and phone operation remain unverified. See [direct-link scope](docs/LOCAL_LINK_NETWORK.md)
-for the exact evidence and limits, including the still-unproven combined-speed gain and general
-spare-download/airtime sharing. Configuration alone never counts as working-network evidence.
+declaration, not runtime connectivity proof. Scoped disposable tests cover concurrent offline-node
+consumption/relay service, LAN+Internet MPQUIC traffic, monitored uplink loss/recovery and 802.11s
+discovery/traffic on simulated radios. Physical Wi-Fi hardware and phone operation remain
+unverified. See [direct-link scope](docs/LOCAL_LINK_NETWORK.md) for the exact evidence and limits;
+configuration alone never counts as working-network evidence.
 Bootstrap contacts are replaceable user peers, not mandatory central infrastructure or authorities.
 
 The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md); wire formats are in
 [PROTOCOL.md](docs/PROTOCOL.md).
+
+## Network and content direction
+
+Direct Ethernet and Wi-Fi links should let a node without its own Internet subscription reach
+an available uplink through other participants. Nodes with an uplink can use useful direct and
+Internet paths together. Sharing must give the owner priority and use genuinely spare capacity;
+more paths do not automatically add bandwidth, especially on a shared uplink or radio channel.
+Cooperative owner-priority downloads now pass a scoped disposable contention/recovery/expiry
+scenario on `efc35ac9`. Useful combined-speed gain, automatic spare-capacity estimation and
+general radio-airtime sharing remain unproved; see the [current evidence](docs/IMPLEMENTATION_STATUS.md).
+
+The next [content-network extension](docs/CONTENT_NETWORK_PROPOSAL.md) adds bounded contributed
+storage: verifiable chunks fetched from useful peers, spare-resource redistribution, validated
+DNS sharing, signed public websites/content and recipient-encrypted offline messages. The local
+`volparossa-content` foundation can reconstruct a verified object from two disk stores after its
+publisher copy is removed. This is not yet network retrieval, an offline website/message service
+or an HTTPS browser adapter; the proposal records the exact local demonstration and C01--C08 scope.
+
+Existing HTTPS reuse needs genuine origin authentication through an application boundary:
+authenticated origin metadata, publisher signatures, or an explicitly configured experimental
+witness. Arbitrary peers are not trust anchors, and no compulsory central witness is proposed.
+There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
+all existing websites can be transparently cached. The proposal is the design reference;
+[implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
 
 ## Safe development setup
 
@@ -92,11 +116,10 @@ Linux network namespaces and must prove cleanup and unchanged host state. See
 
 ## Installation and demo status
 
-The repository contains candidate Debian packaging and hardened service definitions, but they are
-not considered release-ready until the binaries compile, the package is reproduced on clean Debian
-13, and the complete namespace acceptance suite passes. `just package-deb` and `just demo` may
-therefore fail while their corresponding status items remain unchecked. Do not enable the systemd
-services based on documentation alone.
+The repository contains candidate Debian packaging and hardened service definitions for development
+testing, not a supported release. Consult the exact revision's packaging and integration evidence;
+the v1 checkpoint does not certify later builds or configurations. `just package-deb` and `just demo`
+remain development workflows. Do not enable the systemd services based on documentation alone.
 
 When a verified release exists, the intended flow is:
 
@@ -121,8 +144,8 @@ uninstall guidance is in [OPERATIONS.md](docs/OPERATIONS.md).
   the production agent now drives its real datapaths. A same-UID process socket and descriptor
   correlation do not by themselves authenticate privileged-helper origin against an untrusted
   agent. Functional traffic evidence is not a release-security claim.
-- Do not rely on the kill switch, whitelist enforcement, crash cleanup, or privacy properties until
-  their acceptance checks are marked complete.
+- Kill-switch, whitelist, crash-cleanup and privacy results are scoped to the tested build and
+  topology. They are not a release-security guarantee or approval to use sensitive traffic.
 - Anti-Sybil diversity and local performance history can raise an attacker's cost but cannot
   cryptographically prevent Sybil participation.
 - A relay and exit that collude can improve correlation; a global timing observer is outside the
