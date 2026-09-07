@@ -4695,7 +4695,9 @@ impl DiscoveryRuntime {
     }
 
     fn withdraw_local(&mut self) {
-        self.withdraw_content_registration();
+        // Native Relay/Exit readiness is not ownership of an independently bound content
+        // listener. That explicit service retains its own policy/offer deadline and is withdrawn
+        // by its owner, policy invalidation, or shutdown, not a native-capacity/listener gap.
         self.served_local_advertisement = None;
         self.local_relay_snapshot = None;
         self.service.clear_local_advertisement();
@@ -16694,6 +16696,16 @@ mod tests {
             role_store,
             directory,
         }
+    }
+
+    pub(super) fn content_runtime_fixture() -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, TempDir)
+    {
+        let fixture = fixture(RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        });
+        (fixture.runtime, fixture.state, fixture.directory)
     }
 
     #[tokio::test]

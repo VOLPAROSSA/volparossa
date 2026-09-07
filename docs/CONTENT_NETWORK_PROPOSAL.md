@@ -223,6 +223,12 @@ Peer discovery failure can fall back to the authenticated origin without claimin
 Missing chunks use exact ranges; a fully verified 200 response may satisfy an ignored Range,
 with its full transfer cost exposed in the receipt.
 
+Content-service registration is owned by the explicit listener, not by native Relay/Exit
+advertisement readiness. A reproduced coupling bug withdrew cache offers during native
+advertisement withdrawal; the corrected actor preserves the independent offer without renewing
+its deadline. Explicit service stop, policy replacement, shutdown and original offer/policy expiry
+still invalidate it. The local regression passes; a complete multi-node rerun remains necessary.
+
 Default trust comes from Debian's system certificate bundle. Optional `--ca-file` is a bounded
 explicit public PEM input used only for this operation, not an installed interception CA or a
 certificate/hostname-verification bypass. CLI/agent/control tests and strict Clippy pass locally;

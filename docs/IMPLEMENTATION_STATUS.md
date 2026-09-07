@@ -207,6 +207,23 @@ packets. Cleanup is complete with unchanged guest state. Artifact SHA-256:
 [Quality on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/34166413926)
 passes in full; that does not make the failed functional scenario a pass.
 
+The [request-outcome run on `cd291c50`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34167932193)
+now distinguishes the first-fetch failure: control Relay R1 finds the provider and receives an
+empty service response four milliseconds after dispatch. R5 registered its offer about 40 seconds
+earlier. This is not a dial failure or a signed-offer rejection. Cleanup completes with unchanged
+guest state; uptake/captures remain unreached. Artifact SHA-256:
+`cfc42b5edc73a1a50dfef9c932893019ba63fdf3ca3fc3200a64942b1c4a5793`.
+
+The following ownership correction removes content withdrawal from native Relay/Exit advertisement
+withdrawal. The explicit content listener owns its own registration: stop, policy replacement,
+shutdown and the earlier of offer/policy expiry still invalidate it. A real actor regression
+fails with the old coupling and passes with the correction; all eight discovery-content tests
+pass, including earlier policy expiry, unchanged deadlines, explicit stop and policy replacement.
+The independent-node runtime must still be rerun; this does not retroactively pass the earlier
+failed reports or clear their packet findings. Separately, the real Kad/RPC characterization
+confirms that an unadmitted provider-record address alone cannot be used for redial; the product
+already has authenticated Identify address admission, and no speculative addressbook change was made.
+
 The next slice encrypts native messages to an independently authenticated recipient key before
 chunking, using the existing RFC 9180 HPKE dependency/profile. Five focused message tests and
 strict content Clippy pass. A separate-process disposable-loopback proof transfers 2,097,332

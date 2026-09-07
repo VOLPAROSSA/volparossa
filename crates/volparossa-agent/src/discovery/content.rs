@@ -747,6 +747,7 @@ impl DiscoveryRuntime {
                                         .validity()
                                         .expires
                                         .saturating_mul(1000)
+                                        .min(policy.expires_at_ms())
                                         .saturating_sub(unix_millis()),
                                 ),
                         });
@@ -869,6 +870,7 @@ impl DiscoveryRuntime {
             .as_ref()
             .is_some_and(|local| local.deadline <= now)
         {
+            self.content.event("CONTENT_PROVIDER_REGISTRATION_EXPIRED");
             self.withdraw_content_registration();
         }
         let expired: Vec<_> = self
@@ -902,7 +904,9 @@ impl DiscoveryRuntime {
     }
 
     pub(super) fn withdraw_content_registration(&mut self) {
-        self.content.local = None;
+        if self.content.local.take().is_some() {
+            self.content.event("CONTENT_PROVIDER_WITHDRAWN");
+        }
         let _ = self.service.set_local_content_offer(None);
         let _ = self.service.stop_providing(capability::CONTENT);
     }
@@ -975,6 +979,119 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand_core::OsRng;
     use volparossa_content::{Validity, provider::ProviderEndpoint};
+
+    async fn registered_content_runtime()
+    -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, tempfile::TempDir) {
+        let (mut runtime, state, directory) = super::super::tests::content_runtime_fixture();
+        let now_ms = unix_millis();
+        let permission = volparossa_policy::ProtocolPort::new(TransportProtocol::Tcp, 18443)
+            .expect("content port");
+        let rule = volparossa_policy::DestinationRule::exact_domain(
+            "replica.volparossa.test",
+            [permission],
+        )
+        .expect("content endpoint");
+        // The real threshold-verified policy expires in 30 seconds, before this offer's 300s.
+        let policy =
+            volparossa_test_support::verified_development_manifest(now_ms - 3_570_000, vec![rule])
+                .expect("short remaining policy authority");
+        state.write().await.set_policy(Some(policy));
+        let pair = runtime
+            .identity
+            .keypair()
+            .clone()
+            .try_into_ed25519()
+            .unwrap();
+        let bytes = zeroize::Zeroizing::new(pair.to_bytes());
+        let signer = SigningKey::from_keypair_bytes(&bytes).unwrap();
+        let offer = SignedProviderOffer::sign(
+            &signer,
+            ProviderEndpoint::new("replica.volparossa.test", 18443).unwrap(),
+            Validity {
+                created: now_ms / 1000,
+                expires: now_ms / 1000 + 300,
+            },
+        )
+        .unwrap();
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_content_command(
+                ContentCommand::Register {
+                    offer: Box::new(offer),
+                    reply,
+                },
+                &state,
+            )
+            .await;
+        response
+            .await
+            .unwrap()
+            .expect("verified explicit registration");
+        (runtime, state, directory)
+    }
+
+    #[tokio::test]
+    async fn native_advertisement_withdrawal_does_not_withdraw_owned_content_service() {
+        let (mut runtime, state, _directory) = Box::pin(registered_content_runtime()).await;
+        let deadline = runtime.content.local.as_ref().unwrap().deadline;
+        assert!(deadline > Instant::now());
+        assert!(deadline <= Instant::now() + Duration::from_secs(30));
+        assert!(runtime.control_addresses.is_empty());
+        // Exercise the real native publication gate, not a replacement service implementation.
+        runtime.publish_local(&state).await;
+        assert!(runtime.served_local_advertisement.is_none());
+        assert!(runtime.local_relay_snapshot.is_none());
+        assert_eq!(
+            runtime.content.local.as_ref().map(|local| local.deadline),
+            Some(deadline),
+            "a native readiness gap neither withdraws nor renews the independent content offer"
+        );
+        runtime.reannounce_content_registration();
+        assert_eq!(runtime.content.local.as_ref().unwrap().deadline, deadline);
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_content_command(ContentCommand::Withdraw { reply }, &state)
+            .await;
+        response.await.unwrap().unwrap();
+        assert!(
+            runtime.content.local.is_none(),
+            "explicit service stop still withdraws"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_policy_replacement_and_original_deadline_still_withdraw_service() {
+        let (mut runtime, state, _directory) = Box::pin(registered_content_runtime()).await;
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_command(
+                DiscoveryCommand::ApplyPolicy {
+                    policy: None,
+                    reply,
+                },
+                &state,
+            )
+            .await;
+        response.await.unwrap();
+        assert!(runtime.content.local.is_none());
+
+        let (mut runtime, _state, _directory) = Box::pin(registered_content_runtime()).await;
+        runtime.content.local.as_mut().unwrap().deadline = Instant::now();
+        runtime.maintain_content();
+        assert!(runtime.content.local.is_none());
+        assert!(
+            runtime
+                .content
+                .events
+                .contains(&"CONTENT_PROVIDER_REGISTRATION_EXPIRED")
+        );
+        assert!(
+            runtime
+                .content
+                .events
+                .contains(&"CONTENT_PROVIDER_WITHDRAWN")
+        );
+    }
 
     fn fixture() -> (Libp2pPeerId, SignedProviderOffer) {
         let key = SigningKey::generate(&mut OsRng);

@@ -98,9 +98,10 @@ from explicitly selected owned caches. Those two commands remain offline. New `c
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
 reconstruct the same object from two independent providers; missing HTTPS chunks use exact
-origin ranges. After correcting a fixture-address check, a repeated lookup still sometimes
-loses its verified provider offers: native retrieval then fails, while HTTPS retrieves more
-bytes from the origin. That integration defect is under investigation; the full report is pending.
+origin ranges. Lookup reliability remains under integration: the latest live failure reaches
+a provider whose offer was withdrawn although its cache listener had been registered. A native
+Relay/Exit advertisement withdrawal incorrectly also withdrew that independent content offer.
+The ownership correction passes a real actor regression; the full multi-node rerun is pending.
 See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
 [exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
