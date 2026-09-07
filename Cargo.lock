@@ -4606,9 +4606,11 @@ dependencies = [
  "prost",
  "rand_core 0.6.4",
  "rustix",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

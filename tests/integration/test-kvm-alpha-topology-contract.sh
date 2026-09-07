@@ -24,6 +24,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null
+    "$script" --preview --scenario content | grep -Fi 'content' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -734,4 +735,9 @@ python3 -B "$HERE/test-wifi-link-smoke.py"
 sh -n "$HERE/uplink-link-smoke.sh"
 python3 -B "$HERE/test-uplink-link-smoke.py"
 python3 -B "$HERE/test-alpha-vm-diagnostics.py"
+sh -n "$HERE/content-network-smoke.sh"
+grep -F 'content_network_run' "$GUEST" >/dev/null
+grep -F -- '-p volparossa-content --example content-acceptance-fixture' "$HOST" >/dev/null
+grep -F 'Require real native content replica transfer evidence' "$WORKFLOW" >/dev/null
+python3 -B "$HERE/test-content-network-smoke.py"
 printf '%s\n' 'KVM alpha, reciprocity, local-link, mixed-link, sharing, wifi-link and uplink-link topology static contract passed'

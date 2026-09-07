@@ -39,6 +39,30 @@ operations use exactly one selected control relay on both forwarding hops. A gen
 outcome with no response evidence may become `AmbiguousAfterDispatch` for a bounded exact-byte
 retry.
 
+### Native content application stream (development v1)
+
+The optional `volparossa-content` library uses separate application data frames over an
+already supplied protected stream, not a new libp2p control protocol or a direct-exit path.
+The caller independently authenticates the exact native publication manifest. A provider
+needs cached bytes and an approved verified manifest, not the publisher's signing key.
+
+Each frame has a 4-byte big-endian length and one canonical protobuf message. Requests are
+at most 64 bytes; responses at most 256 KiB + 64 bytes. Unknown/noncanonical fields, wrong
+versions, out-of-scope hashes, mismatched lengths and corrupt bytes are rejected.
+
+| Frame | Protobuf field tags |
+|---|---|
+| Chunk request | `1: version=1`, `2: SHA-256 bytes`, `3: expected length`, `4: finish=false` |
+| Session finish | `1: version=1`, `4: finish=true`; hash absent and length zero |
+| Chunk response | `1: version=1`, `2: exact requested hash`, `3: exact requested length`, `4: found`, `5: payload bytes` |
+
+One request is outstanding at a time. Missing responses have `found=false` and no payload;
+successful bytes must match both manifest length and digest before cache insertion. Cached
+chunks skip requests. Default limits are 1,024 requests, 256 MiB of requested payload including
+misses, 15 seconds per complete exchange and 300 seconds per session. Errors terminate reuse
+of that stream. The caller verifies the complete object's hash before publishing output.
+These native frames do not authenticate an HTTPS origin, discover providers or grant egress.
+
 ## Signed control envelope
 
 `SignedEnvelope` commits:

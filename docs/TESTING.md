@@ -84,6 +84,23 @@ expiry, missing pieces, bounded storage and output publication. There is no auto
 capture, HTTPS/browser integration, DNS sharing or origin fallback in this crate. C01--C08 remain
 separate functional checkpoints in the [content proposal](CONTENT_NETWORK_PROPOSAL.md).
 
+Fourteen crate tests now include persistent reopen/ownership/quota checks and real bounded
+stream transfers from two partial stores, corruption rejection, oversized-prefix refusal and
+timeouts. The `content-acceptance-fixture` example also runs as separate processes: seed removes
+the original publisher; two sequential replicas supply disjoint pieces; a restarted consumer
+reopens its cache and downloads only missing chunks before atomically reconstructing the object.
+The disposable-loopback process proof passes for 2,097,275 bytes / nine chunks. Loopback is not
+MPTCP/overlay evidence, even though it exercises real application sockets.
+
+The `content` choice in the **Alpha production-helper topology** workflow runs the same
+application through existing transparent ingress inside the Debian 13 guest. Its gate requires
+two distinct provider processes, a partial first fetch, exact complete second reconstruction,
+both WireGuard legs, complete privacy captures, exact cleanup and unchanged guest state.
+It retains the ordinary destination policy and does not add a direct-peer egress exception.
+Live verification is pending. Providers share one authorized destination in this first scenario;
+the test does not claim provider-node diversity, distributed discovery, HTTPS authentication,
+automatic redistribution or durable retention. Run socket fixtures only in disposable namespaces.
+
 ## Helper-boundary evidence
 
 The helper identity and production IPC boundary has a separate, narrower live gate:

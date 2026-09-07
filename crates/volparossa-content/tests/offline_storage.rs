@@ -191,23 +191,15 @@ fn byte_entry_and_free_space_quotas_evict_only_owned_lru_chunks() {
     );
     assert!(tiny.get(&evicted).expect("evicted tiny chunk").is_none());
 
-    let mut floor = ChunkStore::create(
+    let floor = ChunkStore::create(
         &root.path().join("floor"),
         CacheLimits {
             max_bytes: 1_000,
             max_entries: 2,
             min_free_bytes: u64::MAX,
         },
-    )
-    .expect("store with unsatisfiable reserve");
-    assert!(matches!(floor.put(b"a"), Err(Error::Quota)));
-    assert_eq!(
-        floor.usage(),
-        CacheUsage {
-            bytes: 0,
-            entries: 0
-        }
     );
+    assert!(matches!(floor, Err(Error::Quota)));
 
     let foreign = root.path().join("foreign");
     fs::create_dir(&foreign).expect("foreign directory");

@@ -1,7 +1,7 @@
 # Distributed content, publishing and offline delivery
 
-Status: user idea received 2026-09-07; architecture proposal with a working local native-storage
-foundation. **The distributed network and HTTPS integrations are not implemented.**
+Status: user idea received 2026-09-07; architecture proposal with working persistent native
+storage and bounded stream transfer. **Distributed discovery and HTTPS integration remain absent.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Finish the current downlink and mixed-link repairs while resolving the application boundary.
 
@@ -93,13 +93,23 @@ The caller supplies an independently trusted publisher key; the verified result 
 publisher identity. Byte/entry quotas, a free-space check and LRU eviction bound each fresh
 private cache. Reconstruction can publish an output file atomically without overwriting it.
 
-Six focused tests and strict crate Clippy pass. The executable temporary-disk example rebuilds
-524,349 bytes / three chunks from two separate stores after removing the publisher's directory
-and dropping its signing key, with matching SHA-256. This proves local disk storage and signed
-reassembly, not remote peers, durable offline availability, HTTPS authenticity or speed gain.
-The first store API does not reopen/index a previous process's cache, and does not enable
-capturing or sharing browsing traffic. [Testing instructions](TESTING.md#native-content-storage-foundation)
-and crate documentation record these limits. No new external dependency was introduced.
+Fourteen focused tests and strict crate Clippy pass. Owned caches now reopen after process exit;
+their UID/directory-bound marker, exclusive lock and bounded persisted index prevent arbitrary
+directory adoption. Corrupt/incomplete mutations are refused without a recovery sweep.
+
+The new stream API pulls only missing chunks from each provider, authenticating bytes before
+storage and bounding requests, bytes and exchange/session time. A real separate-process proof
+in a disposable loopback namespace reconstructs 2,097,275 bytes / nine chunks after the publisher
+directory/key are removed: the first replica supplies five chunks / 1,048,699 bytes; the consumer
+restarts and the second supplies only the remaining four / 1,048,576 bytes. The reconstructed
+SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+
+The dedicated `content` KVM scenario now connects that application through the existing real
+MPTCP/TLS ingress, two WireGuard legs and exact policy-authorized destination; live verification
+is pending. Neither the local proof nor two replica processes on the same destination establish
+distributed provider discovery, independent provider nodes, durable offline availability,
+HTTPS authenticity or speed gain. No browsing capture is enabled. [Testing instructions](TESTING.md#native-content-storage-foundation)
+and crate documentation record these limits. Only existing workspace dependencies are reused.
 
 ## Integrated functional checkpoints (all pending)
 

@@ -6,6 +6,7 @@
 
 mod manifest;
 mod store;
+pub mod transfer;
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -60,6 +61,9 @@ pub enum Error {
     /// A protobuf, field, length, metadata value or canonical encoding was invalid.
     #[error("invalid native content manifest")]
     InvalidManifest,
+    /// Cache ownership, its persisted index or an incomplete disk mutation was invalid.
+    #[error("invalid or incomplete owned content cache")]
+    InvalidStore,
     /// Current time is outside the signed validity interval.
     #[error("native content manifest is expired or not yet valid")]
     Expired,

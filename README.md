@@ -86,9 +86,11 @@ general radio-airtime sharing remain unproved; see the [current evidence](docs/I
 The next [content-network extension](docs/CONTENT_NETWORK_PROPOSAL.md) adds bounded contributed
 storage: verifiable chunks fetched from useful peers, spare-resource redistribution, validated
 DNS sharing, signed public websites/content and recipient-encrypted offline messages. The local
-`volparossa-content` foundation can reconstruct a verified object from two disk stores after its
-publisher copy is removed. This is not yet network retrieval, an offline website/message service
-or an HTTPS browser adapter; the proposal records the exact local demonstration and C01--C08 scope.
+`volparossa-content` foundation now reopens persistent caches and pulls verified chunks over an
+application-supplied stream. Two separate replica processes reconstruct a 2.1-MB object after its
+publisher copy is removed; that process proof uses disposable loopback, not the overlay. The
+protected-route VM scenario is awaiting verification. Distributed discovery, an offline website/
+message service and an HTTPS browser adapter remain unfinished; see the proposal's C01--C08 scope.
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental

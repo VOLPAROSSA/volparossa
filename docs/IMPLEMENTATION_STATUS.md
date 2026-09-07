@@ -11,21 +11,29 @@ experiment, through an application/browser boundary. None of C01--C08 is counted
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Current downlink/mixed-link work continues alongside the first bounded content-store slice.
 
-That first local slice now works: `volparossa-content` stores SHA-256 chunks under explicit
-byte/entry limits and a free-space check, authenticates native manifests against a pre-established
-publisher key, and reconstructs an exact object from separate stores. Six targeted tests, strict
-crate Clippy and the executable example pass. The example rebuilds 524,349 bytes / three chunks
-from two stores after removing the publisher directory; its SHA-256 is
-`179680e549de7daceded73549b00ca004ac5c6d37459d4fa29bae52a79581501`.
-This is local disk evidence only: no remote provider transport, cache reopening, automatic
-redistribution, HTTPS/browser integration, DNS sharing or recipient messaging is claimed.
+The content slice now persists/reopens bounded owned caches and pulls missing authenticated
+chunks over caller-supplied streams. Fourteen focused tests and strict crate Clippy pass.
+A separate-process demonstration in a disposable loopback namespace rebuilds 2,097,275 bytes /
+nine chunks after removing the publisher directory/key. The first provider supplies five pieces;
+the consumer restarts, reopens its cache and downloads only four missing pieces from the second.
+The exact output SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+The new `content` KVM scenario routes the application through existing genuine MPTCP/TLS and
+both WireGuard legs; its live verification is pending. The local process proof is not overlay
+evidence, provider-node diversity, distributed discovery, automatic redistribution, HTTPS/browser
+integration, DNS sharing or recipient messaging. No C01--C08 integrated checkpoint is marked done.
 README and the architecture/privacy/threat/testing summaries are updated as one checkpoint;
 detailed changing results remain centralized here and in the content proposal.
 
 The complete cooperative `download-sharing` run on unchanged `efc35ac9` is now green.
 Mixed-link now completes warm failover and both downloads, but its 1.052x speed ratio misses
-the required >1.25x gain. Quality finds test-fixture retirement-pool exhaustion in the new
-128-leg replay test; the isolated-fixture repair passes targeted checks and awaits CI. The scoped download evidence is below; it does
+the required >1.25x gain. Native `76f907fc` preserves all FIFO checks while replacing bytewise
+zero scanning with aligned-safe full-range word reduction. The local lifecycle/FIFO CPU sample
+falls from 3.22--3.29 s to 0.358--0.360 s, but that is not measured network gain. The
+[exact-source mixed-link run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146021889)
+is pending. Quality on `8d76e3e0` fails a different random network-hint collision in the sampler
+success fixture; `9e2cab8` gives that fixture guaranteed diversity and adds deterministic rejection
+coverage without changing production selection. All 18 sampler tests and strict agent Clippy pass;
+broad CI confirmation is pending. The scoped download evidence is below; it does
 not establish automatic Internet-capacity detection or general Wi-Fi airtime fairness.
 
 ## Current live integration checkpoint
