@@ -8,6 +8,8 @@ mod advertisements;
 mod connection_provenance;
 mod content_connection;
 mod content_provider;
+#[cfg(test)]
+mod content_provider_address_tests;
 mod forwarding;
 mod listener_recovery;
 mod mpquic_session;
