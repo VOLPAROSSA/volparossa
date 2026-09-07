@@ -44,6 +44,15 @@ pub(crate) use uplink_sharing::{
 #[path = "engine_v3/wifi_mesh.rs"]
 mod wifi_mesh;
 use wifi_mesh::MeshRecord;
+#[path = "engine_v3/receive_accounting.rs"]
+mod receive_accounting;
+use receive_accounting::AccountingRecord;
+pub(crate) use receive_accounting::{
+    AccountingBackendAction, AccountingBackendBinding, AccountingBackendCompletion,
+    AccountingBackendRequest,
+};
+#[path = "engine_v3/downlink_sender.rs"]
+mod downlink_sender;
 pub(crate) use wifi_mesh::{
     MeshBackendAction, MeshBackendBinding, MeshBackendCompletion, MeshBackendRequest,
     MeshInterfaceIdentity,
@@ -98,6 +107,7 @@ struct EngineState {
     next_ingress_generation: u64,
     sharing: Option<SharingRecord>,
     mesh: Option<MeshRecord>,
+    accounting: Option<AccountingRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -273,6 +283,7 @@ pub(crate) enum ContextPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OperationKind {
+    DownlinkBudget,
     Prepare,
     Activate,
     Probe,
@@ -363,6 +374,7 @@ pub(crate) enum BackendPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BackendAction {
+    ApplyDownlinkBudget,
     Prepare,
     Activate,
     Probe,
@@ -656,6 +668,33 @@ pub(crate) enum BackendError {
 /// unavailable backend. A complete production adapter still requires integration tests for all of
 /// these properties.
 pub(crate) trait AsyncLeaseBackend: Send + Sync {
+    fn apply_downlink_budget(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::ApplyDownlinkBudget>,
+    ) -> BackendFuture<BackendCompletion<volparossa_routing::AppliedDownlinkBudget>> {
+        let (completion, _) = request.into_parts();
+        Box::pin(async move { completion.complete(Err(BackendError::Unavailable)) })
+    }
+    fn install_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<volparossa_routing::InstallReceiveAccounting>,
+    ) -> BackendFuture<AccountingBackendCompletion<u32>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+    fn inspect_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<()>,
+    ) -> BackendFuture<
+        AccountingBackendCompletion<crate::kernel::receive_accounting::ReceiveAccountingSnapshot>,
+    > {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+    fn destroy_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<()>,
+    ) -> BackendFuture<AccountingBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
     fn install_wifi_mesh(
         self: Arc<Self>,
         request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
@@ -1553,6 +1592,14 @@ impl HelperEngine {
                 | helper_request::Operation::InspectWifiMesh(_)
                 | helper_request::Operation::DestroyWifiMesh(_),
             ) => Some(self.execute_mesh(request, sender).await),
+            Some(helper_request::Operation::ApplyDownlinkBudget(value)) => {
+                self.apply_downlink_async(request, value, sender).await
+            }
+            Some(
+                helper_request::Operation::InstallReceiveAccounting(_)
+                | helper_request::Operation::InspectReceiveAccounting(_)
+                | helper_request::Operation::DestroyReceiveAccounting(_),
+            ) => Some(self.execute_accounting(request, sender).await),
             Some(
                 helper_request::Operation::ReconcileExpiredPrepare(_)
                 | helper_request::Operation::BindHelperRuntime(_),
@@ -4768,6 +4815,7 @@ impl HelperEngine {
             response_sent |= outcome.response_sent;
         }
         if scope == CleanupScope::AllOwnedResources {
+            complete &= self.cleanup_accounting().await;
             complete &= self.cleanup_sharing().await;
             complete &= self.cleanup_mesh().await;
         }
@@ -5243,6 +5291,7 @@ impl HelperEngine {
         }
         complete &= self.cleanup_sharing().await;
         complete &= self.cleanup_mesh().await;
+        complete &= self.cleanup_accounting().await;
         let engine_cleanup_complete = {
             let state = self.inner.state.lock().await;
             cleanup_state_complete(&state)
@@ -5303,7 +5352,11 @@ impl HelperEngine {
                     .sharing
                     .as_ref()
                     .is_none_or(|sharing| sharing.handle != handle)
-                && state.mesh.as_ref().is_none_or(|mesh| mesh.handle != handle);
+                && state.mesh.as_ref().is_none_or(|mesh| mesh.handle != handle)
+                && state
+                    .accounting
+                    .as_ref()
+                    .is_none_or(|accounting| accounting.handle != handle);
             if unused {
                 return Some(handle);
             }
@@ -5831,6 +5884,7 @@ fn cleanup_state_complete(state: &EngineState) -> bool {
         && state.ingress_acquire_request_ids.is_empty()
         && state.sharing.is_none()
         && state.mesh.is_none()
+        && state.accounting.is_none()
 }
 
 fn route_cleanup_state_complete(state: &EngineState) -> bool {
@@ -5887,6 +5941,7 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         helper_request::Operation::AddMptcpEndpoint(value) => &value.route_context_id,
         helper_request::Operation::RemoveMptcpEndpoint(value) => &value.route_context_id,
         helper_request::Operation::AcquireTransportSocket(value) => &value.route_context_id,
+        helper_request::Operation::ApplyDownlinkBudget(value) => &value.route_context_id,
         helper_request::Operation::ReconcileExpiredPrepare(value) => &value.route_context_id,
         helper_request::Operation::BindHelperRuntime(value) => {
             &value.prepare_intent.as_ref()?.route_context_id
@@ -5902,6 +5957,9 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         | helper_request::Operation::InstallWifiMesh(_)
         | helper_request::Operation::InspectWifiMesh(_)
         | helper_request::Operation::DestroyWifiMesh(_)
+        | helper_request::Operation::InstallReceiveAccounting(_)
+        | helper_request::Operation::InspectReceiveAccounting(_)
+        | helper_request::Operation::DestroyReceiveAccounting(_)
         | helper_request::Operation::CleanupOwned(_) => return None,
     };
     fixed(value)

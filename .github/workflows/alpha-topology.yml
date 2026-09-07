@@ -17,6 +17,7 @@ on:
           - local-link
           - mixed-link
           - sharing
+          - download-sharing
           - wifi-mesh
           - wifi-link
           - uplink-link
@@ -67,6 +68,7 @@ jobs:
           python3 tests/integration/test-wifi-mesh-smoke.py
           python3 tests/integration/test-wifi-link-smoke.py
           python3 -B tests/integration/test-uplink-link-smoke.py
+          python3 -B tests/integration/test-download-sharing-snapshot.py
 
       - name: Install official Ubuntu VM tools
         run: |
@@ -286,6 +288,21 @@ jobs:
             fi
             exit 0
           fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = download-sharing; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/download-sharing-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "owner-priority download runtime succeeded: \(.success)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "accounting removed: \(.cleanup.accounting_removed)",
+                "guest host state unchanged: \(.host_state.unchanged)"
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish download-sharing runtime evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = sharing; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json"
             if test -f "$report"; then
@@ -387,7 +404,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -664,6 +681,36 @@ jobs:
             .cleanup.baseline_restored == true and .host_state.unchanged == true
           ' "$VOLPAROSSA_ALPHA_OUTPUT/sharing-smoke.json" >/dev/null
 
+      - name: Require real shared-downlink owner-priority evidence
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'download-sharing'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          jq -e --arg revision "$GITHUB_SHA" '
+            .report_kind == "volparossa-owner-priority-downlink" and
+            .source_revision == $revision and .success == true and
+            .windows.baseline.owner_application_mbps > 0 and
+            .windows.idle.contribution_application_mbps >= 1 and
+            .windows.recovery.contribution_application_mbps >= 1 and
+            .windows.owner.owner_application_mbps >= .windows.baseline.owner_application_mbps * 0.8 and
+            .windows.owner.contribution_application_mbps < .windows.idle.contribution_application_mbps * 0.5 and
+            .windows.idle.sender_queue_mbps > 0 and .windows.recovery.sender_queue_mbps > 0 and
+            all(.windows[]; [.receiver_wire_mbps,.sender_queue_mbps,.owner_application_mbps,.contribution_application_mbps] |
+              all(.[]; type == "number" and . >= 0)) and
+            .flow.same_route_context == true and
+            (.flow.wireguard_both_legs | length) == 4 and all(.flow.wireguard_both_legs[]; . > 0) and
+            .expiry.refresh_paused == true and
+            (.expiry.bounded_tail_bytes | type) == "number" and .expiry.bounded_tail_bytes > 0 and
+            (.expiry.drained_tail_bytes | type) == "number" and .expiry.drained_tail_bytes >= 0 and
+            .expiry.drained_tail_bytes <= .expiry.bounded_tail_bytes and
+            .expiry.contribution_after_expiry_bytes == 0 and
+            .privacy.complete == true and .privacy.drops == 0 and
+            .cleanup.complete == true and .cleanup.remaining_owned_objects == 0 and
+            .cleanup.accounting_removed == true and .host_state.unchanged == true
+          ' "$VOLPAROSSA_ALPHA_OUTPUT/download-sharing-smoke.json" >/dev/null
+
       - name: Require real simulated-radio mesh backend evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'wifi-mesh'
         env:
@@ -728,7 +775,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

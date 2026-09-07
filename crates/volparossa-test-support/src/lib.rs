@@ -482,6 +482,7 @@ impl SignedRouteFixture {
                 control_relay_peer_id: authorization.control_relay_peer_id.clone(),
                 exit_peer_id: authorization.exit_peer_id.clone(),
                 signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
+                receive_budget_required: false,
             };
             relay_reservations.push(sign_control_message(
                 &relay,

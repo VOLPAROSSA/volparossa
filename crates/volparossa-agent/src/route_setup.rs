@@ -11,6 +11,7 @@
     reason = "a future transparent ingress coordinator consumes this boundary"
 )]
 
+mod browser_failure;
 mod path_telemetry;
 mod retirement;
 mod selection_bridge;
@@ -19,6 +20,7 @@ pub(crate) use selection_bridge::{
     PreProbeContinuation, PreparedPreselectionEvidence, prepare_preselection_evidence,
 };
 
+use browser_failure::BrowserFailureStage;
 use path_telemetry::PathTelemetry;
 
 use std::{
@@ -576,8 +578,10 @@ impl ActiveProductionMpquicRoute {
                 let statuses = session
                     .path_statuses()
                     .await
-                    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-                identity.project(&statuses, session.warm_path_ids())
+                    .map_err(|_| BrowserFailureStage::TelemetryNative.reject())?;
+                identity
+                    .project(&statuses, session.warm_path_ids())
+                    .inspect_err(|_| BrowserFailureStage::TelemetryProjection.report())
             })
             .await
     }
@@ -2065,6 +2069,10 @@ impl ClientRouteControl {
     }
 
     /// Hand one policy-approved UDP/443 datagram to the retained native MPQUIC session.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep the exact affine send and fixed failure stages together"
+    )]
     pub(crate) async fn send_browser_quic_ingress(
         &self,
         ingress: PolicyAuthorizedUdpIngress,
@@ -2077,16 +2085,19 @@ impl ClientRouteControl {
         self.retire_expired_route(now_ms, Instant::now()).await;
         let mut state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &mut *state else {
+            BrowserFailureStage::RouteState.report();
             return Err(ClientRouteConnectError::Busy);
         };
         let ClientTransportState::Mpquic(active) = &mut established.transport else {
+            BrowserFailureStage::RouteState.report();
             return Err(ClientRouteConnectError::Busy);
         };
         let route = established
             .route
             .as_ref()
-            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)?;
+            .ok_or_else(|| BrowserFailureStage::RouteAuthority.reject())?;
+        let (tunnel_source, maximum_packet_bytes) = mpquic_tunnel_packet_scope(&active.session)
+            .inspect_err(|_| BrowserFailureStage::PacketScope.report())?;
 
         active
             .browser_flows
@@ -2111,14 +2122,14 @@ impl ClientRouteControl {
                 .owner
                 .as_ref()
                 .and_then(PreparedContextOwner::protocol)
-                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                .ok_or_else(|| BrowserFailureStage::RouteAuthority.reject())?;
             let route_expires_at_ms = route
                 .established
                 .relay_grants
                 .iter()
                 .map(VerifiedRelayGrant::expires_at_ms)
                 .min()
-                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                .ok_or_else(|| BrowserFailureStage::RouteAuthority.reject())?;
             let (binding, packet) = ingress
                 .bind_to_multipath_route(
                     route.established.request.parameters.route_context_id,
@@ -2144,33 +2155,35 @@ impl ClientRouteControl {
                     now_ms,
                 )
                 .await
-                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                .map_err(|_| BrowserFailureStage::FlowAuthorization.reject())?;
             active
                 .session
                 .send_browser_quic(pending.flow(), packet, now_ms)
                 .await
-                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                .map_err(|_| BrowserFailureStage::PacketSend.reject())?;
         } else {
-            let index = existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let index = existing.ok_or_else(|| BrowserFailureStage::FlowBinding.reject())?;
             active
                 .session
                 .send_browser_quic(active.browser_flows[index].flow(), packet, now_ms)
                 .await
-                .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                .map_err(|_| BrowserFailureStage::PacketSend.reject())?;
         }
         let index = if let Some(binding) = pending_binding {
             active.browser_flows.push(binding);
             active.browser_flows.len() - 1
         } else {
-            existing.ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+            existing.ok_or_else(|| BrowserFailureStage::FlowBinding.reject())?
         };
         active.browser_flows[index]
             .record_sent(now_ms)
-            .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            .map_err(|_| BrowserFailureStage::ActivityBinding.reject())?;
         // Native Send independently enforces live session/path authority on every datagram.
         // This optional second RPC updates the display only, not permission to send data.
         if let Some(paths) = active.sample_path_summaries(false).await? {
-            self.replace_agent_mpquic_paths(paths).await?;
+            self.replace_agent_mpquic_paths(paths)
+                .await
+                .inspect_err(|_| BrowserFailureStage::TelemetryPublication.report())?;
         }
         Ok(ClientRouteProgress::TransportActive)
     }
@@ -9475,6 +9488,7 @@ mod tests {
                 | ExitForwardOperation::UdpSessionStart
                 | ExitForwardOperation::MptcpSessionStart
                 | ExitForwardOperation::MpquicSessionStart
+                | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -9824,6 +9838,7 @@ mod tests {
                 | ExitForwardOperation::UdpSessionStart
                 | ExitForwardOperation::MptcpSessionStart
                 | ExitForwardOperation::MpquicSessionStart
+                | ExitForwardOperation::AdjacentReceiveBudget
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(

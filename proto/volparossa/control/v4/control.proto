@@ -42,6 +42,8 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_EXIT_RESULT = 24;
   CONTROL_MESSAGE_TYPE_NATIVE_PROBE_RELAY_RESULT = 25;
   CONTROL_MESSAGE_TYPE_NATIVE_ROUTE_CREDENTIAL_DELIVERY = 26;
+  CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET = 27;
+  CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET_RECEIPT = 28;
 }
 
 enum Transport {
@@ -777,6 +779,40 @@ message RelayReservation {
   bytes control_relay_peer_id = 28;
   bytes exit_peer_id = 29;
   bytes signed_client_relay_request_sha256 = 30;
+  bool receive_budget_required = 31;
+}
+
+enum AdjacentReceiveLeg {
+  ADJACENT_RECEIVE_LEG_UNSPECIFIED = 0;
+  ADJACENT_RECEIVE_LEG_EXIT_TO_RELAY = 1;
+}
+
+message AdjacentReceiveBudget {
+  bytes reservation_id = 1;
+  bytes route_context_id = 2;
+  uint32 path_id = 3;
+  bytes receiver_relay_node_id = 4;
+  bytes sender_exit_node_id = 5;
+  bytes relay_reservation_sha256 = 6;
+  AdjacentReceiveLeg leg = 7;
+  uint64 sequence = 8;
+  uint64 rate_bytes_per_second = 9; // Zero closes; never unlimited.
+  uint32 burst_bytes = 10;
+  uint64 created_at_ms = 11;
+  uint64 expires_at_ms = 12;
+  bytes nonce = 13;
+}
+
+message AdjacentReceiveBudgetReceipt {
+  bytes receiver_relay_node_id = 1;
+  bytes sender_exit_node_id = 2;
+  bytes signed_budget_sha256 = 3;
+  uint64 sequence = 4;
+  uint64 rate_bytes_per_second = 5;
+  uint32 burst_bytes = 6;
+  uint64 created_at_ms = 7;
+  uint64 expires_at_ms = 8;
+  bytes nonce = 9;
 }
 
 message ExitReservationConfirmation {

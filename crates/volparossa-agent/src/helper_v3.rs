@@ -4,6 +4,12 @@
 mod uplink_sharing;
 pub(crate) use uplink_sharing::RuntimeBoundUplinkSharing;
 
+#[path = "helper_v3/downlink_sharing.rs"]
+mod downlink_sharing;
+pub(crate) use downlink_sharing::{
+    RuntimeBoundDownlinkBudgetTarget, RuntimeBoundReceiveAccounting,
+};
+
 #[path = "helper_v3/wifi_mesh.rs"]
 mod wifi_mesh;
 pub(crate) use wifi_mesh::RuntimeBoundWifiMesh;

@@ -348,6 +348,7 @@ where
         control_relay_peer_id: grant.control_relay_peer_id,
         exit_peer_id: grant.exit_peer_id,
         signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
+        receive_budget_required: false,
     };
     sign_control_message(
         &accepted,

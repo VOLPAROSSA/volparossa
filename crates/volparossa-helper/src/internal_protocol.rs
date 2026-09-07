@@ -32,7 +32,7 @@ pub(crate) struct InternalWorkerRequest {
     pub(crate) request_id: Vec<u8>,
     #[prost(
         oneof = "internal_worker_request::Operation",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26"
     )]
     pub(crate) operation: Option<internal_worker_request::Operation>,
 }
@@ -70,6 +70,8 @@ pub(crate) mod internal_worker_request {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub(crate) enum Operation {
+        #[prost(message, tag = "26")]
+        ApplyDownlinkBudget(super::ApplyWorkerDownlinkBudget),
         #[prost(message, tag = "10")]
         Initialise(InitialiseContext),
         #[prost(message, tag = "11")]
@@ -252,6 +254,35 @@ pub(crate) struct ActivateLeases {
     /// Parent-frozen Linux `CLOCK_BOOTTIME` hard expiry for this exact route context.
     #[prost(uint64, tag = "3")]
     pub(crate) hard_expires_at_boottime_ns: u64,
+    /// Exact Exit paths whose verified Relay grant requires initially CLOSED sender admission.
+    #[prost(uint32, repeated, tag = "4")]
+    pub(crate) receive_budget_required_paths: Vec<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct ApplyWorkerDownlinkBudget {
+    #[prost(bytes = "vec", tag = "1")]
+    pub(crate) route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub(crate) path_id: u32,
+    #[prost(uint64, tag = "3")]
+    pub(crate) sequence: u64,
+    #[prost(uint64, tag = "4")]
+    pub(crate) rate_bytes_per_second: u64,
+    #[prost(uint32, tag = "5")]
+    pub(crate) burst_bytes: u32,
+    #[prost(uint64, tag = "6")]
+    pub(crate) expires_at_ms: u64,
+    #[prost(uint64, tag = "7")]
+    pub(crate) expires_at_boottime_ns: u64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct WorkerDownlinkBudgetApplied {
+    #[prost(uint64, tag = "1")]
+    pub(crate) sequence: u64,
+    #[prost(uint32, tag = "2")]
+    pub(crate) maximum_queued_bytes: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -450,7 +481,7 @@ pub(crate) struct InternalWorkerResponse {
     pub(crate) activation_failure: Option<ActivationFailureDiagnostic>,
     #[prost(
         oneof = "internal_worker_response::Outcome",
-        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25"
+        tags = "10, 11, 12, 13, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26"
     )]
     pub(crate) outcome: Option<internal_worker_response::Outcome>,
 }
@@ -467,6 +498,8 @@ pub(crate) mod internal_worker_response {
 
     #[derive(Clone, PartialEq, Oneof)]
     pub(crate) enum Outcome {
+        #[prost(message, tag = "26")]
+        DownlinkBudgetApplied(super::WorkerDownlinkBudgetApplied),
         #[prost(message, tag = "10")]
         Initialised(ContextInitialised),
         #[prost(message, tag = "11")]
@@ -699,6 +732,9 @@ fn response_matches_operation(
             request.path_id == response.path_id
         }
         (Operation::DestroyContext(_), Outcome::Destroyed(_)) => true,
+        (Operation::ApplyDownlinkBudget(request), Outcome::DownlinkBudgetApplied(response)) => {
+            request.sequence == response.sequence
+        }
         (Operation::AcquireTransportSocket(request), Outcome::TransportSocketReady(response)) => {
             request.path_id == response.path_id
                 && request.role == response.role
@@ -1081,6 +1117,19 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
         Operation::PrepareLeases(operation) => validate_prepare_leases(operation),
         Operation::ActivateLeases(operation) => {
             route_id(&operation.route_context_id)?;
+            if operation.receive_budget_required_paths.len() > 8
+                || operation
+                    .receive_budget_required_paths
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                || operation.receive_budget_required_paths.iter().any(|path| {
+                    !operation.leases.iter().any(|lease| {
+                        lease.path_id == *path && lease.role == InternalEndpointRole::Exit as i32
+                    })
+                })
+            {
+                return Err(InternalProtocolError::Invalid);
+            }
             if operation.hard_expires_at_boottime_ns == 0 {
                 return Err(InternalProtocolError::Invalid);
             }
@@ -1165,6 +1214,19 @@ fn validate_request(value: &InternalWorkerRequest) -> Result<(), InternalProtoco
             )
         }
         Operation::DestroyContext(operation) => route_id(&operation.route_context_id),
+        Operation::ApplyDownlinkBudget(operation) => {
+            route_id(&operation.route_context_id)?;
+            path(operation.path_id)?;
+            if operation.sequence == 0
+                || operation.rate_bytes_per_second > 125_000_000_000
+                || operation.burst_bytes > 65_536
+                || operation.expires_at_ms == 0
+                || operation.expires_at_boottime_ns == 0
+            {
+                return Err(InternalProtocolError::Invalid);
+            }
+            Ok(())
+        }
         Operation::InitialiseClientIngress(operation) => {
             route_id(&operation.client_runtime_id)?;
             if operation.hard_expires_at_unix == 0 {
@@ -1275,6 +1337,7 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
                 Ok((lease.path_id, lease.role))
             }),
             Outcome::Destroyed(_) => Ok(()),
+            Outcome::DownlinkBudgetApplied(value) => validate_applied_downlink(value),
             Outcome::MptcpEndpointAdded(outcome) => path(outcome.path_id),
             Outcome::MptcpEndpointRemoved(outcome) => path(outcome.path_id),
             Outcome::TransportSocketReady(outcome) => {
@@ -1328,6 +1391,15 @@ fn validate_response(value: &InternalWorkerResponse) -> Result<(), InternalProto
         | (_, Some(_)) => Err(InternalProtocolError::Invalid),
         (_, None) => Ok(()),
     }
+}
+
+fn validate_applied_downlink(
+    value: &WorkerDownlinkBudgetApplied,
+) -> Result<(), InternalProtocolError> {
+    if value.sequence == 0 || !(1..=262_144).contains(&value.maximum_queued_bytes) {
+        return Err(InternalProtocolError::Invalid);
+    }
+    Ok(())
 }
 
 fn validate_activation_failure(
@@ -1744,6 +1816,7 @@ mod tests {
                 leases: vec![plan(1)],
             }),
             internal_worker_request::Operation::ActivateLeases(ActivateLeases {
+                receive_budget_required_paths: Vec::new(),
                 route_context_id: vec![1; 16],
                 hard_expires_at_boottime_ns: 1,
                 leases: vec![LeaseActivation {
@@ -1895,6 +1968,7 @@ mod tests {
         let make = |lease| {
             request(internal_worker_request::Operation::ActivateLeases(
                 ActivateLeases {
+                    receive_budget_required_paths: Vec::new(),
                     route_context_id: vec![1; 16],
                     hard_expires_at_boottime_ns: 1,
                     leases: vec![lease],
@@ -1983,6 +2057,7 @@ mod tests {
             )),
             request(internal_worker_request::Operation::ActivateLeases(
                 ActivateLeases {
+                    receive_budget_required_paths: Vec::new(),
                     route_context_id: vec![1; 16],
                     hard_expires_at_boottime_ns: 1,
                     leases: relay_activations(&plans),
@@ -2473,6 +2548,7 @@ mod tests {
     fn activation_failure_diagnostic_is_closed_correlated_and_failure_only() {
         let activate = request(internal_worker_request::Operation::ActivateLeases(
             ActivateLeases {
+                receive_budget_required_paths: Vec::new(),
                 route_context_id: vec![1; 16],
                 hard_expires_at_boottime_ns: 1,
                 leases: vec![activation_with_role(InternalEndpointRole::Client)],

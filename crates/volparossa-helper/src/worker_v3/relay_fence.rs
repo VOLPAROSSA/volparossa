@@ -38,6 +38,8 @@ use nix::{
 use thiserror::Error;
 use volparossa_routing::{ContextRole, MAX_HELPER_PATHS, MAX_HELPER_RATE_MBPS, WireguardRole};
 
+pub(super) mod downlink_gate;
+
 use crate::{
     deadline::HardDeadline,
     lease_spec::WireguardLeaseSpec,
@@ -2371,13 +2373,20 @@ fn encode_activate_rules_transaction(
 }
 
 fn encode_live_set(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFenceError> {
+    encode_singleton_live_set(&specification.identity, NFPROTO_INET)
+}
+
+fn encode_singleton_live_set(
+    identity: &RelayFenceIdentity,
+    family: u8,
+) -> Result<Vec<u8>, RelayFenceError> {
     let mut description = Vec::new();
     encode_attribute(&mut description, NFTA_SET_DESC_SIZE, &1_u32.to_be_bytes())?;
-    let mut set = encode_request_nfgen(NFPROTO_INET, 0);
+    let mut set = encode_request_nfgen(family, 0);
     encode_attribute(
         &mut set,
         NFTA_SET_TABLE,
-        &encode_nul_string(&specification.identity.table_name)?,
+        &encode_nul_string(&identity.table_name)?,
     )?;
     encode_attribute(&mut set, NFTA_SET_NAME, &encode_nul_string(LIVE_SET_NAME)?)?;
     encode_attribute(
@@ -2397,22 +2406,36 @@ fn encode_live_set(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFence
 }
 
 fn encode_live_set_element(specification: &RelayFenceSpec) -> Result<Vec<u8>, RelayFenceError> {
+    encode_singleton_live_element(
+        &specification.identity,
+        specification.live_gate_timeout_milliseconds,
+        NFPROTO_INET,
+        LIVE_SET_KEY,
+    )
+}
+
+fn encode_singleton_live_element(
+    identity: &RelayFenceIdentity,
+    timeout_ms: u64,
+    family: u8,
+    value: [u8; 1],
+) -> Result<Vec<u8>, RelayFenceError> {
     let mut key = Vec::new();
-    encode_attribute(&mut key, NFTA_DATA_VALUE, &LIVE_SET_KEY)?;
+    encode_attribute(&mut key, NFTA_DATA_VALUE, &value)?;
     let mut element = Vec::new();
     encode_attribute(&mut element, NFTA_SET_ELEM_KEY | NLA_F_NESTED, &key)?;
     encode_attribute(
         &mut element,
         NFTA_SET_ELEM_TIMEOUT,
-        &specification.live_gate_timeout_milliseconds.to_be_bytes(),
+        &timeout_ms.to_be_bytes(),
     )?;
     let mut elements = Vec::new();
     encode_attribute(&mut elements, NFTA_LIST_ELEM | NLA_F_NESTED, &element)?;
-    let mut request = encode_request_nfgen(NFPROTO_INET, 0);
+    let mut request = encode_request_nfgen(family, 0);
     encode_attribute(
         &mut request,
         NFTA_SET_ELEM_LIST_TABLE,
-        &encode_nul_string(&specification.identity.table_name)?,
+        &encode_nul_string(&identity.table_name)?,
     )?;
     encode_attribute(
         &mut request,
@@ -3779,6 +3802,22 @@ fn parse_rule_payload(
     payload: &[u8],
     expected_generation: u32,
 ) -> Result<RuleRecord, RelayFenceError> {
+    parse_rule_with_counts(
+        payload,
+        expected_generation,
+        &[
+            DIRECTION_RULE_EXPRESSIONS,
+            HOST_ISOLATION_RULE_EXPRESSIONS,
+            TERMINAL_RULE_EXPRESSIONS,
+        ],
+    )
+}
+
+fn parse_rule_with_counts(
+    payload: &[u8],
+    expected_generation: u32,
+    counts: &[usize],
+) -> Result<RuleRecord, RelayFenceError> {
     let (header, attributes) = split_nfgenmsg(payload)?;
     validate_object_nfgen(header, expected_generation)?;
     let attributes = parse_attributes(attributes, MAX_RULE_ATTRIBUTES)?;
@@ -3806,7 +3845,10 @@ fn parse_rule_payload(
                 set_once(&mut handle, read_exact_be_u64(attribute.payload)?)?;
             }
             NFTA_RULE_EXPRESSIONS => {
-                set_once(&mut expressions, parse_expressions(attribute.payload)?)?;
+                set_once(
+                    &mut expressions,
+                    parse_expressions(attribute.payload, counts)?,
+                )?;
             }
             NFTA_RULE_POSITION => {
                 set_once(&mut position, read_exact_be_u64(attribute.payload)?)?;
@@ -4039,12 +4081,12 @@ fn parse_set_elements(payload: &[u8]) -> Result<Vec<(Vec<u8>, u64, u64)>, RelayF
     Ok(parsed)
 }
 
-fn parse_expressions(payload: &[u8]) -> Result<Vec<ObservedExpression>, RelayFenceError> {
+fn parse_expressions(
+    payload: &[u8],
+    counts: &[usize],
+) -> Result<Vec<ObservedExpression>, RelayFenceError> {
     let elements = parse_attributes(payload, MAX_RULE_EXPRESSIONS)?;
-    if !matches!(
-        elements.len(),
-        DIRECTION_RULE_EXPRESSIONS | HOST_ISOLATION_RULE_EXPRESSIONS | TERMINAL_RULE_EXPRESSIONS
-    ) {
+    if !counts.contains(&elements.len()) {
         return Err(RelayFenceError::UnexpectedPolicy);
     }
     let mut expressions = Vec::with_capacity(elements.len());

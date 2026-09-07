@@ -12,6 +12,7 @@ mod client_ingress;
 mod client_udp_turns;
 mod control;
 mod discovery;
+mod downlink_sharing;
 mod endpoint_leases;
 #[path = "helper_v3.rs"]
 pub mod helper;
@@ -59,6 +60,7 @@ use client_ingress::{
 use client_udp_turns::{ClientUdpIoTurn, ClientUdpTurns};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
+use downlink_sharing::DownlinkSharingRuntime;
 use helper::{ClientIngressSocketFamily, HelperClient};
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
@@ -196,6 +198,24 @@ impl Agent {
                     return Err(AgentError::UplinkSharing);
                 }
             };
+        let download_sharing = match DownlinkSharingRuntime::start(
+            self.helper.clone(),
+            &self.config.download_sharing,
+            roles,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(error = ?error, "download receive accounting startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::DownlinkSharing);
+            }
+        };
+        self.discovery.set_download_sharing(download_sharing);
         let mesh = match WifiMeshRuntime::start(self.helper.clone(), &self.config.wifi_mesh, roles)
             .await
         {
@@ -224,7 +244,7 @@ impl Agent {
                 Ok(ingress) => ingress,
                 Err(error) => {
                     tracing::error!(error = ?error, "client ingress startup failed");
-                    if mesh.is_some() || sharing.is_some() {
+                    if mesh.is_some() || sharing.is_some() || self.config.download_sharing.enabled {
                         self.helper
                             .cleanup_owned()
                             .await
@@ -834,6 +854,7 @@ async fn run_client_udp_ingress(
                         continue;
                     }
                     Err(_) => {
+                        eprintln!("MPQUIC_BROWSER_FAILURE_STAGE=GateReauthorization");
                         browser_gate = BrowserQuicIngressGate::new();
                         routes.disconnect().await;
                         state.write().await.log(
@@ -1546,6 +1567,9 @@ pub enum AgentError {
     /// The explicitly configured upload scheduler could not be installed or retained.
     #[error("owner-priority upload sharing is unavailable")]
     UplinkSharing,
+    /// The explicitly configured receive accounting and adjacent sender budgets are unavailable.
+    #[error("owner-priority download sharing is unavailable")]
+    DownlinkSharing,
     /// The explicitly configured direct radio adjacency could not be installed or retained.
     #[error("direct Wi-Fi mesh is unavailable")]
     WifiMesh,
@@ -1577,6 +1601,7 @@ impl AgentError {
             Self::Control(_) => "CONTROL_FAILED",
             Self::ClientIngress => "CLIENT_INGRESS_FAILED",
             Self::UplinkSharing => "UPLINK_SHARING_FAILED",
+            Self::DownlinkSharing => "DOWNLINK_SHARING_FAILED",
             Self::WifiMesh => "WIFI_MESH_FAILED",
             Self::Metrics(_) => "METRICS_FAILED",
             Self::Task => "RUNTIME_TASK_FAILED",

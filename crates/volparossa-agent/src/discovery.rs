@@ -1,5 +1,6 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
+mod downlink;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
@@ -1694,6 +1695,7 @@ pub struct DiscoveryRuntime {
     independent_egress_observation: Option<EgressObservation>,
     independent_exit_retiring: bool,
     exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
+    downlink: downlink::DownlinkBridge,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
@@ -1890,6 +1892,7 @@ impl DiscoveryRuntime {
             independent_egress_observation: None,
             independent_exit_retiring: false,
             exit_runtime_retirements: HashMap::new(),
+            downlink: downlink::DownlinkBridge::default(),
             metrics,
             role_commands,
             client_preselection,
@@ -1980,6 +1983,9 @@ impl DiscoveryRuntime {
         capability_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut reservation_maintenance = tokio::time::interval(RESERVATION_MAINTENANCE_INTERVAL);
         reservation_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut downlink_maintenance =
+            tokio::time::interval(crate::downlink_sharing::DOWNLINK_SAMPLE_INTERVAL);
+        downlink_maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             self.maintain_client_preselection();
             let responder_policy = {
@@ -1988,6 +1994,12 @@ impl DiscoveryRuntime {
                 preselection_responder_policy(self.roles, &policy, now_ms)
             };
             tokio::select! {
+                _ = downlink_maintenance.tick() => {
+                    if Box::pin(self.maintain_downlink(&state)).await.is_err() {
+                        state.write().await.log(LogLevel::Error, "DOWNLINK_ACCOUNTING_FAILED_CLOSED", unix_millis());
+                        break;
+                    }
+                }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         break;
@@ -2110,6 +2122,7 @@ impl DiscoveryRuntime {
         self.destroy_expired_production_exit_routes(u64::MAX).await;
         self.destroy_expired_active_mptcp_exit_routes(u64::MAX)
             .await;
+        self.shutdown_downlink(&state).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
@@ -5595,6 +5608,9 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
+                if self.complete_downlink_budget(request_id, peer, &response) {
+                    return;
+                }
                 let outcome =
                     Box::pin(self.complete_relay_forward(request_id, peer, response, state)).await;
                 log_outbound_event(state, outcome).await;
@@ -5602,6 +5618,9 @@ impl DiscoveryRuntime {
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
+                if self.fail_downlink_budget(request_id) {
+                    return;
+                }
                 let outcome = Box::pin(self.fail_relay_forward(request_id, peer)).await;
                 log_outbound_event(state, outcome).await;
             }
@@ -6224,6 +6243,17 @@ impl DiscoveryRuntime {
                 cleanup_not_before_ms: 0,
             },
         );
+        if !self.register_receive_leg(route_context_id) {
+            if let Some(route) = self
+                .prepared_production_relay_routes
+                .remove(&route_context_id)
+            {
+                self.retire_production_relay_route(route_context_id, route)
+                    .await;
+            }
+            reject!("PRODUCTION_RELAY_RECEIVE_BUDGET_UNAVAILABLE");
+        }
+        self.prime_receive_budget().await;
         let _ = self.service.send_datapath_relay_response(channel, response);
         log_relay_forward_admission(Some(state), "PRODUCTION_RELAY_RESERVATION_ACTIVATED");
     }
@@ -6242,6 +6272,11 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let Some(channel) =
+            self.defer_downlink_start_request(authenticated_client_peer, request, channel)
+        else {
+            return;
+        };
         let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
         macro_rules! reject {
             ($code:literal) => {{
@@ -6465,6 +6500,11 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let Some(channel) =
+            self.defer_downlink_start_request(authenticated_client_peer, request, channel)
+        else {
+            return;
+        };
         let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
         macro_rules! reject {
             ($code:literal) => {{
@@ -6711,6 +6751,11 @@ impl DiscoveryRuntime {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         state: &Arc<RwLock<AgentState>>,
     ) {
+        let Some(channel) =
+            self.defer_downlink_start_request(authenticated_client_peer, request, channel)
+        else {
+            return;
+        };
         let mut cleanup: Option<([u8; FORWARD_ID_BYTES], PreparedProductionRelayRoute)> = None;
         macro_rules! reject {
             ($code:literal) => {{
@@ -8802,6 +8847,7 @@ impl DiscoveryRuntime {
         route_context_id: [u8; FORWARD_ID_BYTES],
         mut route: PreparedProductionRelayRoute,
     ) -> bool {
+        self.retire_receive_budget_context(route_context_id);
         route.usable = false;
         route.expires_at_ms = 0;
         if self
@@ -8977,6 +9023,7 @@ impl DiscoveryRuntime {
             else {
                 continue;
             };
+            self.retire_receive_budget_context(route_context_id);
             route.usable = false;
             if self
                 .helper
@@ -9149,6 +9196,16 @@ impl DiscoveryRuntime {
         let Ok(operation) = request.validated_operation() else {
             reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
+        if operation == ExitForwardOperation::AdjacentReceiveBudget {
+            self.answer_downlink_budget(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+            )
+            .await;
+            return;
+        }
         if operation == ExitForwardOperation::NativeProbeReady {
             self.answer_native_probe_ready_upstream(
                 authenticated_control_relay,
@@ -9422,6 +9479,7 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::NativeProbeResult
             | ExitForwardOperation::MptcpSessionStart
             | ExitForwardOperation::MpquicSessionStart
+            | ExitForwardOperation::AdjacentReceiveBudget
             | ExitForwardOperation::Unspecified => None,
         };
         let response = responses
@@ -9697,7 +9755,18 @@ impl DiscoveryRuntime {
             .await
             .is_ok()
         {
-            route.commit = Some(commit_lease_batch(&activation));
+            if self.register_send_legs(route_context_id) {
+                self.prepared_production_exit_routes
+                    .get_mut(&route_context_id)
+                    .expect("activation owner retained")
+                    .commit = Some(commit_lease_batch(&activation));
+            } else {
+                // The required queues remain closed; exact normal retirement retains the owner.
+                self.prepared_production_exit_routes
+                    .get_mut(&route_context_id)
+                    .expect("activation owner retained")
+                    .expires_at_ms = 0;
+            }
         }
     }
 
@@ -15589,7 +15658,9 @@ fn forward_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        ExitForwardOperation::FetchExitAdvertisement | ExitForwardOperation::Unspecified => false,
+        ExitForwardOperation::FetchExitAdvertisement
+        | ExitForwardOperation::AdjacentReceiveBudget
+        | ExitForwardOperation::Unspecified => false,
     }
 }
 
@@ -16148,7 +16219,8 @@ fn build_relay_service(
             MAXIMUM_RESERVATION_TTL_SECONDS,
             TUNNEL_SETUP_TIMEOUT_SECONDS,
             SERVICE_REPLAY_CAPACITY,
-        ),
+        )
+        .with_receive_budget_required(config.download_sharing.enabled),
         Some(metrics.clone()),
     )
     .map_err(|_| ())

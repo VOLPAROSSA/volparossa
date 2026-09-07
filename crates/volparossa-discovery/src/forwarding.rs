@@ -14,11 +14,11 @@ use libp2p::{PeerId, StreamProtocol, identity, request_response};
 use prost::Message;
 use thiserror::Error;
 use volparossa_protocol::{
-    ControlMessageType, ControlPayload, ExitReservation, MAX_CONTROL_MESSAGE_SIZE,
-    MAX_CONTROL_PAYLOAD_SIZE, MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE,
-    NativeProbeAuthorizationChain, NativeProbeEndpointBinding, NodeAdvertisement, PROTOCOL_VERSION,
-    RelayAuthorization, SignedEnvelope, decode_canonical, encode_canonical,
-    node_id_from_public_key,
+    AdjacentReceiveBudget, ControlMessageType, ControlPayload, ExitReservation,
+    MAX_ADJACENT_RECEIVE_BUDGET_BYTES, MAX_CONTROL_MESSAGE_SIZE, MAX_CONTROL_PAYLOAD_SIZE,
+    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, NativeProbeAuthorizationChain,
+    NativeProbeEndpointBinding, NodeAdvertisement, PROTOCOL_VERSION, RelayAuthorization,
+    SignedEnvelope, decode_canonical, encode_canonical, node_id_from_public_key,
 };
 
 /// Client-to-control-relay exit-forwarding protocol.
@@ -66,6 +66,8 @@ pub enum ExitForwardOperation {
     MptcpSessionStart = 11,
     /// Data-Relay-to-Exit activation framing for one exact committed MPQUIC path set.
     MpquicSessionStart = 12,
+    /// Adjacent receiving data Relay's signed download budget; never a client-hop operation.
+    AdjacentReceiveBudget = 13,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -349,6 +351,9 @@ impl ExitForwardRequest {
             ExitForwardOperation::MpquicSessionStart => {
                 validate_mpquic_session_request(self)?;
             }
+            ExitForwardOperation::AdjacentReceiveBudget => {
+                validate_adjacent_receive_request(self)?;
+            }
             ExitForwardOperation::Unspecified => {
                 return Err(ForwardingRpcError::InvalidOperation(self.operation));
             }
@@ -357,7 +362,9 @@ impl ExitForwardRequest {
     }
 
     pub(super) fn validate_client_hop(&self) -> Result<(), ForwardingRpcError> {
-        if !self.control_advertisement.is_empty() {
+        if !self.control_advertisement.is_empty()
+            || self.validated_operation()? == ExitForwardOperation::AdjacentReceiveBudget
+        {
             return Err(ForwardingRpcError::InvalidFrame);
         }
         self.validate()
@@ -433,6 +440,33 @@ impl ExitForwardRequest {
     pub fn canonical_request(&self) -> &[u8] {
         &self.canonical_request
     }
+}
+
+fn validate_adjacent_receive_request(
+    request: &ExitForwardRequest,
+) -> Result<(), ForwardingRpcError> {
+    if request.canonical_request.len() > MAX_ADJACENT_RECEIVE_BUDGET_BYTES {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    let envelope = validate_signed_type(
+        &request.canonical_request,
+        ControlMessageType::AdjacentReceiveBudget,
+    )?;
+    let budget: AdjacentReceiveBudget =
+        decode_canonical(&envelope.payload, MAX_ADJACENT_RECEIVE_BUDGET_BYTES)
+            .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    budget
+        .validate()
+        .and_then(|()| budget.validate_envelope(&envelope))
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+    if budget.receiver_relay_node_id != request.control_relay_node_id
+        || envelope.sender_public_key != request.control_relay_public_key
+        || budget.sender_exit_node_id != request.exit_node_id
+        || request.deadline_unix_ms > budget.expires_at_ms
+    {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    Ok(())
 }
 
 fn validate_mpquic_session_request(request: &ExitForwardRequest) -> Result<(), ForwardingRpcError> {
@@ -814,7 +848,13 @@ impl request_response::Codec for ExitForwardCodec {
         T: AsyncRead + Unpin + Send,
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
-        read_response(io).await
+        let response = read_response(io).await?;
+        if response.validated_operation().map_err(invalid_data)?
+            == ExitForwardOperation::AdjacentReceiveBudget
+        {
+            return Err(invalid_data(ForwardingRpcError::InvalidFrame));
+        }
+        Ok(response)
     }
 
     async fn write_request<T>(
@@ -841,6 +881,11 @@ impl request_response::Codec for ExitForwardCodec {
         T: AsyncWrite + Unpin + Send,
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
+        if response.validated_operation().map_err(invalid_data)?
+            == ExitForwardOperation::AdjacentReceiveBudget
+        {
+            return Err(invalid_data(ForwardingRpcError::InvalidFrame));
+        }
         write_response(io, &response).await
     }
 }
@@ -993,6 +1038,10 @@ fn validate_granted_responses(
         ExitForwardOperation::UdpSessionStart => validate_udp_session_signal(responses),
         ExitForwardOperation::MptcpSessionStart => validate_mptcp_session_signal(responses),
         ExitForwardOperation::MpquicSessionStart => validate_mpquic_session_signal(responses),
+        ExitForwardOperation::AdjacentReceiveBudget => validate_exact_types(
+            responses,
+            &[ControlMessageType::AdjacentReceiveBudgetReceipt],
+        ),
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -1099,6 +1148,9 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         }
         ExitForwardOperation::ConfirmRelay => Ok(ControlMessageType::ExitReservationConfirmation),
         ExitForwardOperation::NativeProbePermit => Ok(ControlMessageType::NativeProbePermitRequest),
+        ExitForwardOperation::AdjacentReceiveBudget => {
+            Ok(ControlMessageType::AdjacentReceiveBudget)
+        }
         ExitForwardOperation::FetchExitAdvertisement
         | ExitForwardOperation::NativeProbeAuthorize
         | ExitForwardOperation::NativeProbeReady
@@ -1220,6 +1272,132 @@ mod tests {
     use super::*;
 
     const DEADLINE: u64 = 1_700_000_012_000;
+
+    fn adjacent_receive_request_fixture() -> ExitForwardRequest {
+        use volparossa_protocol::{AdjacentReceiveLeg, TimePolicy, sign_control_message_with};
+        let key = identity::Keypair::generate_ed25519();
+        let public = key.public().try_into_ed25519().unwrap().to_bytes();
+        let mut request = advertisement_request();
+        request.control_relay_node_id = node_id_from_public_key(&public).to_vec();
+        request.control_relay_public_key = public.to_vec();
+        request.control_relay_peer_id = key.public().to_peer_id().to_bytes();
+        request.exit_node_id = vec![9; NODE_ID_LENGTH];
+        request.operation = ExitForwardOperation::AdjacentReceiveBudget as i32;
+        let budget = AdjacentReceiveBudget {
+            reservation_id: vec![1; 16],
+            route_context_id: vec![2; 16],
+            path_id: 1,
+            receiver_relay_node_id: request.control_relay_node_id.clone(),
+            sender_exit_node_id: request.exit_node_id.clone(),
+            relay_reservation_sha256: vec![3; 32],
+            leg: AdjacentReceiveLeg::ExitToRelay as i32,
+            sequence: 1,
+            rate_bytes_per_second: 125_000,
+            burst_bytes: 4096,
+            created_at_ms: DEADLINE - 5000,
+            expires_at_ms: DEADLINE,
+            nonce: vec![4; 32],
+        };
+        request.canonical_request = sign_control_message_with(
+            &budget,
+            public,
+            budget.created_at_ms,
+            budget.expires_at_ms,
+            [4; 32],
+            TimePolicy::default(),
+            |message| {
+                key.sign(message)
+                    .ok()
+                    .and_then(|signature| signature.try_into().ok())
+            },
+        )
+        .unwrap();
+        request.validate().unwrap();
+        request
+    }
+
+    #[tokio::test]
+    async fn adjacent_receive_budget_is_signed_exact_actor_and_upstream_only() {
+        let request = adjacent_receive_request_fixture();
+        let mut client = ExitForwardCodec;
+        let mut upstream = UpstreamExitForwardCodec;
+        let client_protocol = StreamProtocol::new(EXIT_FORWARD_PROTOCOL);
+        let upstream_protocol = StreamProtocol::new(EXIT_FORWARD_UPSTREAM_PROTOCOL);
+        assert!(
+            client
+                .write_request(
+                    &client_protocol,
+                    &mut Cursor::new(Vec::new()),
+                    request.clone()
+                )
+                .await
+                .is_err()
+        );
+        let mut encoded = Cursor::new(Vec::new());
+        upstream
+            .write_request(&upstream_protocol, &mut encoded, request.clone().into())
+            .await
+            .unwrap();
+        let wire = encoded.into_inner();
+        assert!(
+            client
+                .read_request(&client_protocol, &mut Cursor::new(wire.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            upstream
+                .read_request(&upstream_protocol, &mut Cursor::new(wire))
+                .await
+                .unwrap()
+                .as_forward_request(),
+            &request
+        );
+        let mut wrong = request.clone();
+        wrong.exit_node_id = vec![88; 32];
+        assert!(wrong.validate().is_err());
+        wrong = request.clone();
+        wrong.deadline_unix_ms += 1;
+        assert!(wrong.validate().is_err());
+        let response = ExitForwardResponse::unavailable(
+            request.forward_id.clone(),
+            ExitForwardOperation::AdjacentReceiveBudget,
+            request.exit_node_id,
+            request.exit_peer_id,
+        )
+        .unwrap();
+        assert!(
+            client
+                .write_response(
+                    &client_protocol,
+                    &mut Cursor::new(Vec::new()),
+                    response.clone()
+                )
+                .await
+                .is_err()
+        );
+        let mut wire = Cursor::new(Vec::new());
+        upstream
+            .write_response(&upstream_protocol, &mut wire, response.clone().into())
+            .await
+            .unwrap();
+        assert!(
+            client
+                .read_response(&client_protocol, &mut Cursor::new(wire.into_inner()))
+                .await
+                .is_err()
+        );
+        assert!(
+            ExitForwardResponse::granted(
+                response.forward_id,
+                ExitForwardOperation::AdjacentReceiveBudget,
+                response.exit_node_id,
+                response.exit_peer_id,
+                vec![envelope(ControlMessageType::NodeAdvertisement, Vec::new())]
+            )
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn control_advertisement_is_upstream_only_and_preserves_client_request_bytes() {

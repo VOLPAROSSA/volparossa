@@ -8,7 +8,15 @@
 //! mesh ID/channel and a private connected subnet only for its newly created interface. It cannot
 //! replace an existing interface or install an Internet route.
 
+#[path = "v3/downlink.rs"]
+mod downlink;
 mod wifi_mesh;
+pub use downlink::{
+    AppliedDownlinkBudget, ApplyDownlinkBudget, DestroyReceiveAccounting,
+    DestroyedReceiveAccounting, InspectReceiveAccounting, InstallReceiveAccounting,
+    InstalledReceiveAccounting, ManagedReceiveCounter, ReceiveAccountingSnapshot,
+    ReceiveByteCounters, validate_downlink_response,
+};
 pub use wifi_mesh::{
     DestroyWifiMesh, DestroyedWifiMesh, InspectWifiMesh, InstallWifiMesh, InstalledWifiMesh,
     WifiMeshPeer, WifiMeshSnapshot, validate_wifi_mesh_response,
@@ -65,7 +73,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -86,6 +94,18 @@ pub mod helper_request {
     /// Exactly one typed operation.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Operation {
+        /// Apply a signed adjacent Relay's short-lived budget to its exact owned Exit lease.
+        #[prost(message, tag = "43")]
+        ApplyDownlinkBudget(super::ApplyDownlinkBudget),
+        /// Install count-only receive accounting on one exact physical underlay.
+        #[prost(message, tag = "44")]
+        InstallReceiveAccounting(super::InstallReceiveAccounting),
+        /// Read same-hook total and role-labelled managed receive counters.
+        #[prost(message, tag = "45")]
+        InspectReceiveAccounting(super::InspectReceiveAccounting),
+        /// Remove only the exact count-only accounting owner.
+        #[prost(message, tag = "46")]
+        DestroyReceiveAccounting(super::DestroyReceiveAccounting),
         /// Prepare helper-owned leases without peers.
         #[prost(message, tag = "20")]
         PrepareLeaseBatch(PrepareLeaseBatch),
@@ -801,7 +821,7 @@ pub struct HelperResponse {
     /// Operation-specific success output; absent on failure.
     #[prost(
         oneof = "helper_response::Outcome",
-        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42"
+        tags = "20, 21, 22, 23, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
     )]
     pub outcome: Option<helper_response::Outcome>,
 }
@@ -821,6 +841,18 @@ pub mod helper_response {
     /// Exactly one successful outcome.
     #[derive(Clone, PartialEq, Oneof)]
     pub enum Outcome {
+        /// Exact lease-bound sender queue update, never an unlimited expiry fallback.
+        #[prost(message, tag = "43")]
+        AppliedDownlinkBudget(super::AppliedDownlinkBudget),
+        /// Exact count-only receive accounting owner.
+        #[prost(message, tag = "44")]
+        InstalledReceiveAccounting(super::InstalledReceiveAccounting),
+        /// Same-hook receive counters; no endpoint or payload history.
+        #[prost(message, tag = "45")]
+        ReceiveAccountingSnapshot(super::ReceiveAccountingSnapshot),
+        /// Idempotent receive accounting removal.
+        #[prost(message, tag = "46")]
+        DestroyedReceiveAccounting(super::DestroyedReceiveAccounting),
         /// Prepared endpoints.
         #[prost(message, tag = "20")]
         PreparedLeaseBatch(PreparedLeaseBatch),
@@ -1505,6 +1537,14 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         }
         Operation::InspectWifiMesh(_) => "inspect one owned direct Wi-Fi mesh link".to_owned(),
         Operation::DestroyWifiMesh(_) => "leave and remove one owned Wi-Fi mesh link".to_owned(),
+        Operation::ApplyDownlinkBudget(_) => "apply one signed adjacent receive budget".to_owned(),
+        Operation::InstallReceiveAccounting(_) => {
+            "install count-only receive accounting".to_owned()
+        }
+        Operation::InspectReceiveAccounting(_) => {
+            "inspect count-only receive accounting".to_owned()
+        }
+        Operation::DestroyReceiveAccounting(_) => "remove count-only receive accounting".to_owned(),
         Operation::CleanupOwned(value) => match CleanupScope::try_from(value.scope)
             .map_err(|_| HelperProtocolError::Invalid("cleanup scope"))?
         {
@@ -1781,6 +1821,16 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             handle(&operation.sharing_handle)
         }
         Operation::InstallWifiMesh(operation) => wifi_mesh::validate_install(operation),
+        Operation::ApplyDownlinkBudget(operation) => downlink::validate_apply(operation),
+        Operation::InstallReceiveAccounting(operation) => downlink::validate_install(operation),
+        Operation::InspectReceiveAccounting(operation) => {
+            context(&operation.accounting_runtime_id)?;
+            handle(&operation.accounting_handle)
+        }
+        Operation::DestroyReceiveAccounting(operation) => {
+            context(&operation.accounting_runtime_id)?;
+            handle(&operation.accounting_handle)
+        }
         Operation::InspectWifiMesh(operation) => {
             context(&operation.mesh_runtime_id)?;
             handle(&operation.mesh_handle)
@@ -2050,6 +2100,13 @@ fn validate_outcome(value: &helper_response::Outcome) -> Result<(), HelperProtoc
         Outcome::SharingCounters(value) => validate_sharing_counters(value),
         Outcome::InstalledWifiMesh(value) => wifi_mesh::validate_installed(value),
         Outcome::WifiMeshSnapshot(value) => wifi_mesh::validate_snapshot(value),
+        Outcome::AppliedDownlinkBudget(value) => downlink::validate_applied(value),
+        Outcome::InstalledReceiveAccounting(value) => downlink::validate_installed(value),
+        Outcome::ReceiveAccountingSnapshot(value) => downlink::validate_snapshot(value),
+        Outcome::DestroyedReceiveAccounting(value) => {
+            context(&value.accounting_runtime_id)?;
+            handle(&value.accounting_handle)
+        }
         Outcome::DestroyedClientIngress(_)
         | Outcome::DestroyedContext(_)
         | Outcome::DestroyedSharing(_)

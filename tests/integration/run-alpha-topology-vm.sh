@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -60,6 +60,11 @@ print_plan() {
             'Mixed-link scenario: real HTTP/3 over genuine two-path MPQUIC through LAN/public Relays;' \
             '  compare bounded WAN-only and LAN+WAN HTTP/3 throughput with exact paths, hashes and cleanup;' \
             '  no physical-radio, arbitrary-link speed or packaging claim.'
+    elif [ "$scenario" = download-sharing ]; then
+        printf '%s\n' \
+            'Download-sharing scenario: exact Relay receive counters plus authenticated adjacent sender budgets;' \
+            '  real protected download, same-link owner contention, recovery, privacy and cleanup;' \
+            '  separate download-sharing-smoke.json; no upload-sharing or full-alpha evidence substitution.'
     elif [ "$scenario" = sharing ]; then
         printf '%s\n' \
             'Sharing scenario: genuine Exit contribution and owner upload on one shared veth;' \
@@ -91,7 +96,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -339,7 +344,7 @@ NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
 SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
-              "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json",
+              "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
@@ -418,6 +423,8 @@ def collect(home, opt, revision, scenario, guest_status,
             candidates.append((root / name, f"{label}/{name}"))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
                           if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
+        candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
+                          if re.fullmatch(r"download-sharing-[a-z0-9-]+\.(json|txt|log)", path.name))
     for path, relative in candidates:
         if len(entries) >= FILE_COUNT_LIMIT or total >= TOTAL_LIMIT:
             break
@@ -465,7 +472,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link",
-                           "sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -492,7 +499,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -583,7 +590,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link|crash-recovery) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

@@ -42,6 +42,7 @@ const MAX_IDEMPOTENCY_ENTRIES: usize = 4_096;
 #[derive(Clone, Debug)]
 pub struct RelayServiceConfig {
     enabled: bool,
+    receive_budget_required: bool,
     node_id: [u8; NODE_ID_BYTES],
     bandwidth: Bandwidth,
     maximum_sessions: u32,
@@ -56,6 +57,7 @@ impl RelayServiceConfig {
     pub const fn disabled(node_id: [u8; NODE_ID_BYTES]) -> Self {
         Self {
             enabled: false,
+            receive_budget_required: false,
             node_id,
             bandwidth: Bandwidth {
                 up_mbps: 0,
@@ -80,6 +82,7 @@ impl RelayServiceConfig {
     ) -> Self {
         Self {
             enabled: true,
+            receive_budget_required: false,
             node_id,
             bandwidth,
             maximum_sessions,
@@ -93,6 +96,14 @@ impl RelayServiceConfig {
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Require a fresh receiver-issued budget before an Exit sends contributed payload.
+    /// The choice is signed into ordinary reservations, not projected by their transport.
+    #[must_use]
+    pub const fn with_receive_budget_required(mut self, required: bool) -> Self {
+        self.receive_budget_required = required;
+        self
     }
 }
 
@@ -530,6 +541,8 @@ impl RelayService {
             control_relay_peer_id: authorization.control_relay_peer_id.clone(),
             exit_peer_id: authorization.exit_peer_id.clone(),
             signed_client_relay_request_sha256: request_hash.to_vec(),
+            // A fixed, bounded readiness probe is control work, not an application download.
+            receive_budget_required: false,
         };
         let encoded = match sign_control_message_with(
             &relay_reservation,
@@ -777,6 +790,7 @@ impl RelayService {
                 control_relay_peer_id: authorization.control_relay_peer_id.clone(),
                 exit_peer_id: authorization.exit_peer_id.clone(),
                 signed_client_relay_request_sha256: client_authority.sha256.to_vec(),
+                receive_budget_required: self.config.receive_budget_required,
             };
             let encoded = match sign_control_message_with(
                 &payload,
@@ -1468,6 +1482,45 @@ mod tests {
         service.release(accepted.reservation_id()).unwrap();
         assert_eq!(metrics.snapshot().active_reservations, 0);
         assert!(service.endpoint_lease(accepted.reservation_id()).is_none());
+    }
+
+    #[test]
+    fn receive_budget_requirement_is_in_the_original_signed_relay_grant() {
+        for required in [false, true] {
+            let fixture = SignedRouteFixture::new(1, &[Transport::UdpSinglePath], NOW_MS).unwrap();
+            let relay_key = fixture.relay_key(0).unwrap();
+            let mut service = RelayService::new(
+                RelayServiceConfig::enabled(
+                    fixture.relay_node_id(0).unwrap(),
+                    Bandwidth::new(200, 200).unwrap(),
+                    2,
+                    900,
+                    5,
+                    64,
+                )
+                .with_receive_budget_required(required),
+                None,
+            )
+            .unwrap();
+            let accepted = service
+                .accept_request_with(
+                    fixture.relay_request(0).unwrap(),
+                    NOW_MS,
+                    relay_key.verifying_key().to_bytes(),
+                    |path_id| relay_endpoint(*fixture.route_context_id(), path_id),
+                    |message| Some(relay_key.sign(message).to_bytes()),
+                )
+                .unwrap();
+            let mut replay = ReplayCache::new(8).unwrap();
+            let (verified, _) = verify_relay_reservation(
+                accepted.encoded(),
+                NOW_MS,
+                TimePolicy::default(),
+                &mut replay,
+            )
+            .unwrap();
+            assert_eq!(verified.message().receive_budget_required, required);
+        }
     }
 
     #[test]

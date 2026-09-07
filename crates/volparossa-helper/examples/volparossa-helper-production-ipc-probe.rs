@@ -1539,6 +1539,7 @@ fn functional_signed_relay_reservation(
         relay_reservation_request_sha256(&signed_client_relay_request)
             .map_err(|_| ProbeError::Protocol)?;
     let relay = RelayReservation {
+        receive_budget_required: false,
         reservation_id: reservation_id.to_vec(),
         route_context_id: prepared.context_id.to_vec(),
         path_id: FUNCTIONAL_PATH_ID,
@@ -1798,6 +1799,7 @@ fn functional_signed_relay_pair_authority(
 
     let relay_nonce = generate_nonce();
     let relay = RelayReservation {
+        receive_budget_required: false,
         reservation_id: reservation_id.to_vec(),
         route_context_id: prepared.context_id.to_vec(),
         path_id: FUNCTIONAL_PATH_ID,

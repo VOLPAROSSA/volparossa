@@ -96,6 +96,26 @@ under the unchanged owner-priority and rate caps. Supported software
 unsupported/offloaded geometry are refused before mutation. It is not automatic bandwidth estimation, download-bottleneck control,
 Wi-Fi airtime management or local/WAN throughput aggregation.
 
+The new **cooperative download candidate** uses separate `download_sharing` configuration:
+`enabled`, one physical `interface`, operator-known `total_download_mbps`, and
+`contribution_download_ceiling_mbps`. It remains disabled by default and awaits the complete
+`download-sharing` VM proof. TOTAL and helper-derived WireGuard receive tuples are counted on
+the same NETDEV ingress hook. Only live, controlled Relay-from-Exit contribution is subtracted;
+own Client traffic and unclassified traffic retain owner priority. Substantial owner activity
+requests zero contribution, followed by a quiet hold before recovery. This is not automatic
+capacity discovery or general Wi-Fi airtime management.
+
+The original signed Relay grant requires a budget. Adjacent, signed, at-most-five-second
+budgets bind the exact grant, route, path, sender and receiver. The Exit helper installs a
+closed admission gate and finite sender queue before activation; Start waits for the exact
+positive receipt. Expiry stops new admission in the kernel without needing another message.
+Already admitted queue contents form a bounded tail. Unacknowledged old rate allowances remain
+reserved, preventing sustained-rate double allocation. Individual queues and current-window
+burst allocation are bounded; older burst allowances may briefly overlap during redistribution.
+Receiver ingress is counted, not policed after capacity has already been consumed. Complete
+owner/contribution application-goodput, recovery, expiry, privacy and cleanup evidence is still
+required before calling this combined production path working.
+
 ## Explicit Debian Wi-Fi mesh runtime
 
 The first radio implementation is open-L2 802.11s on a new helper-owned interface. It is disabled

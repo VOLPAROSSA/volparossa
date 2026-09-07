@@ -2,9 +2,60 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 ## Current live integration checkpoint
+
+The [full v1 run on `482e33d0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913)
+**passes all A01--A15 on one unchanged build**, and
+[Quality on that exact revision](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047735082)
+passes workspace tests and strict Clippy. The retained artifact digest is
+`20c6c0eede3d927a7b911ad6182b5098276d67627d8d6d91e6b886197c0546d1`.
+Independent inspection confirms all ten raw native/MPTCP privacy capture windows:
+zero socket drops, no truncation, stopped intake and reconciled per-interface packet
+counts. A03 measures 2.022x real MPTCP aggregation. A07 completes its 32-MiB response
+in 65.662 seconds while retaining the same fresh context across Relay2 removal and
+surviving over Relay0. All 25 forced crashes and helper restart recovery pass; remaining
+objects, namespace references and descriptors are zero, and guest state is unchanged.
+This meets the original v1 live acceptance sequence, not every subsequent extension
+or release-readiness requirement.
+
+The [same-build mixed-link attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047765944)
+passes A06's two-path 8-MiB response, but its separate WAN-only baseline times out after
+removing the LAN path from the warm route. The first retained Client failure is
+`INGRESS_MPQUIC_DATAGRAM_REJECTED`, followed by rejected non-initial QUIC traffic;
+no completed 32-MiB baseline or new gain ratio exists. Cleanup completes with unchanged
+guest state. The cause is still being investigated; the successful fresh-route A07
+above does not prove this distinct warm-context case or useful LAN+WAN speedup.
+
+Owner-priority cooperative downloads are now being integrated across signed adjacent
+budgets, the actual route actor, a helper-owned sender queue and same-hook receive
+counters. They remain **in progress**, not a passed datapath. Physical-radio testing
+is explicitly deferred until hardware is available; simulated Linux Wi-Fi evidence
+below is not substituted for physical-device testing.
+
+The download candidate now connects the signed-grant/receipt actor to real helper accounting
+and sender ownership. Six focused actor/controller checks, the signed Relay issuer check,
+strict agent/Relay Clippy and seven receiver checks pass, including actual same-hook kernel
+packet accounting and exact cleanup. Its new disposable `download-sharing` scenario measures
+owner-only baseline, contributed download, contention, recovery and a paused refresh source
+on the same physical receive bottleneck. It requires application bytes, actual sender-queue
+bytes, both WireGuard legs, complete captures and removal of both accounting owners. No live
+pass for this complete scenario has yet been obtained. Fixed, identity-free browser failure
+stages were also added to distinguish the mixed-link timeout's terminal source; they preserve
+the existing errors and route cleanup rather than adding a speculative retry or waiver.
+
+The actual owned-WireGuard sender proof also passes: 29 real 1000-byte application echoes
+produce 30,392 inner queue bytes at a 32,000-byte/second cap. A closed NETDEV egress gate
+drops contribution without turning normal UDP sends into permission errors; expiry closes
+new admission without refresh. One UDP GSO write is segmented into eight real received
+datagrams and eight accounted queue packets (8,384 inner bytes). The persistent gate cannot
+be retired while its owned WireGuard interface remains, and exact recovery after interface
+deletion is idempotent. A separate disposable socket test checks actual capture stop/drain
+and echoed fixture payloads; it does not claim the VM-only forced capture-buffer capability
+or substitute for the complete protected owner-contention scenario.
+
+### Earlier checkpoints and source-change evidence
 
 The [full v1 run on `55168536`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34045959350)
 passes A01--A06 and A15, including 2.024x measured MPTCP aggregation, actual MPTCP

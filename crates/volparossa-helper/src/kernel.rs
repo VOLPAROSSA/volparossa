@@ -28,6 +28,7 @@ use crate::{
 #[allow(dead_code)] // GET_DEVICE is wired into the v3 lease state machine in phase 2.
 mod wireguard_probe;
 
+pub(crate) mod receive_accounting;
 pub(crate) mod underlay_sharing;
 pub(crate) mod wifi_mesh;
 

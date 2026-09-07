@@ -14,6 +14,7 @@ mode=preview
 scenario=alpha
 wifi_link=no
 uplink_link=no
+download_sharing=no
 approval=no
 source_directory=
 binary_directory=
@@ -26,10 +27,22 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|wifi-link|uplink-link|crash-recovery]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery]'
 }
 
 print_plan() {
+    if [ "$download_sharing" = yes ]; then
+        printf '%s\n' \
+            'VOLPAROSSA owner-priority download-sharing smoke plan:' \
+            '  require the exact-build disposable Debian 13 KVM guest and owned namespaces;' \
+            '  enable receive accounting on Relay0/Relay2 down0, total 12 Mbps and contribution ceiling 10 Mbps;' \
+            '  measure genuine protected Relay contribution and owner download on the same receiving link;' \
+            '  count TOTAL and exact managed WireGuard UDP tuples on the same NETDEV ingress hook;' \
+            '  use authenticated adjacent sender budgets, without ingress policing or NIC-minus-WG subtraction;' \
+            '  require actual payload, both WireGuard legs, contention/recovery, privacy and exact cleanup;' \
+            '  emit download-sharing-smoke.json only; no upload-sharing or A01-A15 evidence substitution.'
+        return
+    fi
     if [ "$scenario" = crash-recovery ]; then
         printf '%s\n' \
             'VOLPAROSSA crash-recovery A14/A15 runtime plan:' \
@@ -165,7 +178,9 @@ while [ "$#" -gt 0 ]; do
             ;;
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+            download_sharing=no
             case $2 in
+                download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
                 alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery) scenario=$2; wifi_link=no; uplink_link=no ;;
@@ -268,6 +283,7 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
     scenario_fixtures='reciprocity-smoke.sh reciprocity-smoke.py'
     [ "$scenario" != local-link ] || scenario_fixtures="$scenario_fixtures local-link-smoke.sh local-link-smoke.py"
     [ "$scenario" != sharing ] || scenario_fixtures="$scenario_fixtures sharing-smoke.sh sharing-smoke.py"
+    [ "$download_sharing" != yes ] || scenario_fixtures="$scenario_fixtures download-sharing-smoke.sh download-sharing-smoke.py download-sharing-snapshot.py"
     [ "$wifi_link" != yes ] || scenario_fixtures="$scenario_fixtures wifi-link-smoke.sh wifi-link-smoke.py"
     [ "$uplink_link" != yes ] || scenario_fixtures="$scenario_fixtures uplink-link-smoke.sh uplink-link-smoke.py"
     for reciprocity_fixture in $scenario_fixtures; do
@@ -943,6 +959,7 @@ cleanup() {
     FINALIZED=yes
     trap - EXIT HUP INT TERM
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
+        if [ "$download_sharing" = yes ]; then download_sharing_resume || original_status=1; fi
         reciprocity_stop_processes
     fi
 
@@ -1283,6 +1300,10 @@ if [ "$scenario" = sharing ]; then
     # shellcheck source=tests/integration/sharing-smoke.sh
     . "$source_directory/tests/integration/sharing-smoke.sh"
 fi
+if [ "$download_sharing" = yes ]; then
+    # shellcheck source=tests/integration/download-sharing-smoke.sh
+    . "$source_directory/tests/integration/download-sharing-smoke.sh"
+fi
 if [ "$scenario" = mixed-link ]; then
     # shellcheck source=tests/integration/mixed-link-smoke.sh
     . "$source_directory/tests/integration/mixed-link-smoke.sh"
@@ -1621,7 +1642,7 @@ write_config() {
             *) bootstrap_one=none; bootstrap_two=none; bootstrap_three=none ;;
         esac
     fi
-    if [ "$scenario" = sharing ] && [ "$node" = exit ]; then
+    if [ "$scenario" = sharing ] && [ "$download_sharing" != yes ] && [ "$node" = exit ]; then
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
@@ -1661,9 +1682,16 @@ write_config() {
         printf '  exit_download_limit_mbps: %s\n' "$exit_capacity"
         printf '  maximum_relay_sessions: %s\n' "$relay_capacity"
         printf '  maximum_exit_sessions: %s\n' "$exit_capacity"
-        if [ "$scenario" = sharing ] && [ "$node" = exit ]; then
+        if [ "$scenario" = sharing ] && [ "$download_sharing" != yes ] && [ "$node" = exit ]; then
             printf 'sharing:\n  enabled: true\n  interface: sharing0\n'
             printf '  total_upload_mbps: 12\n  contribution_upload_ceiling_mbps: 10\n'
+        fi
+        if [ "$download_sharing" = yes ]; then
+            case $node in relay0|relay2)
+                printf 'download_sharing:\n  enabled: true\n  interface: down0\n'
+                printf '  total_download_mbps: 12\n  contribution_download_ceiling_mbps: 10\n'
+                ;;
+            esac
         fi
         [ "$wifi_link" != yes ] || wifi_link_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit

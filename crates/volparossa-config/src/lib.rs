@@ -84,6 +84,8 @@ pub struct Config {
     pub capacity: CapacityConfig,
     /// Optional node-wide upload sharing; configuring it never starts participation.
     pub sharing: SharingConfig,
+    /// Cooperative adjacent-sender protection for a Relay's explicit download bottleneck.
+    pub download_sharing: DownloadSharingConfig,
     /// Explicit direct Wi-Fi underlay; disabled until its open-L2 scope is acknowledged.
     pub wifi_mesh: WifiMeshConfig,
     /// Route-context and interception safety settings.
@@ -109,6 +111,7 @@ impl Default for Config {
             selection: SelectionConfig::default(),
             capacity: CapacityConfig::default(),
             sharing: SharingConfig::default(),
+            download_sharing: DownloadSharingConfig::default(),
             wifi_mesh: WifiMeshConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
@@ -194,6 +197,7 @@ impl Config {
         validate_selection(&self.selection)?;
         validate_capacity(self.roles, &self.capacity)?;
         validate_sharing(&self.sharing)?;
+        validate_download_sharing(&self.download_sharing)?;
         self.wifi_mesh.validate()?;
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
@@ -381,6 +385,23 @@ pub struct SharingConfig {
     pub total_upload_mbps: u32,
     /// Combined relay and exit upload ceiling on that one underlay, in decimal Mbps.
     pub contribution_upload_ceiling_mbps: u32,
+}
+
+/// Explicit receive capacity shared with cooperative adjacent Exit senders.
+///
+/// This does not measure capacity, enable roles, or protect an Exit from uncooperative Internet
+/// senders. The disabled default is inert; runtime installation belongs to the participating Relay.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DownloadSharingConfig {
+    /// Request adjacent-sender budgets when Relay participation actually starts.
+    pub enabled: bool,
+    /// Exact receiving underlay interface; never an arbitrary path or automatic interface choice.
+    pub interface: String,
+    /// Operator-known usable download capacity in decimal Mbps, not NIC line speed.
+    pub total_download_mbps: u32,
+    /// Aggregate contributed download ceiling across all protected routes on this interface.
+    pub contribution_download_ceiling_mbps: u32,
 }
 
 /// Route context and interception configuration.
@@ -895,6 +916,42 @@ fn validate_sharing(sharing: &SharingConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_download_sharing(sharing: &DownloadSharingConfig) -> Result<(), ConfigError> {
+    let name = sharing.interface.as_str();
+    if (sharing.enabled || !name.is_empty())
+        && (!(1..=15).contains(&name.len())
+            || matches!(name, "." | "..")
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+    {
+        return Err(validation(
+            "download_sharing.interface",
+            "must be one bounded ASCII interface name",
+        ));
+    }
+    let minimum = u32::from(sharing.enabled);
+    validate_range(
+        "download_sharing.total_download_mbps",
+        sharing.total_download_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    validate_range(
+        "download_sharing.contribution_download_ceiling_mbps",
+        sharing.contribution_download_ceiling_mbps,
+        minimum,
+        MAX_BANDWIDTH_MBPS,
+    )?;
+    if sharing.enabled && sharing.contribution_download_ceiling_mbps > sharing.total_download_mbps {
+        return Err(validation(
+            "download_sharing.contribution_download_ceiling_mbps",
+            "must not exceed the operator-known total download",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_routing(mode: RuntimeMode, routing: &RoutingConfig) -> Result<(), ConfigError> {
     validate_range(
         "routing.context_ttl_seconds",
@@ -1067,6 +1124,35 @@ fn validate_privacy(mode: RuntimeMode, privacy: PrivacyConfig) -> Result<(), Con
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn download_sharing_is_explicit_manual_and_role_inert() {
+        let configured = Config::from_yaml("download_sharing:\n  enabled: true\n  interface: enp1s0\n  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 60\n").unwrap();
+        assert!(configured.download_sharing.enabled);
+        assert_eq!(configured.download_sharing.total_download_mbps, 100);
+        assert_eq!(configured.roles, RolesConfig::default());
+        assert_eq!(
+            Config::default().download_sharing,
+            DownloadSharingConfig::default()
+        );
+        assert!(Config::from_yaml("download_sharing:\n  speed_test: true\n").is_err());
+    }
+
+    #[test]
+    fn download_sharing_rejects_ambiguous_interface_and_capacity() {
+        for (interface, total, ceiling) in [
+            ("", 100, 50),
+            ("../eth0", 100, 50),
+            ("eth0", 0, 0),
+            ("eth0", 10, 11),
+            ("eth0", 100, 0),
+        ] {
+            let yaml = format!(
+                "download_sharing:\n  enabled: true\n  interface: '{interface}'\n  total_download_mbps: {total}\n  contribution_download_ceiling_mbps: {ceiling}\n"
+            );
+            assert!(Config::from_yaml(&yaml).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]

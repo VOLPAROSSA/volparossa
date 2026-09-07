@@ -38,6 +38,7 @@ const MAX_OPTIONS_BYTES: usize = 4096;
 const FILTER_INFO: u32 = (1 << 16) | (3_u16.to_be() as u32); // priority 1, ETH_P_ALL.
 
 mod defaults;
+pub(crate) mod downlink;
 use defaults::{DefaultTree, LinkGeometry};
 
 /// Explicit operator capacities; this structure is not an interface-selection authority.
@@ -390,11 +391,16 @@ enum QdiscKind {
         bytes_per_second: u64,
         burst: u32,
         limit: u32,
+        overhead: u16,
     },
     Prio,
     Fifo(u32),
     FairContribution {
         quantum: u32,
+    },
+    BudgetContribution {
+        quantum: u32,
+        memory_limit: u32,
     },
 }
 
@@ -429,6 +435,7 @@ fn specifications(config: SharingConfig, mtu: u32) -> Vec<QdiscSpec> {
             bytes_per_second: rate,
             burst,
             limit: burst * 4,
+            overhead: 0,
         }
     };
     let total = tbf(config.total_upload_mbps);
@@ -485,7 +492,7 @@ impl QdiscSpec {
             QdiscKind::Tbf { .. } => "tbf",
             QdiscKind::Prio => "prio",
             QdiscKind::Fifo(_) => "bfifo",
-            QdiscKind::FairContribution { .. } => "fq_codel",
+            QdiscKind::FairContribution { .. } | QdiscKind::BudgetContribution { .. } => "fq_codel",
         }
     }
 
@@ -496,13 +503,19 @@ impl QdiscSpec {
             QdiscKind::Prio => prio_options(),
             QdiscKind::Fifo(limit) => limit.to_ne_bytes().to_vec(),
             QdiscKind::FairContribution { quantum } => fair_contribution_options(quantum)?,
+            QdiscKind::BudgetContribution {
+                quantum,
+                memory_limit,
+            } => budget_contribution_options(quantum, memory_limit)?,
             QdiscKind::Tbf {
                 bytes_per_second,
                 burst,
                 limit,
+                overhead,
             } => {
                 let mut parameters = vec![0; 36];
                 parameters[1] = 1; // Ethernet accounting; no obsolete rate-table lookup.
+                parameters[2..4].copy_from_slice(&overhead.to_ne_bytes());
                 parameters[8..12].copy_from_slice(
                     &u32::try_from(bytes_per_second.min(u64::from(u32::MAX)))
                         .expect("clamped rate")
@@ -534,10 +547,15 @@ impl QdiscSpec {
             QdiscKind::FairContribution { quantum } => {
                 verify_fair_contribution(&record.options, quantum)?
             }
+            QdiscKind::BudgetContribution {
+                quantum,
+                memory_limit,
+            } => verify_budget_contribution(&record.options, quantum, memory_limit)?,
             QdiscKind::Tbf {
                 bytes_per_second,
                 burst,
                 limit,
+                overhead,
             } => {
                 let fields = attributes(&record.options)?;
                 let parameters = exact_attribute(&fields, 1)?;
@@ -552,9 +570,12 @@ impl QdiscSpec {
                 // Kernel converts the burst to nanosecond duration, then dumps legacy 64ns ticks.
                 // Compare the exact Linux 6.12 representation, allowing one integer rounding tick.
                 let ticks = u64::from(read_u32(parameters, 28).ok_or(KernelError::Malformed)?);
-                let expected_ticks = u64::from(burst) * 1_000_000_000 / bytes_per_second / 64;
+                let expected_ticks = (u64::from(burst) + u64::from(overhead)) * 1_000_000_000
+                    / bytes_per_second
+                    / 64;
                 parameters.len() == 36
                     && rate == bytes_per_second
+                    && read_u16(parameters, 2) == Some(overhead)
                     && read_u32(parameters, 24) == Some(limit)
                     && parameters[12..24].iter().all(|byte| *byte == 0)
                     && read_u32(parameters, 32) == Some(0)
@@ -608,6 +629,41 @@ fn verify_fair_contribution(options: &[u8], quantum: u32) -> Result<bool, Kernel
         }
     }
     Ok(true)
+}
+
+fn budget_contribution_options(quantum: u32, memory_limit: u32) -> Result<Vec<u8>, KernelError> {
+    let mut result = Vec::new();
+    for (kind, mut value) in fair_contribution_fields(quantum) {
+        if kind == 9 {
+            value = memory_limit;
+        }
+        push_attribute(&mut result, kind, &value.to_ne_bytes())?;
+    }
+    Ok(result)
+}
+
+fn verify_budget_contribution(
+    options: &[u8],
+    quantum: u32,
+    memory_limit: u32,
+) -> Result<bool, KernelError> {
+    let mut adjusted = options.to_vec();
+    let mut position = 0;
+    while position < adjusted.len() {
+        let length = usize::from(read_u16(&adjusted, position).ok_or(KernelError::Malformed)?);
+        let kind = read_u16(&adjusted, position + 2).ok_or(KernelError::Malformed)? & NLA_TYPE_MASK;
+        if length < 4 || position + length > adjusted.len() {
+            return Err(KernelError::Malformed);
+        }
+        if kind == 9 {
+            if length != 8 || read_u32(&adjusted, position + 4) != Some(memory_limit) {
+                return Ok(false);
+            }
+            adjusted[position + 4..position + 8].copy_from_slice(&(256 * 1024_u32).to_ne_bytes());
+        }
+        position += (length + 3) & !3;
+    }
+    verify_fair_contribution(&adjusted, quantum)
 }
 
 fn filter_request(ifindex: u32, prio: u32) -> Result<Vec<u8>, KernelError> {

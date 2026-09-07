@@ -53,13 +53,14 @@ use volparossa_wireguard::overlay_addresses;
 use crate::{
     deadline::HardDeadline,
     engine::{
-        AsyncLeaseBackend, BackendAction, BackendBinding, BackendCompletion, BackendDestroy,
-        BackendError, BackendFuture, BackendLineage, BackendPhase, BackendProbe, BackendRequest,
-        BackendRuntimeCompletion, BackendRuntimeRequest, ConfirmedAbsent, ContextPhase,
-        IngressBackendAction, IngressBackendBinding, IngressBackendCompletion,
-        IngressBackendRequest, KernelCounters, MeshBackendCompletion, MeshBackendRequest,
-        MeshInterfaceIdentity, OperationKind, PreparedKernelIngressSocket, PreparedKernelLease,
-        SharingBackendCompletion, SharingBackendRequest,
+        AccountingBackendCompletion, AccountingBackendRequest, AsyncLeaseBackend, BackendAction,
+        BackendBinding, BackendCompletion, BackendDestroy, BackendError, BackendFuture,
+        BackendLineage, BackendPhase, BackendProbe, BackendRequest, BackendRuntimeCompletion,
+        BackendRuntimeRequest, ConfirmedAbsent, ContextPhase, IngressBackendAction,
+        IngressBackendBinding, IngressBackendCompletion, IngressBackendRequest, KernelCounters,
+        MeshBackendCompletion, MeshBackendRequest, MeshInterfaceIdentity, OperationKind,
+        PreparedKernelIngressSocket, PreparedKernelLease, SharingBackendCompletion,
+        SharingBackendRequest,
     },
     internal_protocol::{
         AcquireClientIngressReplySocket as InternalAcquireClientIngressReplySocket,
@@ -163,7 +164,11 @@ impl CleanupCheckpoint {
     }
 }
 
+mod receive_accounting;
 mod uplink_sharing;
+use receive_accounting::OpenAccountingEntry;
+mod downlink_sender;
+use downlink_sender::BudgetLeaseState;
 use uplink_sharing::OpenSharingEntry;
 mod wifi_mesh;
 use wifi_mesh::OpenMeshEntry;
@@ -188,6 +193,7 @@ pub(crate) fn functional_alpha_lease_backend(
         )),
         ingress_state: Mutex::new(None),
         sharing_state: Mutex::new(None),
+        accounting_state: Mutex::new(None),
         mesh_state: Mutex::new(None),
         trusted_agent_uid,
         durable_ownership: Some(durable_ownership),
@@ -209,6 +215,7 @@ struct FunctionalAlphaLeaseBackend {
     state: Mutex<OpenLeaseState>,
     ingress_state: Mutex<Option<OpenIngressEntry>>,
     sharing_state: Mutex<Option<OpenSharingEntry>>,
+    accounting_state: Mutex<Option<OpenAccountingEntry>>,
     mesh_state: Mutex<Option<OpenMeshEntry>>,
     trusted_agent_uid: u32,
     /// Always present in production. `None` exists only for narrow unit fixtures which never
@@ -388,6 +395,7 @@ struct OpenLeaseEntry {
     underlays: UnderlayBindings,
     prepared: Vec<PreparedWorkerLease>,
     activated: Vec<ActivatedWorkerLease>,
+    downlink: BTreeMap<u32, BudgetLeaseState>,
     phase: OpenLeasePhase,
     birth_may_exist: Vec<bool>,
     /// Safe phase/birth-classified exact child `Destroyed` response observed before worker reap.
@@ -782,6 +790,7 @@ impl FunctionalAlphaLeaseBackend {
                 underlays,
                 prepared: Vec::new(),
                 activated: Vec::new(),
+                downlink: BTreeMap::new(),
                 phase: OpenLeasePhase::Reserved,
                 birth_may_exist: Vec::new(),
                 child_cleanup: None,
@@ -1011,6 +1020,10 @@ impl FunctionalAlphaLeaseBackend {
             .ok_or_else(|| response_error(execution))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one activation transaction including receiver accounting and signed sender ownership"
+    )]
     async fn activate_one(
         &self,
         binding: BackendBinding,
@@ -1059,6 +1072,10 @@ impl FunctionalAlphaLeaseBackend {
                 )?,
             )
         };
+        let required_budget_paths = plan.receive_budget_required_paths.clone();
+        if let Err(error) = self.register_receive_tuples(key, &activations, operation_deadline) {
+            return Err(self.cleanup_after_failure(key, deadline, error).await);
+        }
         let counters = match self
             .activate_child(key, &prepared, plan, operation_deadline)
             .await
@@ -1094,6 +1111,10 @@ impl FunctionalAlphaLeaseBackend {
             let mut state = lock_state(&self.state);
             exact_entry_mut(&mut state, key).is_ok_and(|entry| {
                 if entry.phase == OpenLeasePhase::Prepared && entry.prepared == prepared {
+                    entry.downlink = downlink_sender::activated_budget_grants(
+                        &activations,
+                        &required_budget_paths,
+                    );
                     entry.activated = activated;
                     entry.phase = OpenLeasePhase::Activated;
                     true
@@ -1693,6 +1714,9 @@ impl FunctionalAlphaLeaseBackend {
             if !self.settle_durable_cleanup(key, parent, deadline).await {
                 return false;
             }
+        }
+        if self.unregister_receive_tuples(key, deadline).is_err() {
+            return false;
         }
         let removed = remove_exact_entry(&self.state, key);
         if removed {
@@ -2749,6 +2773,34 @@ impl FunctionalAlphaLeaseBackend {
 }
 
 impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
+    fn apply_downlink_budget(
+        self: Arc<Self>,
+        request: BackendRequest<volparossa_routing::ApplyDownlinkBudget>,
+    ) -> BackendFuture<BackendCompletion<volparossa_routing::AppliedDownlinkBudget>> {
+        let (completion, value) = request.into_parts();
+        let binding = completion.binding();
+        Box::pin(async move { completion.complete(self.apply_downlink_one(binding, value).await) })
+    }
+    fn install_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<volparossa_routing::InstallReceiveAccounting>,
+    ) -> BackendFuture<AccountingBackendCompletion<u32>> {
+        Box::pin(self.install_accounting_backend(request))
+    }
+    fn inspect_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<()>,
+    ) -> BackendFuture<
+        AccountingBackendCompletion<crate::kernel::receive_accounting::ReceiveAccountingSnapshot>,
+    > {
+        Box::pin(self.inspect_accounting_backend(request))
+    }
+    fn destroy_receive_accounting(
+        self: Arc<Self>,
+        request: AccountingBackendRequest<()>,
+    ) -> BackendFuture<AccountingBackendCompletion<ConfirmedAbsent>> {
+        Box::pin(self.destroy_accounting_backend(request))
+    }
     fn install_wifi_mesh(
         self: Arc<Self>,
         request: MeshBackendRequest<volparossa_routing::InstallWifiMesh>,
@@ -2957,6 +3009,12 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
             let result = match deadline {
                 Err(error) => Err(error),
                 Ok(deadline) => {
+                    if let Err(error) = Arc::clone(&self)
+                        .shutdown_accounting_backend(request.binding().helper_runtime_id, deadline)
+                        .await
+                    {
+                        return request.complete(Err(error));
+                    }
                     if let Err(error) = Arc::clone(&self)
                         .shutdown_mesh_backend(request.binding().helper_runtime_id, deadline)
                         .await
@@ -4186,14 +4244,28 @@ fn verified_internal_activate_batch_plan(
         let endpoints =
             verified_activation_endpoints(&authority, prepared, underlays, activations)?;
         verify_on_link_activation_bindings(&authority, prepared, underlays, &endpoints)?;
-        project_internal_activation_batch(
+        let mut plan = project_internal_activation_batch(
             resources,
             key,
             prepared,
             underlays,
             activations,
             &endpoints,
-        )
+        )?;
+        if context == ContextRole::Exit {
+            plan.receive_budget_required_paths = authority
+                .paths
+                .iter()
+                .zip(prepared)
+                .filter_map(|(path, lease)| {
+                    path.relay
+                        .as_ref()
+                        .is_some_and(|relay| relay.message().receive_budget_required)
+                        .then_some(lease.path_id)
+                })
+                .collect();
+        }
+        Ok(plan)
     })();
 
     if result.is_err() {
@@ -5057,6 +5129,7 @@ fn project_internal_activation_batch(
         )?);
     }
     Ok(ActivateLeases {
+        receive_budget_required_paths: Vec::new(),
         route_context_id: key.context_id.to_vec(),
         hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
         leases,
@@ -5156,6 +5229,7 @@ fn verified_internal_activate_plan(
             return Err(BackendError::Invalid);
         }
         Ok(ActivateLeases {
+            receive_budget_required_paths: Vec::new(),
             route_context_id: key.context_id.to_vec(),
             hard_expires_at_boottime_ns: key.hard_expires_at_boottime_ns,
             leases: vec![internal_lease_activation(
@@ -5895,6 +5969,7 @@ pub(super) mod tests {
             state: Mutex::new(state.into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            accounting_state: Mutex::new(None),
             mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -5959,6 +6034,7 @@ pub(super) mod tests {
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 sharing_state: Mutex::new(None),
+                accounting_state: Mutex::new(None),
                 mesh_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
@@ -6100,6 +6176,7 @@ pub(super) mod tests {
             ),
             prepared: Vec::new(),
             activated: Vec::new(),
+            downlink: BTreeMap::new(),
             phase: OpenLeasePhase::Reserved,
             birth_may_exist: vec![false],
             child_cleanup: None,
@@ -6142,6 +6219,7 @@ pub(super) mod tests {
             ),
             prepared: Vec::new(),
             activated: Vec::new(),
+            downlink: BTreeMap::new(),
             phase: OpenLeasePhase::Reserved,
             child_cleanup: None,
             worker_cleanup: None,
@@ -6279,6 +6357,7 @@ pub(super) mod tests {
                 state: Mutex::new(Some(entry).into()),
                 ingress_state: Mutex::new(None),
                 sharing_state: Mutex::new(None),
+                accounting_state: Mutex::new(None),
                 mesh_state: Mutex::new(None),
                 trusted_agent_uid: 1_001,
                 durable_ownership: None,
@@ -11100,6 +11179,7 @@ pub(super) mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            accounting_state: Mutex::new(None),
             mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -11336,6 +11416,7 @@ pub(super) mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            accounting_state: Mutex::new(None),
             mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -11612,6 +11693,7 @@ pub(super) mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            accounting_state: Mutex::new(None),
             mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: None,
@@ -11729,6 +11811,7 @@ pub(super) mod tests {
             state: Mutex::new(Some(entry).into()),
             ingress_state: Mutex::new(None),
             sharing_state: Mutex::new(None),
+            accounting_state: Mutex::new(None),
             mesh_state: Mutex::new(None),
             trusted_agent_uid: 1_001,
             durable_ownership: Some(handle),

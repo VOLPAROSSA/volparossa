@@ -4,6 +4,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use volparossa_protocol::{
+    AdjacentReceiveBudget, AdjacentReceiveBudgetReceipt, AdjacentReceiveLeg,
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
     AdvertisementQuality, AdvertisementRoles, ClientSessionCapability, ControlMessageType,
     ControlPayload, ExitCapacityHold, ExitCapacityHoldRequest, ExitReservation,
@@ -22,13 +23,230 @@ use volparossa_protocol::{
     finalized_reservation_bundle_hash, frame_control_message, generate_nonce,
     native_route_auth_commitment, node_id_from_public_key, preselection_observation_receipt_hash,
     preselection_observation_request_hash, relay_reservation_request_sha256, sign_control_message,
-    sign_control_message_with, unframe_control_message, verify_control_message,
+    sign_control_message_with, unframe_control_message, verify_adjacent_receive_budget,
+    verify_adjacent_receive_budget_receipt, verify_control_message,
     verify_direct_preselection_transcript, verify_forwarded_preselection_transcript,
     verify_relay_reservation,
 };
 
 const NOW: u64 = 1_700_000_000_000;
 const EXPIRY: u64 = NOW + 60_000;
+
+fn adjacent_budget_fixture() -> (SigningKey, SigningKey, Vec<u8>, AdjacentReceiveBudget) {
+    let exit = SigningKey::from_bytes(&[2; 32]);
+    let relay = SigningKey::from_bytes(&[3; 32]);
+    let mut grant = relay_reservation_fixture(&exit, &relay);
+    grant.receive_budget_required = true;
+    let signed =
+        sign_control_message(&grant, &relay, NOW, EXPIRY, [7; 32], TimePolicy::default()).unwrap();
+    let budget = AdjacentReceiveBudget {
+        reservation_id: grant.reservation_id,
+        route_context_id: grant.route_context_id,
+        path_id: grant.path_id,
+        receiver_relay_node_id: grant.relay_node_id,
+        sender_exit_node_id: grant.exit_node_id,
+        relay_reservation_sha256: Sha256::digest(&signed).to_vec(),
+        leg: AdjacentReceiveLeg::ExitToRelay as i32,
+        sequence: 1,
+        rate_bytes_per_second: 125_000,
+        burst_bytes: 4_096,
+        created_at_ms: NOW,
+        expires_at_ms: NOW + 5_000,
+        nonce: vec![21; 32],
+    };
+    (exit, relay, signed, budget)
+}
+
+fn signed_adjacent_budget(budget: &AdjacentReceiveBudget, relay: &SigningKey) -> Vec<u8> {
+    sign_control_message(
+        budget,
+        relay,
+        budget.created_at_ms,
+        budget.expires_at_ms,
+        budget.nonce.clone().try_into().unwrap(),
+        TimePolicy::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn adjacent_receive_budget_binds_real_signed_grant_and_preserves_sequence_after_expiry() {
+    let (_, relay, grant, mut budget) = adjacent_budget_fixture();
+    let encoded = signed_adjacent_budget(&budget, &relay);
+    let mut cache = ReplayCache::new(8).unwrap();
+    let verified = verify_adjacent_receive_budget(&encoded, &grant, NOW, 0, &mut cache).unwrap();
+    assert_eq!(verified.message(), &budget);
+    assert!(verify_adjacent_receive_budget(&encoded, &grant, NOW, 0, &mut cache).is_err());
+    budget.nonce = vec![22; 32];
+    let fresh_nonce = signed_adjacent_budget(&budget, &relay);
+    assert!(verify_adjacent_receive_budget(&fresh_nonce, &grant, NOW, 1, &mut cache).is_err());
+    budget.sequence = 2;
+    budget.rate_bytes_per_second = 0;
+    let closed = signed_adjacent_budget(&budget, &relay);
+    assert_eq!(
+        verify_adjacent_receive_budget(&closed, &grant, NOW, 1, &mut cache)
+            .unwrap()
+            .message()
+            .rate_bytes_per_second,
+        0
+    );
+    assert!(
+        verify_adjacent_receive_budget(
+            &closed,
+            &grant,
+            NOW + 5_000,
+            1,
+            &mut ReplayCache::new(1).unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn adjacent_receive_budget_rejects_scope_drift_opt_out_and_rate_above_grant() {
+    let (exit, relay, grant, budget) = adjacent_budget_fixture();
+    for changed in [
+        AdjacentReceiveBudget {
+            path_id: 2,
+            ..budget.clone()
+        },
+        AdjacentReceiveBudget {
+            route_context_id: vec![88; 16],
+            ..budget.clone()
+        },
+        AdjacentReceiveBudget {
+            relay_reservation_sha256: vec![88; 32],
+            ..budget.clone()
+        },
+        AdjacentReceiveBudget {
+            sender_exit_node_id: vec![88; 32],
+            ..budget.clone()
+        },
+        AdjacentReceiveBudget {
+            rate_bytes_per_second: 125_000_000_000,
+            ..budget.clone()
+        },
+        AdjacentReceiveBudget {
+            created_at_ms: NOW + 1,
+            expires_at_ms: NOW + 5_001,
+            ..budget.clone()
+        },
+    ] {
+        assert!(
+            verify_adjacent_receive_budget(
+                &signed_adjacent_budget(&changed, &relay),
+                &grant,
+                NOW,
+                0,
+                &mut ReplayCache::new(1).unwrap()
+            )
+            .is_err()
+        );
+    }
+    let opted_out = relay_reservation_fixture(&exit, &relay);
+    let opted_out = sign_control_message(
+        &opted_out,
+        &relay,
+        NOW,
+        EXPIRY,
+        [7; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    let matched = AdjacentReceiveBudget {
+        relay_reservation_sha256: Sha256::digest(&opted_out).to_vec(),
+        ..budget
+    };
+    assert!(
+        verify_adjacent_receive_budget(
+            &signed_adjacent_budget(&matched, &relay),
+            &opted_out,
+            NOW,
+            0,
+            &mut ReplayCache::new(1).unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn adjacent_receive_budget_receipt_is_exact_signed_sender_ack_not_delivery_proof() {
+    let (exit, relay, grant, budget) = adjacent_budget_fixture();
+    let encoded = signed_adjacent_budget(&budget, &relay);
+    let receipt = AdjacentReceiveBudgetReceipt {
+        receiver_relay_node_id: budget.receiver_relay_node_id,
+        sender_exit_node_id: budget.sender_exit_node_id,
+        signed_budget_sha256: Sha256::digest(&encoded).to_vec(),
+        sequence: budget.sequence,
+        rate_bytes_per_second: budget.rate_bytes_per_second,
+        burst_bytes: budget.burst_bytes,
+        created_at_ms: NOW,
+        expires_at_ms: budget.expires_at_ms,
+        nonce: vec![24; 32],
+    };
+    let signed = sign_control_message(
+        &receipt,
+        &exit,
+        NOW,
+        receipt.expires_at_ms,
+        [24; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        verify_adjacent_receive_budget_receipt(
+            &signed,
+            &encoded,
+            &grant,
+            NOW,
+            &mut ReplayCache::new(1).unwrap()
+        )
+        .unwrap()
+        .message(),
+        &receipt
+    );
+    let changed = AdjacentReceiveBudgetReceipt {
+        rate_bytes_per_second: 1,
+        ..receipt
+    };
+    let signed = sign_control_message(
+        &changed,
+        &exit,
+        NOW,
+        changed.expires_at_ms,
+        [24; 32],
+        TimePolicy::default(),
+    )
+    .unwrap();
+    assert!(
+        verify_adjacent_receive_budget_receipt(
+            &signed,
+            &encoded,
+            &grant,
+            NOW,
+            &mut ReplayCache::new(1).unwrap()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn adjacent_receive_budget_schema_and_resource_bounds_are_exact() {
+    let (_, _, _, mut budget) = adjacent_budget_fixture();
+    assert_eq!(ControlMessageType::AdjacentReceiveBudget as i32, 27);
+    assert_eq!(ControlMessageType::AdjacentReceiveBudgetReceipt as i32, 28);
+    budget.burst_bytes = 65_537;
+    assert!(budget.validate().is_err());
+    budget.burst_bytes = 4_096;
+    budget.leg = 2;
+    assert!(budget.validate().is_err());
+    budget.leg = AdjacentReceiveLeg::ExitToRelay as i32;
+    budget.expires_at_ms += 1;
+    assert!(budget.validate().is_err());
+    let schema = include_str!("../../../proto/volparossa/control/v4/control.proto");
+    assert!(schema.contains("bool receive_budget_required = 31;"));
+    assert!(schema.contains("CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET = 27;"));
+}
 
 #[test]
 fn protocol_version_matches_core_contract() {
@@ -3899,6 +4117,7 @@ fn relay_reservation_fixture(exit_key: &SigningKey, relay_key: &SigningKey) -> R
         control_relay_peer_id: grant.control_relay_peer_id.clone(),
         exit_peer_id: grant.exit_peer_id.clone(),
         signed_client_relay_request_sha256: vec![18; 32],
+        receive_budget_required: false,
     }
 }
 

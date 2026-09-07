@@ -2089,6 +2089,7 @@ mod dispatch_tests {
             control_relay_peer_id: authorization.control_relay_peer_id.clone(),
             exit_peer_id: authorization.exit_peer_id.clone(),
             signed_client_relay_request_sha256: Sha256::digest(signed_start).to_vec(),
+            receive_budget_required: false,
         };
         sign_control_message(
             &reservation,

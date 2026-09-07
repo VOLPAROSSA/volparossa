@@ -387,7 +387,23 @@ fn cleanup_request(
             relay_fence::cleanup_dead_worker_relay_fence(namespace, &identity, deadline)
                 .map_err(|_| DeadWorkerReaperError::CleanupIncomplete)?;
         }
-        ContextRole::Client | ContextRole::Exit => {
+        ContextRole::Client => {
+            let pristine = relay_fence::observe_pristine_relay_fence(namespace, deadline)
+                .map_err(|_| DeadWorkerReaperError::CleanupIncomplete)?;
+            drop(pristine);
+        }
+        ContextRole::Exit => {
+            // The authenticated dead-worker namespace can retain an expiring sender gate.
+            // Never remove that fail-closed gate while any corresponding WG device is live.
+            let mut kernel = NamespaceKernel::connect(deadline)
+                .map_err(|_| DeadWorkerReaperError::CleanupIncomplete)?;
+            for resource in resources.iter().rev() {
+                let _ = kernel.delete_exact_owned_wireguard_v3(resource, deadline);
+                relay_fence::downlink_gate::DownlinkGate::cleanup_after_exact_link_absence(
+                    context_id, resource, deadline,
+                )
+                .map_err(|_| DeadWorkerReaperError::CleanupIncomplete)?;
+            }
             let pristine = relay_fence::observe_pristine_relay_fence(namespace, deadline)
                 .map_err(|_| DeadWorkerReaperError::CleanupIncomplete)?;
             drop(pristine);

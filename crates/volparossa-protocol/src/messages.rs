@@ -76,6 +76,10 @@ pub enum ControlMessageType {
     NativeProbeRelayResult = 25,
     /// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
     NativeRouteCredentialDelivery = 26,
+    /// Adjacent receiving Relay's short-lived aggregate-share instruction to its sending Exit.
+    AdjacentReceiveBudget = 27,
+    /// Exit-signed acknowledgement of one exact installed adjacent receive budget.
+    AdjacentReceiveBudgetReceipt = 28,
 }
 
 /// Data transport authorized by a reservation.
@@ -524,6 +528,297 @@ pub struct RelayReservation {
     /// SHA-256 of the exact canonical client-session-signed relay request accepted by this relay.
     #[prost(bytes = "vec", tag = "30")]
     pub signed_client_relay_request_sha256: Vec<u8>,
+    /// This Relay requires an exact short-lived sender budget before its Exit-facing leg activates.
+    #[prost(bool, tag = "31")]
+    pub receive_budget_required: bool,
+}
+
+/// Maximum lifetime and remaining validity of an adjacent sender budget.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS: u64 = 5_000;
+/// Largest permitted single-queue burst; it is not an additional sustained-rate allowance.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES: u32 = 65_536;
+/// Largest signed adjacent budget envelope accepted before decoding.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_BYTES: usize = 2_048;
+
+/// Exact direction of the first cooperative download-sharing datapath.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum AdjacentReceiveLeg {
+    /// No leg was selected.
+    Unspecified = 0,
+    /// The Exit sends protected outer-link traffic toward its directly adjacent data Relay.
+    ExitToRelay = 1,
+}
+
+/// A receiving Relay's signed rate for one exact existing Exit-facing reservation leg.
+///
+/// The receiver splits ONE aggregate allowance across these messages. A zero rate closes the
+/// sender queue; it never means unlimited. No application address or client identity is added.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct AdjacentReceiveBudget {
+    #[prost(bytes = "vec", tag = "1")]
+    pub reservation_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    pub path_id: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub receiver_relay_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub sender_exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub relay_reservation_sha256: Vec<u8>,
+    #[prost(enumeration = "AdjacentReceiveLeg", tag = "7")]
+    pub leg: i32,
+    #[prost(uint64, tag = "8")]
+    pub sequence: u64,
+    #[prost(uint64, tag = "9")]
+    pub rate_bytes_per_second: u64,
+    #[prost(uint32, tag = "10")]
+    pub burst_bytes: u32,
+    #[prost(uint64, tag = "11")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "12")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "13")]
+    pub nonce: Vec<u8>,
+}
+
+/// Exact sending Exit's acknowledgement, not a remote attestation of actual packet delivery.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct AdjacentReceiveBudgetReceipt {
+    #[prost(bytes = "vec", tag = "1")]
+    pub receiver_relay_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub sender_exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_budget_sha256: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub sequence: u64,
+    #[prost(uint64, tag = "5")]
+    pub rate_bytes_per_second: u64,
+    #[prost(uint32, tag = "6")]
+    pub burst_bytes: u32,
+    #[prost(uint64, tag = "7")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "8")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "9")]
+    pub nonce: Vec<u8>,
+}
+
+fn validate_adjacent_budget_bounds(
+    sequence: u64,
+    rate: u64,
+    burst: u32,
+) -> Result<(), ProtocolError> {
+    if sequence == 0
+        || rate > MAX_RATE_MBPS * 125_000
+        || !(1..=MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES).contains(&burst)
+    {
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive budget bounds",
+        ));
+    }
+    Ok(())
+}
+
+impl ControlPayload for AdjacentReceiveBudget {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::AdjacentReceiveBudget;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        require_nonzero_length::<ID_LENGTH>(&self.reservation_id, "budget.reservation_id")?;
+        require_nonzero_length::<ID_LENGTH>(&self.route_context_id, "budget.route_context_id")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.receiver_relay_node_id, "budget.receiver")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.sender_exit_node_id, "budget.sender")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.relay_reservation_sha256, "budget.grant_hash")?;
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "budget.nonce")?;
+        if !(1..=8).contains(&self.path_id)
+            || self.leg != AdjacentReceiveLeg::ExitToRelay as i32
+            || self.receiver_relay_node_id == self.sender_exit_node_id
+        {
+            return Err(ProtocolError::InvalidField("adjacent receive budget scope"));
+        }
+        validate_adjacent_budget_bounds(
+            self.sequence,
+            self.rate_bytes_per_second,
+            self.burst_bytes,
+        )?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            "adjacent receive budget lifetime",
+        )
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        validate_signed_fields(
+            &self.receiver_relay_node_id,
+            self.created_at_ms,
+            self.expires_at_ms,
+            &self.nonce,
+            envelope,
+            "adjacent receive budget envelope",
+        )
+    }
+}
+
+impl ControlPayload for AdjacentReceiveBudgetReceipt {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::AdjacentReceiveBudgetReceipt;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.receiver_relay_node_id,
+            "budget receipt.receiver",
+        )?;
+        require_nonzero_length::<HASH_LENGTH>(&self.sender_exit_node_id, "budget receipt.sender")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.signed_budget_sha256, "budget receipt.hash")?;
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "budget receipt.nonce")?;
+        if self.receiver_relay_node_id == self.sender_exit_node_id {
+            return Err(ProtocolError::InvalidField(
+                "adjacent receive receipt actors",
+            ));
+        }
+        validate_adjacent_budget_bounds(
+            self.sequence,
+            self.rate_bytes_per_second,
+            self.burst_bytes,
+        )?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            "adjacent receive receipt lifetime",
+        )
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        validate_signed_fields(
+            &self.sender_exit_node_id,
+            self.created_at_ms,
+            self.expires_at_ms,
+            &self.nonce,
+            envelope,
+            "adjacent receive receipt envelope",
+        )
+    }
+}
+
+/// Verify a fresh adjacent budget against both original reservation signatures.
+///
+/// The caller additionally binds the grant to its exact retained helper lease and authenticated
+/// Relay connection. `previous_sequence` belongs to that lease, including after a budget expires.
+/// Revalidating the retained grant does not re-admit it or reset its lifetime/replay authority.
+///
+/// # Errors
+/// Rejects malformed/signature/replay/TTL failures, non-opted-in grants, changed actors, grant,
+/// context or path, excessive rate, and any non-increasing sequence.
+pub fn verify_adjacent_receive_budget(
+    encoded: &[u8],
+    signed_relay_reservation: &[u8],
+    now_ms: u64,
+    previous_sequence: u64,
+    replay: &mut ReplayCache,
+) -> Result<VerifiedControlMessage<AdjacentReceiveBudget>, ProtocolError> {
+    if encoded.len() > MAX_ADJACENT_RECEIVE_BUDGET_BYTES {
+        return Err(ProtocolError::Oversized {
+            what: "adjacent receive budget",
+            maximum: MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+        });
+    }
+    let (grant, _) = verify_relay_reservation(
+        signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        &mut ReplayCache::new(2)?,
+    )?;
+    let verified = verify_control_message::<AdjacentReceiveBudget>(
+        encoded,
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            ..TimePolicy::default()
+        },
+        replay,
+    )?;
+    let budget = verified.message();
+    let reservation = grant.message();
+    let valid = reservation.receive_budget_required
+        && verified.sender_public_key() == grant.sender_public_key()
+        && budget.receiver_relay_node_id == reservation.relay_node_id
+        && budget.sender_exit_node_id == reservation.exit_node_id
+        && budget.reservation_id == reservation.reservation_id
+        && budget.route_context_id == reservation.route_context_id
+        && budget.path_id == reservation.path_id
+        && budget.relay_reservation_sha256.as_slice()
+            == Sha256::digest(signed_relay_reservation).as_slice()
+        && budget.sequence > previous_sequence
+        && budget.rate_bytes_per_second <= reservation.maximum_down_mbps * 125_000
+        && budget.expires_at_ms <= grant.expires_at_ms()
+        && budget.expires_at_ms.saturating_sub(now_ms) <= MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS;
+    if !valid {
+        let _ = replay.rollback(verified.sender_id(), verified.nonce());
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive budget grant binding",
+        ));
+    }
+    Ok(verified)
+}
+
+/// Verify the sending Exit's receipt against the exact signed budget and original grant.
+///
+/// # Errors
+/// Rejects an unrelated signer, scope, sequence, rate, burst, hash, or expiry, as well as the
+/// ordinary signature/canonical/replay/TTL failures. A receipt never extends the budget deadline.
+pub fn verify_adjacent_receive_budget_receipt(
+    encoded: &[u8],
+    signed_budget: &[u8],
+    signed_relay_reservation: &[u8],
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> Result<VerifiedControlMessage<AdjacentReceiveBudgetReceipt>, ProtocolError> {
+    if encoded.len() > MAX_ADJACENT_RECEIVE_BUDGET_BYTES {
+        return Err(ProtocolError::Oversized {
+            what: "adjacent receive receipt",
+            maximum: MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+        });
+    }
+    let budget = verify_adjacent_receive_budget(
+        signed_budget,
+        signed_relay_reservation,
+        now_ms,
+        0,
+        &mut ReplayCache::new(1)?,
+    )?;
+    let receipt = verify_control_message::<AdjacentReceiveBudgetReceipt>(
+        encoded,
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            ..TimePolicy::default()
+        },
+        replay,
+    )?;
+    let request = budget.message();
+    let response = receipt.message();
+    if response.receiver_relay_node_id != request.receiver_relay_node_id
+        || response.sender_exit_node_id != request.sender_exit_node_id
+        || response.signed_budget_sha256.as_slice() != Sha256::digest(signed_budget).as_slice()
+        || response.sequence != request.sequence
+        || response.rate_bytes_per_second != request.rate_bytes_per_second
+        || response.burst_bytes != request.burst_bytes
+        || response.expires_at_ms != request.expires_at_ms
+        || response.created_at_ms < request.created_at_ms
+    {
+        let _ = replay.rollback(receipt.sender_id(), receipt.nonce());
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive receipt binding",
+        ));
+    }
+    Ok(receipt)
 }
 
 /// Client-session-signed return of one verified relay grant to the selected exit.

@@ -21,13 +21,17 @@ pub use envelope::{
     verify_control_message,
 };
 pub use messages::{
+    AdjacentReceiveBudget, AdjacentReceiveBudgetReceipt, AdjacentReceiveLeg,
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
     AdvertisementQuality, AdvertisementRoles, AdvertisementUplink, ControlMessageType,
     ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
-    NativeRouteCredentialDelivery, NativeRouteCredentialScope, NativeRouteIdentity,
-    NodeAdvertisement, OpenTcp, RelayAuthorization, RelayReservation, Transport,
-    UdpFlowAuthorization, UnderlayScope, WireguardEndpoint, exit_confirmation_envelope_hash,
-    finalized_reservation_bundle_hash, relay_reservation_request_sha256, verify_relay_reservation,
+    MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES, MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+    MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS, NativeRouteCredentialDelivery,
+    NativeRouteCredentialScope, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
+    RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, UnderlayScope,
+    WireguardEndpoint, exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
+    relay_reservation_request_sha256, verify_adjacent_receive_budget,
+    verify_adjacent_receive_budget_receipt, verify_relay_reservation,
 };
 pub use native_preselection_probe::{
     IssuedNativeProbeRelayReady, IssuedNativeProbeRelayResult, IssuedNativeProbeStart,

@@ -111,6 +111,7 @@ use zeroize::Zeroizing;
 
 mod client_ingress_policy;
 mod dead_worker_reaper;
+mod downlink_sender;
 mod forwarding_bootstrap;
 mod functional_backend;
 mod ipv6_forwarding;
@@ -1931,6 +1932,7 @@ struct WorkerContext<Kernel> {
     lease: Option<WorkerLeaseLifecycle>,
     mptcp: Option<WorkerMptcpPathManager>,
     activation_failure: Option<ActivationFailureDiagnostic>,
+    downlink_senders: BTreeMap<u32, downlink_sender::WorkerDownlinkSender>,
 }
 
 struct WorkerIngressSocket {
@@ -2331,6 +2333,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             lease: None,
             mptcp: None,
             activation_failure: None,
+            downlink_senders: BTreeMap::new(),
         }
     }
 
@@ -2365,6 +2368,7 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             lease: None,
             mptcp: Some(mptcp),
             activation_failure: None,
+            downlink_senders: BTreeMap::new(),
         })
     }
 
@@ -2525,6 +2529,12 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 return self.fail_activation_after_ownership(ownerships, deadline);
             }
             RelayFenceActivationOutcome::Terminate => return WorkerActivateOutcome::Terminate,
+        }
+        if self
+            .install_downlink_senders(&ownerships, operation, deadline)
+            .is_err()
+        {
+            return self.fail_activation_after_ownership(ownerships, deadline);
         }
         let mut activated = Vec::with_capacity(ownerships.len());
         for (index, (peer, prepared)) in validated.into_iter().enumerate() {
@@ -2982,7 +2992,9 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
                 return WorkerActivateOutcome::Terminate;
             }
         }
-        if cleanup_worker_resources(&mut self.kernel, &ownerships, deadline) {
+        if cleanup_worker_resources(&mut self.kernel, &ownerships, deadline)
+            && self.cleanup_downlink_after_links(deadline)
+        {
             drop(ownerships);
             WorkerActivateOutcome::Failed(InternalWorkerResult::Kernel)
         } else {
@@ -3083,6 +3095,10 @@ impl<Kernel: WorkerNamespaceKernel> WorkerContext<Kernel> {
             }
         }
         if !cleanup_worker_resources(&mut self.kernel, &ownerships, deadline) {
+            self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
+            return WorkerDestroyOutcome::CleanupIncomplete;
+        }
+        if !self.cleanup_downlink_after_links(deadline) {
             self.lease = Some(WorkerLeaseLifecycle::CleanupRequired(ownerships));
             return WorkerDestroyOutcome::CleanupIncomplete;
         }
@@ -4088,6 +4104,23 @@ fn child_loop(
                     activate_child_context(&mut context, activate, bound_context, deadline)?;
                 (result, outcome, exit, None)
             }
+            internal_worker_request::Operation::ApplyDownlinkBudget(operation) => {
+                let result = context
+                    .as_mut()
+                    .ok_or(InternalWorkerResult::NotFound)
+                    .and_then(|context| context.apply_downlink_budget(operation, deadline));
+                match result {
+                    Ok(value) => (
+                        InternalWorkerResult::Ok,
+                        Some(internal_worker_response::Outcome::DownlinkBudgetApplied(
+                            value,
+                        )),
+                        false,
+                        None,
+                    ),
+                    Err(error) => (error, None, false, None),
+                }
+            }
             internal_worker_request::Operation::ProbeCommitLeases(probe) => {
                 let (result, outcome, exit) =
                     probe_commit_child_context(&mut context, probe, bound_context, deadline)?;
@@ -4264,6 +4297,7 @@ fn request_context(request: &InternalWorkerRequest) -> Result<ContextId, WorkerV
         Operation::ActivateClientIngress(value) => &value.client_runtime_id,
         Operation::DestroyClientIngress(value) => &value.client_runtime_id,
         Operation::DestroyContext(value) => &value.route_context_id,
+        Operation::ApplyDownlinkBudget(value) => &value.route_context_id,
     };
     context_id(bytes)
 }
@@ -13080,6 +13114,7 @@ mod tests {
         )
         .expect("client worker specification");
         ActivateLeases {
+            receive_budget_required_paths: Vec::new(),
             route_context_id: route_context_id.to_vec(),
             hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
@@ -13152,6 +13187,7 @@ mod tests {
         )
         .expect("exit worker specification");
         ActivateLeases {
+            receive_budget_required_paths: Vec::new(),
             route_context_id: route_context_id.to_vec(),
             hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases: vec![crate::internal_protocol::LeaseActivation {
@@ -13281,6 +13317,7 @@ mod tests {
             })
             .collect();
         ActivateLeases {
+            receive_budget_required_paths: Vec::new(),
             route_context_id: route_context_id.to_vec(),
             hard_expires_at_boottime_ns: test_boottime_expiry(),
             leases,
