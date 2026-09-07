@@ -1858,9 +1858,10 @@ mod tests {
         );
         assert_eq!(production.matches(concat!("checked_", "add(1)")).count(), 1);
         assert_eq!(production.matches(concat!("pub ", "struct ")).count(), 3);
-        assert_eq!(production.matches(concat!("pub ", "enum ")).count(), 1);
+        assert_eq!(production.matches(concat!("pub ", "enum ")).count(), 2);
         assert!(production.contains(concat!("pub struct ConnectionProvenance", "Behaviour {")));
         assert!(production.contains(concat!("pub enum ConnectionProvenance", "Event {}")));
+        assert!(production.contains(concat!("pub enum ContentControlConnection", "State {")));
         assert!(production.contains(concat!(
             "pub struct BoundNativeProbeControl",
             "Connection {"
