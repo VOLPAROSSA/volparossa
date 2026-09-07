@@ -287,8 +287,10 @@ jobs:
               if test "$VOLPAROSSA_ALPHA_SCENARIO" = content-message; then
                 jq -r '"recipient plaintext bytes: \(.transfer.private_message.decryption.plaintext_bytes)",
                   "wrong recipient rejected: \(.transfer.private_message.decryption.wrong_recipient_rejected)",
-                  "temporary key removed: \(.transfer.private_message.temporary_cleanup.recipient_key_removed)",
-                  "scope: explicit disposable recipient fixture, not a complete mailbox or product key storage"' \
+                  "normal recipient CLI: \(.transfer.private_message.decryption.normal_cli_open)",
+                  "temporary encrypted identities removed: \(.transfer.private_message.temporary_cleanup.encrypted_identities_removed)",
+                  "temporary passphrase removed: \(.transfer.private_message.temporary_cleanup.passphrase_removed)",
+                  "scope: normal encrypted-identity recipient CLI, fixture publisher, not a complete mailbox"' \
                   "$report" >>"$GITHUB_STEP_SUMMARY"
               fi
             else

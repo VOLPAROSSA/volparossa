@@ -101,7 +101,10 @@ reconstruct the same object from two independent providers; missing HTTPS chunks
 origin ranges. Lookup reliability remains under integration: the latest live failure reaches
 a provider whose offer was withdrawn although its cache listener had been registered. A native
 Relay/Exit advertisement withdrawal incorrectly also withdrew that independent content offer.
-The ownership correction passes a real actor regression; the full multi-node rerun is pending.
+The ownership correction passes a real actor regression. The next multi-node run exposed a
+second cause: reloading an unchanged policy every 30 seconds also withdrew content. That reload
+now preserves active registrations, in-flight offers and original deadlines; a new real actor
+regression passes, while the next full multi-node rerun remains pending.
 Both `content fetch` and `content fetch-https` support explicit `--reuse-cache` to resume from
 an existing owned cache, retrieving only missing chunks. HTTPS still obtains fresh origin
 authorization; cached bytes do not renew expiry or count as newly received peer traffic.
@@ -114,7 +117,9 @@ now expose that encryption/decryption without test-only key files. They unlock t
 encrypted identity, cache only ciphertext, and write plaintext only to an explicitly requested
 new private file. Identity rotation also changes the message-recipient key; retain the old
 encrypted identity if old messages must remain readable. See the
-[message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands).
+[message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands). The updated network
+harness now uses these normal recipient commands and encrypted identities; its local process
+compatibility test passes, but a new network run is needed to establish that expanded scope.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving

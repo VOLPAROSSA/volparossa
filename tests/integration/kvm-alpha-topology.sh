@@ -66,12 +66,12 @@ print_plan() {
     if [ "$scenario" = content-message ]; then
         printf '%s\n' \
             'VOLPAROSSA private content-message replica-transfer smoke plan:' \
-            '  create an explicit disposable recipient key under the application UID, directory 0700/file 0600;' \
+            '  use normal CLI init/recipient-key with disposable encrypted identities and a private passphrase file, directory 0700/files 0600;' \
             '  give the publisher only the public recipient key and encrypt before chunking;' \
             '  remove the publisher, fetch ciphertext from two separate replica processes via protected MPTCP;' \
             '  require recipient-only decryption, wrong-key rejection, exact bytes and complete privacy captures;' \
-            '  remove the temporary key/plaintext, clean owned networking and compare guest-root host state;' \
-            '  emit content-message-smoke.json; no real mailbox, product key storage, C07 or A01-A15 claim.'
+            '  remove encrypted identities, passphrase and plaintext, clean owned networking and compare guest-root host state;' \
+            '  emit content-message-smoke.json proving normal recipient CLI opening; no normal publisher CLI, mailbox, full C07 or A01-A15 claim.'
         return
     fi
     if [ "$scenario" = content ]; then
@@ -394,6 +394,12 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
         printf '%s\n' 'native content acceptance fixture unavailable' >&2
         exit 69
     fi
+fi
+if [ "$scenario" = content-message ]; then
+    for content_secret_tool in head base64; do
+        command -v "$content_secret_tool" >/dev/null 2>&1 \
+            || { printf 'required recipient fixture tool unavailable: %s\n' "$content_secret_tool" >&2; exit 69; }
+    done
 fi
 [ -x "$binary_directory/examples/acceptance-policy-fixture" ] \
     || { printf '%s\n' 'acceptance policy fixture unavailable' >&2; exit 69; }

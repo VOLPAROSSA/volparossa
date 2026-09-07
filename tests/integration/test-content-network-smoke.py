@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Pure evidence-checker tests; these synthetic records do not prove a network transfer."""
+"""Checker/cleanup tests plus opt-in real CLI compatibility; no live network proof here."""
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
 import runpy
+import secrets
 import subprocess
 import tempfile
 import unittest
@@ -72,20 +74,80 @@ def private_fixture():
     value["phases"][0]["consumer"]["bytes_received"] += 80
     value["phases"][1]["consumer"]["output_bytes"] += 80
     value["private_message"] = dict(
-        recipient=dict(recipient_public_hex="3" * 64, recipient_private_key_persisted_for_fixture_only=True),
+        recipient=dict(recipient_public_key_hex="3" * 64, identity_public_key_hex="4" * 64,
+                       operation="message_recipient_key", profile="volparossa/message-recipient/v1",
+                       private_key_exported=False, network_publication=False),
         recipient_isolation=dict(recipient_uid=1001, provider_uid=1002,
-                                 private_directory_mode="0700", recipient_key_mode="0600",
-                                 key_owned_by_recipient=True, key_unreadable_by_provider=True),
+                                 private_directory_mode="0700", encrypted_identity_mode="0600",
+                                 passphrase_mode="0600", identity_created_by_normal_cli=True,
+                                 identity_storage="encrypted_identity_store",
+                                 raw_recipient_private_key_file=False,
+                                 key_owned_by_recipient=True, key_unreadable_by_provider=True,
+                                 passphrase_unreadable_by_provider=True),
         decryption=dict(plaintext_bytes=2097275, plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"],
-                        wrong_recipient_rejected=True,
-                        recipient_private_key_persisted_for_fixture_only=True),
+                        wrong_recipient_rejected=True, wrong_recipient_output_absent=True,
+                        no_clobber_verified=True, encrypted_identities_unchanged=True, normal_cli_open=True),
+        cli_result=dict(operation="offline_private_message_open", network_retrieval=False, bytes=2097275),
         plaintext_output=dict(plaintext_bytes=2097275, plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"],
                               private_output_mode="0600", private_output_owned_by_recipient=True),
-        temporary_cleanup=dict(recipient_key_removed=True, plaintext_removed=True, private_directory_removed=True))
+        temporary_cleanup=dict(encrypted_identities_removed=True, passphrase_removed=True,
+                               plaintext_removed=True, private_directory_removed=True))
     return value
 
 
 class EvidenceContract(unittest.TestCase):
+    def test_normal_cli_identity_opens_existing_private_seed(self):
+        binary_directory = os.environ.get("VOLPAROSSA_TEST_BIN_DIR")
+        if not binary_directory:
+            self.skipTest("set VOLPAROSSA_TEST_BIN_DIR for the real local CLI compatibility proof")
+        cli = str(Path(binary_directory, "volparossa").resolve(strict=True))
+        seed = str(Path(binary_directory, "examples/content-acceptance-fixture").resolve(strict=True))
+        with tempfile.TemporaryDirectory(prefix=".content-message-cli-", dir=Path(__file__).resolve().parents[2]) as temporary:
+            root = Path(temporary)
+            passphrase = root / "passphrase"
+            with os.fdopen(os.open(passphrase, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+                output.write(secrets.token_urlsafe(48).encode("ascii"))
+
+            def run(*arguments, success=True):
+                result = subprocess.run([cli, *map(str, arguments)], capture_output=True, timeout=30)
+                self.assertEqual(result.returncode == 0, success, result.stderr.decode(errors="replace"))
+                return result
+
+            identities = [root / name for name in ("identity.key", "wrong-identity.key")]
+            for identity in identities:
+                run("init", "--identity", identity, "--passphrase-file", passphrase)
+                self.assertEqual(identity.stat().st_mode & 0o777, 0o600)
+            encrypted = [identity.read_bytes() for identity in identities]
+            recipient = json.loads(run("content", "recipient-key", "--identity", identities[0],
+                                       "--passphrase-file", passphrase).stdout)
+            self.assertFalse(recipient["private_key_exported"])
+            publication = root / "publication"
+            subprocess.run([seed, "seed-private", str(publication), recipient["recipient_public_key_hex"]],
+                           check=True, capture_output=True, timeout=30)
+            metadata = json.loads((publication / "publication.json").read_text())
+            self.assertTrue(metadata["publisher_removed"] and metadata["recipient_encrypted"])
+            self.assertEqual((metadata["chunks"], metadata["replica_a_chunks"], metadata["replica_b_chunks"]), (9, 5, 4))
+            output_path = root / "message.bin"
+
+            def open_message(identity, output, success):
+                return run("content", "open-message", "--identity", identity, "--passphrase-file", passphrase,
+                           "--manifest", publication / "manifest.bin", "--sender-key", metadata["publisher_hex"],
+                           "--cache", publication / "replica-a", "--cache", publication / "replica-b",
+                           "--output", output, success=success)
+
+            wrong = root / "wrong-message.bin"
+            open_message(identities[1], wrong, False)
+            self.assertFalse(wrong.exists())
+            result = json.loads(open_message(identities[0], output_path, True).stdout)
+            self.assertEqual(result["operation"], "offline_private_message_open")
+            self.assertEqual(result["bytes"], CHECK["OBJECT_BYTES"])
+            self.assertEqual(output_path.stat().st_mode & 0o777, 0o600)
+            plaintext = output_path.read_bytes()
+            self.assertEqual(hashlib.sha256(plaintext).hexdigest(), CHECK["FIXTURE_PLAINTEXT_SHA256"])
+            open_message(identities[0], output_path, False)
+            self.assertEqual(output_path.read_bytes(), plaintext)
+            self.assertEqual([identity.read_bytes() for identity in identities], encrypted)
+
     def test_private_transfer_is_distinct_from_public_content(self):
         value = private_fixture()
         CHECK["validate_transfer"](value, True)
@@ -99,12 +161,14 @@ class EvidenceContract(unittest.TestCase):
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       full_alpha_acceptance_claimed=False, distinct_provider_nodes_claimed=False,
                       provider_discovery_claimed=False, https_authentication_claimed=False,
-                      product_recipient_key_storage_claimed=False, mailbox_runtime_claimed=False,
+                      normal_recipient_cli_claimed=True, encrypted_identity_store_claimed=True,
+                      normal_publisher_cli_claimed=False, mailbox_runtime_claimed=False,
                       full_c07_claimed=False)
         CHECK["validate_report"](report, "a" * 40, True)
-        for claim in ("product_recipient_key_storage_claimed", "mailbox_runtime_claimed", "full_c07_claimed"):
+        for claim in ("normal_recipient_cli_claimed", "encrypted_identity_store_claimed",
+                      "normal_publisher_cli_claimed", "mailbox_runtime_claimed", "full_c07_claimed"):
             wrong = copy.deepcopy(report)
-            wrong[claim] = True
+            wrong[claim] = not wrong[claim]
             with self.assertRaises(ValueError):
                 CHECK["validate_report"](wrong, "a" * 40, True)
 
@@ -114,13 +178,20 @@ class EvidenceContract(unittest.TestCase):
             ("oversized envelope", lambda value: value["publication"].update(bytes=2098300)),
             ("unsealed publication", lambda value: value["publication"].update(recipient_encrypted=False)),
             ("provider can read key", lambda value: value["private_message"]["recipient_isolation"].update(key_unreadable_by_provider=False)),
-            ("public key file mode", lambda value: value["private_message"]["recipient_isolation"].update(recipient_key_mode="0644")),
+            ("public identity file mode", lambda value: value["private_message"]["recipient_isolation"].update(encrypted_identity_mode="0644")),
+            ("provider reads passphrase", lambda value: value["private_message"]["recipient_isolation"].update(passphrase_unreadable_by_provider=False)),
+            ("raw recipient key", lambda value: value["private_message"]["recipient_isolation"].update(raw_recipient_private_key_file=True)),
+            ("fixture-only identity", lambda value: value["private_message"]["recipient_isolation"].update(identity_created_by_normal_cli=False)),
             ("shared UID", lambda value: value["private_message"]["recipient_isolation"].update(provider_uid=1001)),
             ("wrong recipient succeeds", lambda value: value["private_message"]["decryption"].update(wrong_recipient_rejected=False)),
             ("wrong plaintext", lambda value: value["private_message"]["plaintext_output"].update(plaintext_sha256="f" * 64)),
             ("plaintext world-readable", lambda value: value["private_message"]["plaintext_output"].update(private_output_mode="0644")),
-            ("test key persistence hidden", lambda value: value["private_message"]["decryption"].update(recipient_private_key_persisted_for_fixture_only=False)),
-            ("key retained", lambda value: value["private_message"]["temporary_cleanup"].update(recipient_key_removed=False)),
+            ("fixture-only opening", lambda value: value["private_message"]["decryption"].update(normal_cli_open=False)),
+            ("output overwritten", lambda value: value["private_message"]["decryption"].update(no_clobber_verified=False)),
+            ("identity changed", lambda value: value["private_message"]["decryption"].update(encrypted_identities_unchanged=False)),
+            ("wrong output retained", lambda value: value["private_message"]["decryption"].update(wrong_recipient_output_absent=False)),
+            ("key retained", lambda value: value["private_message"]["temporary_cleanup"].update(encrypted_identities_removed=False)),
+            ("passphrase retained", lambda value: value["private_message"]["temporary_cleanup"].update(passphrase_removed=False)),
             ("plaintext retained", lambda value: value["private_message"]["temporary_cleanup"].update(plaintext_removed=False)),
         ):
             with self.subTest(label=label):
@@ -182,7 +253,7 @@ class EvidenceContract(unittest.TestCase):
             work = Path(temporary)
             private = work / "client-fixtures/content/private"
             private.mkdir(parents=True, mode=0o700)
-            for name in ("recipient.key", "message.bin"):
+            for name in ("identity.key", "wrong-identity.key", "passphrase", "message.bin", "wrong-message.bin"):
                 path = private / name
                 path.write_bytes(b"public non-secret cleanup fixture")
                 path.chmod(0o600)
@@ -196,7 +267,8 @@ class EvidenceContract(unittest.TestCase):
             self.assertFalse(private.exists())
             self.assertEqual(unrelated.read_text(encoding="ascii"), "preserve")
             self.assertEqual(json.loads((work / "content-private-cleanup.json").read_text()),
-                             dict(recipient_key_removed=True, plaintext_removed=True, private_directory_removed=True))
+                             dict(encrypted_identities_removed=True, passphrase_removed=True,
+                                  plaintext_removed=True, private_directory_removed=True))
 
 
 if __name__ == "__main__":

@@ -1060,6 +1060,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_active_policy_refresh_retains_content_and_collected_offers() {
+        let (mut runtime, state, _directory) = Box::pin(registered_content_runtime()).await;
+        let original_deadline = runtime.content.local.as_ref().unwrap().deadline;
+        let policy = state.read().await.active_policy(unix_millis()).unwrap();
+        let (provider, signed) = fixture_at(unix_seconds());
+        let offer = signed.encode();
+        verify_provider(provider, &offer, unix_seconds()).expect("current verified provider");
+        let started = Instant::now();
+        let query = runtime.service.find_providers(capability::CONTENT).unwrap();
+        runtime.content.relay = Some(RelayLookup {
+            query,
+            collection_deadline: started + COLLECTION_TIMEOUT,
+            response_deadline: started + REQUEST_TIMEOUT,
+            dht_complete: false,
+            candidates: HashSet::from([provider]),
+            offers: BTreeMap::from([(provider, offer.clone())]),
+            waiters: Vec::new(),
+        });
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_command(
+                DiscoveryCommand::ApplyPolicy {
+                    policy: Some(policy),
+                    reply,
+                },
+                &state,
+            )
+            .await;
+        response.await.unwrap();
+        assert_eq!(
+            runtime.content.local.as_ref().map(|local| local.deadline),
+            Some(original_deadline),
+            "an identical active policy refresh neither withdraws nor renews content"
+        );
+        let retained = runtime
+            .content
+            .relay
+            .as_ref()
+            .expect("pending lookup remains");
+        assert_eq!(retained.query, query);
+        assert_eq!(retained.collection_deadline, started + COLLECTION_TIMEOUT);
+        assert_eq!(retained.response_deadline, started + REQUEST_TIMEOUT);
+        assert_eq!(retained.offers.get(&provider), Some(&offer));
+
+        let changed =
+            volparossa_test_support::verified_development_manifest(unix_millis(), Vec::new())
+                .expect("different verified policy");
+        let (reply, response) = oneshot::channel();
+        runtime
+            .handle_command(
+                DiscoveryCommand::ApplyPolicy {
+                    policy: Some(changed),
+                    reply,
+                },
+                &state,
+            )
+            .await;
+        response.await.unwrap();
+        assert!(runtime.content.local.is_none());
+        assert!(runtime.content.relay.is_none());
+    }
+
+    #[tokio::test]
     async fn content_policy_replacement_and_original_deadline_still_withdraw_service() {
         let (mut runtime, state, _directory) = Box::pin(registered_content_runtime()).await;
         let (reply, response) = oneshot::channel();
@@ -1094,6 +1157,10 @@ mod tests {
     }
 
     fn fixture() -> (Libp2pPeerId, SignedProviderOffer) {
+        fixture_at(1000)
+    }
+
+    fn fixture_at(created: u64) -> (Libp2pPeerId, SignedProviderOffer) {
         let key = SigningKey::generate(&mut OsRng);
         let public =
             libp2p::identity::ed25519::PublicKey::try_from_bytes(key.verifying_key().as_bytes())
@@ -1103,8 +1170,8 @@ mod tests {
             &key,
             ProviderEndpoint::new("replica.volparossa.test", 18443).expect("canonical endpoint"),
             Validity {
-                created: 1000,
-                expires: 1300,
+                created,
+                expires: created + 300,
             },
         )
         .expect("signed offer");

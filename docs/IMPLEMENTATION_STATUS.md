@@ -48,6 +48,15 @@ encrypted identities byte-identical. Strict CLI/content Clippy passes, including
 Identity rotation changes the recipient key and is explicitly warned about; there is no forward
 secrecy, profile-specific key separation, mailbox, key discovery or C07 completion claim.
 
+The `content-message` network harness now uses normal `init`, `recipient-key` and `open-message`
+with two disposable encrypted IdentityStore files and a private CSPRNG passphrase. The provider
+UID must be unable to read either identity or the passphrase. The checker requires actual wrong-
+recipient rejection, new 0600 plaintext output, no overwrite, unchanged encrypted identities
+and exact secret-file cleanup. Five checker/cleanup tests and a real separate-process CLI/fixture
+compatibility test pass; shell syntax, the changed hook's ShellCheck and plan preview also pass.
+The live network rerun remains pending. The publisher is still the existing encrypted-message
+fixture; normal publisher CLI networking, key discovery, mailbox and full C07 are not claimed.
+
 The new explicit `content serve` / `content fetch` / `content stop` runtime now compiles with
 strict agent, CLI and local-control Clippy. Serving registers up to 64 exact verified manifests
 from owned caches and signs a five-minute service offer with the existing node identity.
@@ -223,6 +232,19 @@ The independent-node runtime must still be rerun; this does not retroactively pa
 failed reports or clear their packet findings. Separately, the real Kad/RPC characterization
 confirms that an unadmitted provider-record address alone cannot be used for redial; the product
 already has authenticated Identify address admission, and no speculative addressbook change was made.
+
+The next exact-source runs on `7daa72a6` expose a second, reproducible lifecycle defect.
+The [provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34169522477) verifies both
+offers before the unchanged 30-second policy reload invalidates the collection. The
+[redistribution run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34169524017) loses its
+original provider registration at that same maintenance boundary and fails before warmup.
+Both cleanups leave zero owned objects and byte-identical host state; the earlier two forbidden
+Exit packets remain unresolved because no new uptake capture was reached. The narrow correction
+now preserves content only when both policies are active and their canonical hashes match;
+all original offer/query deadlines remain unchanged. An actual ApplyPolicy regression fails
+without the correction and passes with it, including real policy replacement invalidation.
+All nine discovery-content tests and strict agent Clippy pass. No retries, longer timeouts,
+weaker authority checks or completed C02/C03 claim are introduced; live verification is pending.
 
 Native and HTTPS fetch now support explicit `--reuse-cache` across CLI, typed local control and
 the agent. Default creation still rejects existing directories; reuse opens only a validated

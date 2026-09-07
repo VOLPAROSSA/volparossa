@@ -137,26 +137,41 @@ def validate_private_message(evidence):
     recipient, isolation = message["recipient"], message["recipient_isolation"]
     opened, output = message["decryption"], message["plaintext_output"]
     require(evidence["publication"]["recipient_encrypted"] is True
-            and re.fullmatch(r"[0-9a-f]{64}", recipient["recipient_public_hex"])
-            and recipient["recipient_private_key_persisted_for_fixture_only"] is True
+            and recipient["operation"] == "message_recipient_key"
+            and recipient["profile"] == "volparossa/message-recipient/v1"
+            and re.fullmatch(r"[0-9a-f]{64}", recipient["recipient_public_key_hex"])
+            and re.fullmatch(r"[0-9a-f]{64}", recipient["identity_public_key_hex"])
+            and recipient["private_key_exported"] is False
+            and recipient["network_publication"] is False
             and isolation["recipient_uid"] > 0 and isolation["provider_uid"] > 0
             and isolation["recipient_uid"] != isolation["provider_uid"]
             and isolation["private_directory_mode"] == "0700"
-            and isolation["recipient_key_mode"] == "0600"
+            and isolation["encrypted_identity_mode"] == isolation["passphrase_mode"] == "0600"
+            and isolation["identity_created_by_normal_cli"] is True
+            and isolation["identity_storage"] == "encrypted_identity_store"
+            and isolation["raw_recipient_private_key_file"] is False
             and isolation["key_owned_by_recipient"] is True
-            and isolation["key_unreadable_by_provider"] is True,
+            and isolation["key_unreadable_by_provider"] is True
+            and isolation["passphrase_unreadable_by_provider"] is True,
             "recipient key isolation from the publisher/providers not proven")
     require(opened["plaintext_bytes"] == output["plaintext_bytes"] == OBJECT_BYTES
             and opened["plaintext_sha256"] == output["plaintext_sha256"] == FIXTURE_PLAINTEXT_SHA256
+            and opened["normal_cli_open"] is True
             and opened["wrong_recipient_rejected"] is True
-            and opened["recipient_private_key_persisted_for_fixture_only"] is True
+            and opened["wrong_recipient_output_absent"] is True
+            and opened["no_clobber_verified"] is True
+            and opened["encrypted_identities_unchanged"] is True
+            and message["cli_result"]["operation"] == "offline_private_message_open"
+            and message["cli_result"]["bytes"] == OBJECT_BYTES
+            and message["cli_result"]["network_retrieval"] is False
             and output["private_output_mode"] == "0600"
             and output["private_output_owned_by_recipient"] is True
             and evidence["publication"]["object_sha256"] != FIXTURE_PLAINTEXT_SHA256,
             "intended-recipient decryption or wrong-recipient rejection not proven")
     require(message["temporary_cleanup"] == {
-        "recipient_key_removed": True, "plaintext_removed": True, "private_directory_removed": True},
-        "temporary recipient key or plaintext was not removed")
+        "encrypted_identities_removed": True, "passphrase_removed": True,
+        "plaintext_removed": True, "private_directory_removed": True},
+        "temporary encrypted identities, passphrase or plaintext were not removed")
 
 
 def build_evidence(work, private=False):
@@ -179,6 +194,7 @@ def build_evidence(work, private=False):
             "recipient": read(work / "content-recipient.json"),
             "recipient_isolation": read(work / "content-recipient-isolation.json"),
             "decryption": read(work / "content-message-open.json"),
+            "cli_result": read(work / "content-message-cli-open.json"),
             "plaintext_output": read(work / "content-message-object.json"),
             "temporary_cleanup": read(work / "content-private-cleanup.json"),
         }
@@ -202,9 +218,11 @@ def validate_report(report, revision, private=False):
             and report["https_authentication_claimed"] is False,
             "exact source, cleanup or honest proof scope not established")
     if private:
-        require(report["product_recipient_key_storage_claimed"] is False
+        require(report["normal_recipient_cli_claimed"] is True
+                and report["encrypted_identity_store_claimed"] is True
+                and report["normal_publisher_cli_claimed"] is False
                 and report["mailbox_runtime_claimed"] is False and report["full_c07_claimed"] is False,
-                "private fixture must not claim product recipient storage or a complete mailbox")
+                "normal encrypted-identity recipient CLI is required, not a product publisher/mailbox claim")
     validate_transfer(report["transfer"], private)
 
 

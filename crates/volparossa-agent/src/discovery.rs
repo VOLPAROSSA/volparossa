@@ -2196,10 +2196,26 @@ impl DiscoveryRuntime {
                 let _ = reply.send(result);
             }
             DiscoveryCommand::ApplyPolicy { policy, reply } => {
+                let now_ms = unix_millis();
+                let same_content_policy = state
+                    .read()
+                    .await
+                    .active_policy(now_ms)
+                    .zip(policy.as_ref())
+                    .is_some_and(|(current, next)| {
+                        next.ensure_active_at(now_ms).is_ok()
+                            && current.policy_hash() == next.policy_hash()
+                    });
                 // Policy replacement/revocation invalidates every retained Relay authority input.
                 // Cancel both affine owners before publishing the new actor state.
                 self.cancel_client_preselection(ClientPreselectionError::Invalidated);
-                self.invalidate_content();
+                if same_content_policy {
+                    // Maintenance reloads the verified policy every 30s. An identical active
+                    // policy neither revokes content ownership nor renews its original deadlines.
+                    self.maintain_content();
+                } else {
+                    self.invalidate_content();
+                }
                 self.service.cancel_preselection_forwarding();
                 state.write().await.set_policy(policy);
                 self.synchronize_exit_policy(state).await;

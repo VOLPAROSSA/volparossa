@@ -170,6 +170,11 @@ local profiles, not profile isolation. Public keys still need independent authen
 The local CLI smoke reconstructs from two partial ciphertext stores across identity reloads,
 rejects a wrong recipient/sender and overwrites, and preserves a 0600 plaintext output. This
 does not upgrade the older test-only-key network evidence into a normal-CLI network proof.
+The network harness now provisions its disposable encrypted identities through normal `init`,
+exports only `recipient-key`, and uses `open-message` on the retrieved cache. Its six local
+checker/cleanup/process tests pass, including real CLI compatibility with the existing fixture
+publisher. A fresh network run must establish that expanded recipient scope; the sender remains
+a fixture, and neither automatic key discovery nor a mailbox is introduced.
 
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
 proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)

@@ -10,34 +10,62 @@ content_network_event_after() {
     ' "$WORK/logs-$1.txt"
 }
 
-content_network_recipient_init() {
-    PHASE=content-recipient-init
+content_network_recipient_cli() {
     setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- "$content_binary" recipient-init "$content_client_root" \
-        "$WORK/client-fixtures/content-recipient.json" \
-        >"$WORK/content-recipient.log" 2>&1 || fail CONTENT_RECIPIENT_INIT_FAILED
+        -- "$binary_directory/volparossa" "$@"
+}
+
+content_network_recipient_init() {
+    PHASE=content-recipient-init
     content_private=$content_client_root/private
-    if [ -L "$content_private" ] || [ ! -d "$content_private" ] \
-        || [ -L "$content_private/recipient.key" ] || [ ! -f "$content_private/recipient.key" ] \
-        || [ "$(stat -Lc '%a:%u:%g' "$content_private")" != "700:$WORKER_UID:$WORKER_GID" ] \
-        || [ "$(stat -Lc '%a:%u:%g' "$content_private/recipient.key")" != "600:$WORKER_UID:$WORKER_GID" ]; then
-        fail CONTENT_RECIPIENT_KEY_PERMISSIONS_INVALID
-    fi
-    if setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+    # New WORKER-only state, never the agent identity or a raw recipient private-key file.
+    # shellcheck disable=SC2016 # Positional path is expanded only inside the WORKER shell.
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- test -r "$content_private/recipient.key"; then
-        fail CONTENT_PROVIDER_CAN_READ_RECIPIENT_KEY
-    fi
-    # This report contains only the public recipient key, never its private serialization.
-    install -o root -g root -m 0600 "$WORK/client-fixtures/content-recipient.json" \
-        "$WORK/content-recipient.json"
-    content_recipient_public=$(jq -er '.recipient_public_hex | select(test("^[0-9a-f]{64}$"))' \
+        -- sh -eu -c 'umask 077; mkdir -m 0700 -- "$1"; set -C;
+            head -c 48 /dev/urandom | base64 > "$1/passphrase"' sh "$content_private" \
+        >"$WORK/content-recipient-state.log" 2>&1 || fail CONTENT_RECIPIENT_STATE_FAILED
+    for content_identity in identity.key wrong-identity.key; do
+        content_network_recipient_cli init --identity "$content_private/$content_identity" \
+            --passphrase-file "$content_private/passphrase" \
+            >>"$WORK/content-recipient-init.log" 2>&1 || fail CONTENT_RECIPIENT_INIT_FAILED
+    done
+    [ "$(stat -Lc '%a:%u:%g' "$content_private")" = "700:$WORKER_UID:$WORKER_GID" ] \
+        || fail CONTENT_RECIPIENT_KEY_PERMISSIONS_INVALID
+    for content_secret in "$content_private/identity.key" "$content_private/wrong-identity.key" \
+        "$content_private/passphrase"; do
+        if [ -L "$content_secret" ] || [ ! -f "$content_secret" ] \
+            || [ "$(stat -Lc '%a:%u:%g' "$content_secret")" != "600:$WORKER_UID:$WORKER_GID" ]; then
+            fail CONTENT_RECIPIENT_KEY_PERMISSIONS_INVALID
+        fi
+        if setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- test -r "$content_secret"; then
+            fail CONTENT_PROVIDER_CAN_READ_RECIPIENT_KEY
+        fi
+    done
+    content_identity_digest=$(sha256sum "$content_private/identity.key" | awk '{print $1}')
+    content_wrong_identity_digest=$(sha256sum "$content_private/wrong-identity.key" | awk '{print $1}')
+    content_network_recipient_cli content recipient-key --identity "$content_private/identity.key" \
+        --passphrase-file "$content_private/passphrase" \
+        >"$WORK/content-recipient.json" 2>"$WORK/content-recipient.log" \
+        || fail CONTENT_RECIPIENT_PUBLIC_KEY_FAILED
+    content_network_recipient_cli content recipient-key --identity "$content_private/wrong-identity.key" \
+        --passphrase-file "$content_private/passphrase" \
+        >"$WORK/content-wrong-recipient.json" 2>"$WORK/content-wrong-recipient.log" \
+        || fail CONTENT_WRONG_RECIPIENT_PUBLIC_KEY_FAILED
+    content_recipient_public=$(jq -er '.recipient_public_key_hex | select(test("^[0-9a-f]{64}$"))' \
         "$WORK/content-recipient.json") || fail CONTENT_RECIPIENT_PUBLIC_KEY_INVALID
+    jq -e --arg intended "$content_recipient_public" \
+        '.recipient_public_key_hex != $intended and .private_key_exported == false' \
+        "$WORK/content-wrong-recipient.json" >/dev/null || fail CONTENT_WRONG_RECIPIENT_NOT_DISTINCT
     jq -n --argjson recipient_uid "$WORKER_UID" --argjson provider_uid "$AGENT_UID" \
         '{recipient_uid:$recipient_uid,provider_uid:$provider_uid,
-          private_directory_mode:"0700",recipient_key_mode:"0600",
-          key_owned_by_recipient:true,key_unreadable_by_provider:true}' \
+          private_directory_mode:"0700",encrypted_identity_mode:"0600",passphrase_mode:"0600",
+          identity_created_by_normal_cli:true,identity_storage:"encrypted_identity_store",
+          key_owned_by_recipient:true,key_unreadable_by_provider:true,
+          passphrase_unreadable_by_provider:true,raw_recipient_private_key_file:false}' \
         >"$WORK/content-recipient-isolation.json"
 }
 
@@ -49,7 +77,8 @@ content_network_private_cleanup() {
         [ -d "$content_private" ] || return 1
         [ "$(stat -Lc '%a:%u:%g' "$content_private")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for content_secret in "$content_private/recipient.key" "$content_private/message.bin"; do
+        for content_secret in "$content_private/identity.key" "$content_private/wrong-identity.key" \
+            "$content_private/passphrase" "$content_private/message.bin" "$content_private/wrong-message.bin"; do
             [ ! -L "$content_secret" ] || return 1
             if [ -e "$content_secret" ]; then
                 [ -f "$content_secret" ] || return 1
@@ -61,25 +90,57 @@ content_network_private_cleanup() {
         # Unexpected leftover files are a failed fixture cleanup, never silently ignored.
         rmdir -- "$content_private" || return 1
     fi
-    jq -n '{recipient_key_removed:true,plaintext_removed:true,private_directory_removed:true}' \
+    jq -n '{encrypted_identities_removed:true,passphrase_removed:true,
+            plaintext_removed:true,private_directory_removed:true}' \
         >"$WORK/content-private-cleanup.json"
 }
 
 content_network_open_message() {
     PHASE=content-recipient-decryption
-    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
-        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- "$content_binary" open-message "$content_client_root" \
-        "$WORK/client-fixtures/content-manifest.bin" "$content_publisher" \
-        "$WORK/client-fixtures/content-message-open.json" \
-        >"$WORK/content-message-open.log" 2>&1 || fail CONTENT_RECIPIENT_DECRYPTION_FAILED
+    content_private=$content_client_root/private
+    if content_network_recipient_cli content open-message \
+        --identity "$content_private/wrong-identity.key" --passphrase-file "$content_private/passphrase" \
+        --manifest "$WORK/client-fixtures/content-manifest.bin" --sender-key "$content_publisher" \
+        --cache "$content_client_root/cache" --output "$content_private/wrong-message.bin" \
+        >"$WORK/content-wrong-message.out" 2>"$WORK/content-wrong-message.err"; then
+        fail CONTENT_WRONG_RECIPIENT_ACCEPTED
+    fi
+    if [ -e "$content_private/wrong-message.bin" ] || [ -L "$content_private/wrong-message.bin" ]; then
+        fail CONTENT_WRONG_RECIPIENT_OUTPUT_CREATED
+    fi
+    content_network_recipient_cli content open-message \
+        --identity "$content_private/identity.key" --passphrase-file "$content_private/passphrase" \
+        --manifest "$WORK/client-fixtures/content-manifest.bin" --sender-key "$content_publisher" \
+        --cache "$content_client_root/cache" --output "$content_private/message.bin" \
+        >"$WORK/content-message-cli-open.json" 2>"$WORK/content-message-open.log" \
+        || fail CONTENT_RECIPIENT_DECRYPTION_FAILED
     content_plaintext=$content_client_root/private/message.bin
     if [ -L "$content_plaintext" ] || [ ! -f "$content_plaintext" ] \
         || [ "$(stat -Lc '%a:%u:%g' "$content_plaintext")" != "600:$WORKER_UID:$WORKER_GID" ]; then
         fail CONTENT_PRIVATE_OUTPUT_PERMISSIONS_INVALID
     fi
-    install -o root -g root -m 0600 "$WORK/client-fixtures/content-message-open.json" \
-        "$WORK/content-message-open.json"
+    content_plaintext_digest=$(sha256sum "$content_plaintext" | awk '{print $1}')
+    if content_network_recipient_cli content open-message \
+        --identity "$content_private/identity.key" --passphrase-file "$content_private/passphrase" \
+        --manifest "$WORK/client-fixtures/content-manifest.bin" --sender-key "$content_publisher" \
+        --cache "$content_client_root/cache" --output "$content_plaintext" \
+        >"$WORK/content-message-no-clobber.out" 2>"$WORK/content-message-no-clobber.err"; then
+        fail CONTENT_PRIVATE_OUTPUT_OVERWRITTEN
+    fi
+    if [ "$(sha256sum "$content_plaintext" | awk '{print $1}')" != "$content_plaintext_digest" ] \
+        || [ "$(sha256sum "$content_private/identity.key" | awk '{print $1}')" != "$content_identity_digest" ] \
+        || [ "$(sha256sum "$content_private/wrong-identity.key" | awk '{print $1}')" != "$content_wrong_identity_digest" ]; then
+        fail CONTENT_PRIVATE_IDENTITY_OR_OUTPUT_CHANGED
+    fi
+    jq -e '.operation == "offline_private_message_open" and .network_retrieval == false
+        and .bytes == 2097275' "$WORK/content-message-cli-open.json" >/dev/null \
+        || fail CONTENT_MESSAGE_CLI_RESULT_INVALID
+    jq -n --arg sha256 "$content_plaintext_digest" \
+        --argjson bytes "$(stat -Lc '%s' "$content_plaintext")" \
+        '{plaintext_sha256:$sha256,plaintext_bytes:$bytes,normal_cli_open:true,
+          wrong_recipient_rejected:true,wrong_recipient_output_absent:true,
+          no_clobber_verified:true,encrypted_identities_unchanged:true}' \
+        >"$WORK/content-message-open.json"
     # Only the hash/length of known public test bytes are exported, never the plaintext file.
     jq -n --arg sha256 "$(sha256sum "$content_plaintext" | awk '{print $1}')" \
         --argjson bytes "$(stat -Lc '%s' "$content_plaintext")" \
@@ -253,7 +314,7 @@ content_network_finalize_report() {
         content_report_name=content-message-smoke.json
         content_report_kind=volparossa-native-private-content-network
         content_report_mode=message-report
-        content_scope='ciphertext-only native replicas over protected MPTCP, publisher offline, intended-recipient decryption; explicit temporary test key, not product key storage or mailbox runtime'
+        content_scope='ciphertext-only native replicas over protected MPTCP; normal CLI recipient-key and open-message with encrypted IdentityStore, fixture-only publisher, no mailbox runtime'
     fi
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
         --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
@@ -273,7 +334,8 @@ content_network_finalize_report() {
        distinct_provider_nodes_claimed:false,provider_discovery_claimed:false,
        full_alpha_acceptance_claimed:false,https_authentication_claimed:false}
       + (if $scenario == "content-message" then
-          {product_recipient_key_storage_claimed:false,mailbox_runtime_claimed:false,full_c07_claimed:false}
+          {normal_recipient_cli_claimed:true,encrypted_identity_store_claimed:true,
+           normal_publisher_cli_claimed:false,mailbox_runtime_claimed:false,full_c07_claimed:false}
          else {} end)
     ' >"$WORK/$content_report_name" || return 1
     for content_artifact in "$WORK"/content-*.json "$WORK"/content-*.txt \
