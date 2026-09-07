@@ -59,8 +59,31 @@ The mixed-link diagnostic now enables aggregate-only native RPC timing explicitl
 scenarios and product startup leave it disabled. A local empty-runtime probe completes 5,000
 correlated Unix RPCs at 7,861 RPC/s without instrumentation and 6,979 with it, with exact socket
 cleanup. Thus connection/framing overhead alone is not a demonstrated hard 513-packet/second
-limit on this host. Live transport and VM costs remain unmeasured until the next mixed run;
-no scheduler, congestion-control or timeout change is inferred from this empty-runtime result.
+limit on this host. The [profiled run on `5d3ca8ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34137605157)
+again stalls after the LAN leg is removed from the warm route. Its fixed Client failure stage
+is `TelemetryNative`: GetStatus eventually returns a transport error after an earlier period
+with no delivered inner datagrams. Native RPC occupancy and CPU use are low during that stall,
+so native RPC saturation is not its cause. The response barrier was released, but no completed
+WAN-only response or useful aggregation ratio exists. Cleanup leaves zero owned objects and
+unchanged guest state. No scheduler, congestion-control or timeout change is inferred from
+the empty-runtime timing or from the later telemetry error alone.
+
+The [first complete download-sharing attempt on `5d3ca8ac`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34137603326)
+fails before application traffic starts: signed adjacent budgets reach the activated Exit,
+but the helper rejects every update, so the Relay correctly withholds session start. This
+does not prove contention, recovery or refresh-expiry behavior. General teardown completes
+with zero owned objects and unchanged guest state; the scenario's separate accounting-removal
+proof is not reached. The same revision's Quality job finds one stale schema-enum inventory
+test (27 expected versus 29 actual message types); the two new budget types are now included
+in that exact-tag test rather than weakening its count or tag checks.
+
+The downlink rejection is reproduced and repaired locally: Activate/Commit rotate the engine
+operation generation while the original Prepare lineage continues to own the worker. Budget
+validation now follows that post-activation distinction, preserving exact context, operation,
+phase and worker ownership checks. The regression fails with the original equality and passes
+with the repair; the real WireGuard sender/GSO/expiry/cleanup check and exact schema-tag test
+also pass, as does strict helper Clippy. Complete owner-priority operation still awaits the
+next disposable KVM run; these local results do not replace it.
 
 ### Earlier checkpoints and source-change evidence
 

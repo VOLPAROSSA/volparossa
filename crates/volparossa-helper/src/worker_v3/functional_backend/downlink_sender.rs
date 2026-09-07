@@ -40,29 +40,41 @@ pub(super) fn activated_budget_grants(
         .collect()
 }
 
+fn validate_budget_binding(
+    binding: BackendBinding,
+    value: &ApplyDownlinkBudget,
+) -> Result<OpenLineageKey, BackendError> {
+    let key = OpenLineageKey::from(binding.lineage);
+    if binding.action != BackendAction::ApplyDownlinkBudget
+        || binding.operation_kind != OperationKind::DownlinkBudget
+        || value.route_context_id.as_slice() != key.context_id
+        // Activate and Commit rotate the engine operation generation. The retained Prepare
+        // lineage still selects the exact worker; operation generation is not that identity.
+        || binding.operation_generation == 0
+        || binding.operation_sequence == 0
+        || !matches!(
+            (binding.prior_phase, binding.phase),
+            (
+                Some(super::ContextPhase::Activated),
+                super::BackendPhase::Activated
+            ) | (
+                Some(super::ContextPhase::Committed),
+                super::BackendPhase::Committed
+            )
+        )
+    {
+        return Err(BackendError::Invalid);
+    }
+    Ok(key)
+}
+
 impl FunctionalAlphaLeaseBackend {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "retain exact signed authority and worker mutation in one bounded operation"
-    )]
     pub(super) async fn apply_downlink_one(
         &self,
         binding: BackendBinding,
         value: ApplyDownlinkBudget,
     ) -> Result<AppliedDownlinkBudget, BackendError> {
-        let key = OpenLineageKey::from(binding.lineage);
-        if binding.action != BackendAction::ApplyDownlinkBudget
-            || binding.operation_kind != OperationKind::DownlinkBudget
-            || value.route_context_id.as_slice() != key.context_id
-            || binding.operation_generation != key.backend_generation
-            || binding.operation_sequence == 0
-            || !matches!(
-                binding.prior_phase,
-                Some(super::ContextPhase::Activated | super::ContextPhase::Committed)
-            )
-        {
-            return Err(BackendError::Invalid);
-        }
+        let key = validate_budget_binding(binding, &value)?;
         ensure_hard_is_live(key)?;
         let outer_deadline = prepare_deadline(binding)?;
         // Leave sufficient signed TTL for the kernel gate. This does not extend the engine's
@@ -261,5 +273,77 @@ impl FunctionalAlphaLeaseBackend {
                 .map_err(|_| BackendError::CleanupIncomplete)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{BackendLineage, BackendPhase, ContextPhase};
+
+    #[test]
+    fn downlink_budget_accepts_rotated_operation_generation_on_stable_backend_lineage() {
+        let lineage = BackendLineage {
+            helper_runtime_id: [1; 32],
+            context_id: [2; 16],
+            backend_generation: 3,
+            prepare_request_id: [4; 16],
+            prepare_operation_digest: [5; 32],
+            setup_expires_at_unix: 100,
+            hard_expires_at_unix: 200,
+            setup_expires_at_boottime_ns: 100,
+            hard_expires_at_boottime_ns: 200,
+        };
+        let value = ApplyDownlinkBudget {
+            route_context_id: lineage.context_id.to_vec(),
+            context_handle: vec![6; 32],
+            lease_handle: vec![7; 32],
+            signed_budget: Vec::new(), // This test exercises binding, before signature verification.
+        };
+        for (generation, prior_phase, phase) in [
+            (4, ContextPhase::Activated, BackendPhase::Activated),
+            (5, ContextPhase::Committed, BackendPhase::Committed),
+        ] {
+            let binding = BackendBinding {
+                lineage,
+                operation_sequence: 8,
+                request_id: [9; 16],
+                request_digest: [10; 32],
+                operation_generation: generation,
+                prior_phase: Some(prior_phase),
+                operation_kind: OperationKind::DownlinkBudget,
+                phase,
+                action: BackendAction::ApplyDownlinkBudget,
+                call_deadline: tokio::time::Instant::now() + Duration::from_secs(1),
+            };
+            assert_ne!(binding.operation_generation, lineage.backend_generation);
+            assert_eq!(
+                validate_budget_binding(binding, &value).expect("post-Activate/Commit budget"),
+                OpenLineageKey::from(lineage)
+            );
+            for invalid in [
+                BackendBinding {
+                    operation_generation: 0,
+                    ..binding
+                },
+                BackendBinding {
+                    operation_kind: OperationKind::Activate,
+                    ..binding
+                },
+                BackendBinding {
+                    phase: BackendPhase::Prepared,
+                    ..binding
+                },
+                BackendBinding {
+                    prior_phase: Some(ContextPhase::Prepared),
+                    ..binding
+                },
+            ] {
+                assert!(validate_budget_binding(invalid, &value).is_err());
+            }
+            let mut changed = value.clone();
+            changed.route_context_id[0] ^= 1;
+            assert!(validate_budget_binding(binding, &changed).is_err());
+        }
     }
 }

@@ -1701,6 +1701,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NATIVE_PROBE_EXIT_RESULT",
         "NATIVE_PROBE_RELAY_RESULT",
         "NATIVE_ROUTE_CREDENTIAL_DELIVERY",
+        "ADJACENT_RECEIVE_BUDGET",
+        "ADJACENT_RECEIVE_BUDGET_RECEIPT",
     ];
     let rust_names = [
         "Unspecified",
@@ -1730,6 +1732,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "NativeProbeExitResult",
         "NativeProbeRelayResult",
         "NativeRouteCredentialDelivery",
+        "AdjacentReceiveBudget",
+        "AdjacentReceiveBudgetReceipt",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
