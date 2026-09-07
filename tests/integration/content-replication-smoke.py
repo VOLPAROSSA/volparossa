@@ -12,13 +12,15 @@ CAPTURE = runpy.run_path(str(Path(__file__).with_name("content-replication-captu
 P_BYTES, Q_BYTES = 524609, 262267
 P_SHA = "507a1f72e20863b91dbd92265ad6d58499cc16fab5a9d753676c56bbe87cb836"
 Q_SHA = "b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d"
-ROLES = ("receiver", "relay0", "relay2", "exit", "provider")
+ROLES = ("receiver", "relay-a", "relay-b", "exit", "provider")
+RELAY_NODES = {"relay0", "relay1", "relay2"}
 PHYSICAL_INTERFACES = {
     "client": {"underlay", "cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cb1", "cb2"},
     "relay0": {"underlay", "r0c", "r0b1", "r0b2", "r0x", "r0x2", "r0a", "rp0"},
+    "relay1": {"underlay", "r1c", "r1b1", "r1b2", "r1x", "r1a", "rp1"},
     "relay2": {"underlay", "r2c", "r2b1", "r2b2", "r2x", "r2a", "rp2"},
-    "relay4": {"underlay", "r4c", "r4b1", "r4b2", "r4x", "ar0", "ar2"},
-    "relay5": {"underlay", "r5c", "r5b1", "r5b2", "r5x", "pr0", "pr2"},
+    "relay4": {"underlay", "r4c", "r4b1", "r4b2", "r4x", "ar0", "ar1", "ar2"},
+    "relay5": {"underlay", "r5c", "r5b1", "r5b2", "r5x", "pr0", "pr1", "pr2"},
     "exit": {"underlay", "xr0", "xr1", "xr2", "xr3", "xr4", "xr5", "xd"},
 }
 SCOPE = ("full_c03_claimed", "full_c04_claimed", "speed_improvement_claimed",
@@ -42,11 +44,13 @@ def read(path):
 
 def validate_route(route, peers):
     paths, slots = route["paths"], route["benchmark_slots"]
+    selected_relays = {slot["relay_node"] for slot in slots}
     require(route["transport"] == "mptcp" and len(paths) == len(slots) == 2
             and re.fullmatch(r"[0-9a-f]{32}", route["route_context_id"])
-            and {slot["relay_node"] for slot in slots} == {"relay0", "relay2"}
+            and len(selected_relays) == 2 and selected_relays <= RELAY_NODES
             and [slot["relay_peer_id"] for slot in slots] == [path["relay_peer_id"] for path in paths]
-            and {path["relay_peer_id"] for path in paths} == {peers["relay0"], peers["relay2"]}
+            and all(slot["relay_peer_id"] == peers[slot["relay_node"]] for slot in slots)
+            and {path["relay_peer_id"] for path in paths} == {peers[node] for node in selected_relays}
             and all(path["exit_peer_id"] == peers["exit"]
                     and path["route_context_id"] == route["route_context_id"] for path in paths),
             "actual same-Exit two-relay MPTCP route not proven")
@@ -76,18 +80,21 @@ def validate_capture(capture, layout, node):
 def validate_phase(phase, name, peers):
     layout = phase["layout"]
     CAPTURE["validate_layout"](layout)
-    require(layout["phase"] == name and set(layout["relays"]) == {"relay0", "relay2"},
+    relays = sorted(layout["relays"])
+    require(layout["phase"] == name and set(relays) ==
+            {slot["relay_node"] for slot in phase["route"]["benchmark_slots"]},
             "phase or selected relay capture substitution")
     validate_route(phase["route"], peers)
     captures = phase["captures"]
     require(set(captures) == set(ROLES), "five-role capture coverage incomplete")
     for role, capture in captures.items():
         node = (layout["client"]["node"] if role == "receiver" else
-                layout["provider"]["node"] if role == "provider" else role)
+                layout["provider"]["node"] if role == "provider" else
+                relays[0] if role == "relay-a" else relays[1] if role == "relay-b" else role)
         validate_capture(capture, layout, node)
-    for relay in ("relay0", "relay2"):
-        require(captures[relay]["client_leg_wireguard_data_datagrams"] > 16
-                and captures[relay]["exit_leg_wireguard_data_datagrams"] > 16
+    for slot, relay in zip(("relay-a", "relay-b"), relays):
+        require(captures[slot]["client_leg_wireguard_data_datagrams"] > 16
+                and captures[slot]["exit_leg_wireguard_data_datagrams"] > 16
                 and captures["receiver"][f"{relay}_client_leg_wireguard_data_datagrams"] > 16
                 and captures["exit"][f"{relay}_exit_leg_wireguard_data_datagrams"] > 16,
                 "both physical WireGuard legs on both paths did not carry data")
@@ -97,7 +104,7 @@ def validate_phase(phase, name, peers):
                 and captures[role]["provider_response_packets"] > 0
                 and captures[role]["provider_response_payload_bytes"] >= minimum_bytes,
                 "actual Exit-to-provider request/response payload missing")
-    for role in ("receiver", "relay0", "relay2"):
+    for role in ("receiver", "relay-a", "relay-b"):
         require(captures[role]["provider_request_packets"] == 0
                 and captures[role]["provider_response_packets"] == 0
                 and captures[role]["provider_response_payload_bytes"] == 0,
@@ -131,8 +138,8 @@ def validate_evidence(evidence):
     require(seed["foreground"]["publisher_hex"] == seed["reserve"]["publisher_hex"]
             and seed["foreground"]["manifest_id"] != seed["reserve"]["manifest_id"]
             and all(output[field] is True for field in ISOLATION), "cross-publication trust or isolation missing")
-    control = {peers["relay0"], peers["relay2"]}
-    require(len({peers[node] for node in ("client", "relay0", "relay2", "relay4", "relay5", "exit")}) == 6,
+    control = {peers[node] for node in RELAY_NODES}
+    require(len({peers[node] for node in ("client", "relay0", "relay1", "relay2", "relay4", "relay5", "exit")}) == 7,
             "fixture identities are not independent")
     validate_fetch(evidence["warm_fetch"], P_BYTES, 3, peers["relay5"], control)
     validate_fetch(evidence["foreground_fetch"], P_BYTES, 3, peers["relay5"], control)
@@ -154,6 +161,11 @@ def validate_evidence(evidence):
             "original provider agent was not stopped before final retrieval")
     for phase in ("uptake", "reserve-fetch"):
         validate_phase(evidence["phases"][phase], phase, peers)
+        selected = evidence["phases"][phase]["route"]
+        receipt = evidence["foreground_fetch"] if phase == "uptake" else evidence["final_fetch"]
+        require(receipt["control_relay_peer_id"] not in
+                {slot["relay_peer_id"] for slot in selected["benchmark_slots"]},
+                "control relay was substituted by one of the two data relays")
     require(evidence["phases"]["uptake"]["route"]["route_context_id"] !=
             evidence["phases"]["reserve-fetch"]["route"]["route_context_id"],
             "independent consumer reused another node's route authority")

@@ -5,22 +5,23 @@
 
 content_replication_configure_node() {
     case $node in
-        relay1) relay_role=false; relay_capacity=0 ;;
         client|relay4)
             bootstrap_one="/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER"
             bootstrap_two="/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
-            bootstrap_three=none
+            bootstrap_three="/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER"
             [ "$node" != relay4 ] || client_role=true
             ;;
     esac
 }
 
 content_replication_extend_network() {
-    # The two new client legs carry real WG/control packets; the supplier links permit only
+    # Three candidates provide a distinct control relay plus two actual data relays.
+    # The new client legs carry real WG/control packets; the supplier links permit only
     # generic UDP41000 discovery. All links and rules die with their registered namespaces.
-    for cr_index in 0 2; do
+    for cr_index in 0 1 2; do
         case $cr_index in
             0) cr_namespace=$R0; cr_public=42.158.0.1; cr_segment=90 ;;
+            1) cr_namespace=$R1; cr_public=44.160.1.1; cr_segment=94 ;;
             2) cr_namespace=$R2; cr_public=45.161.2.1; cr_segment=92 ;;
         esac
         link_nodes "$R4" "ar$cr_index" "10.241.$cr_segment.1/30" \
@@ -62,15 +63,15 @@ table inet vpa_replication_control_$cr_index {
 RULES
     done
     done
-    # Isolate this fixture's two-relay graph before any agent starts. The primary Client
+    # Isolate this fixture's three-candidate graph before any agent starts. The primary Client
     # cannot use the later replica as its control relay or contact either supplier directly.
     ip netns exec "$CLIENT" nft -f - <<'RULES'
 table inet vpa_replication_client {
  chain input { type filter hook input priority -20; policy accept;
-  iifname { "cr1", "cr3", "cr4", "cr5" } drop
+  iifname { "cr3", "cr4", "cr5" } drop
  }
  chain output { type filter hook output priority -20; policy accept;
-  oifname { "cr1", "cr3", "cr4", "cr5" } drop
+  oifname { "cr3", "cr4", "cr5" } drop
  }
 }
 RULES
@@ -104,8 +105,9 @@ content_replication_cli() {
 content_replication_select() (
     BENCHMARK_NODE=$1
     benchmark_select_route "$2" mptcp || exit 1
-    jq -e '.transport == "mptcp" and
-        ([.benchmark_slots[].relay_node] | sort) == ["relay0","relay2"]' \
+    jq -e '.transport == "mptcp" and (.benchmark_slots | length) == 2 and
+        ([.benchmark_slots[].relay_node] | unique | length) == 2 and
+        all(.benchmark_slots[].relay_node; . == "relay0" or . == "relay1" or . == "relay2")' \
         "$WORK/$2-selection.json" >/dev/null
 )
 
@@ -146,24 +148,36 @@ content_replication_capture() {
     if [ "$cr_phase" = uptake ]; then
         cr_client=relay4; cr_client_ip=49.165.5.1; cr_client_ns=$R4
         cr_provider=relay5; cr_provider_ip=50.166.6.1; cr_provider_ns=$R5
+        cr_selection=$WORK/content-replication-warm-selection.json
     else
         [ "$cr_phase" = reserve-fetch ] || return 1
         cr_client=client; cr_client_ip=43.159.1.1; cr_client_ns=$CLIENT
         cr_provider=relay4; cr_provider_ip=49.165.5.1; cr_provider_ns=$R4
+        cr_selection=$WORK/content-replication-final-selection.json
     fi
+    cr_selected_relays=$(jq -ce '[.benchmark_slots[].relay_node] | sort as $selected |
+      {relay0:"42.158.0.1",relay1:"44.160.1.1",relay2:"45.161.2.1"} |
+      with_entries(select(.key as $node | $selected | index($node)))' "$cr_selection") || return 1
+    cr_relay_a=$(printf '%s\n' "$cr_selected_relays" | jq -er 'keys[0]') || return 1
+    cr_relay_b=$(printf '%s\n' "$cr_selected_relays" | jq -er 'keys[1]') || return 1
     jq -cn --arg phase "$cr_phase" --arg client "$cr_client" --arg cip "$cr_client_ip" \
-        --arg provider "$cr_provider" --arg pip "$cr_provider_ip" '
+        --arg provider "$cr_provider" --arg pip "$cr_provider_ip" --argjson relays "$cr_selected_relays" '
       {phase:$phase,client:{node:$client,ip:$cip},
-       relays:{relay0:"42.158.0.1",relay2:"45.161.2.1"},
+       relays:$relays,
        exit:{node:"exit",ip:"46.162.3.1"},provider:{node:$provider,ip:$pip}}' \
         >"$WORK/content-replication-$cr_phase-layout.json"
-    for cr_role in receiver relay0 relay2 exit provider; do
+    for cr_role in receiver relay-a relay-b exit provider; do
         case $cr_role in
             receiver) cr_capture_node=$cr_client; cr_capture_ns=$cr_client_ns ;;
-            relay0) cr_capture_node=relay0; cr_capture_ns=$R0 ;;
-            relay2) cr_capture_node=relay2; cr_capture_ns=$R2 ;;
+            relay-a) cr_capture_node=$cr_relay_a ;;
+            relay-b) cr_capture_node=$cr_relay_b ;;
             exit) cr_capture_node='exit'; cr_capture_ns=$EXIT_NODE ;;
             provider) cr_capture_node=$cr_provider; cr_capture_ns=$cr_provider_ns ;;
+        esac
+        case $cr_capture_node in
+            relay0) cr_capture_ns=$R0 ;;
+            relay1) cr_capture_ns=$R1 ;;
+            relay2) cr_capture_ns=$R2 ;;
         esac
         # Only fixture physical interfaces, never decrypted worker/TUN/veth interfaces.
         cr_interfaces=$(ip -n "$cr_capture_ns" -j link show | jq -er '
@@ -180,8 +194,8 @@ content_replication_capture() {
         cr_capture_pid=$!
         case $cr_role in
             receiver) PRIVACY_CLIENT_PID=$cr_capture_pid ;;
-            relay0) PRIVACY_RELAY0_PID=$cr_capture_pid ;;
-            relay2) PRIVACY_RELAY2_PID=$cr_capture_pid ;;
+            relay-a) PRIVACY_RELAY0_PID=$cr_capture_pid ;;
+            relay-b) PRIVACY_RELAY2_PID=$cr_capture_pid ;;
             exit) PRIVACY_EXIT_PID=$cr_capture_pid ;;
             provider) PRIVACY_RELAY1_PID=$cr_capture_pid ;;
         esac

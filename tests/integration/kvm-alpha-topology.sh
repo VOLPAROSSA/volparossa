@@ -34,7 +34,7 @@ print_plan() {
     if [ "$scenario" = content-replication ]; then
         printf '%s\n' \
             'VOLPAROSSA content-replication runtime smoke plan:' \
-            '  give Relay4 a client role and two disposable WireGuard/control underlays to Relay0/2;' \
+            '  give Relay4 three disposable underlays: a distinct control relay and two data relays among Relay0/1/2;' \
             '  seed foreground P and reserve Q only in Relay5; remove publisher source/key;' \
             '  fetch P normally, then bounded opportunistic Q uptake in a new private cache;' \
             '  stop Relay5, retrieve Q from Relay4 through original Client and two protected relay paths;' \

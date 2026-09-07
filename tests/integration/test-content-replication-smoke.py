@@ -5,6 +5,7 @@
 import copy
 from pathlib import Path
 import runpy
+import subprocess
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -12,11 +13,12 @@ CHECK = runpy.run_path(str(HERE / "content-replication-smoke.py"))
 CAPTURE = CHECK["CAPTURE"]
 
 
-def fixture():
-    peers = {node: "peer-" + node for node in ("client", "relay0", "relay2", "relay4", "relay5", "exit")}
+def fixture(control_node="relay1"):
+    peers = {node: "peer-" + node for node in ("client", "relay0", "relay1", "relay2", "relay4", "relay5", "exit")}
+    relays = sorted(CHECK["RELAY_NODES"] - {control_node})
     def fetch(size, chunks, provider):
         return dict(bytes=size, peer_bytes=size, chunks=chunks, providers_used=1,
-                    provider_peer_ids=[peers[provider]], control_relay_peer_id=peers["relay0"],
+                    provider_peer_ids=[peers[provider]], control_relay_peer_id=peers[control_node],
                     origin_authenticated=False, origin_body_bytes=0, origin_range_requests=0)
     publication, output = {}, {name: True for name in CHECK["ISOLATION"]}
     for label, field, size, chunks, digest in (("p", "foreground", CHECK["P_BYTES"], 3, CHECK["P_SHA"]),
@@ -28,7 +30,7 @@ def fixture():
         output[field] = dict(bytes=size, sha256=digest)
     publication.update(publisher_removed=True, publisher_private_key_persisted=False, replicator_seeded=False)
     before = dict(serving=True, replication_enabled=True, replica_chunks=0, replica_bytes=0,
-                  replica_publications=0, publications=1, control_relay_peer_id=peers["relay0"])
+                  replica_publications=0, publications=1, control_relay_peer_id=peers[control_node])
     after = dict(before, replica_chunks=2, replica_bytes=CHECK["Q_BYTES"], replica_publications=1, publications=2)
     evidence = dict(success=True, publication=publication, output=output, expected_peers=peers,
         warm_fetch=fetch(CHECK["P_BYTES"], 3, "relay5"),
@@ -43,16 +45,17 @@ def fixture():
                                             ("reserve-fetch", "client", "relay4", "b" * 32)):
         layout = dict(phase=phase, client=dict(node=client, ip=CAPTURE["PUBLIC"][client]),
                       provider=dict(node=provider, ip=CAPTURE["PUBLIC"][provider]),
-                      relays={node: CAPTURE["PUBLIC"][node] for node in ("relay0", "relay2")},
+                      relays={node: CAPTURE["PUBLIC"][node] for node in relays},
                       exit=dict(node="exit", ip=CAPTURE["PUBLIC"]["exit"]))
         route = dict(transport="mptcp", route_context_id=context,
                      paths=[dict(route_context_id=context, relay_peer_id=peers[node], exit_peer_id=peers["exit"])
-                            for node in ("relay0", "relay2")],
+                            for node in relays],
                      benchmark_slots=[dict(relay_node=node, relay_peer_id=peers[node])
-                                      for node in ("relay0", "relay2")])
+                                      for node in relays])
         captures = {}
         for role in CHECK["ROLES"]:
-            node = client if role == "receiver" else provider if role == "provider" else role
+            node = (client if role == "receiver" else provider if role == "provider" else
+                    relays[0] if role == "relay-a" else relays[1] if role == "relay-b" else role)
             capture = dict.fromkeys(CAPTURE["COUNTERS"], 0)
             capture.update(schema_version=1, capture_role=node, node=node, phase=phase, complete=True,
                 truncated=False, observed_frames=500, packet_socket_drops=0,
@@ -61,10 +64,10 @@ def fixture():
                     observed_frames=(500 if interface == "underlay" else 0),
                     packet_socket_packets=(500 if interface == "underlay" else 0), packet_socket_drops=0,
                     intake_stopped=True, drained=True) for interface in CHECK["PHYSICAL_INTERFACES"][node]})
-            for relay in ("relay0", "relay2"):
+            for relay in relays:
                 for leg in ("client_leg", "exit_leg"):
                     capture[f"{relay}_{leg}_wireguard_data_datagrams"] = 50
-            if role in ("relay0", "relay2"):
+            if role in ("relay-a", "relay-b"):
                 capture.update(client_leg_wireguard_data_datagrams=50, exit_leg_wireguard_data_datagrams=50)
             if role in ("exit", "provider"):
                 capture.update(provider_request_packets=50, provider_response_packets=500,
@@ -75,8 +78,31 @@ def fixture():
 
 
 class ReplicationEvidence(unittest.TestCase):
+    def test_fixture_keeps_control_candidate_separate_from_two_data_relays(self):
+        script = '''set -eu
+            . "$1"
+            R0_PEER=peer-r0; R1_PEER=peer-r1; R2_PEER=peer-r2
+            node=$2; client_role=false; relay_role=true; relay_capacity=32
+            bootstrap_one=none; bootstrap_two=none; bootstrap_three=none
+            content_replication_configure_node
+            printf '%s\\n' "$client_role" "$relay_role" "$relay_capacity" \\
+                "$bootstrap_one" "$bootstrap_two" "$bootstrap_three"
+        '''
+        for node in ("client", "relay4", "relay1"):
+            result = subprocess.run(["sh", "-c", script, "config-test",
+                                     str(HERE / "content-replication-smoke.sh"), node],
+                                    check=True, capture_output=True, text=True, timeout=5)
+            fields = result.stdout.splitlines()
+            self.assertEqual(fields[1:3], ["true", "32"])
+            if node in ("client", "relay4"):
+                self.assertEqual({peer.rsplit("/", 1)[-1] for peer in fields[3:]},
+                                 {"peer-r0", "peer-r1", "peer-r2"})
+            if node == "relay4":
+                self.assertEqual(fields[0], "true")
+
     def test_distinct_foreground_then_new_replica_then_independent_consumer(self):
-        CHECK["validate_evidence"](fixture())
+        for control_node in sorted(CHECK["RELAY_NODES"]):
+            CHECK["validate_evidence"](fixture(control_node))
         for mutate in (
             lambda value: value["publication"].update(replicator_seeded=True),
             lambda value: value["publication"]["reserve"].update(manifest_id="d" * 64),
@@ -88,6 +114,7 @@ class ReplicationEvidence(unittest.TestCase):
             lambda value: value["after"].update(replica_publications=0),
             lambda value: value["final_fetch"].update(provider_peer_ids=["peer-relay5"]),
             lambda value: value["final_fetch"].update(control_relay_peer_id="peer-relay4"),
+            lambda value: value["final_fetch"].update(control_relay_peer_id="peer-relay0"),
             lambda value: value["foreground_fetch"].update(peer_bytes=0),
             lambda value: value["origin_stop"].update(serving=True),
             lambda value: value["origin_offline"].update(main_pid=55),
@@ -95,7 +122,8 @@ class ReplicationEvidence(unittest.TestCase):
             lambda value: value["events"].update(exit_mptcp_flows_completed=0),
             lambda value: value["phases"]["uptake"]["route"].update(transport="tcp"),
             lambda value: value["phases"]["reserve-fetch"]["layout"]["provider"].update(node="relay5"),
-            lambda value: value["phases"]["uptake"]["captures"]["relay2"].update(exit_leg_wireguard_data_datagrams=0),
+            lambda value: value["phases"]["uptake"]["captures"]["relay-b"].update(exit_leg_wireguard_data_datagrams=0),
+            lambda value: value["phases"]["uptake"]["captures"]["relay-a"].update(node="relay1", capture_role="relay1"),
             lambda value: value["phases"]["reserve-fetch"]["captures"]["receiver"].update(forbidden_packets=1),
             lambda value: value["phases"]["reserve-fetch"]["captures"]["provider"].update(provider_response_payload_bytes=0),
             lambda value: value["phases"]["uptake"]["captures"]["exit"]["interface_statistics"]["underlay"].update(drained=False),
