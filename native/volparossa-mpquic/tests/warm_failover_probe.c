@@ -27,12 +27,27 @@
 #define WINDOW 32U
 #define PACKET_BYTES (44U + DATA_BYTES)
 #define RETRY_MS 400U
+#define DELAY_QUEUE_FRAMES 256U
+#define DELAY_FRAME_BYTES 4096U
+
+typedef struct {
+    uint64_t release_ms;
+    size_t len;
+    uint8_t bytes[DELAY_FRAME_BYTES];
+} delayed_frame_t;
+
+typedef struct {
+    delayed_frame_t frames[DELAY_QUEUE_FRAMES];
+    unsigned head, count, peak;
+} delay_queue_t;
 
 typedef struct {
     int client_fd, server_fd;
     struct sockaddr_in client_addr, server_addr;
     mqvpn_path_handle_t handle;
     uint64_t forwarded[2], dropped[2], packets[2];
+    unsigned delay_ms;
+    delay_queue_t *delay[2];
 } path_t;
 
 typedef struct {
@@ -51,6 +66,9 @@ typedef struct {
     char auth[65];
     uint64_t started_ms;
     const char *stage;
+    unsigned pump_interval_ms, delay_queue_overflows;
+    bool low_rate;
+    uint64_t low_rate_started_ms, low_rate_last_received_ms;
 } probe_t;
 
 static volatile sig_atomic_t interrupted;
@@ -118,6 +136,15 @@ static void receive_inner(probe_t *p, const uint8_t *data, size_t len, bool at_c
     unsigned phase = get32(data + 32), seq = get32(data + 36), ack = get32(data + 40);
     /* Old packets may still be in flight after a completed, acknowledged phase. */
     if (phase < p->phase) return;
+    if (p->low_rate && p->phase == 4) {
+        /* Diagnostic uplink liveness, not a response transfer or application ACK. */
+        if (phase != 4 || at_client || len != 44U || ack != 1U || seq >= p->count) {
+            p->failed = true; return;
+        }
+        if (!p->seen[seq]) { p->seen[seq] = true; ++p->unique; }
+        p->low_rate_last_received_ms = now_ms();
+        return;
+    }
     if (phase != p->phase || seq >= p->count || ack > 1U ||
         at_client != (ack ? p->sender_is_client : !p->sender_is_client)) {
         p->failed = true; return;
@@ -196,6 +223,38 @@ static int udp_socket(struct sockaddr_in *address)
     return fd;
 }
 
+static void deliver_outer(probe_t *p, unsigned index, unsigned side,
+                          const uint8_t *data, size_t len)
+{
+    path_t *path = &p->paths[index];
+    if (p->blocked && index == p->blocked_path) { path->dropped[side] += len; return; }
+    path->forwarded[side] += len; ++path->packets[side];
+    const struct sockaddr_in *peer = side == 0 ? &path->client_addr : &path->server_addr;
+    int result = side == 0 ? mqvpn_server_on_path_socket_recv(p->server, data, len,
+            (const struct sockaddr *)&path->server_addr, sizeof(path->server_addr),
+            (const struct sockaddr *)peer, sizeof(*peer))
+        : mqvpn_client_on_socket_recv(p->client, path->handle, data, len,
+            (const struct sockaddr *)peer, sizeof(*peer));
+    if (result != MQVPN_OK) p->failed = true;
+}
+
+static void queue_outer(probe_t *p, unsigned index, unsigned side,
+                        const uint8_t *data, size_t len)
+{
+    path_t *path = &p->paths[index];
+    if (path->delay_ms == 0 || (p->blocked && index == p->blocked_path)) {
+        deliver_outer(p, index, side, data, len); return;
+    }
+    delay_queue_t *q = path->delay[side];
+    if (!q || len > DELAY_FRAME_BYTES || q->count == DELAY_QUEUE_FRAMES) {
+        ++p->delay_queue_overflows; p->failed = true; return;
+    }
+    delayed_frame_t *frame = &q->frames[(q->head + q->count) % DELAY_QUEUE_FRAMES];
+    frame->release_ms = now_ms() + path->delay_ms; frame->len = len;
+    memcpy(frame->bytes, data, len); ++q->count;
+    if (q->count > q->peak) q->peak = q->count;
+}
+
 static void pump(probe_t *p)
 {
     uint8_t data[65536];
@@ -208,14 +267,14 @@ static void pump(probe_t *p)
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
             if (n <= 0 || !same_address(side == 0 ? &path->client_addr : &path->server_addr,
                                       (const struct sockaddr *)&peer, len)) { p->failed = true; break; }
-            if (p->blocked && i == p->blocked_path) { path->dropped[side] += (uint64_t)n; continue; }
-            path->forwarded[side] += (uint64_t)n; ++path->packets[side];
-            int result = side == 0 ? mqvpn_server_on_path_socket_recv(p->server, data, (size_t)n,
-                    (const struct sockaddr *)&path->server_addr, sizeof(path->server_addr),
-                    (const struct sockaddr *)&peer, len)
-                : mqvpn_client_on_socket_recv(p->client, path->handle, data, (size_t)n,
-                    (const struct sockaddr *)&peer, len);
-            if (result != MQVPN_OK) p->failed = true;
+            queue_outer(p, i, side, data, (size_t)n);
+        }
+        delay_queue_t *q = path->delay[side];
+        while (q && q->count && q->frames[q->head].release_ms <= now_ms()) {
+            delayed_frame_t *frame = &q->frames[q->head];
+            deliver_outer(p, i, side, frame->bytes, frame->len);
+            memset(frame, 0, sizeof(*frame));
+            q->head = (q->head + 1U) % DELAY_QUEUE_FRAMES; --q->count;
         }
     }
     if (mqvpn_client_tick(p->client) != MQVPN_OK || mqvpn_server_tick(p->server) != MQVPN_OK) p->failed = true;
@@ -303,7 +362,7 @@ static bool initialize(probe_t *p, const char *cert, const char *key)
             p->activated = true;
         }
         if (p->activated && p->connections == 1 && two_active(p)) return true;
-        (void)poll(NULL, 0, 1);
+        (void)poll(NULL, 0, (int)p->pump_interval_ms);
     }
     return false;
 }
@@ -321,7 +380,10 @@ static bool transfer(probe_t *p, unsigned phase, unsigned count, bool client)
     p->unique = 0; p->acknowledged = 0; p->application_sends = 0; p->application_retries = 0;
     memset(p->seen, 0, sizeof(p->seen)); memset(p->acknowledged_chunks, 0, sizeof(p->acknowledged_chunks));
     memset(p->pending_ack, 0, sizeof(p->pending_ack)); memset(p->last_send, 0, sizeof(p->last_send));
-    uint64_t start = now_ms(), end = start + (phase == 4 ? 45000U : 25000U);
+    bool delayed = p->paths[0].delay_ms || p->paths[1].delay_ms;
+    uint64_t budget_ms = delayed ? (phase == 4 ? 90000U : 60000U)
+                                 : (phase == 4 ? 45000U : 25000U);
+    uint64_t start = now_ms(), end = start + budget_ms;
     unsigned base = 0;
     while (!p->failed && !interrupted && now_ms() < end) {
         pump(p);
@@ -341,7 +403,7 @@ static bool transfer(probe_t *p, unsigned phase, unsigned count, bool client)
             if (!send_inner(p, client, false, seq)) { p->failed = true; break; }
             p->last_send[seq] = now; ++p->application_sends;
         }
-        (void)poll(NULL, 0, 1);
+        (void)poll(NULL, 0, (int)p->pump_interval_ms);
     }
     bool ok = !p->failed && !interrupted && p->unique == count && p->acknowledged == count &&
         p->connections == 1 && p->disconnections == 0;
@@ -368,18 +430,81 @@ static bool transfer(probe_t *p, unsigned phase, unsigned count, bool client)
     return ok;
 }
 
+static bool low_rate_uplink(probe_t *p)
+{
+    /* Two small inner datagrams per second never intentionally fill an old cwnd.
+     * Both QUIC engines keep ticking; no explicit native path removal or retry burst.
+     * This diagnostic replaces phase 4 and makes no 32 MiB response claim. */
+    p->phase = 4; p->count = 60; p->sender_is_client = true;
+    p->unique = 0; p->application_sends = 0;
+    memset(p->seen, 0, sizeof(p->seen));
+    p->low_rate_started_ms = now_ms();
+    uint64_t end = p->low_rate_started_ms + 30000U, next = p->low_rate_started_ms;
+    while (!p->failed && !interrupted && now_ms() < end) {
+        pump(p);
+        uint64_t now = now_ms();
+        if (p->application_sends < p->count && now >= next) {
+            if (!send_inner(p, true, true, p->application_sends)) { p->failed = true; break; }
+            ++p->application_sends; next = now + 500U;
+        }
+        (void)poll(NULL, 0, (int)p->pump_interval_ms);
+    }
+    uint64_t last_ms = p->low_rate_last_received_ms ?
+        p->low_rate_last_received_ms - p->low_rate_started_ms : 0;
+    bool ok = !p->failed && !interrupted && p->unique >= 5 && last_ms >= 20000U &&
+        p->connections == 1 && p->disconnections == 0;
+    printf("{\"phase\":4,\"mode\":\"low_rate_uplink_liveness_not_response_transfer\","
+           "\"success\":%s,\"sent_inner_datagrams\":%u,\"received_inner_datagrams\":%u,"
+           "\"inner_datagram_bytes\":44,\"send_interval_ms\":500,\"last_received_after_ms\":%" PRIu64
+           ",\"duration_ms\":%" PRIu64 "}\n", ok ? "true" : "false", p->application_sends,
+           p->unique, last_ms, now_ms() - p->low_rate_started_ms);
+    fflush(stdout);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 3 || argc > 4) { fprintf(stderr, "usage: warm_failover_probe TEST_CERT TEST_KEY [0|1]\n"); return 2; }
+    if (argc != 3 && argc != 4 && argc != 6 && argc != 7 && argc != 8) {
+        fprintf(stderr, "usage: warm_failover_probe TEST_CERT TEST_KEY [0|1 [DELAY0_MS DELAY1_MS [PUMP_MS [burst|lowrate]]]]\n"); return 2;
+    }
     unsigned blocked = 1;
-    if (argc == 4) { if (strcmp(argv[3], "0") && strcmp(argv[3], "1")) return 2; blocked = (unsigned)(argv[3][0] - '0'); }
+    if (argc >= 4) { if (strcmp(argv[3], "0") && strcmp(argv[3], "1")) return 2; blocked = (unsigned)(argv[3][0] - '0'); }
+    unsigned delay[2] = {0, 0}, pump_ms = 1;
+    if (argc >= 6) for (unsigned i = 0; i < 2; ++i) {
+        char *end = NULL;
+        if (!argv[4 + i][0] || strspn(argv[4 + i], "0123456789") != strlen(argv[4 + i])) return 2;
+        unsigned long value = strtoul(argv[4 + i], &end, 10);
+        if (!end || *end || value > 50) return 2;
+        delay[i] = (unsigned)value;
+    }
+    if (argc >= 7) {
+        char *end = NULL;
+        if (!argv[6][0] || strspn(argv[6], "0123456789") != strlen(argv[6])) return 2;
+        unsigned long value = strtoul(argv[6], &end, 10);
+        if (!end || *end || value < 1 || value > 10) return 2;
+        pump_ms = (unsigned)value;
+    }
+    bool low_rate = false;
+    if (argc == 8) {
+        if (strcmp(argv[7], "burst") && strcmp(argv[7], "lowrate")) return 2;
+        low_rate = strcmp(argv[7], "lowrate") == 0;
+    }
     struct sigaction action = {.sa_handler = stop_signal};
     sigemptyset(&action.sa_mask); (void)sigaction(SIGTERM, &action, NULL); (void)sigaction(SIGINT, &action, NULL);
     probe_t *p = calloc(1, sizeof(*p)); if (!p) return 1;
     p->received = calloc(MAX_CHUNKS, DATA_BYTES); p->blocked_path = blocked; p->started_ms = now_ms();
-    for (unsigned i = 0; i < 2; ++i) p->paths[i].client_fd = p->paths[i].server_fd = -1;
+    p->pump_interval_ms = pump_ms;
+    p->low_rate = low_rate;
+    bool queues_allocated = true;
+    for (unsigned i = 0; i < 2; ++i) {
+        p->paths[i].client_fd = p->paths[i].server_fd = -1; p->paths[i].delay_ms = delay[i];
+        if (delay[i]) for (unsigned side = 0; side < 2; ++side) {
+            p->paths[i].delay[side] = calloc(1, sizeof(delay_queue_t));
+            queues_allocated = queues_allocated && p->paths[i].delay[side] != NULL;
+        }
+    }
     p->stage = "initialize";
-    bool ok = p->received && initialize(p, argv[1], argv[2]);
+    bool ok = p->received && queues_allocated && initialize(p, argv[1], argv[2]);
     uint64_t initialized_bytes[2];
     for (unsigned i = 0; i < 2; ++i)
         initialized_bytes[i] = p->paths[i].forwarded[0] + p->paths[i].forwarded[1];
@@ -387,7 +512,7 @@ int main(int argc, char **argv)
     if (ok) { p->stage = "warm_response"; ok = transfer(p, 2, 8192, false); }
     if (ok) {
         p->stage = "drain"; uint64_t end = now_ms() + 1000U;
-        while (!p->failed && !interrupted && now_ms() < end) { pump(p); (void)poll(NULL, 0, 1); }
+        while (!p->failed && !interrupted && now_ms() < end) { pump(p); (void)poll(NULL, 0, (int)p->pump_interval_ms); }
         ok = !p->failed && two_active(p);
         for (unsigned i = 0; i < 2; ++i)
             ok = ok && p->paths[i].forwarded[0] + p->paths[i].forwarded[1] > initialized_bytes[i] + 65536U;
@@ -395,20 +520,26 @@ int main(int argc, char **argv)
     if (ok) { p->stage = "second_request"; ok = transfer(p, 3, 4096, true); }
     uint64_t survivor_before[2] = {0, 0};
     if (ok) {
-        p->stage = "second_response_after_blackhole"; p->blocked = true;
+        p->stage = low_rate ? "low_rate_uplink_after_blackhole" : "second_response_after_blackhole";
+        p->blocked = true;
         memcpy(survivor_before, p->paths[1U - blocked].forwarded, sizeof(survivor_before));
-        ok = transfer(p, 4, 32768, false);
-        ok = ok && p->paths[1U - blocked].forwarded[1] > survivor_before[1] + 32768U * DATA_BYTES;
+        ok = low_rate ? low_rate_uplink(p) : transfer(p, 4, 32768, false);
+        if (!low_rate) ok = ok && p->paths[1U - blocked].forwarded[1] > survivor_before[1] + 32768U * DATA_BYTES;
     }
     printf("{\"scope\":\"native_loopback_diagnostic_not_wireguard_or_http3_acceptance\","
            "\"success\":%s,\"stage\":\"%s\",\"same_session_connections\":%u,"
-           "\"disconnections_before_cleanup\":%u,\"blackholed_path_index\":%u,\"elapsed_ms\":%" PRIu64 ",\"paths\":[",
-           ok ? "true" : "false", p->stage, p->connections, p->disconnections, blocked, now_ms() - p->started_ms);
+           "\"disconnections_before_cleanup\":%u,\"blackholed_path_index\":%u,\"elapsed_ms\":%" PRIu64
+           ",\"synthetic_one_way_delay_ms\":[%u,%u],\"pump_interval_ms\":%u,"
+           "\"delay_queue_overflows\":%u,\"maximum_queued_outer_frames\":%u,\"paths\":[",
+           ok ? "true" : "false", p->stage, p->connections, p->disconnections, blocked, now_ms() - p->started_ms,
+           delay[0], delay[1], pump_ms, p->delay_queue_overflows, 4U * DELAY_QUEUE_FRAMES);
     for (unsigned i = 0; i < 2; ++i) {
         path_t *path = &p->paths[i];
         printf("%s{\"index\":%u,\"uplink_outer_bytes\":%" PRIu64 ",\"downlink_outer_bytes\":%" PRIu64
-               ",\"blackholed_uplink_bytes\":%" PRIu64 ",\"blackholed_downlink_bytes\":%" PRIu64 "}",
-               i ? "," : "", i, path->forwarded[0], path->forwarded[1], path->dropped[0], path->dropped[1]);
+               ",\"blackholed_uplink_bytes\":%" PRIu64 ",\"blackholed_downlink_bytes\":%" PRIu64
+               ",\"delay_queue_peak_frames\":[%u,%u]}",
+               i ? "," : "", i, path->forwarded[0], path->forwarded[1], path->dropped[0], path->dropped[1],
+               path->delay[0] ? path->delay[0]->peak : 0U, path->delay[1] ? path->delay[1]->peak : 0U);
     }
     puts("]}");
     if (p->client) {
@@ -427,6 +558,7 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < 2; ++i) {
         if (p->paths[i].client_fd >= 0) close(p->paths[i].client_fd);
         if (p->paths[i].server_fd >= 0) close(p->paths[i].server_fd);
+        free(p->paths[i].delay[0]); free(p->paths[i].delay[1]);
     }
     memset(p->auth_random, 0, sizeof(p->auth_random)); memset(p->auth, 0, sizeof(p->auth));
     free(p->received); free(p); return ok ? 0 : 1;

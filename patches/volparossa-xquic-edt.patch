@@ -58,10 +58,10 @@ index c89a751..fe0e084 100644
          xqc_conn_send_ping;
 diff --git a/src/transport/scheduler/xqc_scheduler_volparossa_edt.c b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
 new file mode 100644
-index 0000000..0a366b3
+index 0000000..6b5f076
 --- /dev/null
 +++ b/src/transport/scheduler/xqc_scheduler_volparossa_edt.c
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,368 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -70,7 +70,7 @@ index 0000000..0a366b3
 + * Select exactly one currently writable path by estimated delivery time:
 + *
 + *   RTT/2 + queued/rate + RTT*(inflight/cwnd)
-+ *         + RTT*(loss/(1-loss))
++ *         + RTT*(loss/(1-loss)) + overdue outstanding ACK time
 + *
 + * queued is the path's current bytes in flight, bytes already scheduled in
 + * this send burst, and the packet being scheduled.  The independent
@@ -80,7 +80,10 @@ index 0000000..0a366b3
 + * bytes.  Startup exploration stops at an 8 MiB attempt debt plus at most
 + * the packet currently being scheduled.  Afterwards only current EDT cost
 + * and congestion availability select the path: historical delivered-byte
-+ * differences must not force application packets onto a worse path.
++ * differences must not force application packets onto a worse path. A
++ * previously fast path with outstanding bytes but no ACK progress accrues
++ * delivery-delay cost beyond its RTT/variance/peer ACK-delay allowance;
++ * stale RTT and cwnd must not strand low-rate traffic on a silent black hole.
 + * The loss multiplier is capped at 100 RTTs and the queue term at 60 seconds,
 + * keeping
 + * adversarial or transient counters finite.  Reinjection is deliberately
@@ -132,8 +135,40 @@ index 0000000..0a366b3
 +    return (uint64_t)(value + 0.999999L);
 +}
 +
++/* Delivery estimates must age while real outstanding bytes receive no ACK.
++ * xquic refreshes ctl_delivered_time on ACK progress, or on the first send
++ * from idle; later sends with bytes in flight do not refresh it. Preserve
++ * the normal RTT/variance/peer ACK-delay allowance before adding overdue
++ * time. This neither arms a timer nor changes CC, path state or packet count. */
 +static uint64_t
-+volparossa_edt_cost_us(xqc_path_ctx_t *path, size_t packet_bytes)
++volparossa_edt_overdue_ack_us(xqc_send_ctl_t *ctl, xqc_usec_t now)
++{
++    if (ctl->ctl_bytes_in_flight == 0 || ctl->ctl_delivered_time == 0
++        || now <= ctl->ctl_delivered_time)
++    {
++        return 0;
++    }
++    uint64_t variance_us = volparossa_edt_bounded_us(
++        4.0L * (long double)ctl->ctl_rttvar,
++        VOLPAROSSA_EDT_QUEUE_LIMIT_US);
++    if (variance_us < 1000) variance_us = 1000;
++    uint64_t allowance_us = volparossa_edt_saturating_add(
++        ctl->ctl_srtt, variance_us);
++    if (ctl->ctl_conn != NULL) {
++        uint64_t peer_ack_us = volparossa_edt_bounded_us(
++            1000.0L * (long double)ctl->ctl_conn->remote_settings.max_ack_delay,
++            VOLPAROSSA_EDT_QUEUE_LIMIT_US);
++        allowance_us = volparossa_edt_saturating_add(allowance_us, peer_ack_us);
++    }
++    uint64_t elapsed_us = now - ctl->ctl_delivered_time;
++    if (elapsed_us <= allowance_us) return 0;
++    uint64_t overdue_us = elapsed_us - allowance_us;
++    return overdue_us < VOLPAROSSA_EDT_QUEUE_LIMIT_US
++        ? overdue_us : VOLPAROSSA_EDT_QUEUE_LIMIT_US;
++}
++
++static uint64_t
++volparossa_edt_cost_us(xqc_path_ctx_t *path, size_t packet_bytes, xqc_usec_t now)
 +{
 +    xqc_send_ctl_t *ctl = path->path_send_ctl;
 +    if (ctl == NULL || ctl->ctl_cong_callback == NULL
@@ -194,7 +229,9 @@ index 0000000..0a366b3
 +    uint64_t cost = srtt_us / 2;
 +    cost = volparossa_edt_saturating_add(cost, queue_cost);
 +    cost = volparossa_edt_saturating_add(cost, congestion_cost);
-+    return volparossa_edt_saturating_add(cost, loss_cost);
++    cost = volparossa_edt_saturating_add(cost, loss_cost);
++    return volparossa_edt_saturating_add(
++        cost, volparossa_edt_overdue_ack_us(ctl, now));
 +}
 +
 +static uint64_t
@@ -295,6 +332,7 @@ index 0000000..0a366b3
 +        return NULL;
 +    }
 +
++    xqc_usec_t now = xqc_monotonic_timestamp();
 +    xqc_path_ctx_t *best = NULL;
 +    xqc_path_ctx_t *sendable_fallback = NULL;
 +    xqc_path_ctx_t *startup = NULL;
@@ -353,7 +391,7 @@ index 0000000..0a366b3
 +            sendable_fallback = path;
 +        }
 +
-+        uint64_t cost = volparossa_edt_cost_us(path, packet_out->po_used_size);
++        uint64_t cost = volparossa_edt_cost_us(path, packet_out->po_used_size, now);
 +        if (cost == UINT64_MAX) {
 +            continue;
 +        }
@@ -415,10 +453,10 @@ index 0000000..5e516a6
 +#endif /* _XQC_SCHEDULER_VOLPAROSSA_EDT_H_INCLUDED_ */
 diff --git a/tests/xqc_volparossa_edt_contract.c b/tests/xqc_volparossa_edt_contract.c
 new file mode 100644
-index 0000000..872a1a9
+index 0000000..02a92c8
 --- /dev/null
 +++ b/tests/xqc_volparossa_edt_contract.c
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,408 @@
 +// SPDX-License-Identifier: GPL-3.0-only
 +
 +/**
@@ -584,6 +622,96 @@ index 0000000..872a1a9
 +    return 0;
 +}
 +
++static xqc_usec_t edt_ack_age_test_now;
++
++static xqc_usec_t
++edt_ack_age_test_clock(void)
++{
++    return edt_ack_age_test_now;
++}
++
++static int
++edt_warm_stale_fast_path_ack_age(void)
++{
++    edt_test_fixture_t fixture;
++    memset(&fixture, 0, sizeof(fixture));
++    fixture.log.log_level = XQC_LOG_FATAL;
++    fixture.conn.log = &fixture.log;
++    fixture.conn.remote_settings.max_ack_delay = 25;
++    xqc_init_list_head(&fixture.conn.conn_paths_list);
++    fixture.scheduler =
++        calloc(1, xqc_volparossa_edt_scheduler_cb.xqc_scheduler_size());
++    if (fixture.scheduler == NULL) return 1;
++    xqc_volparossa_edt_scheduler_cb.xqc_scheduler_init(
++        fixture.scheduler, &fixture.log, NULL);
++
++    /* Actual mixed-link 34139658819 states after warm-up: the disappeared
++     * LAN retains its old low RTT and large cwnd. No subsequent ACK means
++     * no packet-threshold loss declaration; tiny 2/s inner ACKs never fill
++     * its cwnd. The WAN remains writable with a much larger measured RTT. */
++    edt_add_path(&fixture, 0, 1, 1762, 1520439, 239809, 1298, 0, 100);
++    edt_add_path(&fixture, 1, 2, 270034, 1947368, 338696, 0, 0, 100);
++    fixture.send_ctls[0].ctl_delivered = 5766117;
++    fixture.send_ctls[0].ctl_bytes_send = 5924171;
++    fixture.send_ctls[1].ctl_delivered = 3722034;
++    fixture.send_ctls[1].ctl_bytes_send = 3976972;
++    fixture.send_ctls[0].ctl_rttvar = 400;
++
++    xqc_timestamp_pt saved_clock = xqc_monotonic_timestamp;
++    xqc_monotonic_timestamp = edt_ack_age_test_clock;
++    edt_ack_age_test_now = 100000000;
++    fixture.send_ctls[0].ctl_delivered_time = edt_ack_age_test_now;
++    int failed = 0;
++    if (edt_select(&fixture, NULL) != 1) {
++        fputs("fresh low-RTT path lost before its ACK allowance\n", stderr);
++        failed = 1;
++        goto done;
++    }
++    /* Observed tiny sends keep the old path below cwnd for the whole
++     * stalled interval. Advancing send time must not refresh ACK progress. */
++    for (unsigned i = 0; i < 32; ++i) {
++        edt_ack_age_test_now += 500000;
++        fixture.send_ctls[0].ctl_bytes_send += 93;
++        fixture.send_ctls[0].ctl_bytes_in_flight += 76;
++        fixture.send_ctls[0].ctl_last_inflight_pkt_sent_time =
++            edt_ack_age_test_now;
++        fixture.send_ctls[1].ctl_delivered += 14;
++        fixture.send_ctls[1].ctl_delivered_time = edt_ack_age_test_now;
++        if (edt_select(&fixture, NULL) != 2) {
++            fputs("stale fast LAN still wins despite live writable WAN\n", stderr);
++            failed = 1;
++            goto done;
++        }
++    }
++    /* Real ACK progress restores eligibility without timers/path mutation. */
++    fixture.send_ctls[0].ctl_delivered += 1200;
++    fixture.send_ctls[0].ctl_delivered_time = edt_ack_age_test_now;
++    if (edt_select(&fixture, NULL) != 1) {
++        fputs("ACK recovery did not restore live fast-path EDT\n", stderr);
++        failed = 1;
++        goto done;
++    }
++    /* Idle time alone is not evidence of failed delivery. */
++    edt_ack_age_test_now += 10000000;
++    fixture.send_ctls[0].ctl_bytes_in_flight = 0;
++    if (edt_select(&fixture, NULL) != 1) {
++        fputs("idle healthy path was treated as stalled delivery\n", stderr);
++        failed = 1;
++        goto done;
++    }
++    /* The only remaining usable path is never suppressed by stale cost. */
++    fixture.send_ctls[0].ctl_bytes_in_flight = 1298;
++    fixture.paths[1].app_path_status = XQC_APP_PATH_STATUS_STANDBY;
++    if (edt_select(&fixture, NULL) != 1) {
++        fputs("stale estimate suppressed the only writable path\n", stderr);
++        failed = 1;
++    }
++done:
++    xqc_monotonic_timestamp = saved_clock;
++    free(fixture.scheduler);
++    return failed;
++}
++
 +int
 +main(void)
 +{
@@ -734,5 +862,6 @@ index 0000000..872a1a9
 +        return 1;
 +    }
 +    free(fixture.scheduler);
-+    return edt_blackhole_small_retransmission_budget();
++    if (edt_blackhole_small_retransmission_budget() != 0) return 1;
++    return edt_warm_stale_fast_path_ack_age();
 +}

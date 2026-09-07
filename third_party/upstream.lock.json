@@ -126,14 +126,15 @@
       "applies_to_commit": "6957ccf9b9fcb9ab62c43672638876abe47162dc",
       "applies_after": "patches/volparossa-xquic.patch",
       "file": "patches/volparossa-xquic-edt.patch",
-      "sha256": "0359b92b5c14b88db3070153f43a5ec013a2167d945dadb36d347d6017cdd75e",
+      "sha256": "8b0a5d5aff8360f390325e618693f78e480fde116d33e58729bc6ab9aa17fa50",
       "purpose": [
         "select exactly one writable path by bounded estimated delivery time",
         "use live RTT, in-flight queue, bandwidth, congestion window and recent loss",
+        "add bounded overdue ACK-progress cost beyond the RTT, variance and peer ACK-delay allowance without changing congestion control or path state",
         "bound initial exploration to a 2 MiB ACKed floor per path without ongoing historical-byte equalisation",
         "stop initial exploration after 8 MiB attempted debt plus one scheduled packet without sufficient ACK progress",
         "exclude congestion-blocked paths without reinjection, duplication or FEC",
-        "exercise post-warm-up EDT selection, bounded startup debt and a 32-DATAGRAM active-blackhole regression in the exact scheduler callback"
+        "exercise post-warm-up EDT selection, bounded startup debt, active-blackhole selection and measured stale-fast-LAN low-rate regression with ACK recovery and idle-path handling in the exact scheduler callback"
       ]
     },
     {

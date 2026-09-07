@@ -6,8 +6,8 @@ set -eu
 umask 077
 export LC_ALL=C
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    printf '%s\n' 'Usage: sh run-warm-failover-probe.sh ABSOLUTE_SDK_ROOT [0|1]' >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 6 ] || [ "$#" -eq 3 ]; then
+    printf '%s\n' 'Usage: sh run-warm-failover-probe.sh ABSOLUTE_SDK_ROOT [0|1 [DELAY0_MS DELAY1_MS [PUMP_MS [burst|lowrate]]]]' >&2
     exit 2
 fi
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -18,6 +18,15 @@ sdk=$(CDPATH='' cd -- "$1" && pwd -P)
 case $sdk in "$common"/*) ;; *) printf '%s\n' 'SDK must be inside this repository common Git directory' >&2; exit 2 ;; esac
 blocked=${2:-1}
 case $blocked in 0|1) ;; *) exit 2 ;; esac
+delay0=${3:-0}; delay1=${4:-0}; pump_ms=${5:-1}; mode=${6:-burst}
+for delay in "$delay0" "$delay1"; do
+    case $delay in ''|*[!0-9]*) exit 2 ;; esac
+    [ "${#delay}" -le 2 ] && [ "$delay" -le 50 ] || exit 2
+done
+case $pump_ms in 1|2|3|4|5|6|7|8|9|10) ;; *) exit 2 ;; esac
+case $mode in burst|lowrate) ;; *) exit 2 ;; esac
+probe_timeout=140s
+if [ "$delay0" -gt 0 ] || [ "$delay1" -gt 0 ]; then probe_timeout=310s; fi
 for command_name in cc git jq sha256sum mktemp timeout unshare ip; do
     command -v "$command_name" >/dev/null 2>&1 || exit 2
 done
@@ -56,9 +65,12 @@ case $work in "$sdk"/probe.??????) ;; *) exit 2 ;; esac
 printf '%s\n' \
     'Plan: compile one source-built diagnostic into the SDK-owned temporary directory;' \
     'create a disposable user/network namespace, bring up only its private loopback;' \
-    'use four ephemeral UDP sockets, exchange 4+8+4+32 MiB through one real two-path session;' \
+    'use four ephemeral UDP sockets, warm one real two-path session with 4+8+4 MiB;' \
     'discard one path in userspace without closing its FD; close sockets and retire the namespace.' \
     'This is not WireGuard, HTTP/3, host-network, or alpha acceptance evidence.'
+printf 'Mode: %s; synthetic one-way delay: %s/%s ms; pump interval: %s ms.\n' "$mode" "$delay0" "$delay1" "$pump_ms"
+printf '%s\n' 'Burst transfers another 32 MiB; lowrate instead tests 44-byte uplink datagrams at two per second for 30 s.' \
+    'Optional userspace delay is a synthetic diagnostic, not the VM TBF topology or a production scheduler change.'
 printf 'Diagnostic artifacts: %s\n' "$work"
 cc -std=c11 -O1 -g -Wall -Wextra -Werror \
     -I "$sdk/source/mqvpn/include" -I "$boringssl/source/boringssl/include" \
@@ -79,10 +91,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-timeout --signal=TERM --kill-after=3s 140s \
+timeout --signal=TERM --kill-after=3s "$probe_timeout" \
     unshare -Urn sh -c 'ip link set lo up && exec "$@"' sh \
     "$work/warm_failover_probe" "$sdk/source/mqvpn/tests/certs/test.crt" \
-    "$sdk/source/mqvpn/tests/certs/test.key" "$blocked" \
+    "$sdk/source/mqvpn/tests/certs/test.key" "$blocked" "$delay0" "$delay1" "$pump_ms" "$mode" \
     >"$work/probe.stdout" 2>"$work/probe.stderr" &
 probe_pid=$!
 status=0

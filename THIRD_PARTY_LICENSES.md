@@ -62,14 +62,21 @@ existing Apache-2.0 upstream files preserve their upstream license and
 notices.
 
 The additional GPL-3.0-only `patches/volparossa-xquic-edt.patch`
-(`0359b92b5c14b88db3070153f43a5ec013a2167d945dadb36d347d6017cdd75e`)
+(`8b0a5d5aff8360f390325e618693f78e480fde116d33e58729bc6ab9aa17fa50`)
 retains bounded initial exploration (2 MiB ACKed per path, at most 8 MiB attempt
 debt plus one packet), then selects by live delivery cost and congestion.
-It does not continuously equalise historical path bytes. The exact callback
-contract covers a warmed-up, still-active black hole with spare congestion
-window: all 32 small application datagrams select the healthy EDT winner.
-This is a deterministic scheduler regression, not a live failover or bandwidth
-acceptance claim. Upstream revisions and original licenses are unchanged.
+It does not continuously equalise historical path bytes. Outstanding bytes
+without ACK progress add bounded overdue time to the delivery estimate after
+the normal RTT/variance/peer ACK-delay allowance. This uses xquic's actual
+ACK-progress timestamp, which resets on send-from-idle; it changes neither
+congestion control nor path state and sends no extra packets. The exact
+callback contract covers the previously tested black hole and the measured
+warm stale-fast-LAN state from mixed-link run `34139658819`: 32 low-rate
+selections use the live slower WAN, real ACK progress restores fast-path
+selection, and idle or sole-writable paths remain usable. The new regression
+fails with the previous patch and passes with this patch. This is deterministic
+scheduler evidence, not a live failover or bandwidth acceptance claim.
+Upstream revisions and original licenses are unchanged.
 
 No local patch is applied to lwIP or BoringSSL. The builder checks all patch
 hashes, runs `git apply --check`, and applies them only to fresh
