@@ -1089,11 +1089,18 @@ mod tests {
             codec.read_request(&protocol, &mut wire).await.unwrap(),
             request
         );
-        let offer =
-            ContentProviderOffer::new(PeerId::random(), vec![4; MAX_CONTENT_OFFER_BYTES]).unwrap();
-        let response =
-            ContentDiscoveryResponse::new(&request, vec![offer.clone(); MAX_CONTENT_OFFERS])
-                .unwrap();
+        let offers: Vec<_> = (0..MAX_CONTENT_OFFERS)
+            .map(|_| {
+                ContentProviderOffer::new(PeerId::random(), vec![4; MAX_CONTENT_OFFER_BYTES])
+                    .unwrap()
+            })
+            .collect();
+        let offer = offers[0].clone();
+        assert_eq!(
+            ContentDiscoveryResponse::new(&request, vec![offer.clone(), offer.clone()]),
+            Err(ContentProviderRpcError::Correlation)
+        );
+        let response = ContentDiscoveryResponse::new(&request, offers).unwrap();
         let mut wire = Cursor::new(Vec::new());
         codec
             .write_response(&protocol, &mut wire, response.clone())
