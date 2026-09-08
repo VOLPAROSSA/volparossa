@@ -10,6 +10,7 @@ import runpy
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).parent
 CHECK = runpy.run_path(str(HERE / "content-provider-https-smoke.py"))
@@ -72,13 +73,35 @@ def fixture(control_node="relay2", native_publication=None):
                 origin_body_bytes=1048576 if index else 0, origin_range_requests=4 if index else 0),
             status=dict(serving=False, control_relay_peer_id=control_peer),
             output=dict(bytes=CHECK["BYTES"], sha256=CHECK["SHA"], path=f"/user/{name}.bin",
-                agent_cache=f"/agent/{name}-cache", user_uid=1001, agent_uid=1002,
+                agent_cache=f"/agent/{name}-cache", user_uid=985, agent_uid=1002,
                 control_gid=1003, agent_gid=1002, output_mode="0600", directory_mode="0700",
                 agent_cache_mode="0700", local_output_initially_absent=True,
                 no_clobber_verified=True, no_clobber_rejected_before_network=True,
                 agent_mount_positive_control=True, agent_cannot_read_user_output_directory=True,
                 client_cache_initially_absent=True, client_mount_cannot_read_origin=True),
             selected_route=copy.deepcopy(route), privacy=privacy, control=control)
+        fetch = cases[name]["fetch"]
+        boundary = dict(user_uid=985, user_gid=985, control_gid=1003,
+                        client_namespace=True, outside_parent_namespace=True,
+                        all_capabilities_dropped=True, no_new_privileges=True)
+        application = dict(consumer=copy.deepcopy(boundary), cli=copy.deepcopy(boundary),
+                           elapsed_ns=3_000_000_000)
+        if not index:
+            for key in ("local_delivery", "output_mode", "ownership_changed", "local_output", "cache"):
+                del fetch[key]
+            fetch.update(operation="browser_content_download", private_spool_removed=True,
+                         authentication_scope="cooperative-origin", https_origin_privileges=False,
+                         single_use=True)
+            ready = {key: value for key, value in fetch.items() if key != "private_spool_removed"}
+            ready.update(operation="browser_download_ready", expires_unix_seconds=1788848552)
+            application.update(ready=ready, ready_elapsed_ns=2_000_000_000,
+                browser_engine_executed=False, private_spool=dict(directory_mode="0700",
+                    file_mode="0600", observed_complete=True, removed=True),
+                http=dict(status=200, bytes=CHECK["BYTES"], sha256=CHECK["SHA"], attachment=True,
+                    octet_stream=True, no_store=True, nosniff=True, loopback_only=True,
+                    single_use_listener_closed=True, completed_before_expiry=True, elapsed_ns=100_000_000))
+        application["final"] = copy.deepcopy(fetch)
+        cases[name]["application"] = application
     origin = dict(pid=300, connections=[
         dict(kind="metadata", payload_bytes=1024, tls13=True, alpn_http11=True,
              source="47.163.4.1:32100", status=200, range_start=None, range_end=None, range_total=None)
@@ -104,6 +127,41 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_browser_delivery_requires_actual_client_get_receipt_deadline_and_private_spool(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        for path, wrong in (
+            (("cli", "user_uid"), 0), (("consumer", "client_namespace"), False),
+            (("cli", "all_capabilities_dropped"), False),
+            (("consumer", "outside_parent_namespace"), False),
+            (("consumer", "no_new_privileges"), False),
+            (("http", "bytes"), 0), (("http", "sha256"), "0" * 64),
+            (("http", "loopback_only"), False), (("http", "single_use_listener_closed"), False),
+            (("http", "completed_before_expiry"), False), (("http", "attachment"), False),
+            (("private_spool", "file_mode"), "0644"), (("private_spool", "removed"), False),
+            (("browser_engine_executed",), True), (("elapsed_ns",), 0),
+            (("ready_elapsed_ns",), 3_000_000_000), (("http", "elapsed_ns"), 3_000_000_000),
+            (("ready", "peer_bytes"), 0), (("ready", "https_origin_privileges"), True),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, ("cases", "complete", "application", *path), wrong))
+        relabelled = copy.deepcopy(value)
+        relabelled["cases"]["complete"]["fetch"]["operation"] = "https_content_download"
+        relabelled["cases"]["complete"]["application"]["final"]["operation"] = "https_content_download"
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](relabelled)
+
+    def test_browser_driver_rejects_nonlocal_or_expired_url_before_any_socket(self):
+        with mock.patch("http.client.HTTPConnection", side_effect=AssertionError("socket attempted")):
+            for url, expiry in (
+                ("http://example.com/" + "a" * 64, 9999999999),
+                ("http://127.0.0.1:1234/" + "a" * 64, 1),
+                ("http://127.0.0.1:1234/" + "a" * 64 + "?url=anything", 9999999999),
+            ):
+                with self.subTest(url=url), self.assertRaises(ValueError):
+                    CHECK["browser_http_get"](dict(download_url=url, expires_unix_seconds=expiry),
+                                              Path("/unused-test-output"), 0)
+
     def test_https_local_delivery_requires_actual_owner_and_no_clobber_not_native_export(self):
         evidence = fixture()
         for field, wrong in (

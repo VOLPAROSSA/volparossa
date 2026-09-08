@@ -4,7 +4,7 @@
 # shellcheck disable=SC2154,SC2034
 
 content_provider_https_cli() {
-    timeout --signal=TERM --kill-after=5s 120s setpriv \
+    timeout --signal=TERM --kill-after=5s 120s ip netns exec "$CLIENT" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ph_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" "$@"
@@ -50,12 +50,19 @@ content_provider_https_phase() {
         || fail PROVIDER_HTTPS_CONTROL_CAPTURE_UNAVAILABLE
 
     PHASE=$ph_prefix-fetch
-    content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
-        --metadata-path /.well-known/volparossa/content/asset \
-        --ca-file "$ph_user/origin.pem" \
-        --cache "$ph_cache" --local-output "$ph_output" \
-        >"$WORK/$ph_prefix-fetch.json" 2>"$WORK/$ph_prefix-fetch.err" \
+    # Both the CLI process and the application's loopback HTTP GET inherit the exact
+    # Client namespace and unprivileged operator credentials, never the VM root network.
+    timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" setpriv \
+        --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ph_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$source_directory/tests/integration/content-provider-https-smoke.py" \
+        consume "$ph_case" "$binary_directory/volparossa" \
+        "$WORK/runtime-client/control/agent.sock" "$ph_cache" "$ph_user" \
+        "$ph_parent_netns" "$ph_client_netns" "$WORKER_UID" "$WORKER_GID" "$ph_control_gid" \
+        >"$WORK/$ph_prefix-consumer.json" 2>"$WORK/$ph_prefix-fetch.err" \
         || fail PROVIDER_HTTPS_RUNTIME_FETCH_FAILED
+    jq '.final' "$WORK/$ph_prefix-consumer.json" >"$WORK/$ph_prefix-fetch.json" \
+        || fail PROVIDER_HTTPS_RECEIPT_INVALID
     benchmark_capture_paths "$ph_prefix-live" mptcp || fail PROVIDER_HTTPS_PATHS_UNAVAILABLE
     jq -e --arg context "$provider_context" '.route_context_id == $context' \
         "$WORK/$ph_prefix-live-selection.json" >/dev/null || fail PROVIDER_HTTPS_ROUTE_CHANGED
@@ -65,7 +72,8 @@ content_provider_https_phase() {
     stop_privacy_observers || fail PROVIDER_HTTPS_PRIVACY_INCOMPLETE
     content_provider_stop_control_observer || fail PROVIDER_HTTPS_CONTROL_CAPTURE_INCOMPLETE
     ph_output_digest=$(sha256sum "$ph_output" | awk '{print $1}')
-    # The existing output is refused by the caller before another origin/control request.
+    # This is the existing local-output command's no-clobber guard, also for the file
+    # obtained via HTTP. It is not an invented browser-download output-path option.
     if content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
         --metadata-path /.well-known/volparossa/content/asset --ca-file "$ph_user/origin.pem" \
         --cache "$ph_cache" --local-output "$ph_output" \
@@ -114,6 +122,10 @@ content_provider_https_run() {
     ph_user=$WORK/client-fixtures/https-output
     if [ -e "$ph_user" ] || [ -L "$ph_user" ]; then fail PROVIDER_HTTPS_USER_DIRECTORY_EXISTS; fi
     install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$ph_user"
+    ph_parent_netns=$(readlink /proc/self/ns/net)
+    ph_client_netns=$(ip netns exec "$CLIENT" readlink /proc/self/ns/net) \
+        || fail PROVIDER_HTTPS_CLIENT_NAMESPACE_UNAVAILABLE
+    [ "$ph_parent_netns" != "$ph_client_netns" ] || fail PROVIDER_HTTPS_CLIENT_NAMESPACE_INVALID
     # Same UID is insufficient evidence in this topology: probe the actual Client agent's
     # private mount namespace, whose existing InaccessiblePaths hides this entire seed root.
     provider_client_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)

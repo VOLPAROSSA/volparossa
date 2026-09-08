@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Normal CLI HTTPS/provider evidence, not browser, speed or full C02 acceptance.
+"""Normal CLI/browser-HTTP provider evidence, not a GUI, speed or full C02/C08 acceptance.
 
 The enclosing native-provider report owns exact-source and final host/guest cleanup checks.
 This checker requires both HTTPS phases and their independently drained physical captures.
 """
 
+import hashlib
+import http.client
 import json
+import os
 from pathlib import Path
 import re
 import runpy
+import selectors
+import signal
+import socket
+import stat
+import subprocess
 import sys
+import time
+from urllib.parse import urlsplit
 
 COMMON = runpy.run_path(str(Path(__file__).with_name("content-network-smoke.py")))
 read, require, ROLES = COMMON["read"], COMMON["require"], COMMON["ROLES"]
@@ -21,6 +31,169 @@ PUBLIC_IPS = dict(relay0="42.158.0.1", relay1="44.160.1.1", relay2="45.161.2.1",
 RANGES = ((262144, 524287), (786432, 1048575),
           (1310720, 1572863), (1835008, 2097151))
 RANGE_BYTES = 262144
+
+
+def process_boundary(pid, parent_namespace, client_namespace, uid, gid, control_gid):
+    """Inspect real inherited credentials, not successful setpriv exit status alone."""
+    status = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines())
+    namespace = os.readlink(f"/proc/{pid}/ns/net")
+    capabilities = ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+    require(namespace == client_namespace != parent_namespace
+            and uid == 985 and all(int(value) == uid for value in status["Uid"].split())
+            and all(int(value) == gid for value in status["Gid"].split())
+            and {int(value) for value in status["Groups"].split()} == {control_gid}
+            and all(int(status[key], 16) == 0 for key in capabilities)
+            and int(status["NoNewPrivs"]) == 1,
+            "consumer is not the exact capless Client-namespace operator")
+    return dict(user_uid=uid, user_gid=gid, control_gid=control_gid,
+                client_namespace=True, outside_parent_namespace=True,
+                all_capabilities_dropped=True, no_new_privileges=True)
+
+
+def bounded_json_line(stream, deadline):
+    data = bytearray()
+    with selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_READ)
+        while len(data) < 16384:
+            require(selector.select(max(0, deadline - time.monotonic())), "CLI receipt timeout")
+            byte = os.read(stream.fileno(), 1)
+            require(byte, "CLI ended without its receipt")
+            if byte == b"\n":
+                return json.loads(data)
+            data.extend(byte)
+    raise ValueError("oversized CLI receipt")
+
+
+def browser_http_get(ready, output, deadline):
+    url = urlsplit(ready["download_url"])
+    require(url.scheme == "http" and url.hostname == "127.0.0.1"
+            and url.username is None and url.password is None and url.port is not None
+            and url.netloc == f"127.0.0.1:{url.port}"
+            and re.fullmatch(r"/[0-9a-f]{64}", url.path) and not url.query and not url.fragment
+            and time.time() < ready["expires_unix_seconds"] <= time.time() + 301,
+            "browser readiness lacks a live exact loopback single-use URL")
+    started = time.monotonic_ns()
+    digest, count = hashlib.sha256(), 0
+    connection = http.client.HTTPConnection("127.0.0.1", url.port, timeout=5)
+    try:
+        connection.request("GET", url.path)
+        response = connection.getresponse()
+        require(response.status == 200 and response.getheader("Content-Length") == str(BYTES)
+                and response.getheader("Content-Type") == "application/octet-stream"
+                and response.getheader("Content-Disposition")
+                    == 'attachment; filename="volparossa-download.bin"'
+                and response.getheader("Cache-Control") == "no-store"
+                and response.getheader("X-Content-Type-Options") == "nosniff",
+                "browser HTTP attachment headers differ from the authenticated object")
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as target:
+            while chunk := response.read(65536):
+                require(time.monotonic() < deadline and count + len(chunk) <= BYTES,
+                        "browser body exceeded time or exact object bound")
+                target.write(chunk)
+                digest.update(chunk)
+                count += len(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        directory = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        connection.close()
+    require(count == BYTES and digest.hexdigest() == SHA
+            and time.time() < ready["expires_unix_seconds"],
+            "browser HTTP output hash, length or original deadline invalid")
+    try:
+        repeated = socket.create_connection(("127.0.0.1", url.port), timeout=2)
+    except ConnectionRefusedError:
+        pass
+    else:
+        repeated.close()
+        raise ValueError("single-use listener still accepts a second connection")
+    return dict(status=200, bytes=count, sha256=digest.hexdigest(), attachment=True,
+                octet_stream=True, no_store=True, nosniff=True, loopback_only=True,
+                single_use_listener_closed=True, completed_before_expiry=True,
+                elapsed_ns=time.monotonic_ns() - started)
+
+
+def inspect_spool(user_directory, uid, gid):
+    spools = list(user_directory.glob("volparossa-browser-*"))
+    require(len(spools) == 1, "expected exactly one private browser spool")
+    directory = spools[0].lstat()
+    require(stat.S_ISDIR(directory.st_mode) and stat.S_IMODE(directory.st_mode) == 0o700
+            and directory.st_uid == uid and directory.st_gid == gid, "unsafe browser spool directory")
+    files = list(spools[0].iterdir())
+    require(len(files) == 1, "browser spool is not the bounded single-object storage")
+    metadata = files[0].lstat()
+    require(stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o600
+            and metadata.st_uid == uid and metadata.st_gid == gid and metadata.st_size == BYTES,
+            "unsafe or incomplete private browser spool")
+    return spools[0]
+
+
+def consume(arguments):
+    """Called only after the enclosing disposable harness enters CLIENT and drops privileges."""
+    case, binary, control, cache, user_path, parent_ns, client_ns, uid, gid, control_gid = arguments
+    require(case in ("complete", "missing"), "unknown HTTPS consumer phase")
+    uid, gid, control_gid = int(uid), int(gid), int(control_gid)
+    boundary = process_boundary("self", parent_ns, client_ns, uid, gid, control_gid)
+    user_directory = Path(user_path)
+    output = user_directory / f"{case}-object.bin"
+    require(not output.exists() and not output.is_symlink()
+            and not list(user_directory.glob("volparossa-browser-*")), "consumer storage is not fresh")
+    command = [binary, "--control-socket", control, "content",
+               "browser-download" if case == "complete" else "fetch-https",
+               "--url", "https://destination.volparossa.test:18443/asset.bin",
+               "--metadata-path", "/.well-known/volparossa/content/asset",
+               "--ca-file", str(user_directory / "origin.pem"), "--cache", cache]
+    if case == "missing":
+        command.extend(["--local-output", str(output)])
+    started, deadline = time.monotonic_ns(), time.monotonic() + 110
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
+                               env=dict(os.environ, TMPDIR=str(user_directory)))
+    previous = {}
+    def interrupted(_signum, _frame):
+        raise ValueError("HTTPS application consumer interrupted")
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, interrupted)
+        cli_boundary = process_boundary(process.pid, parent_ns, client_ns, uid, gid, control_gid)
+        first = bounded_json_line(process.stdout, deadline)
+        report = dict(final=first, consumer=boundary, cli=cli_boundary)
+        if case == "complete":
+            require(first["operation"] == "browser_download_ready" and first["bytes"] == BYTES
+                    and first["sha256"] == SHA and first["origin_authenticated"] is True,
+                    "expected complete origin-authenticated browser readiness")
+            ready_elapsed = time.monotonic_ns() - started
+            spool = inspect_spool(user_directory, uid, gid)
+            report["http"] = browser_http_get(first, output, deadline)
+            final = bounded_json_line(process.stdout, deadline)
+            require(final["operation"] == "browser_content_download"
+                    and final["private_spool_removed"] is True,
+                    "browser CLI did not confirm completed delivery and cleanup")
+            report.update(final=final, ready={key: value for key, value in first.items()
+                                            if key != "download_url"},
+                          private_spool=dict(directory_mode="0700", file_mode="0600",
+                                             observed_complete=True, removed=not spool.exists()),
+                          ready_elapsed_ns=ready_elapsed, browser_engine_executed=False)
+        require(process.wait(timeout=max(0.1, deadline - time.monotonic())) == 0
+                and process.stdout.read(1) == b"", "CLI failed or emitted unexpected trailing data")
+        report["elapsed_ns"] = time.monotonic_ns() - started
+        require(not list(user_directory.glob("volparossa-browser-*")), "private browser spool remained")
+        return report
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        process.stdout.close()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def origin_exit_source(source):
@@ -120,14 +293,10 @@ def validate_path(phase, peers, provider_nodes, missing):
 
 def validate_local_output(phase):
     fetch, output = phase["fetch"], phase["output"]
-    require(fetch["operation"] == "https_content_download" and fetch["local_delivery"] is True
-            and fetch["output_mode"] == "0600" and fetch["ownership_changed"] is False
-            and fetch["origin_authority_persisted"] is False
+    require(fetch["origin_authority_persisted"] is False
             and fetch["sha256"] == output["sha256"] == SHA
-            and fetch["local_output"] == output["path"]
-            and fetch["cache"] == output["agent_cache"]
-            and fetch["local_output"] != fetch["cache"]
-            and output["user_uid"] > 0 and output["agent_uid"] > 0
+            and output["path"] != output["agent_cache"]
+            and output["user_uid"] == 985 and output["agent_uid"] > 0
             and output["user_uid"] != output["agent_uid"]
             and output["control_gid"] > 0 and output["control_gid"] != output["agent_gid"]
             and output["output_mode"] == "0600" and output["directory_mode"] == "0700"
@@ -138,6 +307,52 @@ def validate_local_output(phase):
             and phase["status"]["serving"] is False
             and phase["status"]["control_relay_peer_id"] == fetch["control_relay_peer_id"],
             "same-operation HTTPS result was not delivered privately to the actual user account")
+
+
+def validate_application(phase, browser):
+    application, fetch, output = phase["application"], phase["fetch"], phase["output"]
+    require(application["final"] == fetch and 0 < application["elapsed_ns"] <= 120_000_000_000,
+            "application receipt differs from real CLI result or lacks bounded monotone timing")
+    for key in ("consumer", "cli"):
+        boundary = application[key]
+        require(boundary["user_uid"] == output["user_uid"] == 985
+                and boundary["control_gid"] == output["control_gid"]
+                and boundary["user_gid"] > 0
+                and all(boundary[flag] is True for flag in (
+                    "client_namespace", "outside_parent_namespace",
+                    "all_capabilities_dropped", "no_new_privileges")),
+                "HTTP application or CLI ran outside the capless Client operator boundary")
+    require(application["consumer"] == application["cli"], "CLI/application credentials differ")
+    if not browser:
+        require(fetch["operation"] == "https_content_download" and fetch["local_delivery"] is True
+                and fetch["output_mode"] == "0600" and fetch["ownership_changed"] is False
+                and fetch["local_output"] == output["path"]
+                and fetch["cache"] == output["agent_cache"]
+                and "http" not in application and "ready" not in application,
+                "missing-range phase is not the ordinary HTTPS local-output command")
+        return
+    ready, http, spool = application["ready"], application["http"], application["private_spool"]
+    require(fetch["operation"] == "browser_content_download"
+            and ready["operation"] == "browser_download_ready"
+            and fetch["private_spool_removed"] is True
+            and ready["expires_unix_seconds"] > 0 and "download_url" not in ready
+            and all(key not in fetch for key in ("local_delivery", "local_output", "cache"))
+            and {key: value for key, value in ready.items()
+                 if key not in ("operation", "expires_unix_seconds")}
+                == {key: value for key, value in fetch.items()
+                    if key not in ("operation", "private_spool_removed")}
+            and fetch["authentication_scope"] == "cooperative-origin"
+            and fetch["https_origin_privileges"] is False and fetch["single_use"] is True
+            and application["browser_engine_executed"] is False,
+            "browser receipt is relabelled, mismatched or claims an unexecuted browser engine")
+    require(http["status"] == 200 and http["bytes"] == fetch["bytes"] == BYTES
+            and http["sha256"] == fetch["sha256"] == SHA
+            and all(http[flag] is True for flag in ("attachment", "octet_stream", "no_store",
+                "nosniff", "loopback_only", "single_use_listener_closed", "completed_before_expiry"))
+            and 0 < application["ready_elapsed_ns"] < application["elapsed_ns"]
+            and 0 < http["elapsed_ns"] <= application["elapsed_ns"] - application["ready_elapsed_ns"]
+            and spool == dict(directory_mode="0700", file_mode="0600", observed_complete=True, removed=True),
+            "actual single-use HTTP delivery, elapsed timing or private spool cleanup not proven")
 
 
 def validate_evidence(evidence):
@@ -202,6 +417,7 @@ def validate_evidence(evidence):
                 and output["client_mount_cannot_read_origin"] is True,
                 "normal CLI did not authenticate/reconstruct the expected peer-plus-origin bytes")
         validate_local_output(phase)
+        validate_application(phase, browser=not missing)
         validate_path(phase, peers, provider_nodes, missing)
         validate_control(phase["control"], control_node, provider_nodes, missing)
     require(cases["complete"]["selected_route"]["route_context_id"]
@@ -218,6 +434,7 @@ def build_evidence(work):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
             fetch=read(work / f"{prefix}-fetch.json"),
+            application=read(work / f"{prefix}-consumer.json"),
             status=read(work / f"{prefix}-status.json"),
             output=read(work / f"{prefix}-output.json"),
             selected_route=read(work / f"{prefix}-live-selection.json"),
@@ -238,10 +455,15 @@ def build_evidence(work):
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 4 or sys.argv[1] != "evidence":
-            raise ValueError("usage: content-provider-https-smoke.py evidence WORK OUTPUT")
-        evidence = build_evidence(Path(sys.argv[2]))
-        with Path(sys.argv[3]).open("x", encoding="ascii") as target:
-            json.dump(evidence, target, sort_keys=True, separators=(",", ":"))
-    except (KeyError, TypeError, ValueError, OSError) as error:
+        if len(sys.argv) == 12 and sys.argv[1] == "consume":
+            json.dump(consume(sys.argv[2:]), sys.stdout, sort_keys=True, separators=(",", ":"))
+            sys.stdout.write("\n")
+        elif len(sys.argv) == 4 and sys.argv[1] == "evidence":
+            evidence = build_evidence(Path(sys.argv[2]))
+            with Path(sys.argv[3]).open("x", encoding="ascii") as target:
+                json.dump(evidence, target, sort_keys=True, separators=(",", ":"))
+        else:
+            raise ValueError("expected evidence WORK OUTPUT or bounded consume arguments")
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError,
+            http.client.HTTPException) as error:
         raise SystemExit(f"HTTPS provider evidence rejected: {error}") from error
