@@ -24,9 +24,13 @@ mod https_download;
 mod mailbox;
 mod named_download;
 mod private_message;
+mod site;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Pack explicit static website assets or open a publisher-authenticated site from peers.
+    #[command(subcommand)]
+    Site(site::Command),
     /// Explicit two-provider encrypted mailbox invitations, deposits and inbox retrieval.
     #[command(subcommand)]
     Mailbox(mailbox::Command),
@@ -304,6 +308,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         ContentFetchRequest, ContentServeRequest, Empty, control_request::Operation,
     };
     let report = match command {
+        Command::Site(args) => return site::run(args, socket).await,
         Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
         Command::Publish(args) => publish(&args)?,

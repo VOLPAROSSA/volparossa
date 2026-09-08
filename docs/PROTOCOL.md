@@ -1294,6 +1294,25 @@ maintainer set/environment, exact and wildcard domains, exact IP rules, and exac
 Production defaults require three unique valid signatures from five trusted production maintainers;
 development maintainers are rejected in production mode. See [WHITELIST.md](WHITELIST.md).
 
+## Native static-site object v1
+
+Native content type `application/vnd.volparossa.site.v1` uses the existing signed publication
+envelope, chunk hashes, publisher/name lookup and protected transfer. There is no new publisher
+identity, signature scheme or HTTPS-origin authority. The complete object consists of a four-byte
+big-endian index length, a canonical protobuf index, then contiguous asset bytes. Index fields
+are `uint32 version = 1` (value 1) and repeated `Asset assets = 2`. Each Asset has string `path = 1`,
+string `content_type = 2`, `uint64 offset = 3` and `uint64 length = 4`; offsets are relative to the
+payload immediately after the index. Entries are strictly sorted by path and cover the exact
+payload with no gaps, overlap or trailing bytes. Canonical re-encoding must equal the index bytes.
+
+Bounds are 256 assets, a 256-KiB index, 1024-byte UTF-8 paths, 128-byte lowercase ASCII MIME types
+without parameters, and the existing 256-MiB complete-object limit. Absolute paths reject empty,
+dot/hidden, whitespace, control, backslash, percent, query and fragment components. `/index.html`
+with `text/html` is mandatory. Filesystem selection and symlink refusal belong to the explicit
+pack command; the codec performs no filesystem lookup. HTTP URL decoding/query handling happens
+only in the local viewer and never changes the authenticated asset index. A structurally valid
+bundle is not authenticated until the outer native manifest and complete payload are verified.
+
 ## Versioning rules
 
 Unknown enum values, versions, required fields, or oneof operations are rejected. New optional

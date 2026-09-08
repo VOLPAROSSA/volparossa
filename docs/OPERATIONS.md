@@ -696,6 +696,52 @@ attachment gains none of the source website's browser permissions, cookies or lo
 This is an explicit download integration, not general website rendering or transparent HTTPS
 caching. Measured benefit and the complete C08 checkpoint remain unproved.
 
+### Native static websites
+
+Pack an explicitly selected directory with an `index.html`, then publish the bundle with the
+existing encrypted identity and ordinary native-content commands:
+
+```sh
+volparossa content site pack --directory ./public --output ./site.vps
+volparossa content publish \
+  --identity /path/to/existing/identity.key \
+  --input ./site.vps --cache ./site-cache --manifest ./site.v1.pb \
+  --name my-site --revision 1 --content-type application/vnd.volparossa.site.v1
+```
+
+Packing is offline and does not publish anything. It selects at most 256 regular files within
+the native 256-MiB object limit, excludes dotfiles/directories, rejects symlinks and requires
+unambiguous UTF-8 paths. Keep secrets outside this explicitly public directory. The new private
+bundle is never written over an existing file. HTML, CSS, JavaScript, images, fonts and media are
+indexed into one signed publication; no files are extracted while viewing.
+
+Import and serve that public publication using the [existing account handoff](#moving-an-explicit-public-publication-to-or-from-the-service)
+and `content serve --name-lookup`. Each consumer obtains the trusted publisher key and exact name,
+not the publisher's private key or a browser localhost URL:
+
+```sh
+volparossa content site open \
+  --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX --name my-site --min-revision 1 \
+  --cache /agent-owned/new-site-cache
+```
+
+Keep the command running and paste `site_url` from its first JSON line into the browser. It first
+retrieves and verifies the entire named publication through the existing protected chunk path,
+then serves only those immutable assets on a random `*.localhost` name and loopback-only port.
+Root-relative links, directory `index.html`, UTF-8 paths, GET/HEAD and single byte ranges work;
+bounded query strings are ignored for immutable lookup, not interpreted as server operations.
+`--reuse-cache` and `--min-revision` retain the normal named-cache semantics.
+
+The local viewer expires at the earlier of the original signed expiry or its own
+`--lifetime-seconds` (default one hour, maximum one day). SIGINT/TERM closes the listener and
+in-flight responses and removes the private spool. No certificate is installed and the page
+does not inherit an external website's origin, login or cookies. Its browser sandbox supports
+scripts and local assets but excludes persistent origin storage, service workers, forms,
+embedded frames and external network requests. This is a static publication, not a dynamic
+server/database, transparent HTTPS cache or a promise of permanent replica availability.
+The publisher may be offline only while reachable replicas retain valid metadata and every
+required chunk. See [source-scoped verification](IMPLEMENTATION_STATUS.md).
+
 ### Opportunistic replica cache
 
 For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`

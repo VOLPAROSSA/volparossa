@@ -11,6 +11,7 @@ mod manifest;
 pub mod origin_https;
 pub mod private_message;
 pub mod provider;
+pub mod site;
 mod store;
 pub mod transfer;
 

@@ -114,3 +114,11 @@ The agent wires this into an explicitly configured post-download job, with expli
 listener. Full owner-priority I/O scheduling, retention repair, web policy and DNS remain
 unfinished. Publisher input and output-path selection remain
 caller-authorized; this crate does not authorize sharing captured/private/no-store traffic.
+
+`site` packs a canonical bounded HTML/CSS/JavaScript/media index and immutable asset bytes into
+one ordinary native object. The existing signed manifest authenticates the whole bundle; the
+codec alone conveys no publisher or HTTPS authority and performs no filesystem or network I/O.
+The CLI's `content site pack` and `content site open` compose it with explicit publication,
+protected named retrieval and an isolated local browser origin. See the
+[site commands](../../docs/OPERATIONS.md#native-static-websites) and
+[wire format](../../docs/PROTOCOL.md#native-static-site-object-v1).

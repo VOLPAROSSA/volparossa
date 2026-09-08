@@ -2,6 +2,9 @@
 //! Actual CLI/local-stream proof, not a provider-discovery or globally-latest-version proof.
 //! Sockets exist only inside the verified disposable, capability-free network namespace.
 
+#[path = "named_download_cli/site.rs"]
+mod site;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
@@ -44,6 +47,10 @@ fn named_download_rejects_wrong_publisher_name_revision_expiry_and_final() {
 }
 
 fn isolated(test: &str, scenario: impl Future<Output = ()>) {
+    isolated_network(test, scenario, "none");
+}
+
+fn isolated_network(test: &str, scenario: impl Future<Output = ()>, network: &str) {
     if let Some(parent) = std::env::var_os(MARKER) {
         assert_ne!(
             fs::read_link("/proc/self/ns/net").unwrap().as_os_str(),
@@ -61,7 +68,7 @@ fn isolated(test: &str, scenario: impl Future<Output = ()>) {
         "/../../scripts/run-isolated-test.sh"
     ))
     .arg(std::env::current_exe().unwrap())
-    .args([test, MARKER, "none"])
+    .args([test, MARKER, network])
     .output()
     .expect("isolated test runner");
     assert!(
@@ -84,6 +91,7 @@ struct Fixture {
     store: ChunkStore,
     key: SigningKey,
     bytes: Vec<u8>,
+    content_type: &'static str,
 }
 
 impl Fixture {
@@ -105,6 +113,7 @@ impl Fixture {
             store,
             key: SigningKey::generate(&mut OsRng),
             bytes,
+            content_type: "application/octet-stream",
         }
     }
 
@@ -135,7 +144,7 @@ impl Fixture {
                     } else {
                         3
                     },
-                    content_type: "application/octet-stream".into(),
+                    content_type: self.content_type.into(),
                 },
                 length: u64::try_from(self.bytes.len()).unwrap(),
                 validity: Validity {
@@ -328,6 +337,17 @@ async fn successful_downloads() {
         assert_eq!(result["globally_latest"], false);
         assert_eq!(result["local_delivery"], true);
         assert_eq!(result["ownership_changed"], false);
+        assert_eq!(result["local_output"], name);
+        assert_eq!(
+            result["cache"],
+            fixture
+                .directory
+                .path()
+                .join("agent-cache")
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(result["output_mode"], "0600");
         let path = fixture.directory.path().join(name);
         assert_eq!(fs::read(&path).unwrap(), fixture.bytes);
         assert_eq!(

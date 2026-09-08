@@ -17,14 +17,80 @@ use super::{FetchName, absolute_path, ensure_new_output, now_seconds, output_par
 
 pub(super) async fn run(args: &FetchName, socket: &Path) -> Result<()> {
     ensure_new_output(&args.local_output)?;
-    let report = timeout(Duration::from_secs(600), download(args, socket))
-        .await
-        .context("named download deadline exceeded; verified agent cache chunks may remain")??;
+    let download = prepare(args, socket, output_parent(&args.local_output)).await?;
+    let mut report = download.report();
+    report["cache"] = serde_json::to_value(&args.cache)?;
+    report["local_output"] = serde_json::to_value(&args.local_output)?;
+    download.check_live()?;
+    download
+        .temporary
+        .persist_noclobber(&args.local_output)
+        .map_err(|error| error.error)
+        .context("cannot publish named output without overwriting an existing entry")?;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
 
-async fn download(args: &FetchName, socket: &Path) -> Result<serde_json::Value> {
+/// Created only after publisher/name validation, complete bytes and correlated final receipt.
+pub(super) struct VerifiedNamedDownload {
+    temporary: tempfile::NamedTempFile,
+    manifest: VerifiedManifest,
+    receipt: ContentReceipt,
+    expires: u64,
+    authority_deadline: Instant,
+}
+
+impl VerifiedNamedDownload {
+    pub(super) fn as_file(&self) -> &std::fs::File {
+        self.temporary.as_file()
+    }
+
+    pub(super) fn manifest(&self) -> &VerifiedManifest {
+        &self.manifest
+    }
+
+    pub(super) fn receipt(&self) -> &ContentReceipt {
+        &self.receipt
+    }
+
+    pub(super) fn report(&self) -> serde_json::Value {
+        report(self.receipt(), self.manifest())
+    }
+
+    pub(super) fn expires(&self) -> u64 {
+        self.expires
+    }
+
+    pub(super) fn authority_deadline(&self) -> Instant {
+        self.authority_deadline
+    }
+
+    pub(super) fn check_live(&self) -> Result<()> {
+        if Instant::now() >= self.authority_deadline() || now_seconds()? >= self.expires() {
+            bail!("publication expired before local output publication");
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn prepare(
+    args: &FetchName,
+    socket: &Path,
+    private_parent: &Path,
+) -> Result<VerifiedNamedDownload> {
+    timeout(
+        Duration::from_secs(600),
+        download(args, socket, private_parent),
+    )
+    .await
+    .context("named download deadline exceeded; verified agent cache chunks may remain")?
+}
+
+async fn download(
+    args: &FetchName,
+    socket: &Path,
+    private_parent: &Path,
+) -> Result<VerifiedNamedDownload> {
     let query = NameQuery::new(
         args.publisher_key.to_bytes(),
         &args.name,
@@ -48,14 +114,15 @@ async fn download(args: &FetchName, socket: &Path) -> Result<serde_json::Value> 
     };
     let manifest =
         query.verify_candidate(&SignedManifest::decode(&ready.manifest)?, now_seconds()?)?;
-    let remaining = manifest
-        .validity()
-        .expires
+    let expires = manifest.validity().expires;
+    let authority_observed_at = Instant::now();
+    let remaining = expires
         .checked_sub(now_seconds()?)
         .filter(|seconds| *seconds > 0)
         .context("named publication expired before local delivery")?;
-    let deadline = Instant::now() + Duration::from_secs(remaining.min(30));
-    let mut temporary = tempfile::NamedTempFile::new_in(output_parent(&args.local_output))?;
+    let authority_deadline = authority_observed_at + Duration::from_secs(remaining);
+    let deadline = authority_deadline.min(authority_observed_at + Duration::from_secs(30));
+    let mut temporary = tempfile::NamedTempFile::new_in(private_parent)?;
     temporary
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))?;
@@ -92,28 +159,28 @@ async fn download(args: &FetchName, socket: &Path) -> Result<serde_json::Value> 
     {
         bail!("named local delivery did not complete with the exact publisher-authorized object");
     }
-    temporary.as_file().sync_all()?;
-    if Instant::now() >= deadline || now_seconds()? >= manifest.validity().expires {
+    let download = VerifiedNamedDownload {
+        temporary,
+        manifest,
+        receipt,
+        expires,
+        authority_deadline,
+    };
+    download.as_file().sync_all()?;
+    if Instant::now() >= deadline {
         bail!("publication expired before local output publication");
     }
-    temporary
-        .persist_noclobber(&args.local_output)
-        .map_err(|error| error.error)
-        .context("cannot publish named output without overwriting an existing entry")?;
-    Ok(report(&receipt, args, &manifest))
+    download.check_live()?;
+    Ok(download)
 }
 
-fn report(
-    receipt: &ContentReceipt,
-    args: &FetchName,
-    manifest: &VerifiedManifest,
-) -> serde_json::Value {
+fn report(receipt: &ContentReceipt, manifest: &VerifiedManifest) -> serde_json::Value {
     serde_json::json!({
         "operation":"named_content_download", "bytes":receipt.bytes, "chunks":receipt.chunks,
         "publisher_key":hex::encode(manifest.publisher()), "name":manifest.metadata().name,
         "revision":manifest.metadata().revision, "manifest_id":hex::encode(manifest.manifest_id()),
-        "sha256":hex::encode(manifest.object_sha256()), "local_output":args.local_output,
-        "cache":args.cache, "local_delivery":true, "output_mode":"0600",
+        "sha256":hex::encode(manifest.object_sha256()),
+        "local_delivery":true, "output_mode":"0600",
         "ownership_changed":false, "origin_authenticated":false, "globally_latest":false,
         "peer_bytes":receipt.peer_bytes, "providers_used":receipt.providers_used,
         "provider_peer_ids":receipt.provider_peer_ids,
