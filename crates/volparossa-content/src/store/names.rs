@@ -1,6 +1,10 @@
 //! Durable revision observations scoped only to an explicitly selected owned consumer cache.
 //! These are independent of chunk LRU and expiring storage-only replica registrations.
 
+mod cached;
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 
@@ -111,7 +115,8 @@ impl ChunkStore {
     }
 
     pub(super) fn check_name_metadata(&self) -> Result<(), Error> {
-        self.read_name_pins().map(|_| ())
+        self.read_name_pins()?;
+        self.check_cached_name_metadata()
     }
 
     fn read_name_pins(&self) -> Result<PinMap, Error> {

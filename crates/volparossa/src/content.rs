@@ -184,6 +184,9 @@ pub(crate) struct FetchName {
     /// Reopen verified owned chunks and preserve the cache's observed revision floor.
     #[arg(long)]
     reuse_cache: bool,
+    /// Use only the existing complete native cache; no route, discovery or network fetch.
+    #[arg(long, requires = "reuse_cache")]
+    cache_only: bool,
     /// New 0600 output owned by your account; its path is never sent to the agent.
     #[arg(long)]
     local_output: PathBuf,
@@ -832,6 +835,18 @@ mod tests {
         assert_eq!(args.name, "notes.résumé");
         assert_eq!(args.min_revision, None);
         assert!(!args.reuse_cache);
+        assert!(!args.cache_only);
+        assert!(crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only"])).is_err());
+        let parsed =
+            crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only", "--reuse-cache"]))
+                .unwrap();
+        let crate::CliCommand::Content { command } = parsed.command else {
+            panic!("content command expected");
+        };
+        let Command::FetchName(args) = *command else {
+            panic!("named fetch expected");
+        };
+        assert!(args.cache_only && args.reuse_cache);
         assert!(crate::Cli::try_parse_from(&base[..base.len() - 2]).is_err());
         assert!(
             crate::Cli::try_parse_from(base.into_iter().chain(["--min-revision", "0"])).is_err()

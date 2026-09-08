@@ -2,6 +2,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
+use ed25519_dalek::VerifyingKey;
 use tokio::{net::UnixStream, time::timeout};
 use volparossa_content::provider::named::{NameQuery, NameResolution, lookup_publication};
 use volparossa_content::transfer::{TransferLimits, serve_peer};
@@ -25,7 +26,8 @@ struct Selected {
 struct PreparedDownload {
     selected: Selected,
     query: NameQuery,
-    policy: VerifiedPolicy,
+    // None is the explicit cache-only path, never permission to fetch without policy.
+    policy: Option<VerifiedPolicy>,
     store: ChunkStore,
     source_root: PathBuf,
     source_limits: CacheLimits,
@@ -104,6 +106,41 @@ async fn checked_policy(
         return Err(ContentError::Policy);
     }
     Ok(current)
+}
+
+async fn checked_download_access(
+    context: &ControlContext,
+    policy: Option<&VerifiedPolicy>,
+) -> Result<(), ContentError> {
+    if let Some(policy) = policy {
+        checked_policy(context, policy).await?;
+    } else if !context.state.read().await.roles().client {
+        return Err(ContentError::Policy);
+    }
+    Ok(())
+}
+
+/// Purely local lookup: no discovery, route, provider or contribution call is reachable here.
+fn cached_selection(
+    store: &mut ChunkStore,
+    query: &NameQuery,
+) -> Result<(Selected, ContentReceipt), ContentError> {
+    let signed = store
+        .cached_named_manifest(query.publisher(), query.name(), query.min_revision(), now())
+        .map_err(|error| cache_error(&error))?
+        .ok_or(ContentError::Unavailable)?;
+    let manifest = query
+        .verify_candidate(&signed, now())
+        .map_err(|_| ContentError::Unavailable)?;
+    let bytes =
+        volparossa_content::reassemble(&manifest, &mut [store], now(), &mut std::io::sink())
+            .map_err(|_| ContentError::Unavailable)?;
+    let receipt = ContentReceipt {
+        bytes,
+        chunks: u32::try_from(manifest.chunks().len()).map_err(|_| ContentError::Invalid)?,
+        ..ContentReceipt::default()
+    };
+    Ok((Selected { signed, manifest }, receipt))
 }
 
 async fn metadata_round(
@@ -193,6 +230,9 @@ async fn retrieve(
     request: ContentFetchNameRequest,
     context: &ControlContext,
 ) -> Result<PreparedDownload, ContentError> {
+    if request.cache_only && !request.reuse_cache {
+        return Err(ContentError::Invalid);
+    }
     let publisher = request
         .publisher_key
         .as_slice()
@@ -202,6 +242,29 @@ async fn retrieve(
         .map_err(|_| ContentError::Invalid)?;
     let cache_limits = limits(request.limits)?;
     let mut store = download_cache(&request.cache, cache_limits, request.reuse_cache)?;
+    checked_download_access(context, None).await?;
+    if request.cache_only {
+        let (selected, receipt) = cached_selection(&mut store, &query)?;
+        return Ok(PreparedDownload {
+            selected,
+            query,
+            policy: None,
+            store,
+            source_root: PathBuf::from(request.cache),
+            source_limits: cache_limits,
+            receipt,
+        });
+    }
+    retrieve_network(request, context, query, store, cache_limits).await
+}
+
+async fn retrieve_network(
+    request: ContentFetchNameRequest,
+    context: &ControlContext,
+    query: NameQuery,
+    mut store: ChunkStore,
+    cache_limits: CacheLimits,
+) -> Result<PreparedDownload, ContentError> {
     let policy = {
         let state = context.state.read().await;
         if !state.roles().client {
@@ -237,7 +300,7 @@ async fn retrieve(
     )
     .await
     .map_err(|_| ContentError::Unavailable)??;
-    let selected = selected_at_floor(&store, &publisher, &request.name, selected)?;
+    let selected = selected_at_floor(&store, query.publisher(), query.name(), selected)?;
     let verified = query
         .verify_candidate(&selected.signed, now())
         .map_err(|_| ContentError::Unavailable)?;
@@ -251,6 +314,13 @@ async fn retrieve(
     let bytes =
         volparossa_content::reassemble(&verified, &mut [&mut store], now(), &mut std::io::sink())
             .map_err(|_| ContentError::Unavailable)?;
+    store
+        .remember_named_manifest(
+            &selected.signed,
+            &VerifyingKey::from_bytes(query.publisher()).map_err(|_| ContentError::Invalid)?,
+            now(),
+        )
+        .map_err(|error| cache_error(&error))?;
     let receipt = ContentReceipt {
         bytes,
         chunks: u32::try_from(verified.chunks().len()).map_err(|_| ContentError::Invalid)?,
@@ -264,7 +334,7 @@ async fn retrieve(
     Ok(PreparedDownload {
         selected,
         query,
-        policy,
+        policy: Some(policy),
         store,
         source_root: PathBuf::from(request.cache),
         source_limits: cache_limits,
@@ -298,7 +368,7 @@ pub(super) async fn download(
         .filter(|v| *v > 0)
         .ok_or(ContentError::Unavailable)?;
     timeout(Duration::from_secs(remaining.min(30)), async {
-        checked_policy(context, &policy).await?;
+        checked_download_access(context, policy.as_ref()).await?;
         query
             .verify_candidate(&selected.signed, now())
             .map_err(|_| ContentError::Unavailable)?;
@@ -309,6 +379,7 @@ pub(super) async fn download(
             "NAMED_CONTENT_TRANSFER_READY",
             Payload::NamedContentTransferReady(NamedContentTransferReady {
                 manifest: selected.signed.encode(),
+                cache_only: policy.is_none(),
             }),
         )
         .await?;
@@ -331,19 +402,22 @@ pub(super) async fn download(
         {
             return Err(ContentError::Unavailable);
         }
-        checked_policy(context, &policy).await?;
+        checked_download_access(context, policy.as_ref()).await?;
         query
             .verify_candidate(&selected.signed, now())
             .map_err(|_| ContentError::Unavailable)?;
-        context
-            .content
-            .contribute_native(
-                selected.signed.clone(),
-                verified.clone(),
-                source_root,
-                source_limits,
-            )
-            .await;
+        // A cache-only request must not schedule background networking as a side effect.
+        if policy.is_some() {
+            context
+                .content
+                .contribute_native(
+                    selected.signed.clone(),
+                    verified.clone(),
+                    source_root,
+                    source_limits,
+                )
+                .await;
+        }
         send_response(stream, request_id, "CONTENT_OK", Payload::Content(receipt)).await
     })
     .await
@@ -410,6 +484,68 @@ mod tests {
         .unwrap();
         let manifest = signed.verify(&key.verifying_key(), now()).unwrap();
         (signed, manifest)
+    }
+
+    #[tokio::test]
+    async fn cache_only_reopens_original_publication_and_delivers_without_network_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        let mut store = ChunkStore::create(&root, cache_limits()).unwrap();
+        let key = SigningKey::generate(&mut rand_core::OsRng);
+        let (signed, manifest) = publication(&key, 1, &mut store);
+        store
+            .remember_named_manifest(&signed, &key.verifying_key(), now())
+            .unwrap();
+        drop(store);
+        let mut reopened = ChunkStore::open(&root, cache_limits()).unwrap();
+        let query = NameQuery::new(key.verifying_key().to_bytes(), "Exact Name", 1).unwrap();
+        let (selected, receipt) = cached_selection(&mut reopened, &query).unwrap();
+        assert_eq!(selected.signed.encode(), signed.encode());
+        assert_eq!(receipt.bytes, manifest.length());
+        assert_eq!(receipt.peer_bytes, 0);
+        assert_eq!(receipt.providers_used, 0);
+        assert!(receipt.provider_peer_ids.is_empty());
+        assert!(receipt.control_relay_peer_id.is_empty());
+        assert!(!receipt.origin_authenticated);
+        assert_eq!(receipt.origin_body_bytes, 0);
+        assert_eq!(receipt.origin_range_requests, 0);
+
+        // Exercise the same chunk protocol used for local Ready, with no network objects.
+        let (mut sender, mut receiver) = tokio::io::duplex(128);
+        let mut output = Vec::new();
+        let (sent, downloaded) = tokio::join!(
+            serve_peer(
+                &mut sender,
+                &selected.manifest,
+                &mut reopened,
+                TransferLimits::default()
+            ),
+            volparossa_content::transfer::pull_to_writer(
+                &mut receiver,
+                &selected.manifest,
+                &mut output,
+                TransferLimits::default(),
+            ),
+        );
+        assert_eq!(sent.unwrap().bytes, manifest.length());
+        assert_eq!(downloaded.unwrap().bytes, manifest.length());
+        assert_eq!(output, b"named public fixture");
+
+        let mut incomplete =
+            ChunkStore::create(&directory.path().join("metadata-only"), cache_limits()).unwrap();
+        incomplete
+            .remember_named_manifest(&signed, &key.verifying_key(), now())
+            .unwrap();
+        assert!(matches!(
+            cached_selection(&mut incomplete, &query),
+            Err(ContentError::Unavailable)
+        ));
+        let (_, higher) = publication(&key, 2, &mut reopened);
+        reopened.observe_name_revision(&higher, now()).unwrap();
+        assert!(matches!(
+            cached_selection(&mut reopened, &query),
+            Err(ContentError::NameRollback)
+        ));
     }
 
     #[test]

@@ -46,6 +46,14 @@ fn named_download_rejects_wrong_publisher_name_revision_expiry_and_final() {
     );
 }
 
+#[test]
+fn named_cache_only_correlates_ready_and_rejects_network_receipts() {
+    isolated(
+        "named_cache_only_correlates_ready_and_rejects_network_receipts",
+        cache_only_downloads(),
+    );
+}
+
 fn isolated(test: &str, scenario: impl Future<Output = ()>) {
     isolated_network(test, scenario, "none");
 }
@@ -92,6 +100,8 @@ struct Fixture {
     key: SigningKey,
     bytes: Vec<u8>,
     content_type: &'static str,
+    cache_only: bool,
+    retained: Option<(SignedManifest, VerifiedManifest)>,
 }
 
 impl Fixture {
@@ -114,7 +124,24 @@ impl Fixture {
             key: SigningKey::generate(&mut OsRng),
             bytes,
             content_type: "application/octet-stream",
+            cache_only: false,
+            retained: None,
         }
+    }
+
+    fn retain_for_cache_only(&mut self) {
+        let (signed, manifest) = self.publication(Fault::None);
+        self.store
+            .remember_named_manifest(&signed, &self.key.verifying_key(), now())
+            .unwrap();
+        let original = self
+            .store
+            .cached_named_manifest(&self.key.verifying_key().to_bytes(), NAME, 3, now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.encode(), signed.encode());
+        self.retained = Some((original, manifest));
+        self.cache_only = true;
     }
 
     fn publication(&mut self, fault: Fault) -> (SignedManifest, VerifiedManifest) {
@@ -173,11 +200,19 @@ impl Fixture {
         assert_eq!(parameters.name, NAME);
         assert_eq!(parameters.min_revision, resume.then_some(3));
         assert_eq!(parameters.reuse_cache, resume);
+        assert_eq!(parameters.cache_only, self.cache_only);
         assert_eq!(
             Path::new(&parameters.cache),
-            self.directory.path().join("agent-cache")
+            self.directory.path().join(if self.cache_only {
+                "served-store"
+            } else {
+                "agent-cache"
+            })
         );
-        let (signed, verified) = self.publication(fault);
+        let (signed, verified) = match &self.retained {
+            Some(original) => original.clone(),
+            None => self.publication(fault),
+        };
         write_response(
             &mut stream,
             &response(
@@ -185,6 +220,7 @@ impl Fixture {
                 "NAMED_CONTENT_TRANSFER_READY",
                 Payload::NamedContentTransferReady(NamedContentTransferReady {
                     manifest: signed.encode(),
+                    cache_only: self.cache_only != matches!(fault, Fault::WrongMode),
                 }),
             ),
         )
@@ -216,24 +252,37 @@ impl Fixture {
         if matches!(fault, Fault::WrongFinal) {
             request_id[0] ^= 1;
         }
+        let network = !self.cache_only || matches!(fault, Fault::NetworkReceipt);
         write_response(
             &mut stream,
             &response(
                 request_id,
                 "CONTENT_OK",
-                Payload::Content(ContentReceipt {
-                    bytes: verified.length(),
-                    chunks: u32::try_from(verified.chunks().len()).unwrap(),
-                    peer_bytes: verified.length(),
-                    providers_used: 1,
-                    provider_peer_ids: vec!["12D3ProviderA".into()],
-                    control_relay_peer_id: "12D3Control".into(),
-                    ..ContentReceipt::default()
-                }),
+                Payload::Content(transfer_receipt(&verified, network)),
             ),
         )
         .await
         .unwrap();
+    }
+}
+
+fn transfer_receipt(manifest: &VerifiedManifest, network: bool) -> ContentReceipt {
+    ContentReceipt {
+        bytes: manifest.length(),
+        chunks: u32::try_from(manifest.chunks().len()).unwrap(),
+        peer_bytes: if network { manifest.length() } else { 0 },
+        providers_used: u32::from(network),
+        provider_peer_ids: if network {
+            vec!["12D3ProviderA".into()]
+        } else {
+            Vec::new()
+        },
+        control_relay_peer_id: if network {
+            "12D3Control".into()
+        } else {
+            String::new()
+        },
+        ..ContentReceipt::default()
     }
 }
 
@@ -246,13 +295,19 @@ enum Fault {
     Expired,
     Disconnect,
     WrongFinal,
+    WrongMode,
+    NetworkReceipt,
 }
 
 impl Fault {
     fn rejects_ready(self) -> bool {
         matches!(
             self,
-            Self::WrongPublisher | Self::WrongName | Self::OldRevision | Self::Expired
+            Self::WrongPublisher
+                | Self::WrongName
+                | Self::OldRevision
+                | Self::Expired
+                | Self::WrongMode
         )
     }
 }
@@ -268,6 +323,16 @@ fn response(request_id: Vec<u8>, code: &str, payload: Payload) -> ControlRespons
 }
 
 async fn invoke(root: &Path, key: [u8; 32], name: &str, resume: bool) -> Output {
+    invoke_mode(root, key, name, resume, false).await
+}
+
+async fn invoke_mode(
+    root: &Path,
+    key: [u8; 32],
+    name: &str,
+    resume: bool,
+    cache_only: bool,
+) -> Output {
     let root = root.to_owned();
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -279,10 +344,17 @@ async fn invoke(root: &Path, key: [u8; 32], name: &str, resume: bool) -> Output 
             .args(["content", "fetch-name", "--publisher-key"])
             .arg(hex::encode(key))
             .args(["--name", NAME, "--cache"])
-            .arg(root.join("agent-cache"))
+            .arg(root.join(if cache_only {
+                "served-store"
+            } else {
+                "agent-cache"
+            }))
             .args(["--local-output", &name, "--min-free-bytes", "0"]);
         if resume {
             command.args(["--reuse-cache", "--min-revision", "3"]);
+        }
+        if cache_only {
+            command.arg("--cache-only");
         }
         command
             .stdin(Stdio::null())
@@ -296,11 +368,12 @@ async fn invoke(root: &Path, key: [u8; 32], name: &str, resume: bool) -> Output 
 async fn exchange(fixture: &mut Fixture, name: &str, fault: Fault, resume: bool) -> Output {
     let root = fixture.directory.path().to_owned();
     let key = fixture.key.verifying_key().to_bytes();
+    let cache_only = fixture.cache_only;
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
     let ((), output) = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::join!(
             fixture.serve(&listener, fault, resume),
-            invoke(&root, key, name, resume)
+            invoke_mode(&root, key, name, resume, cache_only)
         )
     })
     .await
@@ -336,6 +409,7 @@ async fn successful_downloads() {
         assert_eq!(result["origin_authenticated"], false);
         assert_eq!(result["globally_latest"], false);
         assert_eq!(result["local_delivery"], true);
+        assert_eq!(result["cache_only"], false);
         assert_eq!(result["ownership_changed"], false);
         assert_eq!(result["local_output"], name);
         assert_eq!(
@@ -380,6 +454,7 @@ async fn rejected_downloads() {
         Fault::Expired,
         Fault::Disconnect,
         Fault::WrongFinal,
+        Fault::WrongMode,
     ] {
         let output = exchange(&mut fixture, "rejected.bin", fault, true).await;
         assert!(
@@ -392,6 +467,48 @@ async fn rejected_downloads() {
             "no published output, manifest, secondary cache or tempfile after rejection"
         );
     }
+}
+
+async fn cache_only_downloads() {
+    let mut fixture = Fixture::new();
+    fixture.retain_for_cache_only();
+    let original = fixture.retained.as_ref().unwrap().0.encode();
+    for fault in [Fault::WrongMode, Fault::NetworkReceipt] {
+        let output = exchange(&mut fixture, "rejected.bin", fault, true).await;
+        assert!(
+            !output.status.success(),
+            "cache-only source contract accepted {fault:?}"
+        );
+        assert_eq!(directory_names(fixture.directory.path()), ["served-store"]);
+    }
+    let output = exchange(&mut fixture, "local.bin", Fault::None, true).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["cache_only"], true);
+    assert_eq!(report["peer_bytes"], 0);
+    assert_eq!(report["origin_body_bytes"], 0);
+    assert_eq!(report["origin_range_requests"], 0);
+    assert_eq!(
+        report["publication_expires_unix_seconds"],
+        fixture.retained.as_ref().unwrap().1.validity().expires
+    );
+    assert_eq!(report["providers_used"], 0);
+    assert_eq!(report["provider_peer_ids"], serde_json::json!([]));
+    assert_eq!(report["control_relay_peer_id"], "");
+    assert_eq!(
+        report["manifest_id"],
+        hex::encode(ChunkId::digest(&original).as_bytes())
+    );
+    let path = fixture.directory.path().join("local.bin");
+    assert_eq!(fs::read(&path).unwrap(), fixture.bytes);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 fn directory_names(path: &Path) -> Vec<String> {

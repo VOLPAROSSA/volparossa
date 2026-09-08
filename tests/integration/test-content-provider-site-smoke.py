@@ -30,7 +30,9 @@ def fixture(control_node="relay2"):
                  control_relay_peer_id=layout["control_relay_peer_id"], native_publisher_authenticated=True,
                  static_only=True, local_delivery=True, origin_authenticated=False,
                  https_origin_authenticated=False, globally_latest=False, automatic_browser_open=False,
-                 ownership_changed=False, expires_unix_seconds=1788851000)
+                 ownership_changed=False, expires_unix_seconds=1788851000,
+                 publication_expires_unix_seconds=1788851100, origin_body_bytes=0,
+                 origin_range_requests=0, cache_only=False)
     final = dict(ready, operation="native_site_closed", reason="terminated", private_spool_removed=True)
     results = {path: dict(value, status=200, content_length=str(value["bytes"]),
                          content_range=None, security_headers_verified=True)
@@ -42,12 +44,30 @@ def fixture(control_node="relay2"):
                         content_range=f"bytes 101-4196/{len(media)}", content_length="4096", security_headers_verified=True),
         rejected=dict(host=400, traversal=404), elapsed_ns=2_000_000_000, no_manifest_argument=True,
         browser_engine_executed=False, sigterm_cleanup=True, listener_closed=True,
-        private_spool_removed=True, spool_modes="0700/0600")
+        private_spool_removed=True, spool_modes="0700/0600", agent_cache="/state-client/site-cache",
+        cache_only=False, before=None, after=None)
     imports = {node: dict(operation="content_import", complete=True, content_bytes=expected["bundle_bytes"],
                          public_content=True, ownership_changed=False, network_transfer=False,
                          origin_authenticated=False, manifest_id="3"*64, agent_cache=f"/state-{node}/site-cache")
                for node in layout["provider_nodes"]}
+    offline_app = copy.deepcopy(application)
+    offline_app["cache_only"] = True
+    for key in ("ready", "final"):
+        offline_app[key].update(cache_only=True, providers_used=0, provider_peer_ids=[], peer_bytes=0,
+                                control_relay_peer_id="", expires_unix_seconds=1788851001)
+    for key, observed in (("before", 1788850000100), ("after", 1788850000300)):
+        offline_app[key] = dict(observed_unix_ms=observed, paths="",
+            status="connected: false\nactive peers: 4\ncandidate pool: 5\nactive contexts: 0\nMPTCP subflows: 0\nMPQUIC paths: 0\n",
+            logs="1788850000000 Info event=CONTENT_DISCOVERY_COMPLETED\n")
+    offline_privacy = copy.deepcopy(phase["privacy"])
+    for capture in offline_privacy.values():
+        capture.update(client_leg_wireguard_data_datagrams=0, exit_leg_wireguard_data_datagrams=0)
+        for counters in capture["provider_application"].values():
+            for key in counters:
+                counters[key] = 0
     return dict(success=True, input=expected, application=application, expected_peers=peers, layout=layout,
+        cache_only=dict(application=offline_app, privacy=offline_privacy,
+                        control_privacy=copy.deepcopy(phase["control"])),
         pack=dict(operation="site_pack", assets=4, bytes=expected["bundle_bytes"],
                   content_type=CHECK["CONTENT_TYPE"], network_published=False),
         publish=dict(operation="offline_content_publish", network_publication=False, bytes=expected["bundle_bytes"],
@@ -59,12 +79,44 @@ def fixture(control_node="relay2"):
                        agent_gid=987, control_gid=1003, cache_modes="0700", fresh_client_cache=True,
                        agent_mount_positive_control=True, client_cannot_read_provider_caches=True,
                        agent_cannot_read_user_directory=True, user_cannot_read_agent_caches=True,
+                       agent_cache="/state-client/site-cache", cache_identity_before="1:42", cache_identity_after="1:42",
                        publisher_process_exited_before_fetch=True, publisher_node_offline_claimed=False),
         publisher_cleanup=dict(publisher_files_removed=True, source_cache_removed=True, manifest_removed=True),
         cleanup=dict(user_directory_removed=True))
 
 
 class SiteProof(unittest.TestCase):
+    def test_cache_only_requires_same_authority_no_route_or_discovery_and_zero_provider_payload(self):
+        evidence = fixture()
+        CHECK["validate_evidence"](evidence)
+        changes = [
+            (("cache_only", "application", "ready", "cache_only"), False),
+            (("cache_only", "application", "ready", "peer_bytes"), 1),
+            (("cache_only", "application", "ready", "control_relay_peer_id"), "peer-relay2"),
+            (("cache_only", "application", "ready", "origin_body_bytes"), 1),
+            (("cache_only", "application", "ready", "publication_expires_unix_seconds"), 1788851200),
+            (("cache_only", "application", "ready", "manifest_id"), "f" * 64),
+            (("cache_only", "application", "agent_cache"), "/other-cache"),
+            (("isolation", "cache_identity_after"), "1:43"),
+            (("cache_only", "application", "before", "paths"), "context=hidden path=1\n"),
+            (("cache_only", "application", "after", "status"), "connected: true\nactive contexts: 1\nMPTCP subflows: 2\nMPQUIC paths: 0\n"),
+            (("cache_only", "application", "after", "logs"), "1788850000000 Info event=OLD\n1788850000200 Info event=CONTENT_DISCOVERY_COMMAND_RECEIVED\n"),
+            (("cache_only", "application", "after", "logs"), "1788850000200 Info event=LOG_WINDOW_OVERWRITTEN\n"),
+            (("cache_only", "privacy", "exit", "provider_application", "relay4", "response_payload_bytes"), 1),
+            (("cache_only", "privacy", "client", "client_leg_wireguard_data_datagrams"), 1),
+            (("cache_only", "privacy", "exit", "packet_socket_drops"), 1),
+            (("cache_only", "application", "byte_range", "sha256"), "f" * 64),
+        ]
+        for path, value in changes:
+            with self.subTest(path=path):
+                changed = copy.deepcopy(evidence)
+                target = changed
+                for part in path[:-1]:
+                    target = target[part]
+                target[path[-1]] = value
+                with self.assertRaises(ValueError):
+                    CHECK["validate_evidence"](changed)
+
     def test_full_scoped_site_evidence_and_missing_functional_boundaries(self):
         evidence = fixture()
         CHECK["validate_evidence"](evidence)

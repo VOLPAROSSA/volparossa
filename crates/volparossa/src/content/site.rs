@@ -53,6 +53,9 @@ pub(crate) struct Open {
     cache: PathBuf,
     #[arg(long)]
     reuse_cache: bool,
+    /// Open only the existing complete native cache; no route or provider discovery.
+    #[arg(long, requires = "reuse_cache")]
+    cache_only: bool,
     /// Maximum local viewer lifetime, also bounded by the original signed publication expiry.
     #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=86400))]
     lifetime_seconds: u64,
@@ -68,6 +71,7 @@ impl Open {
             min_revision: self.min_revision,
             cache: self.cache.clone(),
             reuse_cache: self.reuse_cache,
+            cache_only: self.cache_only,
             local_output: private_output,
             limits: Limits {
                 quota_bytes: self.limits.quota_bytes,
@@ -213,6 +217,41 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn site_cache_only_requires_existing_cache_and_preserves_fetch_mode() {
+        use clap::Parser as _;
+        let key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[1; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let base = [
+            "volparossa",
+            "content",
+            "site",
+            "open",
+            "--publisher-key",
+            &key,
+            "--name",
+            "site",
+            "--cache",
+            "existing",
+        ];
+        assert!(crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only"])).is_err());
+        let parsed =
+            crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only", "--reuse-cache"]))
+                .unwrap();
+        let crate::CliCommand::Content { command } = parsed.command else {
+            panic!("content expected");
+        };
+        let super::super::Command::Site(Command::Open(args)) = *command else {
+            panic!("site open expected");
+        };
+        let fetch = args.fetch_args(PathBuf::from("private-temporary"));
+        assert!(fetch.cache_only && fetch.reuse_cache);
+        assert_eq!(fetch.name, "site");
+    }
 
     #[test]
     fn packs_exact_static_assets_without_hidden_files_or_overwriting_output() {

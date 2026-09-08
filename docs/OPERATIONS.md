@@ -644,6 +644,22 @@ The caller receives a verified `0600` file through the same local socket; no use
 is sent to the agent. An offline publisher is usable only while reachable replicas retain valid
 metadata and all required chunks. This is not yet general website hosting or a message mailbox.
 
+To reopen a previously completed named download without network retrieval, use the same cache,
+trusted publisher key and exact name with both `--reuse-cache --cache-only`. Keep the existing
+`--local-output` argument pointed at a new file. The current download path retains up to 64
+original public-native manifest envelopes alongside its durable revision/conflict observations.
+Older caches containing only chunks and revision pins need one successful online named download
+before this mode can work; metadata is not invented from the cached bytes.
+
+Cache-only performs no route setup, provider discovery, origin fetch or post-download extra
+replication. It requires the running agent's client role and authorized local control socket,
+but not a live Internet policy for this purely local operation. Publisher signature, exact
+name/minimum revision, retained floor, original expiry and complete object integrity still
+apply. A higher observed revision with missing content or a recorded conflict blocks older
+snapshots; there is no silent network fallback. JSON reports `cache_only: true` and zero
+peer/provider/origin activity. Other independently enabled agent services are not stopped by
+this option. This native mode cannot replace fresh origin authentication for HTTPS downloads.
+
 For cooperative HTTPS origins, `content fetch-https` first obtains fresh authenticated
 same-origin metadata, uses matching peer chunks and fills missing ranges from that origin.
 To receive the result in the calling user's account instead of creating an agent-owned output:
@@ -721,13 +737,17 @@ peer index is found, but an offline origin still cannot authorize a new download
 Local/browser JSON reports `authentication_scope: "origin-repr-digest"` and the original
 `transport_manifest_id`; descriptor mode reports `cooperative-origin`. These labels distinguish
 authorization from transport signatures. The original HTTP expiry is never renewed by caching.
-Targeted local origin-TLS, provider, CLI and harness checks pass; the integrated network proof
-is pending. No general website support or speed gain is claimed.
+Targeted local origin-TLS, provider, CLI and harness checks pass. The
+[integrated run on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
+also passes: fresh HEAD and two providers supply 2,097,275 bytes with zero origin body.
+It takes 9.23 seconds versus 2.58 seconds origin-only in this fixture; no general website support
+or speed gain is claimed. This does not verify the later cache-only native-site extension.
 
 ### Automatic public-content contribution
 
 This integration removes the manual initial `content serve --manifest` step for received
-public objects. It is still awaiting its dedicated source-stop/restart network proof.
+public objects. Its [dedicated source-stop/restart network proof on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
+passes; it is not a permanent-retention or global-fairness guarantee.
 On an explicitly participating relay, configure a policy-authorized endpoint and private cache:
 
 ```yaml
@@ -832,6 +852,19 @@ then serves only those immutable assets on a random `*.localhost` name and loopb
 Root-relative links, directory `index.html`, UTF-8 paths, GET/HEAD and single byte ranges work;
 bounded query strings are ignored for immutable lookup, not interpreted as server operations.
 `--reuse-cache` and `--min-revision` retain the normal named-cache semantics.
+
+After an initial successful download with the current manifest-retaining implementation,
+reopen the same site without requiring network access:
+
+```sh
+volparossa content site open --publisher-key "$PUBLISHER_KEY" --name my-site \
+  --cache /agent-owned/site-cache --reuse-cache --cache-only
+```
+
+The original signed bundle must remain valid and complete in that cache. This mode keeps the
+same temporary localhost viewer, HTTP/range behavior and browser isolation; it does not extend
+expiry or claim that the cached version is globally newest. Missing/expired content fails
+without trying the network. The new integrated no-route reopen proof is pending.
 
 The local viewer expires at the earlier of the original signed expiry or its own
 `--lifetime-seconds` (default one hour, maximum one day). SIGINT/TERM closes the listener and

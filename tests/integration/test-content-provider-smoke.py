@@ -101,6 +101,11 @@ def site_raw_files(evidence):
             files[f"content-provider-site-{node}-{operation}.json"] = receipt
     for role, capture in evidence["privacy"].items():
         files[f"content-provider-site-privacy-{role}.json"] = capture
+    offline = evidence["cache_only"]
+    files["content-provider-site-cache-only-consumer.json"] = offline["application"]
+    files["content-provider-site-cache-only-control.json"] = offline["control_privacy"]
+    for role, capture in offline["privacy"].items():
+        files[f"content-provider-site-cache-only-privacy-{role}.json"] = capture
     return files
 
 

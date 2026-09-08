@@ -68,6 +68,13 @@ Static site assets can remain available while the original machine is offline on
 needed chunks still have reachable replicas. Dynamic application execution is a separate
 capability; caching HTML does not provide an offline database, login service or checkout.
 
+The additional explicit cache-only consumer mode preserves the original publisher-signed
+envelope after a completed named download. An existing owned cache can then reopen a native
+publication/site without route setup or peer discovery, while retaining its original expiry
+and durable revision/conflict floor. Missing newer content cannot silently revive an older
+version. This is local availability, separate from external replica retention or global
+latest-version claims; its no-route integrated proof is pending.
+
 Best-effort cache eviction alone cannot provide durable publishing. Retention commitments,
 replica receipts, repair and an honest availability status are needed. No permanent-availability
 or deletion-of-all-remote-copies guarantee is implied.
@@ -362,10 +369,13 @@ currently returns unavailable, not arbitrary peer trust. Unsupported-site/witnes
 remains separate work, with any extra trust requiring the user's explicit choice.
 
 Real local origin-TLS and provider-stream tests, CLI-process checks, strict scoped Clippy and
-the additive harness checks pass. The new protected-network sequence is ready but not yet
-verified: cold HEAD+origin GET, then cold HEAD+two-provider delivery with zero origin body,
-exact original transport index, same output hash, physical captures and cleanup. C08 and
-measured benefit remain open; the older descriptor proofs do not certify this new mode.
+the additive harness checks pass. The
+[protected-network run on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
+now verifies cold HEAD+origin GET, then cold HEAD+two-provider delivery with zero origin body,
+the exact original transport index, same output hash, physical captures and cleanup. The
+peer-assisted operation takes 9.230 seconds versus 2.577 seconds for origin-only: all 2,097,275
+origin payload bytes are avoided on the peer hit, but there is no latency benefit. C08 remains
+open; explicit peers-first is not evidence of successful measured automatic peer selection.
 
 ### Bounded post-download redistribution
 
@@ -452,7 +462,10 @@ native/named and freshly origin-authorized cooperative/digest HTTPS objects, and
 without live-content eviction. The existing extra-chunk exchange and local copy share a single
 background owner. Name lookup retains the original independently trusted publisher authority;
 no URL, private-message payload or reusable HTTPS authority enters this automatic public queue.
-The dedicated source-offline/agent-restart/independent-retrieval network proof is pending.
+The [source-offline/agent-restart/independent-retrieval run on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
+passes: an empty automatic service admits a completed normal P download, retains its original
+journal across a real agent PID change after source shutdown, then serves all 524,609 bytes to
+an independent Client. Twenty complete zero-drop captures and unchanged-state cleanup pass.
 This does not introduce global placement fairness, retention repair or generic HTTPS capture.
 
 The preceding measured-source selection now has a

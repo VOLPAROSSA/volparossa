@@ -115,6 +115,14 @@ request operation tags 20/21/22/23 for serve/fetch/stop/status and response payl
 content receipt; unknown operations remain rejected by older agents. This is not a name service,
 automatic replica placement or an HTTPS trust constructor.
 
+Local `ContentFetchNameRequest` adds optional bool `cache_only` at tag 7; true requires
+`reuse_cache`. `NamedContentTransferReady` echoes it at tag 2, and the CLI rejects a changed
+mode before chunk transfer. Omitted/false retains online named retrieval. Cache-only loads
+the original signed public-native envelope from the owned cache and rechecks the independently
+supplied publisher/name, original expiry, durable revision/conflict floor and complete bytes.
+It performs no route setup or provider exchange; final provider/control/origin accounting must
+be empty/zero. This is not an offline HTTPS authorization constructor or a global freshness proof.
+
 Exact representation-digest lookup uses an additive selector `version=6`, `operation=4` and
 an empty manifest ID. Its canonical request (at most 128 bytes) binds a fresh 32-byte nonce,
 SHA-256, complete length, creation time and at most fifteen seconds of validity. The reply

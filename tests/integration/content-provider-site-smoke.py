@@ -147,7 +147,27 @@ def http_request(port, host, method, path, extra=None):
         connection.close()
 
 
-def consume(arguments):
+def local_snapshot(binary, control):
+    snapshot = dict(observed_unix_ms=time.time_ns() // 1_000_000)
+    for key, arguments in (("status", ["status"]), ("paths", ["paths"]),
+                           ("logs", ["logs", "--limit", "400"])):
+        result = subprocess.run([binary, "--control-socket", control, *arguments],
+                                check=True, stdout=subprocess.PIPE, timeout=5, text=True)
+        require(len(result.stdout.encode()) <= 256 * 1024, "local snapshot exceeds control bound")
+        snapshot[key] = result.stdout
+    validate_disconnected(snapshot)
+    return snapshot
+
+
+def validate_disconnected(snapshot):
+    fields = dict(line.split(": ", 1) for line in snapshot["status"].splitlines())
+    require(fields["connected"] == "false" and fields["active contexts"] == "0"
+            and fields["MPTCP subflows"] == fields["MPQUIC paths"] == "0"
+            and snapshot["paths"] == "" and snapshot["observed_unix_ms"] > 0,
+            "cache-only operation retained or created a route")
+
+
+def consume(arguments, cache_only=False):
     binary, control, cache, directory, parent_ns, client_ns, uid, gid, group = arguments
     uid, gid, group = int(uid), int(gid), int(group)
     boundary = HTTPS["process_boundary"]("self", parent_ns, client_ns, uid, gid, group)
@@ -158,6 +178,9 @@ def consume(arguments):
     command = [binary, "--control-socket", control, "content", "site", "open",
                "--publisher-key", expected["publisher_key"], "--name", NAME, "--min-revision", "1",
                "--cache", cache, "--min-free-bytes", "0", "--lifetime-seconds", "90"]
+    if cache_only:
+        command += ["--reuse-cache", "--cache-only"]
+    before = local_snapshot(binary, control) if cache_only else None
     started, deadline = time.monotonic_ns(), time.monotonic() + 110
     process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
                                env=dict(os.environ, TMPDIR=str(directory)))
@@ -208,9 +231,11 @@ def consume(arguments):
             repeated.close()
             raise ValueError("site listener survived SIGTERM")
         require({entry.name for entry in directory.iterdir()} == {"expected.json"}, "viewer left private files")
+        after = local_snapshot(binary, control) if cache_only else None
         return dict(consumer=boundary, cli=cli, ready={k: v for k, v in ready.items() if k != "site_url"},
                     final={k: v for k, v in final.items() if k != "site_url"}, assets=results,
                     head=head, byte_range=partial, rejected=rejected, elapsed_ns=time.monotonic_ns()-started,
+                    agent_cache=cache, cache_only=cache_only, before=before, after=after,
                     no_manifest_argument=True, browser_engine_executed=False, sigterm_cleanup=True,
                     listener_closed=True, private_spool_removed=True, spool_modes="0700/0600")
     finally:
@@ -301,19 +326,43 @@ def validate_evidence(evidence):
                 "ordinary public import or explicit name serving missing")
     require(len(manifests) == 1 and len(caches) == 2 and ready["manifest_id"] in manifests,
             "site manifest or independent cache identity differs")
+    validate_application(evidence, app, manifests, False)
+    require(isolation["user_uid"] != isolation["agent_uid"]
+            and isolation["control_gid"] != isolation["agent_gid"]
+            and isolation["cache_modes"] == "0700"
+            and all(isolation[key] is True for key in ("fresh_client_cache", "agent_mount_positive_control",
+                "client_cannot_read_provider_caches", "agent_cannot_read_user_directory",
+                "user_cannot_read_agent_caches", "publisher_process_exited_before_fetch"))
+            and isolation["publisher_node_offline_claimed"] is False
+            and evidence["publisher_cleanup"] == dict(publisher_files_removed=True, source_cache_removed=True, manifest_removed=True)
+            and evidence["cleanup"] == dict(user_directory_removed=True), "site publisher/consumer isolation or cleanup absent")
+    validate_path(evidence)
+    validate_cache_only(evidence, manifests)
+
+
+def validate_application(evidence, app, manifests, cache_only):
+    expected, publication = evidence["input"], evidence["publish"]
+    peers, layout, isolation = evidence["expected_peers"], evidence["layout"], evidence["isolation"]
+    ready, final = app["ready"], app["final"]
+    provider_ids = [] if cache_only else [peers[node] for node in layout["provider_nodes"]]
     for receipt, operation in ((ready, "native_site_ready"), (final, "native_site_closed")):
         require(receipt["operation"] == operation and receipt["publisher_key"] == expected["publisher_key"]
                 and receipt["name"] == NAME and receipt["revision"] == 1 and receipt["assets"] == 4
-                and receipt["bytes"] == receipt["peer_bytes"] == expected["bundle_bytes"]
+                and receipt["bytes"] == expected["bundle_bytes"]
+                and receipt["peer_bytes"] == (0 if cache_only else expected["bundle_bytes"])
                 and receipt["chunks"] == publication["chunks"] == 9
                 and receipt["sha256"] == expected["bundle_sha256"] and receipt["manifest_id"] in manifests
-                and receipt["providers_used"] == 2 and set(receipt["provider_peer_ids"]) == {peers[n] for n in nodes}
-                and len(receipt["provider_peer_ids"]) == 2
-                and receipt["control_relay_peer_id"] == layout["control_relay_peer_id"]
+                and receipt["providers_used"] == len(provider_ids)
+                and set(receipt["provider_peer_ids"]) == set(provider_ids)
+                and len(receipt["provider_peer_ids"]) == len(provider_ids)
+                and receipt["control_relay_peer_id"] == ("" if cache_only else layout["control_relay_peer_id"])
+                and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0
+                and receipt["publication_expires_unix_seconds"] == publication["expires_unix_seconds"]
+                and receipt["cache_only"] is cache_only
                 and all(receipt[key] is True for key in ("native_publisher_authenticated", "static_only", "local_delivery"))
                 and all(receipt[key] is False for key in ("origin_authenticated", "https_origin_authenticated",
                     "globally_latest", "automatic_browser_open", "ownership_changed"))
-                and "site_url" not in receipt, "site was not verified and fetched over both real providers")
+                and "site_url" not in receipt, "site verification or exact network/local source accounting failed")
     require(final["reason"] == "terminated" and final["private_spool_removed"] is True
             and ready["expires_unix_seconds"] == final["expires_unix_seconds"] <= publication["expires_unix_seconds"],
             "viewer renewed authority or failed SIGTERM")
@@ -325,6 +374,7 @@ def validate_evidence(evidence):
                 and all(boundary[flag] is True for flag in ("client_namespace", "outside_parent_namespace",
                     "all_capabilities_dropped", "no_new_privileges")), "site user process boundary missing")
     require(app["consumer"] == app["cli"] and 0 < app["elapsed_ns"] <= 120_000_000_000
+            and app["agent_cache"] == isolation["agent_cache"] and app["cache_only"] is cache_only
             and all(app[key] is True for key in ("no_manifest_argument", "sigterm_cleanup", "listener_closed", "private_spool_removed"))
             and app["browser_engine_executed"] is False and app["spool_modes"] == "0700/0600",
             "site HTTP is not a bounded ordinary user operation")
@@ -343,16 +393,48 @@ def validate_evidence(evidence):
             and app["byte_range"]["sha256"] == hashlib.sha256(media[101:4197]).hexdigest()
             and app["byte_range"]["content_range"] == f"bytes 101-4196/{len(media)}"
             and app["rejected"] == dict(host=400, traversal=404), "HEAD, actual byte range or Host/path rejection failed")
-    require(isolation["user_uid"] != isolation["agent_uid"]
-            and isolation["control_gid"] != isolation["agent_gid"]
-            and isolation["cache_modes"] == "0700"
-            and all(isolation[key] is True for key in ("fresh_client_cache", "agent_mount_positive_control",
-                "client_cannot_read_provider_caches", "agent_cannot_read_user_directory",
-                "user_cannot_read_agent_caches", "publisher_process_exited_before_fetch"))
-            and isolation["publisher_node_offline_claimed"] is False
-            and evidence["publisher_cleanup"] == dict(publisher_files_removed=True, source_cache_removed=True, manifest_removed=True)
-            and evidence["cleanup"] == dict(user_directory_removed=True), "site publisher/consumer isolation or cleanup absent")
-    validate_path(evidence)
+
+
+def validate_cache_only(evidence, manifests):
+    offline, isolation = evidence["cache_only"], evidence["isolation"]
+    app = offline["application"]
+    validate_application(evidence, app, manifests, True)
+    require(isolation["cache_identity_before"] == isolation["cache_identity_after"]
+            and re.fullmatch(r"[0-9]+:[1-9][0-9]*", isolation["cache_identity_before"]),
+            "cache-only replaced rather than reopened the same agent cache")
+    for snapshot in (app["before"], app["after"]):
+        validate_disconnected(snapshot)
+    baseline = app["before"]["observed_unix_ms"]
+    records = []
+    for line in app["after"]["logs"].splitlines():
+        fields = line.split()
+        require(len(fields) >= 3 and fields[0].isdigit() and fields[2].startswith("event="),
+                "invalid bounded client event evidence")
+        records.append((int(fields[0]), fields[2][6:]))
+    require(records and min(stamp for stamp, _ in records) <= baseline <= app["after"]["observed_unix_ms"]
+            and not any(stamp >= baseline and event.startswith(("CONTENT_DISCOVERY_", "CONTENT_PROVIDER_"))
+                        for stamp, event in records),
+            "cache-only log window lost coverage or started provider discovery")
+    privacy = offline["privacy"]
+    require(set(privacy) == set(ROLES), "cache-only physical capture coverage incomplete")
+    for role, capture in privacy.items():
+        HTTPS["validate_drained"](capture, allow_empty=True)
+        require(capture["capture_role"] == role and capture["content_provider_mode"] is True
+                and all(capture[key] == 0 for key in ("unexpected_outer_packets", "expected_link_down_notifications",
+                    "unexpected_provider_application_packets", "direct_client_exit_packets",
+                    "client_leg_wireguard_data_datagrams", "exit_leg_wireguard_data_datagrams"))
+                and set(capture["provider_application"]) == set(CANDIDATES)
+                and all(value == 0 for counters in capture["provider_application"].values() for value in counters.values()),
+                "cache-only emitted protected or provider application data")
+        if role == "exit":
+            require(capture["client_public_packets"] == capture["outbound_client_discovery_attempt_packets"] == 0,
+                    "Exit learned forbidden Client traffic during cache-only read")
+        else:
+            require(capture["internet_destination_outer_packets"] == 0, "cache-only used direct destination")
+    layout, peers = evidence["layout"], evidence["expected_peers"]
+    control_node = next(node for node in HTTPS["PUBLIC_IPS"] if peers[node] == layout["control_relay_peer_id"])
+    HTTPS["validate_control"](offline["control_privacy"], control_node, layout["provider_nodes"], False,
+                              require_contacts=False)
 
 
 def build_evidence(work):
@@ -365,6 +447,10 @@ def build_evidence(work):
                     imports={node: read(work / f"content-provider-site-{node}-import.json") for node in layout["provider_nodes"]},
                     serves={node: read(work / f"content-provider-site-{node}-serve.json") for node in layout["provider_nodes"]},
                     privacy={role: read(work / f"content-provider-site-privacy-{role}.json") for role in ROLES})
+    evidence["cache_only"] = dict(
+        application=read(work / "content-provider-site-cache-only-consumer.json"),
+        control_privacy=read(work / "content-provider-site-cache-only-control.json"),
+        privacy={role: read(work / f"content-provider-site-cache-only-privacy-{role}.json") for role in ROLES})
     validate_evidence(evidence)
     return evidence
 
@@ -377,6 +463,8 @@ def main(arguments):
         result = remove_publisher(Path(arguments[0]))
     elif operation == "consume":
         result = consume(arguments)
+    elif operation == "consume-cache-only":
+        result = consume(arguments, cache_only=True)
     elif operation == "user-cleanup":
         result = remove_user(Path(arguments[0]))
     elif operation == "evidence":

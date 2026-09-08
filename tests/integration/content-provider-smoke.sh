@@ -249,7 +249,17 @@ content_provider_run() {
         jq -e '.serving == false and .publications == 0' \
             "$WORK/content-provider-$provider_node-stop.json" >/dev/null || fail CONTENT_PROVIDER_STOP_NOT_COMPLETE
     done
-    benchmark_disconnect_route content-provider || fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
+    # The site cache-only phase already retired this exact route, with its normal disconnect
+    # receipt retained. Do not hide an accidental reconnect by disconnecting a second time.
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" status \
+        >"$WORK/content-provider-final-status.txt" || fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" paths \
+        >"$WORK/content-provider-final-paths.txt" || fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
+    if ! grep -Fx 'connected: false' "$WORK/content-provider-final-status.txt" >/dev/null \
+        || ! grep -Fx 'active contexts: 0' "$WORK/content-provider-final-status.txt" >/dev/null \
+        || [ -s "$WORK/content-provider-final-paths.txt" ]; then
+        fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
+    fi
     python3 -B "$source_directory/tests/integration/content-provider-smoke.py" \
         evidence "$WORK" "$WORK/content-provider-evidence.json" || fail CONTENT_PROVIDER_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

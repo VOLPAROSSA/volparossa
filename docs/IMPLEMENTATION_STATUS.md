@@ -207,13 +207,53 @@ and parser-mode tests, four isolated CLI-process tests, the legacy parser test a
 fixture tests. Eleven HTTPS and fourteen parent-provider checker tests and narrow shell checks
 pass. These local results do not establish network delivery or browser-engine behavior.
 
-The additive provider topology now requires fresh HEAD+origin GET and then fresh
-HEAD+two-provider retrieval using different cold caches. It checks all 2,097,275 bytes, the
-original transport manifest, zero origin body on the peer hit, bounded physical captures and
-cleanup. That network run is pending. C08, arbitrary-site compatibility and speedup remain
-unproved; previous descriptor-mode passes do not certify this implementation.
+The [additive provider run on exact `f3abee8e7183381ef1fb00e05bbc2783bf16900b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
+now **passes**, including full independent raw rebuild using that commit's checker, not the
+later dirty worktree. Fresh HEAD+full GET supplies 2,097,275 origin bytes and zero peer bytes
+to one cold cache. Fresh HEAD+two providers supplies all 2,097,275 peer bytes / nine chunks and
+zero origin body to a different cold cache, preserving the same protected R2/R1 route context.
+Whole-object SHA-256 is `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`;
+the peer hit retains original transport manifest
+`32ec1dfd49cc4e7739d1b46d7b03e5ba98224e6e868aee0c626c02f583d6a805`.
+Origin-only takes **2.576731230 seconds**, explicit peers-first **9.230297498 seconds**.
+This avoids origin payload transfer but does not improve latency or prove automatic peer
+selection. C08 and arbitrary-site compatibility remain unproved.
+All 64 captures / 304 interface rows pass complete zero-drop boundary checks; cleanup leaves
+zero owned objects and byte-identical guest host state, SHA-256
+`8912e8acbc4416f8cf00d506bc2cac073d07f802fcdaee2dbc6d6aeaffb608fe`.
+Artifact ZIP SHA-256: `c4d419b330703d14a514c30138de53f7a390f79b6878f05dc75ecd82452c9ed1`;
+canonical raw rebuild SHA-256: `ea64f62341a0e0a300c625bc75fc4a8d21d6a9362e02ce2966ad35b648aea545`.
+This result does not verify the later native cache-only site extension.
 
-### Automatic contribution integration in progress
+### Native publication/site cache-only reopen
+
+`content fetch-name` and `content site open` now accept explicit `--reuse-cache --cache-only`.
+A completed normal named retrieval retains its original public-native signed envelope beside
+the existing durable revision floor, bounded to 64 names in the same owned cache. Reopening
+uses the caller's independently trusted publisher key, exact name/minimum revision, original
+signature/expiry and complete object hash. Missing chunks, an expired manifest or a higher
+observed/conflicting revision cannot silently return an older snapshot or trigger a network
+fallback. Old chunk-only caches need one normal successful retrieval to acquire an envelope.
+
+The cache-only agent branch performs no route preparation, discovery, origin retrieval,
+contribution enqueue or post-download incidental uptake. It retains the client-role/local-socket
+boundary but does not require an Internet policy to read already authorized local native bytes.
+The normal network branch's policy checks remain unchanged. Ready echoes the exact source mode;
+the CLI rejects network/provider accounting in cache-only receipts. The existing site viewer
+keeps its isolated localhost behavior and original signed expiry. Separately configured running
+agent services are not stopped by this per-operation flag.
+
+Two real disk/reopen tests pass, including original-envelope preservation, floor-before-snapshot
+rollback refusal, durable conflicts, expiry, missing chunks and bounded private storage. Three
+agent named tests pass, including actual local chunk transfer from a reopened complete store.
+Five isolated CLI-process tests, two wire tests and two parser tests pass; scoped content and
+joint agent/CLI/local-control Clippy also pass. The CLI site fixture exercises HTTP retrieval,
+not a browser engine or a live production-agent topology. The additive real-agent no-route
+site-reopen network proof is ready; three site and fourteen parent checker tests pass with
+narrow shell checks. Its actual VM result is pending. This is local native availability, not completed
+external retention repair, reusable HTTPS authority or globally latest-version assurance.
+
+### Automatic contribution startup/restart checkpoint
 
 The new explicit `content_contribution` configuration binds one cache, endpoint and quota to
 the agent lifecycle. It requires relay participation and configured upload/download accounting;
@@ -227,10 +267,10 @@ Two library store/duplex tests, three new runtime tests, two existing replicatio
 all thirty configuration tests and strict content/agent/config Clippy pass. These include actual
 incremental storage and re-serving after reopen, quota without eviction, private-v3 admission
 rejection and refusal to promote a legacy private journal. Expiry tests use explicit library
-time; this is not yet a live agent-start proof. Seven additive harness/checker tests, shellsyntax
-and strict ShellCheck pass. The dedicated VM will require an initially empty automatic service,
-ordinary P download, original-node shutdown, a real agent PID change with retained journal, and
-independent protected P retrieval. That run remains pending. This is not arbitrary HTTPS
+time; the newer source-bound network result below supplies the live agent-start proof. Seven
+initial additive harness/checker tests, shellsyntax and strict ShellCheck pass. The dedicated
+VM requires an initially empty automatic service, ordinary P download, original-node shutdown,
+a real agent PID change with retained journal and independent protected P retrieval. This is not arbitrary HTTPS
 interception, retention repair or globally fair placement.
 
 The [first automatic-start VM on `24e9a4b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34209702866)
@@ -243,9 +283,23 @@ The replication script now performs its own bounded restart of the already owned
 retaining PID/namespace/executable and journal checks. Eight narrow checker tests and strict
 shell checks pass; the standalone dependency regression performs no host service operation.
 The [corrected network run on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
-is pending; the failed run is not relabelled as a pass. The
+now **passes**, including an independent rebuild from the complete raw artifact. R4 starts
+with zero publications/chunks/bytes, admits a normal P download into three chunks / 524,609
+bytes, and publishes one usable object. The original R5 provider stops (inactive, PID zero,
+listener absent). R4's agent PID changes from 18565 to 21526 in the same namespace, preserving
+cache inode 27282 and its exact 624-byte journal. An independent Client then retrieves every
+P byte from R4 alone through a new protected context with R1/R2; the earlier uptake used R0/R1.
+P SHA-256 is `507a1f72e20863b91dbd92265ad6d58499cc16fab5a9d753676c56bbe87cb836`;
+unchanged journal SHA-256 is `9df829ad50804c734151c996950acfb6d0ee74d1cd35628b1225fb40db0cf44c`.
+All twenty captures / 156 interface rows are complete with zero drops or forbidden packets.
+Cleanup leaves zero owned objects and identical guest host state, SHA-256
+`f3a2de8a8a0053d1a98e7fcba7f2ffbd274545ec86a93cc379e4bad7a90809ad`.
+Artifact ZIP SHA-256: `0091da2ebbc4252c86c753523ff17b4e7702a3204869d2e12e8218102bf34599`;
+canonical raw rebuild SHA-256: `6aa3ef51114bb65d1e4799bcd48f7593fa3080ecea5405d634f0417c088b7864`.
+The older failed run remains failed. The
 [Quality run on the original `24e9a4b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34209675968)
-passes independently of that scenario failure.
+passes independently of that scenario failure; the subsequent `f76ac97a` Quality run was
+cancelled after a newer push, not passed or attributed to a test failure.
 
 ## Latest known-contact mailbox integration checkpoint
 

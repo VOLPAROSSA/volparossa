@@ -115,7 +115,8 @@ impl ChunkStore {
     /// duplicate/length constraints and every indexed file's type/length. SHA-256 is checked
     /// on each subsequent read. New limits apply immediately; this method never evicts to make
     /// an oversized old cache fit. Renaming the directory is supported; copied markers bound
-    /// to a different directory inode are rejected. No signing keys or manifests are loaded.
+    /// to a different directory inode are rejected. Saved native-name envelopes are checked
+    /// for storage consistency; no signing keys or independent trust anchors are loaded.
     ///
     /// # Errors
     /// Rejects foreign/private-ownership failures, a busy lock, corrupt/incomplete indexes or

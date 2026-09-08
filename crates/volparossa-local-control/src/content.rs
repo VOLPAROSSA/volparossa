@@ -175,6 +175,10 @@ pub struct ContentFetchNameRequest {
     /// Reopen only a previously owned cache, preserving its durable observed revision floor.
     #[prost(bool, tag = "6")]
     pub reuse_cache: bool,
+    /// Use only the reopened cache's original signed publication and complete chunks.
+    /// No route preparation, discovery, provider exchange or origin access is permitted.
+    #[prost(bool, tag = "7")]
+    pub cache_only: bool,
 }
 
 impl ContentFetchNameRequest {
@@ -184,6 +188,7 @@ impl ContentFetchNameRequest {
             || self.name.len() > 128
             || self.name.chars().any(char::is_control)
             || self.min_revision == Some(0)
+            || (self.cache_only && !self.reuse_cache)
         {
             return Err(ControlProtocolError::Invalid("invalid native name request"));
         }
@@ -198,6 +203,9 @@ pub struct NamedContentTransferReady {
     /// Caller verifies this against its original publisher key, exact name and minimum revision.
     #[prost(bytes = "vec", tag = "1")]
     pub manifest: Vec<u8>,
+    /// Echo the exact requested source mode before the caller accepts any local chunks.
+    #[prost(bool, tag = "2")]
+    pub cache_only: bool,
 }
 
 impl NamedContentTransferReady {
@@ -523,6 +531,7 @@ mod tests {
                 min_free_bytes: 0,
             }),
             reuse_cache: true,
+            cache_only: false,
         };
         let request = ControlRequest {
             protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -541,6 +550,7 @@ mod tests {
             payload: Some(Payload::NamedContentTransferReady(
                 NamedContentTransferReady {
                     manifest: vec![4; 1024],
+                    cache_only: false,
                 },
             )),
         };
@@ -560,7 +570,8 @@ mod tests {
         assert!(changed.validate().is_ok());
         assert!(
             NamedContentTransferReady {
-                manifest: vec![0; 64 * 1024 + 1]
+                manifest: vec![0; 64 * 1024 + 1],
+                cache_only: false,
             }
             .validate()
             .is_err()
@@ -575,6 +586,56 @@ mod tests {
         original.extend([0x40, 1]);
         serve.name_lookup = true;
         assert_eq!(serve.encode_to_vec(), original);
+    }
+
+    #[test]
+    fn cache_only_named_wire_requires_reuse_and_echoes_explicit_mode() {
+        let mut request = ContentFetchNameRequest {
+            publisher_key: vec![2; 32],
+            name: "site".into(),
+            cache: "/private/existing-cache".into(),
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            }),
+            reuse_cache: true,
+            ..ContentFetchNameRequest::default()
+        };
+        let mut legacy = request.encode_to_vec();
+        assert!(
+            !ContentFetchNameRequest::decode(legacy.as_slice())
+                .unwrap()
+                .cache_only
+        );
+        request.cache_only = true;
+        legacy.extend([0x38, 1]);
+        assert_eq!(request.encode_to_vec(), legacy);
+        assert_eq!(
+            ContentFetchNameRequest::decode(legacy.as_slice()).unwrap(),
+            request
+        );
+        assert!(request.validate().is_ok());
+        request.reuse_cache = false;
+        assert!(request.validate().is_err());
+        let mut ready = NamedContentTransferReady {
+            manifest: vec![3; 32],
+            cache_only: false,
+        };
+        let mut legacy = ready.encode_to_vec();
+        assert!(
+            !NamedContentTransferReady::decode(legacy.as_slice())
+                .unwrap()
+                .cache_only
+        );
+        ready.cache_only = true;
+        legacy.extend([0x10, 1]);
+        assert_eq!(ready.encode_to_vec(), legacy);
+        assert_eq!(
+            NamedContentTransferReady::decode(legacy.as_slice()).unwrap(),
+            ready
+        );
+        assert!(ready.validate().is_ok());
     }
 
     #[test]

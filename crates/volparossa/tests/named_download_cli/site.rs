@@ -19,7 +19,16 @@ mod browser;
 fn site_cli_delivers_signed_html_assets_ranges_and_cleans_up() {
     isolated_network(
         "site::site_cli_delivers_signed_html_assets_ranges_and_cleans_up",
-        successful_site(),
+        successful_site(false),
+        "loopback",
+    );
+}
+
+#[test]
+fn site_cache_only_uses_existing_signed_cache_and_reports_no_provider_activity() {
+    isolated_network(
+        "site::site_cache_only_uses_existing_signed_cache_and_reports_no_provider_activity",
+        successful_site(true),
         "loopback",
     );
 }
@@ -52,8 +61,39 @@ fn site_fixture() -> Fixture {
     fixture
 }
 
-async fn successful_site() {
+fn site_command(fixture: &Fixture, lifetime: &str) -> Command {
+    let root = fixture.directory.path();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_volparossa"));
+    command
+        .current_dir(root)
+        .env("TMPDIR", root)
+        .arg("--control-socket")
+        .arg(root.join("control.sock"))
+        .args(["content", "site", "open", "--publisher-key"])
+        .arg(hex::encode(fixture.key.verifying_key().to_bytes()))
+        .args(["--name", NAME, "--cache"])
+        .arg(root.join(if fixture.cache_only {
+            "served-store"
+        } else {
+            "agent-cache"
+        }))
+        .args(["--min-free-bytes", "0", "--lifetime-seconds", lifetime]);
+    if fixture.cache_only {
+        command.args(["--reuse-cache", "--cache-only", "--min-revision", "3"]);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+async fn successful_site(cache_only: bool) {
     let mut fixture = site_fixture();
+    if cache_only {
+        fixture.retain_for_cache_only();
+    }
     let browser_artifact = std::env::var_os("VOLPAROSSA_SITE_BROWSER_ARTIFACT");
     let lifetime = if browser_artifact.is_some() {
         "60"
@@ -62,27 +102,12 @@ async fn successful_site() {
     };
     let root = fixture.directory.path().to_owned();
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_volparossa"))
-        .current_dir(&root)
-        .env("TMPDIR", &root)
-        .arg("--control-socket")
-        .arg(root.join("control.sock"))
-        .args(["content", "site", "open", "--publisher-key"])
-        .arg(hex::encode(fixture.key.verifying_key().to_bytes()))
-        .args(["--name", NAME, "--cache"])
-        .arg(root.join("agent-cache"))
-        .args(["--min-free-bytes", "0", "--lifetime-seconds", lifetime])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+    let mut child = site_command(&fixture, lifetime).spawn().unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     timeout(Duration::from_secs(15), async {
         let ((), read) = tokio::join!(
-            fixture.serve(&listener, Fault::None, false),
+            fixture.serve(&listener, Fault::None, cache_only),
             output.read_line(&mut line)
         );
         assert!(
@@ -102,7 +127,16 @@ async fn successful_site() {
     assert_eq!(ready["https_origin_authenticated"], false);
     assert_eq!(ready["static_only"], true);
     assert_eq!(ready["automatic_browser_open"], false);
-    assert_eq!(ready["peer_bytes"], fixture.bytes.len());
+    assert_eq!(ready["cache_only"], cache_only);
+    assert_eq!(
+        ready["peer_bytes"],
+        if cache_only { 0 } else { fixture.bytes.len() }
+    );
+    if cache_only {
+        assert_eq!(ready["providers_used"], 0);
+        assert_eq!(ready["provider_peer_ids"], serde_json::json!([]));
+        assert_eq!(ready["control_relay_peer_id"], "");
+    }
     let url = ready["site_url"].as_str().unwrap();
     let host = url
         .strip_prefix("http://")
@@ -131,6 +165,7 @@ async fn successful_site() {
     let closed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(closed["operation"], "native_site_closed");
     assert_eq!(closed["private_spool_removed"], true);
+    assert_eq!(closed["cache_only"], cache_only);
     let result = timeout(Duration::from_secs(5), child.wait_with_output())
         .await
         .unwrap()

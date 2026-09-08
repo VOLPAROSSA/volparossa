@@ -476,6 +476,7 @@ impl ContentRuntime {
         request_id: &[u8],
         ready_sent: &mut bool,
     ) -> Result<(), ContentError> {
+        let allow_replication = !request.cache_only;
         let foreground = self.foreground.enter();
         let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
         let result = timeout(
@@ -486,7 +487,7 @@ impl ContentRuntime {
         .map_err(|_| ContentError::Unavailable)?;
         drop(retrieval);
         drop(foreground);
-        if result.is_ok() {
+        if result.is_ok() && allow_replication {
             self.start_replication(context).await;
         }
         result

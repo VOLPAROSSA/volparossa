@@ -166,6 +166,12 @@ retrieves the signed site from two independent providers and reads its HTML/CSS/
 byte ranges. The VM checks HTTP behavior; actual Firefox rendering is a separate local proof.
 This does not give cached pages another
 website's HTTPS origin or a dynamic backend. See the [site commands](docs/OPERATIONS.md#native-static-websites).
+An explicit `--reuse-cache --cache-only` mode is now implemented for `content fetch-name`
+and `content site open`: reopen a previously completed native download using the caller's
+trusted publisher key, original signed manifest, retained revision floor and complete local
+chunks, without opening a route or looking for peers. The original expiry still applies;
+this is neither a globally latest-version check nor offline HTTPS-origin authentication.
+Targeted storage, agent and CLI checks pass; the no-route integrated reopen proof is pending.
 The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
 also passes: publish, import, serve, protected retrieval, export and recipient opening after
 the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
@@ -206,9 +212,11 @@ state unchanged. Earlier TLS/report failures remain recorded, not retrospectivel
 That older run proves C03's bounded uptake/offline-provider/reopen/re-serving sequence, not
 automatic boot service or retention repair. The newer `fed8ab33` run also passes C04's local
 owner-priority criterion; it does not prove global fairness or universal no-slowdown behavior.
-An explicitly configured automatic contribution service is now being integrated: start empty,
+The explicitly configured automatic contribution service now passes its
+[source-stop/restart network proof on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709): start empty,
 retain verified public downloads within one quota, and restore useful replicas at agent startup.
-Its separate source-stop/restart network proof is pending. See
+After the original provider stops and the replica agent restarts, an independent Client retrieves
+the exact object from that restored replica. Capture and cleanup checks pass. See
 [automatic contribution](docs/OPERATIONS.md#automatic-public-content-contribution).
 C08 existing-web integration/benefit, retention repair and permanent availability remain open.
 More replicas alone do not establish a speedup.
@@ -284,8 +292,10 @@ no VOLPAROSSA-specific origin descriptor: providers supply an untrusted chunk in
 agent checks the complete object against the origin digest before delivery or contribution.
 It currently supports the same anonymous public binary profile, with complete peer retrieval or
 one full origin GET. Missing/unsupported digest metadata is rejected, not replaced by peer trust.
-The library, normal CLI and provider harness pass their targeted local checks; its protected
-network proof is pending. This is not arbitrary-site compatibility or a demonstrated speedup.
+The [protected-network proof on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
+passes: two providers deliver every payload byte with zero origin body transfer after a fresh
+origin HEAD. In this fixture peers-first takes 9.23 seconds versus 2.58 seconds origin-only;
+server payload is saved, but latency does not improve. This is not arbitrary-site compatibility.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

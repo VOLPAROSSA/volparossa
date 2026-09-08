@@ -7,7 +7,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 use volparossa_content::{
     SignedManifest, VerifiedManifest,
     provider::named::NameQuery,
-    transfer::{TransferLimits, pull_to_writer},
+    transfer::{TransferLimits, TransferProgress, pull_to_writer},
 };
 use volparossa_local_control::{
     ContentFetchNameRequest, ContentReceipt, control_request::Operation, control_response::Payload,
@@ -38,6 +38,7 @@ pub(super) struct VerifiedNamedDownload {
     receipt: ContentReceipt,
     expires: u64,
     authority_deadline: Instant,
+    cache_only: bool,
 }
 
 impl VerifiedNamedDownload {
@@ -54,7 +55,9 @@ impl VerifiedNamedDownload {
     }
 
     pub(super) fn report(&self) -> serde_json::Value {
-        report(self.receipt(), self.manifest())
+        let mut report = report(self.receipt(), self.manifest());
+        report["cache_only"] = self.cache_only.into();
+        report
     }
 
     pub(super) fn expires(&self) -> u64 {
@@ -103,6 +106,7 @@ async fn download(
         cache: absolute_path(&args.cache)?,
         limits: Some(args.limits.wire_limits()),
         reuse_cache: args.reuse_cache,
+        cache_only: args.cache_only,
     };
     let (mut stream, request_id, response) =
         crate::control::begin_request(socket, Operation::ContentFetchName(request)).await?;
@@ -112,6 +116,9 @@ async fn download(
     let Some(Payload::NamedContentTransferReady(ready)) = response.payload else {
         bail!("expected same-operation named readiness");
     };
+    if ready.cache_only != args.cache_only {
+        bail!("named readiness changed the requested cache-only mode");
+    }
     let manifest =
         query.verify_candidate(&SignedManifest::decode(&ready.manifest)?, now_seconds()?)?;
     let expires = manifest.validity().expires;
@@ -147,7 +154,45 @@ async fn download(
     let Some(Payload::Content(receipt)) = final_response.payload else {
         bail!("missing final named delivery receipt");
     };
-    if final_response.diagnostic_code != "CONTENT_OK"
+    validate_completion(
+        &final_response.diagnostic_code,
+        &receipt,
+        &manifest,
+        progress,
+        args.cache_only,
+    )?;
+    let download = VerifiedNamedDownload {
+        temporary,
+        manifest,
+        receipt,
+        expires,
+        authority_deadline,
+        cache_only: args.cache_only,
+    };
+    download.as_file().sync_all()?;
+    if Instant::now() >= deadline {
+        bail!("publication expired before local output publication");
+    }
+    download.check_live()?;
+    Ok(download)
+}
+
+fn validate_completion(
+    code: &str,
+    receipt: &ContentReceipt,
+    manifest: &VerifiedManifest,
+    progress: TransferProgress,
+    cache_only: bool,
+) -> Result<()> {
+    if cache_only
+        && (receipt.peer_bytes != 0
+            || receipt.providers_used != 0
+            || !receipt.provider_peer_ids.is_empty()
+            || !receipt.control_relay_peer_id.is_empty())
+    {
+        bail!("cache-only named delivery reported network or provider activity");
+    }
+    if code != "CONTENT_OK"
         || receipt.origin_authenticated
         || receipt.origin_body_bytes != 0
         || receipt.origin_range_requests != 0
@@ -159,19 +204,7 @@ async fn download(
     {
         bail!("named local delivery did not complete with the exact publisher-authorized object");
     }
-    let download = VerifiedNamedDownload {
-        temporary,
-        manifest,
-        receipt,
-        expires,
-        authority_deadline,
-    };
-    download.as_file().sync_all()?;
-    if Instant::now() >= deadline {
-        bail!("publication expired before local output publication");
-    }
-    download.check_live()?;
-    Ok(download)
+    Ok(())
 }
 
 fn report(receipt: &ContentReceipt, manifest: &VerifiedManifest) -> serde_json::Value {
@@ -179,10 +212,12 @@ fn report(receipt: &ContentReceipt, manifest: &VerifiedManifest) -> serde_json::
         "operation":"named_content_download", "bytes":receipt.bytes, "chunks":receipt.chunks,
         "publisher_key":hex::encode(manifest.publisher()), "name":manifest.metadata().name,
         "revision":manifest.metadata().revision, "manifest_id":hex::encode(manifest.manifest_id()),
+        "publication_expires_unix_seconds":manifest.validity().expires,
         "sha256":hex::encode(manifest.object_sha256()),
         "local_delivery":true, "output_mode":"0600",
         "ownership_changed":false, "origin_authenticated":false, "globally_latest":false,
         "peer_bytes":receipt.peer_bytes, "providers_used":receipt.providers_used,
+        "origin_body_bytes":receipt.origin_body_bytes, "origin_range_requests":receipt.origin_range_requests,
         "provider_peer_ids":receipt.provider_peer_ids,
         "control_relay_peer_id":receipt.control_relay_peer_id,
     })

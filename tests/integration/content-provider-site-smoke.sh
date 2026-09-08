@@ -29,6 +29,27 @@ content_provider_site_cleanup() {
         >"$WORK/content-provider-site-cleanup.json" || return 1
 }
 
+content_provider_site_cache_only_run() {
+    PHASE=content-provider-site-cache-only-disconnect
+    # The final online site capture is already drained. Retire the real shared route once;
+    # retain the normal parent disconnect receipt as evidence for final scenario teardown.
+    benchmark_disconnect_route content-provider || fail CONTENT_SITE_ROUTE_CLEANUP_FAILED
+    PHASE=content-provider-site-cache-only-open
+    start_privacy_observers content-provider-site-cache-only-privacy || fail CONTENT_SITE_PRIVACY_UNAVAILABLE
+    content_provider_start_control_observer content-provider-site-cache-only-control \
+        || fail CONTENT_SITE_CONTROL_CAPTURE_UNAVAILABLE
+    timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" setpriv \
+        --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$site_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/content-provider-site-smoke.py" consume-cache-only "$binary_directory/volparossa" \
+        "$WORK/runtime-client/control/agent.sock" "$site_client_cache" "$site_user" \
+        "$site_parent_ns" "$site_client_ns" "$WORKER_UID" "$WORKER_GID" "$site_control_gid" \
+        >"$WORK/content-provider-site-cache-only-consumer.json" \
+        2>"$WORK/content-provider-site-cache-only-open.err" || fail CONTENT_SITE_CACHE_ONLY_FAILED
+    stop_privacy_observers || fail CONTENT_SITE_PRIVACY_INCOMPLETE
+    content_provider_stop_control_observer || fail CONTENT_SITE_CONTROL_CAPTURE_INCOMPLETE
+}
+
 content_provider_site_run() {
     PHASE=content-provider-site-publish
     site_control_gid=$(getent group volparossa-users | cut -d: -f3)
@@ -138,10 +159,18 @@ content_provider_site_run() {
     if setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$site_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- test -r "$site_client_cache"; then fail CONTENT_SITE_CONSUMER_CACHE_EXPOSED; fi
+    site_cache_before=$(stat -Lc '%d:%i' "$site_client_cache") || fail CONTENT_SITE_CACHE_IDENTITY_UNAVAILABLE
+    content_provider_site_cache_only_run
+    site_cache_after=$(stat -Lc '%d:%i' "$site_client_cache") || fail CONTENT_SITE_CACHE_IDENTITY_UNAVAILABLE
+    [ "$site_cache_before" = "$site_cache_after" ] || fail CONTENT_SITE_CACHE_REPLACED
+    [ "$(stat -Lc '%a:%u:%g' "$site_client_cache")" = "700:$AGENT_UID:$AGENT_GID" ] \
+        || fail CONTENT_SITE_CACHE_OWNERSHIP_CHANGED
     jq -n --arg context "$provider_context" --argjson user "$WORKER_UID" --argjson user_gid "$WORKER_GID" \
         --argjson agent "$AGENT_UID" --argjson agent_gid "$AGENT_GID" --argjson control "$site_control_gid" \
+        --arg cache "$site_client_cache" --arg before "$site_cache_before" --arg after "$site_cache_after" \
         '{route_context_id:$context,user_uid:$user,user_gid:$user_gid,agent_uid:$agent,agent_gid:$agent_gid,
           control_gid:$control,cache_modes:"0700",fresh_client_cache:true,agent_mount_positive_control:true,
+          agent_cache:$cache,cache_identity_before:$before,cache_identity_after:$after,
           client_cannot_read_provider_caches:true,agent_cannot_read_user_directory:true,
           user_cannot_read_agent_caches:true,publisher_process_exited_before_fetch:true,
           publisher_node_offline_claimed:false}' >"$WORK/content-provider-site-isolation.json"
