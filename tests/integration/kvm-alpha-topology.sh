@@ -72,6 +72,8 @@ print_plan() {
             '  fetch the same cooperative-origin HTTPS object from complete peers and missing origin ranges;' \
             '  then publish/import/serve a normal user file, remotely fetch/export/assemble it across service UIDs;' \
             '  grant only control-group traversal and remove the exact temporary publisher identity/passphrase;' \
+            '  pack/publish a normal signed static site, import two replicas, remove original publisher files;' \
+            '  open by publisher/name in the Client, verify HTTP assets/ranges and SIGTERM spool cleanup (no browser engine);' \
             '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
@@ -414,7 +416,8 @@ if [ "$scenario" = content-mailbox ]; then
 fi
 if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
-        content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh; do
+        content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh \
+        content-provider-site-smoke.sh content-provider-site-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1205,6 +1208,9 @@ cleanup() {
     if [ "$scenario" = content-provider ] && command -v content_named_cleanup >/dev/null 2>&1; then
         content_named_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-provider ] && command -v content_provider_site_cleanup >/dev/null 2>&1; then
+        content_provider_site_cleanup || original_status=1
+    fi
     capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
@@ -1526,6 +1532,8 @@ if [ "$scenario" = content-provider ]; then
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-publication-smoke.sh
     . "$source_directory/tests/integration/content-publication-smoke.sh"
+    # shellcheck source=tests/integration/content-provider-site-smoke.sh
+    . "$source_directory/tests/integration/content-provider-site-smoke.sh"
 fi
 if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-replication-smoke.sh
@@ -4506,7 +4514,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-user-privacy|content-provider-named-privacy)
+        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

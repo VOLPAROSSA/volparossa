@@ -279,6 +279,23 @@ def validate_transfer(evidence):
             "ordinary publication reused fixture publisher or changed the established topology")
     validate_named_publication(evidence["named_publication"], publication, peers, layout,
                                selected["route_context_id"])
+    site_check = runpy.run_path(str(Path(__file__).with_name("content-provider-site-smoke.py")))
+    site = evidence["site_publication"]
+    site_check["validate_evidence"](site)
+    require(site["expected_peers"] == peers and site["layout"] == layout
+            and site["selected_route"]["route_context_id"] == selected["route_context_id"]
+            and site["input"]["publisher_key"] != publication["publisher_hex"]
+            and site["input"]["bundle_bytes"] == site_check["BUNDLE_BYTES"]
+            and site["input"]["bundle_sha256"] == site_check["BUNDLE_SHA256"],
+            "site proof substituted the topology, fixture authority or full canonical bundle")
+
+
+def build_site_publication(work):
+    site_check = runpy.run_path(str(Path(__file__).with_name("content-provider-site-smoke.py")))
+    rebuilt = site_check["build_evidence"](work)
+    require(rebuilt == read(work / "content-provider-site-evidence.json"),
+            "site component report differs from its raw CLI, HTTP or packet evidence")
+    return rebuilt
 
 
 def build_evidence(work):
@@ -297,6 +314,7 @@ def build_evidence(work):
                     https=read(work / "content-provider-https-evidence.json"),
                     ordinary_publication=read(work / "content-provider-user-publication.json"),
                     named_publication=build_named_publication(work, layout["provider_nodes"]),
+                    site_publication=build_site_publication(work),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -352,6 +370,7 @@ def validate_report(report, revision):
             and report["explicit_origin_authenticated_https"] is True
             and report["normal_user_publication"] is True
             and report["native_name_retrieval"] is True
+            and report["native_static_site"] is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]

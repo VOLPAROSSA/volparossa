@@ -239,6 +239,8 @@ content_provider_run() {
     # shellcheck source=tests/integration/content-named-smoke.sh
     . "$source_directory/tests/integration/content-named-smoke.sh"
     content_named_run
+    # An additional normal signed multi-asset site; never substitute for earlier object proofs.
+    content_provider_site_run
     PHASE=content-provider-stop
     for provider_node in "$provider_node_a" "$provider_node_b"; do
         "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node/control/agent.sock" \
@@ -278,15 +280,16 @@ content_provider_finalize_report() {
       {schema_version:1,report_kind:"volparossa-native-content-providers",
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and
-         $evidence.ordinary_publication.success == true and $complete and
+         $evidence.ordinary_publication.success == true and $evidence.site_publication.success == true and $complete and
          $remaining == 0 and $host.unchanged == true),transfer:$evidence,
        runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host | del(.acceptance_id)),
-       scope:"explicit native publication and cooperative-origin HTTPS for the same object, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges",
+       scope:"explicit native publication and cooperative-origin HTTPS for the same object, normal named static-site HTTP assets, two policy-authorized providers via generic DHT/control-relay discovery and protected MPTCP/TLS/WireGuard, complete peers and missing origin ranges",
        general_nat_reachability_claimed:false,full_c02_claimed:false,
        explicit_origin_authenticated_https:($evidence.https.success == true),
        normal_user_publication:($evidence.ordinary_publication.success == true),
        native_name_retrieval:($evidence.named_publication.success == true),
+       native_static_site:($evidence.site_publication.success == true),
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1

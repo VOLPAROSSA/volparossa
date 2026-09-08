@@ -9,6 +9,7 @@ from pathlib import Path
 import runpy
 import socket
 import struct
+import subprocess
 import tempfile
 import unittest
 
@@ -86,7 +87,21 @@ def fixture(control_node="relay2"):
         control_node, evidence["publication"])
     evidence["ordinary_publication"] = user_fixture(evidence)
     evidence["named_publication"] = named_fixture(evidence)
+    evidence["site_publication"] = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))["fixture"](control_node)
     return evidence
+
+
+def site_raw_files(evidence):
+    files = {f"content-provider-site-{suffix}.json": evidence[key] for key, suffix in (
+        ("input", "input"), ("pack", "pack"), ("publish", "publish"), ("application", "consumer"),
+        ("isolation", "isolation"), ("publisher_cleanup", "publisher-cleanup"), ("cleanup", "cleanup"),
+        ("selected_route", "selection"), ("control_privacy", "control"))}
+    for key, operation in (("imports", "import"), ("serves", "serve")):
+        for node, receipt in evidence[key].items():
+            files[f"content-provider-site-{node}-{operation}.json"] = receipt
+    for role, capture in evidence["privacy"].items():
+        files[f"content-provider-site-privacy-{role}.json"] = capture
+    return files
 
 
 def named_fixture(base):
@@ -149,6 +164,38 @@ def user_fixture(base):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_site_proof_is_required_and_bound_to_parent_topology_and_exact_bundle(self):
+        evidence = fixture()
+        CHECK["validate_transfer"](evidence)
+        for mutate in (
+            lambda item: item.pop("site_publication"),
+            lambda item: item["site_publication"].update(success=False),
+            lambda item: item["site_publication"]["expected_peers"].update(client="different-client"),
+            lambda item: item["site_publication"]["input"].update(bundle_sha256="f"*64),
+            lambda item: item["site_publication"]["application"]["ready"].update(peer_bytes=0),
+            lambda item: item["site_publication"]["cleanup"].update(user_directory_removed=False),
+        ):
+            changed = copy.deepcopy(evidence)
+            mutate(changed)
+            with self.assertRaises((ValueError, KeyError)):
+                CHECK["validate_transfer"](changed)
+
+    def test_site_prefix_and_unconditional_run_cleanup_hooks_are_registered(self):
+        source = HERE.joinpath("kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
+        script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
+        for scenario in ("content-provider", "content", "content-https", "content-message", "dns-cache"):
+            for prefix in ("content-provider-site-privacy", "content-provider-site-unregistered"):
+                result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
+                                        capture_output=True, timeout=2, check=False)
+                self.assertEqual(result.returncode == 0,
+                                 scenario == "content-provider" and prefix == "content-provider-site-privacy")
+        self.assertIn('. "$source_directory/tests/integration/content-provider-site-smoke.sh"', source)
+        self.assertIn("content_provider_site_cleanup || original_status=1", source)
+        runtime = HERE.joinpath("content-provider-smoke.sh").read_text(encoding="utf-8")
+        self.assertIn("content_named_run\n    # An additional normal signed multi-asset site; never substitute for earlier object proofs.\n    content_provider_site_run\n    PHASE=content-provider-stop", runtime)
+        self.assertIn("$evidence.site_publication.success == true", runtime)
+
     def test_parallel_proof_requires_overlapping_kernel_bulk_not_handshake_or_drain_times(self):
         evidence = fixture()
         nodes = evidence["layout"]["provider_nodes"]
@@ -269,9 +316,11 @@ class ContentProviderContract(unittest.TestCase):
             "status_after": "status-after", "output": "object", "fetch": "fetch",
             "https": "https-evidence", "selected_route": "live-selection",
             "ordinary_publication": "user-publication",
+            "site_publication": "site-evidence",
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
+        files.update(site_raw_files(evidence["site_publication"]))
         named = evidence["named_publication"]
         for key, suffix in (("fetch", "fetch"), ("output", "output"), ("cleanup", "cleanup"),
                             ("selected_route", "selection"), ("control_privacy", "control")):
@@ -294,6 +343,14 @@ class ContentProviderContract(unittest.TestCase):
             for name, value in files.items():
                 (work / name).write_text(json.dumps(value), encoding="ascii")
             self.assertEqual(CHECK["build_evidence"](work), evidence)
+            # The site must be rebuilt from raw receipts/captures, not accepted by its summary flag.
+            site_report = work / "content-provider-site-evidence.json"
+            substituted = copy.deepcopy(evidence["site_publication"])
+            substituted["application"]["elapsed_ns"] += 1
+            site_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            site_report.write_text(json.dumps(evidence["site_publication"]), encoding="ascii")
             # Keep every existing exact source/destination/gateway/device check after decoding.
             wrong = copy.deepcopy(files["content-provider-control-relay4-out.json"])
             wrong[0]["dev"] = "underlay"
@@ -328,6 +385,7 @@ class ContentProviderContract(unittest.TestCase):
     def test_exact_scoped_report(self):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
                       explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
+                      native_static_site=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})
@@ -336,6 +394,7 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item.update(source_revision="c" * 40),
             lambda item: item.update(full_c02_claimed=True),
             lambda item: item.update(explicit_origin_authenticated_https=False),
+            lambda item: item.update(native_static_site=False),
             lambda item: item["cleanup"].update(remaining_owned_objects=1),
             lambda item: item["host_state"].update(after_sha256="c" * 64),
         ):
