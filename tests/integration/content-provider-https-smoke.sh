@@ -55,7 +55,7 @@ content_provider_https_phase() {
     timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ph_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$source_directory/tests/integration/content-provider-https-smoke.py" \
+        -- python3 -B "$ph_driver" \
         consume "$ph_case" "$binary_directory/volparossa" \
         "$WORK/runtime-client/control/agent.sock" "$ph_cache" "$ph_user" \
         "$ph_parent_netns" "$ph_client_netns" "$WORKER_UID" "$WORKER_GID" "$ph_control_gid" \
@@ -114,7 +114,7 @@ content_provider_https_baseline() {
     timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" setpriv \
         --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ph_control_gid" \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$source_directory/tests/integration/content-provider-https-smoke.py" \
+        -- python3 -B "$ph_driver" \
         consume baseline "$ph_binary" "$WORK/runtime-client/control/agent.sock" unused \
         "$ph_user" "$ph_parent_netns" "$ph_client_netns" "$WORKER_UID" "$WORKER_GID" "$ph_control_gid" \
         >"$WORK/$ph_prefix-consumer.json" 2>"$WORK/$ph_prefix-fetch.err" \
@@ -144,6 +144,13 @@ content_provider_https_baseline() {
 content_provider_https_run() {
     PHASE=content-provider-https-origin-seed
     ph_binary=$binary_directory/examples/https-content-acceptance-fixture
+    # The operator must not traverse the private checkout home. Stage only these
+    # public driver sources, including the driver's relative read/require dependency.
+    for ph_script in content-provider-https-smoke.py content-network-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$ph_script" \
+            "$WORK/bin/$ph_script" || fail PROVIDER_HTTPS_DRIVER_UNAVAILABLE
+    done
+    ph_driver=$WORK/bin/content-provider-https-smoke.py
     # Reuse exactly the publication already held in the two independent providers. Only
     # its public key crosses into the origin fixture; no resigning or replacement authority.
     ph_origin_root=$WORK/content-provider-seed/https-origin
