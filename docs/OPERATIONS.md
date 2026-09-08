@@ -450,7 +450,11 @@ ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or emai
 ### Explicit protected content service and retrieval
 
 The development runtime now also has `content serve`, `content fetch`, `content status` and `content stop`.
-Compilation and focused tests pass; the independent-node network acceptance run is pending.
+Compilation and focused tests pass. The
+[exact `10f63244` independent-node run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
+also passes native and cooperative HTTPS retrieval, plus normal user publication/import,
+service serving, independent retrieval and user export/assembly. This is a scoped command-path
+result, not complete C02, generic browser integration or guaranteed availability.
 Use a disposable topology while this integration is under development. These commands talk to
 the already running unprivileged agent (`--control-socket` can select its socket); they neither
 unlock another private key nor install/change the host network.
@@ -459,12 +463,13 @@ A provider needs an existing cache created by the **agent account**, an independ
 publisher key, and an explicitly chosen reachable bind address/DNS name. That hostname and TCP
 port must already be allowed by the threshold-signed Exit policy; an offer does not create an
 allowlist entry. Do not copy/chown an owned cache as a provisioning shortcut. Use caller-chosen
-paths accessible inside the agent's service sandbox. For example, after provisioning those
+cache/output paths accessible inside the agent's service sandbox. The CLI reads and verifies
+`--manifest` itself, so that file must be readable by the calling user. After provisioning those
 prerequisites, substitute the actual addresses and paths:
 
 ```sh
 volparossa content serve \
-  --manifest /agent-accessible/notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
   --cache /agent-owned/replica-cache --bind PROVIDER_BIND_IP:18080 \
   --advertised-hostname provider.example
 

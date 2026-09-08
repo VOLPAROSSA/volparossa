@@ -151,8 +151,10 @@ unfinished; see the proposal's C02--C08 scope. More replicas alone do not establ
 The first positive DNSSEC cache is now connected to the ordinary agent's TCP, UDP and protected
 DNS resolution. It independently validates peer evidence, excludes involved route relays and
 retains the existing resolver when evidence is missing or unsupported. Combined compilation and
-strict Clippy pass; the real public-chain/two-Exit sharing proof is still pending, so C05 is not
-complete. See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
+strict Clippy pass. The [public DNSSEC-chain run on `0fa80d65`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684)
+now passes real IPv4/IPv6 validation with unchanged built-in roots and local cache reuse.
+Ordinary two-Exit peer sharing is still awaiting its network proof, so C05 is not complete.
+See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
 On `10f63244`, general Quality still fails before two local handoff tests can run because the
 CI runner refuses their user-namespace UID mapping. CodeQL analysis completes, but its separate
 PR alert gate remains red with 126 results. These failures are separate from the passing VM

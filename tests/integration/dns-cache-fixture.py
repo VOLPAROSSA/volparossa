@@ -294,6 +294,9 @@ def serve(root, listen, report, ready, maximum_seconds):
     signal.signal(signal.SIGTERM, lambda *_: stopped.__setitem__(0, True))
     signal.signal(signal.SIGINT, lambda *_: stopped.__setitem__(0, True))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        # Consecutive bounded fixture phases reopen this exact isolated endpoint;
+        # previous accepted TCP sockets may still be in TIME_WAIT. Never share a live listener.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((host, port))
         listener.listen(8)
         listener.settimeout(0.1)

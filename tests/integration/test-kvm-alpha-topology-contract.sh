@@ -29,6 +29,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario content-https | grep -Fi 'content-https' >/dev/null
     "$script" --preview --scenario content-provider | grep -Fi 'content-provider' >/dev/null
     "$script" --preview --scenario content-replication | grep -Fi 'content-replication' >/dev/null
+    "$script" --preview --scenario dns-cache | grep -Fi 'DNS-cache' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?

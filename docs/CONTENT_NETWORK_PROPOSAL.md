@@ -108,7 +108,9 @@ record, so this is not an absolute network-wide TTL-replay guarantee.
 The combined runtime compiles and the focused core verifies a real cryptographic test chain
 and TCP collector in a disposable namespace. That test's private anchor exists only under
 `cfg(test)`; it does not prove the current public chain or network-wide C05. A separate fixture
-probe requires genuine A and AAAA validation against the unchanged built-in production anchors.
+probe now passes genuine public A and AAAA validation against the unchanged built-in production
+anchors, followed by local cache reuse, in the
+[exact `0fa80d65` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684).
 The ordinary two-Exit peer-hit/fallback network checkpoint remains open.
 
 ## First delivered foundation (2026-09-07)
@@ -129,7 +131,7 @@ trusted publisher key and explicit local cache paths. Both have real separate-in
 roundtrip evidence, but do not announce a provider, distribute chunks or resolve a public name.
 See the [operational commands](OPERATIONS.md#offline-content-commands).
 
-The next integrated runtime adds explicit `content serve` / `content fetch` / `content stop`.
+The integrated runtime provides explicit `content serve` / `content fetch` / `content stop`.
 A provider signs only a short-lived generic service location. A consumer asks its current
 authenticated control Relay to find services, verifies their node-key signatures, then fetches
 the exact independently trusted manifest over existing policy-authorized MPTCP/TLS routes.
@@ -149,11 +151,15 @@ valid provider offers without renewing their deadlines. The fresh `e592b610` pro
 now passes native and both HTTPS cases, including exact partial ranges, physical captures and
 cleanup. That scoped explicit-object proof does not establish general NAT reachability or a
 complete C02 claim. Automatic placement, retention and name lookup are not supplied by it,
-and C06 remains open.
+and C06 remains open. The newer
+[normal-user run on `10f63244`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
+also passes publication/import, service serving, independent protected retrieval and user
+export/assembly of the exact signed object across separate accounts. This does not supply
+stable-name discovery, retention repair or general website hosting.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.
 
-The next runtime uses a real provider application-TLS layer inside the protected path. The
+The runtime uses a real provider application-TLS layer inside the protected path. The
 existing libp2p TLS identity proof pins the endpoint to its verified signed offer; exact SNI and
 content ALPN are required. A new temporary consumer identity is used per TLS session, not the
 permanent Client key. This provider authentication does not replace the separately trusted
@@ -204,7 +210,12 @@ checker/cleanup/process tests pass, including real CLI compatibility with the ex
 publisher. The [fresh network run on `4c4c8954`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34170523962)
 now passes with normal recipient CLI decryption of the retrieved ciphertext, exact bytes,
 wrong-recipient/no-clobber checks, ten complete zero-drop captures and unchanged-host cleanup.
-The sender remains a fixture; neither automatic key discovery nor a mailbox is introduced.
+In that `4c4c8954` run the sender remains a fixture; neither automatic key discovery nor a
+mailbox is introduced. The additive `f0936007` harness now composes normal private
+publish/import/serve/fetch/export/open, with the new sender's key and input removed before
+remote retrieval. Its local checks pass; its
+[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) is still in progress,
+not a completed normal-sender or full C07 network claim.
 
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
 proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)

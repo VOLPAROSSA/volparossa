@@ -33,16 +33,28 @@ The signed protocol and codec tests, two actor/exclusion tests, verified Exit-sc
 config tests and exact schema check pass. The actor executes inside a disposable namespace and
 proves a signed cache miss without triggering an upstream lookup, not a positive peer hit.
 The bounded public-wire recorder/replayer and preflight runner have four socket-free evidence
-tests and shell checks passing; no fresh public fixture could be obtained in this environment.
+tests and shell checks passing. The source-bound
+[public-chain preflight on `0fa80d65`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684)
+now also passes: fresh unmodified public `iana.org` A and AAAA answers validate against the
+unchanged built-in roots, each reports `UpstreamValidated`, and each repeats from `LocalValidated`
+cache. The answers are `192.0.43.8` and `2001:500:88:200::8`; both had 969 seconds of remaining
+validity during this run. Original public wire records, source/binary hashes and collector output
+are retained in artifact SHA-256
+`4efa632e5ea53462b7c16cfda30ddc9eca935a183a8d2aeea1a077aa586ff857`.
+The replay listener closes cleanly. This is a real public-root collector/local-cache pass,
+not a normal Client route or positive peer-cache pass.
 The normal resolver now exports only aggregate local/peer/upstream/fallback counters through the
 existing loopback-only metrics endpoint, plus signed cache-miss replies queued by the actor.
 No names, addresses or peer labels are added. Targeted cache/source-accounting, actor, metrics
-and exact development-policy flag tests pass. A source-bound GitHub preflight builds first,
-then fetches fresh public DNS wire data and validates it with the actual unchanged-root collector
-inside the same capability-dropped namespace runner; merely preparing this workflow is not a pass.
+and exact development-policy flag tests pass. The GitHub preflight builds before collecting the
+expiring public records and uses the same capability-dropped namespace runner.
 
-**C05 remains incomplete.** Current public-chain collection/validation and the ordinary two-Exit
-upstream/peer/local-hit/fallback network sequence have not passed yet. CNAME/negative-answer
+**C05 remains incomplete.** The ordinary two-Exit upstream/peer/local-hit/fallback network sequence
+has not passed yet. Its disposable `dns-cache` scenario is now executable: fresh original public
+wire records, normal protected requests to each selected Exit, seven source-accounted phases,
+peer shutdown and 35 physical capture windows. Four checker/classifier tests, four existing
+public-fixture tests and shell/topology-contract checks pass; these are not a live peer-cache pass.
+CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
 is claimed. The older content VM successes below do not verify this newer DNS-integrated build.
@@ -69,6 +81,14 @@ Artifact SHA-256: `0f352df1445d02e3c8f9f4f176a08aeded77709ac81dd68c80470b1118537
 This is normal local sender/account integration plus the existing fixture-publisher network path,
 not a complete normal sender network runtime, mailbox or C07. Exact CodeQL analysis passes;
 Quality was cancelled by a newer head, not reported as passed.
+The additive normal private-network harness is now committed as `f0936007` and its
+[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) is in progress,
+not passed. It preserves the earlier complementary-replica proof, then uses normal
+publish-message/import/serve/fetch/export/open across separate operator/service accounts.
+The new sender identity and plaintext input are removed before remote retrieval; the recipient
+supplies its trusted key independently. Its local checks pass, including the positive Client-mount
+access control before rejecting fixture-local cache shortcuts. A mailbox/full C07 is not claimed.
+
 The installed runtime ancestor now gives only search permission to the control group through a
 non-inherited ACL, retaining the helper's required `0750` mode and private socket permissions.
 
@@ -141,11 +161,15 @@ fails with 126 critical results. The unchanged count is not a new SARIF identity
 security claim. No alert is dismissed and no failed run is relabelled.
 
 The namespace runner correction in `41690c9` keeps real execution rather than skipping these
-tests. It first tries disposable user/network/PID namespaces. Only the explicit Quality opt-in
+tests. It first tries disposable user/network/PID namespaces. Only an explicit CI-fixture opt-in
 may use sudo for namespace creation when user mappings are denied; the exact test then runs as
 the original user with capabilities removed. It never retries a failed test on the host network.
-Both CLI tests and the new TCP collector pass locally through the corrected isolated runner;
-the sudo path still requires a fresh actual Ubuntu CI result and is not reported as passed here.
+Both CLI tests and the new TCP collector pass locally through the corrected isolated runner.
+The `0fa80d65` public DNS preflight now proves its explicit command-mode CI opt-in: Ubuntu denies
+the user mapping, the fixed trampoline creates only disposable network/PID namespaces, and the
+real collector runs as the original UID/GID 1001 with all capabilities cleared. This does not
+retroactively pass the old handoff failures or a complete Quality run; `0fa80d65` Quality was
+cancelled after the newer private-message harness was pushed.
 
 ### Preceding replica diagnostics and retirement integration
 

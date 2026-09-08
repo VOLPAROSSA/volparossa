@@ -51,6 +51,7 @@ set -- \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
     tests/integration/dns-cache-proof.sh \
+    tests/integration/dns-cache-smoke.sh \
     tests/integration/content-message-publication-smoke.sh \
     tests/integration/generate-alpha-acceptance-report.sh \
     tests/integration/test-alpha-acceptance-report.sh \

@@ -27,10 +27,22 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache]'
 }
 
 print_plan() {
+    if [ "$scenario" = dns-cache ]; then
+        printf '%s\n' \
+            'VOLPAROSSA DNS-cache protected network smoke plan:' \
+            '  collect bounded current public DNS wire DATA from literal https://dns.google/dns-query after build;' \
+            '  independently validate the unmodified signed A/AAAA chain using the built-in production roots;' \
+            '  add one disposable ExitA-ExitB control-only veth; never direct Client-Exit connectivity;' \
+            '  send normal UDP DNS through one real Relay and two WireGuard legs to each selected Exit;' \
+            '  warm ExitA upstream, prove ExitB peer hits without upstream, stop A, prove B local hits;' \
+            '  verify unsigned trusted fallback and cache-only peer miss without recursive traffic;' \
+            '  retain 35 complete physical captures, exact source counters and unchanged guest host state.'
+        return
+    fi
     if [ "$scenario" = content-replication ]; then
         printf '%s\n' \
             'VOLPAROSSA content-replication runtime smoke plan:' \
@@ -242,7 +254,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -355,6 +367,18 @@ if [ "$scenario" = mixed-link ]; then
     [ -f "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         && [ ! -L "$source_directory/tests/integration/mixed-link-smoke.sh" ] \
         || { printf '%s\n' 'mixed-link fixture unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = dns-cache ]; then
+    for dns_fixture in dns-cache-smoke.sh dns-cache-smoke.py dns-cache-capture.py dns-cache-fixture.py \
+        dns-cache-proof.sh content-replication-capture.py; do
+        if [ ! -f "$source_directory/tests/integration/$dns_fixture" ] \
+            || [ -L "$source_directory/tests/integration/$dns_fixture" ]; then
+            printf '%s\n' 'DNS cache fixture unavailable' >&2
+            exit 69
+        fi
+    done
+    [ -x "$binary_directory/examples/dns-cache-proof" ] \
+        || { printf '%s\n' 'built-in DNS root validator unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-replication ]; then
     for replication_fixture in content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
@@ -555,6 +579,8 @@ DESTINATION_PID=
 HTTP3_SERVER_PID=
 HTTP3_CLIENT_PID=
 TLS_POLICY_SERVER_PID=
+# shellcheck disable=SC2034 # Owned by the sourced DNS scenario and its cleanup function.
+DNS_CACHE_SERVER_PID=
 HOSTS_BACKUP=
 DOWNLOAD_CLIENT_PID=
 CLIENT_OBSERVER_PID=
@@ -1074,6 +1100,9 @@ cleanup() {
     [ "$FINALIZED" = no ] || exit "$original_status"
     FINALIZED=yes
     trap - EXIT HUP INT TERM
+    if [ "$scenario" = dns-cache ] && command -v dns_cache_stop_server >/dev/null 2>&1; then
+        dns_cache_stop_server || original_status=1
+    fi
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         if [ "$download_sharing" = yes ]; then download_sharing_resume || original_status=1; fi
         reciprocity_stop_processes
@@ -1360,7 +1389,9 @@ cleanup() {
     fi
     copy_artifacts || original_status=1
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    if [ "$scenario" = content-replication ]; then
+    if [ "$scenario" = dns-cache ]; then
+        dns_cache_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content-replication ]; then
         content_replication_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-provider ]; then
         content_provider_finalize_report "$original_status" || original_status=1
@@ -1465,6 +1496,10 @@ if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-replication-smoke.sh
     . "$source_directory/tests/integration/content-replication-smoke.sh"
 fi
+if [ "$scenario" = dns-cache ]; then
+    # shellcheck source=tests/integration/dns-cache-smoke.sh
+    . "$source_directory/tests/integration/dns-cache-smoke.sh"
+fi
 
 PHASE=host-state-before
 A15_REQUESTED=true
@@ -1534,6 +1569,12 @@ if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/https-content-acceptance-fixture" \
         "$WORK/bin/examples/https-content-acceptance-fixture"
+fi
+if [ "$scenario" = dns-cache ]; then
+    install -o root -g root -m 0555 "$binary_directory/examples/dns-cache-proof" "$WORK/bin/examples/dns-cache-proof"
+    for dns_client_script in dns-cache-smoke.py dns-cache-fixture.py dns-cache-capture.py content-replication-capture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$dns_client_script" "$WORK/bin/$dns_client_script"
+    done
 fi
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/client-fixtures"
 binary_directory=$WORK/bin
@@ -1685,7 +1726,9 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
-if [ "$scenario" = content-replication ]; then
+if [ "$scenario" = dns-cache ]; then
+    dns_cache_extend_network
+elif [ "$scenario" = content-replication ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
@@ -1758,7 +1801,9 @@ jq -S -c -n \
     >"$WORK/a01-expected-peers.json"
 
 set --
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ]; then
+if [ "$scenario" = dns-cache ]; then
+    set -- --dns-cache
+elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ]; then
     set -- --content-providers
 fi
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
@@ -1770,6 +1815,7 @@ write_config() {
     bootstrap_one=$6; bootstrap_two=$7; bootstrap_three=$8
     client_role=false; relay_capacity=0; exit_capacity=0; advertised_asn=0; advertised_prefix=null
     uplink=independent_internet; extra_listen=none
+    dc_enabled=false; dc_upstream=null; dc_metrics=false
     [ "$node" != client ] || client_role=true
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
@@ -1839,6 +1885,7 @@ write_config() {
     if [ "$scenario" = content-replication ]; then
         content_replication_configure_node
     fi
+    [ "$scenario" != dns-cache ] || dns_cache_configure_node
     if [ "$wifi_link" = yes ]; then
         # Only the absent, not-yet-started Ethernet/WAN contacts remain configured. Neither
         # mesh peer is preconfigured on the other; the first association must be mDNS-driven.
@@ -1897,10 +1944,15 @@ write_config() {
         # advertisement. The native authorization chain binds this value to both service ledgers.
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
         printf '  client_minimum_download_mbps: 8\n'
+        if [ "$scenario" = dns-cache ]; then
+            printf 'dns_cache:\n  enabled: %s\n  upstream: %s\n' "$dc_enabled" "$dc_upstream"
+        fi
         printf 'policy:\n  fail_closed: true\n'
         printf '  manifest_path: "%s/development-policy.manifest"\n' "$WORK"
         printf '  minimum_signatures: 3\n  reject_ech: true\n'
-        printf '  reject_unverifiable_sni: true\nprivacy:\n  metrics_enabled: false\n'
+        printf '  reject_unverifiable_sni: true\nprivacy:\n'
+        if [ "$scenario" = dns-cache ]; then printf '  metrics_enabled: %s\n' "$dc_metrics"
+        else printf '  metrics_enabled: false\n'; fi
         printf '  persist_domain_logs: false\n  persist_destination_ips: false\n'
     } >"$WORK/config-$node.yaml"
     chown "$AGENT_UID:$AGENT_GID" "$WORK/config-$node.yaml"
@@ -3790,7 +3842,7 @@ fi
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
-    && [ "$scenario" != content-replication ]; then
+    && [ "$scenario" != content-replication ] && [ "$scenario" != dns-cache ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -5053,6 +5105,10 @@ if [ "$scenario" = content-provider ]; then
 fi
 if [ "$scenario" = content-replication ]; then
     content_replication_run
+    exit 0
+fi
+if [ "$scenario" = dns-cache ]; then
+    dns_cache_run
     exit 0
 fi
 
