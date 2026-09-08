@@ -70,6 +70,13 @@ const NFT_META_OIF: u32 = 5;
 const NFT_META_SKUID: u32 = 10;
 const NFT_META_NFPROTO: u32 = 15;
 const NFT_META_L4PROTO: u32 = 16;
+const NFT_CT_DIRECTION: u32 = 1;
+const NFT_CT_MARK: u32 = 3;
+const NFT_CT_LABELS: u32 = 13;
+const CT_ORIGINAL: u8 = 0;
+const CT_REPLY: u8 = 1;
+// Conntrack metadata only: never copied into a packet/routing mark.
+const TRUSTED_TCP_REPLY_CONNMARK: u32 = 0x5650_4b52;
 const NFT_PAYLOAD_TRANSPORT_HEADER: u32 = 2;
 const NFT_CMP_EQ: u32 = 0;
 const NFT_CMP_NEQ: u32 = 1;
@@ -100,6 +107,14 @@ const NFTA_EXPR_DATA: u16 = 2;
 const NFTA_META_DREG: u16 = 1;
 const NFTA_META_KEY: u16 = 2;
 const NFTA_META_SREG: u16 = 3;
+const NFTA_CT_DREG: u16 = 1;
+const NFTA_CT_KEY: u16 = 2;
+const NFTA_CT_SREG: u16 = 4;
+const NFTA_BITWISE_SREG: u16 = 1;
+const NFTA_BITWISE_DREG: u16 = 2;
+const NFTA_BITWISE_LEN: u16 = 3;
+const NFTA_BITWISE_MASK: u16 = 4;
+const NFTA_BITWISE_XOR: u16 = 5;
 const NFTA_CMP_SREG: u16 = 1;
 const NFTA_CMP_OP: u16 = 2;
 const NFTA_CMP_DATA: u16 = 3;
@@ -447,9 +462,7 @@ fn parent_install_transaction(
     let mut table_payload = nfgen(NFPROTO_INET);
     attr(&mut table_payload, NFTA_TABLE_NAME, &nul(table)?)?;
     attr(&mut table_payload, NFTA_TABLE_FLAGS, &0_u32.to_be_bytes())?;
-    let mut userdata = Vec::with_capacity(PARENT_TABLE_USERDATA_DOMAIN.len() + runtime.len());
-    userdata.extend_from_slice(PARENT_TABLE_USERDATA_DOMAIN);
-    userdata.extend_from_slice(&runtime);
+    let userdata = [PARENT_TABLE_USERDATA_DOMAIN, runtime.as_slice()].concat();
     attr(&mut table_payload, NFTA_TABLE_USERDATA, &userdata)?;
     transaction.push(
         NFT_MSG_NEWTABLE,
@@ -470,7 +483,7 @@ fn parent_install_transaction(
             NF_DROP,
         )?,
     )?;
-    let rules = [
+    let mut rules = vec![
         rule(
             table,
             OUTPUT_CHAIN,
@@ -506,6 +519,13 @@ fn parent_install_transaction(
             OUTPUT_CHAIN,
             output_interface_accept_expressions(ingress_ifindex)?,
         )?,
+    ];
+    for family in [NFPROTO_IPV4, NFPROTO_IPV6] {
+        for expressions in trusted_tcp_reply_rules(family, runtime, trusted_agent_uid)? {
+            rules.push(rule(table, OUTPUT_CHAIN, expressions)?);
+        }
+    }
+    rules.extend([
         rule(
             table,
             OUTPUT_CHAIN,
@@ -521,7 +541,7 @@ fn parent_install_transaction(
             OUTPUT_CHAIN,
             parent_steering_expressions(NFPROTO_IPV6, CLIENT_INGRESS_PARENT_IPV6_MARK)?,
         )?,
-    ];
+    ]);
     for (index, rule) in rules.iter().enumerate() {
         transaction.push(
             NFT_MSG_NEWRULE,
@@ -530,8 +550,8 @@ fn parent_install_transaction(
             rule,
         )?;
     }
-    append_parent_return_path(&mut transaction, table, ingress_ifindex)?;
-    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 16, &batch_nfgen())?;
+    append_parent_return_path(&mut transaction, table, ingress_ifindex, runtime)?;
+    transaction.push(NFNL_MSG_BATCH_END, NLM_F_REQUEST, 24, &batch_nfgen())?;
     Ok(transaction)
 }
 
@@ -539,11 +559,12 @@ fn append_parent_return_path(
     transaction: &mut Transaction,
     table: &[u8],
     ingress_ifindex: u32,
+    runtime: [u8; 16],
 ) -> Result<(), ClientIngressPolicyError> {
     transaction.push(
         NFT_MSG_NEWCHAIN,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
-        14,
+        20,
         &chain(
             table,
             MANGLE_CHAIN,
@@ -553,16 +574,143 @@ fn append_parent_return_path(
             NF_ACCEPT,
         )?,
     )?;
+    for (family, sequence) in [(NFPROTO_IPV4, 21), (NFPROTO_IPV6, 22)] {
+        transaction.push(
+            NFT_MSG_NEWRULE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+            sequence,
+            &rule(
+                table,
+                MANGLE_CHAIN,
+                clear_tcp_reply_authority(family, runtime)?,
+            )?,
+        )?;
+    }
     transaction.push(
         NFT_MSG_NEWRULE,
         NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
-        15,
+        23,
         &rule(
             table,
             MANGLE_CHAIN,
             parent_reply_mark_expressions(ingress_ifindex)?,
         )?,
     )
+}
+
+fn tcp_conntrack_scope(
+    family: u8,
+    direction: u8,
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    let mut expressions = protocol_expressions(family, IPPROTO_TCP)?;
+    expressions.extend([
+        ct_expression(NFT_CT_DIRECTION, false)?,
+        compare(NFT_CMP_EQ, &[direction])?,
+    ]);
+    Ok(expressions)
+}
+
+fn trusted_tcp_reply_rules(
+    family: u8,
+    runtime: [u8; 16],
+    uid: u32,
+) -> Result<[Vec<Expression>; 3], ClientIngressPolicyError> {
+    // SYNACK still belongs to the listening socket. Later pre-accept ACKs/RSTs
+    // have no socket file, hence cannot satisfy meta skuid. Retain only this
+    // existing UID authority on the exact conntrack flow and runtime lineage.
+    let mut seed = tcp_conntrack_scope(family, CT_REPLY)?;
+    seed.extend(tcp_syn_ack_flags(0x12)?);
+    seed.extend([
+        meta_load(NFT_META_SKUID)?,
+        compare(NFT_CMP_EQ, &uid.to_ne_bytes())?,
+        ct_expression(NFT_CT_MARK, false)?,
+        compare(NFT_CMP_EQ, &0_u32.to_ne_bytes())?,
+        ct_expression(NFT_CT_LABELS, false)?,
+    ]);
+    let mut label = seed.clone();
+    label.extend([
+        compare(NFT_CMP_EQ, &[0; 16])?,
+        immediate_value(&runtime)?,
+        ct_expression(NFT_CT_LABELS, true)?,
+    ]);
+    seed.extend([
+        compare(NFT_CMP_EQ, &runtime)?,
+        immediate_value(&TRUSTED_TCP_REPLY_CONNMARK.to_ne_bytes())?,
+        ct_expression(NFT_CT_MARK, true)?,
+    ]);
+    let mut accept = tcp_conntrack_scope(family, CT_REPLY)?;
+    accept.extend(tcp_reply_owner(runtime)?);
+    accept.push(verdict(NF_ACCEPT)?);
+    Ok([label, seed, accept])
+}
+
+fn tcp_reply_owner(runtime: [u8; 16]) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    Ok(vec![
+        ct_expression(NFT_CT_LABELS, false)?,
+        compare(NFT_CMP_EQ, &runtime)?,
+        ct_expression(NFT_CT_MARK, false)?,
+        compare(NFT_CMP_EQ, &TRUSTED_TCP_REPLY_CONNMARK.to_ne_bytes())?,
+    ])
+}
+
+fn clear_tcp_reply_authority(
+    family: u8,
+    runtime: [u8; 16],
+) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    let mut expressions = tcp_conntrack_scope(family, CT_ORIGINAL)?;
+    expressions.extend(tcp_syn_ack_flags(0x02)?);
+    expressions.extend(tcp_reply_owner(runtime)?);
+    // nft ct-label setters only OR bits. Clear our mark instead; a remaining
+    // label alone is inert. Tuple reuse must earn a fresh trusted SYNACK.
+    // Foreign labels/marks are neither cleared nor adopted.
+    expressions.extend([
+        immediate_value(&0_u32.to_ne_bytes())?,
+        ct_expression(NFT_CT_MARK, true)?,
+    ]);
+    Ok(expressions)
+}
+
+fn ct_expression(key: u32, store: bool) -> Result<Expression, ClientIngressPolicyError> {
+    let mut data = Vec::new();
+    attr(&mut data, NFTA_CT_KEY, &key.to_be_bytes())?;
+    attr(
+        &mut data,
+        if store { NFTA_CT_SREG } else { NFTA_CT_DREG },
+        &NFT_REG_1.to_be_bytes(),
+    )?;
+    Ok(Expression { name: b"ct", data })
+}
+
+fn tcp_syn_ack_flags(flags: u8) -> Result<Vec<Expression>, ClientIngressPolicyError> {
+    let mut payload = Vec::new();
+    attr(&mut payload, NFTA_PAYLOAD_DREG, &NFT_REG_1.to_be_bytes())?;
+    attr(
+        &mut payload,
+        NFTA_PAYLOAD_BASE,
+        &NFT_PAYLOAD_TRANSPORT_HEADER.to_be_bytes(),
+    )?;
+    attr(&mut payload, NFTA_PAYLOAD_OFFSET, &13_u32.to_be_bytes())?;
+    attr(&mut payload, NFTA_PAYLOAD_LEN, &1_u32.to_be_bytes())?;
+    let mut bitwise = Vec::new();
+    attr(&mut bitwise, NFTA_BITWISE_SREG, &NFT_REG_1.to_be_bytes())?;
+    attr(&mut bitwise, NFTA_BITWISE_DREG, &NFT_REG_1.to_be_bytes())?;
+    attr(&mut bitwise, NFTA_BITWISE_LEN, &1_u32.to_be_bytes())?;
+    for (kind, value) in [(NFTA_BITWISE_MASK, 0x12), (NFTA_BITWISE_XOR, 0)] {
+        let mut nested = Vec::new();
+        attr(&mut nested, NFTA_DATA_VALUE, &[value])?;
+        attr(&mut bitwise, kind | NLA_F_NESTED, &nested)?;
+    }
+    Ok(vec![
+        Expression {
+            name: b"payload",
+            data: payload,
+        },
+        Expression {
+            name: b"bitwise",
+            data: bitwise,
+        },
+        compare(NFT_CMP_EQ, &[flags])?,
+    ])
 }
 
 fn parent_reply_mark_expressions(
@@ -638,6 +786,7 @@ fn rule(
     Ok(payload)
 }
 
+#[derive(Clone)]
 struct Expression {
     name: &'static [u8],
     data: Vec<u8>,
@@ -1367,15 +1516,25 @@ mod tests {
 
     #[test]
     fn parent_output_steering_is_one_atomic_fail_closed_batch() {
+        let values = env::var("VOLPAROSSA_REPLY_ENCODE").ok().map_or_else(
+            || vec![7, 1, 1_001],
+            |value| {
+                value
+                    .split(',')
+                    .map(|part| part.parse::<u32>().unwrap())
+                    .collect::<Vec<_>>()
+            },
+        );
+        assert_eq!(values.len(), 3);
         let transaction = parent_install_transaction(
             &parent_table_name([8; 16]).expect("table"),
             [8; 16],
-            7,
-            1,
-            1_001,
+            values[0],
+            values[1],
+            values[2],
         )
         .expect("transaction");
-        assert_eq!(transaction.requests.len(), 16);
+        assert_eq!(transaction.requests.len(), 24);
         assert!(transaction.bytes.len() <= MAX_BATCH_BYTES);
         assert_eq!(
             transaction
@@ -1383,8 +1542,30 @@ mod tests {
                 .iter()
                 .filter(|request| request.ack)
                 .count(),
-            14
+            22
         );
+        if env::var_os("VOLPAROSSA_REPLY_ENCODE").is_some() {
+            use std::fmt::Write as _;
+            let mut encoded = String::new();
+            for byte in &transaction.bytes {
+                write!(encoded, "{byte:02x}").unwrap();
+            }
+            println!("TCP_REPLY_BATCH={encoded}");
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit disposable user/network namespace proof; requires nft and veth support"]
+    fn parent_tcp_kernel_replies_keep_only_authenticated_flow_authority() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/integration/client-parent-tcp-reply-smoke.py");
+        let status = Command::new("python3")
+            .arg("-B")
+            .arg(script)
+            .env("VOLPAROSSA_REPLY_ENCODER", env::current_exe().unwrap())
+            .status()
+            .expect("disposable namespace TCP regression");
+        assert!(status.success(), "TCP reply regression must run, not skip");
     }
 
     #[test]
