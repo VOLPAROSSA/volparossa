@@ -946,6 +946,7 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           jq -e --arg revision "$GITHUB_SHA" '
             .report_kind == "volparossa-wifi-mesh-kernel-backend" and
+            .admission_setter_readback_proven == true and
             .source_revision == $revision and .success == true and
             .simulation == "mac80211_hwsim" and .kernel == "6.12.107+deb13-amd64" and
             .frequency_mhz == 2412 and .open_layer2 == true and .sae_claimed == false and

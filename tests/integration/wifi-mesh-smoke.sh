@@ -19,6 +19,7 @@ plan() {
         '  load only guest mac80211_hwsim with two simulated radios;' \
         '  create two temporary namespaces and move one simulated radio into each;' \
         '  execute actual MeshOwner create/join/ESTAB and bidirectional UDP/hash/counter proof;' \
+        '  read back owned admission 0 then 2, preserving the established peer before payload;' \
         '  prove explicit idempotent deletion and socket-loss automatic deletion;' \
         '  remove exact namespaces/module and compare original guest routes/DNS/firewall/links.' \
         'No development-host radio action, physical Wi-Fi, SAE, throughput or full overlay claim.'

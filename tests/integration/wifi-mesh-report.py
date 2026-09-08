@@ -25,6 +25,28 @@ def payload_hash(response):
     return hashlib.sha256(data).hexdigest()
 
 
+def admission_evidence(log, node):
+    """Require the real setter/readback before bytes, on the same affine kernel owner."""
+    admission = event(log, "MESH_ADMISSION ")
+    if (admission.get("role") != node["role"]
+            or type(admission.get("ifindex")) is not int
+            or admission["ifindex"] != node["ifindex"]
+            or admission.get("zero_readback") is not True
+            or type(admission.get("final_maximum_peers")) is not int
+            or admission["final_maximum_peers"] != 2
+            or admission.get("established_preserved") is not True):
+        raise ValueError("owned mesh admission/readback or retained ESTAB peer evidence failed")
+    # event() already bounds the immutable test log and requires each event exactly once.
+    # The Rust event follows both exact-owner readbacks and retained-original-peer checks;
+    # MESH_RESULT then proves actual bidirectional payload/counters on those retained links.
+    prefixes = ("MESH_ADMISSION ", "MESH_RESULT ", "MESH_REMOVED ")
+    ordered = [prefix for line in log.read_text().splitlines()
+               for prefix in prefixes if line.startswith(prefix)]
+    if ordered != list(prefixes):
+        raise ValueError("mesh admission must precede payload and exact-owner retirement")
+    return admission
+
+
 def evidence(directory):
     nodes = []
     for role in ("a", "b"):
@@ -42,6 +64,7 @@ def evidence(directory):
                     "rx_bytes_delta", "tx_bytes_delta", "rx_packets_delta", "tx_packets_delta"))
                 or retired != {"role": role, "idempotent": True}):
             raise ValueError("actual mesh payload, peering, counters or retirement evidence failed")
+        node["admission"] = admission_evidence(log, node)
         nodes.append(node)
     crash = event(directory / "mesh-crash.log", "MESH_CRASH_READY ")
     if crash["interface"] != "vw5353535353535" or crash["ifindex"] <= 0:
@@ -64,6 +87,7 @@ def build(directory, revision, status, normal, socket_loss, unchanged, remaining
         "physical_radio_proven": False,
         "bandwidth_claimed": False,
         "full_agent_overlay_proven": False,
+        "admission_setter_readback_proven": False,
         "nodes": [],
         "socket_loss_cleanup": socket_loss == "yes",
         "cleanup": {"complete": remaining == 0, "remaining_owned_objects": remaining,
@@ -74,6 +98,7 @@ def build(directory, revision, status, normal, socket_loss, unchanged, remaining
         report["nodes"] = evidence(directory)
         if status != 0 or normal != "yes" or socket_loss != "yes" or unchanged != "yes" or remaining != 0:
             raise ValueError("mesh fixture or exact cleanup did not complete")
+        report["admission_setter_readback_proven"] = True
         report["success"] = True
     except (OSError, ValueError, KeyError, TypeError) as error:
         report["observed_blocker"] = str(error)[:512]

@@ -23,6 +23,7 @@ class MeshEvidence(unittest.TestCase):
         result = subprocess.run(["sh", str(HERE / "wifi-mesh-smoke.sh"), "--preview"],
                                 capture_output=True, text=True, check=True)
         self.assertIn("PREVIEW ONLY", result.stdout)
+        self.assertIn("admission 0 then 2", result.stdout)
         self.assertEqual(subprocess.run(["sh", str(HERE / "wifi-mesh-smoke.sh"), "--execute"],
                                        capture_output=True).returncode, 64)
         outer = subprocess.run(["sh", str(HERE / "run-alpha-topology-vm.sh"), "--preview", "--scenario", "wifi-mesh"],
@@ -45,10 +46,17 @@ class MeshEvidence(unittest.TestCase):
                         "rx_packets_delta": 128, "tx_packets_delta": 128}
                 nodes.append(node)
 
-            def save(values):
+            def save(values, admission_changes=None, omit_admission=False, late_admission=False):
                 for node in values:
                     role = node["role"]
-                    (output / f"mesh-{role}.log").write_text("MESH_RESULT " + json.dumps(node) + "\nMESH_REMOVED "
+                    admission = {"role": role, "ifindex": node["ifindex"], "zero_readback": True,
+                                 "final_maximum_peers": 2, "established_preserved": True}
+                    if role == "a" and admission_changes:
+                        admission.update(admission_changes)
+                    admission_line = "" if omit_admission else "MESH_ADMISSION " + json.dumps(admission) + "\n"
+                    payload_line = "MESH_RESULT " + json.dumps(node) + "\n"
+                    lines = payload_line + admission_line if late_admission else admission_line + payload_line
+                    (output / f"mesh-{role}.log").write_text(lines + "MESH_REMOVED "
                         + json.dumps({"role": role, "idempotent": True}) + "\n")
                 (output / "mesh-crash.log").write_text('MESH_CRASH_READY {"interface":"vw5353535353535","ifindex":9}\n')
 
@@ -59,6 +67,8 @@ class MeshEvidence(unittest.TestCase):
 
             save(nodes)
             self.assertTrue(report()["success"])
+            self.assertTrue(report()["admission_setter_readback_proven"])
+            self.assertEqual(report()["nodes"][0]["admission"]["ifindex"], nodes[0]["ifindex"])
             self.assertFalse(report()["full_agent_overlay_proven"])
             for key, value in (("socket_loss", "no"), ("unchanged", "no"), ("remaining", 1), ("status", 1)):
                 self.assertFalse(report(**{key: value})["success"])
@@ -68,6 +78,14 @@ class MeshEvidence(unittest.TestCase):
                 changed[0][key] = value
                 save(changed)
                 self.assertFalse(report()["success"], key)
+            for key, value in (("role", "b"), ("ifindex", 8), ("zero_readback", False),
+                               ("final_maximum_peers", 8), ("established_preserved", False)):
+                save(nodes, admission_changes={key: value})
+                self.assertFalse(report()["success"], key)
+                self.assertFalse(report()["admission_setter_readback_proven"])
+            for options in ({"omit_admission": True}, {"late_admission": True}):
+                save(nodes, **options)
+                self.assertFalse(report()["success"], options)
 
 
 if __name__ == "__main__":
