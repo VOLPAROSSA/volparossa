@@ -175,13 +175,17 @@ retains the existing resolver when evidence is missing or unsupported. Combined 
 strict Clippy pass. The [public DNSSEC-chain run on `0fa80d65`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684)
 now passes real IPv4/IPv6 validation with unchanged built-in roots and local cache reuse.
 Ordinary two-Exit peer sharing is still awaiting its network proof, so C05 is not complete.
+The [partial `4f90e370` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187656229)
+now proves ordinary A/AAAA requests through the protected route; it still fails while preparing
+the second Exit's route, before any peer-cache request.
 Protected DNS now owns a separate bounded client route instead of contending with the general
 datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
 See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
-On `d2f886c8`, general Quality fails in one helper ownership-journal test during intent
-registration; the cause is still under investigation. The explicit disposable-namespace fallback
-works in that run. CodeQL analysis completes, but its separate PR alert gate remains red with
-126 results. These failures are separate from the passing VM scenarios; see the exact
+On `2459833a`, the helper fixture passes, but general Quality fails in a DNS cache deadline
+assertion. The test now compares against the retained expiry and monotone deadline instead of
+independently rounded exported timestamps; its targeted check passes, not yet full CI.
+CodeQL analysis completes, but its separate PR alert gate remains red with 126 results.
+These failures are separate from the passing VM scenarios; see the exact
 [CI checkpoint](docs/IMPLEMENTATION_STATUS.md).
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:

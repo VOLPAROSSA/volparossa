@@ -125,7 +125,7 @@ def selection(text, peers, wanted):
               "transport": "protected-dns", "state": int(state), "rtt_us": int(rtt), "reported_bytes": int(count)}
     require(result["state"] == 1 and result["rtt_us"] == result["reported_bytes"] == 0,
             "DNS prewarm must report reachability without invented traffic or RTT")
-    require(result["exit_node"] != "exit2" or result["relay_node"] == "relay0", "Exit2 has only its actual R0 link")
+    # Both Exits have actual adjacent links to every admitted data relay in this scenario.
     return (0 if result["exit_node"] == wanted else 2), result
 
 

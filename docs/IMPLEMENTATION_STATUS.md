@@ -97,6 +97,20 @@ Clippy. Four DNS network-checker tests, five original-wire fixture tests and she
 The C05 harness selects this actual DNS route separately for every
 request and keeps all answer, source, original-root/TTL, capture and cleanup gates. Its new live
 result is pending, and simultaneous main-data/DNS packet delivery is not claimed from unit tests.
+The [exact `4f90e370` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187656229)
+now passes both ordinary warm DNS requests: A via Relay2 (42 response bytes, 593 ms) and AAAA
+via Relay1 (54 bytes, 554 ms), each over one real two-leg WireGuard route. ExitA reports exactly
+one `upstream_validated` answer per phase and no peer/local/fallback increment; each collects
+six original public-chain records. All ten physical captures are complete, drained and free of
+forbidden packets or socket drops. The original-source phase validator passes on the raw records.
+The overall run still **fails** before the first peer request: route setup selects Relay1 for
+Exit2, but the original fixture only provides Relay0--Exit2 connectivity. The scenario now adds
+real Relay1/Relay2--Exit2 links and exact return routes, excludes their private addresses from
+the Client, and requires their actual interfaces in capture accounting. Selection, timeouts,
+DNSSEC roots and privacy gates are unchanged; this correction still needs its new live run.
+Cleanup leaves zero owned objects and raw guest state unchanged, SHA-256
+`b43c60da6762c1f52f856340e06e15c6717083d0f7f84670588f4ab92a78f6d3`.
+Artifact SHA-256: `abe005c73a69bccf7cf1b072db018903b6290e68d141ae9913e5a7384ff5c7c6`.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -302,6 +316,16 @@ disposable-namespace fallback, so this is not the old UID-mapping blocker. All t
 [CodeQL analysis jobs](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186328279) pass,
 but the [separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101935381514) still
 fails with 126 critical results. No alert is dismissed and no passing full-Quality claim is made.
+
+The [exact `2459833a` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187871366)
+passes that helper fixture but fails the UDP shareable-availability test (18 pass, one fails).
+Its assertion compares two exported expiry clones, each independently projected from the
+monotone deadline to truncated wall-clock milliseconds. The test now checks against the actual
+retained expiry and additionally requires both stored expiry and monotone deadline to remain
+exactly unchanged. Resolver code, TTL authority and expiry limits are unchanged; the single
+targeted test passes locally. All three [CodeQL analyses on this head](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187869719)
+pass, while the [separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101939846881)
+still reports 126 critical results. This is not a complete Quality pass or a new alert-identity audit.
 
 ### Preceding replica diagnostics and retirement integration
 

@@ -80,8 +80,11 @@ class DnsNetworkEvidenceTests(unittest.TestCase):
         self.assertEqual(CHECK.selection(row, peers, "exit2")[0], 0)
         self.assertEqual(CHECK.selection(row, peers, "exit")[0], 2)
         self.assertEqual(CHECK.selection("", peers, "exit")[0], 1)
+        for relay in ("relay0", "relay1", "relay2"):
+            self.assertEqual(CHECK.selection(row.replace("peer-relay0", "peer-" + relay), peers, "exit2")[0], 0)
+            CAPTURE.validate_layout(dict(phase="peer-b-a", exit_node="exit2", relays={relay: CHECK.PUBLIC[relay]}))
         with self.assertRaises(ValueError):
-            CHECK.selection(row.replace("peer-relay0", "peer-relay1"), peers, "exit2")
+            CHECK.selection(row.replace("peer-relay0", "peer-relay3"), peers, "exit2")
         for invented in (row.replace("state=1", "state=3"), row.replace("rtt_us=0", "rtt_us=42"),
                          row.replace("bytes=0", "bytes=1")):
             with self.assertRaises(ValueError):
@@ -141,6 +144,23 @@ class DnsNetworkEvidenceTests(unittest.TestCase):
                                  dport=53, payload=b"wire", iface="xd")["upstream_request_payload_bytes"], 4)
         self.assertEqual(classify("exit2", "10.241.26.1", "51.167.7.1", dport=41000)["control_packets"], 1)
         self.assertEqual(classify("exit2", "10.241.99.1", "51.167.7.1", dport=41000), {"forbidden_packets": 1})
+        for index, segment in ((1, 97), (2, 98)):
+            relay, iface = f"relay{index}", f"x2r{index}"
+            current = dict(phase="peer-b-a", exit_node="exit2", relays={relay: CHECK.PUBLIC[relay]})
+            self.assertIn(iface, CAPTURE.PHYSICAL_INTERFACES["exit2"])
+            self.assertIn(f"r{index}x2", CAPTURE.PHYSICAL_INTERFACES[relay])
+            self.assertEqual(classify("exit2", CHECK.PUBLIC[relay], CHECK.PUBLIC["exit2"], iface=iface)
+                             ["exit_leg_wireguard_data_datagrams"], 1)
+            self.assertEqual(classify("exit2", CHECK.PUBLIC["relay0"], CHECK.PUBLIC["exit2"], iface=iface),
+                             {"forbidden_packets": 1})
+            self.assertEqual(classify("exit2", f"10.241.{segment}.1", CHECK.PUBLIC["exit2"],
+                                     dport=41000, iface=iface)["control_packets"], 1)
+            self.assertEqual(classify("exit2", f"10.241.{segment}.1", CHECK.PUBLIC["exit2"],
+                                     dport=41000, iface="x2r0"), {"forbidden_packets": 1})
+            self.assertEqual(classify("exit2", f"10.241.{segment}.2", "224.0.0.251", dport=5353,
+                                     iface=iface)["mdns_packets"], 1)
+            self.assertEqual(classify("exit2", f"10.241.{segment}.2", CHECK.PUBLIC["exit2"], dport=53,
+                                     iface=iface)["unexpected_dns_packets"], 1)
 
 
 if __name__ == "__main__":

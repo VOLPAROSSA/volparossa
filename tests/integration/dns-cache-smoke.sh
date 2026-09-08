@@ -4,6 +4,22 @@
 # shellcheck disable=SC2154,SC2034
 
 dns_cache_extend_network() {
+    # Exit2's existing R0 link carries control forwarding, but ordinary selection may
+    # choose R1/R2 as its data relay. Provide those real adjacent links as for Exit1;
+    # no selector override, extra hop, or Client-to-Exit route is introduced.
+    printf '%s\n' 'DNS fixture: create R1 r1x2 <-> Exit2 x2r1 (10.241.97.0/30) and R2 r2x2 <-> Exit2 x2r2 (10.241.98.0/30), with exact public /32 return routes inside the disposable namespaces.'
+    link_nodes "$R1" r1x2 10.241.97.1/30 "$EXIT2_NODE" x2r1 10.241.97.2/30
+    link_nodes "$R2" r2x2 10.241.98.1/30 "$EXIT2_NODE" x2r2 10.241.98.2/30
+    ip -n "$R1" route add 51.167.7.1/32 via 10.241.97.2 dev r1x2 src 44.160.1.1
+    ip -n "$R2" route add 51.167.7.1/32 via 10.241.98.2 dev r2x2 src 45.161.2.1
+    ip -n "$EXIT2_NODE" route add 44.160.1.1/32 via 10.241.97.1 dev x2r1 src 51.167.7.1
+    ip -n "$EXIT2_NODE" route add 45.161.2.1/32 via 10.241.98.1 dev x2r2 src 51.167.7.1
+    for dc_forbidden in 10.241.97.1 10.241.97.2 10.241.98.1 10.241.98.2; do
+        ip -n "$CLIENT" route add unreachable "$dc_forbidden/32"
+        if ip -n "$CLIENT" route get "$dc_forbidden" >/dev/null 2>&1; then
+            fail DIRECT_CLIENT_EXIT_REACHABLE
+        fi
+    done
     link_nodes "$EXIT_NODE" xc0 10.241.96.1/30 "$EXIT2_NODE" xc1 10.241.96.2/30
     ip -n "$EXIT_NODE" route add 51.167.7.1/32 via 10.241.96.2 dev xc0 src 46.162.3.1
     ip -n "$EXIT2_NODE" route add 46.162.3.1/32 via 10.241.96.1 dev xc1 src 51.167.7.1

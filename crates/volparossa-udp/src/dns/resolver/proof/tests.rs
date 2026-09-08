@@ -258,10 +258,16 @@ async fn shareable_availability_requires_current_policy_and_both_original_deadli
     resolver
         .retain(proof, &policy, DnsAnswerSource::PeerValidated)
         .unwrap();
-    let original_expiry = resolver
-        .cached_bundle(&question, &policy)
-        .unwrap()
-        .expires_at_unix_ms();
+    // Compare with retained authority, not a previous wall/monotone-clock projection.
+    // Independent millisecond truncation can make two exported clones differ by 1 ms.
+    let (original_expiry, original_deadline) = {
+        let cache = resolver.cache.lock().unwrap();
+        let entry = cache
+            .entries
+            .get(&ExitResolver::key(&question, &policy))
+            .unwrap();
+        (entry.proof.bundle.expires_at_unix_ms(), entry.deadline)
+    };
     assert!(resolver.has_shareable_proof(&policy));
     assert!(!resolver.has_shareable_proof(&[4; 32]));
     assert!(
@@ -271,6 +277,15 @@ async fn shareable_availability_requires_current_policy_and_both_original_deadli
             .expires_at_unix_ms()
             <= original_expiry
     );
+    {
+        let cache = resolver.cache.lock().unwrap();
+        let entry = cache
+            .entries
+            .get(&ExitResolver::key(&question, &policy))
+            .unwrap();
+        assert_eq!(entry.proof.bundle.expires_at_unix_ms(), original_expiry);
+        assert_eq!(entry.deadline, original_deadline);
+    }
     assert!(!ExitResolver::default().has_shareable_proof(&policy));
     // Monotone expiry withdraws availability even when signed wall-clock expiry is in the future.
     resolver

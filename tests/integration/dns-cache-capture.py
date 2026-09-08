@@ -17,12 +17,13 @@ PHASES = ("warm-a-a", "warm-a-aaaa", "peer-b-a", "peer-b-aaaa", "unsigned-b", "l
 PHYSICAL_INTERFACES = {
     "client": {"underlay", "cb1", "cb2", *(f"cr{index}" for index in range(6))},
     "exit": {"underlay", "xd", "xc0", *(f"xr{index}" for index in range(6))},
-    "exit2": {"underlay", "x2r0", "x2d", "xc1"},
+    "exit2": {"underlay", "x2r0", "x2r1", "x2r2", "x2d", "xc1"},
     "destination": {"dx", "dx2"},
     **{f"relay{index}": {"underlay", f"r{index}c", f"r{index}x", f"r{index}b1", f"r{index}b2"}
        for index in range(3)},
 }
-PHYSICAL_INTERFACES["relay0"].add("r0x2")
+for INDEX in range(3):
+    PHYSICAL_INTERFACES[f"relay{INDEX}"].add(f"r{INDEX}x2")
 METADATA = dict(ENGINE.MDNS_INTERFACE_ADDRESSES)
 METADATA.update({("exit2", "underlay"): {"51.167.7.1"},
                  ("exit2", "x2d"): {"10.241.32.1", "10.241.32.2", "52.168.8.1", "52.168.8.2"},
@@ -47,6 +48,11 @@ for INDEX in range(6):
 for BOOTSTRAP in (1, 2):
     control_link("client", f"cb{BOOTSTRAP}", f"bootstrap{BOOTSTRAP}", f"b{BOOTSTRAP}c", 39 + BOOTSTRAP)
 control_link("relay0", "r0x2", "exit2", "x2r0", 26)
+for INDEX, SEGMENT in ((1, 97), (2, 98)):
+    control_link(f"relay{INDEX}", f"r{INDEX}x2", "exit2", f"x2r{INDEX}", SEGMENT)
+    PAIR = {f"10.241.{SEGMENT}.1", f"10.241.{SEGMENT}.2"}
+    METADATA[f"relay{INDEX}", f"r{INDEX}x2"] = PAIR
+    METADATA["exit2", f"x2r{INDEX}"] = PAIR
 control_link("exit", "xc0", "exit2", "xc1", 96)
 CONTROL_IDENTITIES = frozenset(ENGINE.CONTROL_PEERS)
 
@@ -58,7 +64,7 @@ def validate_layout(layout):
     relays = layout.get("relays", {})
     if layout.get("exit_node") != expected_exit or len(relays) != 1 or any(
             relay not in ("relay0", "relay1", "relay2") or PUBLIC[relay] != address
-            for relay, address in relays.items()) or (expected_exit == "exit2" and "relay0" not in relays):
+            for relay, address in relays.items()):
         raise ValueError("DNS exact route endpoints")
     return layout
 
