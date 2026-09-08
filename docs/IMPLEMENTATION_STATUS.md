@@ -42,6 +42,17 @@ Unix/duplex streams, not the production network. The CLI parser test passes. The
 network mailbox scenario is still pending; no complete mailbox/C07, automatic contact discovery,
 retention repair, speedup or global offline-availability claim is made.
 
+The additive `content-mailbox` KVM scenario is now executable: two independent provider agents,
+normal invite/enroll/deposit, sender application keys/input/manifest removed, normal Disconnect,
+one provider store stopped/reopened, then private listing/Get/decryption/two acknowledgements
+and an empty repeat on a fresh protected route. Two application identities share one Client
+agent; this does not claim an independently offline sender node. It requires two real MPTCP
+relay paths, both providers' signed receipts, complete physical/control captures and unchanged
+guest cleanup. Its source-bound checker and shell/runner contracts pass locally; live proof is
+pending. The [initial `891f86f5` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34190575234)
+stopped at formatting because the new mailbox/manifest module declarations were out of order;
+that two-line ordering is corrected without changing behavior. No full Quality pass is claimed.
+
 ## Latest DNS integration checkpoint
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
@@ -142,6 +153,16 @@ DNSSEC roots and privacy gates are unchanged; this correction still needs its ne
 Cleanup leaves zero owned objects and raw guest state unchanged, SHA-256
 `b43c60da6762c1f52f856340e06e15c6717083d0f7f84670588f4ab92a78f6d3`.
 Artifact SHA-256: `abe005c73a69bccf7cf1b072db018903b6290e68d141ae9913e5a7384ff5c7c6`.
+The [subsequent exact `5ac9bb0e` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34189965926)
+passes warm A/AAAA again and now reaches Exit2 through Relay2, with 56 WireGuard data datagrams
+on each leg. The ordinary A query returns 42 correct response bytes in 564 ms, but Exit2 reports
+`TrustedFallback +1` and `PeerValidated 0`: the run correctly fails with
+`DNS_CACHE_EXPECTED_SOURCE_NOT_OBSERVED`. Later peer/local phases were not run. The precise
+peer-selection/response failure is not yet observed, so no timeout or TTL cause is inferred.
+All 15 required role captures validate as complete/drained with zero drops or forbidden packets;
+cleanup leaves zero owned objects. Raw guest-state files are byte-identical, SHA-256
+`0cef40bb226a7c3151fbc5d404392ec7c30809becc7b9260da49912c0c08852d`.
+Artifact SHA-256: `dc105e10a2d8557ecaa28b140cd45482fe1154e6d3955301d87740b7825effd4`.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention

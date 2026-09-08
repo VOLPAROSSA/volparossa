@@ -26,6 +26,7 @@ on:
           - content-https
           - content-provider
           - content-replication
+          - content-mailbox
           - dns-cache
   pull_request:
     branches:
@@ -85,6 +86,8 @@ jobs:
           python3 -B tests/integration/test-content-provider-smoke.py
           sh -n tests/integration/content-provider-https-smoke.sh
           python3 -B tests/integration/test-content-provider-https-smoke.py
+          sh -n tests/integration/content-mailbox-smoke.sh
+          python3 -B tests/integration/test-content-mailbox-smoke.py
           sh -n tests/integration/content-replication-smoke.sh
           python3 -B tests/integration/test-content-replication-smoke.py
           python3 -B tests/integration/test-content-replication-capture.py
@@ -502,7 +505,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -587,6 +590,20 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-provider-smoke.json"
           python3 -B tests/integration/content-provider-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require actual mailbox deposits inbox decryption and acknowledgement
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'content-mailbox'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/content-mailbox-smoke.json"
+          python3 -B tests/integration/content-mailbox-smoke.py report "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -950,7 +967,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

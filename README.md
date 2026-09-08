@@ -183,8 +183,10 @@ strict Clippy pass. The [public DNSSEC-chain run on `0fa80d65`](https://github.c
 now passes real IPv4/IPv6 validation with unchanged built-in roots and local cache reuse.
 Ordinary two-Exit peer sharing is still awaiting its network proof, so C05 is not complete.
 The [partial `4f90e370` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187656229)
-now proves ordinary A/AAAA requests through the protected route; it still fails while preparing
-the second Exit's route, before any peer-cache request.
+proves ordinary A/AAAA requests through the protected route. The
+[subsequent `5ac9bb0e` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34189965926)
+also reaches the second Exit and returns a correct answer, but from the trusted fallback rather
+than the peer cache. That source requirement remains unmet.
 Protected DNS now owns a separate bounded client route instead of contending with the general
 datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
 See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).

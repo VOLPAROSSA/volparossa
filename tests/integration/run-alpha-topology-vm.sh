@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -51,6 +51,12 @@ print_plan() {
             '  exact two protected relay paths, real physical-interface accounting, fresh private cache;' \
             '  stop the original provider, then Client retrieves Q from Relay4 with independent publisher trust;' \
             '  complete role-specific captures and cleanup; no full C03/C04, browser or speed claim.'
+    elif [ "$scenario" = content-mailbox ]; then
+        printf '%s\n' \
+            'Mailbox scenario: two independently trusted providers; normal invite/enroll/send/receive CLI;' \
+            '  remove sender application keys/input, disconnect, reopen one durable provider cache;' \
+            '  fresh protected owner route, no manifest/ID input, exact plaintext/two ACKs/empty second receive;' \
+            '  both identities share one Client agent; complete privacy and cleanup, no independent sender-node/full-C07 claim.'
     elif [ "$scenario" = content-provider ]; then
         printf '%s\n' \
             'Content-provider scenario: two of Relay3/4/5 serve disjoint caches, excluding the current control relay;' \
@@ -130,7 +136,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -379,7 +385,7 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
               "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
-              "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "dns-cache-smoke.json",
+              "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
               "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
@@ -509,7 +515,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-replication", "dns-cache"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-replication", "content-mailbox", "dns-cache"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -536,7 +542,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -651,7 +657,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|dns-cache) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

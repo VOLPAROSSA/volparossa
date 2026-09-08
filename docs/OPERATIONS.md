@@ -544,6 +544,11 @@ keys, opaque IDs, length, expiry and operation timing; do not infer metadata ano
 secrecy from encryption. Private inbox names and message IDs are not published into Kademlia or
 the public-name service. All identity commands support the existing strict `--passphrase-file`.
 
+The additive disposable-VM acceptance scenario is `content-mailbox`; inspect it without changing
+network state with `tests/integration/run-alpha-topology-vm.sh --preview --scenario content-mailbox`.
+It exercises separate storage agents and distinct sender/recipient applications using one Client
+agent, not two independently located client nodes. A local checker pass is not a passing VM run.
+
 ### Explicit protected content service and retrieval
 
 The development runtime now also has `content serve`, `content fetch`, `content status` and `content stop`.
