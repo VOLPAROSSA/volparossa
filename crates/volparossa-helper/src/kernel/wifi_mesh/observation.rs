@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{KernelError, NLA_TYPE_MASK, attributes, parse_string_attribute};
+use super::MeshPeer;
 use super::netlink::{
     IFINDEX, IFNAME, IFTYPE, INTERFACE_COMBINATIONS, MAC, MESH_CONFIG, MESH_POINT,
     SOFTWARE_IFTYPES, STA_INFO, SUPPORTED_IFTYPES, WIPHY, WIPHY_BANDS, WIPHY_FREQ, field, nested,
     number, number_field, required,
 };
-use super::{MeshPeer, WifiMeshConfig};
 
 #[derive(Debug)]
 pub(super) struct Interface {
@@ -185,13 +185,13 @@ fn types(value: &[u8]) -> Result<BTreeSet<u32>, KernelError> {
 
 pub(super) fn verify_mesh_configuration(
     data: &[u8],
-    config: &WifiMeshConfig,
+    maximum_peers: u16,
 ) -> Result<(), KernelError> {
     let fields = attributes(data)?;
     let mesh = nested(&fields, MESH_CONFIG)?;
     // Linux GET_MESH_CONFIG places IFINDEX *inside* this nest, colliding numerically with
     // HOLDING_TIMEOUT. Read only the required, unambiguous configuration keys.
-    if required(&mesh, 4)? != config.maximum_peers.to_ne_bytes()
+    if required(&mesh, 4)? != maximum_peers.to_ne_bytes()
         || required(&mesh, 14)? != [0]
         || required(&mesh, 17)? != [0]
         || required(&mesh, 19)? != [0]
@@ -201,12 +201,10 @@ pub(super) fn verify_mesh_configuration(
     Ok(())
 }
 
-pub(super) fn peers(
-    records: &[Vec<u8>],
-    index: u32,
-    maximum: u16,
-) -> Result<Vec<MeshPeer>, KernelError> {
-    if records.len() > usize::from(maximum) {
+pub(super) fn peers(records: &[Vec<u8>], index: u32) -> Result<Vec<MeshPeer>, KernelError> {
+    // Admission may be lowered below the live station count. Observing those peers must not
+    // fail or erase them: this is a separate defensive dump/wire bound, not a target width.
+    if records.len() > volparossa_routing::MAX_WIFI_MESH_OBSERVATIONS {
         return Err(KernelError::Malformed);
     }
     let mut result = Vec::new();

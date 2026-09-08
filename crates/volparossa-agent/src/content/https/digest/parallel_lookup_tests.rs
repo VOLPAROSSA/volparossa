@@ -1,4 +1,4 @@
-//! Real digest selector exchanges gated until both client requests have arrived, no host sockets.
+//! Real digest selector exchanges gated until all three requests arrive, no host sockets.
 
 use std::{
     path::Path,
@@ -71,7 +71,7 @@ async fn gated_provider(
         let count = ingress.read(&mut prefix).await.unwrap();
         assert!(count > 0, "actual digest request arrived");
         barrier.wait().await;
-        // Neither provider can answer until both actual client selector streams wrote data.
+        // No provider can answer until all actual client selector streams wrote data.
         forward.write_all(&prefix[..count]).await.unwrap();
         copy_bidirectional(&mut ingress, &mut forward)
             .await
@@ -97,15 +97,15 @@ async fn digest_index_lookups_overlap_keep_provider_order_and_drop_timed_out_sib
         let _guard = DropProof(observation);
         std::future::pending::<usize>().await
     };
-    let results = lookup_pair_until(
-        async { 17_usize },
-        hanging,
-        Instant::now() + Duration::from_millis(20),
-    )
-    .await;
+    let lookups: Vec<std::pin::Pin<Box<dyn Future<Output = usize>>>> = vec![
+        Box::pin(async { 17 }),
+        Box::pin(hanging),
+        Box::pin(async { 19 }),
+    ];
+    let results = lookup_many_until(lookups, Instant::now() + Duration::from_millis(20)).await;
     assert_eq!(
         results,
-        [Some(17), None],
+        [Some(17), None, Some(19)],
         "keep an already completed sibling"
     );
     assert!(
@@ -116,49 +116,52 @@ async fn digest_index_lookups_overlap_keep_provider_order_and_drop_timed_out_sib
 
 async fn overlapping_requests() {
     let directory = tempfile::tempdir().unwrap();
-    let (registry_a, signed_a, manifest_a) = provider(&directory.path().join("a"), 31);
-    let (registry_b, signed_b, manifest_b) = provider(&directory.path().join("b"), 32);
-    assert_ne!(manifest_a.manifest_id(), manifest_b.manifest_id());
-    assert!(compatible_transport(&manifest_a, &manifest_b));
-    let query = DigestQuery::new(*manifest_a.object_sha256(), manifest_a.length()).unwrap();
-    let (mut client_a, server_a) = duplex(1024);
-    let (mut client_b, server_b) = duplex(1024);
-    let barrier = Barrier::new(2);
-    let queries = lookup_pair_until(
-        async {
-            let result = lookup_publication(&mut client_a, &query, TransferLimits::default())
-                .await
-                .unwrap();
-            drop(client_a);
-            result
-        },
-        async {
-            let result = lookup_publication(&mut client_b, &query, TransferLimits::default())
-                .await
-                .unwrap();
-            drop(client_b);
-            result
-        },
-        Instant::now() + Duration::from_secs(2),
-    );
-    let (results, (), ()) = tokio::join!(
+    let providers = (0..3)
+        .map(|index| provider(&directory.path().join(format!("p{index}")), 31 + index))
+        .collect::<Vec<_>>();
+    let expected = &providers[0].2;
+    for (_, _, candidate) in &providers[1..] {
+        assert_ne!(expected.manifest_id(), candidate.manifest_id());
+        assert!(compatible_transport(expected, candidate));
+    }
+    let query = DigestQuery::new(*expected.object_sha256(), expected.length()).unwrap();
+    let (clients, servers): (Vec<_>, Vec<_>) = (0..3).map(|_| duplex(1024)).unzip();
+    let barrier = Barrier::new(3);
+    let lookups = clients
+        .into_iter()
+        .map(|mut client| {
+            let query = &query;
+            async move {
+                let result = lookup_publication(&mut client, query, TransferLimits::default())
+                    .await
+                    .unwrap();
+                drop(client);
+                result
+            }
+        })
+        .collect();
+    let queries = lookup_many_until(lookups, Instant::now() + Duration::from_secs(2));
+    let services = servers
+        .into_iter()
+        .zip(&providers)
+        .map(|(server, (registry, _, _))| gated_provider(server, registry, &barrier))
+        .collect();
+    let (results, services) = tokio::join!(
         queries,
-        gated_provider(server_a, &registry_a, &barrier),
-        gated_provider(server_b, &registry_b, &barrier)
+        lookup_many_until(services, Instant::now() + Duration::from_secs(2))
     );
-    let [Some(Some(first)), Some(Some(second))] = results else {
-        panic!("both independently authenticated original indexes");
-    };
-    assert_eq!(first.signed().encode(), signed_a.encode());
-    assert_eq!(second.signed().encode(), signed_b.encode());
-    assert_eq!(
-        first.transport_manifest().manifest_id(),
-        manifest_a.manifest_id()
-    );
-    assert_eq!(
-        second.transport_manifest().manifest_id(),
-        manifest_b.manifest_id()
-    );
+    assert!(services.iter().all(Option::is_some));
+    assert_eq!(results.len(), 3);
+    for (result, (_, signed, manifest)) in results.into_iter().zip(&providers) {
+        let candidate = result
+            .flatten()
+            .expect("independently authenticated original index");
+        assert_eq!(candidate.signed().encode(), signed.encode());
+        assert_eq!(
+            candidate.transport_manifest().manifest_id(),
+            manifest.manifest_id()
+        );
+    }
 }
 
 struct DropProof(Arc<AtomicBool>);

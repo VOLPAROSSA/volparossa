@@ -253,7 +253,7 @@ async fn pull_selected(
         .map_err(|_| ContentError::Unavailable)?;
     checked_policy(context, origin, policy).await?;
     super::content_event(context, "CONTENT_HTTPS_SOURCE_MEASURED_PEERS").await;
-    // The writer retains verified byte counts on timeout and joins/drops both owned
+    // The writer retains verified byte counts on timeout and joins/drops all owned
     // protected streams before returning. Only then may fill_missing contact origin.
     let remaining = plan.total_budget.saturating_sub(started.elapsed());
     if remaining.is_zero() {

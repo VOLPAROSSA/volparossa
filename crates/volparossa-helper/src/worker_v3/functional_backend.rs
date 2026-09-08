@@ -2822,6 +2822,13 @@ impl AsyncLeaseBackend for FunctionalAlphaLeaseBackend {
         Box::pin(self.destroy_mesh_backend(request))
     }
 
+    fn update_wifi_mesh_admission(
+        self: Arc<Self>,
+        request: MeshBackendRequest<u16>,
+    ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+        Box::pin(self.update_mesh_admission_backend(request))
+    }
+
     fn install_uplink_sharing(
         self: Arc<Self>,
         request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,

@@ -449,10 +449,10 @@ released, and a last-moment resource refusal opening no stream. Three resource-a
 and strict agent all-targets/all-features Clippy pass. These use backpressured duplex streams
 and deterministic resource samples, not physical network or operating-system pressure measurements.
 
-The actual three-provider protected-network proof now passes on `d0251a27`, recorded below. Existing HTTPS source plans
-still select pairs; sixteen is still the bounded discovery-message input, not an adaptive active
-target. The subsequent control-admission slice is described below; local/Wi-Fi neighbors and
-native MPTCP/MPQUIC backend ceilings have not been generalized. These are bounded integrations,
+The actual three-provider protected-network proof now passes on `d0251a27`, recorded below.
+Subsequent HTTPS batching, control admission and mesh-neighbor integration are described below;
+sixteen remains the bounded discovery-message input, not an adaptive active target. Native
+MPTCP/MPQUIC backend ceilings have not been generalized. These are bounded integrations,
 not the entire user requirement.
 
 The additive protected-network scenario is now executable in the existing disposable provider
@@ -521,6 +521,44 @@ canonical parent raw rebuild SHA-256:
 This is real three-provider missing-content growth, not general speedup, more than two active
 MPQUIC paths or a complete expanded-alpha certificate.
 
+### Adaptive HTTPS provider batches
+
+Cooperative-origin and whole-object-digest retrieval no longer reject more than two candidate
+providers at the protected writer boundary. Digest index requests use resource-sized batches,
+each actual flow taking the same shared lease before route/TLS setup. Completed siblings retain
+their input order when another lookup stalls; all pending owners drop before origin fallback.
+Compatible original indexes from the complete admitted batch reach the adaptive single writer
+together, without changing origin authority, identity, chunks, expiry or the absolute deadline.
+Automatic cost prediction prices every resource-limited index batch rather than pretending all
+lookups overlap. Unknown costs still prefer the origin; this is not a speed guarantee.
+
+Useful-provider hints now retain a RAM-budgeted recent set rather than two records. The same
+sixty-second age and exact route/policy/offer expiry apply; metadata alone cannot create a hint.
+One discovery-response batch remains bounded to sixteen candidates, distinct from hint retention
+or dynamically admitted active workers. Ten HTTPS tests and four hint/lifecycle tests pass,
+including three real simultaneous digest exchanges with independent original indexes and exact
+order, a timed-out sibling's cleanup, and source-cost accounting for one/two/three resource slots.
+The earlier three-provider native VM does **not** establish three-provider HTTPS delivery;
+that expanded live application proof remains pending.
+
+### Adaptive mesh-neighbor integration
+
+Wi-Fi configuration now uses zero as the default optional operator ceiling, replacing the
+former eight-default/thirty-two-maximum product policy. The normal five-second monitor derives
+one-at-a-time new peering admission from actual station progress, resource headroom and real
+in-use-channel active/busy survey deltas. Missing survey data permits slower thirty-second
+exploratory peering, with an explicit one-time bypass for a silent first acquaintance; subsequent
+new stations must actually progress. Missing telemetry is never reported as spare airtime.
+Pressure/lower admission preserves current peers. The new typed helper update is bound to the
+original runtime/handle and only changes `MESHCONF_MAX_PEER_LINKS` after owned-interface checks,
+then verifies ACK and actual readback. The current 512-observation wire/dump boundary still
+limits effective admission; no unlimited peer count or physical-radio benefit is claimed.
+Eighteen targeted checks pass: four agent admission/Unix-owner lifecycle checks, eleven helper
+checks (including six pure kernel cases), two configuration checks and one routing-wire check.
+Combined agent/helper/configuration/routing all-targets/all-features strict Clippy and formatting
+pass. The existing guarded hwsim-owner test now includes ESTAB -> admission zero -> two -> original
+payload, but this live extension has not yet run; the absent local module was not loaded.
+
 ### Adaptive control-connection admission
 
 The production discovery actor now replaces its bootstrap established-connection ceilings
@@ -570,7 +608,7 @@ fixture sends 32 MiB each way without artificial application sleeps. Fixed 15% l
 Relay exit-facing veth must cause live growth; fresh three-path counters and physical captures
 must then prove all six WireGuard legs, followed by exact payload hashes and complete cleanup.
 The scenario is separate from A01–A15 and throughput comparisons. Its first exact-source VM
-result remains pending; injected health tests and an executable fixture do not make it a pass.
+result is recorded below; injected health tests and an executable fixture do not make it a pass.
 
 Local verification passes: two growth lifecycle cases, two independent-cadence/shutdown checks,
 the existing warm replacement and policy/role-revocation regressions, and strict agent
@@ -579,6 +617,17 @@ The wrapper's static contract, non-mutating previews, syntax and warning-level S
 three pure evidence checks also pass. One disposable user/network namespace accepts the exact
 15% netem JSON profile and restores its owned veth to `noqueue`; that schema/cleanup check carries
 no payload. These local checks are not live MPQUIC payload evidence.
+
+The [first `fbd070aa` growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34234984155)
+**fails at selection**, before HTTP/3, loss injection or payload captures; its separate
+[Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34234801937) passes.
+The last native snapshot contains two active paths through R2/R1, but not the required reserved
+warm row. Normal contexts did establish and disconnect during bounded retries, so this is not
+evidence that all connection attempts failed. Selection, warm ownership and CLI projection must
+be distinguished before fixing the cause. No three-path payload proof was reached.
+Global disposable cleanup reports zero objects and byte-identical guest state, but the Client
+log separately contains `SHUTDOWN_CLEANUP_FAILED`; that is not a clean-agent-shutdown result.
+Artifact ZIP SHA-256: `258fcb219e0da713a3b3ad5cbbd3bd45b967507dc967b6104c8f9727574de8b7`.
 
 ### Native publication/site cache-only reopen
 
@@ -2366,8 +2415,9 @@ connections when measured throughput, capacity, stability or useful cache reach 
 retire unhelpful connections and scale back under owner demand or resource pressure. This
 applies to connection policy, not unbounded allocation or permission to exceed a transport's
 actual protocol/backend capacity. Control peers, local neighbors, active route paths and cache
-workers need separate accounting. Adaptive cache workers and resource-derived control admission
-are described above; local-neighbor and transport limits have **not** yet been generalized.
+workers need separate accounting. Adaptive cache workers, HTTPS provider batches, resource-derived
+control admission and mesh-neighbor integration are described above. Native transport ceilings and
+the defensive mesh-observation boundary remain; the complete limit-removal requirement is not done.
 
 The functional-development target now includes direct Ethernet and Wi-Fi peer links alongside
 Internet underlays, Internet access for a node without its own uplink through reachable

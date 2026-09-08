@@ -15,7 +15,7 @@ use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
 use super::super::{
     ContentError, content_event, download_cache, limits, now, parallel,
-    recent::{DigestIndexCost, RecentProviderScope},
+    recent::{DigestIndexCost, OFFER_BATCH, RecentProviderScope, collect_until},
     tls,
 };
 use super::{
@@ -276,9 +276,13 @@ async fn initial_peers(
                 return None;
             };
             let hints = context.content.recent_provider_hints(scope).await;
-            let Some(plan) =
-                sources::PeerPlan::new_digest(estimate, authority.length(), &hints, Instant::now())
-            else {
+            let Some(plan) = sources::PeerPlan::new_digest(
+                estimate,
+                authority.length(),
+                &hints,
+                Instant::now(),
+                context.content.worker_budget.available_workers(),
+            ) else {
                 content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED").await;
                 return None;
             };
@@ -298,6 +302,7 @@ async fn initial_peers(
                 &refreshed,
                 started.elapsed(),
                 Instant::now(),
+                context.content.worker_budget.available_workers(),
             ) {
                 return None;
             }
@@ -343,40 +348,47 @@ impl PeerAttempt<'_> {
         providers: Vec<DiscoveredContentProvider>,
         store: &mut ChunkStore,
     ) -> Result<bool, ContentError> {
-        if providers.len() > 16 {
+        if providers.len() > OFFER_BATCH {
             return Err(ContentError::Invalid);
         }
-        let mut pair = Vec::new();
+        let mut indexed = Vec::new();
         let mut providers = providers.into_iter();
-        while Instant::now() < self.deadline && self.looked_up.len() < 16 {
+        while Instant::now() < self.deadline && self.looked_up.len() < OFFER_BATCH {
+            let width = self
+                .context
+                .content
+                .worker_budget
+                .available_workers()
+                .min(OFFER_BATCH);
+            if width == 0 {
+                break;
+            }
             let mut batch = Vec::new();
             for provider in providers.by_ref() {
-                if self.looked_up.len() >= 16 {
+                if self.looked_up.len() >= OFFER_BATCH {
                     break;
                 }
                 if self.looked_up.insert(provider.peer_id) {
                     batch.push(provider);
                 }
-                if batch.len() == 2 - pair.len() {
+                if batch.len() == width {
                     break;
                 }
             }
             if batch.is_empty() {
                 break;
             }
-            let first = async {
-                lookup(self.context, self.authority, self.policy, batch.first()?)
-                    .await
-                    .ok()
-                    .flatten()
-            };
-            let second = async {
-                lookup(self.context, self.authority, self.policy, batch.get(1)?)
-                    .await
-                    .ok()
-                    .flatten()
-            };
-            let results = Box::pin(lookup_pair_until(first, second, self.deadline)).await;
+            let (context, authority, policy) = (self.context, self.authority, self.policy);
+            let lookups = batch
+                .iter()
+                .map(|provider| async move {
+                    lookup(context, authority, policy, provider)
+                        .await
+                        .ok()
+                        .flatten()
+                })
+                .collect();
+            let results = Box::pin(lookup_many_until(lookups, self.deadline)).await;
             // Stable input order, not completion timing, determines the original expected index.
             // An error/deadline in one future never discards its sibling's completed result.
             for (provider, result) in batch.into_iter().zip(results) {
@@ -399,22 +411,19 @@ impl PeerAttempt<'_> {
                 } else {
                     self.expected = Some((signed, manifest.clone()));
                 }
-                pair.push(IndexedProvider {
+                indexed.push(IndexedProvider {
                     provider,
                     manifest,
                     index_cost: cost,
                 });
             }
-            if pair.len() == 2 && self.pull_pair(std::mem::take(&mut pair), store).await? {
-                return Ok(true);
-            }
         }
-        self.pull_pair(pair, store).await
+        self.pull_sources(indexed, store).await
     }
 
-    async fn pull_pair(
+    async fn pull_sources(
         &mut self,
-        pair: Vec<IndexedProvider>,
+        sources: Vec<IndexedProvider>,
         store: &mut ChunkStore,
     ) -> Result<bool, ContentError> {
         let Some((_, expected)) = &self.expected else {
@@ -423,14 +432,14 @@ impl PeerAttempt<'_> {
         if self.authority.verify_cached(expected, store, now()).is_ok() {
             return Ok(true);
         }
-        if pair.is_empty() || Instant::now() >= self.deadline {
+        if sources.is_empty() || Instant::now() >= self.deadline {
             return Ok(false);
         }
-        if !self.admits_pair(&pair).await {
+        if !self.admits_sources(&sources).await {
             return Ok(false);
         }
         checked_policy(self.context, self.origin, self.policy).await?;
-        let attempted = pair
+        let attempted = sources
             .iter()
             .map(|source| (source.provider.peer_id, source.index_cost))
             .collect::<Vec<_>>();
@@ -443,7 +452,8 @@ impl PeerAttempt<'_> {
             expected,
             store,
             self.policy,
-            pair.into_iter()
+            sources
+                .into_iter()
                 .map(|source| (source.provider, source.manifest))
                 .collect(),
             self.deadline.saturating_duration_since(Instant::now()),
@@ -479,12 +489,12 @@ impl PeerAttempt<'_> {
         Ok(false)
     }
 
-    async fn admits_pair(&self, pair: &[IndexedProvider]) -> bool {
+    async fn admits_sources(&self, sources: &[IndexedProvider]) -> bool {
         let Some(plan) = &self.auto else {
             return true;
         };
         let hints = self.context.content.recent_provider_hints(self.scope).await;
-        let selected = pair
+        let selected = sources
             .iter()
             .map(|source| source.provider.peer_id)
             .collect::<Vec<_>>();
@@ -499,13 +509,11 @@ impl PeerAttempt<'_> {
 
 /// No tasks outlive this call: each protected lookup owns its flow until completion/drop.
 /// Separate timers retain completed siblings without extending the caller's shared deadline.
-async fn lookup_pair_until<T>(
-    first: impl Future<Output = T>,
-    second: impl Future<Output = T>,
+async fn lookup_many_until<F: Future>(
+    lookups: Vec<F>,
     deadline: Instant,
-) -> [Option<T>; 2] {
-    let (first, second) = tokio::join!(timeout_at(deadline, first), timeout_at(deadline, second));
-    [first.ok(), second.ok()]
+) -> Vec<Option<F::Output>> {
+    collect_until(lookups, deadline).await
 }
 
 fn compatible_transport(expected: &VerifiedManifest, candidate: &VerifiedManifest) -> bool {
@@ -523,6 +531,11 @@ async fn lookup(
     provider: &DiscoveredContentProvider,
 ) -> Result<Option<LookupResult>, ContentError> {
     let started = Instant::now();
+    // Metadata uses the same process-wide protected-flow accounting as payload work.
+    // This lease precedes any route/TLS socket and survives the complete close/drop.
+    let Some(_lease) = context.content.worker_budget.try_acquire() else {
+        return Ok(None);
+    };
     if !context
         .routes
         .content_provider_is_distinct(&provider.peer_id)

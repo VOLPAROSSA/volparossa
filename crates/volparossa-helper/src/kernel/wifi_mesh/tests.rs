@@ -50,7 +50,7 @@ fn wifi_mesh_bounded_geometry_and_socket_owned_no_forward_join() {
             ..config.clone()
         },
         WifiMeshConfig {
-            maximum_peers: 33,
+            maximum_peers: 513,
             ..config.clone()
         },
     ] {
@@ -77,7 +77,7 @@ fn wifi_mesh_bounded_geometry_and_socket_owned_no_forward_join() {
     }
     assert_eq!(required(&mesh, 6).unwrap(), [1]);
     assert_eq!(required(&mesh, 4).unwrap(), 8_u16.to_ne_bytes());
-    observation::verify_mesh_configuration(&encoded, &config).unwrap();
+    observation::verify_mesh_configuration(&encoded, config.maximum_peers).unwrap();
 }
 
 fn nest(target: &mut Vec<u8>, kind: u16, value: &[u8]) {
@@ -160,18 +160,18 @@ fn peer_record(state: u8) -> Vec<u8> {
 
 #[test]
 fn wifi_mesh_peer_snapshot_requires_kernel_established_state_and_real_bounded_counters() {
-    assert_eq!(observation::peers(&[], 7, 8).unwrap(), []);
-    let peers = observation::peers(&[peer_record(4)], 7, 8).unwrap();
+    assert_eq!(observation::peers(&[], 7).unwrap(), []);
+    let peers = observation::peers(&[peer_record(4)], 7).unwrap();
     assert!(peers[0].established);
     assert_eq!(peers[0].rx_bytes, 9_000_000_000);
     assert_eq!(peers[0].tx_bytes, 8_000_000_000);
     assert_eq!(peers[0].rx_packets, 41);
     assert_eq!(peers[0].tx_packets, 42);
-    assert!(!observation::peers(&[peer_record(1)], 7, 8).unwrap()[0].established);
-    assert!(observation::peers(&[peer_record(7)], 7, 8).is_err());
-    assert!(observation::peers(&[peer_record(4)], 8, 8).is_err());
-    assert!(observation::peers(&[peer_record(4), peer_record(4)], 7, 8).is_err());
-    assert!(observation::peers(&[peer_record(4)], 7, 0).is_err());
+    assert!(!observation::peers(&[peer_record(1)], 7).unwrap()[0].established);
+    assert!(observation::peers(&[peer_record(7)], 7).is_err());
+    assert!(observation::peers(&[peer_record(4)], 8).is_err());
+    assert!(observation::peers(&[peer_record(4), peer_record(4)], 7).is_err());
+    assert!(observation::peers(&vec![Vec::new(); 513], 7).is_err());
 }
 
 #[test]
@@ -185,9 +185,79 @@ fn wifi_mesh_config_readback_handles_kernel_nested_ifindex_collision() {
     }
     let mut response = Vec::new();
     nest(&mut response, MESH_CONFIG, &mesh);
-    observation::verify_mesh_configuration(&response, &config()).unwrap();
+    observation::verify_mesh_configuration(&response, config().maximum_peers).unwrap();
     push_attribute(&mut mesh, 19, &[1]).unwrap();
     let mut duplicate = Vec::new();
     nest(&mut duplicate, MESH_CONFIG, &mesh);
-    assert!(observation::verify_mesh_configuration(&duplicate, &config()).is_err());
+    assert!(observation::verify_mesh_configuration(&duplicate, config().maximum_peers).is_err());
+}
+
+#[test]
+fn wifi_mesh_admission_changes_only_owned_limit_and_does_not_bound_live_station_dump() {
+    for maximum_peers in [0, 1, 512] {
+        let config = WifiMeshConfig {
+            maximum_peers,
+            ..config()
+        };
+        validate_config(&config).unwrap();
+        let data = admission_attributes(7, maximum_peers).unwrap();
+        let fields = attributes(&data).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(number_field(&fields, IFINDEX).unwrap(), 7);
+        let mesh = nested(&fields, MESH_CONFIG).unwrap();
+        assert_eq!(mesh.len(), 1);
+        assert_eq!(required(&mesh, 4).unwrap(), maximum_peers.to_ne_bytes());
+        // A zero admission limit still permits observing every already-established station.
+        assert_eq!(observation::peers(&[peer_record(4)], 7).unwrap().len(), 1);
+    }
+}
+
+fn survey_record(index: u32, frequency: u32, in_use: bool, counters: &[u8]) -> Vec<u8> {
+    let mut record = index_attributes(index).unwrap();
+    let mut info = Vec::new();
+    push_attribute(&mut info, 1, &frequency.to_ne_bytes()).unwrap();
+    if in_use {
+        push_attribute(&mut info, 3, &[]).unwrap();
+    }
+    info.extend_from_slice(counters);
+    nest(&mut record, netlink::SURVEY_INFO, &info);
+    record
+}
+
+#[test]
+fn wifi_mesh_survey_uses_exact_in_use_channel_and_preserves_unavailable_vs_malformed() {
+    let mut counters = Vec::new();
+    push_attribute(&mut counters, 4, &12_000_u64.to_ne_bytes()).unwrap();
+    push_attribute(&mut counters, 5, &3_000_u64.to_ne_bytes()).unwrap();
+    let valid = survey_record(7, 2412, true, &counters);
+    let other = survey_record(7, 2437, false, &counters);
+    assert_eq!(
+        survey::parse(&[other.clone(), valid.clone()], 7, 2412).unwrap(),
+        Some(MeshSurvey {
+            active_ms: 12_000,
+            busy_ms: 3_000
+        })
+    );
+    assert_eq!(survey::parse(&[other], 7, 2412).unwrap(), None);
+    assert_eq!(
+        survey::parse(&[survey_record(7, 2412, true, &[])], 7, 2412).unwrap(),
+        None
+    );
+    assert!(survey::parse(&[valid.clone()], 8, 2412).is_err());
+    assert!(survey::parse(&[valid.clone()], 7, 2437).is_err());
+    assert!(survey::parse(&[valid.clone(), valid], 7, 2412).is_err());
+    for invalid in [vec![0; 7], 12_001_u64.to_ne_bytes().to_vec()] {
+        let mut fields = Vec::new();
+        push_attribute(&mut fields, 4, &12_000_u64.to_ne_bytes()).unwrap();
+        push_attribute(&mut fields, 5, &invalid).unwrap();
+        assert!(survey::parse(&[survey_record(7, 2412, true, &fields)], 7, 2412).is_err());
+    }
+    assert!(
+        netlink::dump_completion(Some(-libc::EOPNOTSUPP))
+            .unwrap_err()
+            .is_errno(libc::EOPNOTSUPP)
+    );
+    assert!(netlink::dump_completion(Some(1)).is_err());
+    assert!(netlink::dump_completion(None).is_err());
+    netlink::dump_completion(Some(0)).unwrap();
 }

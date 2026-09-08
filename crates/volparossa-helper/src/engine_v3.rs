@@ -716,6 +716,13 @@ pub(crate) trait AsyncLeaseBackend: Send + Sync {
         Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
     }
 
+    fn update_wifi_mesh_admission(
+        self: Arc<Self>,
+        request: MeshBackendRequest<u16>,
+    ) -> BackendFuture<MeshBackendCompletion<crate::kernel::wifi_mesh::MeshSnapshot>> {
+        Box::pin(async move { request.complete(Err(BackendError::Unavailable)) })
+    }
+
     fn install_uplink_sharing(
         self: Arc<Self>,
         request: SharingBackendRequest<volparossa_routing::InstallUplinkSharing>,
@@ -1590,6 +1597,7 @@ impl HelperEngine {
             Some(
                 helper_request::Operation::InstallWifiMesh(_)
                 | helper_request::Operation::InspectWifiMesh(_)
+                | helper_request::Operation::UpdateWifiMeshAdmission(_)
                 | helper_request::Operation::DestroyWifiMesh(_),
             ) => Some(self.execute_mesh(request, sender).await),
             Some(helper_request::Operation::ApplyDownlinkBudget(value)) => {
@@ -5956,6 +5964,7 @@ fn request_context_id(request: &HelperRequest) -> Option<[u8; 16]> {
         | helper_request::Operation::DestroyUplinkSharing(_)
         | helper_request::Operation::InstallWifiMesh(_)
         | helper_request::Operation::InspectWifiMesh(_)
+        | helper_request::Operation::UpdateWifiMeshAdmission(_)
         | helper_request::Operation::DestroyWifiMesh(_)
         | helper_request::Operation::InstallReceiveAccounting(_)
         | helper_request::Operation::InspectReceiveAccounting(_)
@@ -6252,6 +6261,8 @@ mod tests {
                         wiphy: 0,
                         frequency_mhz: 2412,
                         joined: true,
+                        maximum_peers: 8,
+                        survey: None,
                         peers: vec![crate::kernel::wifi_mesh::MeshPeer {
                             mac: [2, 1, 2, 3, 4, 5],
                             established: true,

@@ -15,6 +15,9 @@ pub(super) const DEL_INTERFACE: u8 = 8;
 pub(super) const GET_STATION: u8 = 17;
 pub(super) const NEW_STATION: u8 = 19;
 pub(super) const GET_MESH_CONFIG: u8 = 28;
+pub(super) const SET_MESH_CONFIG: u8 = 29;
+pub(super) const GET_SURVEY: u8 = 50;
+pub(super) const NEW_SURVEY_RESULTS: u8 = 51;
 pub(super) const JOIN_MESH: u8 = 68;
 pub(super) const LEAVE_MESH: u8 = 69;
 pub(super) const WIPHY: u16 = 1;
@@ -28,6 +31,7 @@ pub(super) const MESH_ID: u16 = 24;
 pub(super) const SUPPORTED_IFTYPES: u16 = 32;
 pub(super) const MESH_CONFIG: u16 = 35;
 pub(super) const WIPHY_FREQ: u16 = 38;
+pub(super) const SURVEY_INFO: u16 = 84;
 pub(super) const INTERFACE_COMBINATIONS: u16 = 120;
 pub(super) const SOFTWARE_IFTYPES: u16 = 121;
 pub(super) const CHANNEL_WIDTH: u16 = 159;
@@ -36,7 +40,7 @@ pub(super) const SPLIT_WIPHY_DUMP: u16 = 174;
 pub(super) const SOCKET_OWNER: u16 = 204;
 pub(super) const MESH_POINT: u32 = 7;
 pub(super) const MAX_DUMP_BYTES: usize = 1024 * 1024;
-const MAX_DUMP_RECORDS: usize = 512;
+const MAX_DUMP_RECORDS: usize = volparossa_routing::MAX_WIFI_MESH_OBSERVATIONS;
 const NLM_F_DUMP: u16 = 0x300;
 const NLM_F_DUMP_INTR: u16 = 0x10;
 const NLMSG_DONE: u16 = 3;
@@ -159,9 +163,7 @@ pub(super) fn dump(
                 return Err(KernelError::Malformed);
             }
             if kind == NLMSG_DONE {
-                if read_i32(frame, NLMSG_HEADER_LEN) != Some(0) {
-                    return Err(KernelError::Malformed);
-                }
+                dump_completion(read_i32(frame, NLMSG_HEADER_LEN))?;
                 deadline.ensure_remaining()?;
                 return Ok(result);
             }
@@ -174,6 +176,15 @@ pub(super) fn dump(
             }
             result.push(frame.to_vec());
         }
+    }
+}
+
+// Drivers can report unsupported GET_SURVEY in the multipart terminator rather than an ACK.
+pub(super) fn dump_completion(status: Option<i32>) -> Result<(), KernelError> {
+    match status {
+        Some(0) => Ok(()),
+        Some(value @ -4095..=-1) => Err(KernelError::Errno(-value)),
+        _ => Err(KernelError::Malformed),
     }
 }
 

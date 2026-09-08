@@ -66,7 +66,7 @@ wifi_mesh:
   frequency_mhz: 0
   local_address: ""
   prefix_len: 0
-  maximum_peers: 8
+  maximum_peers: 0 # adaptive admission; a positive value is an optional operator ceiling
 
 routing:
   context_ttl_seconds: 600

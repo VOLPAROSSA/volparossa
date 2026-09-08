@@ -331,12 +331,21 @@ aggregate benefit, within current memory/descriptor headroom. Resource pressure 
 and drains surplus streams at chunk boundaries. Discovery/control admission now also follows
 current resources instead of a permanent 384-total/256-per-direction connection ceiling, without
 filling that allowance speculatively or breaking existing routes when it shrinks. See
-[adaptive control connections](docs/OPERATIONS.md#adaptive-control-connections). Wi-Fi-neighbor
-and native transport path limits remain separate unfinished work. The
+[adaptive control connections](docs/OPERATIONS.md#adaptive-control-connections). The
 [three-provider network run on `d0251a27`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
 passes: all fifteen unique chunks arrive from three overlapping provider streams through the
-protected route, with no origin body. HTTPS automatic source plans still select at most two
-providers; broader adaptive connection management remains in progress.
+protected route, with no origin body. HTTPS source plans now admit a bounded batch beyond two
+providers into that same resource-leased downloader; independent original indexes and fresh
+origin authentication remain required. The three-index local exchange passes, but a real
+three-provider HTTPS network run is still pending.
+
+Configured Wi-Fi meshes now adjust new-neighbor admission instead of defaulting to eight and
+rejecting everything above thirty-two. `wifi_mesh.maximum_peers: 0` means no operator ceiling;
+resources, observed channel load and actual new-peer progress govern gradual exploration.
+Missing radio measurements trigger slower exploration, not a claim of spare airtime. Existing
+peers are not forcibly removed by a lower allowance. The defensive 512-station observation
+bound and native transport path ceilings remain; this is not unlimited allocation or physical
+radio/throughput proof. See [adaptive mesh admission](docs/OPERATIONS.md#adaptive-mesh-admission).
 
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the

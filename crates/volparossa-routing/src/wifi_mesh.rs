@@ -11,6 +11,25 @@ use std::{
 };
 use volparossa_core::is_local_lan_ip;
 
+/// Defensive station-dump/response bound, not a desired number of radio peers.
+/// Even maximum-sized station counters remain below the helper's bounded frame limit.
+pub const MAX_WIFI_MESH_OBSERVATIONS: usize = 512;
+
+pub(super) fn preview(
+    operation: &helper_request::Operation,
+) -> Result<&'static str, HelperProtocolError> {
+    use helper_request::Operation;
+    match operation {
+        Operation::InstallWifiMesh(_) => {
+            Ok("create one owned open-L2 Wi-Fi mesh link; no default route or radio retuning")
+        }
+        Operation::InspectWifiMesh(_) => Ok("inspect one owned direct Wi-Fi mesh link"),
+        Operation::UpdateWifiMeshAdmission(_) => Ok("update owned mesh new-peer admission only"),
+        Operation::DestroyWifiMesh(_) => Ok("leave and remove one owned Wi-Fi mesh link"),
+        _ => Err(HelperProtocolError::Invalid("mesh operation")),
+    }
+}
+
 /// Create one new mesh interface on a verified existing wireless parent.
 #[derive(Clone, PartialEq, Message)]
 pub struct InstallWifiMesh {
@@ -32,7 +51,7 @@ pub struct InstallWifiMesh {
     /// Non-default connected subnet prefix.
     #[prost(uint32, tag = "6")]
     pub prefix_len: u32,
-    /// Bound on directly peered stations. Mesh forwarding remains disabled.
+    /// Initial admission cap; zero pauses new peering. Mesh forwarding remains disabled.
     #[prost(uint32, tag = "7")]
     pub maximum_peers: u32,
 }
@@ -46,6 +65,20 @@ pub struct InspectWifiMesh {
     /// Opaque helper-issued handle.
     #[prost(bytes = "vec", tag = "2")]
     pub mesh_handle: Vec<u8>,
+}
+
+/// Change only new-peer admission on the exact helper-owned mesh; no peer is removed.
+#[derive(Clone, PartialEq, Message)]
+pub struct UpdateWifiMeshAdmission {
+    /// Exact runtime identity.
+    #[prost(bytes = "vec", tag = "1")]
+    pub mesh_runtime_id: Vec<u8>,
+    /// Opaque helper-issued handle.
+    #[prost(bytes = "vec", tag = "2")]
+    pub mesh_handle: Vec<u8>,
+    /// Kernel admission cap, including existing peers; zero pauses new peering.
+    #[prost(uint32, tag = "3")]
+    pub maximum_peers: u32,
 }
 
 /// Idempotently leave and remove only this mesh owner's interface.
@@ -126,6 +159,23 @@ pub struct WifiMeshSnapshot {
     /// Zero peers is valid while neighbors have not arrived.
     #[prost(message, repeated, tag = "7")]
     pub peers: Vec<WifiMeshPeer>,
+    /// Actual read-back kernel admission cap, not a count of established peers.
+    #[prost(uint32, tag = "8")]
+    pub maximum_peers: u32,
+    /// Actual in-use channel survey, when the driver supplies both counters.
+    #[prost(message, optional, tag = "9")]
+    pub survey: Option<WifiMeshSurvey>,
+}
+
+/// Monotonic cumulative channel times; only deltas establish observed airtime headroom.
+#[derive(Clone, PartialEq, Message)]
+pub struct WifiMeshSurvey {
+    /// Milliseconds the radio was active on the configured channel.
+    #[prost(uint64, tag = "1")]
+    pub active_ms: u64,
+    /// Milliseconds that channel was busy, including other transmitters.
+    #[prost(uint64, tag = "2")]
+    pub busy_ms: u64,
 }
 
 /// Idempotent exact-owner retirement result.
@@ -152,7 +202,7 @@ pub(super) fn validate_install(value: &InstallWifiMesh) -> Result<(), HelperProt
         || !(1..=32).contains(&value.mesh_id.len())
         || !value.mesh_id.iter().all(u8::is_ascii_graphic)
         || !frequency(value.frequency_mhz)
-        || !(1..=32).contains(&value.maximum_peers)
+        || usize::try_from(value.maximum_peers).unwrap_or(usize::MAX) > MAX_WIFI_MESH_OBSERVATIONS
     {
         return Err(HelperProtocolError::Invalid("Wi-Fi mesh configuration"));
     }
@@ -213,7 +263,15 @@ pub(super) fn validate_installed(value: &InstalledWifiMesh) -> Result<(), Helper
 pub(super) fn validate_snapshot(value: &WifiMeshSnapshot) -> Result<(), HelperProtocolError> {
     context(&value.mesh_runtime_id)?;
     handle(&value.mesh_handle)?;
-    if value.ifindex <= 1 || !frequency(value.frequency_mhz) || value.peers.len() > 32 {
+    if value.ifindex <= 1
+        || !frequency(value.frequency_mhz)
+        || value.peers.len() > MAX_WIFI_MESH_OBSERVATIONS
+        || usize::try_from(value.maximum_peers).unwrap_or(usize::MAX) > MAX_WIFI_MESH_OBSERVATIONS
+        || value
+            .survey
+            .as_ref()
+            .is_some_and(|survey| survey.busy_ms > survey.active_ms)
+    {
         return Err(HelperProtocolError::Invalid("mesh snapshot bounds"));
     }
     let mut seen = BTreeSet::new();
@@ -225,6 +283,15 @@ pub(super) fn validate_snapshot(value: &WifiMeshSnapshot) -> Result<(), HelperPr
         {
             return Err(HelperProtocolError::Invalid("mesh station address"));
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_update(value: &UpdateWifiMeshAdmission) -> Result<(), HelperProtocolError> {
+    context(&value.mesh_runtime_id)?;
+    handle(&value.mesh_handle)?;
+    if usize::try_from(value.maximum_peers).unwrap_or(usize::MAX) > MAX_WIFI_MESH_OBSERVATIONS {
+        return Err(HelperProtocolError::Invalid("mesh admission bound"));
     }
     Ok(())
 }
@@ -249,6 +316,7 @@ pub fn validate_wifi_mesh_response(
         operation,
         Operation::InstallWifiMesh(_)
             | Operation::InspectWifiMesh(_)
+            | Operation::UpdateWifiMeshAdmission(_)
             | Operation::DestroyWifiMesh(_)
     ) || request.request_id != response.request_id
         || response.operation_digest.as_slice() != operation_digest(request)?
@@ -265,6 +333,11 @@ pub fn validate_wifi_mesh_response(
         (Operation::InspectWifiMesh(request), Some(Outcome::WifiMeshSnapshot(value))) => {
             request.mesh_runtime_id == value.mesh_runtime_id
                 && request.mesh_handle == value.mesh_handle
+        }
+        (Operation::UpdateWifiMeshAdmission(request), Some(Outcome::WifiMeshSnapshot(value))) => {
+            request.mesh_runtime_id == value.mesh_runtime_id
+                && request.mesh_handle == value.mesh_handle
+                && request.maximum_peers == value.maximum_peers
         }
         (Operation::DestroyWifiMesh(_), Some(Outcome::DestroyedWifiMesh(_))) => true,
         _ => false,

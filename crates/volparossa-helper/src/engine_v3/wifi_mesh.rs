@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use subtle::ConstantTimeEq;
 use volparossa_routing::{
     DestroyedWifiMesh, InstallWifiMesh, InstalledWifiMesh, WifiMeshPeer, WifiMeshSnapshot,
-    validate_wifi_mesh_response,
+    WifiMeshSurvey, validate_wifi_mesh_response,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +29,7 @@ pub(super) struct MeshRecord {
 pub(crate) enum MeshBackendAction {
     Install,
     Inspect,
+    UpdateAdmission,
     Destroy,
 }
 
@@ -81,8 +82,20 @@ impl HelperEngine {
                 self.install_mesh(request, value, sender).await
             }
             Some(helper_request::Operation::InspectWifiMesh(value)) => {
-                self.inspect_mesh(request, &value.mesh_runtime_id, &value.mesh_handle)
+                self.observe_mesh(request, &value.mesh_runtime_id, &value.mesh_handle, None)
                     .await
+            }
+            Some(helper_request::Operation::UpdateWifiMeshAdmission(value)) => {
+                let Ok(maximum) = u16::try_from(value.maximum_peers) else {
+                    return execution(super::invalid_response(request), None);
+                };
+                self.observe_mesh(
+                    request,
+                    &value.mesh_runtime_id,
+                    &value.mesh_handle,
+                    Some(maximum),
+                )
+                .await
             }
             Some(helper_request::Operation::DestroyWifiMesh(value)) => {
                 self.destroy_mesh(request, &value.mesh_runtime_id, &value.mesh_handle)
@@ -215,14 +228,20 @@ impl HelperEngine {
         )
     }
 
-    async fn inspect_mesh(
+    async fn observe_mesh(
         &self,
         request: &HelperRequest,
         runtime_id: &[u8],
         handle: &[u8],
+        admission: Option<u16>,
     ) -> super::HelperResponse {
+        let action = if admission.is_some() {
+            MeshBackendAction::UpdateAdmission
+        } else {
+            MeshBackendAction::Inspect
+        };
         let binding = match self
-            .exact_mesh_binding(request, runtime_id, handle, MeshBackendAction::Inspect)
+            .exact_mesh_binding(request, runtime_id, handle, action)
             .await
         {
             Ok(Some(binding)) => binding,
@@ -232,9 +251,13 @@ impl HelperEngine {
             Err(result) => return response(request, result, "MESH_OWNER_MISMATCH", None),
         };
         let backend = self.inner.backend.clone();
-        let input = MeshBackendRequest::new(binding, ());
         match self
-            .settle_mesh_call(binding, move || backend.inspect_wifi_mesh(input))
+            .settle_mesh_call(binding, move || match admission {
+                Some(maximum) => {
+                    backend.update_wifi_mesh_admission(MeshBackendRequest::new(binding, maximum))
+                }
+                None => backend.inspect_wifi_mesh(MeshBackendRequest::new(binding, ())),
+            })
             .await
         {
             Ok(snapshot) => {
@@ -306,7 +329,11 @@ impl HelperEngine {
         {
             return Err(HelperResult::UnauthorisedPeer);
         }
-        if action == MeshBackendAction::Inspect && !record.active {
+        if matches!(
+            action,
+            MeshBackendAction::Inspect | MeshBackendAction::UpdateAdmission
+        ) && !record.active
+        {
             return Err(HelperResult::CleanupIncomplete);
         }
         Ok(Some(self.mesh_binding(record, action, Some(request))))
@@ -403,6 +430,11 @@ fn wire_snapshot(
         wiphy: snapshot.wiphy,
         frequency_mhz: snapshot.frequency_mhz,
         joined: snapshot.joined,
+        maximum_peers: snapshot.maximum_peers.into(),
+        survey: snapshot.survey.map(|value| WifiMeshSurvey {
+            active_ms: value.active_ms,
+            busy_ms: value.busy_ms,
+        }),
         peers: snapshot
             .peers
             .into_iter()

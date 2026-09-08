@@ -123,6 +123,7 @@ fn exchange(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
+    admission_readback(owner, &before, role)?;
     let mut sent = Vec::with_capacity(PAYLOAD * ROUNDS as usize);
     let mut received = Vec::with_capacity(PAYLOAD * ROUNDS as usize);
     let mut buffer = [0_u8; PAYLOAD + 1];
@@ -192,5 +193,36 @@ fn exchange(
             return Err("peer snapshot incomplete".into());
         }
     }
+    Ok(())
+}
+
+fn admission_readback(
+    owner: &mut MeshOwner,
+    established: &MeshPeer,
+    role: &str,
+) -> Result<(), String> {
+    let original = owner.config().clone();
+    for maximum in [0, 2] {
+        let snapshot = owner
+            .update_admission(maximum, deadline())
+            .map_err(|error| error.to_string())?;
+        if snapshot.ifindex != owner.ifindex()
+            || snapshot.wiphy != owner.wiphy()
+            || snapshot.frequency_mhz != original.frequency_mhz
+            || snapshot.maximum_peers != maximum
+            || !snapshot.joined
+            || owner.config() != &original
+            || !snapshot
+                .peers
+                .iter()
+                .any(|peer| peer.mac == established.mac && peer.established)
+        {
+            return Err("admission readback lost exact ownership or existing ESTAB peer".into());
+        }
+    }
+    println!(
+        "MESH_ADMISSION {{\"role\":\"{role}\",\"ifindex\":{},\"zero_readback\":true,\"final_maximum_peers\":2,\"established_preserved\":true}}",
+        owner.ifindex()
+    );
     Ok(())
 }

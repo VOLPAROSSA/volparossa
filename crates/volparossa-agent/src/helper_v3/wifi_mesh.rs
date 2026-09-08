@@ -4,8 +4,8 @@ use subtle::ConstantTimeEq as _;
 use tokio::{io::AsyncWriteExt as _, time::timeout};
 use volparossa_routing::{
     DestroyWifiMesh, HELPER_PROTOCOL_VERSION, HelperRequest, HelperResult, HelperRuntime,
-    InspectWifiMesh, InstallWifiMesh, WifiMeshSnapshot, encode_request, helper_request,
-    helper_response, read_response, validate_wifi_mesh_response,
+    InspectWifiMesh, InstallWifiMesh, UpdateWifiMeshAdmission, WifiMeshSnapshot, encode_request,
+    helper_request, helper_response, read_response, validate_wifi_mesh_response,
 };
 use zeroize::Zeroizing;
 
@@ -68,17 +68,25 @@ impl HelperClient {
                 }),
             )
             .await?;
-        match outcome {
-            helper_response::Outcome::WifiMeshSnapshot(value)
-                if value.ifindex == owner.ifindex
-                    && value.wiphy == owner.wiphy
-                    && value.frequency_mhz == owner.frequency_mhz
-                    && value.joined =>
-            {
-                Ok(value)
-            }
-            _ => Err(HelperClientError::Correlation),
-        }
+        owner.snapshot(outcome)
+    }
+
+    pub(crate) async fn update_wifi_mesh_admission(
+        &self,
+        owner: &RuntimeBoundWifiMesh,
+        maximum_peers: u16,
+    ) -> Result<WifiMeshSnapshot, HelperClientError> {
+        let (_, outcome) = self
+            .execute_mesh(
+                Some(&owner.helper_runtime_id),
+                helper_request::Operation::UpdateWifiMeshAdmission(UpdateWifiMeshAdmission {
+                    mesh_runtime_id: owner.mesh_runtime_id.to_vec(),
+                    mesh_handle: owner.mesh_handle.to_vec(),
+                    maximum_peers: maximum_peers.into(),
+                }),
+            )
+            .await?;
+        owner.snapshot(outcome)
     }
 
     pub(crate) async fn destroy_wifi_mesh(
@@ -99,7 +107,28 @@ impl HelperClient {
             _ => Err(HelperClientError::Correlation),
         }
     }
+}
 
+impl RuntimeBoundWifiMesh {
+    fn snapshot(
+        &self,
+        outcome: helper_response::Outcome,
+    ) -> Result<WifiMeshSnapshot, HelperClientError> {
+        match outcome {
+            helper_response::Outcome::WifiMeshSnapshot(value)
+                if value.ifindex == self.ifindex
+                    && value.wiphy == self.wiphy
+                    && value.frequency_mhz == self.frequency_mhz
+                    && value.joined =>
+            {
+                Ok(value)
+            }
+            _ => Err(HelperClientError::Correlation),
+        }
+    }
+}
+
+impl HelperClient {
     async fn execute_mesh(
         &self,
         expected_runtime: Option<&[u8; 32]>,
@@ -179,7 +208,7 @@ mod tests {
         let socket = directory.path().join("helper.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(async move {
-            for step in 0..4 {
+            for step in 0..6 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let bind = read_request(&mut stream).await.unwrap();
                 assert!(matches!(
@@ -193,14 +222,14 @@ mod tests {
                     result: HelperResult::Ok as i32,
                     diagnostic_code: "OK".into(),
                     outcome: Some(helper_response::Outcome::HelperRuntime(HelperRuntime {
-                        helper_runtime_id: vec![if step == 3 { 4 } else { 2 }; 32],
+                        helper_runtime_id: vec![if step == 5 { 4 } else { 2 }; 32],
                     })),
                 };
                 stream
                     .write_all(&encode_response(&response).unwrap())
                     .await
                     .unwrap();
-                if step == 3 {
+                if step == 5 {
                     assert_eq!(
                         timeout(HELPER_TIMEOUT, stream.read(&mut [0]))
                             .await
@@ -231,10 +260,30 @@ mod tests {
                             wiphy: 0,
                             frequency_mhz: 2412,
                             joined: true,
+                            maximum_peers: 8,
+                            survey: None,
                             peers: vec![],
                         })
                     }
-                    helper_request::Operation::DestroyWifiMesh(value) if step == 2 => {
+                    helper_request::Operation::UpdateWifiMeshAdmission(value)
+                        if matches!(step, 2 | 3) =>
+                    {
+                        assert_eq!(value.mesh_runtime_id, vec![7; 16]);
+                        assert_eq!(value.mesh_handle, vec![3; 32]);
+                        assert_eq!(value.maximum_peers, 34);
+                        helper_response::Outcome::WifiMeshSnapshot(WifiMeshSnapshot {
+                            mesh_runtime_id: value.mesh_runtime_id.clone(),
+                            mesh_handle: value.mesh_handle.clone(),
+                            ifindex: 2,
+                            wiphy: 0,
+                            frequency_mhz: 2412,
+                            joined: true,
+                            maximum_peers: if step == 2 { 34 } else { 33 },
+                            survey: None,
+                            peers: vec![],
+                        })
+                    }
+                    helper_request::Operation::DestroyWifiMesh(value) if step == 4 => {
                         assert_eq!(value.mesh_handle, vec![3; 32]);
                         helper_response::Outcome::DestroyedWifiMesh(DestroyedWifiMesh {
                             existed: true,
@@ -281,9 +330,18 @@ mod tests {
                 .peers
                 .is_empty()
         );
+        assert_eq!(
+            client
+                .update_wifi_mesh_admission(&owner, 34)
+                .await
+                .unwrap()
+                .maximum_peers,
+            34
+        );
+        assert!(client.update_wifi_mesh_admission(&owner, 34).await.is_err());
         client.destroy_wifi_mesh(&owner).await.unwrap();
         assert!(matches!(
-            client.inspect_wifi_mesh(&owner).await,
+            client.update_wifi_mesh_admission(&owner, 0).await,
             Err(HelperClientError::RuntimeChanged)
         ));
         server.await.unwrap();

@@ -7,9 +7,12 @@ use tokio::sync::watch;
 use volparossa_config::{RolesConfig, WifiMeshConfig};
 use volparossa_routing::InstallWifiMesh;
 
+mod admission;
+
 pub(crate) struct WifiMeshRuntime {
     helper: HelperClient,
     owner: RuntimeBoundWifiMesh,
+    operator_ceiling: u16,
 }
 
 impl WifiMeshRuntime {
@@ -27,6 +30,11 @@ impl WifiMeshRuntime {
             .map_err(|_| HelperClientError::Correlation)?;
         let mut runtime_id = [0_u8; 16];
         OsRng.fill_bytes(&mut runtime_id);
+        let initial_admission = admission::Admission::default().next(
+            &volparossa_routing::WifiMeshSnapshot::default(),
+            crate::resource_headroom::capture(),
+            config.maximum_peers,
+        );
         let owner = helper
             .install_wifi_mesh(InstallWifiMesh {
                 mesh_runtime_id: runtime_id.to_vec(),
@@ -38,10 +46,14 @@ impl WifiMeshRuntime {
                     IpAddr::V6(ip) => ip.octets().to_vec(),
                 },
                 prefix_len: config.prefix_len.into(),
-                maximum_peers: config.maximum_peers.into(),
+                maximum_peers: initial_admission.into(),
             })
             .await?;
-        let runtime = Self { helper, owner };
+        let runtime = Self {
+            helper,
+            owner,
+            operator_ceiling: config.maximum_peers,
+        };
         if let Err(error) = runtime.helper.inspect_wifi_mesh(&runtime.owner).await {
             let _ = runtime.shutdown().await;
             return Err(error);
@@ -59,6 +71,7 @@ impl WifiMeshRuntime {
     ) -> Result<(), HelperClientError> {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut admission = admission::Admission::default();
         loop {
             if *shutdown.borrow() {
                 return Ok(());
@@ -67,7 +80,11 @@ impl WifiMeshRuntime {
                 changed = shutdown.changed() => { if changed.is_err() { return Ok(()); } }
                 _ = interval.tick(), if runtime.is_some() => {
                     if let Some(runtime) = &runtime {
-                        runtime.helper.inspect_wifi_mesh(&runtime.owner).await?;
+                        let snapshot = runtime.helper.inspect_wifi_mesh(&runtime.owner).await?;
+                        let next = admission.next(&snapshot, crate::resource_headroom::capture(), runtime.operator_ceiling);
+                        if u32::from(next) != snapshot.maximum_peers {
+                            runtime.helper.update_wifi_mesh_admission(&runtime.owner, next).await?;
+                        }
                     }
                 }
             }

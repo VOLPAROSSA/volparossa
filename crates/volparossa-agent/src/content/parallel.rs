@@ -73,7 +73,7 @@ pub(super) async fn pull_with_budget(
     providers: Vec<DiscoveredContentProvider>,
     budget: Duration,
 ) -> Result<(Vec<String>, u64), ContentError> {
-    if providers.len() > 2 {
+    if providers.len() > super::recent::OFFER_BATCH {
         return Err(ContentError::Invalid);
     }
     if budget.is_zero() {
@@ -103,7 +103,7 @@ pub(super) async fn pull_indexed_with_budget(
     providers: Vec<(DiscoveredContentProvider, VerifiedManifest)>,
     budget: Duration,
 ) -> Result<(Vec<String>, u64), ContentError> {
-    if providers.len() > 2 {
+    if providers.len() > super::recent::OFFER_BATCH {
         return Err(ContentError::Invalid);
     }
     if budget.is_zero() {

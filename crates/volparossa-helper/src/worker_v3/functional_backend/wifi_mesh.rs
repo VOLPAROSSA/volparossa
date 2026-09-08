@@ -143,6 +143,34 @@ impl FunctionalAlphaLeaseBackend {
         MeshBackendCompletion { binding, result }
     }
 
+    pub(super) async fn update_mesh_admission_backend(
+        self: Arc<Self>,
+        request: MeshBackendRequest<u16>,
+    ) -> MeshBackendCompletion<MeshSnapshot> {
+        let (binding, maximum) = request.into_parts();
+        let result = tokio::task::spawn_blocking(move || {
+            validate_binding(binding, MeshBackendAction::UpdateAdmission)?;
+            if usize::from(maximum) > volparossa_routing::MAX_WIFI_MESH_OBSERVATIONS {
+                return Err(BackendError::Invalid);
+            }
+            let mut slot = self
+                .mesh_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = slot.as_mut().ok_or(BackendError::Invalid)?;
+            if !same_owner(entry.binding, binding) {
+                return Err(BackendError::Invalid);
+            }
+            entry
+                .owner
+                .update_admission(maximum, deadline(binding)?)
+                .map_err(|_| BackendError::Kernel)
+        })
+        .await
+        .unwrap_or(Err(BackendError::CleanupIncomplete));
+        MeshBackendCompletion { binding, result }
+    }
+
     pub(super) async fn shutdown_mesh_backend(
         self: Arc<Self>,
         helper_runtime_id: [u8; 32],

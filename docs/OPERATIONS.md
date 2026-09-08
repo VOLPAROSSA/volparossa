@@ -787,9 +787,19 @@ remains. This preserves existing foreground progress; it is not a one-stream glo
 policy. The actual RAM/descriptor limit remains global. Missing pressure telemetry prevents
 expansion; unknown RAM/descriptor capacity refuses new workers. No host settings are changed.
 This is not a kernel memory reservation, measured radio fairness or an owner-goodput guarantee.
-HTTPS source-selection plans still use pairs, and the current signed discovery input is bounded
-to sixteen candidates. Control-connection admission is described below; local neighbors and
-native transport path limits remain separate unfinished adaptive integrations.
+HTTPS source-selection plans now accept the same bounded candidate batch rather than requiring
+a pair. Digest indexes are fetched in batches sized by currently available protected-flow leases;
+every lookup acquires its lease before route/TLS setup and releases it only on full close/drop.
+The original compatible indexes then reach the adaptive single writer together, including a
+third useful provider. Predictions include each index batch's slowest cost at the current resource
+width, not imaginary all-at-once concurrency. All owners stop before origin fallback.
+
+Successful-provider hints are RAM-only, route/policy scoped and valid for at most sixty seconds.
+Their retention allowance uses conservative entry units within 1/1024 of free RAM, divided by
+sixteen under pressure; no permanent pair cap or preallocated peer catalogue remains. Fresh
+offer lookup still uses at most sixteen candidates per bounded discovery response. This does
+not create content authority, renew offer deadlines or prove three-provider HTTPS speedup.
+Control and mesh admission are described below; native transport ceilings remain separate work.
 
 The [exact `d0251a27` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
 passes the three-provider extension: disjoint R3/R4/R5 caches each supply five unique chunks,
@@ -822,6 +832,30 @@ already-admitted events and live witness generations. The separate 64-pending-pe
 four-connections-per-peer and 1,024-peer address-cache guards remain; this does not claim an
 unbounded DHT catalogue, adaptive radio neighbors or more WireGuard/MPTCP/MPQUIC route paths.
 No configuration or host network changes are needed.
+
+### Adaptive mesh admission
+
+For an explicitly configured Wi-Fi mesh, `wifi_mesh.maximum_peers: 0` (the new default) removes
+the operator-selected peer ceiling. A positive value remains an optional operator ceiling, not
+a target to fill. Every five seconds the agent considers actual owned-station observations,
+RAM/descriptor headroom and monotone in-use-channel active/busy counters when the driver supplies
+them. At least twenty percent measured unoccupied airtime and continuing station progress may
+justify one additional peering slot. Resource pressure closes expansion; a lower allowance does
+not disconnect established neighbors or grant any new overlay/Exit authority.
+
+Without complete channel surveys, one resource-covered exploratory slot is considered at most
+every thirty seconds. A newly arrived station must show actual byte progress before further
+growth. One discovery probe may bypass a silent first acquaintance so missing telemetry does
+not impose a permanent one-neighbor limit. This fallback does not measure spare airtime or
+guarantee owner performance. The agent changes only admission via a typed helper operation;
+the helper checks the exact owned runtime/interface/wiphy/network namespace, changes only
+`MESHCONF_MAX_PEER_LINKS`, and requires ACK plus actual readback. Mesh forwarding stays disabled.
+
+The helper's bounded station dump currently supports 512 observations and limits effective
+admission accordingly; it is a defensive representation boundary, not proven hardware capacity.
+Physical-radio and large-mesh performance remain untested. The existing guarded simulated-radio
+test now checks established-peer retention while admission changes from zero to two before its
+normal payload exchange; that extension still needs a live run.
 
 ### Warm MPQUIC path growth
 

@@ -17,14 +17,15 @@ use super::{
 use netlink::{
     CENTER_FREQ1, CHANNEL_WIDTH, DEL_INTERFACE, GET_INTERFACE, GET_MESH_CONFIG, GET_STATION,
     GET_WIPHY, IFINDEX, IFNAME, IFTYPE, JOIN_MESH, LEAVE_MESH, MESH_CONFIG, MESH_ID, MESH_POINT,
-    NEW_INTERFACE, NEW_STATION, NEW_WIPHY, SOCKET_OWNER, SPLIT_WIPHY_DUMP, WIPHY, WIPHY_FREQ,
-    Wireless,
+    NEW_INTERFACE, NEW_STATION, NEW_WIPHY, SET_MESH_CONFIG, SOCKET_OWNER, SPLIT_WIPHY_DUMP, WIPHY,
+    WIPHY_FREQ, Wireless,
 };
 use observation::{Interface, Radio};
 
 mod addressing;
 mod netlink;
 mod observation;
+mod survey;
 #[cfg(test)]
 mod tests;
 
@@ -58,7 +59,16 @@ pub(crate) struct MeshSnapshot {
     pub wiphy: u32,
     pub frequency_mhz: u32,
     pub joined: bool,
+    pub maximum_peers: u16,
+    pub survey: Option<MeshSurvey>,
     pub peers: Vec<MeshPeer>,
+}
+
+/// Cumulative kernel channel airtime, not a bandwidth promise or per-peer attribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MeshSurvey {
+    pub active_ms: u64,
+    pub busy_ms: u64,
 }
 
 /// Keep the socket-owned cleanup authority even if creation acknowledgement was lost.
@@ -81,6 +91,7 @@ pub(crate) struct MeshOwner {
     link_verified: bool,
     wireless: Option<Wireless>,
     joined: bool,
+    maximum_peers: u16,
     removed: bool,
 }
 
@@ -149,6 +160,7 @@ fn preflight(config: WifiMeshConfig, deadline: HardDeadline) -> Result<MeshOwner
     addressing::prove_subnet_available(&mut route, &config, deadline)?;
     let alias = format!("volparossa-mesh:{}", runtime_hex(&config.runtime_id));
     Ok(MeshOwner {
+        maximum_peers: config.maximum_peers,
         config,
         name,
         alias,
@@ -255,21 +267,49 @@ impl MeshOwner {
         let attrs = index_attributes(self.ifindex)?;
         observation::verify_mesh_configuration(
             &wireless.query(GET_MESH_CONFIG, GET_MESH_CONFIG, &attrs, deadline)?,
-            &self.config,
+            self.maximum_peers,
         )?;
         let peers = observation::peers(
             &wireless.dump(GET_STATION, NEW_STATION, &attrs, deadline)?,
             self.ifindex,
-            self.config.maximum_peers,
         )?;
+        let survey = survey::query(wireless, self.ifindex, self.config.frequency_mhz, deadline)?;
         addressing::verify_address(&mut route, self.ifindex, &self.config, deadline)?;
         Ok(MeshSnapshot {
             ifindex: self.ifindex,
             wiphy: self.wiphy,
             frequency_mhz: self.config.frequency_mhz,
             joined: true,
+            maximum_peers: self.maximum_peers,
+            survey,
             peers,
         })
+    }
+
+    /// Change only admission on the exact socket-owned mesh; existing stations are not removed.
+    pub(crate) fn update_admission(
+        &mut self,
+        maximum_peers: u16,
+        deadline: HardDeadline,
+    ) -> Result<MeshSnapshot, KernelError> {
+        if usize::from(maximum_peers) > volparossa_routing::MAX_WIFI_MESH_OBSERVATIONS {
+            return Err(KernelError::Invalid);
+        }
+        // This proves namespace, alias, ifindex, parent/wiphy, frequency and all no-forward
+        // settings before sending the single allowed mutation. No name-based radio authority.
+        let before = self.inspect(deadline)?;
+        if maximum_peers == self.maximum_peers {
+            return Ok(before);
+        }
+        self.wireless.as_mut().ok_or(KernelError::Invalid)?.ack(
+            SET_MESH_CONFIG,
+            &admission_attributes(self.ifindex, maximum_peers)?,
+            deadline,
+        )?;
+        self.maximum_peers = maximum_peers;
+        // ACK alone does not prove the applied limit or continued ownership. An ambiguous
+        // failed write/readback fails closed; the original affine owner still permits cleanup.
+        self.inspect(deadline)
     }
 
     /// Retire only this owner, retaining failed cleanup authority for a later retry.
@@ -440,7 +480,7 @@ fn validate_config(config: &WifiMeshConfig) -> Result<(), KernelError> {
             .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-' | b'.'))
         || !(1..=32).contains(&config.mesh_id.len())
         || !config.mesh_id.iter().all(u8::is_ascii_graphic)
-        || !(1..=32).contains(&config.maximum_peers)
+        || usize::from(config.maximum_peers) > volparossa_routing::MAX_WIFI_MESH_OBSERVATIONS
         || !(((2412..=2472).contains(&config.frequency_mhz) && config.frequency_mhz % 5 == 2)
             || ((5000..=5900).contains(&config.frequency_mhz) && config.frequency_mhz % 5 == 0))
     {
@@ -476,6 +516,14 @@ fn create_attributes(wiphy: u32, name: &str) -> Result<Vec<u8>, KernelError> {
     push_string_attribute(&mut attrs, IFNAME, name)?;
     push_attribute(&mut attrs, IFTYPE, &MESH_POINT.to_ne_bytes())?;
     push_attribute(&mut attrs, SOCKET_OWNER, &[])?;
+    Ok(attrs)
+}
+
+fn admission_attributes(index: u32, maximum_peers: u16) -> Result<Vec<u8>, KernelError> {
+    let mut attrs = index_attributes(index)?;
+    let mut mesh = Vec::new();
+    push_attribute(&mut mesh, 4, &maximum_peers.to_ne_bytes())?;
+    push_attribute(&mut attrs, MESH_CONFIG | super::NLA_F_NESTED, &mesh)?;
     Ok(attrs)
 }
 

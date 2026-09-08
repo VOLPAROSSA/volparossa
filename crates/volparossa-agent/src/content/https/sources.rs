@@ -122,8 +122,12 @@ impl PeerPlan {
         object_bytes: u64,
         hints: &[RecentProviderHint],
         at: Instant,
+        parallelism: usize,
     ) -> Option<Self> {
-        Self::with_transfer_cost(origin, estimate_digest_peers(object_bytes, hints, at)?)
+        Self::with_transfer_cost(
+            origin,
+            estimate_digest_peers(object_bytes, hints, at, parallelism)?,
+        )
     }
 
     fn with_transfer_cost(origin: Duration, transfer: Duration) -> Option<Self> {
@@ -156,8 +160,12 @@ impl PeerPlan {
         hints: &[RecentProviderHint],
         spent: Duration,
         at: Instant,
+        parallelism: usize,
     ) -> bool {
-        self.admits_cost(estimate_digest_peers(object_bytes, hints, at), spent)
+        self.admits_cost(
+            estimate_digest_peers(object_bytes, hints, at, parallelism),
+            spent,
+        )
     }
 
     pub(super) fn admits_after_index(
@@ -190,19 +198,31 @@ fn estimate_digest_peers(
     object_bytes: u64,
     hints: &[RecentProviderHint],
     at: Instant,
+    parallelism: usize,
 ) -> Option<Duration> {
     let transfer = estimate_peers(object_bytes, hints)?;
-    let mut index = Duration::ZERO;
-    for hint in hints {
-        index = index.max(hint.digest_index?.elapsed(at)?);
+    if parallelism == 0 {
+        return None;
     }
-    // At most two index lookups overlap, followed by the protected payload workers.
+    let mut index = Duration::ZERO;
+    // Index batches use the currently resource-admissible width. Include every actual
+    // batch's slowest setup, never pretend all indexes overlap when only one slot fits.
+    for batch in hints.chunks(parallelism.min(hints.len())) {
+        let mut batch_cost = Duration::ZERO;
+        for hint in batch {
+            batch_cost = batch_cost.max(hint.digest_index?.elapsed(at)?);
+        }
+        index = index.checked_add(batch_cost)?;
+    }
     // Setup is fixed, not scaled by object size or optimistically divided by peers.
     transfer.checked_add(index)
 }
 
 fn estimate_peers(object_bytes: u64, hints: &[RecentProviderHint]) -> Option<Duration> {
-    if object_bytes < MIN_SAMPLE_BYTES || hints.is_empty() || hints.len() > 2 {
+    if object_bytes < MIN_SAMPLE_BYTES
+        || hints.is_empty()
+        || hints.len() > super::super::recent::OFFER_BATCH
+    {
         return None;
     }
     let mut cost = Duration::ZERO;
@@ -337,29 +357,63 @@ mod tests {
             digest_index: None,
         });
         assert!(PeerPlan::new(origin, size, &hints).is_some());
-        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        assert!(PeerPlan::new_digest(origin, size, &hints, at, 2).is_none());
         hints[0].digest_index = DigestIndexCost::new(Duration::from_millis(400), at);
-        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        assert!(PeerPlan::new_digest(origin, size, &hints, at, 2).is_none());
         hints[1].digest_index = DigestIndexCost::new(Duration::from_millis(700), at);
         assert_eq!(
-            estimate_digest_peers(size, &hints, at),
+            estimate_digest_peers(size, &hints, at, 2),
             Some(Duration::from_millis(1100)),
             "parallel index max700 + conservative payload max400, no index scaling"
         );
-        let plan = PeerPlan::new_digest(origin, size, &hints, at).unwrap();
-        assert!(plan.admits_digest_refreshed(size, &hints, Duration::from_millis(100), at));
-        assert!(!plan.admits_digest_refreshed(size, &hints, Duration::from_millis(600), at));
+        let plan = PeerPlan::new_digest(origin, size, &hints, at, 2).unwrap();
+        assert!(plan.admits_digest_refreshed(size, &hints, Duration::from_millis(100), at, 2));
+        assert!(!plan.admits_digest_refreshed(size, &hints, Duration::from_millis(600), at, 2));
         let selected = hints.map(|hint| hint.peer_id);
         assert!(plan.admits_after_index(size, &hints, &selected, Duration::from_secs(1)));
         assert!(!plan.admits_after_index(size, &hints, &selected, Duration::from_millis(1300)));
         assert!(plan.admits_after_index(size, &hints, &selected[..1], Duration::from_millis(1300)));
         assert!(!plan.admits_after_index(size, &hints[..1], &selected, Duration::ZERO));
         hints[1].digest_index = DigestIndexCost::new(Duration::from_secs(2), at);
-        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        assert!(PeerPlan::new_digest(origin, size, &hints, at, 2).is_none());
         assert!(
             PeerPlan::new(origin, size, &hints).is_some(),
             "native cost is unchanged"
         );
-        assert!(PeerPlan::new_digest(origin, size, &hints, at + COST_LIFETIME).is_none());
+        assert!(PeerPlan::new_digest(origin, size, &hints, at + COST_LIFETIME, 2).is_none());
+    }
+
+    #[test]
+    fn digest_source_plan_accepts_three_useful_peers_and_prices_resource_limited_batches() {
+        use crate::content::recent::DigestIndexCost;
+        let at = Instant::now();
+        let hints = [10, 20, 30].map(|cost| RecentProviderHint {
+            peer_id: libp2p::PeerId::random(),
+            verified_bytes: 1024 * 1024,
+            elapsed: Duration::from_millis(100),
+            digest_index: DigestIndexCost::new(Duration::from_millis(cost), at),
+        });
+        let size = 2 * 1024 * 1024;
+        assert_eq!(
+            estimate_digest_peers(size, &hints, at, 3),
+            Some(Duration::from_millis(230))
+        );
+        assert_eq!(
+            estimate_digest_peers(size, &hints, at, 1),
+            Some(Duration::from_millis(260))
+        );
+        assert_eq!(
+            estimate_digest_peers(size, &hints, at, 2),
+            Some(Duration::from_millis(250))
+        );
+        assert!(PeerPlan::new_digest(Duration::from_secs(2), size, &hints, at, 3).is_some());
+        assert!(PeerPlan::new_digest(Duration::from_secs(2), size, &hints, at, 0).is_none());
+        let plan = PeerPlan::new_digest(Duration::from_secs(2), size, &hints, at, 3).unwrap();
+        assert!(plan.admits_after_index(
+            size,
+            &hints,
+            &hints.map(|hint| hint.peer_id),
+            Duration::from_secs(1)
+        ));
     }
 }

@@ -19,7 +19,8 @@ pub use downlink::{
 };
 pub use wifi_mesh::{
     DestroyWifiMesh, DestroyedWifiMesh, InspectWifiMesh, InstallWifiMesh, InstalledWifiMesh,
-    WifiMeshPeer, WifiMeshSnapshot, validate_wifi_mesh_response,
+    MAX_WIFI_MESH_OBSERVATIONS, UpdateWifiMeshAdmission, WifiMeshPeer, WifiMeshSnapshot,
+    WifiMeshSurvey, validate_wifi_mesh_response,
 };
 
 use std::{
@@ -73,7 +74,7 @@ pub struct HelperRequest {
     /// Strict operation allowlist.
     #[prost(
         oneof = "helper_request::Operation",
-        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46"
+        tags = "20, 21, 22, 23, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47"
     )]
     pub operation: Option<helper_request::Operation>,
 }
@@ -169,6 +170,9 @@ pub mod helper_request {
         /// Leave and remove only the exact owned mesh interface.
         #[prost(message, tag = "42")]
         DestroyWifiMesh(DestroyWifiMesh),
+        /// Update only future peering admission on the exact owned mesh interface.
+        #[prost(message, tag = "47")]
+        UpdateWifiMeshAdmission(super::UpdateWifiMeshAdmission),
     }
 }
 
@@ -1531,12 +1535,10 @@ pub fn safe_preview(value: &HelperRequest) -> Result<String, HelperProtocolError
         Operation::InstallUplinkSharing(_) => "install one owned upload-sharing runtime".to_owned(),
         Operation::InspectUplinkSharing(_) => "inspect one owned upload-sharing runtime".to_owned(),
         Operation::DestroyUplinkSharing(_) => "destroy one owned upload-sharing runtime".to_owned(),
-        Operation::InstallWifiMesh(_) => {
-            "create one owned open-L2 Wi-Fi mesh link; no default route or radio retuning"
-                .to_owned()
-        }
-        Operation::InspectWifiMesh(_) => "inspect one owned direct Wi-Fi mesh link".to_owned(),
-        Operation::DestroyWifiMesh(_) => "leave and remove one owned Wi-Fi mesh link".to_owned(),
+        operation @ (Operation::InstallWifiMesh(_)
+        | Operation::InspectWifiMesh(_)
+        | Operation::UpdateWifiMeshAdmission(_)
+        | Operation::DestroyWifiMesh(_)) => wifi_mesh::preview(operation)?.to_owned(),
         Operation::ApplyDownlinkBudget(_) => "apply one signed adjacent receive budget".to_owned(),
         Operation::InstallReceiveAccounting(_) => {
             "install count-only receive accounting".to_owned()
@@ -1821,6 +1823,7 @@ fn validate_request(value: &HelperRequest) -> Result<(), HelperProtocolError> {
             handle(&operation.sharing_handle)
         }
         Operation::InstallWifiMesh(operation) => wifi_mesh::validate_install(operation),
+        Operation::UpdateWifiMeshAdmission(operation) => wifi_mesh::validate_update(operation),
         Operation::ApplyDownlinkBudget(operation) => downlink::validate_apply(operation),
         Operation::InstallReceiveAccounting(operation) => downlink::validate_install(operation),
         Operation::InspectReceiveAccounting(operation) => {

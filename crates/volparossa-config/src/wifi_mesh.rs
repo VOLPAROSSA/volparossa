@@ -8,7 +8,7 @@ use volparossa_core::is_local_lan_ip;
 use crate::{ConfigError, validation};
 
 /// One operator-configured 20MHz 802.11s adjacency underlay, not an Internet uplink.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WifiMeshConfig {
     /// Create a separate owned mesh interface when explicitly starting participation.
@@ -25,30 +25,13 @@ pub struct WifiMeshConfig {
     pub local_address: String,
     /// Connected subnet prefix; no default route is installed.
     pub prefix_len: u8,
-    /// Maximum directly peered stations; kernel mesh forwarding is disabled.
+    /// Optional operator ceiling; zero uses resource/radio admission without an operator ceiling.
+    /// Actual admission remains bounded by observable kernel state. Mesh forwarding is disabled.
     pub maximum_peers: u16,
-}
-
-impl Default for WifiMeshConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            acknowledge_open_underlay: false,
-            parent_interface: String::new(),
-            mesh_id: String::new(),
-            frequency_mhz: 0,
-            local_address: String::new(),
-            prefix_len: 0,
-            maximum_peers: 8,
-        }
-    }
 }
 
 impl WifiMeshConfig {
     pub(super) fn validate(&self) -> Result<(), ConfigError> {
-        if !(1..=32).contains(&self.maximum_peers) {
-            return Err(validation("wifi_mesh.maximum_peers", "must be 1..=32"));
-        }
         if !self.enabled {
             return Ok(());
         }
@@ -159,6 +142,16 @@ mod tests {
             maximum_peers: 8,
         };
         assert!(valid.validate().is_ok());
+        for maximum_peers in [0, 33, u16::MAX] {
+            assert!(
+                WifiMeshConfig {
+                    maximum_peers,
+                    ..valid.clone()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
         for invalid in [
             WifiMeshConfig {
                 acknowledge_open_underlay: false,
@@ -199,10 +192,6 @@ mod tests {
             WifiMeshConfig {
                 local_address: "fd12:3456::1".into(),
                 prefix_len: 6,
-                ..valid.clone()
-            },
-            WifiMeshConfig {
-                maximum_peers: 33,
                 ..valid.clone()
             },
         ] {
