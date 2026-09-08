@@ -672,12 +672,23 @@ def validate_digest_phase(evidence, phase, from_origin, strategy, control_node, 
 def limited_comparison(cases):
     origin = cases["limited-origin-only"]["application"]["elapsed_ns"]
     automatic = cases["limited-auto"]["application"]["elapsed_ns"]
+    fetch = cases["limited-auto"]["fetch"]
+    peer_hit = (fetch["peer_bytes"] == BYTES and fetch["origin_body_bytes"] == 0
+                and fetch["providers_used"] == 2)
     return dict(reference="product-origin-only-fixed-4mbit-origin-uplink", samples_per_case=1,
         complete_command_duration=True, rate_tuned_after_measurement=False,
-        origin_to_auto_command_ratio=origin / automatic, benefit_passed=automatic < origin,
+        origin_to_auto_command_ratio=origin / automatic, automatic_peer_hit=peer_hit,
+        benefit_passed=peer_hit and automatic < origin,
         measurements={name: dict(command_elapsed_ns=phase["application"]["elapsed_ns"],
             peer_bytes=phase["fetch"]["peer_bytes"], origin_body_bytes=phase["fetch"]["origin_body_bytes"],
             providers_used=phase["fetch"]["providers_used"]) for name, phase in cases.items()})
+
+
+def limited_auto_from_origin(evidence):
+    fetch = evidence["limited_uplink"]["cases"]["limited-auto"]["fetch"]
+    require((fetch["peer_bytes"], fetch["origin_body_bytes"]) in ((BYTES, 0), (0, BYTES)),
+            "limited Auto must account for one complete peer or origin body")
+    return fetch["origin_body_bytes"] == BYTES
 
 
 def tbf(qdiscs):
@@ -705,10 +716,14 @@ def validate_limited(evidence, records, control_node):
         qdiscs = value["qdisc_" + name]
         require(len(qdiscs) == 1 and qdiscs[0]["kind"] == "noqueue" and qdiscs[0]["root"] is True,
                 "origin link was not initially unshaped or its owned limiter survived cleanup")
-    require([record["kind"] for record in records] == ["digest_head", "body", "digest_head", "digest_head"],
-            "limited cases require exactly fresh HEAD+GET, HEAD, HEAD with no fallback body")
+    auto_origin = limited_auto_from_origin(evidence)
+    expected_kinds = ["digest_head", "body", "digest_head", "digest_head"]
+    if auto_origin:
+        expected_kinds.append("body")
+    require([record["kind"] for record in records] == expected_kinds,
+            "limited cases require exact fresh HEADs and bodies matching actual source choices")
     for index, record in enumerate(records):
-        body = index == 1
+        body = index in (1, 4)
         require(record["method"] == ("GET" if body else "HEAD") and record["status"] == 200
                 and record["payload_bytes"] == (BYTES if body else 0) and record["content_length"] == BYTES
                 and record["representation_digest"] == REPR_DIGEST and record["object_sha256"] == SHA
@@ -720,7 +735,8 @@ def validate_limited(evidence, records, control_node):
     for name in LIMITED_CASES:
         phase = cases[name]
         strategy = name.removeprefix("limited-")
-        validate_digest_phase(evidence, phase, strategy == "origin-only", strategy, control_node, ids)
+        from_origin = strategy == "origin-only" or (strategy == "auto" and auto_origin)
+        validate_digest_phase(evidence, phase, from_origin, strategy, control_node, ids)
         app = phase["application"]
         require(last_clock <= app["started_monotonic_ns"] < app["completed_monotonic_ns"]
                 <= profile["completed_monotonic_ns"]
@@ -736,7 +752,8 @@ def validate_limited(evidence, records, control_node):
         fresh = phase["source_events"]
         expected = {"origin-only":"CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN",
                     "peers-first":"CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS",
-                    "auto":"CONTENT_HTTPS_SOURCE_MEASURED_PEERS"}[strategy]
+                    "auto":"CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED" if auto_origin
+                        else "CONTENT_HTTPS_SOURCE_MEASURED_PEERS"}[strategy]
         require(len(fresh) == 1 and fresh[0]["event"] == expected
                 and app["started_unix_ms"] <= fresh[0]["unix_ms"] <= app["completed_unix_ms"],
                 "current source-choice event is absent, historical or disagrees with actual command")
@@ -794,8 +811,11 @@ def validate_evidence(evidence):
     # Digest phases run after complete; B's independent index replaces only its registration.
     # Keep every raw record; validate their exact slice independently, never ignore extras.
     digest_records = raw_records[1:4]
-    limited_records = raw_records[4:8]
-    records = raw_records[:1] + raw_records[8:]
+    # Auto may legitimately prefer the origin even under this fixed link profile. Its exact
+    # additional full GET belongs to that phase, not the following missing-chunk metadata.
+    limited_end = 8 + int(limited_auto_from_origin(evidence))
+    limited_records = raw_records[4:limited_end]
+    records = raw_records[:1] + raw_records[limited_end:]
     require(origin["pid"] > 0 and 19 <= len(raw_records) <= 31
             and origin["request_limit"] == 31 and origin["stop_requested"] is True
             and origin["listener_closed"] is True and origin["inflight_drained"] is True

@@ -475,6 +475,27 @@ and removes the exact nft filter, ending with an empty ruleset; this carries no 
 The actual three-provider VM result remains pending; earlier source-scoped reports do not gain
 this new required proof retroactively.
 
+The [first `8247ebcd` attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34229670864)
+**fails before reaching that phase**; its [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34229455721)
+passes. Limited Auto legitimately selected the origin (`ORIGIN_PREFERRED`), adding one full
+GET to the five fresh digest HEADs. The HTTPS checker assumed Auto always selected peers and
+assigned that extra body to the following missing-range metadata phase. The correction accounts
+for either actual complete-source choice, requires its matching fresh event, exact TLS/body/
+provider accounting, and preserves every subsequent original range and metadata check.
+Sixteen HTTPS and fifteen parent checks pass, including rejecting omitted/duplicate records and
+falsely relabelled peer benefit. Rebuilding the complete retained HTTPS component with this
+correction passes (canonical SHA-256
+`4b52b5420db650e956b8ebf359d6011191319bc104037cac2b099d94530cfbb5`);
+the original workflow remains failed, not a completed parent or three-provider proof.
+
+That fixed 4-Mbps sample measures 6.629 seconds OriginOnly, 4.548 seconds PeersFirst and 6.625
+seconds Auto. Auto obtains all 2,097,275 bytes from the origin and no peer object bytes: the
+3.9-ms difference between two origin downloads is **not** cache-network benefit. The report now
+requires an actual automatic peer hit as well as lower elapsed time before setting benefit true.
+All 65 captures / 306 interface records are completely drained with zero drops or forbidden
+traffic, the limiter is unchanged and removed, and cleanup succeeds with byte-identical guest
+state (SHA-256 `be814e7f2f5d2a2e18973f042ec2970383e82936475a90b93655c727d2bb37bd`).
+
 ### Adaptive control-connection admission
 
 The production discovery actor now replaces its bootstrap established-connection ceilings

@@ -313,7 +313,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
             CHECK["validate_evidence"](changed(value,
                 ("origin_baseline", "selected_route", "benchmark_slots", 1, "relay_node"), "relay2"))
 
-    def test_fixed_origin_uplink_requires_actual_auto_hit_and_does_not_invent_latency_benefit(self):
+    def test_fixed_origin_uplink_verifies_actual_auto_hit_and_does_not_invent_latency_benefit(self):
         value = fixture()
         CHECK["validate_evidence"](value)
         self.assertTrue(value["limited_uplink"]["comparison"]["benefit_passed"])
@@ -351,6 +351,51 @@ class ProviderHttpsEvidence(unittest.TestCase):
         script = (HERE / "content-provider-https-smoke.sh").read_text()
         self.assertLess(script.index("    content_provider_https_phase digest-peers-first\n"), script.index("    content_provider_https_limited_run\n"))
         self.assertLess(script.index("    content_provider_https_limited_run\n"), script.index("    PHASE=content-provider-https-withdraw-one\n"))
+
+    def test_limited_auto_origin_keeps_extra_get_in_its_phase_without_claiming_peer_benefit(self):
+        value = fixture()
+        limited = value["limited_uplink"]
+        phase = limited["cases"]["limited-auto"]
+        phase["fetch"].update(peer_bytes=0, origin_body_bytes=CHECK["BYTES"],
+            providers_used=0, provider_peer_ids=[])
+        app = phase["application"]
+        # A marginally quicker second origin request is not a cache-network speedup.
+        app.update(final=copy.deepcopy(phase["fetch"]), elapsed_ns=5_996_000_000,
+            completed_monotonic_ns=app["started_monotonic_ns"] + 5_996_000_000,
+            completed_unix_ms=app["started_unix_ms"] + 5996)
+        phase["privacy"] = copy.deepcopy(limited["cases"]["limited-origin-only"]["privacy"])
+        phase["source_events"][0]["event"] = "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED"
+        phase["qdisc_after"][0]["bytes"] += CHECK["BYTES"]
+        limited["qdisc_final"][0]["bytes"] += CHECK["BYTES"]
+        value["origin"]["connections"].insert(8, copy.deepcopy(value["origin"]["connections"][5]))
+        limited["comparison"] = CHECK["limited_comparison"](limited["cases"])
+        CHECK["validate_evidence"](value)
+        self.assertGreater(limited["comparison"]["origin_to_auto_command_ratio"], 1)
+        self.assertFalse(limited["comparison"]["automatic_peer_hit"])
+        self.assertFalse(limited["comparison"]["benefit_passed"])
+        for path, wrong in (
+            (("limited_uplink", "comparison", "benefit_passed"), True),
+            (("limited_uplink", "comparison", "automatic_peer_hit"), True),
+            (("limited_uplink", "cases", "limited-auto", "source_events", 0, "event"),
+             "CONTENT_HTTPS_SOURCE_MEASURED_PEERS"),
+            (("limited_uplink", "cases", "limited-auto", "fetch", "providers_used"), 2),
+            (("origin", "connections", 8, "payload_bytes"), CHECK["BYTES"] - 1),
+            (("origin", "connections", 8, "tls13"), False),
+            (("origin", "connections", 9, "kind"), "body"),
+            (("origin", "connections", 10, "range_start"), 1),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, path, wrong))
+        for index in (8, 9):
+            missing = copy.deepcopy(value)
+            del missing["origin"]["connections"][index]
+            with self.subTest(missing_record=index), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](missing)
+        extra = copy.deepcopy(value)
+        extra["origin"]["connections"].insert(8, copy.deepcopy(value["origin"]["connections"][8]))
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](extra)
+
     def test_digest_combines_only_original_independent_indexes_over_unchanged_partial_cache(self):
         value = fixture()
         CHECK["validate_evidence"](value)
