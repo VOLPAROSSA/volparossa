@@ -141,6 +141,33 @@ impl RecentProviders {
         }
     }
 
+    fn batch_deadline(
+        &mut self,
+        scope: RecentProviderScope,
+        peers: &[PeerId],
+        wall: u64,
+        clock: Instant,
+    ) -> Option<Instant> {
+        self.prune(wall, clock);
+        if peers.is_empty() || peers.len() > OFFER_BATCH {
+            return None;
+        }
+        let mut deadline = clock.checked_add(MAX_MEASUREMENT_AGE)?;
+        for peer in peers {
+            let entry = self
+                .0
+                .iter()
+                .find(|entry| entry.scope == scope && entry.hint.peer_id == *peer)?;
+            deadline = deadline
+                .min(entry.deadline)
+                .min(entry.measured_at.checked_add(MAX_MEASUREMENT_AGE)?);
+            let index = entry.hint.digest_index?;
+            index.elapsed(clock)?;
+            deadline = deadline.min(index.deadline);
+        }
+        Some(deadline)
+    }
+
     fn forget(&mut self, scope: RecentProviderScope, peer: PeerId) {
         self.0
             .retain(|entry| entry.scope != scope || entry.hint.peer_id != peer);
@@ -185,6 +212,16 @@ fn retention_capacity(headroom: Option<crate::resource_headroom::ResourceHeadroo
 }
 
 impl ContentRuntime {
+    pub(super) async fn recent_batch_deadline(
+        &self,
+        scope: RecentProviderScope,
+        peers: &[PeerId],
+    ) -> Option<Instant> {
+        self.recent
+            .lock()
+            .await
+            .batch_deadline(scope, peers, now(), Instant::now())
+    }
     pub(super) async fn recent_provider_hints(
         &self,
         scope: RecentProviderScope,
@@ -465,6 +502,15 @@ mod tests {
         assert_eq!(cache.0[0].deadline, clock + Duration::from_secs(70));
         assert_eq!(cache.0[0].measured_at, measured_at);
         assert_eq!(
+            cache.batch_deadline(scope, &[peer], 100, measured_at),
+            Some(clock + MAX_MEASUREMENT_AGE)
+        );
+        assert!(
+            cache
+                .batch_deadline(scope, &[PeerId::random()], 100, measured_at)
+                .is_none()
+        );
+        assert_eq!(
             cache.hints(scope, 100, measured_at)[0]
                 .digest_index
                 .unwrap()
@@ -472,6 +518,11 @@ mod tests {
             Some(Duration::from_millis(500))
         );
         let expired_index = clock + MAX_MEASUREMENT_AGE;
+        assert!(
+            cache
+                .batch_deadline(scope, &[peer], 100, expired_index)
+                .is_none()
+        );
         let hints = cache.hints(scope, 100, expired_index);
         assert_eq!(hints.len(), 1, "payload sample is still recent");
         assert!(hints[0].digest_index.is_none(), "index age was not renewed");

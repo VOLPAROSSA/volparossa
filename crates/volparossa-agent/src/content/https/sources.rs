@@ -22,6 +22,56 @@ const MAX_PEER_ATTEMPT: Duration = Duration::from_secs(30);
 #[derive(Default)]
 pub(crate) struct SourceCosts {
     origins: Vec<OriginCost>,
+    batches: Vec<DigestBatchCost>,
+}
+
+/// RAM-only equality key. This is neither stored content authority nor a URL catalogue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct DigestBatchKey {
+    scope: RecentProviderScope,
+    origin: [u8; 32],
+    representation: [u8; 32],
+    bytes: u64,
+}
+
+impl DigestBatchKey {
+    pub(super) fn new(
+        scope: RecentProviderScope,
+        origin: &OriginRequest,
+        representation: [u8; 32],
+        bytes: u64,
+    ) -> Self {
+        Self {
+            scope,
+            origin: origin_key(origin),
+            representation,
+            bytes,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct DigestBatchCost {
+    pub(super) key: DigestBatchKey,
+    pub(super) peers: Vec<libp2p::PeerId>,
+    pub(super) index: Duration,
+    pub(super) payload: Duration,
+    pub(super) deadline: Instant,
+}
+
+impl DigestBatchCost {
+    fn matches(&self, peers: &[libp2p::PeerId], at: Instant, available: usize) -> bool {
+        // Requiring room for every contributing source is conservative even if the old
+        // adaptive scheduler did not activate the entire set at precisely the same instant.
+        at < self.deadline
+            && available >= self.peers.len()
+            && peers.len() == self.peers.len()
+            && self.peers.iter().all(|peer| peers.contains(peer))
+    }
+
+    fn total(&self) -> Option<Duration> {
+        self.index.checked_add(self.payload)
+    }
 }
 
 struct OriginCost {
@@ -35,6 +85,41 @@ struct OriginCost {
 }
 
 impl SourceCosts {
+    pub(super) fn observe_digest_batch(&mut self, mut sample: DigestBatchCost, at: Instant) {
+        self.batches.retain(|sample| at < sample.deadline);
+        sample.peers.sort_unstable();
+        sample.peers.dedup();
+        if sample.peers.is_empty()
+            || sample.peers.len() > super::super::recent::OFFER_BATCH
+            || sample.key.bytes < MIN_SAMPLE_BYTES
+            || sample.index.is_zero()
+            || sample.payload.is_zero()
+            || at >= sample.deadline
+        {
+            return;
+        }
+        self.batches
+            .retain(|old| old.key != sample.key || old.peers != sample.peers);
+        if self.batches.len() == MAX_ORIGINS {
+            self.batches.remove(0);
+        }
+        self.batches.push(sample);
+    }
+
+    pub(super) fn digest_batch(
+        &mut self,
+        key: DigestBatchKey,
+        hints: &[RecentProviderHint],
+        at: Instant,
+        available: usize,
+    ) -> Option<DigestBatchCost> {
+        self.batches.retain(|sample| at < sample.deadline);
+        let peers = hints.iter().map(|hint| hint.peer_id).collect::<Vec<_>>();
+        self.batches
+            .iter()
+            .find(|sample| sample.key == key && sample.matches(&peers, at, available))
+            .cloned()
+    }
     pub(super) fn observe_origin(
         &mut self,
         scope: RecentProviderScope,
@@ -105,9 +190,15 @@ fn origin_key(origin: &OriginRequest) -> [u8; 32] {
 pub(super) struct PeerPlan {
     pub(super) lookup_budget: Duration,
     pub(super) total_budget: Duration,
+    batch: Option<DigestBatchCost>,
 }
 
 impl PeerPlan {
+    pub(super) fn from_digest_batch(origin: Duration, batch: DigestBatchCost) -> Option<Self> {
+        let mut plan = Self::with_transfer_cost(origin, batch.total()?)?;
+        plan.batch = Some(batch);
+        Some(plan)
+    }
     pub(super) fn new(
         origin: Duration,
         object_bytes: u64,
@@ -142,6 +233,7 @@ impl PeerPlan {
         Some(Self {
             lookup_budget,
             total_budget,
+            batch: None,
         })
     }
 
@@ -162,10 +254,14 @@ impl PeerPlan {
         at: Instant,
         parallelism: usize,
     ) -> bool {
-        self.admits_cost(
-            estimate_digest_peers(object_bytes, hints, at, parallelism),
-            spent,
-        )
+        let peers = hints.iter().map(|hint| hint.peer_id).collect::<Vec<_>>();
+        let cost = self
+            .batch
+            .as_ref()
+            .filter(|sample| sample.matches(&peers, at, parallelism))
+            .and_then(DigestBatchCost::total)
+            .or_else(|| estimate_digest_peers(object_bytes, hints, at, parallelism));
+        self.admits_cost(cost, spent)
     }
 
     pub(super) fn admits_after_index(
@@ -174,6 +270,7 @@ impl PeerPlan {
         hints: &[RecentProviderHint],
         selected: &[libp2p::PeerId],
         spent: Duration,
+        available: usize,
     ) -> bool {
         let retained = hints
             .iter()
@@ -182,7 +279,13 @@ impl PeerPlan {
             .collect::<Vec<_>>();
         // Lookup has now actually elapsed. Only the selected, still-useful payload hints
         // predict the remaining work; adding the old index estimate would count it twice.
-        retained.len() == selected.len() && self.admits_refreshed(object_bytes, &retained, spent)
+        let cost = self
+            .batch
+            .as_ref()
+            .filter(|sample| sample.matches(selected, Instant::now(), available))
+            .map(|sample| sample.payload)
+            .or_else(|| estimate_peers(object_bytes, &retained));
+        retained.len() == selected.len() && self.admits_cost(cost, spent)
     }
 
     fn admits_cost(&self, cost: Option<Duration>, spent: Duration) -> bool {
@@ -253,6 +356,72 @@ fn scale(time: Duration, numerator: u64, denominator: u64) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_batch_cost_matches_exact_representation_and_prices_setup_once() {
+        use crate::content::recent::DigestIndexCost;
+        let at = Instant::now();
+        let route_scope = scope();
+        let origin = origin("object");
+        let size = 2 * 1024 * 1024;
+        let key = DigestBatchKey::new(route_scope, &origin, [8; 32], size);
+        let hints = [libp2p::PeerId::random(), libp2p::PeerId::random()].map(|peer_id| {
+            RecentProviderHint {
+                peer_id,
+                verified_bytes: size / 2,
+                elapsed: Duration::from_millis(2200),
+                digest_index: DigestIndexCost::new(Duration::from_millis(700), at),
+            }
+        });
+        assert!(PeerPlan::new_digest(Duration::from_secs(5), size, &hints, at, 2).is_none());
+        let mut costs = SourceCosts::default();
+        costs.observe_digest_batch(
+            DigestBatchCost {
+                key,
+                peers: hints.map(|hint| hint.peer_id).to_vec(),
+                index: Duration::from_millis(700),
+                payload: Duration::from_millis(2200),
+                deadline: at + Duration::from_secs(5),
+            },
+            at,
+        );
+        assert!(costs.digest_batch(key, &hints, at, 1).is_none());
+        assert!(costs.digest_batch(key, &hints[..1], at, 2).is_none());
+        let wrong = DigestBatchKey::new(route_scope, &origin, [9; 32], size);
+        assert!(costs.digest_batch(wrong, &hints, at, 2).is_none());
+        let wrong = DigestBatchKey::new(scope(), &origin, [8; 32], size);
+        assert!(costs.digest_batch(wrong, &hints, at, 2).is_none());
+        let batch = costs.digest_batch(key, &hints, at, 2).unwrap();
+        let plan = PeerPlan::from_digest_batch(Duration::from_secs(5), batch).unwrap();
+        assert!(plan.admits_digest_refreshed(size, &hints, Duration::from_millis(50), at, 2));
+        // 1.5s actual lookup + 2.2s payload fits4s; charging old0.7s index again would not.
+        assert!(plan.admits_after_index(
+            size,
+            &hints,
+            &hints.map(|hint| hint.peer_id),
+            Duration::from_millis(1500),
+            2
+        ));
+        assert!(!plan.admits_after_index(
+            size,
+            &hints,
+            &hints.map(|hint| hint.peer_id),
+            Duration::from_millis(1900),
+            2
+        ));
+        assert!(!plan.admits_after_index(
+            size,
+            &hints,
+            &hints.map(|hint| hint.peer_id),
+            Duration::from_millis(1500),
+            1
+        ));
+        assert!(
+            costs
+                .digest_batch(key, &hints, at + Duration::from_secs(5), 2)
+                .is_none()
+        );
+    }
 
     fn scope() -> RecentProviderScope {
         RecentProviderScope::new(libp2p::PeerId::random(), [7; 32], [8; 16])
@@ -370,10 +539,16 @@ mod tests {
         assert!(plan.admits_digest_refreshed(size, &hints, Duration::from_millis(100), at, 2));
         assert!(!plan.admits_digest_refreshed(size, &hints, Duration::from_millis(600), at, 2));
         let selected = hints.map(|hint| hint.peer_id);
-        assert!(plan.admits_after_index(size, &hints, &selected, Duration::from_secs(1)));
-        assert!(!plan.admits_after_index(size, &hints, &selected, Duration::from_millis(1300)));
-        assert!(plan.admits_after_index(size, &hints, &selected[..1], Duration::from_millis(1300)));
-        assert!(!plan.admits_after_index(size, &hints[..1], &selected, Duration::ZERO));
+        assert!(plan.admits_after_index(size, &hints, &selected, Duration::from_secs(1), 3));
+        assert!(!plan.admits_after_index(size, &hints, &selected, Duration::from_millis(1300), 3));
+        assert!(plan.admits_after_index(
+            size,
+            &hints,
+            &selected[..1],
+            Duration::from_millis(1300),
+            3
+        ));
+        assert!(!plan.admits_after_index(size, &hints[..1], &selected, Duration::ZERO, 3));
         hints[1].digest_index = DigestIndexCost::new(Duration::from_secs(2), at);
         assert!(PeerPlan::new_digest(origin, size, &hints, at, 2).is_none());
         assert!(
@@ -413,7 +588,8 @@ mod tests {
             size,
             &hints,
             &hints.map(|hint| hint.peer_id),
-            Duration::from_secs(1)
+            Duration::from_secs(1),
+            3
         ));
     }
 }

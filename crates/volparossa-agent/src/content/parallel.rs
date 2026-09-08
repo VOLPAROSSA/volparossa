@@ -35,6 +35,25 @@ struct ProviderSource {
     transport: Option<VerifiedManifest>,
 }
 
+/// Actual joined-worker wall time; each source completed setup, bytes and clean close.
+pub(super) struct CompletedBatch {
+    pub(super) started: Instant,
+    pub(super) elapsed: Duration,
+}
+
+#[derive(Default)]
+pub(super) struct IndexedReceipt {
+    pub(super) providers: Vec<String>,
+    pub(super) bytes: u64,
+    pub(super) completed: Option<CompletedBatch>,
+}
+
+impl IndexedReceipt {
+    fn progress(self) -> (Vec<String>, u64) {
+        (self.providers, self.bytes)
+    }
+}
+
 fn exact_sources(providers: Vec<DiscoveredContentProvider>) -> Vec<ProviderSource> {
     providers
         .into_iter()
@@ -61,6 +80,7 @@ pub(super) async fn pull(
         None,
     )
     .await
+    .map(IndexedReceipt::progress)
 }
 
 /// A source-selection budget, not a new transfer protocol or a renewed operation deadline.
@@ -91,6 +111,7 @@ pub(super) async fn pull_with_budget(
         Some(deadline),
     )
     .await
+    .map(IndexedReceipt::progress)
 }
 
 /// Whole-object HTTPS authority remains with the caller. Each provider keeps its own original
@@ -102,12 +123,12 @@ pub(super) async fn pull_indexed_with_budget(
     policy: &volparossa_policy::VerifiedManifest,
     providers: Vec<(DiscoveredContentProvider, VerifiedManifest)>,
     budget: Duration,
-) -> Result<(Vec<String>, u64), ContentError> {
+) -> Result<IndexedReceipt, ContentError> {
     if providers.len() > super::recent::OFFER_BATCH {
         return Err(ContentError::Invalid);
     }
     if budget.is_zero() {
-        return Ok((Vec::new(), 0));
+        return Ok(IndexedReceipt::default());
     }
     let deadline = Instant::now()
         .checked_add(budget)
@@ -129,7 +150,7 @@ async fn pull_inner(
     policy: &volparossa_policy::VerifiedManifest,
     providers: Vec<ProviderSource>,
     deadline: Option<Instant>,
-) -> Result<(Vec<String>, u64), ContentError> {
+) -> Result<IndexedReceipt, ContentError> {
     if providers.len() > 16 {
         return Err(ContentError::Invalid);
     }
@@ -139,20 +160,20 @@ async fn pull_inner(
         .filter(|source| seen.insert(source.provider.peer_id))
         .collect::<Vec<_>>();
     if providers.is_empty() || complete(manifest, store)? {
-        return Ok((Vec::new(), 0));
+        return Ok(IndexedReceipt::default());
     }
     let mut limits = TransferLimits::default();
     let deadline = deadline.unwrap_or_else(|| Instant::now() + limits.session_timeout);
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Ok((Vec::new(), 0));
+        return Ok(IndexedReceipt::default());
     }
     limits.session_timeout = limits.session_timeout.min(remaining);
     limits.exchange_timeout = limits.exchange_timeout.min(remaining);
     let budget = &context.content.worker_budget;
     let allowance = budget.available_workers();
     if allowance == 0 {
-        return Ok((Vec::new(), 0));
+        return Ok(IndexedReceipt::default());
     }
     let (download, workers) = prepare_download(manifest, store, &providers, limits, allowance)?;
     let scope = RecentProviderScope::for_route(context, policy).await;
@@ -180,6 +201,7 @@ async fn pull_inner(
         deadline,
     ))
     .await?;
+    let elapsed = observed_at.elapsed();
     if timed_out {
         content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
     }
@@ -194,6 +216,7 @@ async fn pull_inner(
             scope,
             observed_at,
             observed_wall,
+            elapsed,
             valid: !timed_out && same_route,
         },
     )
@@ -231,6 +254,7 @@ struct BatchMeasurement {
     observed_at: Instant,
     observed_wall: u64,
     valid: bool,
+    elapsed: Duration,
 }
 
 async fn record_batch(
@@ -240,7 +264,8 @@ async fn record_batch(
     progress: Vec<TransferProgress>,
     measurements: Vec<drivers::Measurement>,
     sample: BatchMeasurement,
-) -> Result<(Vec<String>, u64), ContentError> {
+) -> Result<IndexedReceipt, ContentError> {
+    let completed = clean_completed_batch(manifest.length(), &progress, &measurements, &sample);
     let mut used = Vec::new();
     let mut bytes = 0_u64;
     for ((source, received), measurement) in sources.into_iter().zip(progress).zip(measurements) {
@@ -284,7 +309,39 @@ async fn record_batch(
             )
             .await;
     }
-    Ok((used, bytes))
+    Ok(IndexedReceipt {
+        providers: used,
+        bytes,
+        completed,
+    })
+}
+
+fn clean_completed_batch(
+    length: u64,
+    progress: &[TransferProgress],
+    measurements: &[drivers::Measurement],
+    sample: &BatchMeasurement,
+) -> Option<CompletedBatch> {
+    if !sample.valid
+        || sample.scope.is_none()
+        || sample.elapsed.is_zero()
+        || progress.is_empty()
+        || progress.len() != measurements.len()
+        || progress.iter().any(|part| part.bytes == 0)
+        || progress
+            .iter()
+            .try_fold(0_u64, |total, part| total.checked_add(part.bytes))?
+            != length
+        || measurements
+            .iter()
+            .any(|part| !part.attempted || part.elapsed.is_none())
+    {
+        return None;
+    }
+    Some(CompletedBatch {
+        started: sample.observed_at,
+        elapsed: sample.elapsed,
+    })
 }
 
 async fn remember_measurement(
@@ -414,9 +471,10 @@ async fn peer(
 ) -> Result<bool, ContentError> {
     // An earlier useful provider may have closed its idle v1 read while its sibling stalled.
     // Reopen at most once, keeping the same assignment, original deadline and byte/request limits.
-    for _ in 0..2 {
+    for attempt_number in 0..2 {
         match attempt(context, policy, provider, &mut worker).await? {
-            Attempt::Complete => return Ok(true),
+            // Retried bytes remain deliverable, but failed setup must not become a clean cost sample.
+            Attempt::Complete => return Ok(attempt_number == 0),
             Attempt::Stopped => return Ok(false),
             Attempt::Retry => {}
         }
@@ -503,4 +561,60 @@ async fn attempt(
             Attempt::Stopped
         },
     )
+}
+
+#[cfg(test)]
+mod batch_cost_tests {
+    use super::*;
+
+    #[test]
+    fn digest_batch_wall_requires_full_unique_bytes_and_every_clean_close() {
+        let mut sample = BatchMeasurement {
+            scope: Some(RecentProviderScope::new(
+                libp2p::PeerId::random(),
+                [1; 32],
+                [2; 16],
+            )),
+            observed_at: Instant::now(),
+            observed_wall: 100,
+            valid: true,
+            elapsed: Duration::from_secs(2),
+        };
+        let mut progress = [TransferProgress {
+            bytes: 100,
+            ..TransferProgress::default()
+        }; 2];
+        let mut measurements = [
+            drivers::Measurement {
+                attempted: true,
+                elapsed: Some(Duration::from_secs(2)),
+            },
+            drivers::Measurement {
+                attempted: true,
+                elapsed: Some(Duration::from_secs(1)),
+            },
+        ];
+        let full = clean_completed_batch(200, &progress, &measurements, &sample).unwrap();
+        assert_eq!(full.started, sample.observed_at);
+        assert_eq!(
+            full.elapsed,
+            Duration::from_secs(2),
+            "joined wall, never sum of peer elapsed"
+        );
+        assert!(
+            clean_completed_batch(201, &progress, &measurements, &sample).is_none(),
+            "cached/prefix bytes are not a full peer sample"
+        );
+        measurements[1].elapsed = None;
+        assert!(clean_completed_batch(200, &progress, &measurements, &sample).is_none());
+        measurements[1].elapsed = Some(Duration::from_secs(1));
+        sample.valid = false;
+        assert!(clean_completed_batch(200, &progress, &measurements, &sample).is_none());
+        sample.valid = true;
+        progress[1].bytes = 0;
+        assert!(
+            clean_completed_batch(100, &progress, &measurements, &sample).is_none(),
+            "unused source is not part of a measured provider cohort"
+        );
+    }
 }

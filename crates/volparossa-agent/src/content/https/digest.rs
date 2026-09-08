@@ -276,13 +276,24 @@ async fn initial_peers(
                 return None;
             };
             let hints = context.content.recent_provider_hints(scope).await;
-            let Some(plan) = sources::PeerPlan::new_digest(
-                estimate,
-                authority.length(),
+            let available = context.content.worker_budget.available_workers();
+            let batch = context.content.source_costs.lock().await.digest_batch(
+                batch_key(scope, origin, authority),
                 &hints,
                 Instant::now(),
-                context.content.worker_budget.available_workers(),
-            ) else {
+                available,
+            );
+            let plan = match batch {
+                Some(batch) => sources::PeerPlan::from_digest_batch(estimate, batch),
+                None => sources::PeerPlan::new_digest(
+                    estimate,
+                    authority.length(),
+                    &hints,
+                    Instant::now(),
+                    available,
+                ),
+            };
+            let Some(plan) = plan else {
                 content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED").await;
                 return None;
             };
@@ -342,6 +353,24 @@ struct LookupResult {
     cost: Option<DigestIndexCost>,
 }
 
+struct IndexBatch {
+    started: Instant,
+    expires: u64,
+}
+
+fn batch_key(
+    scope: RecentProviderScope,
+    origin: &OriginRequest,
+    authority: &OriginAuthorizedDigest,
+) -> sources::DigestBatchKey {
+    sources::DigestBatchKey::new(
+        scope,
+        origin,
+        *authority.object_sha256(),
+        authority.length(),
+    )
+}
+
 impl PeerAttempt<'_> {
     async fn pull(
         &mut self,
@@ -351,6 +380,10 @@ impl PeerAttempt<'_> {
         if providers.len() > OFFER_BATCH {
             return Err(ContentError::Invalid);
         }
+        // This boundary excludes completed offer discovery, but includes every actual index
+        // flow/batch, validation and preparation up to the existing joined-worker start.
+        let index_started = Instant::now();
+        let first_round = self.looked_up.is_empty();
         let mut indexed = Vec::new();
         let mut providers = providers.into_iter();
         while Instant::now() < self.deadline && self.looked_up.len() < OFFER_BATCH {
@@ -418,13 +451,26 @@ impl PeerAttempt<'_> {
                 });
             }
         }
-        self.pull_sources(indexed, store).await
+        let index_batch = (first_round && indexed.len() == self.looked_up.len())
+            .then(|| {
+                indexed
+                    .iter()
+                    .map(|source| source.manifest.validity().expires)
+                    .min()
+            })
+            .flatten()
+            .map(|expires| IndexBatch {
+                started: index_started,
+                expires,
+            });
+        self.pull_sources(indexed, store, index_batch).await
     }
 
     async fn pull_sources(
         &mut self,
         sources: Vec<IndexedProvider>,
         store: &mut ChunkStore,
+        index_batch: Option<IndexBatch>,
     ) -> Result<bool, ContentError> {
         let Some((_, expected)) = &self.expected else {
             return Ok(false);
@@ -459,25 +505,20 @@ impl PeerAttempt<'_> {
             self.deadline.saturating_duration_since(Instant::now()),
         )
         .await;
-        let (providers, bytes) = match received {
+        let received = match received {
             // The writer returns its verified prefix even when a worker times out or fails.
             Ok(progress) => progress,
-            Err(ContentError::Unavailable) => (Vec::new(), 0),
+            Err(ContentError::Unavailable) => parallel::IndexedReceipt::default(),
             Err(error) => return Err(error),
         };
-        self.used.extend(providers);
-        self.bytes = self.bytes.checked_add(bytes).ok_or(ContentError::Invalid)?;
+        self.used.extend(received.providers);
+        self.bytes = self
+            .bytes
+            .checked_add(received.bytes)
+            .ok_or(ContentError::Invalid)?;
         if self.authority.verify_cached(expected, store, now()).is_ok() {
-            // Only a real, fully checked object can augment the useful payload measurement.
-            // Failed/unused workers cannot create hints through their metadata exchange.
-            for (peer, cost) in attempted {
-                if let Some(cost) = cost.filter(|_| self.used.contains(&peer.to_string())) {
-                    self.context
-                        .content
-                        .attach_digest_index_cost(self.scope, peer, cost)
-                        .await;
-                }
-            }
+            self.remember_completed(&attempted, received.completed, index_batch)
+                .await;
             return Ok(true);
         }
         for (peer, _) in attempted {
@@ -487,6 +528,72 @@ impl PeerAttempt<'_> {
                 .await;
         }
         Ok(false)
+    }
+
+    async fn remember_completed(
+        &self,
+        attempted: &[(PeerId, Option<DigestIndexCost>)],
+        payload: Option<parallel::CompletedBatch>,
+        index: Option<IndexBatch>,
+    ) {
+        // The final complete origin-authorized SHA check has succeeded, after all flows closed.
+        let completed_at = Instant::now();
+        for (peer, cost) in attempted {
+            if let Some(cost) = cost.filter(|_| self.used.contains(&peer.to_string())) {
+                self.context
+                    .content
+                    .attach_digest_index_cost(self.scope, *peer, cost)
+                    .await;
+            }
+        }
+        let (Some(payload), Some(index)) = (payload, index) else {
+            return;
+        };
+        if self.bytes != self.authority.length()
+            || attempted.len() != self.used.len()
+            || attempted
+                .iter()
+                .any(|(peer, _)| !self.used.contains(&peer.to_string()))
+        {
+            return;
+        }
+        let peers = attempted.iter().map(|(peer, _)| *peer).collect::<Vec<_>>();
+        let Some(offer_deadline) = self
+            .context
+            .content
+            .recent_batch_deadline(self.scope, &peers)
+            .await
+        else {
+            return;
+        };
+        let Ok(expires) = self.authority.check_validity(now()) else {
+            return;
+        };
+        // A whole-second wall expiry must never round the advisory monotonic bound upward.
+        let remaining = expires
+            .min(index.expires)
+            .saturating_sub(now())
+            .saturating_sub(1);
+        let deadline = offer_deadline
+            .min(index.started + Duration::from_secs(60))
+            .min(completed_at + Duration::from_secs(remaining));
+        self.context
+            .content
+            .source_costs
+            .lock()
+            .await
+            .observe_digest_batch(
+                sources::DigestBatchCost {
+                    key: batch_key(self.scope, self.origin, self.authority),
+                    peers,
+                    index: payload.started.saturating_duration_since(index.started),
+                    payload: payload
+                        .elapsed
+                        .max(completed_at.saturating_duration_since(payload.started)),
+                    deadline,
+                },
+                completed_at,
+            );
     }
 
     async fn admits_sources(&self, sources: &[IndexedProvider]) -> bool {
@@ -503,6 +610,7 @@ impl PeerAttempt<'_> {
             &hints,
             &selected,
             self.started.elapsed(),
+            self.context.content.worker_budget.available_workers(),
         )
     }
 }
