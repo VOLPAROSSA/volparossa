@@ -236,7 +236,7 @@ a06_client_line=$(grep -nF '"$WORK/bin/examples/http3-acceptance-fixture" client
 grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
     >/dev/null
 grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null
-grep -F 'native ACK/accounting counter, not independent unique payload evidence' "$HERE/benchmark-paths.py" >/dev/null
+# Counter semantics are exercised by test-benchmark-selection.py below, not comment wording.
 grep -F 'native_acked_bytes=int(acked_count or "0")' "$HERE/benchmark-paths.py" >/dev/null
 grep -F 'agent local-control native MPQUIC status' "$HERE/benchmark-paths.py" >/dev/null
 grep -F 'native_bind_slots "$WORK/a06-selection.json"' "$GUEST" >/dev/null

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Three actual protected cache suppliers; no speed or unlimited-worker claim."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -14,6 +15,126 @@ NODES = ("relay3", "relay4", "relay5")
 BYTES, CHUNKS, SHARD_BYTES = 3932160, 15, 1310720
 SHA = "26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011"
 PREFIX = "content-provider-adaptive"
+REPR_DIGEST = "sha-256=:JvxGlvDrzX42o8CgNp4thDdCs5FaIirVe0nNUwIKkBE=:"
+
+
+def validate_https_indexes(evidence):
+    phase, native = evidence["https"], evidence["publication"]
+    require(set(phase["indexes"]) == {"relay4", "relay5"}, "independent B/C indices missing")
+    layout = [dict(sha256=hashlib.sha256(bytes([65 + i]) * 262144).hexdigest(), bytes=262144)
+              for i in range(CHUNKS)]
+    ids, publishers = {native["manifest_id"]}, {native["publisher_hex"]}
+    require(phase["a_status"]["serving"] is True and phase["a_status"]["publications"] == 1
+            and phase["a_status"]["replication_enabled"] is False, "original A registration changed")
+    for shard, node in enumerate(NODES[1:], 1):
+        index = phase["indexes"][node]
+        publication, binding = index["publication"], index["binding"]
+        original, independent = publication["original"], publication["independent"]
+        require(publication["report_kind"] == "volparossa-https-independent-index"
+                and original["manifest_id"] == native["manifest_id"]
+                and original["publisher_hex"] == native["publisher_hex"]
+                and re.fullmatch(r"[0-9a-f]{64}", independent["manifest_id"])
+                and re.fullmatch(r"[0-9a-f]{64}", independent["publisher_hex"])
+                and independent["manifest_id"] not in ids and independent["publisher_hex"] not in publishers
+                and publication["publisher_private_key_persisted"] is False
+                and publication["temporary_full_copy_removed"] is True,
+                "provider transport indices are not three independent original signed envelopes")
+        for manifest in (original, independent):
+            require(manifest["chunks"] == layout and manifest["object_sha256"] == SHA
+                    and manifest["bytes"] == BYTES and manifest["content_type"] == "application/octet-stream"
+                    and manifest["name"] == "disposable-adaptive-native-publication" and manifest["revision"] == 1
+                    and manifest["created_unix_seconds"] == native["created_unix_seconds"]
+                    and manifest["expires_unix_seconds"] == native["expires_unix_seconds"],
+                    "independent transport index changed the original layout, object or expiry")
+        cache = publication["cache_before"]
+        require(cache == publication["cache_after"] and cache["path"] == binding["cache"]
+                and cache["device"] > 0 and cache["inode"] > 0
+                and cache["entries"] == 5 and cache["bytes"] == SHARD_BYTES
+                and cache["chunk_ids"] == [chunk["sha256"] for chunk in layout[shard::3]]
+                and Path(cache["path"]).parts[-3:] == (f"state-{node}", "content-adaptive", "cache")
+                and Path(binding["manifest_path"]) == Path(cache["path"]).parent / "digest-index" / "manifest.bin"
+                and binding["provider_node"] == node
+                and binding["provider_peer_id"] == evidence["expected_peers"][node]
+                and binding["publisher_hex"] == independent["publisher_hex"]
+                and binding["manifest_file_sha256"] == independent["manifest_id"]
+                and binding["original_manifest_file_sha256"] == native["manifest_id"]
+                and binding["bind_address"] == f"{BASE['PUBLIC_IPS'][node]}:18080"
+                and binding["advertised_hostname"] == f"provider-{'a' if shard == 1 else 'b'}.volparossa.test"
+                and native["created_unix_seconds"] <= publication["checked_unix_seconds"]
+                    <= binding["registered_unix_seconds"] <= phase["application"]["started_unix_ms"] // 1000
+                and phase["application"]["completed_unix_ms"] // 1000 < native["expires_unix_seconds"]
+                and index["stop"]["serving"] is False and index["stop"]["publications"] == 0
+                and index["serve"]["serving"] is True and index["serve"]["publications"] == 1
+                and index["serve"]["replication_enabled"] is False,
+                "B/C original cache, actual endpoint/index registration or cleanup was substituted")
+        ids.add(independent["manifest_id"])
+        publishers.add(independent["publisher_hex"])
+    return ids
+
+
+def validate_https(evidence, control_node):
+    phase, native = evidence["https"], evidence["publication"]
+    publication, fetch, output = (phase[key] for key in ("publication", "fetch", "output"))
+    ids = validate_https_indexes(evidence)
+    require(publication["report_kind"] == "volparossa-https-content-seed"
+            and publication["manifest_id"] == native["manifest_id"]
+            and publication["publisher_hex"] == native["publisher_hex"]
+            and publication["bytes"] == BYTES and publication["chunks"] == CHUNKS
+            and publication["object_sha256"] == SHA and publication["existing_publication_reused"] is True
+            and publication["publisher_private_key_persisted"] is False,
+            "origin did not independently authorize the existing adaptive representation")
+    require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == CHUNKS
+            and fetch["sha256"] == output["sha256"] == SHA
+            and fetch["transport_manifest_id"] in ids and fetch["origin_authenticated"] is True
+            and fetch["authentication_scope"] == "origin-repr-digest" and fetch["origin_digest"] is True
+            and fetch["origin_authority_persisted"] is False
+            and fetch["providers_used"] == len(fetch["provider_peer_ids"]) == 3
+            and set(fetch["provider_peer_ids"]) == {evidence["expected_peers"][node] for node in NODES}
+            and fetch["peer_bytes"] == BYTES and fetch["origin_body_bytes"] == fetch["origin_range_requests"] == 0
+            and phase["application"]["requested_origin_digest"] is True
+            and phase["status"]["serving"] is False
+            and phase["status"]["control_relay_peer_id"] == fetch["control_relay_peer_id"]
+                == evidence["layout"]["control_relay_peer_id"]
+            and phase["selected_route"]["route_context_id"] == evidence["selected_route"]["route_context_id"]
+            and phase["selected_route"]["benchmark_slots"] == evidence["selected_route"]["benchmark_slots"],
+            "three-source normal HTTPS receipt, independent index or original route is missing")
+    require(output["user_uid"] == 985 != output["agent_uid"] and output["agent_uid"] > 0
+            and output["output_mode"] == "0600" and output["directory_mode"] == output["agent_cache_mode"] == "0700"
+            and Path(output["path"]).parts[-2:] == ("adaptive-https-output", "digest-peers-first-object.bin")
+            and Path(output["agent_cache"]).parts[-3:] == ("state-client", "content-adaptive", "https-cache")
+            and all(output[key] is True for key in ("client_cache_initially_absent", "local_output_initially_absent",
+                "no_clobber_verified", "no_clobber_rejected_before_network", "agent_mount_positive_control",
+                "agent_cannot_read_user_output_directory", "client_mount_cannot_read_origin"))
+            and "already exists" in phase["no_clobber_error"],
+            "isolated cold operator storage or early no-clobber rejection missing")
+    BASE["validate_application"](phase, browser=False, source_strategy="peers-first")
+    application = phase["application"]
+    require(application["elapsed_ns"] == application["completed_monotonic_ns"] - application["started_monotonic_ns"]
+            and 0 < application["started_unix_ms"] <= application["completed_unix_ms"],
+            "HTTPS command elapsed time does not match its actual monotonic interval")
+    origin = phase["origin"]
+    require(origin["report_kind"] == "volparossa-https-content-origin"
+            and origin["request_limit"] == 1 and origin["stop_requested"] is False
+            and origin["listener_closed"] is True and origin["inflight_drained"] is True
+            and len(origin["connections"]) == 1, "origin must complete exactly one fresh HEAD")
+    head = origin["connections"][0]
+    require(head["kind"] == "digest_head" and head["method"] == "HEAD" and head["status"] == 200
+            and head["payload_bytes"] == 0 and head["content_length"] == BYTES
+            and head["representation_digest"] == REPR_DIGEST and head["object_sha256"] == SHA
+            and head["tls13"] is True and head["alpn_http11"] is True
+            and BASE["origin_exit_source"](head["source"])
+            and all(head[key] is None for key in ("range_start", "range_end", "range_total")),
+            "fresh HEAD origin/hash/TLS authority or Exit-source boundary is missing")
+    BASE["validate_path"](phase, evidence["expected_peers"], list(NODES), False)
+    validate_control(dict(control_underlay=dict(capture=phase["control"],
+        routes=evidence["control_underlay"]["routes"])), control_node)
+    for node in NODES:
+        require(SHARD_BYTES <= phase["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"]
+                <= SHARD_BYTES + 131072, "HTTPS supplier payload lacks its exact independent shard")
+    require(phase["provider_payload_overlap_ns"] == payload_overlap(phase["privacy"]["exit"]),
+            "HTTPS triple overlap differs from actual kernel payload timing")
+    require(phase["cleanup"] == dict(user_output_removed=True, user_directory_removed=True,
+            fixture_ca_removed=True, origin_body_removed=True), "HTTPS private files remain after completion")
 
 
 def payload_overlap(capture):
@@ -157,6 +278,7 @@ def validate(evidence):
             "reported triple bulk-payload overlap differs from kernel evidence")
     validate_control(evidence, control_nodes[0])
     validate_filter(evidence["control_filter"])
+    validate_https(evidence, control_nodes[0])
     require(set(evidence["providers"]) == set(NODES), "provider service receipts incomplete")
     for provider in evidence["providers"].values():
         require(provider["before"]["serving"] is False and provider["before"]["publications"] == 0
@@ -204,6 +326,18 @@ def build_evidence(work):
                             work / f"{PREFIX}-control-{node}-{direction}.json"))
                             for direction in ("out", "back")} for node in NODES}))
     evidence["provider_payload_overlap_ns"] = payload_overlap(evidence["privacy"]["exit"])
+    prefix = f"{PREFIX}-https"
+    evidence["https"] = {key: read(work / f"{prefix}-{suffix}.json") for key, suffix in (
+        ("publication", "publication"), ("a_status", "a-status"), ("application", "application"),
+        ("fetch", "fetch"), ("output", "output"), ("status", "status"), ("origin", "origin"),
+        ("cleanup", "cleanup"), ("selected_route", "live-selection"), ("control", "control-privacy"))}
+    phase = evidence["https"]
+    phase["indexes"] = {node: {key: read(work / f"{prefix}-{node}-{suffix}.json") for key, suffix in (
+        ("publication", "index"), ("binding", "binding"), ("stop", "stop"), ("serve", "serve"))}
+        for node in NODES[1:]}
+    phase["privacy"] = {role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES}
+    phase["provider_payload_overlap_ns"] = payload_overlap(phase["privacy"]["exit"])
+    phase["no_clobber_error"] = bounded_text(work / f"{prefix}-no-clobber.err")
     validate(evidence)
     return evidence
 

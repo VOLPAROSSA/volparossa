@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Pure evidence-gate regressions; these synthetic captures are not network proof."""
 
+import ast
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -74,7 +77,7 @@ def fixture(control_node="relay2"):
     for label in "abc":
         publication[f"replica_{label}_chunks"] = 5
         publication[f"replica_{label}_bytes"] = CHECK["SHARD_BYTES"]
-    return dict(success=True, publication=publication, expected_peers=peers,
+    evidence = dict(success=True, publication=publication, expected_peers=peers,
         previous_context="a" * 32, selected_before=copy.deepcopy(selected), selected_route=selected,
         layout=dict(provider_nodes=list(nodes), control_relay_peer_id=control),
         status_before=dict(control_relay_peer_id=control), status_after=dict(control_relay_peer_id=control),
@@ -92,6 +95,63 @@ def fixture(control_node="relay2"):
         provider_payload_overlap_ns=160, cleanup=dict(previous_route_disconnected=True,
             route_disconnected=True, active_contexts=0, paths_empty=True,
             client_output_removed=True, client_manifest_removed=True))
+    evidence["https"] = https_fixture(evidence)
+    return evidence
+
+
+def https_fixture(evidence):
+    native, peers = evidence["publication"], evidence["expected_peers"]
+    layout = [dict(sha256=hashlib.sha256(bytes([65 + i]) * 262144).hexdigest(), bytes=262144)
+              for i in range(15)]
+    original = {key: native[key] for key in ("manifest_id", "publisher_hex", "object_sha256", "bytes",
+                                            "created_unix_seconds", "expires_unix_seconds")}
+    original.update(chunks=layout, name="disposable-adaptive-native-publication", revision=1,
+                    content_type="application/octet-stream")
+    indexes = {}
+    for shard, node in enumerate(CHECK["NODES"][1:], 1):
+        independent = dict(original, publisher_hex=str(4 + shard) * 64, manifest_id=str(2 + shard) * 64)
+        cache = dict(path=f"/fixture/state-{node}/content-adaptive/cache", device=1, inode=123 + shard,
+                     entries=5, bytes=CHECK["SHARD_BYTES"], chunk_ids=[chunk["sha256"] for chunk in layout[shard::3]])
+        indexes[node] = dict(publication=dict(report_kind="volparossa-https-independent-index",
+            original=copy.deepcopy(original), independent=independent,
+            cache_before=cache, cache_after=copy.deepcopy(cache), checked_unix_seconds=1050,
+            publisher_private_key_persisted=False, temporary_full_copy_removed=True),
+            binding=dict(provider_node=node, provider_peer_id=peers[node], publisher_hex=independent["publisher_hex"],
+                cache=cache["path"], manifest_path=str(Path(cache["path"]).parent / "digest-index" / "manifest.bin"),
+                manifest_file_sha256=independent["manifest_id"], original_manifest_file_sha256=native["manifest_id"],
+                bind_address=f"{CHECK['BASE']['PUBLIC_IPS'][node]}:18080",
+                advertised_hostname=f"provider-{'a' if shard == 1 else 'b'}.volparossa.test", registered_unix_seconds=1060),
+            stop=dict(serving=False, publications=0), serve=dict(serving=True, publications=1, replication_enabled=False))
+    output = dict(path="/fixture/client-fixtures/adaptive-https-output/digest-peers-first-object.bin",
+        agent_cache="/fixture/state-client/content-adaptive/https-cache", sha256=CHECK["SHA"], bytes=CHECK["BYTES"],
+        user_uid=985, agent_uid=980, control_gid=986, output_mode="0600", directory_mode="0700",
+        agent_cache_mode="0700", client_cache_initially_absent=True, local_output_initially_absent=True,
+        no_clobber_verified=True, no_clobber_rejected_before_network=True, agent_mount_positive_control=True,
+        agent_cannot_read_user_output_directory=True, client_mount_cannot_read_origin=True)
+    fetch = dict(evidence["fetch"], operation="https_content_download", origin_authenticated=True,
+        sha256=CHECK["SHA"], transport_manifest_id=native["manifest_id"], authentication_scope="origin-repr-digest",
+        origin_digest=True, origin_authority_persisted=False, local_delivery=True, output_mode="0600",
+        ownership_changed=False, local_output=output["path"], cache=output["agent_cache"])
+    boundary = dict(user_uid=985, user_gid=985, control_gid=986, client_namespace=True,
+        outside_parent_namespace=True, all_capabilities_dropped=True, no_new_privileges=True)
+    application = dict(final=copy.deepcopy(fetch), consumer=boundary, cli=copy.deepcopy(boundary),
+        requested_origin_digest=True, requested_source_strategy="peers-first", elapsed_ns=1_000_000_000,
+        started_monotonic_ns=10_000_000_000, completed_monotonic_ns=11_000_000_000,
+        started_unix_ms=1_100_000, completed_unix_ms=1_101_000)
+    return dict(publication=dict(report_kind="volparossa-https-content-seed", manifest_id=native["manifest_id"],
+        publisher_hex=native["publisher_hex"], bytes=CHECK["BYTES"], chunks=15, object_sha256=CHECK["SHA"],
+        existing_publication_reused=True, publisher_private_key_persisted=False),
+        a_status=dict(serving=True, publications=1, replication_enabled=False), indexes=indexes,
+        fetch=fetch, output=output, application=application, status=dict(serving=False,
+            control_relay_peer_id=evidence["layout"]["control_relay_peer_id"]),
+        selected_route=copy.deepcopy(evidence["selected_route"]), privacy=copy.deepcopy(evidence["privacy"]),
+        control=copy.deepcopy(evidence["control_underlay"]["capture"]), provider_payload_overlap_ns=160,
+        origin=dict(report_kind="volparossa-https-content-origin", request_limit=1, stop_requested=False,
+            listener_closed=True, inflight_drained=True, connections=[dict(kind="digest_head", method="HEAD",
+                status=200, payload_bytes=0, content_length=CHECK["BYTES"], representation_digest=CHECK["REPR_DIGEST"],
+                object_sha256=CHECK["SHA"], tls13=True, alpn_http11=True, source="47.163.4.1:45678",
+                range_start=None, range_end=None, range_total=None)]), no_clobber_error="output already exists\n",
+        cleanup=dict(user_output_removed=True, user_directory_removed=True, fixture_ca_removed=True, origin_body_removed=True))
 
 
 def raw_files(evidence):
@@ -115,10 +175,55 @@ def raw_files(evidence):
     for node, routes in evidence["control_underlay"]["routes"].items():
         for direction, route in routes.items():
             files[f"{prefix}-control-{node}-{direction}.json"] = route
+    prefix += "-https"
+    phase = evidence["https"]
+    files.update({f"{prefix}-{suffix}.json": phase[key] for key, suffix in (
+        ("publication", "publication"), ("a_status", "a-status"), ("application", "application"),
+        ("fetch", "fetch"), ("output", "output"), ("status", "status"), ("origin", "origin"),
+        ("cleanup", "cleanup"), ("selected_route", "live-selection"), ("control", "control-privacy"))})
+    for node, index in phase["indexes"].items():
+        for key, suffix in (("publication", "index"), ("binding", "binding"), ("stop", "stop"), ("serve", "serve")):
+            files[f"{prefix}-{node}-{suffix}.json"] = index[key]
+    for role, capture in phase["privacy"].items():
+        files[f"{prefix}-privacy-{role}.json"] = capture
+    files[f"{prefix}-no-clobber.err"] = phase["no_clobber_error"]
     return files
 
 
 class AdaptiveEvidence(unittest.TestCase):
+    def test_https_exact_capture_prefix_enables_only_exit_kernel_timing_and_cleanup(self):
+        source = (Path(__file__).with_name("kvm-alpha-topology.sh")).read_text(encoding="utf-8")
+        observer = source.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
+        timing = next(node for node in ast.parse(observer).body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "provider_timing_enabled" for target in node.targets))
+        for role in ("exit", "client", "content-control"):
+            for filename in ("content-provider-adaptive-https-privacy-exit.json", "content-provider-adaptive-https-other.json"):
+                environment = dict(os=os, role=role, output_path=f"/fixture/{filename}", content_provider_mode=True)
+                exec(compile(ast.Module(body=[timing], type_ignores=[]), "actual-https-prefix", "exec"), environment)
+                self.assertEqual(environment["provider_timing_enabled"], role == "exit" and "privacy-exit" in filename)
+        self.assertIn("|content-provider-adaptive-https-privacy|", source)
+        self.assertIn("content_provider_adaptive_https_cleanup || original_status=1", source)
+
+    def test_https_requires_fresh_origin_three_original_indexes_and_real_payload(self):
+        for mutation in (
+                lambda e: e["https"]["fetch"].update(providers_used=2),
+                lambda e: e["https"]["fetch"].update(origin_body_bytes=1),
+                lambda e: e["https"]["fetch"].update(transport_manifest_id="0" * 64),
+                lambda e: e["https"]["origin"]["connections"][0].update(method="GET", payload_bytes=CHECK["BYTES"]),
+                lambda e: e["https"]["origin"]["connections"][0].update(source="10.241.10.1:3456"),
+                lambda e: e["https"]["indexes"]["relay5"]["publication"]["independent"].update(manifest_id="3" * 64),
+                lambda e: e["https"]["indexes"]["relay5"]["publication"]["cache_after"].update(entries=15),
+                lambda e: e["https"]["indexes"]["relay4"]["publication"]["independent"].update(expires_unix_seconds=4601),
+                lambda e: e["https"]["privacy"]["exit"]["provider_payload_timing"]["providers"].update(relay5=[301, 500]),
+                lambda e: e["https"]["privacy"]["exit"]["provider_application"]["relay5"].update(response_payload_bytes=65536),
+                lambda e: e["https"]["application"]["cli"].update(all_capabilities_dropped=False),
+                lambda e: e["https"]["output"].update(client_cache_initially_absent=False),
+                lambda e: e["https"]["cleanup"].update(user_output_removed=False)):
+            evidence = fixture()
+            mutation(evidence)
+            with self.assertRaises(ValueError):
+                CHECK["validate"](evidence)
+
     def test_three_kernel_payload_windows_and_raw_rebuild(self):
         for node in ("relay0", "relay1", "relay2"):
             CHECK["validate"](fixture(node))

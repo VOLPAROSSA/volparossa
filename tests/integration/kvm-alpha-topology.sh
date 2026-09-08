@@ -1270,6 +1270,9 @@ cleanup() {
     if [ "$scenario" = content-provider ] && command -v content_provider_https_cleanup >/dev/null 2>&1; then
         content_provider_https_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-provider ] && command -v content_provider_adaptive_https_cleanup >/dev/null 2>&1; then
+        content_provider_adaptive_https_cleanup || original_status=1
+    fi
     if [ "$scenario" = content-provider ] && command -v content_named_cleanup >/dev/null 2>&1; then
         content_named_cleanup || original_status=1
     fi
@@ -2355,6 +2358,9 @@ launch_mpquic() {
     # packet content or browsing identifiers. All normal scenarios leave the probe disabled.
     set --
     [ "$scenario" != mixed-link ] || set -- --property=Environment=VMP_RPC_TIMING=1
+    if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
+        set -- --property=Environment=VMP_RPC_TIMING=1
+    fi
     if [ "$scenario" = mixed-link ] && [ "$native_mode" = exit ]; then
         # Bounded, sparse scheduler fields only; no general DEBUG logs or payload logging.
         set -- '--property=Environment=VMP_RPC_TIMING=1 VMP_DEV_EDT_TRACE=1'
@@ -2491,6 +2497,10 @@ launch_agent() {
     [ "$(unit_load_state "$agent_unit")" = not-found ] || fail AGENT_UNIT_COLLISION
     AGENT_UNITS="$AGENT_UNITS $agent_unit"
     agent_rust_log=volparossa_agent=info
+    if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
+        # Exact owned-path counters/decisions only, no destination or payload logging.
+        agent_rust_log=$agent_rust_log,volparossa_agent::path_health=debug
+    fi
     if [ "$wifi_link" = yes ]; then
         case $node in client|relay0)
             agent_rust_log=$agent_rust_log,volparossa_discovery::authenticated_link=debug ;;
@@ -3191,7 +3201,8 @@ provider_application = {node: dict(request_packets=0, response_packets=0, respon
 provider_timing_enabled = (content_provider_mode and role == "exit"
                           and os.path.basename(output_path) in {
                               "content-provider-privacy-exit.json",
-                              "content-provider-adaptive-privacy-exit.json"})
+                              "content-provider-adaptive-privacy-exit.json",
+                              "content-provider-adaptive-https-privacy-exit.json"})
 # Linux UAPI SO_TIMESTAMPNS_NEW reports __kernel_timespec, two signed 64-bit fields.
 # Capture packet arrival, not socket-drain time: fair queue draining can reorder interfaces.
 # https://docs.kernel.org/networking/timestamping.html#so-timestampns-also-so-timestampns-old-and-so-timestampns-new
@@ -4636,7 +4647,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-adaptive-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
+        content-provider-privacy|content-provider-adaptive-privacy|content-provider-adaptive-https-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

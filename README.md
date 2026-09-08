@@ -323,7 +323,11 @@ uplink samples do not replace the earlier faster-origin results or promise a gen
 A successful cold peer-only download now also teaches its complete batch cost, instead of scaling
 each partial provider's fixed setup to a whole object. Reuse requires the same authorized object,
 provider set, route/policy, fresh original deadlines and sufficient current resources. Unknown or
-changed conditions retain conservative origin fallback; a new network comparison remains pending.
+changed conditions retain conservative origin fallback. The
+[complete `fb86ea62` provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34242925635)
+passes: with the fixed 4-Mbps origin, automatic retrieval actually uses two peers and no origin
+body, taking 4.52 seconds versus 6.63 seconds origin-only. This is one constrained-uplink sample,
+not a general speedup or a three-provider HTTPS result.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

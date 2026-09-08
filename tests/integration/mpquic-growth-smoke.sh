@@ -7,7 +7,7 @@ mpquic_growth_cleanup() {
     [ "${growth_loss_owned:-false}" = true ] || return 0
     case ${growth_loss_interface:-} in r0x|r1x|r2x) ;; *) return 1 ;; esac
     [ -n "${growth_loss_ns:-}" ] || return 1
-    ip netns exec "$growth_loss_ns" tc -j qdisc show dev "$growth_loss_interface" \
+    ip netns exec "$growth_loss_ns" tc -j -s qdisc show dev "$growth_loss_interface" \
         >"$WORK/mpquic-growth-qdisc-cleanup.json" || return 1
     if jq -e 'length == 1 and .[0].kind == "noqueue" and .[0].handle == "0:"' \
         "$WORK/mpquic-growth-qdisc-cleanup.json" >/dev/null; then

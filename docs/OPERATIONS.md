@@ -885,7 +885,8 @@ The separate `mpquic-growth` VM scenario starts with two active paths and one re
 uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only to one owned
 Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
 route retirement and unchanged guest state. The first two runs found fixture selection and
-native-counter integration faults; both are corrected in source, with the API7 rerun pending.
+native-counter integration faults; both are corrected. The API7 rerun proves initial ACK progress
+but still fails to activate the third path under loss. A diagnostic follow-up is pending.
 Local state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
 ceiling and other transport limits are not removed by this bounded integration.
 

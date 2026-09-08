@@ -645,14 +645,26 @@ impl ActiveProductionMpquicRoute {
         let warm = (!self.browser_flows.is_empty())
             .then(|| self.session.warm_path_ids().next())
             .flatten();
-        match self.growth.observe(
+        let growth = self.growth.observe(
             &statuses,
             &self.health,
             Instant::now(),
             now,
             warm,
             self.session.minimum_paths(),
-        ) {
+        );
+        tracing::debug!(
+            target: "volparossa_agent::path_health",
+            observations = ?statuses.iter().map(|path| (
+                path.path_id, path.acked_transport_bytes, path.packets_lost,
+                self.health.statuses.get(&path.path_id).map(|health| (
+                    health.state, health.metrics.packet_loss_ratio,
+                )),
+            )).collect::<Vec<_>>(),
+            warm, decision = ?growth,
+            "MPQUIC_PATH_HEALTH"
+        );
+        match growth {
             GrowthDecision::Unchanged => {}
             GrowthDecision::Hold => return Ok(ClientPathMaintenance::Unchanged),
             GrowthDecision::Activate { warm, risky } => {

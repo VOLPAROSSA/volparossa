@@ -39,6 +39,9 @@ const METADATA: &str = "/.well-known/volparossa/content/asset";
 const OBJECT_BYTES: usize = 2 * 1024 * 1024 + 123;
 const OBJECT_SHA256: &str = "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767";
 const OBJECT_REPR_DIGEST: &str = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:";
+const ADAPTIVE_BYTES: usize = 15 * CHUNK_BYTES;
+const ADAPTIVE_SHA256: &str = "26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011";
+const ADAPTIVE_REPR_DIGEST: &str = "sha-256=:JvxGlvDrzX42o8CgNp4thDdCs5FaIirVe0nNUwIKkBE=:";
 const DEADLINE: Duration = Duration::from_secs(90);
 
 #[tokio::main]
@@ -49,8 +52,15 @@ async fn main() -> Result<()> {
         [mode, root, manifest, publisher] if mode == "seed-from-publication" => {
             seed_from_publication(Path::new(root), Path::new(manifest), publisher)
         }
+        [mode, root, manifest, publisher] if mode == "seed-adaptive-origin" => {
+            seed_publication_profile(Path::new(root), Path::new(manifest), publisher, true)
+        }
         [mode, root, manifest, publisher, cache] if mode == "independent-index" => {
             independent_index(Path::new(root), Path::new(manifest), publisher, Path::new(cache))
+        }
+        [mode, root, manifest, publisher, cache, shard] if mode == "independent-adaptive-index" => {
+            independent_index_profile(Path::new(root), Path::new(manifest), publisher,
+                Path::new(cache), Some(shard.parse()?))
         }
         [mode, root, listen, cert, report, connections] if matches!(mode.as_str(), "origin" | "origin-pem" | "origin-pem-bounded") => {
             let count = connections.parse()?;
@@ -75,7 +85,7 @@ async fn main() -> Result<()> {
                 _ = interrupt.recv() => Err("origin baseline interrupted; private spool discarded".into()),
             }
         }
-        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | independent-index ROOT MANIFEST PUBLISHER_HEX EXISTING_B_CACHE | origin|origin-pem|origin-pem-bounded ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-from-publication|seed-adaptive-origin ROOT MANIFEST PUBLISHER_HEX | independent-index ROOT MANIFEST PUBLISHER_HEX EXISTING_B_CACHE | independent-adaptive-index ROOT MANIFEST PUBLISHER_HEX EXISTING_CACHE SHARD_0_1_2 | origin|origin-pem|origin-pem-bounded ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
     }
 }
 
@@ -162,6 +172,45 @@ fn fixture_bytes() -> Vec<u8> {
 /// Authorize the exact already-published fixture manifest at this independent HTTPS origin.
 /// The origin receives only the publisher public key; it does not re-sign or substitute objects.
 fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> Result<()> {
+    seed_publication_profile(root, manifest_path, publisher, false)
+}
+
+fn checked_fixture_bytes(manifest: &VerifiedManifest, adaptive: bool) -> Result<Vec<u8>> {
+    let bytes = if adaptive {
+        (b'A'..=b'O')
+            .flat_map(|value| vec![value; CHUNK_BYTES])
+            .collect()
+    } else {
+        fixture_bytes()
+    };
+    let hash = if adaptive {
+        ADAPTIVE_SHA256
+    } else {
+        OBJECT_SHA256
+    };
+    if manifest.length() != bytes.len() as u64
+        || hex::encode(manifest.object_sha256()) != hash
+        || manifest.metadata().content_type != "application/octet-stream"
+        || manifest.chunks().len() != bytes.chunks(CHUNK_BYTES).len()
+        || manifest
+            .chunks()
+            .iter()
+            .zip(bytes.chunks(CHUNK_BYTES))
+            .any(|(chunk, part)| {
+                chunk.id() != &ChunkId::digest(part) || chunk.length() as usize != part.len()
+            })
+    {
+        return Err("not the exact selected public fixture representation".into());
+    }
+    Ok(bytes)
+}
+
+fn seed_publication_profile(
+    root: &Path,
+    manifest_path: &Path,
+    publisher: &str,
+    adaptive: bool,
+) -> Result<()> {
     let public: [u8; 32] = hex::decode(publisher)?
         .try_into()
         .map_err(|_| "publisher key length")?;
@@ -169,17 +218,7 @@ fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> 
     let signed = SignedManifest::decode(&read_bounded(manifest_path, MAX_MANIFEST_BYTES)?)?;
     let time = now()?;
     let manifest = signed.verify(&public, time)?;
-    let bytes = fixture_bytes();
-    if manifest.length() != OBJECT_BYTES as u64
-        || manifest.chunks().len() != 9
-        || manifest
-            .chunks()
-            .iter()
-            .zip(bytes.chunks(CHUNK_BYTES))
-            .any(|(chunk, part)| chunk.id() != &ChunkId::digest(part))
-    {
-        return Err("not the exact shared provider fixture object".into());
-    }
+    let bytes = checked_fixture_bytes(&manifest, adaptive)?;
     let descriptor = encode_origin_descriptor(
         &OriginRequest::new(RESOURCE, METADATA)?,
         &signed,
@@ -195,7 +234,7 @@ fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> 
         &root.join("publication.json"),
         &json!({
             "report_kind":"volparossa-https-content-seed", "bytes":bytes.len(),
-            "object_sha256":OBJECT_SHA256, "chunks":manifest.chunks().len(),
+            "object_sha256":hex::encode(manifest.object_sha256()), "chunks":manifest.chunks().len(),
             "publisher_hex":hex::encode(public.as_bytes()), "publisher_private_key_persisted":false,
             "manifest_id":hex::encode(manifest.manifest_id()), "metadata_bytes":descriptor.len(),
             "existing_publication_reused":true,
@@ -211,27 +250,26 @@ fn independent_index(
     publisher: &str,
     cache: &Path,
 ) -> Result<()> {
+    independent_index_profile(root, manifest_path, publisher, cache, None)
+}
+
+fn independent_index_profile(
+    root: &Path,
+    manifest_path: &Path,
+    publisher: &str,
+    cache: &Path,
+    shard: Option<usize>,
+) -> Result<()> {
+    if shard.is_some_and(|value| value >= 3) {
+        return Err("adaptive shard must be one of the three fixed disjoint caches".into());
+    }
     let public: [u8; 32] = hex::decode(publisher)?
         .try_into()
         .map_err(|_| "publisher key length")?;
     let original = SignedManifest::decode(&read_bounded(manifest_path, MAX_MANIFEST_BYTES)?)?
         .verify(&VerifyingKey::from_bytes(&public)?, now()?)?;
-    let bytes = fixture_bytes();
-    if original.length() != OBJECT_BYTES as u64
-        || hex::encode(original.object_sha256()) != OBJECT_SHA256
-        || original.metadata().content_type != "application/octet-stream"
-        || original.chunks().len() != 9
-        || original
-            .chunks()
-            .iter()
-            .zip(bytes.chunks(CHUNK_BYTES))
-            .any(|(chunk, part)| {
-                chunk.id() != &ChunkId::digest(part) || chunk.length() as usize != part.len()
-            })
-    {
-        return Err("independent index requires the exact public fixture representation".into());
-    }
-    let before = partial_cache_snapshot(cache, &original)?;
+    let bytes = checked_fixture_bytes(&original, shard.is_some())?;
+    let before = partial_cache_snapshot(cache, &original, shard)?;
     fs::DirBuilder::new().mode(0o700).create(root)?;
     let temporary = tempfile::tempdir_in(root)?;
     let mut store = ChunkStore::create(&temporary.path().join("publisher-cache"), limits())?;
@@ -257,7 +295,7 @@ fn independent_index(
     drop(store);
     drop(signer);
     temporary.close()?;
-    let after = partial_cache_snapshot(cache, &original)?;
+    let after = partial_cache_snapshot(cache, &original, shard)?;
     if before != after {
         return Err("independent publication changed provider B's original cache".into());
     }
@@ -283,19 +321,23 @@ fn index_summary(manifest: &VerifiedManifest) -> Value {
             "sha256":chunk.id().to_string(),"bytes":chunk.length()})).collect::<Vec<_>>()})
 }
 
-fn partial_cache_snapshot(cache: &Path, manifest: &VerifiedManifest) -> Result<Value> {
+fn partial_cache_snapshot(
+    cache: &Path,
+    manifest: &VerifiedManifest,
+    shard: Option<usize>,
+) -> Result<Value> {
     let metadata = fs::symlink_metadata(cache)?;
     let mut store = ChunkStore::open(cache, limits())?;
     if !metadata.is_dir()
-        || store.usage().entries != 4
-        || store.usage().bytes != 4 * CHUNK_BYTES as u64
+        || store.usage().entries != if shard.is_some() { 5 } else { 4 }
+        || store.usage().bytes != if shard.is_some() { 5 } else { 4 } * CHUNK_BYTES as u64
     {
         return Err("provider B must retain exactly its four original odd chunks".into());
     }
     let mut present = Vec::new();
     for (index, chunk) in manifest.chunks().iter().enumerate() {
         let payload = store.get(chunk.id())?;
-        if payload.is_some() != (index % 2 == 1)
+        if payload.is_some() != shard.map_or(index % 2 == 1, |shard| index % 3 == shard)
             || payload
                 .as_ref()
                 .is_some_and(|bytes| bytes.len() != chunk.length() as usize)
@@ -333,10 +375,8 @@ async fn origin(
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind(listen).await?;
     let descriptor = read_bounded(&root.join("descriptor.bin"), MAX_MANIFEST_BYTES + 8192)?;
-    let object = read_bounded(&root.join("object.bin"), OBJECT_BYTES)?;
-    if object.len() != OBJECT_BYTES || ChunkId::digest(&object).to_string() != OBJECT_SHA256 {
-        return Err("origin representation does not match its fixed digest".into());
-    }
+    let object = read_bounded(&root.join("object.bin"), ADAPTIVE_BYTES)?;
+    let (object_hash, representation_digest) = origin_object_profile(&object)?;
     if certificate_pem {
         write_new(cert_path, generated.cert.pem().as_bytes())?;
     } else {
@@ -395,7 +435,7 @@ async fn origin(
             let date = format_http_date(now()?)?;
             let length = if payload.head { object.len() } else { payload.bytes.len() };
             let digest_header = if payload.kind == "metadata" { String::new() }
-                else { format!("Repr-Digest: {OBJECT_REPR_DIGEST}\r\n") };
+                else { format!("Repr-Digest: {representation_digest}\r\n") };
             let response = format!("HTTP/1.1 {status_line}\r\nDate: {date}\r\nContent-Length: {length}\r\nContent-Type: {}\r\n{range_header}{digest_header}Cache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.content_type);
             stream.write_all(response.as_bytes()).await?;
             stream.write_all(payload.bytes).await?;
@@ -408,8 +448,8 @@ async fn origin(
                 "range_end":payload.range.map(|range| range.1),
                 "range_total":payload.range.map(|_| object.len()),
                 "content_length":length, "method":if payload.head { "HEAD" } else { "GET" },
-                "representation_digest":if payload.kind == "metadata" { None } else { Some(OBJECT_REPR_DIGEST) },
-                "object_sha256":if payload.kind == "metadata" { None } else { Some(OBJECT_SHA256) },
+                "representation_digest":if payload.kind == "metadata" { None } else { Some(representation_digest) },
+                "object_sha256":if payload.kind == "metadata" { None } else { Some(object_hash) },
             }))
         }).await??;
         records.push(record);
@@ -420,6 +460,18 @@ async fn origin(
         &json!({"report_kind":"volparossa-https-content-origin", "pid":std::process::id(), "connections":records,
             "request_limit":connections, "stop_requested":stopped, "listener_closed":true, "inflight_drained":true}),
     )
+}
+
+fn origin_object_profile(object: &[u8]) -> Result<(&'static str, &'static str)> {
+    let (hash, digest) = match object.len() {
+        OBJECT_BYTES => (OBJECT_SHA256, OBJECT_REPR_DIGEST),
+        ADAPTIVE_BYTES => (ADAPTIVE_SHA256, ADAPTIVE_REPR_DIGEST),
+        _ => return Err("origin representation is not a fixed fixture object".into()),
+    };
+    if ChunkId::digest(object).to_string() != hash {
+        return Err("origin representation does not match its fixed digest".into());
+    }
+    Ok((hash, digest))
 }
 
 struct OriginPayload<'a> {
@@ -745,6 +797,86 @@ fn write_report(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_fixture_adaptive_preserves_three_disjoint_caches_and_original_indexes() -> Result<()>
+    {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path();
+        let bytes = (b'A'..=b'O')
+            .flat_map(|value| vec![value; CHUNK_BYTES])
+            .collect::<Vec<_>>();
+        let mut source = ChunkStore::create(&root.join("source"), limits())?;
+        let signer = SigningKey::generate(&mut rand_core::OsRng);
+        let time = now()?;
+        let signed = publish(
+            &mut bytes.as_slice(),
+            Publication {
+                metadata: Metadata {
+                    name: "disposable-adaptive-native-publication".into(),
+                    revision: 1,
+                    content_type: "application/octet-stream".into(),
+                },
+                length: ADAPTIVE_BYTES as u64,
+                validity: Validity {
+                    created: time,
+                    expires: time + 3600,
+                },
+            },
+            &signer,
+            &mut source,
+        )?;
+        let original = signed.verify(&signer.verifying_key(), time)?;
+        let manifest = root.join("manifest.bin");
+        write_new(&manifest, &signed.encode())?;
+        let publisher = hex::encode(original.publisher());
+        let origin = root.join("origin");
+        seed_publication_profile(&origin, &manifest, &publisher, true)?;
+        assert_eq!(fs::read(origin.join("manifest.bin"))?, signed.encode());
+        assert_eq!(
+            origin_object_profile(&fs::read(origin.join("object.bin"))?)?,
+            (ADAPTIVE_SHA256, ADAPTIVE_REPR_DIGEST)
+        );
+        let mut identities = vec![*original.manifest_id()];
+        for shard in 0..3 {
+            let cache = root.join(format!("shard-{shard}"));
+            let mut destination = ChunkStore::create(&cache, limits())?;
+            for (index, chunk) in original.chunks().iter().enumerate() {
+                if index % 3 == shard {
+                    destination.put(&source.get(chunk.id())?.ok_or("missing chunk")?)?;
+                }
+            }
+            drop(destination);
+            let before = partial_cache_snapshot(&cache, &original, Some(shard))?;
+            if shard == 0 {
+                continue;
+            }
+            let index = root.join(format!("index-{shard}"));
+            independent_index_profile(&index, &manifest, &publisher, &cache, Some(shard))?;
+            let envelope = SignedManifest::decode(&fs::read(index.join("manifest.bin"))?)?;
+            let verified = envelope.verify(
+                &VerifyingKey::from_bytes(&envelope.publisher_key_hint())?,
+                time,
+            )?;
+            assert!(!identities.contains(verified.manifest_id()));
+            identities.push(*verified.manifest_id());
+            assert_eq!(verified.chunks(), original.chunks());
+            assert_eq!(verified.validity(), original.validity());
+            assert_eq!(
+                before,
+                partial_cache_snapshot(&cache, &original, Some(shard))?
+            );
+            assert_eq!(
+                fs::read_dir(&index)?.count(),
+                2,
+                "no full source or signer persisted"
+            );
+            assert!(partial_cache_snapshot(&cache, &original, Some(0)).is_err());
+        }
+        assert_eq!(identities.len(), 3);
+        assert!(seed_from_publication(&root.join("old-mode"), &manifest, &publisher).is_err());
+        Ok(())
+    }
 
     #[test]
     fn origin_fixture_independent_index_keeps_expiry_and_only_original_partial_cache() -> Result<()>

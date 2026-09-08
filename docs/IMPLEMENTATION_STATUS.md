@@ -550,8 +550,21 @@ original offer/measurement expiry. Actual aggregate index setup is counted once 
 then excluded from the predicted remainder after the new lookup has really elapsed. Partial,
 cached-prefix, failed or unused-worker attempts cannot teach or refresh this sample;
 unknown/changed conditions keep the previous conservative fallback and unchanged twenty-percent
-margin. Eleven HTTPS, five parallel-worker and four recent-provider tests pass for this slice;
-the comparison on an actual changed-build network remains pending.
+margin. Eleven HTTPS, five parallel-worker and four recent-provider tests pass for this slice.
+The [complete `fb86ea62` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34242925635)
+passes with exact-source raw reconstruction: the 4-Mbps-origin automatic comparison chooses
+two actual peers, receives all 2,097,275 bytes with zero origin body, and takes 4.524811562 seconds
+versus 6.631889388 seconds origin-only. This is one constrained-uplink sample, not general benefit
+or three-provider HTTPS evidence. Cleanup leaves zero objects and byte-identical guest state.
+Artifact ZIP SHA-256: `71b5832033d1fbaa9d80746a690bffd659924329610e35b3aede41701faa2d9f`;
+canonical raw reconstruction SHA-256: `de1742fb500b0de157209fc77a8303c118d40ef261d4c81ea674d32f45adc6a8`.
+
+The next fixture adds a cold digest-authorized HTTPS retrieval within the existing R3/R4/R5
+three-provider phase. It preserves each original independent index and requires all three
+providers, full-object SHA, no origin body, and actual overlapping kernel payload windows.
+The old two-provider/Range/reference cases remain unchanged. Four origin-fixture and six
+evidence checks, parent reconstruction compatibility, strict example Clippy and shell checks
+pass locally; this new three-provider HTTPS network result is still pending.
 
 ### Adaptive mesh-neighbor integration
 
@@ -682,6 +695,22 @@ Cleanup leaves zero owned objects and byte-identical retained guest state; this 
 Client shutdown error in its empty Client log. Its [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238544971)
 passes. Artifact ZIP SHA-256:
 `b5c27e689c53fe71fd184578ea7d2d2484ec0aab08551b66c8e995f07e469990`.
+
+The [API7 `fb86ea62` growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34242922200)
+passes the initial two-path ACK-progress gate, but **fails** with
+`MPQUIC_GROWTH_THIRD_PATH_NOT_ACTIVE`. Both native counters continue forward for 90.074 seconds
+under the installed 15% loss profile, while the original warm path stays unused. Final counters
+are 5,000,460 and 31,470,964 acknowledged transport bytes; user-byte counters correctly remain
+zero. There are no final application receipts or three-path proof. The retained cleanup qdisc
+shows the installed profile but lacks drop statistics; sequential internal health observations
+were not logged, so a controller cause is not yet established. The follow-up enables only bounded
+owned-path counter/decision diagnostics in this disposable scenario and retains qdisc statistics
+even on failure; it does not relax growth conditions.
+Artifact ZIP SHA-256: `898b3bbe2c9f722057c3e5c7d4accb67ddc4b084224fc72c3021c369ebe7e3b3`.
+The same-source [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34242594444)
+passes strict Clippy/workspace tests but fails its static harness check on a changed comment's
+literal wording. The obsolete comment grep is removed; executable ACK-versus-user-counter
+assertions remain in the benchmark checker test.
 
 ### Native publication/site cache-only reopen
 
