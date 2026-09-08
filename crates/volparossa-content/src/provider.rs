@@ -411,9 +411,56 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     *progress = TransferProgress::default();
+    store.require_object_capacity(manifest.length())?;
+    let session = select_publication(stream, manifest, limits).await?;
+    timeout_at(session.deadline, async {
+        pull_from_peer_with_progress(
+            stream,
+            manifest,
+            store,
+            session.remaining(limits)?,
+            progress,
+        )
+        .await?;
+        session.check_deadline()?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| ProviderError::Timeout)?
+}
+
+/// Select the same exact publication, then serve one parallel coordinator worker's v1 requests.
+///
+/// This API never dials and never chooses publisher authority. The worker owns an independently
+/// verified manifest and an original deadline that includes the caller's protected stream setup.
+///
+/// # Errors
+/// Rejects selector mismatch, unavailable publications, corrupt chunks, expiry and bounded time.
+/// The caller must close the supplied stream after any error.
+pub async fn pull_publication_worker<S>(
+    stream: &mut S,
+    worker: &mut crate::transfer::parallel::ChunkWorker,
+) -> Result<(), ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let session = select_publication(stream, worker.manifest(), worker.remaining_limits()?).await?;
+    timeout_at(session.deadline, worker.run(stream))
+        .await
+        .map_err(|_| ProviderError::Timeout)??;
+    session.check_deadline()
+}
+
+async fn select_publication<S>(
+    stream: &mut S,
+    manifest: &VerifiedManifest,
+    limits: TransferLimits,
+) -> Result<SelectorSession, ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let session = SelectorSession::new(limits)?;
     manifest.check_time(now()?)?;
-    store.require_object_capacity(manifest.length())?;
     let selector = Selector {
         version: VERSION,
         manifest_id: manifest.manifest_id().to_vec(),
@@ -438,19 +485,12 @@ where
             UNAVAILABLE => return Err(ProviderError::Unavailable),
             _ => return Err(ProviderError::Protocol),
         }
-        pull_from_peer_with_progress(
-            stream,
-            manifest,
-            store,
-            session.remaining(limits)?,
-            progress,
-        )
-        .await?;
         session.check_deadline()?;
         Ok(())
     })
     .await
-    .map_err(|_| ProviderError::Timeout)?
+    .map_err(|_| ProviderError::Timeout)??;
+    Ok(session)
 }
 
 /// Serve only an exact signed-manifest ID in the local registry, then its approved chunks.

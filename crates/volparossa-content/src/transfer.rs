@@ -17,6 +17,8 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::{CHUNK_BYTES, ChunkId, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, VerifiedManifest};
 
+pub mod parallel;
+
 const VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 64;
 const MAX_RESPONSE_BYTES: usize = CHUNK_BYTES + 64;

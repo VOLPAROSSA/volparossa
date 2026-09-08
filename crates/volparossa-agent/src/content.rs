@@ -6,6 +6,7 @@
 mod https;
 mod mailbox;
 mod named;
+mod parallel;
 mod replication;
 mod replication_budget;
 #[cfg(test)]
@@ -15,7 +16,7 @@ mod tls;
 use replication::ReplicationRuntime;
 use replication_budget::Foreground;
 
-use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use socket2::SockRef;
@@ -26,11 +27,12 @@ use tokio::{
     time::{interval, timeout},
 };
 use volparossa_content::provider::{
-    ProviderEndpoint, PublicationRegistry, SignedProviderOffer, pull_publication_with_progress,
-    serve_publication,
+    ProviderEndpoint, PublicationRegistry, SignedProviderOffer, serve_publication,
 };
-use volparossa_content::transfer::{TransferLimits, TransferProgress};
+use volparossa_content::transfer::TransferLimits;
 use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest};
+#[cfg(test)]
+use volparossa_content::{provider::pull_publication_with_progress, transfer::TransferProgress};
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_identity::Identity;
 use volparossa_local_control::{
@@ -507,89 +509,7 @@ impl ContentRuntime {
         policy: &volparossa_policy::VerifiedManifest,
         providers: Vec<crate::discovery::DiscoveredContentProvider>,
     ) -> Result<(Vec<String>, u64), ContentError> {
-        let mut used = HashSet::new();
-        let mut peer_bytes = 0_u64;
-        for provider in providers {
-            if complete(manifest, store)? {
-                break;
-            }
-            if !context
-                .routes
-                .content_provider_is_distinct(&provider.peer_id)
-                .await
-            {
-                continue;
-            }
-            let endpoint = provider.offer.endpoint();
-            let current = context
-                .state
-                .read()
-                .await
-                .active_policy(unix_millis())
-                .ok_or(ContentError::Policy)?;
-            if current.policy_hash() != policy.policy_hash() {
-                return Err(ContentError::Policy);
-            }
-            if provider.offer.validity().expires <= now() {
-                continue;
-            }
-            let Ok(mut flow) = context
-                .routes
-                .open_content_stream(
-                    &current,
-                    endpoint.hostname(),
-                    endpoint.port(),
-                    unix_millis(),
-                )
-                .await
-            else {
-                content_event(context, "CONTENT_PROVIDER_ROUTE_FLOW_FAILED").await;
-                continue;
-            };
-            let Ok(mut stream) =
-                tls::connect(flow.stream_mut(), provider.peer_id, &provider.offer).await
-            else {
-                content_event(context, "CONTENT_PROVIDER_TLS_FAILED").await;
-                continue;
-            };
-            let mut progress = TransferProgress::default();
-            let pulled = pull_publication_with_progress(
-                &mut stream,
-                manifest,
-                store,
-                TransferLimits::default(),
-                &mut progress,
-            )
-            .await;
-            if pulled.is_ok() && tls::finish(&mut stream).await.is_err() {
-                content_event(context, "CONTENT_PROVIDER_TLS_CLOSE_FAILED").await;
-                return Err(ContentError::Unavailable);
-            }
-            drop(stream);
-            if pulled.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
-                content_event(context, "CONTENT_PROVIDER_ROUTE_CLOSE_FAILED").await;
-                return Err(ContentError::Unavailable);
-            }
-            flow.shutdown();
-            if pulled.is_err() {
-                content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
-            }
-            // Includes verified inserts before a later failure, excluding old cache hits.
-            let received = progress.bytes;
-            peer_bytes = peer_bytes
-                .checked_add(received)
-                .ok_or(ContentError::Invalid)?;
-            if received > 0 {
-                used.insert(provider.peer_id.to_string());
-                context
-                    .content
-                    .remember_provider(provider.peer_id, provider.offer, *manifest.manifest_id())
-                    .await;
-            }
-        }
-        let mut provider_peer_ids: Vec<_> = used.into_iter().collect();
-        provider_peer_ids.sort_unstable();
-        Ok((provider_peer_ids, peer_bytes))
+        Box::pin(parallel::pull(context, manifest, store, policy, providers)).await
     }
 }
 
