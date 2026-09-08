@@ -357,11 +357,29 @@ content_replication_automatic_status() {
 
 content_replication_automatic_restart() {
     cra_restart_label=$1
-    restart_advertiser relay4 || return 1
-    cra_net=$(stat -Lc '%d:%i' "/proc/$restart_new_pid/ns/net") || return 1
+    # A01's restart_advertiser is defined only inside the A01 scenario block. This
+    # scenario owns this one fixed unit and must be executable without that block.
+    cra_restart_unit=volparossa-alpha-agent@relay4.service
+    case " $AGENT_UNITS " in *" $cra_restart_unit "*) ;; *) return 1 ;; esac
+    cra_old_pid=$(systemctl show --property=MainPID --value "$cra_restart_unit") || return 1
+    case $cra_old_pid in ''|0|*[!0-9]*) return 1 ;; esac
+    systemctl restart "$cra_restart_unit" || return 1
+    cra_restart_attempt=0; cra_restart_ready=no
+    while [ "$cra_restart_attempt" -lt 300 ]; do
+        cra_restart_state=$(systemctl show --property=ActiveState --value "$cra_restart_unit" 2>/dev/null || true)
+        cra_new_pid=$(systemctl show --property=MainPID --value "$cra_restart_unit" 2>/dev/null || true)
+        case $cra_new_pid in ''|0|*[!0-9]*) cra_new_pid=0 ;; esac
+        if [ "$cra_restart_state" = active ] && [ "$cra_new_pid" != 0 ] \
+            && [ "$cra_new_pid" != "$cra_old_pid" ] \
+            && [ -S "$WORK/runtime-relay4/control/agent.sock" ]; then cra_restart_ready=yes; break; fi
+        sleep 0.1
+        cra_restart_attempt=$((cra_restart_attempt + 1))
+    done
+    [ "$cra_restart_ready" = yes ] || return 1
+    cra_net=$(stat -Lc '%d:%i' "/proc/$cra_new_pid/ns/net") || return 1
     [ "$cra_net" = "$(stat -Lc '%d:%i' "/run/netns/$R4")" ] || return 1
-    [ "$(readlink -f -- "/proc/$restart_new_pid/exe")" = "$binary_directory/volparossa-agent" ] || return 1
-    jq -cn --argjson before "$restart_old_pid" --argjson after "$restart_new_pid" \
+    [ "$(readlink -f -- "/proc/$cra_new_pid/exe")" = "$binary_directory/volparossa-agent" ] || return 1
+    jq -cn --argjson before "$cra_old_pid" --argjson after "$cra_new_pid" \
         --arg net "$cra_net" '{unit:"volparossa-alpha-agent@relay4.service",active_state:"active",
           pid_before:$before,pid_after:$after,network_namespace_identity:$net,executable_verified:true}' \
         >"$WORK/content-replication-automatic-$cra_restart_label.json"

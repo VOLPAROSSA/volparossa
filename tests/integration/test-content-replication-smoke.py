@@ -129,6 +129,29 @@ def fixture(control_node="relay1"):
 
 
 class ReplicationEvidence(unittest.TestCase):
+    def test_automatic_restart_is_available_without_the_skipped_a01_block(self):
+        # Dependency regression only: reach the fixed systemd restart request and deliberately
+        # fail it. No host service is touched and no successful restart evidence is fabricated.
+        script = '''set -eu
+            . "$1"
+            AGENT_UNITS=" volparossa-alpha-agent@relay4.service"
+            systemctl() {
+                if [ "$*" = 'show --property=MainPID --value volparossa-alpha-agent@relay4.service' ]; then
+                    printf '123\\n'
+                elif [ "$*" = 'restart volparossa-alpha-agent@relay4.service' ]; then
+                    printf 'fixed owned restart reached\\n' >&2
+                    return 1
+                else return 95; fi
+            }
+            content_replication_automatic_restart startup
+        '''
+        result = subprocess.run(["sh", "-c", script, "automatic-restart-contract",
+                                 str(HERE / "content-replication-smoke.sh")],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "fixed owned restart reached\n")
+        self.assertEqual(result.stdout, "")
+
     def test_automatic_contribution_requires_empty_start_real_restart_journal_and_independent_p(self):
         CHECK["validate_evidence"](fixture())
         for mutate in (

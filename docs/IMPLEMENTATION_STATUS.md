@@ -204,6 +204,17 @@ ordinary P download, original-node shutdown, a real agent PID change with retain
 independent protected P retrieval. That run remains pending. This is not arbitrary HTTPS
 interception, retention repair or globally fair placement.
 
+The [first automatic-start VM on `24e9a4b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34209702866)
+**fails before automatic startup**: the test calls `restart_advertiser`, which is defined only
+inside the skipped A01 scenario block. The existing P/Q transfers, owner-contention interval
+and ten complete zero-drop captures pass independently, but provide no automatic-start proof.
+Cleanup leaves zero owned objects and unchanged guest state. Artifact ZIP SHA-256:
+`63cbcc758e44fafb32dd57514531f8b749b16737498ab2215083c2678bb5a5d8`.
+The replication script now performs its own bounded restart of the already owned R4 unit,
+retaining PID/namespace/executable and journal checks. Eight narrow checker tests and strict
+shell checks pass; the standalone dependency regression performs no host service operation.
+The corrected network run is pending; the failed run is not relabelled as a pass.
+
 ## Latest known-contact mailbox integration checkpoint
 
 The new normal `content mailbox` path implements explicit invite, two-provider enrollment,
