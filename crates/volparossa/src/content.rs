@@ -20,11 +20,15 @@ use zeroize::Zeroizing;
 
 mod handoff;
 mod https_download;
+mod mailbox;
 mod named_download;
 mod private_message;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Explicit two-provider encrypted mailbox invitations, deposits and inbox retrieval.
+    #[command(subcommand)]
+    Mailbox(mailbox::Command),
     /// Chunk and sign an explicit local file; does NOT distribute it to any network.
     Publish(Publish),
     /// Show the public message-recipient key of an existing encrypted node identity.
@@ -297,6 +301,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         ContentFetchRequest, ContentServeRequest, Empty, control_request::Operation,
     };
     let report = match command {
+        Command::Mailbox(args) => return mailbox::run(args, socket).await,
         Command::Publish(args) => publish(&args)?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,
         Command::PublishMessage(args) => private_message::publish_message(&args)?,

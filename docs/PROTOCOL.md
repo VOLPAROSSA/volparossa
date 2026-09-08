@@ -163,6 +163,60 @@ The caller independently authenticates recipient encryption and sender signing k
 objects define neither discovery, private-key persistence, mailbox replay/acknowledgements,
 forward secrecy after recipient-key compromise nor HTTPS-origin authority.
 
+### Known-contact mailbox operations (development v1)
+
+The additive provider selector is `version=5`, empty manifest ID, `operation=3`. It runs on the
+same independently authenticated provider TLS stream through the normal protected route. Old
+providers reject it; no direct-provider or unprotected fallback exists. The recipient explicitly
+trusts two provider keys and one sender, not keys learned from arbitrary cached metadata.
+
+Canonical mailbox envelopes contain body tag 1 and Ed25519 signature tag 2. Body fields are
+`1: version=1`, `2: signing key`, `3: created`, `4: expires`, `5: random 32-byte nonce`,
+`6: type`, `7: SHA-256 payload hash`, `8: canonical payload`. Signatures use the domain
+`VOLPAROSSA/native-mailbox/v1\0` followed by the canonical body. Types are invitation (1),
+challenge (2), request authorization (3), and operation receipt (4). Unknown/noncanonical fields,
+lengths, signatures, unsupported types and original expiry fail closed.
+
+Invitation payload fields are `1: opaque mailbox ID`, `2: allowed sender Ed25519 key`,
+`3: recipient HPKE key`, `4: exactly two sorted distinct provider Ed25519 keys`,
+`5: maximum retained bytes`, `6: maximum messages including unexpired acknowledgement records`.
+The owner signs the exact immutable association. The invitation is at most 2 KiB, valid for at
+most 31 days, and permits at most 64 messages / 64 MiB. Embedded owner keys permit bounded
+self-registration only; they do not establish an independently trusted contact for consumers.
+
+The provider sends a fresh signed one-connection challenge. The caller signs authorization over
+`1: challenge-envelope hash`, `2: exact provider`, `3: original signed invitation`,
+`4: operation`, `5: original Deposit manifest only`, `6: Get/Acknowledge message ID only`.
+Operations are Register (1), Deposit (2), List (3), Get (4), Acknowledge (5). Only the invited
+sender can Deposit; only the owner can perform the other operations. A new connection has a new
+challenge, so copying an old authorization does not replay it after a connection/provider restart.
+Challenges and authorizations expire after at most 120 seconds and each connection consumes one
+operation. Ciphertext remains the existing RFC 9180 object, not a new encryption construction.
+
+The provider's receipt binds `1: request-envelope hash`, `2: invitation-envelope hash`,
+`3: operation`, `4: bounded original manifests`, `5: exact message ID`, `6: retained-until`,
+`7: acknowledged`, `8: ciphertext bytes`. Deposit/Get retain the original manifest and expiry;
+List never makes a provider a sender-signing authority. Metadata frames are bounded to 278,528
+bytes (64 manifests of at most 4 KiB plus framing); ciphertext uses exact bounded chunk frames
+and at most 4 MiB plus the existing envelope per message. Deposit is acknowledged only after
+hash verification and durable storage. Acknowledgement tombstones survive reopening until the
+original expiry; retries cannot recreate an acknowledged message. Receipts are not proof that
+a provider remains honest, reachable or able to repair a lost replica.
+
+Local control adds `MailboxServe` (29), `MailboxRemote` (30), and `MailboxReady` response (22).
+The caller verifies the exact signed provider challenge, signs locally, and performs one typed
+operation over that same authorized Unix socket. The agent bridges only the specified invitation,
+operation and object, never arbitrary commands or a raw tunnel. A correlated final existing
+`ContentReceipt` is required in addition to the signed mailbox receipt. No private key, passphrase,
+plaintext output path or decrypted payload is transferred to the agent.
+
+Exact provider discovery adds optional repeated Peer IDs at `ContentDiscoveryRequest` tag 4;
+empty keeps generic discovery, while one/two distinct IDs request a fresh exact set. The current
+control Relay resolves an unknown provider with Kademlia and retrieves its short-lived signed
+offer. Only the exact queried peer's bounded addresses can be used for that request. The Client
+does not dial providers for discovery, and mailbox IDs, contacts and message names are not DHT
+records. This neither provides anonymous metadata nor replaces independent key authentication.
+
 ### Cooperative-origin HTTPS descriptor (development v1)
 
 The consumer obtains this descriptor through its own hostname/CA-verified TLS 1.3 connection

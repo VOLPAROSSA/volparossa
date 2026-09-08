@@ -3,6 +3,8 @@
 //! No object identifiers, names, URLs or publication keys enter this protocol. Provider offers
 //! locate explicit services only: they never grant origin, route, DNS or Internet-egress authority.
 
+mod exact;
+
 use super::{
     AgentState, Arc, BehaviourEvent, ConnectionId, DirectRelayCapability, DiscoveryCommand,
     DiscoveryControlHandle, DiscoveryRuntime, HashMap, HashSet, Instant, Libp2pPeerId, LogLevel,
@@ -60,6 +62,11 @@ pub(super) enum ContentCommand {
         maximum: usize,
         reply: DiscoveryReply,
     },
+    Lookup {
+        control_peer: Libp2pPeerId,
+        providers: Vec<Libp2pPeerId>,
+        reply: DiscoveryReply,
+    },
 }
 
 impl ContentCommand {
@@ -71,7 +78,7 @@ impl ContentCommand {
             Self::Withdraw { reply } => {
                 let _ = reply.send(Err(error));
             }
-            Self::Discover { reply, .. } => {
+            Self::Discover { reply, .. } | Self::Lookup { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
         }
@@ -79,6 +86,30 @@ impl ContentCommand {
 }
 
 impl DiscoveryControlHandle {
+    /// Refresh one or two enrolled providers through the carrying route's control Relay.
+    pub(crate) async fn lookup_content_providers(
+        &self,
+        control_peer: Libp2pPeerId,
+        providers: &[Libp2pPeerId],
+    ) -> Result<Vec<DiscoveredContentProvider>, ContentDiscoveryError> {
+        ContentDiscoveryRequest::for_peers(providers)
+            .map_err(|_| ContentDiscoveryError::Invalid)?;
+        let (reply, response) = oneshot::channel();
+        timeout(REQUEST_TIMEOUT, async {
+            self.sender
+                .send(DiscoveryCommand::Content(ContentCommand::Lookup {
+                    control_peer,
+                    providers: providers.to_vec(),
+                    reply,
+                }))
+                .await
+                .map_err(|_| ContentDiscoveryError::Closed)?;
+            response.await.map_err(|_| ContentDiscoveryError::Closed)?
+        })
+        .await
+        .map_err(|_| ContentDiscoveryError::Timeout)?
+    }
+
     /// Register only after the caller owns a bound, live, explicitly populated service.
     pub(crate) async fn register_content_offer(
         &self,
@@ -142,6 +173,7 @@ impl DiscoveryControlHandle {
 
 #[derive(Default)]
 pub(super) struct ContentBridge {
+    exact: exact::ExactLookups,
     events: Vec<&'static str>,
     local: Option<LocalOffer>,
     clients: HashMap<OutboundId, PendingClient>,
@@ -159,6 +191,7 @@ struct PendingClient {
     connection: ConnectionId,
     deadline: Instant,
     maximum: usize,
+    targets: Vec<Libp2pPeerId>,
     reply: DiscoveryReply,
 }
 
@@ -211,6 +244,7 @@ impl ContentBridge {
         self.clients.len()
             + self.upstream.len()
             + self.relay.as_ref().map_or(0, |lookup| lookup.waiters.len())
+            + self.exact.pending()
     }
 
     fn next_deadline(&self) -> Instant {
@@ -219,6 +253,7 @@ impl ContentBridge {
             .map(|p| p.deadline)
             .chain(self.relay.iter().map(|r| r.collection_deadline))
             .chain(self.local.iter().map(|local| local.deadline))
+            .chain(self.exact.next_deadline())
             .min()
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))
     }
@@ -246,6 +281,7 @@ impl DiscoveryRuntime {
             ..
         } = &event
         {
+            self.close_exact_content_connection(*peer_id, *connection_id);
             let lost: Vec<_> = self
                 .content
                 .clients
@@ -281,6 +317,11 @@ impl DiscoveryRuntime {
                 self.handle_content_service_event(event);
                 None
             }
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
+                    id, result, step, ..
+                },
+            )) if self.handle_exact_content_query(id, &result, step.last) => None,
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id, result, step, ..
@@ -430,6 +471,7 @@ impl DiscoveryRuntime {
             if provider == *self.service.local_peer_id()
                 || provider == peer
                 || !peers.insert(provider)
+                || (!pending.targets.is_empty() && !pending.targets.contains(&provider))
             {
                 return Err(ContentDiscoveryError::Invalid);
             }
@@ -437,6 +479,9 @@ impl DiscoveryRuntime {
                 peer_id: provider,
                 offer: verify_provider(provider, item.signed_offer(), unix_seconds())?,
             });
+        }
+        if !pending.targets.is_empty() && peers.len() != pending.targets.len() {
+            return Err(ContentDiscoveryError::Unavailable);
         }
         Ok(verified)
     }
@@ -504,6 +549,14 @@ impl DiscoveryRuntime {
             request,
             channel,
         };
+        if waiter
+            .request
+            .target_peers()
+            .is_ok_and(|targets| !targets.is_empty())
+        {
+            self.begin_exact_content_lookup(waiter);
+            return;
+        }
         if let Some(lookup) = self.content.relay.as_mut() {
             lookup.waiters.push(waiter);
             self.content.event("CONTENT_DISCOVERY_RELAY_QUERY_JOINED");
@@ -560,6 +613,9 @@ impl DiscoveryRuntime {
         &mut self,
         event: request_response::Event<ContentServiceRequest, ContentServiceResponse>,
     ) {
+        if self.handle_exact_content_service(&event) {
+            return;
+        }
         match event {
             request_response::Event::Message {
                 peer,
@@ -767,6 +823,16 @@ impl DiscoveryRuntime {
             } => {
                 self.begin_content_discovery(control_peer, maximum, reply);
             }
+            ContentCommand::Lookup {
+                control_peer,
+                providers,
+                reply,
+            } => match ContentDiscoveryRequest::for_peers(&providers) {
+                Ok(request) => self.dispatch_content_discovery(control_peer, request, reply),
+                Err(_) => {
+                    let _ = reply.send(Err(ContentDiscoveryError::Invalid));
+                }
+            },
         }
         self.flush_content_events(state).await;
     }
@@ -777,16 +843,37 @@ impl DiscoveryRuntime {
         maximum: usize,
         reply: DiscoveryReply,
     ) {
-        self.content.event("CONTENT_DISCOVERY_COMMAND_RECEIVED");
-        if reply.is_closed() {
-            self.content.event("CONTENT_DISCOVERY_CALLER_CLOSED");
-            return;
-        }
         let Ok(request) = ContentDiscoveryRequest::new(maximum) else {
             self.content.event("CONTENT_DISCOVERY_LIMIT_INVALID");
             let _ = reply.send(Err(ContentDiscoveryError::Invalid));
             return;
         };
+        self.dispatch_content_discovery(control_peer, request, reply);
+    }
+
+    fn dispatch_content_discovery(
+        &mut self,
+        control_peer: Libp2pPeerId,
+        request: ContentDiscoveryRequest,
+        reply: DiscoveryReply,
+    ) {
+        self.content.event("CONTENT_DISCOVERY_COMMAND_RECEIVED");
+        if reply.is_closed() {
+            self.content.event("CONTENT_DISCOVERY_CALLER_CLOSED");
+            return;
+        }
+        let maximum = request.maximum_offers();
+        let Ok(targets) = request.target_peers() else {
+            let _ = reply.send(Err(ContentDiscoveryError::Invalid));
+            return;
+        };
+        if targets
+            .iter()
+            .any(|peer| *peer == control_peer || peer == self.service.local_peer_id())
+        {
+            let _ = reply.send(Err(ContentDiscoveryError::Invalid));
+            return;
+        }
         if !self.roles.client {
             self.content.event("CONTENT_DISCOVERY_CLIENT_ROLE_REJECTED");
             let _ = reply.send(Err(ContentDiscoveryError::Busy));
@@ -847,6 +934,7 @@ impl DiscoveryRuntime {
                     control,
                     connection,
                     maximum,
+                    targets,
                     reply,
                     deadline: Instant::now() + REQUEST_TIMEOUT,
                 },
@@ -863,6 +951,7 @@ impl DiscoveryRuntime {
 
     pub(super) fn maintain_content(&mut self) {
         let now = Instant::now();
+        self.maintain_exact_content(now);
         self.content.replay.retain(|_, until| *until > now);
         if self
             .content
@@ -927,6 +1016,7 @@ impl DiscoveryRuntime {
             self.content.event("CONTENT_LOOKUP_INVALIDATED");
         }
         self.finish_content_lookup(false);
+        self.invalidate_exact_content();
     }
 }
 
@@ -980,7 +1070,7 @@ mod tests {
     use rand_core::OsRng;
     use volparossa_content::{Validity, provider::ProviderEndpoint};
 
-    async fn registered_content_runtime()
+    pub(super) async fn registered_content_runtime()
     -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, tempfile::TempDir) {
         let (mut runtime, state, directory) = super::super::tests::content_runtime_fixture();
         let now_ms = unix_millis();

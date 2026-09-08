@@ -20,6 +20,10 @@ const CHUNK_STAGE: &str = ".volparossa-chunk-next-v1";
 const REPLICA_FILE: &str = ".volparossa-replicas-v1";
 const REPLICA_STAGE: &str = ".volparossa-replicas-next-v1";
 const REPLICA_MAGIC: &[u8; 8] = b"VPCR0001";
+const MAILBOX_FILE: &str = ".volparossa-mailbox-v1";
+const MAILBOX_STAGE: &str = ".volparossa-mailbox-next-v1";
+const MAILBOX_MAGIC: &[u8; 8] = b"VPCM0001";
+pub(crate) const MAX_MAILBOX_METADATA_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_REPLICA_METADATA_BYTES: usize = 8 * 1024 * 1024;
 const REPLICA_OVERHEAD: usize = 8 + 32 + CHECKSUM_BYTES;
 const OWNER_MAGIC: &[u8; 8] = b"VPCC0001";
@@ -135,6 +139,7 @@ impl ChunkStore {
         ensure_absent(&directory, INDEX_STAGE)?;
         ensure_absent(&directory, CHUNK_STAGE)?;
         ensure_absent(&directory, REPLICA_STAGE)?;
+        ensure_absent(&directory, MAILBOX_STAGE)?;
         let mut index = Vec::new();
         open_private_file(&directory, INDEX_FILE, MAX_INDEX_BYTES as u64)?
             .take(MAX_INDEX_BYTES as u64 + 1)
@@ -221,6 +226,78 @@ impl ChunkStore {
             REPLICA_FILE,
         )
         .map_err(io_error)?;
+        self.directory.sync_all()?;
+        self.healthy = true;
+        Ok(())
+    }
+
+    // A separate fixed-name journal keeps mailbox ownership out of the opportunistic replica
+    // registry. Its original cache ID binding forbids copying/adopting another cache's index.
+    pub(crate) fn read_mailbox_metadata(&self) -> Result<Option<Vec<u8>>, Error> {
+        self.ensure_healthy()?;
+        ensure_absent(&self.directory, MAILBOX_STAGE)?;
+        let maximum = MAX_MAILBOX_METADATA_BYTES + REPLICA_OVERHEAD;
+        let file = match open_private_file(&self.directory, MAILBOX_FILE, maximum as u64) {
+            Ok(file) => file,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() < REPLICA_OVERHEAD
+            || bytes.len() > maximum
+            || &bytes[..8] != MAILBOX_MAGIC
+            || bytes[8..40] != self.cache_id
+        {
+            return Err(Error::InvalidStore);
+        }
+        let end = bytes.len() - CHECKSUM_BYTES;
+        if Sha256::digest(&bytes[..end]).as_slice() != &bytes[end..] {
+            return Err(Error::InvalidStore);
+        }
+        Ok(Some(bytes[40..end].to_vec()))
+    }
+
+    pub(crate) fn replace_mailbox_metadata(&mut self, payload: &[u8]) -> Result<(), Error> {
+        if payload.len() > MAX_MAILBOX_METADATA_BYTES {
+            return Err(Error::Limit("mailbox metadata"));
+        }
+        self.read_mailbox_metadata()?;
+        let mut bytes = Vec::with_capacity(payload.len() + REPLICA_OVERHEAD);
+        bytes.extend_from_slice(MAILBOX_MAGIC);
+        bytes.extend_from_slice(&self.cache_id);
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&Sha256::digest(&bytes));
+        self.check_free_space(bytes.len() as u64)?;
+        self.healthy = false;
+        let mut output = create_file(&self.directory, MAILBOX_STAGE)?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+        rustix::fs::renameat(
+            &self.directory,
+            MAILBOX_STAGE,
+            &self.directory,
+            MAILBOX_FILE,
+        )
+        .map_err(io_error)?;
+        self.directory.sync_all()?;
+        self.healthy = true;
+        Ok(())
+    }
+
+    /// Remove only one indexed, verified owned chunk; higher layers retain reference ownership.
+    /// Never scans directories or changes ordinary LRU admission behavior.
+    pub(crate) fn remove_owned_chunk(&mut self, id: ChunkId) -> Result<(), Error> {
+        if self.get(&id)?.is_none() {
+            return Ok(());
+        }
+        self.healthy = false;
+        rustix::fs::unlinkat(&self.directory, id.to_string(), AtFlags::empty())
+            .map_err(io_error)?;
+        self.forget(&id);
+        self.persist_index()?;
         self.directory.sync_all()?;
         self.healthy = true;
         Ok(())

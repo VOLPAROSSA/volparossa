@@ -149,6 +149,13 @@ The [normal private sender network sequence on `1024e6d2`](https://github.com/VO
 also passes: publish, import, serve, protected retrieval, export and recipient opening after
 the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
 an automatically discoverable mailbox or guaranteed offline retention.
+The new `content mailbox` commands add a known-contact inbox: invite one sender, enroll at two
+independently trusted providers, deposit encrypted messages, then receive without supplying a
+message manifest or ID. Providers persist bounded inbox metadata and ciphertext; acknowledgements
+prevent a sender retry from putting an already received message back into that inbox. Local
+store-reopen and authenticated-stream delivery tests pass; the normal protected-network mailbox
+scenario is still pending. This is not automatic contact discovery, SMTP, retention repair or a
+guarantee that a provider stays online. See the [mailbox commands](docs/OPERATIONS.md#known-contact-mailboxes).
 That `10f63244` run also joins the normal commands end to end: user publication/import,
 agent serving, independent protected retrieval, then user export/assembly. The complete
 2,097,275-byte file retains its exact hash across accounts and the network; all twenty physical

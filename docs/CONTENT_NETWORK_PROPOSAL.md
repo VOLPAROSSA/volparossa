@@ -243,6 +243,18 @@ lifetime remain visible. Key discovery, a mailbox, anti-spam/acknowledgements, r
 secrecy after key compromise and email interoperability are not supplied by this slice. C07
 therefore stays open rather than counting the configured fixture as a complete messaging service.
 
+The next executable slice adds known-contact mailboxes rather than requiring a manifest to be
+handed to the recipient for every message. Normal `content mailbox invite/enroll/send/receive/serve`
+commands bind one sender and recipient to two explicitly trusted providers. A private durable
+index supports bounded listing, original expiry, quota refusal and acknowledgement tombstones;
+the original encrypted messages survive provider-store reopen. Fresh provider offers are found
+through the Client's existing control Relay, with no public mailbox/contact index or direct
+Client-provider discovery. Two local wire tests prove authenticated deposit, reopening, private
+listing, retrieval/decryption and acknowledgement; three disk-store tests and a four-node real
+libp2p exact-lookup test also pass. These are scoped local results, not yet the normal protected
+network mailbox proof. C07 remains unchecked. Automatic contact discovery, retention repair,
+forward secrecy and ordinary email interoperability are still separate work.
+
 ### Cooperative-origin HTTPS retrieval
 
 The first HTTPS route is implemented in `origin_https`: every consumer performs its own real

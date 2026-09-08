@@ -450,7 +450,7 @@ fn validate_publication(manifest: &[u8], key: &[u8]) -> Result<(), ControlProtoc
     Ok(())
 }
 
-fn validate_path(value: &str) -> Result<(), ControlProtocolError> {
+pub(super) fn validate_path(value: &str) -> Result<(), ControlProtocolError> {
     if value.is_empty()
         || value.len() > 4096
         || value.bytes().any(|b| b.is_ascii_control())
@@ -463,7 +463,9 @@ fn validate_path(value: &str) -> Result<(), ControlProtocolError> {
     Ok(())
 }
 
-fn validate_limits(value: Option<ContentCacheLimits>) -> Result<(), ControlProtocolError> {
+pub(super) fn validate_limits(
+    value: Option<ContentCacheLimits>,
+) -> Result<(), ControlProtocolError> {
     if !value.is_some_and(|v| v.quota_bytes > 0 && (1..=65_536).contains(&v.max_entries)) {
         return Err(ControlProtocolError::Invalid(
             "invalid content cache limits",

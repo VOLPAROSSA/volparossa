@@ -4,6 +4,7 @@
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
 mod https;
+mod mailbox;
 mod named;
 mod replication;
 mod replication_budget;
@@ -77,6 +78,7 @@ struct Service {
     task: JoinHandle<()>,
     replication: Option<Arc<ReplicationRuntime>>,
     name_lookup: bool,
+    mailbox: bool,
 }
 
 impl ContentRuntime {
@@ -103,18 +105,7 @@ impl ContentRuntime {
         context: &ControlContext,
     ) -> Result<ContentReceipt, ContentError> {
         let mut service = self.service.try_lock().map_err(|_| ContentError::Busy)?;
-        let (roles, policy) = {
-            let state = context.state.read().await;
-            (
-                state.roles(),
-                state
-                    .active_policy(unix_millis())
-                    .ok_or(ContentError::Policy)?,
-            )
-        };
-        if !roles.relay {
-            return Err(ContentError::Policy);
-        }
+        let policy = serving_policy(context).await?;
         let manifest = verified(&request.manifest, &request.publisher_key)?;
         let bind: SocketAddr = request
             .bind_address
@@ -199,6 +190,7 @@ impl ContentRuntime {
             task,
             replication,
             name_lookup: request.name_lookup,
+            mailbox: false,
         });
         Ok(receipt)
     }
@@ -670,6 +662,18 @@ fn serving_receipt(registry: &PublicationRegistry) -> Result<ContentReceipt, Con
         publications: u32::try_from(registry.len()).map_err(|_| ContentError::Invalid)?,
         ..ContentReceipt::default()
     })
+}
+
+async fn serving_policy(
+    context: &ControlContext,
+) -> Result<volparossa_policy::VerifiedManifest, ContentError> {
+    let state = context.state.read().await;
+    if !state.roles().relay {
+        return Err(ContentError::Policy);
+    }
+    state
+        .active_policy(unix_millis())
+        .ok_or(ContentError::Policy)
 }
 
 fn verified(bytes: &[u8], key: &[u8]) -> Result<VerifiedManifest, ContentError> {

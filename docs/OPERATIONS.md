@@ -421,8 +421,9 @@ volparossa content import --manifest ./message.pb --publisher-key TRUSTED_SENDER
 The agent cache must be a new path with an existing agent-writable parent. Use `content serve`
 with that agent-owned cache, the same manifest and sender key, and a policy-authorized endpoint
 to make ciphertext available. Import itself starts no network service and transfers no keys.
-Recipients must receive the exact manifest and authenticate the sender key independently; there
-is no mailbox or automatic name/key lookup. `content fetch` can retrieve the ciphertext through
+For this explicit-object workflow, recipients must receive the exact manifest and authenticate
+the sender key independently. The separate mailbox workflow below removes the per-message
+manifest handoff, not the need to authenticate contacts. `content fetch` can retrieve the ciphertext through
 the existing protected route into a new agent-owned cache/output. That fetched output is still
 encrypted. Export its ciphertext to a new cache owned by the receiving user:
 
@@ -459,6 +460,89 @@ losing the identity loses access to old messages unless the old encrypted identi
 Use `--identity` to select such a retained copy explicitly. One identity has one recipient key,
 not one per local profile. Identity compromise also compromises these messages; there is no
 ratchet, forward secrecy, delivery acknowledgement, guaranteed retention or email interoperability.
+
+### Known-contact mailboxes
+
+`content mailbox` adds a private inbox to the existing protected content service. It is an
+explicit development feature: use disposable test nodes until its normal-network scenario has
+passed. There is no automatic contact lookup, SMTP delivery, background boot activation or
+promise of permanent availability. Existing encrypted identities remain in the calling user's
+account; providers and the agent receive neither passphrases nor recipient decryption keys.
+
+First select **two independently authenticated provider Ed25519 keys** and a known sender's
+Ed25519 key. Distinct keys alone do not prove independent operators or failure domains.
+Each provider explicitly starts its mailbox service using its normal agent socket:
+
+```sh
+volparossa content mailbox serve --bind 0.0.0.0:7443 \
+  --advertised-hostname mailbox.example.net --cache /var/lib/volparossa/mailbox-cache
+```
+
+The hostname/port must already be authorized by the common signed Exit policy. The cache parent
+must be agent-writable. Use a new cache initially; after `content stop` or restart, add
+`--reuse-cache` to reopen only that same owned store. A mailbox can attach to an already running
+public content service only at its exact existing bind and advertised endpoint. Otherwise stop
+that service first. `content stop` stops both services while retaining their owned cache files.
+
+The recipient creates an invitation using an existing encrypted identity and registers it:
+
+```sh
+volparossa content mailbox invite --identity /path/to/recipient/identity.key \
+  --sender-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --provider-key TRUSTED_PROVIDER_A_KEY_HEX --provider-key TRUSTED_PROVIDER_B_KEY_HEX \
+  --invitation ./invitation.pb
+volparossa content mailbox enroll --identity /path/to/recipient/identity.key \
+  --invitation ./invitation.pb
+```
+
+Give the invitation privately to that sender, who must independently authenticate the recipient's
+Ed25519 key. The invitation binds the recipient encryption key, sender, exact providers, an opaque
+inbox ID, original expiry and limits. It is not a registration receipt. Enrollment succeeds only
+after two actual signed provider confirmations; registration does not reserve future disk space.
+Defaults are seven days, 64 MiB and 64 messages per invitation; acknowledged-message records count
+against the message limit until their original expiry. Limits cannot be silently renewed.
+
+The sender encrypts and deposits an explicit file, at most 4 MiB:
+
+```sh
+volparossa content mailbox send --identity /path/to/sender/identity.key \
+  --invitation ./invitation.pb --owner-key TRUSTED_RECIPIENT_SIGNING_KEY_HEX \
+  --input ./message.txt --cache ./outgoing-ciphertext --manifest ./outgoing-message.pb
+```
+
+Success requires two signed storage confirmations after durable writes. Keep the original local
+manifest/cache until that succeeds. If a connection fails after one provider stored the message,
+repeat with `--resume` and the same invitation/cache/manifest, omitting `--input`. That retries the
+same message rather than producing a duplicate. Storage receipts attest to the operation then;
+they cannot prove future reachability or force a dishonest provider to keep bytes.
+
+The recipient needs only its identity and original invitation, **not a message ID or manifest**:
+
+```sh
+volparossa content mailbox receive --identity /path/to/recipient/identity.key \
+  --invitation ./invitation.pb --output-dir ./new-inbox
+```
+
+The command asks both enrolled providers for signed private inbox metadata and accepts at least
+one valid list; `listed_providers` and `degraded` expose a missing provider rather than claiming
+the complete network inbox was checked. It verifies sender and original expiry, tries the other
+provider if retrieval fails, and decrypts locally. It creates a new `0700` directory
+and `0600` files named only by opaque message IDs; existing outputs are never overwritten.
+Only after a complete verified file is durably written does it acknowledge that exact message
+at both providers. An interrupted or partially acknowledged receive preserves already written
+files and reports the incomplete operation; it does not claim two confirmations. Provider
+tombstones prevent an acknowledged message from returning through a sender retry.
+An exact `send --resume` after acknowledgement reports `already_acknowledged_providers`, not
+renewed storage; `retained_providers` counts only actual still-retained copies.
+
+Provider storage is bounded to 16 invitations and a shared configurable payload quota of at most
+256 MiB, also respecting the configured free-space reserve. It refuses excess deposits rather
+than evicting unexpired accepted mail to admit another sender. Expiry removes retained messages;
+acknowledgement can free their ciphertext earlier. There is no automatic replica repair, global
+fairness/Sybil guarantee or remote secure-deletion guarantee. Providers see pseudonymous contact
+keys, opaque IDs, length, expiry and operation timing; do not infer metadata anonymity or forward
+secrecy from encryption. Private inbox names and message IDs are not published into Kademlia or
+the public-name service. All identity commands support the existing strict `--passphrase-file`.
 
 ### Explicit protected content service and retrieval
 

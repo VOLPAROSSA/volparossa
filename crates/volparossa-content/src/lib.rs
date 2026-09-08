@@ -7,6 +7,7 @@
 //! through the consumer's own authenticated origin connection, not from a native signature.
 
 mod manifest;
+pub mod mailbox;
 pub mod origin_https;
 pub mod private_message;
 pub mod provider;

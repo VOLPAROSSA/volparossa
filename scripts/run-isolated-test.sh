@@ -29,7 +29,7 @@ case "$test_executable" in /*) ;; *) fail 'test executable must be absolute' ;; 
 if [ ! -f "$test_executable" ] || [ ! -x "$test_executable" ]; then fail 'test executable is unavailable'; fi
 case "$test_name" in ''|*[!a-zA-Z0-9_:]*) fail 'invalid exact test name' ;; esac
 case "$test_marker" in
-    VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS|VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS) ;;
+    VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS|VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS|VOLPAROSSA_EXACT_CONTENT_PARENT_NETNS) ;;
     *) fail 'unsupported namespace marker' ;;
 esac
 case "$test_network" in none|loopback) ;; *) fail 'unsupported disposable network setup' ;; esac

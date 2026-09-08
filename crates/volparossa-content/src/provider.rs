@@ -265,6 +265,7 @@ impl VerifiedProviderOffer {
 pub struct PublicationRegistry {
     entries: BTreeMap<[u8; 32], RegisteredPublication>,
     name_lookup: bool,
+    mailbox: Option<Arc<crate::mailbox::wire::MailboxService>>,
 }
 #[derive(Clone)]
 struct RegisteredPublication {
@@ -285,6 +286,12 @@ impl PublicationRegistry {
     /// Defaults off; no DHT index, background replication or private-message lookup is enabled.
     pub fn set_name_lookup(&mut self, enabled: bool) {
         self.name_lookup = enabled;
+    }
+
+    /// Attach an explicitly owned private mailbox service; public-name lookup remains separate.
+    /// Cloned registries share this bounded service owner, not copied keys or cache handles.
+    pub fn set_mailbox(&mut self, service: Arc<crate::mailbox::wire::MailboxService>) {
+        self.mailbox = Some(service);
     }
 
     /// Register the original independently verified envelope without opting into replication.
@@ -467,6 +474,19 @@ where
         let selector: Selector = timeout_at(session.selector_deadline, read_frame(stream))
             .await
             .map_err(|_| ProviderError::Timeout)??;
+        if selector.version == crate::mailbox::wire::SELECTOR_VERSION
+            && selector.operation == crate::mailbox::wire::SELECTOR_OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            registry
+                .mailbox
+                .as_ref()
+                .ok_or(ProviderError::Missing)?
+                .serve(stream)
+                .await
+                .map_err(|_| ProviderError::Protocol)?;
+            return Ok(TransferProgress::default());
+        }
         if selector.version == named::VERSION
             && selector.operation == named::OPERATION
             && selector.manifest_id.is_empty()

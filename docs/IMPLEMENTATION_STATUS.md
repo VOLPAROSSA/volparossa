@@ -11,6 +11,37 @@ experiment, through an application/browser boundary. C01 now passes; C02--C08 re
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Scoped downlink and mixed-link runs now pass; content/application integration continues.
 
+## Latest known-contact mailbox integration checkpoint
+
+The new normal `content mailbox` path implements explicit invite, two-provider enrollment,
+encrypted deposit, private inbox discovery without a caller-supplied message manifest/ID,
+retrieval/local decryption and acknowledgement. Original invitations bind independently trusted
+contact/provider keys, quotas and expiry. The provider uses its existing signed identity and
+protected content endpoint, not a new central service; application keys stay with the local CLI.
+Every operation binds a fresh provider-signed connection challenge to its exact invitation and
+object. See the [commands and limits](OPERATIONS.md#known-contact-mailboxes) and
+[wire contract](PROTOCOL.md#known-contact-mailbox-operations-development-v1).
+
+Three actual disk-store tests pass, including reopen/HPKE delivery, quota refusal, expiry,
+acknowledgement tombstones and corrupt/foreign cache rejection. Two authenticated-stream tests
+pass: two stores accept a deposit, both reopen without the sender's manifest supplied to the
+recipient, then private listing/Get/decryption/Acknowledge completes; connection/provider/grant
+and operation substitutions fail. Strict content-crate Clippy passes. These use real cryptography
+and filesystem stores but in-process transport, not protected-network packet evidence.
+
+Fresh exact provider lookup also passes a four-swarm disposable-namespace libp2p test: the broker
+learns an initially unknown provider via Kademlia, both actual signed offers reach the Client,
+and the Client makes zero direct provider connections. Withdrawal fails closed. The exact codec
+test and strict discovery Clippy pass. The agent's signed-grant/provider/typed-operation test and
+combined agent/local-control/CLI strict Clippy also pass. Two real CLI-process tests run in
+capability-dropped disposable namespaces: they delete the sender identity, input and manifest,
+reopen both providers, discover/Get/decrypt/acknowledge the inbox, check private output and
+no-clobber, reject wrong identities and mismatched final responses, and exercise one-provider
+List failure with explicit degraded readout. Those providers use the real store/protocol behind
+Unix/duplex streams, not the production network. The CLI parser test passes. The normal protected
+network mailbox scenario is still pending; no complete mailbox/C07, automatic contact discovery,
+retention repair, speedup or global offline-availability claim is made.
+
 ## Latest DNS integration checkpoint
 
 The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver

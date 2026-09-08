@@ -5,7 +5,7 @@
 //! signatures, identity, lifetime and policy; these bytes confer no route or Exit authority.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     time::{Duration, Instant},
 };
@@ -40,7 +40,8 @@ pub const MAX_CONTENT_DISCOVERY_FRAME_BYTES: usize = 36 * 1_024;
 pub const MAX_PENDING_CONTENT_REQUESTS: usize = 32;
 /// Deadline for each request-response exchange.
 pub const CONTENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const REQUEST_BYTES: usize = 64;
+const SERVICE_REQUEST_BYTES: usize = 64;
+const DISCOVERY_REQUEST_BYTES: usize = 192;
 const SERVICE_RESPONSE_BYTES: usize = MAX_CONTENT_OFFER_BYTES + 64;
 const NONCE_BYTES: usize = 32;
 
@@ -150,6 +151,8 @@ pub struct ContentDiscoveryRequest {
     nonce: Vec<u8>,
     #[prost(uint32, tag = "3")]
     maximum_offers: u32,
+    #[prost(bytes = "vec", repeated, tag = "4")]
+    target_peer_ids: Vec<Vec<u8>>,
 }
 
 impl ContentDiscoveryRequest {
@@ -163,9 +166,38 @@ impl ContentDiscoveryRequest {
             nonce: random_nonce(),
             maximum_offers: u32::try_from(maximum_offers)
                 .map_err(|_| ContentProviderRpcError::InvalidFrame)?,
+            target_peer_ids: Vec::new(),
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Look up fresh generic offers for one or two exact enrolled providers, never a mailbox.
+    ///
+    /// # Errors
+    /// Rejects empty, duplicate or excessive provider sets.
+    pub fn for_peers(peers: &[PeerId]) -> Result<Self, ContentProviderRpcError> {
+        if !(1..=2).contains(&peers.len()) {
+            return Err(ContentProviderRpcError::InvalidFrame);
+        }
+        let mut request = Self::new(peers.len())?;
+        request.target_peer_ids = peers.iter().copied().map(PeerId::to_bytes).collect();
+        request.target_peer_ids.sort();
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Exact provider identities, or an empty set for the unchanged generic capability lookup.
+    ///
+    /// # Errors
+    /// Rejects malformed encoded peer identities.
+    pub fn target_peers(&self) -> Result<Vec<PeerId>, ContentProviderRpcError> {
+        self.target_peer_ids
+            .iter()
+            .map(|bytes| {
+                PeerId::from_bytes(bytes).map_err(|_| ContentProviderRpcError::InvalidFrame)
+            })
+            .collect()
     }
 
     /// Requested upper bound on returned offers.
@@ -185,6 +217,18 @@ impl ContentDiscoveryRequest {
         if self.maximum_offers == 0 || self.maximum_offers() > MAX_CONTENT_OFFERS {
             return Err(ContentProviderRpcError::InvalidFrame);
         }
+        if !self.target_peer_ids.is_empty()
+            && (self.target_peer_ids.len() > 2
+                || self.target_peer_ids.len() != self.maximum_offers()
+                || self.target_peer_ids.iter().any(|bytes| bytes.len() > 64)
+                || self
+                    .target_peer_ids
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(ContentProviderRpcError::InvalidFrame);
+        }
+        self.target_peers()?;
         Ok(())
     }
 }
@@ -288,6 +332,14 @@ impl ContentDiscoveryResponse {
         if self.nonce != request.nonce || self.offers.len() > request.maximum_offers() {
             return Err(ContentProviderRpcError::Correlation);
         }
+        let targets = request.target_peers()?;
+        let mut received = HashSet::new();
+        for offer in &self.offers {
+            let peer = offer.peer_id()?;
+            if !received.insert(peer) || (!targets.is_empty() && !targets.contains(&peer)) {
+                return Err(ContentProviderRpcError::Correlation);
+            }
+        }
         Ok(())
     }
 
@@ -324,7 +376,7 @@ fn validate_offer(offer: &[u8]) -> Result<(), ContentProviderRpcError> {
 }
 
 macro_rules! content_codec {
-    ($codec:ident, $request:ty, $response:ty, $protocol:ident, $response_bytes:ident) => {
+    ($codec:ident, $request:ty, $response:ty, $protocol:ident, $request_bytes:ident, $response_bytes:ident) => {
         /// Canonical, bounded codec for one role-separated content control protocol.
         #[derive(Clone, Copy, Debug, Default)]
         pub struct $codec;
@@ -344,9 +396,9 @@ macro_rules! content_codec {
                 T: AsyncRead + Unpin + Send,
             {
                 require_protocol(protocol, $protocol)?;
-                let encoded = read_bounded(io, REQUEST_BYTES).await?;
+                let encoded = read_bounded(io, $request_bytes).await?;
                 let value =
-                    decode_canonical::<$request>(&encoded, REQUEST_BYTES).map_err(invalid_data)?;
+                    decode_canonical::<$request>(&encoded, $request_bytes).map_err(invalid_data)?;
                 value.validate().map_err(invalid_data)?;
                 Ok(value)
             }
@@ -378,7 +430,7 @@ macro_rules! content_codec {
             {
                 require_protocol(protocol, $protocol)?;
                 value.validate().map_err(invalid_data)?;
-                io.write_all(&encode_canonical(&value, REQUEST_BYTES).map_err(invalid_data)?)
+                io.write_all(&encode_canonical(&value, $request_bytes).map_err(invalid_data)?)
                     .await
             }
 
@@ -405,6 +457,7 @@ content_codec!(
     ContentServiceRequest,
     ContentServiceResponse,
     CONTENT_SERVICE_PROTOCOL,
+    SERVICE_REQUEST_BYTES,
     SERVICE_RESPONSE_BYTES
 );
 content_codec!(
@@ -412,6 +465,7 @@ content_codec!(
     ContentDiscoveryRequest,
     ContentDiscoveryResponse,
     CONTENT_DISCOVERY_PROTOCOL,
+    DISCOVERY_REQUEST_BYTES,
     MAX_CONTENT_DISCOVERY_FRAME_BYTES
 );
 
@@ -481,6 +535,7 @@ struct Pending<Request> {
 pub(crate) struct ContentProviderState {
     local_offer: Option<Vec<u8>>,
     pub(crate) provider_query: Option<kad::QueryId>,
+    address_queries: HashMap<kad::QueryId, PeerId>,
     service: HashMap<request_response::OutboundRequestId, Pending<ContentServiceRequest>>,
     discovery: HashMap<request_response::OutboundRequestId, Pending<ContentDiscoveryRequest>>,
 }
@@ -511,7 +566,9 @@ impl ContentProviderState {
         let now = Instant::now();
         self.service.retain(|_, pending| pending.deadline > now);
         self.discovery.retain(|_, pending| pending.deadline > now);
-        if self.service.len() + self.discovery.len() >= MAX_PENDING_CONTENT_REQUESTS {
+        if self.service.len() + self.discovery.len() + self.address_queries.len()
+            >= MAX_PENDING_CONTENT_REQUESTS
+        {
             return Err(DiscoveryError::ResourceLimit);
         }
         Ok(())
@@ -519,6 +576,110 @@ impl ContentProviderState {
 }
 
 impl DiscoveryService {
+    /// Whether an exact provider has a live connection or admitted dial addresses.
+    #[must_use]
+    pub fn content_provider_address_known(&self, peer: &PeerId) -> bool {
+        self.swarm.is_connected(peer) || self.address_admissions.contains_peer(peer)
+    }
+
+    /// Resolve only an enrolled provider's node identity through Kademlia, never content keys.
+    ///
+    /// # Errors
+    /// Rejects non-relay use, self targets and exhausted combined content request capacity.
+    pub fn begin_content_address_lookup(
+        &mut self,
+        peer: PeerId,
+    ) -> Result<kad::QueryId, DiscoveryError> {
+        if !self.protocol_roles.relay() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        if peer == *self.local_peer_id() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.content_provider.reserve()?;
+        let id = self.swarm.behaviour_mut().kademlia.get_closest_peers(peer);
+        self.content_provider.address_queries.insert(id, peer);
+        Ok(id)
+    }
+
+    /// Finish only this exact enrolled-provider node lookup, without touching capability queries.
+    ///
+    /// # Errors
+    /// Rejects unknown query IDs or mismatched Kademlia query provenance.
+    pub fn finish_content_address_lookup(
+        &mut self,
+        id: kad::QueryId,
+    ) -> Result<(), DiscoveryError> {
+        let expected = self
+            .content_provider
+            .address_queries
+            .get(&id)
+            .ok_or(DiscoveryError::ProtocolPeer)?;
+        if let Some(mut query) = self.swarm.behaviour_mut().kademlia.query_mut(&id) {
+            if !matches!(query.info(), kad::QueryInfo::GetClosestPeers { key, .. } if key == &expected.to_bytes())
+            {
+                return Err(DiscoveryError::ProtocolPeer);
+            }
+            query.finish();
+        }
+        self.content_provider.address_queries.remove(&id);
+        Ok(())
+    }
+
+    /// Turn an exact node lookup into one fresh peer-authenticated service request.
+    /// Returned addresses are request-local untrusted dial hints, not remembered identity proof.
+    ///
+    /// # Errors
+    /// Rejects foreign query results, missing exact targets and invalid or unavailable addresses.
+    pub fn request_content_service_resolved(
+        &mut self,
+        id: kad::QueryId,
+        result: &kad::GetClosestPeersResult,
+        request: ContentServiceRequest,
+    ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
+        let peer = self
+            .content_provider
+            .address_queries
+            .get(&id)
+            .copied()
+            .ok_or(DiscoveryError::ProtocolPeer)?;
+        self.finish_content_address_lookup(id)?;
+        let result = result.as_ref().map_err(|_| DiscoveryError::PeerAddress)?;
+        if result.key != peer.to_bytes() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        let mut addresses = Vec::new();
+        for found in result
+            .peers
+            .iter()
+            .take(crate::MAX_DISCOVERY_ADDRESSES_PER_EVENT)
+        {
+            if found.peer_id != peer {
+                continue;
+            }
+            for address in found
+                .addrs
+                .iter()
+                .take(crate::MAX_DISCOVERY_ADDRESSES_PER_PEER)
+            {
+                if let Ok(canonical) =
+                    crate::prepare_discovery_address(self.local_peer_id(), peer, address)
+                {
+                    if crate::private_address_is_local(&canonical)
+                        && !addresses.contains(&canonical)
+                    {
+                        addresses.push(canonical);
+                    }
+                }
+            }
+            break;
+        }
+        if addresses.is_empty() && !self.content_provider_address_known(&peer) {
+            return Err(DiscoveryError::PeerAddress);
+        }
+        self.request_content_service_at(&peer, request, addresses)
+    }
+
     /// Finish only the exact generic content-provider lookup owned by this service.
     /// A bounded relay job uses this when its shorter deadline precedes Kademlia's deadline,
     /// preventing the next caller from joining an abandoned, partially consumed query.
@@ -588,6 +749,15 @@ impl DiscoveryService {
         provider: &PeerId,
         request: ContentServiceRequest,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
+        self.request_content_service_at(provider, request, Vec::new())
+    }
+
+    fn request_content_service_at(
+        &mut self,
+        provider: &PeerId,
+        request: ContentServiceRequest,
+        addresses: Vec<libp2p::Multiaddr>,
+    ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
         if !self.protocol_roles.relay() {
             return Err(DiscoveryError::ProtocolRole);
         }
@@ -600,7 +770,7 @@ impl DiscoveryService {
             .swarm
             .behaviour_mut()
             .content_service
-            .send_request(provider, request.clone());
+            .send_request_with_addresses(provider, request.clone(), addresses);
         self.content_provider.service.insert(
             id,
             Pending {
@@ -776,6 +946,49 @@ mod tests {
     use super::*;
     use futures::io::Cursor;
     use libp2p::request_response::Codec as _;
+
+    #[tokio::test]
+    async fn exact_content_lookup_codec_binds_provider_subset_without_changing_generic_requests() {
+        let peers = [PeerId::random(), PeerId::random()];
+        let request = ContentDiscoveryRequest::for_peers(&peers).unwrap();
+        assert_eq!(request.maximum_offers(), 2);
+        let mut codec = ContentDiscoveryCodec;
+        let protocol = StreamProtocol::new(CONTENT_DISCOVERY_PROTOCOL);
+        let mut wire = Cursor::new(Vec::new());
+        codec
+            .write_request(&protocol, &mut wire, request.clone())
+            .await
+            .unwrap();
+        assert!(wire.get_ref().len() <= DISCOVERY_REQUEST_BYTES);
+        wire.set_position(0);
+        assert_eq!(
+            codec.read_request(&protocol, &mut wire).await.unwrap(),
+            request
+        );
+        let offer = ContentProviderOffer::new(peers[0], vec![1; 32]).unwrap();
+        let partial = ContentDiscoveryResponse::new(&request, vec![offer.clone()]).unwrap();
+        assert!(
+            partial
+                .validate_for(&ContentDiscoveryRequest::for_peers(&peers).unwrap())
+                .is_err()
+        );
+        assert!(ContentDiscoveryResponse::new(&request, vec![offer.clone(), offer]).is_err());
+        assert!(
+            ContentDiscoveryResponse::new(
+                &request,
+                vec![ContentProviderOffer::new(PeerId::random(), vec![2; 32]).unwrap()]
+            )
+            .is_err()
+        );
+        assert!(ContentDiscoveryRequest::for_peers(&[]).is_err());
+        assert!(ContentDiscoveryRequest::for_peers(&[peers[0], peers[0]]).is_err());
+        assert!(
+            ContentDiscoveryRequest::for_peers(&[peers[0], peers[1], PeerId::random()]).is_err()
+        );
+        let generic = ContentDiscoveryRequest::new(16).unwrap();
+        assert!(generic.target_peers().unwrap().is_empty());
+        assert!(encode_canonical(&generic, SERVICE_REQUEST_BYTES).is_ok());
+    }
 
     #[test]
     fn content_provider_lookup_timeout_releases_only_the_exact_query() {
