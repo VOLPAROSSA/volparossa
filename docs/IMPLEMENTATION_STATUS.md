@@ -25,11 +25,11 @@ disconnect. Older narrower checkpoint labels below retain their historical scope
 also proves actual overlapping provider bulk traffic; a full expanded-alpha verification on one
 build and measured speedup remain unproved.
 
-## Current candidate: local checks, integrated results pending
+## Current candidate: functional integration in progress
 
 `b0e7c36` preserves individually verified peer progress when a parallel stream fails; three real
 duplex variants in one focused test and strict agent Clippy pass. The browser-network harness
-`d82a64f` passes six local checker tests and twelve parent checks, but has no VM result yet.
+`d82a64f` passes six local checker tests and twelve parent checks.
 `49a0253` adds a fixture-only origin reference using the existing `OriginClient`, a cold private
 store and an ordinary Client application socket through transparent ingress. Strict example
 Clippy passes; the comparison harness now records actual monotone durations and descriptive
@@ -40,16 +40,90 @@ The owner-contention harness `910a3ac` extends the existing replication topology
 524,411-byte, three-chunk Q. It requires actual capless owner UDP traffic on the configured local
 link, one permitted in-flight chunk, a quiet provider-payload interval and resume on the same
 provider connection, followed by verified Q retrieval and complete cleanup. Twelve capture
-tests, five evidence tests, the seed test and narrow shell checks pass locally; no contention VM
-pass or owner-goodput guarantee is inferred. C04/C08 remain unchecked.
+tests, five evidence tests, the seed test and narrow shell checks pass locally.
+
+The [owner-contention VM on `b9404908`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34197447110)
+proves actual same-flow pause/resume: 2,170 owner UDP packets carry 2,604,000 bytes during
+3.0004 seconds; the observed provider application-payload windows contain 263,914 bytes before,
+zero during and 263,679 bytes after that load. All three Q chunks are retained and the replica
+reopens. The scenario nevertheless **fails** at the later fresh Client retrieval with
+`CONTENT_PROVIDER_TLS_FAILED`; there is no final Q output hash or complete C04 pass. Captures
+are complete with zero drops/forbidden packets and cleanup leaves guest state unchanged.
+
+`c75ab91` fixes a reproduced parent-ingress error behind that failed return path: kernel TCP
+ACK/RST packets emitted before `accept()` lack the socket file required by `meta skuid` and
+were redirected into client ingress. A genuine trusted-UID SYNACK now binds only that incoming
+connection's reply direction to the helper's exact runtime label; original-direction traffic
+and other UIDs gain no exemption, and a new SYN revokes the old marker. There is no generic
+established-flow bypass, TLS relaxation or new agent/helper RPC. The actual Rust-encoded nft
+batch passes the disposable reproduction: misdirected replies fall from five to zero, the
+full TCP request/response completes, wrong UID and original-direction attempts remain blocked,
+and two injected stale SYN markers are cleared. Three existing parent tests and strict helper
+Clippy also pass. The privileged regression is explicit opt-in; a new integrated C04 result
+is still required.
+
+The [browser/provider VM on `b9404908`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34197445147)
+passes its native two-provider download but **fails before the browser consumer starts**: the
+capability-dropped UID cannot traverse the private checkout to load the Python driver.
+`af1701da` stages only that public driver and its imported dependency in the existing root-owned
+test binary directory; no checkout permissions are loosened. The
+[corrected run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34199383486) delivers native,
+one-use browser HTTP and partial-origin downloads with the exact 2,097,275-byte hash. Two peers
+supply the complete browser object; the missing case obtains 1,048,699 peer bytes and exactly
+1,048,576 origin bytes in four ranges. The observed private spool is removed. All eighteen
+present captures are complete/zero-drop with unchanged privacy predicates; guest state is
+unchanged and cleanup leaves zero owned objects. The scenario still **fails** before its origin
+reference because that capture prefix was not registered. `5f648434` adds only the exact prefix
+and a guard regression, with no packet-predicate relaxation. The
+[new reference run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34201378552) now **passes**
+the complete unchanged-source report and raw rebuild, including ordinary publication and named
+retrieval. All 34 captures / 164 interface rows are complete with zero drops, truncation or
+forbidden packets, and cleanup leaves zero owned objects and byte-identical guest state.
+Artifact ZIP SHA-256: `4e0b8af49af9339570eaa3059d531c994657909aebf289a47ceede0b03b46e04`;
+raw rebuild SHA-256: `12b33191a38605bea6593ed950b52554ad2a7e5b778047415cd5975dcbcd109f`.
+
+The actual comparison uses the same exact object/hash, two relay paths, Exit and route context:
+the complete peer-assisted browser command takes **4.398605732 seconds**, versus
+**1.623640130 seconds** for a cold origin-only full retrieval through normal TCP ingress.
+The origin is about **2.71 times faster in this one sample**. Browser delivery avoids all origin
+body bytes; its final localhost HTTP GET takes only 10.9 ms, which must not be substituted for
+the complete command time. This VM executes an HTTP consumer, not a browser engine. Useful
+cache/origin latency selection is still unfinished; neither general speedup nor owner-goodput
+is guaranteed. C04/C08 remain unchecked.
 
 Quality on `1283` failed
 `refreshed_control_lineage_keeps_forwarded_exit_selectable`; its random fixture nonce can collide
 with the fixture's Exit/control network hints. Forcing that collision reproduced the same
 sampler rejection; using the existing distinct-discriminator fixture helper passes both the
-positive test and existing collision rejection test, plus strict agent Clippy. This is not a
-new full Quality pass. The earlier `b22a9153` provider and `b172d11f` DNS/mailbox
+positive test and existing collision rejection test, plus strict agent Clippy. The
+[full Quality run on `b9404908`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34197426766)
+now passes formatting, locked dependencies/licenses, strict Clippy, workspace tests,
+namespace-backed proof reporting and the non-mutating integration harness. This does not turn
+the separate failed network runs into passes. The earlier `b22a9153` provider and `b172d11f` DNS/mailbox
 network evidence above retains its exact source scope and is not extended to these candidates.
+
+### Native static-site application
+
+`dd19ffa` adds `content site pack`: a canonical bounded multi-asset object from explicitly selected
+regular files; the existing native identity/publication/provider commands sign and distribute
+it. `content site open` uses the sealed named-download result, original authority deadline and
+complete canonical bundle to expose verified assets on an ephemeral, exact-host loopback URL.
+HTML/CSS/JavaScript, root-relative/directory/UTF-8 paths and single media byte ranges are
+implemented; immutable query strings do not create a dynamic backend. Browser isolation does
+not confer an external HTTPS origin, cookies, persistent storage or service workers.
+
+Two codec tests and strict content Clippy pass. Four targeted CLI pack/HTTP tests and three real
+named-transfer CLI process tests pass, including site assets, ranges, expiry, listener shutdown
+and private spool cleanup. A separate explicit installed-Firefox run also passes in 2.36 seconds:
+the host filesystem is read-only, network/PID/user namespaces are disposable, the viewer and
+browser have no capabilities, and only the owned fixture/evidence storage is writable. The
+rendered screenshot visibly contains the expected JavaScript-replaced text in CSS green, SHA-256
+`01c64a9fb42b7b40d902020a9c3f7a0aa349012dc017c42aa219ba1de1c66c28`.
+This is actual browser execution behind the real local named-transfer protocol, not yet a
+protected-network/offline-publisher site proof. The additive two-provider site topology remains
+pending. Run the opt-in browser proof with `sh tests/integration/site-browser-smoke.sh`, supplying
+the built named-download test executable and a new empty `0700` evidence directory; it installs
+nothing and does not disable Firefox's sandbox. See [site commands](OPERATIONS.md#native-static-websites).
 
 ## Latest known-contact mailbox integration checkpoint
 

@@ -8,10 +8,12 @@
 > See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
 > installing, or enabling a role.
 
-Peer downloads retain already verified chunks if another provider fails. The current integration
-work connects the one-use browser download to the protected network, measures an origin-only
-reference, and exercises replica pause/resume under owner traffic. Those new network results
-and measured benefit remain pending; C04/C08 are still open in the implementation status.
+Peer downloads retain already verified chunks if another provider fails. The protected native,
+browser-download and partial-origin sequence now passes on `5f648434`, including its origin-only
+reference. In that one comparison the complete peer-assisted download took 4.40 seconds versus
+1.62 seconds from the origin: origin-body traffic was avoided, but latency did not improve.
+Replica pause/resume is observed; its final re-fetch fix still needs a new integrated result.
+C04/C08 therefore remain open.
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
@@ -150,6 +152,13 @@ account isolation, no-clobber and cleanup pass. This does not guarantee the glob
 website hosting or permanent retention. See the
 [name-retrieval instructions](docs/OPERATIONS.md#retrieving-a-native-publication-by-publisher-and-name)
 and source-specific evidence in the implementation status.
+The new `content site pack` and `content site open` commands add native static websites:
+publish an explicit HTML/CSS/JavaScript/media directory through the same signed-content service,
+then retrieve it by publisher/name and open its verified assets on a temporary local browser URL.
+Local packing, HTTP/range handling, actual CLI-transfer/cleanup and isolated Firefox rendering
+with working CSS/JavaScript pass; complete protected-network site integration is still pending.
+This does not give cached pages another
+website's HTTPS origin or a dynamic backend. See the [site commands](docs/OPERATIONS.md#native-static-websites).
 The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
 also passes: publish, import, serve, protected retrieval, export and recipient opening after
 the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
