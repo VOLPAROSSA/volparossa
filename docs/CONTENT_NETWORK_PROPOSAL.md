@@ -2,7 +2,8 @@
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
 storage, protected-route public/encrypted transfer and a cooperative-origin HTTPS consumer.
-**Integrated multi-peer retrieval, browser integration and generic existing-site reuse remain incomplete.**
+**Multi-peer retrieval has source-bound passing checkpoints; owner-contention integration,
+browser benefit and generic existing-site reuse remain incomplete.**
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Continue from the scoped downlink/mixed-link passes into the application/content runtime.
 
@@ -317,6 +318,13 @@ the normal command's exact protected-route KVM proof now passes on `e592b610`, w
 independent providers and four exact fallback ranges. This is not complete C02/C08 or automatic capture
 of arbitrary browser HTTPS, personalized response sharing, or generic unsupported-site adapter.
 
+The explicit one-shot `content browser-download` adapter now has local process tests and an
+executable protected-network harness (`d82a64f`), whose checker passes locally. A same-overlay
+origin-only reference fixture (`49a0253`) uses the existing origin verifier and an ordinary Client
+socket; the integrated comparison harness records actual monotone durations and reports the
+result even when the origin is faster. Neither preparation is a browser-network pass or measured
+benefit. The reference is fixture-only, not a new CLI benchmark mode; C08 stays open.
+
 ### Bounded post-download redistribution
 
 The first C03 implementation adds a separate versioned exchange over the existing protected
@@ -332,6 +340,8 @@ reconnection does not reset the original deadline or request budget. Focused tes
 Clippy pass. The [exact `b22a9153` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
 also proves 933,365,936 ns of overlapping provider bulk-payload windows using kernel arrival
 timestamps, with exact reconstruction and complete captures/cleanup. This is not measured speedup.
+The later `b0e7c36` correction retains verified partial progress after a failed parallel stream;
+three duplex variants and strict agent Clippy pass locally, without extending that older VM result.
 
 An explicitly configured agent replica cache can pick up other chunks from a recently used
 provider after a successful foreground download. No new provider discovery or route is created
@@ -359,6 +369,9 @@ are not all-link/per-flow accounting, radio fairness or a no-slowdown/speedup gu
 does not subtract its own estimated bytes from counters; samples run at quiet credit boundaries,
 where residual packets may conservatively postpone the next credit rather than renew any budget.
 This bounded pause/resume is not an integrated contention or completed C04 proof.
+The new `910a3ac` harness requires real owner UDP traffic during three-chunk Q uptake, allows one
+already credited chunk, then requires provider-payload silence and resume on the same connection.
+Its local seed/capture/evidence checks pass; the actual contention VM and C04 remain pending.
 Original replica manifests, hop counts and retained chunk IDs now persist in a private,
 cache-ID-bound, atomically replaced journal (at most 64 records / 8 MiB). Subsequent uptake merges
 with previous valid records; partial replicas retain their original expiry. Explicit

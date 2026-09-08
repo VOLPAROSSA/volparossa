@@ -8,6 +8,11 @@
 > See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
 > installing, or enabling a role.
 
+Peer downloads retain already verified chunks if another provider fails. The current integration
+work connects the one-use browser download to the protected network, measures an origin-only
+reference, and exercises replica pause/resume under owner traffic. Those new network results
+and measured benefit remain pending; C04/C08 are still open in the implementation status.
+
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
 The normal low-latency Internet path is always:

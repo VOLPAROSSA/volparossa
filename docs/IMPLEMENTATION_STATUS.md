@@ -25,6 +25,32 @@ disconnect. Older narrower checkpoint labels below retain their historical scope
 also proves actual overlapping provider bulk traffic; a full expanded-alpha verification on one
 build and measured speedup remain unproved.
 
+## Current candidate: local checks, integrated results pending
+
+`b0e7c36` preserves individually verified peer progress when a parallel stream fails; three real
+duplex variants in one focused test and strict agent Clippy pass. The browser-network harness
+`d82a64f` passes six local checker tests and twelve parent checks, but has no VM result yet.
+`49a0253` adds a fixture-only origin reference using the existing `OriginClient`, a cold private
+store and an ordinary Client application socket through transparent ingress. Strict example
+Clippy passes; the comparison harness now records actual monotone durations and descriptive
+ratios, including results where origin retrieval is faster. SIGINT/TERM drops its private
+temporary store. There is no new user CLI benchmark flag or measured network speedup result.
+
+The owner-contention harness `910a3ac` extends the existing replication topology with a
+524,411-byte, three-chunk Q. It requires actual capless owner UDP traffic on the configured local
+link, one permitted in-flight chunk, a quiet provider-payload interval and resume on the same
+provider connection, followed by verified Q retrieval and complete cleanup. Twelve capture
+tests, five evidence tests, the seed test and narrow shell checks pass locally; no contention VM
+pass or owner-goodput guarantee is inferred. C04/C08 remain unchecked.
+
+Quality on `1283` failed
+`refreshed_control_lineage_keeps_forwarded_exit_selectable`; its random fixture nonce can collide
+with the fixture's Exit/control network hints. Forcing that collision reproduced the same
+sampler rejection; using the existing distinct-discriminator fixture helper passes both the
+positive test and existing collision rejection test, plus strict agent Clippy. This is not a
+new full Quality pass. The earlier `b22a9153` provider and `b172d11f` DNS/mailbox
+network evidence above retains its exact source scope and is not extended to these candidates.
+
 ## Latest known-contact mailbox integration checkpoint
 
 The new normal `content mailbox` path implements explicit invite, two-provider enrollment,
