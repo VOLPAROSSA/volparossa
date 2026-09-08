@@ -50,6 +50,8 @@ print_plan() {
             '  fetch via genuine MPTCP/TLS/two-leg WireGuard after publisher removal;' \
             '  deny Client mount access to replica files, require exact bytes and both provider IDs;' \
             '  fetch the same cooperative-origin HTTPS object from complete peers and missing origin ranges;' \
+            '  then publish/import/serve a normal user file, remotely fetch/export/assemble it across service UIDs;' \
+            '  grant only control-group traversal and remove the exact temporary publisher identity/passphrase;' \
             '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
@@ -365,7 +367,7 @@ if [ "$scenario" = content-replication ]; then
 fi
 if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
-        content-provider-https-smoke.sh content-provider-https-smoke.py; do
+        content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1133,6 +1135,9 @@ cleanup() {
     if [ "$scenario" = content-message ]; then
         content_network_private_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-provider ] && command -v content_publication_cleanup >/dev/null 2>&1; then
+        content_publication_cleanup || original_status=1
+    fi
     capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
@@ -1443,6 +1448,8 @@ fi
 if [ "$scenario" = content-provider ]; then
     # shellcheck source=tests/integration/content-provider-smoke.sh
     . "$source_directory/tests/integration/content-provider-smoke.sh"
+    # shellcheck source=tests/integration/content-publication-smoke.sh
+    . "$source_directory/tests/integration/content-publication-smoke.sh"
 fi
 if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-replication-smoke.sh
@@ -1688,7 +1695,9 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
-    if [ "$scenario" = content-message ] && [ "$node" = relay4 ]; then
+    if { [ "$scenario" = content-message ] && [ "$node" = relay4 ]; } \
+        || { [ "$scenario" = content-provider ] && { [ "$node" = client ] \
+            || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; }; then
         # Match package access without adding the operator to the private service group.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
@@ -4325,7 +4334,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy)
+        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-user-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         *) return 1 ;;
     esac

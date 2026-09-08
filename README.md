@@ -124,9 +124,13 @@ recipient keys nor start a listener. The [different-UID VM run on `ec091bdd`](ht
 passes normal local publication, import/export and opening with unchanged private permissions
 and complete cleanup. Ordinary native files now use the same bridge with explicit
 `--public-content`; local CLI/agent tests pass, including files above 4 MiB and empty objects.
-The extended public-file VM proof is pending. This does not authenticate arbitrary HTTPS content.
+The [extended public-file VM on `49b6a7d1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34177846462)
+also passes, including default refusal, exact reconstruction and cleanup. This does not authenticate arbitrary HTTPS content.
 See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
 before serving or assembling a publication held by another account.
+The next provider scenario joins these normal commands end to end: user publication/import,
+agent serving, independent protected retrieval, then user export/assembly. Its original
+complementary-provider and HTTPS checks remain in place; this new user-network proof is pending.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving

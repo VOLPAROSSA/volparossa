@@ -30,6 +30,71 @@ def read_route(path):
     return rows
 
 
+def validate_user_publication(evidence):
+    output, publish = evidence["output"], evidence["publish"]
+    imported, exported = evidence["import"], evidence["export"]
+    fetch, assembled = evidence["fetch"], evidence["assemble"]
+    peers, layout = evidence["expected_peers"], evidence["layout"]
+    node = output["provider_node"]
+    require(evidence["success"] is True and node == layout["provider_nodes"][0]
+            and output["bytes"] == publish["bytes"] == fetch["bytes"] == assembled["bytes"] == BYTES
+            and output["sha256"] == SHA and publish["chunks"] == fetch["chunks"] == assembled["chunks"] == 9
+            and publish["operation"] == "offline_content_publish" and publish["network_publication"] is False
+            and assembled["operation"] == "offline_content_assemble" and assembled["network_retrieval"] is False
+            and publish["publisher_key_hex"] == assembled["publisher_key_hex"]
+            and re.fullmatch(r"[0-9a-f]{64}", publish["publisher_key_hex"])
+            and evidence["serve"]["serving"] is True and evidence["serve"]["publications"] == 2,
+            "ordinary user publication/registration/reassembly not proven")
+    require(re.fullmatch(r"[0-9a-f]{64}", imported["manifest_id"])
+            and imported["manifest_id"] == exported["manifest_id"]
+            and imported["cache"] == publish["cache"]
+            and imported["agent_cache"] != exported["agent_cache"]
+            and imported["cache"] != exported["cache"],
+            "handoff changed manifest or reused sender/destination caches")
+    for result, operation in ((imported, "content_import"), (exported, "content_export")):
+        require(result["operation"] == operation and result["complete"] is True
+                and result["content_bytes"] == BYTES and result["chunks"] == 9
+                and result["public_content"] is True
+                and all(result[key] is False for key in (
+                    "ownership_changed", "network_transfer", "recipient_decryption_performed",
+                    "private_keys_transferred", "ciphertext_format_verified", "origin_authenticated")),
+                "local handoff was incomplete or changed ownership/content authority")
+    require(fetch["providers_used"] == 1 and fetch["provider_peer_ids"] == [peers[node]]
+            and fetch["peer_bytes"] == BYTES and fetch["origin_authenticated"] is False
+            and fetch["origin_body_bytes"] == 0
+            and fetch["control_relay_peer_id"] == layout["control_relay_peer_id"]
+            and evidence["selected_route"]["route_context_id"] == output["route_context_id"],
+            "new cache was not filled by exact independent provider through its real route")
+    require(output["user_uid"] != output["agent_uid"] and output["control_gid"] != output["agent_gid"]
+            and output["cache_modes"] == "0700" and output["output_mode"] == "0600"
+            and all(output[key] is True for key in (
+                "fresh_destination_cache", "agent_cannot_read_user_state", "user_cannot_read_agent_caches",
+                "client_mount_cannot_read_provider_cache", "encrypted_identity_unchanged",
+                "publisher_process_exited_before_fetch", "explicit_public_fixture"))
+            and output["https_origin_authenticated"] is False and output["mailbox_claimed"] is False
+            and evidence["private_cleanup"] == dict(encrypted_identity_removed=True, passphrase_removed=True,
+                input_and_output_removed=True, private_directory_removed=True),
+            "ordinary user/service isolation or exact temporary-secret cleanup missing")
+    # This existing helper validates only real path/capture facts, not HTTPS authority.
+    # Provider B was deliberately withdrawn by the preceding HTTPS fallback case.
+    path_check = runpy.run_path(str(Path(__file__).with_name("content-provider-https-smoke.py")))
+    path_check["validate_path"](evidence, peers, layout["provider_nodes"], True)
+    require(evidence["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] >= BYTES,
+            "selected provider did not return the whole ordinary publication over its captured path")
+
+
+def build_user_publication(work):
+    evidence = {name: read(work / f"content-provider-user-{suffix}.json") for name, suffix in (
+        ("output", "object"), ("publish", "publish"), ("import", "import"), ("serve", "serve"),
+        ("fetch", "fetch"), ("export", "export"), ("assemble", "assemble"),
+        ("private_cleanup", "cleanup"), ("selected_route", "selection"))}
+    evidence.update(success=True, expected_peers=read(work / "a01-expected-peers.json"),
+                    layout=read(work / "content-provider-layout.json"),
+                    privacy={r: read(work / f"content-provider-user-privacy-{r}.json") for r in ROLES})
+    validate_user_publication(evidence)
+    return evidence
+
+
 def validate_transfer(evidence):
     publication, output, fetch = evidence["publication"], evidence["output"], evidence["fetch"]
     require(publication["bytes"] == output["bytes"] == fetch["bytes"] == BYTES
@@ -135,6 +200,12 @@ def validate_transfer(evidence):
             and all(case["selected_route"]["route_context_id"] == selected["route_context_id"]
                     for case in evidence["https"]["cases"].values()),
             "HTTPS proof does not retain the exact native publication and provider identities")
+    ordinary = evidence["ordinary_publication"]
+    validate_user_publication(ordinary)
+    require(ordinary["expected_peers"] == peers and ordinary["layout"] == layout
+            and ordinary["output"]["route_context_id"] == selected["route_context_id"]
+            and ordinary["publish"]["publisher_key_hex"] != publication["publisher_hex"],
+            "ordinary publication reused fixture publisher or changed the established topology")
 
 
 def build_evidence(work):
@@ -151,6 +222,7 @@ def build_evidence(work):
                     output=read(work / "content-provider-object.json"),
                     fetch=read(work / "content-provider-fetch.json"),
                     https=read(work / "content-provider-https-evidence.json"),
+                    ordinary_publication=read(work / "content-provider-user-publication.json"),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -202,6 +274,7 @@ def validate_report(report, revision):
             and report["source_revision"] == revision and report["success"] is True
             and report["runner_exit_status"] == 0
             and report["explicit_origin_authenticated_https"] is True
+            and report["normal_user_publication"] is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]
@@ -213,9 +286,10 @@ def validate_report(report, revision):
 if __name__ == "__main__":
     try:
         if len(sys.argv) != 4:
-            raise ValueError("usage: evidence WORK OUTPUT | report REPORT REVISION")
-        if sys.argv[1] == "evidence":
-            result = build_evidence(Path(sys.argv[2]))
+            raise ValueError("usage: evidence WORK OUTPUT | user-publication WORK OUTPUT | report REPORT REVISION")
+        if sys.argv[1] in ("evidence", "user-publication"):
+            builder = build_evidence if sys.argv[1] == "evidence" else build_user_publication
+            result = builder(Path(sys.argv[2]))
             with Path(sys.argv[3]).open("x", encoding="ascii") as target:
                 json.dump(result, target, sort_keys=True, separators=(",", ":"))
         elif sys.argv[1] == "report":

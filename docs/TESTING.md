@@ -179,7 +179,16 @@ identity files and complete cleanup. The next source additionally publishes an e
 fixture file, rejects default import before creating a destination, then uses `--public-content`
 for import/export and normal `assemble`. Its checker requires exact hashes, distinct account
 ownership and no false ciphertext, HTTPS-origin or network-service claim. Local >4-MiB/empty-object
-CLI/agent probes and seven checker tests pass; the new public-file VM proof is pending.
+CLI/agent probes and seven checker tests pass. The public-file VM proof now also passes on
+`49b6a7d1`, with exact 2,097,275-byte reconstruction, account isolation and complete cleanup.
+
+The next `content-provider` source additionally performs the complete normal user chain:
+`publish -> import --public-content -> serve -> remote fetch -> export --public-content -> assemble`.
+The publisher key is independent of the original fixture authority. Only the control group is
+granted access; provider and Client service caches remain mutually inaccessible through their
+actual mount namespaces. New receipts, exact bytes, selected provider, drained two-leg captures
+and secret cleanup are required. Original 5+4-provider and HTTPS fallback evidence is retained;
+this new chain has not yet obtained a live VM pass.
 
 ## Helper-boundary evidence
 

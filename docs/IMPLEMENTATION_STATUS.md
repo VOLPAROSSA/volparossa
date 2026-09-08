@@ -42,9 +42,25 @@ with streamed full-object verification and finish-only empty transfers. Exact pr
 types retain their envelope/4-MiB check even with that flag. Public receipts cannot claim verified
 ciphertext or HTTPS origin authentication. Two actual CLI-process tests, three agent stream tests,
 one wire test and combined strict CLI/agent/control Clippy pass; they cover >4-MiB public files,
-empty objects, default refusal and unchanged private behavior. The next different-UID fixture
-adds normal public publish/import/export/assemble; seven checker tests and shell checks pass,
-but its new VM proof remains pending. No automatic serving, browser capture or HTTPS export.
+empty objects, default refusal and unchanged private behavior. The different-UID fixture
+adds normal public publish/import/export/assemble; seven checker tests and shell checks pass.
+Its [exact `49b6a7d1` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34177846462)
+now passes nine public chunks / 2,097,275 bytes with the original expected hash, default refusal
+before destination creation, isolated account ownership and unchanged identity. It also preserves
+the private-message checks. All owned networks and temporary secrets/output are removed; raw
+guest state is unchanged, SHA-256 `2caf3e00759c843289b12e4a01b4c6a11fe1e4ca009a01ad401b2afc5db24dc9`.
+Artifact SHA-256: `2a535c5c2d07cb0164c713c4467016a17ee69113279dcc02807414c775ded6c4`.
+No automatic serving, browser capture or HTTPS export is claimed.
+
+The next `content-provider` extension now composes those normal commands through the network:
+a separate user identity signs an explicit file, imports it to one provider account and registers
+it with normal Serve; the Client agent retrieves it through existing provider discovery and
+protected MPTCP, then exports to the user for normal Assemble. The existing complementary 5+4
+provider and cooperative HTTPS cases remain intact. A dedicated capture window binds the new
+publication to its selected provider and both WireGuard relay paths; private fixture identity,
+passphrase and input/output must be removed. Nine provider-checker tests, four replication tests
+(including the large-report regression) and shell checks pass. This is an integration harness
+awaiting its source-bound VM result, not a claimed ordinary-user network pass, mailbox or complete C06/C07.
 
 The [source-bound C03 run on `97e478a2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175385789)
 remains **failed**, but at a new boundary: final Client retrieval reaches provider discovery,
