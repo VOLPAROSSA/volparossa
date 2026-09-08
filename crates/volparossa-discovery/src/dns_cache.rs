@@ -1,6 +1,6 @@
 //! Bounded signed DNSSEC cache RPC over an already authenticated direct peer connection.
 
-use crate::{ContentControlConnectionState, DiscoveryError, DiscoveryService};
+use crate::{DiscoveryError, DiscoveryService};
 use async_trait::async_trait;
 use futures::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use libp2p::{PeerId, StreamProtocol, kad, request_response, swarm::ConnectionId};
@@ -183,19 +183,15 @@ impl DiscoveryService {
             .dial(peer)
             .map_err(|_| DiscoveryError::ProtocolPeer)
     }
-    /// Send only after one direct authenticated connection exists; never queue a DNS-bearing dial.
+    /// Bind request-response's actual connection before dispatch; never queue a DNS-bearing dial.
     /// # Errors
-    /// Rejects ambiguous/relayed/unconnected peers and exhausted fixed request capacity.
+    /// Rejects poisoned, relayed, unconnected or stale selected lineage and exhausted capacity.
     pub fn request_dns_cache(
         &mut self,
         peer: PeerId,
         request: DnsCacheRequest,
-    ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
-        if !self.protocol_roles.exit()
-            || peer == *self.local_peer_id()
-            || self.content_control_connection_state(&peer) != ContentControlConnectionState::Unique
-            || !self.swarm.behaviour().dns_cache.is_connected(&peer)
-        {
+    ) -> Result<(request_response::OutboundRequestId, ConnectionId), DiscoveryError> {
+        if !self.protocol_roles.exit() || peer == *self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
         }
         validate::<DnsCacheQuery>(request.signed(), REQUEST_MAX)?;
@@ -205,15 +201,19 @@ impl DiscoveryService {
         if self.dns_cache.pending.len() >= MAX_PENDING {
             return Err(DiscoveryError::ResourceLimit);
         }
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .dns_cache
-            .send_request(&peer, request);
+        let behaviour = &mut self.swarm.behaviour_mut().0;
+        let (id, connection) =
+            behaviour
+                .dns_cache
+                .send_bound_request(&peer, request, |chosen| {
+                    behaviour
+                        .connection_provenance
+                        .content_control_connection_is_current(peer, chosen)
+                })?;
         self.dns_cache
             .pending
             .insert(id, Instant::now() + DNS_CACHE_RPC_TIMEOUT);
-        Ok(id)
+        Ok((id, connection))
     }
     /// Retire this actor's bounded request bookkeeping after completion/cancellation.
     pub fn finish_dns_cache_request(&mut self, id: request_response::OutboundRequestId) {

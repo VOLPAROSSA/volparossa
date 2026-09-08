@@ -313,7 +313,7 @@ pub struct DiscoveryBehaviour {
     /// Client to its already authenticated control relay for public service offers.
     content_discovery: ContentConnectionBehaviour,
     /// Direct authenticated Exit-to-cache peer exchange; never control-relay forwarding.
-    dns_cache: request_response::Behaviour<DnsCacheCodec>,
+    dns_cache: ContentConnectionBehaviour<DnsCacheCodec>,
     /// Client-to-control-relay forwarding hop.
     pub exit_forward: request_response::Behaviour<ExitForwardCodec>,
     /// Control-relay-to-exit forwarding hop.
@@ -416,10 +416,10 @@ impl DiscoveryBehaviour {
             advertisements,
             content_service,
             content_discovery,
-            dns_cache: dns_cache::behaviour(protocol_support(
+            dns_cache: ContentConnectionBehaviour::new(dns_cache::behaviour(protocol_support(
                 protocol_roles.exit(),
                 protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
-            )),
+            ))),
             exit_forward,
             exit_forward_upstream,
             datapath_relay,

@@ -1,8 +1,11 @@
 //! Cache-only DNSSEC exchange owned by the discovery actor. Names never enter the DHT/logs.
 
-use libp2p::{PeerId, kad, request_response, swarm::SwarmEvent};
+use libp2p::{
+    PeerId, kad, request_response,
+    swarm::{ConnectionId, SwarmEvent},
+};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -28,6 +31,7 @@ const COLLECTION_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_LOOKUPS: usize = 8;
 const MAX_CANDIDATES: usize = 16;
 const MAX_PEERS: usize = 2;
+const MAX_STAGE_EVENTS: usize = 32;
 type OutboundId = request_response::OutboundRequestId;
 type Reply = oneshot::Sender<Result<Option<DnsProofBundle>, DnsResolverError>>;
 
@@ -97,6 +101,7 @@ struct Lookup {
 struct Pending {
     lookup: u64,
     peer: PeerId,
+    connection: ConnectionId,
     request_hash: [u8; 32],
 }
 pub(super) struct DnsBridge {
@@ -110,6 +115,7 @@ pub(super) struct DnsBridge {
     candidates: Vec<PeerId>,
     next_id: u64,
     replay: ReplayCache,
+    events: VecDeque<(&'static str, u64)>,
 }
 impl Default for DnsBridge {
     fn default() -> Self {
@@ -124,6 +130,18 @@ impl Default for DnsBridge {
             candidates: Vec::new(),
             next_id: 0,
             replay: ReplayCache::new(256).expect("fixed nonzero DNS replay capacity"),
+            events: VecDeque::new(),
+        }
+    }
+}
+
+impl DnsBridge {
+    // Deduplicate between actor maintenance turns; no names, peers, addresses or raw errors.
+    fn stage(&mut self, code: &'static str) {
+        if self.events.len() < MAX_STAGE_EVENTS
+            && !self.events.iter().any(|(queued, _)| *queued == code)
+        {
+            self.events.push_back((code, unix_millis()));
         }
     }
 }
@@ -174,10 +192,12 @@ impl DiscoveryRuntime {
                     return;
                 }
                 let Some(excluded) = exclusions(&scope) else {
+                    self.dns_cache.stage("DNS_CACHE_SCOPE_REJECTED");
                     let _ = reply.send(Ok(None));
                     return;
                 };
                 if !self.roles.exit || self.dns_cache.lookups.len() >= MAX_LOOKUPS {
+                    self.dns_cache.stage("DNS_CACHE_LOOKUP_UNAVAILABLE");
                     let _ = reply.send(Err(DnsResolverError::Unavailable));
                     return;
                 }
@@ -203,12 +223,14 @@ impl DiscoveryRuntime {
                 };
                 if self.dns_cache.provider_query.is_none() {
                     let Ok(query) = self.service.find_providers(capability::DNSSEC_CACHE) else {
+                        self.dns_cache.stage("DNS_CACHE_QUERY_REJECTED");
                         let _ = reply.send(Err(DnsResolverError::Unavailable));
                         return;
                     };
                     self.dns_cache.candidates.clear();
                     self.dns_cache.provider_query =
                         Some((query, Instant::now() + COLLECTION_TIMEOUT));
+                    self.dns_cache.stage("DNS_CACHE_QUERY_STARTED");
                 }
                 self.dns_cache.next_id = id;
                 self.dns_cache.lookups.insert(
@@ -259,23 +281,37 @@ impl DiscoveryRuntime {
             }
         }
         for peer in connecting {
-            if self.service.content_control_connection_state(&peer)
-                == ContentControlConnectionState::Unique
-            {
+            let state = self.service.content_control_connection_state(&peer);
+            self.dns_cache.stage(match state {
+                ContentControlConnectionState::Unique => "DNS_CACHE_CONNECTION_UNIQUE",
+                ContentControlConnectionState::Multiple => "DNS_CACHE_CONNECTION_MULTIPLE",
+                ContentControlConnectionState::Missing => "DNS_CACHE_CONNECTION_MISSING",
+                ContentControlConnectionState::NoDirect => "DNS_CACHE_CONNECTION_NOT_DIRECT",
+                ContentControlConnectionState::Poisoned => "DNS_CACHE_CONNECTION_POISONED",
+            });
+            if matches!(
+                state,
+                ContentControlConnectionState::Unique | ContentControlConnectionState::Multiple
+            ) {
                 self.send_dns_on_ready_peer(peer);
-            } else {
-                // No question bytes enter libp2p until a unique direct authenticated connection exists.
-                let _ = self.service.connect_dns_cache_peer(peer);
+            } else if state == ContentControlConnectionState::Missing {
+                // Only generic connection establishment is allowed here, never question bytes.
+                if self.service.connect_dns_cache_peer(peer).is_err() {
+                    self.dns_cache.stage("DNS_CACHE_CONNECT_REJECTED");
+                }
             }
         }
     }
 
     fn send_dns_on_ready_peer(&mut self, peer: PeerId) {
-        if self.service.content_control_connection_state(&peer)
-            != ContentControlConnectionState::Unique
-        {
+        if !matches!(
+            self.service.content_control_connection_state(&peer),
+            ContentControlConnectionState::Unique | ContentControlConnectionState::Multiple
+        ) {
             return;
         }
+        let mut dispatched = false;
+        let mut rejected = false;
         for (id, lookup) in &mut self.dns_cache.lookups {
             if lookup.deadline <= Instant::now()
                 || lookup.reply.is_closed()
@@ -285,16 +321,28 @@ impl DiscoveryRuntime {
             {
                 continue;
             }
-            if let Ok(request_id) = self.service.request_dns_cache(peer, lookup.request.clone()) {
+            if let Ok((request_id, connection)) =
+                self.service.request_dns_cache(peer, lookup.request.clone())
+            {
+                dispatched = true;
                 self.dns_cache.outbound.insert(
                     request_id,
                     Pending {
                         lookup: *id,
                         peer,
+                        connection,
                         request_hash: dns_cache_request_hash(lookup.request.signed()),
                     },
                 );
+            } else {
+                rejected = true;
             }
+        }
+        if dispatched {
+            self.dns_cache.stage("DNS_CACHE_REQUEST_DISPATCHED");
+        }
+        if rejected {
+            self.dns_cache.stage("DNS_CACHE_REQUEST_REJECTED");
         }
     }
 
@@ -333,6 +381,7 @@ impl DiscoveryRuntime {
                 })) = result
                 {
                     if key == kad::RecordKey::new(&capability::DNSSEC_CACHE) {
+                        self.dns_cache.stage("DNS_CACHE_PROVIDERS_FOUND");
                         for peer in providers {
                             if self.dns_cache.candidates.len() >= MAX_CANDIDATES {
                                 break;
@@ -345,6 +394,7 @@ impl DiscoveryRuntime {
                     }
                 }
                 if step.last {
+                    self.dns_cache.stage("DNS_CACHE_QUERY_COMPLETED");
                     self.finish_dns_query();
                 }
                 None
@@ -370,6 +420,7 @@ impl DiscoveryRuntime {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
+                    self.dns_cache.stage("DNS_CACHE_REQUEST_RECEIVED");
                     if !(self.roles.client || self.roles.relay || self.roles.exit) {
                         return;
                     }
@@ -377,6 +428,7 @@ impl DiscoveryRuntime {
                         .service
                         .content_control_connection_is_current(&peer, connection_id)
                     {
+                        self.dns_cache.stage("DNS_CACHE_INBOUND_LINEAGE_REJECTED");
                         return;
                     }
                     let Ok(verified) = verify_control_message::<DnsCacheQuery>(
@@ -385,6 +437,7 @@ impl DiscoveryRuntime {
                         time_policy(),
                         &mut self.dns_cache.replay,
                     ) else {
+                        self.dns_cache.stage("DNS_CACHE_INBOUND_SIGNATURE_REJECTED");
                         return;
                     };
                     if !peer_matches(&verified, peer) {
@@ -403,6 +456,7 @@ impl DiscoveryRuntime {
                         return;
                     };
                     let Some(resolver) = &self.dns_cache.resolver else {
+                        self.dns_cache.stage("DNS_CACHE_RESPONDER_UNAVAILABLE");
                         return;
                     };
                     // This synchronous accessor reads independently validated positive RAM entries only.
@@ -412,6 +466,11 @@ impl DiscoveryRuntime {
                         .map(|b| b.encode())
                         .unwrap_or_default();
                     let cache_miss = bundle.is_empty();
+                    self.dns_cache.stage(if cache_miss {
+                        "DNS_CACHE_REPLY_EMPTY"
+                    } else {
+                        "DNS_CACHE_REPLY_BUNDLE"
+                    });
                     let reply = DnsCacheReply {
                         request_hash: dns_cache_request_hash(request.signed()).to_vec(),
                         bundle,
@@ -435,42 +494,82 @@ impl DiscoveryRuntime {
                     response,
                 } => self.handle_dns_response(peer, connection_id, request_id, &response),
             },
-            request_response::Event::OutboundFailure { request_id, .. } => {
-                self.service.finish_dns_cache_request(request_id);
-                self.dns_cache.outbound.remove(&request_id);
-            }
+            request_response::Event::OutboundFailure {
+                peer,
+                connection_id,
+                request_id,
+                error,
+            } => self.handle_dns_failure(peer, connection_id, request_id, &error),
             _ => {}
         }
+    }
+
+    fn handle_dns_failure(
+        &mut self,
+        peer: PeerId,
+        connection: ConnectionId,
+        request: OutboundId,
+        error: &request_response::OutboundFailure,
+    ) {
+        if !self
+            .dns_cache
+            .outbound
+            .get(&request)
+            .is_some_and(|p| p.peer == peer && p.connection == connection)
+        {
+            return;
+        }
+        self.service.finish_dns_cache_request(request);
+        self.dns_cache.outbound.remove(&request);
+        self.dns_cache.stage(match error {
+            request_response::OutboundFailure::DialFailure => "DNS_CACHE_RPC_DIAL_FAILED",
+            request_response::OutboundFailure::Timeout => "DNS_CACHE_RPC_TIMEOUT",
+            request_response::OutboundFailure::ConnectionClosed => {
+                "DNS_CACHE_RPC_CONNECTION_CLOSED"
+            }
+            request_response::OutboundFailure::UnsupportedProtocols => "DNS_CACHE_RPC_UNSUPPORTED",
+            request_response::OutboundFailure::Io(_) => "DNS_CACHE_RPC_IO_FAILED",
+        });
     }
 
     fn handle_dns_response(
         &mut self,
         peer: PeerId,
-        connection_id: libp2p::swarm::ConnectionId,
+        connection_id: ConnectionId,
         request_id: OutboundId,
         response: &DnsCacheResponse,
     ) {
-        self.service.finish_dns_cache_request(request_id);
-        let Some(pending) = self.dns_cache.outbound.remove(&request_id) else {
+        let Some(pending) = self.dns_cache.outbound.get(&request_id) else {
             return;
         };
         if peer != pending.peer
+            || connection_id != pending.connection
             || !self
                 .service
                 .content_control_connection_is_current(&peer, connection_id)
         {
+            self.dns_cache.stage("DNS_CACHE_RESPONSE_LINEAGE_REJECTED");
             return;
         }
+        let pending = self
+            .dns_cache
+            .outbound
+            .remove(&request_id)
+            .expect("checked pending request");
+        self.service.finish_dns_cache_request(request_id);
         let Ok(verified) = verify_control_message::<DnsCacheReply>(
             response.signed(),
             unix_millis(),
             time_policy(),
             &mut self.dns_cache.replay,
         ) else {
+            self.dns_cache
+                .stage("DNS_CACHE_RESPONSE_SIGNATURE_REJECTED");
             return;
         };
         if !peer_matches(&verified, peer) || verified.message().request_hash != pending.request_hash
         {
+            self.dns_cache.stage("DNS_CACHE_RESPONSE_BINDING_REJECTED");
             return;
         }
         let Some(lookup) = self.dns_cache.lookups.get(&pending.lookup) else {
@@ -479,12 +578,20 @@ impl DiscoveryRuntime {
         if lookup.deadline <= Instant::now() || lookup.excluded.contains(&peer) {
             return;
         }
+        if verified.message().bundle.is_empty() {
+            self.dns_cache.stage("DNS_CACHE_RESPONSE_EMPTY_VERIFIED");
+            return;
+        }
         let Ok(bundle) = DnsProofBundle::decode(&verified.message().bundle) else {
+            self.dns_cache.stage("DNS_CACHE_RESPONSE_BUNDLE_REJECTED");
             return;
         };
         if bundle.question() != &lookup.question || bundle.expires_at_unix_ms() <= unix_millis() {
+            self.dns_cache.stage("DNS_CACHE_RESPONSE_BUNDLE_REJECTED");
             return;
         }
+        // This stage proves the signed peer envelope, not DNSSEC: the resolver validates that.
+        self.dns_cache.stage("DNS_CACHE_RESPONSE_BUNDLE_RECEIVED");
         self.finish_dns_lookup(pending.lookup, Some(bundle));
     }
 
@@ -562,6 +669,7 @@ impl DiscoveryRuntime {
             .provider_query
             .is_some_and(|(_, expires)| expires <= now)
         {
+            self.dns_cache.stage("DNS_CACHE_COLLECTION_DEADLINE");
             self.finish_dns_query();
         }
         let finished: Vec<_> = self
@@ -583,10 +691,30 @@ impl DiscoveryRuntime {
             })
             .collect();
         for id in finished {
+            let code = self.dns_cache.lookups.get(&id).map(|lookup| {
+                if lookup.reply.is_closed() {
+                    "DNS_CACHE_LOOKUP_CALLER_CLOSED"
+                } else if lookup.deadline <= now {
+                    "DNS_CACHE_LOOKUP_DEADLINE"
+                } else if lookup.selected.is_empty() {
+                    "DNS_CACHE_LOOKUP_NO_CANDIDATE"
+                } else {
+                    "DNS_CACHE_LOOKUP_NO_BUNDLE"
+                }
+            });
+            if let Some(code) = code {
+                self.dns_cache.stage(code);
+            }
             self.finish_dns_lookup(id, None);
         }
         if self.dns_cache.lookups.is_empty() {
             self.finish_dns_query();
+        }
+        if !self.dns_cache.events.is_empty() {
+            let mut state = state.write().await;
+            for (code, timestamp) in self.dns_cache.events.drain(..) {
+                state.log(LogLevel::Info, code, timestamp);
+            }
         }
     }
     pub(super) fn dns_deadline(&self) -> tokio::time::Instant {
@@ -616,7 +744,7 @@ mod tests {
     use super::*;
     use volparossa_discovery::DiscoveryEvent;
 
-    fn run_actor_test_in_isolated_namespace() -> bool {
+    fn run_actor_test_in_isolated_namespace(test: &str) -> bool {
         const MARKER: &str = "VOLPAROSSA_DNS_CACHE_PARENT_NETNS";
         if let Some(parent) = std::env::var_os(MARKER) {
             let current = std::fs::read_link("/proc/self/ns/net").unwrap();
@@ -631,7 +759,7 @@ mod tests {
             .join("../../scripts/run-isolated-test.sh");
         let status = std::process::Command::new(runner)
             .arg(std::env::current_exe().unwrap())
-            .arg("discovery::dns_cache::tests::actual_dns_cache_actor_returns_signed_cache_miss_without_upstream_and_excludes_route_peers")
+            .arg(test)
             .arg(MARKER)
             .arg("none")
             .status()
@@ -655,35 +783,179 @@ mod tests {
     #[tokio::test]
     async fn actual_dns_cache_actor_returns_signed_cache_miss_without_upstream_and_excludes_route_peers()
      {
-        if run_actor_test_in_isolated_namespace() {
+        if run_actor_test_in_isolated_namespace(
+            "discovery::dns_cache::tests::actual_dns_cache_actor_returns_signed_cache_miss_without_upstream_and_excludes_route_peers",
+        ) {
             return;
         }
+        Box::pin(cache_miss_actor_exchange(1)).await;
+    }
+
+    #[tokio::test]
+    async fn actual_dns_cache_actor_pins_two_authenticated_connections() {
+        if run_actor_test_in_isolated_namespace(
+            "discovery::dns_cache::tests::actual_dns_cache_actor_pins_two_authenticated_connections",
+        ) {
+            return;
+        }
+        Box::pin(cache_miss_actor_exchange(2)).await;
+    }
+
+    async fn cache_miss_actor_exchange(connections: usize) {
         let (mut exit, exit_state, _exit_dir) = super::super::tests::retirement_runtime_fixture();
         let (mut cache, cache_state, _cache_dir) =
             super::super::tests::retirement_runtime_fixture();
-        super::super::tests::connect_runtime_client_to_control(&mut exit, &mut cache.service).await;
+        for _ in 0..connections {
+            super::super::tests::connect_runtime_client_to_control(&mut exit, &mut cache.service)
+                .await;
+        }
+        assert_eq!(
+            exit.service
+                .content_control_connection_state(cache.service.local_peer_id()),
+            if connections == 1 {
+                ContentControlConnectionState::Unique
+            } else {
+                ContentControlConnectionState::Multiple
+            },
+            "real authenticated sibling connections must exist before the DNS request"
+        );
+        let (peer, question) =
+            cold_cache_and_exclusions(&mut exit, &exit_state, &mut cache, &cache_state).await;
+        let other = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let mut responses = Vec::new();
+        for _ in 0..connections {
+            let (reply, response) = oneshot::channel();
+            exit.handle_dns_command(DnsCommand::Fetch {
+                question: question.clone(),
+                scope: DnsResolutionScope::new([1; 32], vec![other.to_bytes()]).unwrap(),
+                reply,
+            });
+            responses.push(response);
+        }
+        // Test only the exact actor/cache/RPC seam. Generic DHT discovery is not mocked as proven.
+        exit.dns_cache.candidates = vec![peer];
+        exit.choose_dns_peers();
+        exit.finish_dns_query();
+        assert_eq!(exit.dns_cache.outbound.len(), connections);
+        assert_eq!(
+            exit.dns_cache
+                .outbound
+                .values()
+                .map(|p| p.connection)
+                .collect::<HashSet<_>>()
+                .len(),
+            connections,
+            "capture both actual round-robin siblings, never select an arbitrary first connection"
+        );
+        assert_eq!(
+            exit.dns_cache
+                .outbound
+                .values()
+                .map(|p| p.request_hash)
+                .collect::<HashSet<_>>()
+                .len(),
+            connections,
+            "each request has its own fresh signed nonce"
+        );
+        let response = async move {
+            let mut results = Vec::new();
+            for response in responses {
+                results.push(response.await);
+            }
+            results
+        };
+        tokio::pin!(response);
+        let mut cache_requests = 0;
+        let mut rejected_wrong_sibling = false;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                exit.maintain_dns_cache(&exit_state).await;
+                tokio::select! {
+                    result = &mut response => break result,
+                    event = exit.service.next_event() => if let DiscoveryEvent::Other(event) = event {
+                        if connections == 2 && !rejected_wrong_sibling {
+                            rejected_wrong_sibling = reject_wrong_sibling(&mut exit, &event);
+                        }
+                        let _ = exit.handle_dns_event(event);
+                    },
+                    event = cache.service.next_event() => if let DiscoveryEvent::Other(event) = event {
+                        if matches!(&event, SwarmEvent::Behaviour(BehaviourEvent::DnsCache(request_response::Event::Message { message: request_response::Message::Request { .. }, .. }))) { cache_requests += 1; }
+                        let _ = cache.handle_dns_event(event);
+                    },
+                }
+            }
+        }).await.unwrap();
+        assert!(
+            result
+                .into_iter()
+                .all(|answer| answer.unwrap().unwrap().is_none())
+        );
+        assert_eq!(rejected_wrong_sibling, connections == 2);
+        assert_eq!(cache_requests, connections);
+        assert_completed_misses(&exit, &cache, connections, &question);
+    }
+
+    fn assert_completed_misses(
+        exit: &DiscoveryRuntime,
+        cache: &DiscoveryRuntime,
+        connections: usize,
+        question: &DnsQuestion,
+    ) {
+        assert!(exit.dns_cache.outbound.is_empty());
+        assert!(exit.dns_cache.lookups.is_empty());
+        assert!(exit.dns_cache.provider_query.is_none());
+        assert_eq!(
+            cache.metrics.snapshot().dns_cache_miss_replies,
+            u64::try_from(connections).unwrap()
+        );
+        assert_eq!(exit.metrics.snapshot().dns_cache_miss_replies, 0);
+        assert_eq!(cache.dns_cache.replay.len(), connections);
+        assert_eq!(
+            exit.dns_cache.replay.len(),
+            connections,
+            "the miss was independently signed and correlated"
+        );
+        assert!(
+            cache
+                .dns_cache
+                .resolver
+                .as_ref()
+                .unwrap()
+                .cached_bundle(question, &[1; 32])
+                .is_none()
+        );
+    }
+
+    async fn cold_cache_and_exclusions(
+        exit: &mut DiscoveryRuntime,
+        exit_state: &Arc<RwLock<AgentState>>,
+        cache: &mut DiscoveryRuntime,
+        cache_state: &Arc<RwLock<AgentState>>,
+    ) -> (PeerId, DnsQuestion) {
         cache.configure_dns_cache(Arc::new(ExitResolver::new(None, None)));
-        // A real cold resolver on a pure fixture Client cannot publish DNSSEC_CACHE. Also
-        // withdraw an actual old provider operation, including its late completion event.
+        // A real cold resolver cannot publish DNSSEC_CACHE; withdraw an actual old provider
+        // operation as well, including its late completion event.
         cache.roles = volparossa_config::RolesConfig {
             client: true,
             relay: false,
             exit: false,
         };
-        cache.maintain_dns_cache(&cache_state).await;
+        cache.maintain_dns_cache(cache_state).await;
         assert!(!cache.dns_cache.advertised);
         assert!(cache.dns_cache.advertisement_query.is_none());
         let old_query = cache.service.provide(capability::DNSSEC_CACHE).unwrap();
         cache.dns_cache.advertised = true;
         cache.dns_cache.advertisement_query = Some(old_query);
         cache.dns_cache.publication_ready = true;
-        cache.maintain_dns_cache(&cache_state).await;
+        cache.maintain_dns_cache(cache_state).await;
         assert!(!cache.dns_cache.advertised);
         assert!(cache.dns_cache.advertisement_query.is_none());
         assert!(!cache.dns_cache.publication_ready);
         let peer = *cache.service.local_peer_id();
         let question = DnsQuestion::new("www.example.org", DnsQueryType::A).unwrap();
-        // Both self and the live cache peer are genuinely excluded; no DNS-bearing RPC exists.
+        // Self and the live cache peer are excluded: no DNS-bearing RPC can exist.
         let (reply, response) = oneshot::channel();
         exit.handle_dns_command(DnsCommand::Fetch {
             question: question.clone(),
@@ -694,55 +966,50 @@ mod tests {
         exit.choose_dns_peers();
         assert!(exit.dns_cache.outbound.is_empty());
         exit.finish_dns_query();
-        exit.maintain_dns_cache(&exit_state).await;
+        exit.maintain_dns_cache(exit_state).await;
         assert!(response.await.unwrap().unwrap().is_none());
+        (peer, question)
+    }
 
-        let other = libp2p::identity::Keypair::generate_ed25519()
-            .public()
-            .to_peer_id();
-        let (reply, mut response) = oneshot::channel();
-        exit.handle_dns_command(DnsCommand::Fetch {
-            question: question.clone(),
-            scope: DnsResolutionScope::new([1; 32], vec![other.to_bytes()]).unwrap(),
-            reply,
-        });
-        // Test only the exact actor/cache/RPC seam. Generic DHT discovery is not mocked as proven.
-        exit.dns_cache.candidates = vec![peer];
-        exit.choose_dns_peers();
-        exit.finish_dns_query();
-        assert_eq!(exit.dns_cache.outbound.len(), 1);
-        let mut cache_requests = 0;
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                exit.maintain_dns_cache(&exit_state).await;
-                tokio::select! {
-                    result = &mut response => break result.unwrap().unwrap(),
-                    event = exit.service.next_event() => if let DiscoveryEvent::Other(event) = event { let _ = exit.handle_dns_event(event); },
-                    event = cache.service.next_event() => if let DiscoveryEvent::Other(event) = event {
-                        if matches!(&event, SwarmEvent::Behaviour(BehaviourEvent::DnsCache(request_response::Event::Message { message: request_response::Message::Request { .. }, .. }))) { cache_requests += 1; }
-                        let _ = cache.handle_dns_event(event);
-                    },
-                }
-            }
-        }).await.unwrap();
-        assert!(result.is_none());
-        assert_eq!(cache_requests, 1);
-        assert_eq!(cache.metrics.snapshot().dns_cache_miss_replies, 1);
-        assert_eq!(exit.metrics.snapshot().dns_cache_miss_replies, 0);
-        assert_eq!(cache.dns_cache.replay.len(), 1);
+    fn reject_wrong_sibling(
+        exit: &mut DiscoveryRuntime,
+        event: &SwarmEvent<BehaviourEvent>,
+    ) -> bool {
+        let SwarmEvent::Behaviour(BehaviourEvent::DnsCache(request_response::Event::Message {
+            peer,
+            connection_id,
+            message:
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                },
+        })) = event
+        else {
+            return false;
+        };
         assert_eq!(
-            exit.dns_cache.replay.len(),
-            1,
-            "the miss was independently signed and correlated"
+            exit.dns_cache.outbound[request_id].connection,
+            *connection_id
         );
-        assert!(
-            cache
-                .dns_cache
-                .resolver
-                .as_ref()
-                .unwrap()
-                .cached_bundle(&question, &[1; 32])
-                .is_none()
-        );
+        let sibling = exit
+            .dns_cache
+            .outbound
+            .values()
+            .find(|p| p.connection != *connection_id)
+            .unwrap()
+            .connection;
+        let pending = exit.dns_cache.outbound.len();
+        let replay = exit.dns_cache.replay.len();
+        // A correctly signed real response still cannot consume another connection's request.
+        exit.handle_dns_response(*peer, sibling, *request_id, response);
+        exit.handle_dns_rpc(request_response::Event::OutboundFailure {
+            peer: *peer,
+            connection_id: sibling,
+            request_id: *request_id,
+            error: request_response::OutboundFailure::ConnectionClosed,
+        });
+        assert_eq!(exit.dns_cache.outbound.len(), pending);
+        assert_eq!(exit.dns_cache.replay.len(), replay);
+        true
     }
 }

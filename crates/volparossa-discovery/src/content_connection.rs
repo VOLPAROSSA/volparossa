@@ -1,4 +1,4 @@
-//! Pin content discovery to request-response's actual, already authenticated connection.
+//! Pin bounded control RPCs to request-response's actual authenticated connection.
 //!
 //! The pinned request-response 0.29 behaviour queues exactly one `NotifyHandler::One`
 //! synchronously for an already connected peer. Observe that choice before handing it to the
@@ -20,24 +20,24 @@ use libp2p::{
     },
 };
 
-use crate::{
-    ContentDiscoveryRequest, ContentDiscoveryResponse, DiscoveryError,
-    content_provider::ContentDiscoveryCodec,
-};
+use crate::{DiscoveryError, content_provider::ContentDiscoveryCodec};
 
-type Inner = request_response::Behaviour<ContentDiscoveryCodec>;
-type Action = ToSwarm<<Inner as NetworkBehaviour>::ToSwarm, THandlerInEvent<Inner>>;
+type Inner<C = ContentDiscoveryCodec> = request_response::Behaviour<C>;
+type Action<C = ContentDiscoveryCodec> =
+    ToSwarm<<Inner<C> as NetworkBehaviour>::ToSwarm, THandlerInEvent<Inner<C>>>;
 const MAX_DEFERRED_EVENTS: usize = 128;
 
 /// Private protocol adapter; syntactically public for the composed behaviour's handler type.
-pub struct ContentConnectionBehaviour {
-    inner: Inner,
-    deferred: VecDeque<Action>,
+pub struct ContentConnectionBehaviour<
+    C: request_response::Codec + Send + Clone + 'static = ContentDiscoveryCodec,
+> {
+    inner: Inner<C>,
+    deferred: VecDeque<Action<C>>,
     incompatible: bool,
 }
 
-impl ContentConnectionBehaviour {
-    pub(super) fn new(inner: Inner) -> Self {
+impl<C: request_response::Codec + Send + Clone + 'static> ContentConnectionBehaviour<C> {
+    pub(super) fn new(inner: Inner<C>) -> Self {
         Self {
             inner,
             deferred: VecDeque::new(),
@@ -49,7 +49,7 @@ impl ContentConnectionBehaviour {
     pub(super) fn send_bound_request(
         &mut self,
         peer: &PeerId,
-        request: ContentDiscoveryRequest,
+        request: C::Request,
         authorized: impl FnOnce(ConnectionId) -> bool,
     ) -> Result<(request_response::OutboundRequestId, ConnectionId), DiscoveryError> {
         if self.incompatible || !self.inner.is_connected(peer) {
@@ -85,9 +85,9 @@ impl ContentConnectionBehaviour {
             self.inner.on_connection_handler_event(
                 peer_id,
                 connection,
-                THandlerOutEvent::<Inner>::OutboundStreamFailed {
+                THandlerOutEvent::<Inner<C>>::OutboundStreamFailed {
                     request_id: id,
-                    error: io::Error::other("content control lineage rejected before dispatch"),
+                    error: io::Error::other("control lineage rejected before dispatch"),
                 },
             );
             return Err(DiscoveryError::ProtocolPeer);
@@ -102,16 +102,18 @@ impl ContentConnectionBehaviour {
 
     pub(super) fn send_response(
         &mut self,
-        channel: request_response::ResponseChannel<ContentDiscoveryResponse>,
-        response: ContentDiscoveryResponse,
-    ) -> Result<(), ContentDiscoveryResponse> {
+        channel: request_response::ResponseChannel<C::Response>,
+        response: C::Response,
+    ) -> Result<(), C::Response> {
         self.inner.send_response(channel, response)
     }
 }
 
-impl NetworkBehaviour for ContentConnectionBehaviour {
-    type ConnectionHandler = THandler<Inner>;
-    type ToSwarm = <Inner as NetworkBehaviour>::ToSwarm;
+impl<C: request_response::Codec + Send + Clone + 'static> NetworkBehaviour
+    for ContentConnectionBehaviour<C>
+{
+    type ConnectionHandler = THandler<Inner<C>>;
+    type ToSwarm = <Inner<C> as NetworkBehaviour>::ToSwarm;
 
     fn handle_pending_inbound_connection(
         &mut self,
@@ -178,7 +180,7 @@ impl NetworkBehaviour for ContentConnectionBehaviour {
         self.inner.on_connection_handler_event(peer, id, event);
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Action> {
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Action<C>> {
         if let Some(action) = self.deferred.pop_front() {
             Poll::Ready(action)
         } else if self.incompatible {
@@ -192,6 +194,7 @@ impl NetworkBehaviour for ContentConnectionBehaviour {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ContentDiscoveryRequest, ContentDiscoveryResponse};
     use futures::StreamExt as _;
     use libp2p::{core::ConnectedPoint, swarm::behaviour::ConnectionClosed};
 
