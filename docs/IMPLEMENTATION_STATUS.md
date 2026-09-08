@@ -23,7 +23,7 @@ proves intended-recipient inbox retrieval/decryption after sender application ex
 disconnect. Older narrower checkpoint labels below retain their historical scope. The
 [`b22a9153` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
 also proves actual overlapping provider bulk traffic; a full expanded-alpha verification on one
-build and measured speedup remain unproved.
+build and general speedup remain unproved.
 
 ## Current candidate: functional integration in progress
 
@@ -403,6 +403,24 @@ zero owned objects and equal guest-state SHA-256
 Artifact ZIP SHA-256: `9328af15ced2ea4a84f82d5232cb6a4b162229cd1407ceb68b977d178701d2bc`.
 No full corrected-source VM pass or expanded-alpha completion is claimed.
 
+The subsequent [exact `6d3f44d` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34227589468)
+**passes** with the committed corrected checkers and adaptive worker runtime. Its complete raw
+rebuild equals the top-level transfer report; independent HTTPS and ordinary-publication rebuilds
+also match. Earlier native/two-provider, browser consumer, four missing-origin ranges,
+independent-index digest, ordinary publication, named retrieval, site and cache-only phases all
+pass. This is not the later three-provider scenario or a browser-engine/full-alpha claim.
+
+Actual fixed-uplink command times are **6.392691790 seconds** origin-only, **4.118268956 seconds**
+peers-first and **4.319381088 seconds** automatic. Auto chooses both providers and receives all
+2,097,275 peer bytes with zero origin body; this single whole-command sample is about 1.48 times
+faster. The unchanged qdisc and original authority remain within one 17.311804233-second window;
+the limiter is removed afterward. All 88 captures / 416 interface rows have exact stopped intake
+and socket accounting, zero drops/unexpected/direct traffic. The 152,074 summed boundary frames
+are not unique packets. Cleanup leaves zero owned objects and byte-identical guest state,
+SHA-256 `2cd5a285bd5b878fd412a93513957ff97e782648988148c9cbe89d2a94b067b0`.
+Artifact ZIP SHA-256: `7460fb85e4740a4d59ae4c804e430fc839f3cca2c4cc77a7ee75ffc708793099`;
+canonical raw rebuild SHA-256: `9ae980b60e816a7a2ed0f67ce730df6dba51202630a6ad152eef601e1da18a30`.
+
 ### Adaptive cache-worker integration
 
 Native/named downloads now pass their bounded candidate batch to a dynamically sized coordinator,
@@ -435,6 +453,26 @@ The actual three-provider protected-network proof remains pending. Existing HTTP
 still select pairs; sixteen is still the bounded discovery-message input, not an adaptive active
 target. Control peers, local/Wi-Fi neighbors and native MPTCP/MPQUIC backend ceilings have not
 been generalized. This is the first connection-management slice, not the entire user requirement.
+
+The additive protected-network scenario is now executable in the existing disposable provider
+topology. After the unchanged earlier phases and route retirement, a fresh route retrieves
+fifteen unique chunks / 3,932,160 bytes from disjoint R3/R4/R5 caches (five chunks each), with
+SHA-256 `26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011`.
+The independent publisher exits and its complete temporary source is removed before fetch.
+The original public manifest is copied to the Client; its mount cannot read provider stores or seed state.
+The checker requires all three providers' actual kernel-timestamped bulk-payload windows to
+overlap, both selected WireGuard paths, exact reconstruction, six drained captures and normal
+service/route cleanup. Three IDs in a receipt alone cannot satisfy this proof.
+
+The fixture restricts only Client control-UDP41000 on its three spare-node interfaces before
+Discovery starts; the real independent control peer must then be R0/R1/R2. Three new, separately
+named broker links carry only exact UDP41000 control traffic. Their actual routes and the
+Client filter are retained; no production selection rule or host network is changed. One narrow
+seed/reopen test and strict example Clippy pass, as do four new evidence tests, fifteen parent
+tests, ten observer tests and targeted shell checks. A disposable user/network namespace accepts
+and removes the exact nft filter, ending with an empty ruleset; this carries no payload.
+The actual three-provider VM result remains pending; earlier source-scoped reports do not gain
+this new required proof retroactively.
 
 ### Native publication/site cache-only reopen
 

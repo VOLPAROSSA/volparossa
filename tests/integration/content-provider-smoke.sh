@@ -93,6 +93,53 @@ content_provider_start_control_observer() {
     wait_observer "$PROVIDER_CONTROL_PID" "$WORK/$provider_control_prefix.ready"
 }
 
+# A fresh adaptive phase may select a different broker. Its links and route evidence must
+# not overwrite the two-link phase; all changes remain inside the owned disposable nodes.
+content_provider_adaptive_control_underlay() {
+    provider_control_peer=$1
+    provider_control_node=$(jq -er --arg peer "$provider_control_peer" \
+        'to_entries[] | select(.value == $peer) | .key' "$WORK/a01-expected-peers.json") || return 1
+    case $provider_control_node in relay0|relay1|relay2) ;; *) return 1 ;; esac
+    content_provider_node "$provider_control_node" || return 1
+    provider_control_ns=$provider_ns
+    provider_control_ip=$provider_ip
+    provider_control_ips=$provider_ip
+    adaptive_slot=0
+    for adaptive_node in relay3 relay4 relay5; do
+        content_provider_node "$adaptive_node" || return 1
+        adaptive_segment=$((83 + adaptive_slot))
+        link_nodes "$provider_control_ns" "ac$adaptive_slot" "10.241.$adaptive_segment.1/30" \
+            "$provider_ns" "ap$adaptive_slot" "10.241.$adaptive_segment.2/30" || return 1
+        content_provider_filter_link "$provider_control_ns" "adaptive_$adaptive_slot" "ac$adaptive_slot" \
+            "$provider_control_ip" "$provider_ip" || return 1
+        content_provider_filter_link "$provider_ns" "adaptive_$adaptive_slot" "ap$adaptive_slot" \
+            "$provider_ip" "$provider_control_ip" || return 1
+        ip -n "$provider_control_ns" route replace "$provider_ip/32" \
+            via "10.241.$adaptive_segment.2" dev "ac$adaptive_slot" src "$provider_control_ip" || return 1
+        ip -n "$provider_ns" route replace "$provider_control_ip/32" \
+            via "10.241.$adaptive_segment.1" dev "ap$adaptive_slot" src "$provider_ip" || return 1
+        ip -n "$provider_control_ns" -j route get "$provider_ip" \
+            >"$WORK/content-provider-adaptive-control-$adaptive_node-out.json" || return 1
+        ip -n "$provider_ns" -j route get "$provider_control_ip" \
+            >"$WORK/content-provider-adaptive-control-$adaptive_node-back.json" || return 1
+        provider_control_ips=$provider_control_ips,$provider_ip
+        adaptive_slot=$((adaptive_slot + 1))
+    done
+}
+
+content_provider_adaptive_start_control_observer() {
+    provider_control_prefix=$1
+    case $provider_control_prefix in content-provider-adaptive-*) ;; *) return 1 ;; esac
+    [ -z "$PROVIDER_CONTROL_PID" ] || return 1
+    ip netns exec "$provider_control_ns" python3 "$WORK/bin/privacy-observer.py" \
+        content-control "$WORK/$provider_control_prefix.json" \
+        "$WORK/$provider_control_prefix.ready" --content-providers \
+        "--content-control=$provider_control_ips" ac0 ac1 ac2 \
+        >"$WORK/$provider_control_prefix.log" 2>&1 &
+    PROVIDER_CONTROL_PID=$!
+    wait_observer "$PROVIDER_CONTROL_PID" "$WORK/$provider_control_prefix.ready"
+}
+
 content_provider_stop_control_observer() {
     [ -n "$PROVIDER_CONTROL_PID" ] || return 1
     kill -TERM "$PROVIDER_CONTROL_PID" || return 1
@@ -260,6 +307,7 @@ content_provider_run() {
         || [ -s "$WORK/content-provider-final-paths.txt" ]; then
         fail CONTENT_PROVIDER_ROUTE_CLEANUP_FAILED
     fi
+    content_provider_adaptive_run
     python3 -B "$source_directory/tests/integration/content-provider-smoke.py" \
         evidence "$WORK" "$WORK/content-provider-evidence.json" || fail CONTENT_PROVIDER_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
@@ -290,7 +338,8 @@ content_provider_finalize_report() {
       {schema_version:1,report_kind:"volparossa-native-content-providers",
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and
-         $evidence.ordinary_publication.success == true and $evidence.site_publication.success == true and $complete and
+         $evidence.ordinary_publication.success == true and $evidence.site_publication.success == true and
+         $evidence.adaptive_workers.success == true and $complete and
          $remaining == 0 and $host.unchanged == true),transfer:$evidence,
        runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        cleanup:{complete:$complete,remaining_owned_objects:$remaining},host_state:($host | del(.acceptance_id)),
@@ -300,6 +349,7 @@ content_provider_finalize_report() {
        normal_user_publication:($evidence.ordinary_publication.success == true),
        native_name_retrieval:($evidence.named_publication.success == true),
        native_static_site:($evidence.site_publication.success == true),
+       adaptive_provider_workers:($evidence.adaptive_workers.success == true),
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1

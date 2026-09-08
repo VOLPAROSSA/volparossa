@@ -408,8 +408,10 @@ cost after the actual index round. The fixed 4-Mbps origin-uplink comparison on 
 completes a genuine automatic two-provider hit: 4.092 seconds versus 6.308 seconds origin-only
 for complete commands, with zero origin body. Its workflow fails at two checker-shape/accounting
 errors; the retained HTTPS raw evidence passes after those narrow corrections. Later phases
-were not reached, so this is not a full workflow pass. The single bounded benefit does not
-replace the earlier fast-origin trials or complete C08.
+were not reached, so this is not a full workflow pass. The complete corrected `6d3f44d` workflow
+then passes all phases, including a second actual automatic hit: 4.319 seconds versus 6.393
+seconds origin-only, with both peers and zero origin body. These bounded benefits do not
+replace the earlier fast-origin trials, certify three providers or complete C08.
 
 ### Bounded post-download redistribution
 

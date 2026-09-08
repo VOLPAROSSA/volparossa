@@ -288,6 +288,15 @@ def validate_transfer(evidence):
             and site["input"]["bundle_bytes"] == site_check["BUNDLE_BYTES"]
             and site["input"]["bundle_sha256"] == site_check["BUNDLE_SHA256"],
             "site proof substituted the topology, fixture authority or full canonical bundle")
+    adaptive_check = runpy.run_path(str(Path(__file__).with_name("content-provider-adaptive-smoke.py")))
+    adaptive = evidence["adaptive_workers"]
+    adaptive_check["validate"](adaptive)
+    require(adaptive["expected_peers"] == peers
+            and adaptive["previous_context"] == selected["route_context_id"]
+            and adaptive["selected_route"]["route_context_id"] != selected["route_context_id"]
+            and adaptive["publication"]["publisher_hex"] != publication["publisher_hex"]
+            and adaptive["publication"]["manifest_id"] != publication["manifest_id"],
+            "adaptive proof substituted the topology or reused the earlier route/publication")
 
 
 def build_site_publication(work):
@@ -295,6 +304,15 @@ def build_site_publication(work):
     rebuilt = site_check["build_evidence"](work)
     require(rebuilt == read(work / "content-provider-site-evidence.json"),
             "site component report differs from its raw CLI, HTTP or packet evidence")
+    return rebuilt
+
+
+def build_adaptive_workers(work):
+    # Load lazily: component helpers may import shared provider-path validation.
+    adaptive_check = runpy.run_path(str(Path(__file__).with_name("content-provider-adaptive-smoke.py")))
+    rebuilt = adaptive_check["build_evidence"](work)
+    require(rebuilt == read(work / "content-provider-adaptive-evidence.json"),
+            "adaptive component report differs from its raw receipts, routes or packet evidence")
     return rebuilt
 
 
@@ -315,6 +333,7 @@ def build_evidence(work):
                     ordinary_publication=read(work / "content-provider-user-publication.json"),
                     named_publication=build_named_publication(work, layout["provider_nodes"]),
                     site_publication=build_site_publication(work),
+                    adaptive_workers=build_adaptive_workers(work),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -371,6 +390,7 @@ def validate_report(report, revision):
             and report["normal_user_publication"] is True
             and report["native_name_retrieval"] is True
             and report["native_static_site"] is True
+            and report["adaptive_provider_workers"] is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]

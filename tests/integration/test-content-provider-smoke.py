@@ -5,12 +5,14 @@
 import ast
 import copy
 import json
+import os
 from pathlib import Path
 import runpy
 import socket
 import struct
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 HERE = Path(__file__).parent
@@ -88,6 +90,7 @@ def fixture(control_node="relay2"):
     evidence["ordinary_publication"] = user_fixture(evidence)
     evidence["named_publication"] = named_fixture(evidence)
     evidence["site_publication"] = runpy.run_path(str(HERE / "test-content-provider-site-smoke.py"))["fixture"](control_node)
+    evidence["adaptive_workers"] = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["fixture"]()
     return evidence
 
 
@@ -169,6 +172,21 @@ def user_fixture(base):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_adaptive_workers_are_required_and_bound_to_real_component_evidence(self):
+        evidence = fixture()
+        CHECK["validate_transfer"](evidence)
+        for mutate in (
+            lambda item: item.pop("adaptive_workers"),
+            lambda item: item["adaptive_workers"].update(success=False),
+            lambda item: item["adaptive_workers"]["expected_peers"].update(client="different-client"),
+            lambda item: item["adaptive_workers"]["publication"].update(object_sha256="f" * 64),
+            lambda item: item["adaptive_workers"]["selected_route"].update(route_context_id="a" * 32),
+        ):
+            changed = copy.deepcopy(evidence)
+            mutate(changed)
+            with self.assertRaises((ValueError, KeyError)):
+                CHECK["validate_transfer"](changed)
+
     def test_site_proof_is_required_and_bound_to_parent_topology_and_exact_bundle(self):
         evidence = fixture()
         CHECK["validate_transfer"](evidence)
@@ -227,6 +245,16 @@ class ContentProviderContract(unittest.TestCase):
     def test_actual_kernel_timestamp_decoder_and_bounded_bulk_milestones(self):
         text = (HERE / "kvm-alpha-topology.sh").read_text(encoding="utf-8")
         embedded = text.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
+        timing_assignment = next(node for node in ast.parse(embedded).body if isinstance(node, ast.Assign)
+                                 and any(isinstance(target, ast.Name) and target.id == "provider_timing_enabled"
+                                         for target in node.targets))
+        for role in ("exit", "client", "content-control"):
+            for filename in ("content-provider-privacy-exit.json", "content-provider-adaptive-privacy-exit.json",
+                             "content-provider-adaptive-unregistered-exit.json"):
+                environment = dict(os=os, role=role, output_path=f"/fixture/{filename}", content_provider_mode=True)
+                exec(compile(ast.Module(body=[timing_assignment], type_ignores=[]), "actual-timing-prefix", "exec"), environment)
+                self.assertEqual(environment["provider_timing_enabled"], role == "exit" and filename in (
+                    "content-provider-privacy-exit.json", "content-provider-adaptive-privacy-exit.json"))
         names = {"decode_packet_timestamp", "record_provider_payload_timing", "record_provider_application"}
         functions = [node for node in ast.parse(embedded).body
                      if isinstance(node, ast.FunctionDef) and node.name in names]
@@ -322,10 +350,17 @@ class ContentProviderContract(unittest.TestCase):
             "https": "https-evidence", "selected_route": "live-selection",
             "ordinary_publication": "user-publication",
             "site_publication": "site-evidence",
+            "adaptive_workers": "adaptive-evidence",
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
         files.update(site_raw_files(evidence["site_publication"]))
+        adaptive_raw = runpy.run_path(str(HERE / "test-content-provider-adaptive-smoke.py"))["raw_files"](
+            evidence["adaptive_workers"])
+        for name, value in adaptive_raw.items():
+            if name in files:
+                self.assertEqual(files[name], value, "component fixture cannot replace earlier proof inputs")
+            files[name] = value
         named = evidence["named_publication"]
         for key, suffix in (("fetch", "fetch"), ("output", "output"), ("cleanup", "cleanup"),
                             ("selected_route", "selection"), ("control_privacy", "control")):
@@ -346,7 +381,7 @@ class ContentProviderContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             for name, value in files.items():
-                (work / name).write_text(json.dumps(value), encoding="ascii")
+                (work / name).write_text(value if isinstance(value, str) else json.dumps(value), encoding="ascii")
             self.assertEqual(CHECK["build_evidence"](work), evidence)
             # The site must be rebuilt from raw receipts/captures, not accepted by its summary flag.
             site_report = work / "content-provider-site-evidence.json"
@@ -356,6 +391,16 @@ class ContentProviderContract(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CHECK["build_evidence"](work)
             site_report.write_text(json.dumps(evidence["site_publication"]), encoding="ascii")
+            adaptive_report = work / "content-provider-adaptive-evidence.json"
+            adaptive_report.unlink()
+            with self.assertRaises(OSError):
+                CHECK["build_evidence"](work)
+            substituted = copy.deepcopy(evidence["adaptive_workers"])
+            substituted["success"] = False
+            adaptive_report.write_text(json.dumps(substituted), encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["build_evidence"](work)
+            adaptive_report.write_text(json.dumps(evidence["adaptive_workers"]), encoding="ascii")
             # Keep every existing exact source/destination/gateway/device check after decoding.
             wrong = copy.deepcopy(files["content-provider-control-relay4-out.json"])
             wrong[0]["dev"] = "underlay"
@@ -391,6 +436,7 @@ class ContentProviderContract(unittest.TestCase):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
                       explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
                       native_static_site=True,
+                      adaptive_provider_workers=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})
@@ -400,6 +446,7 @@ class ContentProviderContract(unittest.TestCase):
             lambda item: item.update(full_c02_claimed=True),
             lambda item: item.update(explicit_origin_authenticated_https=False),
             lambda item: item.update(native_static_site=False),
+            lambda item: item.update(adaptive_provider_workers=False),
             lambda item: item["cleanup"].update(remaining_owned_objects=1),
             lambda item: item["host_state"].update(after_sha256="c" * 64),
         ):
@@ -472,7 +519,29 @@ class ContentProviderContract(unittest.TestCase):
     def test_actual_control_classifier_rejects_app_traffic_and_wrong_endpoints(self):
         text = (HERE / "kvm-alpha-topology.sh").read_text(encoding="utf-8")
         embedded = text.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
-        function = next(node for node in ast.parse(embedded).body if isinstance(node, ast.FunctionDef)
+        nodes = ast.parse(embedded).body
+        start = next(index for index, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Tuple) and isinstance(target.elts[0], ast.Name)
+                             and target.elts[0].id == "role" for target in node.targets))
+        end = next(index for index, node in enumerate(nodes) if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "direct_lan_relay1"
+                           for target in node.targets))
+        parser = compile(ast.Module(body=nodes[start:end], type_ignores=[]), "actual-control-arguments", "exec")
+        for interfaces, accepted in ((["cp0", "cp1"], True), (["ac0", "ac1", "ac2"], True),
+                                     (["cp0"], False), (["cp0", "ac1"], False),
+                                     (["ac0", "ac1"], False), (["ac0", "ac1", "ac3"], False),
+                                     (["cp0", "cp1", "cp2"], False)):
+            addresses = ["42.158.0.1", "48.164.4.1", "49.165.5.1", "50.166.6.1"][:len(interfaces) + 1]
+            environment = dict(socket=socket, sys=SimpleNamespace(argv=["observer", "content-control", "out", "ready",
+                "--content-providers", "--content-control=" + ",".join(addresses), *interfaces]))
+            if accepted:
+                exec(parser, environment)
+                self.assertEqual(environment["content_control_pairs"], {
+                    interface: [addresses[0], addresses[index + 1]] for index, interface in enumerate(interfaces)})
+            else:
+                with self.assertRaises(SystemExit):
+                    exec(parser, environment)
+        function = next(node for node in nodes if isinstance(node, ast.FunctionDef)
                         and node.name == "record_provider_control")
         environment = dict(socket=socket, content_control_pairs={"cp0": ["42.158.0.1", "49.165.5.1"]},
                            content_control_packets={"cp0": dict(inbound=0, outbound=0)},
@@ -488,6 +557,24 @@ class ContentProviderContract(unittest.TestCase):
             ("cp0", socket.IPPROTO_UDP, "43.159.1.1", 41000, "49.165.5.1", 41000),
             ("cp1", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000),
         ):
+            record(*args)
+        self.assertEqual(environment["unexpected_provider_control_packets"], 4)
+        # The additive family has three exact endpoint pairs, not a wildcard control allowance.
+        pairs = {f"ac{index}": ["42.158.0.1", CHECK["PUBLIC_IPS"][node]]
+                 for index, node in enumerate(("relay3", "relay4", "relay5"))}
+        environment = dict(socket=socket, content_control_pairs=pairs,
+                           content_control_packets={interface: dict(inbound=0, outbound=0) for interface in pairs},
+                           unexpected_provider_control_packets=0)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "actual-adaptive-control", "exec"), environment)
+        record = environment["record_provider_control"]
+        for interface, (source, destination) in pairs.items():
+            record(interface, socket.IPPROTO_UDP, source, 41000, destination, 41000)
+            record(interface, socket.IPPROTO_UDP, destination, 41000, source, 41000)
+            self.assertEqual(environment["content_control_packets"][interface], dict(inbound=1, outbound=1))
+        for args in (("ac0", socket.IPPROTO_TCP, "42.158.0.1", 32000, "48.164.4.1", 18080),
+                     ("ac0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "49.165.5.1", 41000),
+                     ("ac3", socket.IPPROTO_UDP, "42.158.0.1", 41000, "48.164.4.1", 41000),
+                     ("cp0", socket.IPPROTO_UDP, "42.158.0.1", 41000, "48.164.4.1", 41000)):
             record(*args)
         self.assertEqual(environment["unexpected_provider_control_packets"], 4)
 

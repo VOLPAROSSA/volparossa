@@ -65,6 +65,7 @@ print_plan() {
             'VOLPAROSSA content-provider runtime smoke plan:' \
             '  register two disjoint stores on two of Relay3/4/5, excluding the current control relay;' \
             '  add exactly two disposable broker-provider links restricted to UDP41000 control traffic;' \
+            '  before Discovery, block only Client controlUDP41000 on cr3/cr4/cr5 so the real control relay is R0/1/2;' \
             '  permit only their exact fixture DNS names/TCP18080, never unrestricted raw-IP egress;' \
             '  discover generic services through the control relay and actual private Kademlia;' \
             '  fetch via genuine MPTCP/TLS/two-leg WireGuard after publisher removal;' \
@@ -75,6 +76,8 @@ print_plan() {
             '  grant only control-group traversal and remove the exact temporary publisher identity/passphrase;' \
             '  pack/publish a normal signed static site, import two replicas, remove original publisher files;' \
             '  open by publisher/name in the Client, verify HTTP assets/ranges and SIGTERM spool cleanup (no browser engine);' \
+            '  after existing phases, create three separate control-only broker links to R3/R4/R5 and fetch 15 disjoint chunks on a fresh route;' \
+            '  require real triple provider payload overlap, exact reconstruction and normal service/route teardown;' \
             '  retain complete privacy captures/cleanup; no general NAT, arbitrary-browser HTTPS or full-C02 claim.'
         return
     fi
@@ -420,7 +423,8 @@ fi
 if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
         content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh \
-        content-provider-site-smoke.sh content-provider-site-smoke.py; do
+        content-provider-site-smoke.sh content-provider-site-smoke.py \
+        content-provider-adaptive-smoke.sh content-provider-adaptive-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1236,6 +1240,10 @@ cleanup() {
         done
     fi
     for cleanup_unit in $AGENT_UNITS; do retire_unit "$cleanup_unit" || true; done
+    if [ "$scenario" = content-provider ] \
+        && ip netns exec "$CLIENT" nft list table inet vpa_content_adaptive_client_control >/dev/null 2>&1; then
+        ip netns exec "$CLIENT" nft delete table inet vpa_content_adaptive_client_control || original_status=1
+    fi
     if [ "$wifi_link" = yes ]; then
         wifi_link_agents_stopped || original_status=1
     fi
@@ -1540,6 +1548,8 @@ if [ "$scenario" = content-provider ]; then
     . "$source_directory/tests/integration/content-publication-smoke.sh"
     # shellcheck source=tests/integration/content-provider-site-smoke.sh
     . "$source_directory/tests/integration/content-provider-site-smoke.sh"
+    # shellcheck source=tests/integration/content-provider-adaptive-smoke.sh
+    . "$source_directory/tests/integration/content-provider-adaptive-smoke.sh"
 fi
 if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-replication-smoke.sh
@@ -1801,6 +1811,26 @@ for forbidden in 10.241.20.2 10.241.21.2 10.241.22.2 10.241.23.2 \
     fi
 done
 CLIENT_EXIT_ROUTE_ABSENT=true
+if [ "$scenario" = content-provider ]; then
+    # Fixture reachability, not selection injection: the original actor starts with this
+    # network already in place. Providers remain reachable via the Exit and actual broker.
+    ip netns exec "$CLIENT" nft -f - <<'CONTENT_ADAPTIVE_FILTER'
+table inet vpa_content_adaptive_client_control {
+    chain input {
+        type filter hook input priority -25; policy accept;
+        iifname { "cr3", "cr4", "cr5" } udp sport 41000 counter drop
+        iifname { "cr3", "cr4", "cr5" } udp dport 41000 counter drop
+    }
+    chain output {
+        type filter hook output priority -25; policy accept;
+        oifname { "cr3", "cr4", "cr5" } udp sport 41000 counter drop
+        oifname { "cr3", "cr4", "cr5" } udp dport 41000 counter drop
+    }
+}
+CONTENT_ADAPTIVE_FILTER
+    ip netns exec "$CLIENT" nft -j list table inet vpa_content_adaptive_client_control \
+        >"$WORK/content-provider-adaptive-control-filter.json" || fail CONTENT_PROVIDER_ADAPTIVE_FILTER_INVALID
+fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
 elif [ "$scenario" = content-replication ]; then
@@ -3031,13 +3061,15 @@ content_control_pairs = {}
 if role == "content-control" and content_provider_mode:
     control_argument = interfaces.pop(0) if interfaces else ""
     control_addresses = control_argument.removeprefix("--content-control=").split(",")
-    if not control_argument.startswith("--content-control=") or len(control_addresses) != 3 \
-            or len(set(control_addresses)) != 3 or interfaces != ["cp0", "cp1"]:
+    allowed_interfaces = (["cp0", "cp1"], ["ac0", "ac1", "ac2"])
+    if not control_argument.startswith("--content-control=") or interfaces not in allowed_interfaces \
+            or len(control_addresses) != len(interfaces) + 1 \
+            or len(set(control_addresses)) != len(control_addresses):
         raise SystemExit("invalid provider control capture")
     for address in control_addresses:
         socket.inet_pton(socket.AF_INET, address)
-    content_control_pairs = {"cp0": control_addresses[:2],
-                             "cp1": [control_addresses[0], control_addresses[2]]}
+    content_control_pairs = {interface: [control_addresses[0], control_addresses[index + 1]]
+                             for index, interface in enumerate(interfaces)}
 direct_lan_relay1 = interfaces[:1] == ["--direct-lan-relay1"]
 if direct_lan_relay1:
     interfaces.pop(0)
@@ -3081,7 +3113,9 @@ provider_addresses = {"49.165.5.1": "relay4", "50.166.6.1": "relay5", "48.164.4.
 provider_application = {node: dict(request_packets=0, response_packets=0, response_payload_bytes=0)
                         for node in provider_addresses.values()}
 provider_timing_enabled = (content_provider_mode and role == "exit"
-                          and os.path.basename(output_path) == "content-provider-privacy-exit.json")
+                          and os.path.basename(output_path) in {
+                              "content-provider-privacy-exit.json",
+                              "content-provider-adaptive-privacy-exit.json"})
 # Linux UAPI SO_TIMESTAMPNS_NEW reports __kernel_timespec, two signed 64-bit fields.
 # Capture packet arrival, not socket-drain time: fair queue draining can reorder interfaces.
 # https://docs.kernel.org/networking/timestamping.html#so-timestampns-also-so-timestampns-old-and-so-timestampns-new
@@ -4523,7 +4557,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
+        content-provider-privacy|content-provider-adaptive-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

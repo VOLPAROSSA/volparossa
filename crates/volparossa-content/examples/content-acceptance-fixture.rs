@@ -4,6 +4,9 @@
 //! ingress and carried over genuine MPTCP/TLS and both `WireGuard` legs. Loopback use only
 //! proves this application's protocol; it does not prove any overlay or HTTPS property.
 
+#[path = "content-acceptance-fixture/adaptive.rs"]
+mod adaptive;
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -35,6 +38,9 @@ async fn main() -> Result<()> {
         [mode, root, first, second] if mode == "seed-providers" => {
             seed_replicas(Path::new(root), None, Path::new(first), Path::new(second))
         }
+        [mode, root, first, second, third] if mode == "seed-adaptive-providers" => {
+            adaptive::seed(Path::new(root), [Path::new(first), Path::new(second), Path::new(third)])
+        }
         [mode, root, foreground, reserve] if mode == "seed-replication" => {
             seed_replication(Path::new(root), Path::new(foreground), Path::new(reserve))
         }
@@ -61,7 +67,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-replication ROOT CACHE_P CACHE_Q | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-providers ROOT CACHE_A CACHE_B | seed-adaptive-providers ROOT CACHE_A CACHE_B CACHE_C | seed-replication ROOT CACHE_P CACHE_Q | seed-private ROOT RECIPIENT_PUBLIC_HEX | recipient-init CLIENT_ROOT REPORT | serve ROOT a|b LISTEN REPORT | fetch CLIENT_ROOT MANIFEST PUBLISHER_HEX CONNECT REPORT | open-message CLIENT_ROOT MANIFEST PUBLISHER_HEX REPORT".into()),
     }
 }
 

@@ -316,8 +316,10 @@ admission. The [fixed 4-Mbps-origin run on `2769761c`](https://github.com/VOLPAR
 completed an actual automatic peer hit: 4.09 seconds for the full command versus 6.31 seconds
 origin-only, with zero origin body. The workflow **failed in its evidence checker**, not during
 those downloads; rechecking the retained HTTPS evidence with two narrow checker corrections
-passes. A complete corrected workflow remains pending. This one constrained-uplink sample does
-not replace the earlier faster-origin results or promise a general speedup.
+passes. The [complete corrected workflow on `6d3f44d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34227589468)
+now passes, including the later publication/name/site/cache-only phases. Its automatic command
+takes 4.32 seconds versus 6.39 seconds origin-only, again with zero origin body. These constrained-
+uplink samples do not replace the earlier faster-origin results or promise a general speedup.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

@@ -762,8 +762,11 @@ RAM-only costs expire within sixty seconds and do not renew offers or establish 
 The fixed 4-Mbps-origin comparison on `2769761c` completed a genuine automatic hit with two
 providers and zero origin body: 4.092074725 seconds for the full command versus 6.307903196
 seconds origin-only. That workflow failed in the checker; retained HTTPS raw evidence passes
-with the subsequent qdisc-array and silent-unselected-relay corrections. A new complete workflow
-remains pending. This is one bounded comparison, not a general speed guarantee.
+with the subsequent qdisc-array and silent-unselected-relay corrections. The
+[complete corrected workflow on `6d3f44d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34227589468)
+passes with all later publication/name/site/cache-only phases. Its full automatic command takes
+4.319381088 seconds versus 6.392691790 seconds origin-only, with both peers and zero origin body.
+These are bounded comparisons, not a general speed guarantee or three-provider network proof.
 
 ### Adaptive foreground cache workers
 
