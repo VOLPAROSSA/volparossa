@@ -38,8 +38,11 @@ bounded contributed chunk storage, multi-peer retrieval and spare-resource repli
 DNS sharing, signed public publication and recipient-encrypted offline delivery. The local
 `volparossa-content` foundation has bounded persistent storage and protected-route retrieval
 evidence (C01). Recipient-encrypted messages reuse that storage/transfer layer, with caller-trusted
-keys and no implicit key store or mailbox. Distributed discovery, browser integration and the
-remaining C02--C08 scope are unfinished; exact test revisions are in the implementation status.
+keys and no implicit key store or mailbox. Explicit native/cooperative-origin retrieval through
+generic provider discovery now has an independent-node proof. Replica metadata can be restored
+from an owned cache on explicit service restart, not automatically on boot. General reachability,
+retention repair, browser integration and the remaining C02--C08 scope are unfinished; exact test
+revisions and the remote route-retirement gap are in the implementation status.
 
 This is an application layer, not an HTTPS-decrypting property of the VPN. Reconstructed bytes
 need authenticated origin/publisher authority as well as chunk integrity, and must retain

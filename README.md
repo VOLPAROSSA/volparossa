@@ -125,8 +125,10 @@ tests pass. Optional uptake now requests one chunk at a time, checking the confi
 before granting the next chunk; a busy sample ends the exchange with verified partial data.
 The new one-chunk-credit exchange also completes multi-node uptake and re-serving on `e592b610`,
 after the original provider shuts down. Its final capture check still fails: the replicator's
-local disconnect leaves remote WireGuard route owners alive until expiry. Explicit remote
-retirement is being added; that failed scenario is not a privacy pass.
+local disconnect leaves remote WireGuard route owners alive until expiry. Explicit session-signed
+remote retirement now has local Client/Relay/Exit and helper-RPC tests, but still needs the live
+rerun. Its bounded scope-capacity reclamation remains unfinished; see implementation status.
+The earlier failed scenario is not a privacy pass.
 `content serve --reuse-replica-cache` now explicitly restores unexpired registrations from an
 owned replica cache; local transfer/reopen/re-serving tests pass. This starts no service on boot
 and does not supply automatic repair or retention guarantees; its network probe is pending.

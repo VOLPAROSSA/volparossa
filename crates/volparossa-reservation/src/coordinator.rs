@@ -18,7 +18,7 @@ use volparossa_protocol::{
     NATIVE_ROUTE_AUTH_BEARER_LENGTH, NativeRouteCredentialDelivery, NativeRouteCredentialError,
     NativeRouteCredentialScope, NativeRouteIdentity, OpenTcp, ProbeAddressFamily, ProbeLegEvidence,
     ProtocolError, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest, RelayProbeResult,
-    RelayReservationRequest, ReplayCache, SignedEnvelope, TimePolicy, Transport,
+    RelayReservationRequest, ReplayCache, RouteRetire, SignedEnvelope, TimePolicy, Transport,
     UdpFlowAuthorization, WireguardEndpoint, decode_canonical, exit_confirmation_envelope_hash,
     finalized_reservation_bundle_hash, generate_nonce, native_route_auth_commitment,
     node_id_from_public_key, seal_native_route_credential, sign_control_message,
@@ -528,6 +528,40 @@ impl ReservationCoordinator {
     #[must_use]
     pub fn client_session_public_key(&self) -> [u8; KEY_BYTES] {
         self.session_key.verifying_key().to_bytes()
+    }
+
+    /// Sign destruction of this route attempt without granting new traffic or renewing leases.
+    ///
+    /// The remote actor must independently match its retained context, reservation, policy and
+    /// session authority; this signature is not permission to create or modify another route.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed scope, an invalid lifetime, or a noncanonical control frame.
+    pub fn sign_route_retire(
+        &self,
+        route_context_id: [u8; ID_BYTES],
+        reservation_id: [u8; ID_BYTES],
+        policy_hash: [u8; KEY_BYTES],
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        let request = RouteRetire {
+            route_context_id: route_context_id.to_vec(),
+            reservation_id: reservation_id.to_vec(),
+            policy_hash: policy_hash.to_vec(),
+            client_session_id: self.client_session_id.to_vec(),
+            client_session_public_key: self.client_session_public_key().to_vec(),
+        };
+        sign_control_message(
+            &request,
+            &self.session_key,
+            timestamp_ms,
+            expires_at_ms,
+            generate_nonce(),
+            TimePolicy::default(),
+        )
+        .map_err(CoordinatorError::from)
     }
 
     /// Sign one policy-bound TCP flow with this fresh route-attempt session.
@@ -2173,6 +2207,48 @@ mod tests {
     };
 
     const NOW: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn route_retire_preserves_session_and_scope_without_renewing_route_authority() {
+        let coordinator = ReservationCoordinator::new(8).expect("session");
+        let mut replay = ReplayCache::new(4).expect("replay bound");
+        let mut messages = Vec::new();
+        for _ in 0..2 {
+            let signed = coordinator
+                .sign_route_retire([1; 16], [2; 16], [3; 32], NOW, NOW + 15_000)
+                .expect("retirement");
+            let verified = verify_control_message::<volparossa_protocol::RouteRetire>(
+                &signed,
+                NOW + 1,
+                TimePolicy::default(),
+                &mut replay,
+            )
+            .expect("same-session genuine signature");
+            assert_eq!(verified.message().route_context_id, [1; 16]);
+            assert_eq!(verified.message().reservation_id, [2; 16]);
+            assert_eq!(verified.message().policy_hash, [3; 32]);
+            assert_eq!(
+                verified.message().client_session_id,
+                *coordinator.client_session_id()
+            );
+            assert_eq!(
+                verified.message().client_session_public_key,
+                coordinator.client_session_public_key()
+            );
+            messages.push(signed);
+        }
+        assert_ne!(messages[0], messages[1], "retry uses a fresh nonce");
+        assert!(
+            coordinator
+                .sign_route_retire([1; 16], [2; 16], [3; 32], NOW, NOW + 15_001)
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .sign_route_retire([0; 16], [2; 16], [3; 32], NOW, NOW + 1)
+                .is_err()
+        );
+    }
 
     #[test]
     fn raw_ip_open_tcp_is_signed_with_the_exact_destination_bytes() {

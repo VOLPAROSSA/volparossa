@@ -21,6 +21,7 @@ mod preselection_transaction;
 mod preselection_wire;
 mod quic_lan;
 mod reservations;
+mod route_retire;
 mod udp_session;
 
 use std::{
@@ -1480,10 +1481,13 @@ impl DiscoveryService {
         exit_peer: &PeerId,
         request: UpstreamExitForwardRequest,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
-        if !self.protocol_roles.relay() {
+        request.validate()?;
+        if !self.protocol_roles.relay()
+            && request.as_forward_request().validated_operation()?
+                != ExitForwardOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
         let canonical = request.as_forward_request();
         let wrapper_relay = peer_id_from_wire(canonical.control_relay_peer_id())?;
         let wrapper_exit = peer_id_from_wire(canonical.exit_peer_id())?;
@@ -1554,6 +1558,26 @@ impl DiscoveryService {
             .ok_or(DiscoveryError::ProtocolPeer)
     }
 
+    /// Check exact live authenticated lineage for destruction of an already retained route.
+    ///
+    /// This remains available after roles are disabled. It grants no new route/prefix authority,
+    /// chooses no sibling connection and performs no dial. The caller must independently verify
+    /// the signed retirement request and its complete retained ownership scope.
+    #[must_use]
+    pub fn route_retirement_connection_live(
+        &self,
+        peer: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> bool {
+        peer != *self.local_peer_id()
+            && self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .bind_native_probe_data_relay(peer, connection_id)
+                .is_some()
+    }
+
     /// Sends one canonical exit response to the authenticated control relay.
     ///
     /// # Errors
@@ -1565,10 +1589,13 @@ impl DiscoveryService {
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
         response: UpstreamExitForwardResponse,
     ) -> Result<(), DiscoveryError> {
-        if !self.protocol_roles.exit() {
+        response.validate()?;
+        if !self.protocol_roles.exit()
+            && response.as_forward_response().validated_operation()?
+                != ExitForwardOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        response.validate()?;
         if peer_id_from_wire(response.as_forward_response().exit_peer_id())?
             != *self.local_peer_id()
         {
@@ -1741,10 +1768,12 @@ impl DiscoveryService {
         relay_peer: &PeerId,
         request: DatapathRelayRequest,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
-        if !self.protocol_roles.client() {
+        request.validate()?;
+        if !self.protocol_roles.client()
+            && request.validated_operation()? != DatapathRelayOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
         let wrapper_relay = peer_id_from_wire(request.relay_peer_id())?;
         if wrapper_relay != *relay_peer || wrapper_relay == *self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
@@ -1767,10 +1796,12 @@ impl DiscoveryService {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         response: DatapathRelayResponse,
     ) -> Result<(), DiscoveryError> {
-        if !self.protocol_roles.relay() {
+        response.validate()?;
+        if !self.protocol_roles.relay()
+            && response.validated_operation()? != DatapathRelayOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        response.validate()?;
         if peer_id_from_wire(response.relay_peer_id())? != *self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
         }
@@ -1891,7 +1922,8 @@ impl DiscoveryService {
                             },
                     },
                 )) => {
-                    if !self.protocol_roles.relay()
+                    if (!self.protocol_roles.relay()
+                        && request.validated_operation() != Ok(DatapathRelayOperation::RouteRetire))
                         || !datapath_request_targets_local_relay(&request, self.local_peer_id())
                     {
                         continue;

@@ -6,7 +6,7 @@ every future version are rejected without fallback. Historical schemas are retai
 archaeology and refusal tests; they are not registered or negotiated.
 
 The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
-`SignedEnvelope` and all twenty-five signed `ControlPayload` messages. The separate checked-in
+`SignedEnvelope` and the signed `ControlPayload` messages. The separate checked-in
 [discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
@@ -38,6 +38,30 @@ operations use exactly one selected control relay on both forwarding hops. A gen
 `Unavailable` is definitive for that setup and is not a retry trigger; only a local transport
 outcome with no response evidence may become `AmbiguousAfterDispatch` for a bounded exact-byte
 retry.
+
+### Destruction-only remote route retirement
+
+Control-v4 adds signed `RouteRetire` (29) and `RetirementReceipt` (30), each at most 4096 bytes
+with at most 15 seconds of envelope lifetime. A request is signed by the original ephemeral
+Client session, not its permanent node identity. Payload tags are `1: route context` (16 bytes),
+`2: reservation` (16), `3: original policy hash` (32), `4: session ID` (32), and `5: session
+public key` (32). The receiver still needs its exact retained grant/ownership scope and the
+authenticated adjacent peer; a signature alone grants no arbitrary-context deletion.
+
+The Client uses `DatapathRelayOperation::RouteRetire` (9) for its retained control/data relays.
+Only a Relay forwards `ExitForwardOperation::RouteRetire` (14) on the upstream Exit channel;
+the Client-facing Exit-forward codec refuses that operation. No destination, permanent Client
+Peer ID or endpoint is added. Cleanup may outlive the original policy/role, but it cannot renew
+traffic, create a route or acquire new egress authority.
+
+A receipt binds `1: context`, `2: reservation`, `3: exact signed-request hash`, `4: concrete
+signer node ID`, `5: confirmed_destroyed=true`, and `6: signed Exit receipt` (Relay only).
+The hash uses `volparossa/route-retire-request/v4\0`, the request byte length as big-endian u32,
+and the complete canonical signed request including nonce. Nesting is exactly one level.
+Consumers independently verify both node signatures, request correlation and original scopes;
+an outer Relay signature cannot replace the Exit signature. A generic unavailable/rejected
+response is not cleanup confirmation. Remote acknowledgements are not independent proof that
+a malicious peer erased its state; actual owned-runtime teardown still needs functional evidence.
 
 ### Native content application stream (development v1)
 
@@ -90,6 +114,20 @@ Selector and transfer share one original session deadline. Normal local-control 
 request operation tags 20/21/22/23 for serve/fetch/stop/status and response payload tag 18 for a bounded
 content receipt; unknown operations remain rejected by older agents. This is not a name service,
 automatic replica placement or an HTTPS trust constructor.
+
+Optional post-download redistribution uses a separate selector version: v2 sends bounded
+extra chunks; the normal agent uses v3 with one receiver credit per chunk and a checked finish
+on receiver stop. No silent v2 fallback occurs. Request, selector, metadata, credit, chunk and
+finish bytes all share the original protocol-byte budget and deadline. The provider releases
+cache handles and the registry lock while waiting for credit. Original signed manifests and
+expiry remain unchanged; a storage peer's signature check is not consumer publisher authority.
+
+Normal local control's optional `ContentReplicationConfig` adds tag 5 `reuse_replica_cache`
+(bool, default false). Explicit true reopens only an owned replica store; it does not start a
+service without Serve. The private fixed-name cache-bound journal stores canonical original
+manifests, publisher hints, original creation times, local hop counts and retained chunk IDs,
+bounded to 64 records / 8 MiB. Restoration verifies signatures and live chunks before listener
+start; it never reissues manifests, refreshes expiry or adopts foreign directories.
 
 ### Recipient-encrypted native message object (development v1)
 

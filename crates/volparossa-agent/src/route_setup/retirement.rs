@@ -1,7 +1,9 @@
 //! Bounded, non-blocking publication of helper context retirement ownership.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -15,13 +17,62 @@ use crate::{
 };
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, MissedTickBehavior, interval, timeout},
 };
 
 use super::{ClientReservationProtocol, LocalRouteBackend};
+use libp2p::PeerId;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+pub(super) type RemoteRetirementFuture = Pin<Box<dyn Future<Output = Result<(), ()>> + Send>>;
+pub(super) type RemoteRetirementDispatcher =
+    Box<dyn Fn(PeerId, PeerId, Vec<u8>) -> RemoteRetirementFuture + Send + Sync>;
+
+/// Destruction-only scope retained before a request can create a remote datapath.
+#[derive(Clone, Debug)]
+pub(super) struct RemoteRetirementScope {
+    pub(super) route_context_id: [u8; 16],
+    pub(super) reservation_id: [u8; 16],
+    pub(super) policy_hash: [u8; 32],
+    pub(super) exit_peer_id: PeerId,
+}
+
+struct RemoteRetirement {
+    scope: RemoteRetirementScope,
+    pending_relays: BTreeSet<PeerId>,
+    dispatch: RemoteRetirementDispatcher,
+}
+
+impl RemoteRetirement {
+    async fn attempt<P: ClientReservationProtocol>(&mut self, protocol: &mut P) -> bool {
+        // The caller bounds this whole pass, not each individual peer. Completed targets are
+        // removed immediately, so cancellation/retry cannot forget an unconfirmed owner.
+        // All <=9 calls run concurrently: an offline relay cannot starve live owners. A separate
+        // nonce per target also avoids coupling different Relay->Exit hops through replay state.
+        let mut calls = JoinSet::new();
+        for peer in self.pending_relays.iter().copied() {
+            let now_ms = crate::unix_millis();
+            let Some(expires_ms) =
+                now_ms.checked_add(volparossa_protocol::MAX_ROUTE_RETIRE_LIFETIME_MS)
+            else {
+                return false;
+            };
+            let Ok(signed) = protocol.sign_route_retire(&self.scope, now_ms, expires_ms) else {
+                return false;
+            };
+            let dispatched = (self.dispatch)(peer, self.scope.exit_peer_id, signed);
+            calls.spawn(async move { (peer, dispatched.await) });
+        }
+        while let Some(completed) = calls.join_next().await {
+            if let Ok((peer, Ok(()))) = completed {
+                self.pending_relays.remove(&peer);
+            }
+        }
+        self.pending_relays.is_empty()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RetirementOutcome {
@@ -95,6 +146,7 @@ impl Drop for RetirementSlot {
 
 enum CleanupTarget {
     Exact(Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>),
+    LocallyDestroyed,
     AmbiguousPrepare {
         authority: PrepareReconciliationAuthority,
         not_before: Instant,
@@ -103,6 +155,7 @@ enum CleanupTarget {
 
 struct RetirementJob<P> {
     target: CleanupTarget,
+    remote: Option<RemoteRetirement>,
     endpoints: Option<LocalEndpointLeaseBatch>,
     protocol: P,
     reservation_id: [u8; 16],
@@ -212,6 +265,7 @@ impl<P> RetirementReservation<P> {
             sink: self.sink.clone(),
             job: Some(RetirementJob {
                 target: CleanupTarget::Exact(Arc::new(Mutex::new(prepared))),
+                remote: None,
                 endpoints: None,
                 protocol,
                 reservation_id,
@@ -239,6 +293,7 @@ impl<P> RetirementReservation<P> {
                     authority,
                     not_before,
                 },
+                remote: None,
                 endpoints: None,
                 protocol,
                 reservation_id,
@@ -258,11 +313,46 @@ pub(super) struct PreparedContextOwner<P> {
 }
 
 impl<P> PreparedContextOwner<P> {
+    pub(super) fn arm_remote_retirement(
+        &mut self,
+        scope: RemoteRetirementScope,
+        control_relay: PeerId,
+        dispatch: RemoteRetirementDispatcher,
+    ) -> Result<(), ()> {
+        let job = self.job.as_mut().ok_or(())?;
+        if job.remote.is_some() || scope.reservation_id != job.reservation_id {
+            return Err(());
+        }
+        job.remote = Some(RemoteRetirement {
+            scope,
+            pending_relays: BTreeSet::from([control_relay]),
+            dispatch,
+        });
+        Ok(())
+    }
+
+    pub(super) fn retain_remote_relay(&mut self, relay: PeerId) -> Result<(), ()> {
+        let remote = self
+            .job
+            .as_mut()
+            .and_then(|job| job.remote.as_mut())
+            .ok_or(())?;
+        if remote.pending_relays.len() >= 9 && !remote.pending_relays.contains(&relay) {
+            return Err(());
+        }
+        remote.pending_relays.insert(relay);
+        Ok(())
+    }
+
+    pub(super) fn owns_remote_retirement(&self) -> bool {
+        self.job.as_ref().is_some_and(|job| job.remote.is_some())
+    }
+
     pub(super) fn runtime_owner(&self) -> Option<Arc<Mutex<RuntimeBoundPreparedLeaseBatch>>> {
         let job = self.job.as_ref()?;
         match &job.target {
             CleanupTarget::Exact(owner) => Some(Arc::clone(owner)),
-            CleanupTarget::AmbiguousPrepare { .. } => None,
+            CleanupTarget::AmbiguousPrepare { .. } | CleanupTarget::LocallyDestroyed => None,
         }
     }
 
@@ -492,7 +582,8 @@ async fn process_job<P, L>(
         quarantine.push_back(job);
         return;
     }
-    let confirmed = match &job.target {
+    let local_confirmed = match &job.target {
+        CleanupTarget::LocallyDestroyed => true,
         CleanupTarget::Exact(owner) => {
             let owner = owner.lock().await;
             matches!(
@@ -512,6 +603,19 @@ async fn process_job<P, L>(
             )
         }
     };
+    if local_confirmed {
+        // The receipt has settled local ownership. Keep the remote cleanup job, protocol and
+        // endpoint leases until all peers confirm, but never reissue this local destruction.
+        job.target = CleanupTarget::LocallyDestroyed;
+    }
+    let confirmed = local_confirmed
+        && match job.remote.as_mut() {
+            Some(remote) => matches!(
+                timeout(destroy_timeout, remote.attempt(&mut job.protocol)).await,
+                Ok(true)
+            ),
+            None => true,
+        };
     if confirmed {
         if job.quarantined {
             state.quarantined.fetch_sub(1, Ordering::AcqRel);

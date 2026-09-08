@@ -60,6 +60,8 @@ pub enum DatapathRelayOperation {
     MptcpSessionStart = 7,
     /// Forward one exact committed MPQUIC path proof set to the selected Exit.
     MpquicSessionStart = 8,
+    /// Retire one exact retained reservation; never a new Prepare or Start authorization.
+    RouteRetire = 9,
 }
 
 /// Canonical direct datapath-relay request.
@@ -202,6 +204,16 @@ impl DatapathRelayRequest {
                 )
                 .map_err(|_| DatapathRelayRpcError::InvalidFrame)?
                 .validate()
+                .map_err(|_| DatapathRelayRpcError::InvalidFrame)
+            }
+            DatapathRelayOperation::RouteRetire => {
+                if !self.exit_signed_authorization.is_empty() {
+                    return Err(DatapathRelayRpcError::InvalidFrame);
+                }
+                crate::route_retire::validate_request(
+                    &self.client_signed_request,
+                    self.deadline_unix_ms,
+                )
                 .map_err(|_| DatapathRelayRpcError::InvalidFrame)
             }
             DatapathRelayOperation::Unspecified => {
@@ -403,6 +415,14 @@ impl DatapathRelayResponse {
                     }
                     DatapathRelayOperation::MpquicSessionStart => {
                         return validate_mpquic_session_signal(&self.signed_response);
+                    }
+                    DatapathRelayOperation::RouteRetire => {
+                        return crate::route_retire::validate_receipt(
+                            &self.signed_response,
+                            &self.relay_node_id,
+                            true,
+                        )
+                        .map_err(|_| DatapathRelayRpcError::InvalidFrame);
                     }
                     DatapathRelayOperation::Unspecified => {
                         return Err(DatapathRelayRpcError::InvalidOperation(self.operation));

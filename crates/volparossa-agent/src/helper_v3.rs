@@ -697,7 +697,11 @@ impl HelperClient {
     }
 
     #[cfg(test)]
-    fn new_for_test(socket: PathBuf, cleanup_token: PathBuf, expected_server_uid: u32) -> Self {
+    pub(crate) fn new_for_test(
+        socket: PathBuf,
+        cleanup_token: PathBuf,
+        expected_server_uid: u32,
+    ) -> Self {
         Self {
             socket,
             cleanup_token,

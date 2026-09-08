@@ -13,6 +13,12 @@ mod native_route;
 mod native_route_credential;
 mod preselection_observation;
 mod reservation_requests;
+mod route_retire;
+
+pub use route_retire::{
+    MAX_ROUTE_RETIRE_BYTES, MAX_ROUTE_RETIRE_LIFETIME_MS, RetirementReceipt, RouteRetire,
+    route_retire_request_hash,
+};
 
 pub use canonical::{decode_canonical, encode_canonical};
 pub use envelope::{

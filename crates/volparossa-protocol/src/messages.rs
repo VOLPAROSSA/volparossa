@@ -80,6 +80,10 @@ pub enum ControlMessageType {
     AdjacentReceiveBudget = 27,
     /// Exit-signed acknowledgement of one exact installed adjacent receive budget.
     AdjacentReceiveBudgetReceipt = 28,
+    /// Client-session-signed retirement of one exact retained route reservation.
+    RouteRetire = 29,
+    /// Concrete remote owner's acknowledgement of one exact retirement request.
+    RetirementReceipt = 30,
 }
 
 /// Data transport authorized by a reservation.

@@ -7556,6 +7556,11 @@ mod tests {
             false
         }
 
+        fn retirement_dispatcher(&self) -> super::super::retirement::RemoteRetirementDispatcher {
+            // This handoff fixture fails before a remote Finalize dispatch.
+            Box::new(|_, _, _| Box::pin(async { Err(()) }))
+        }
+
         async fn endpoint_traversal_hints(
             &mut self,
             _bindings: Vec<EndpointTraversalBinding>,

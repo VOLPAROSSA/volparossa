@@ -13,6 +13,40 @@ Scoped downlink and mixed-link runs now pass; content/application integration co
 
 ## Latest content integration checkpoint
 
+The next local integration adds actual signed remote route retirement, rather than relaxing the
+C03 packet boundary. An affine Client job retains its original session signer and exact selected
+control/data relays before Finalize/ReservePath dispatch, including ambiguous rollback. Local
+Destroy happens once; at most nine remote requests run in parallel with fresh per-target nonces.
+Unconfirmed targets remain owned and coordinator/endpoint capacity is released only after all
+Relay and independently verified nested Exit receipts bind the exact request. A stalled peer
+does not prevent the other requests. The remote actors retain original authority across prepared
+and running MPTCP/UDP/MPQUIC owners, request real shutdown/join/Destroy, keep failed owners for
+retry and block late Prepare/Start for retiring contexts. A fieldless/generic reply is not success.
+
+Two signed-message tests, one real two-hop codec test, six schema tests and a registry guard pass;
+protocol/discovery strict Clippy passes. Three Client retirement tests cover ambiguous Finalize,
+one unconfirmed peer and a stalled-first/live-other case. The real same-session signer/nonce/TTL
+test and reservation Clippy pass. Two actor tests pass: actual three-node MemoryTransport with
+independent signed Relay/Exit receipts, and a Unix helper-RPC proof of join-before-Destroy,
+failure-retention and another context left untouched. Disabled runtime roles and expired original
+grants do not block exact cleanup; wrong policy/session does. Strict agent Clippy also passes.
+Normal daemon shutdown now keeps discovery alive until the bounded route-retirement attempt
+finishes; a focused ordering test covers both confirmed and failed cleanup, with failure preserved
+as `ShutdownCleanup`. These are local functional proofs, not a new KVM pass. The source-bound C03
+run including replica stop/reopen is still pending.
+
+Temporary functional limitation: each remote role retains at most 1,024 retirement scopes,
+including completed ones; full maps reject new admission. Premature expiry-based deletion would
+strand a later selected relay's confirmation. Safe capacity reclamation needs portable original
+authority/terminal-scope evidence and remains unfinished, as does scope recovery after actor
+restart. Missing state is never presented as proof that unknown helper resources disappeared.
+
+The pushed replica-persistence checkpoint `413cddca` passes
+[full Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34173394726) and
+[all three CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34173393113).
+The separate PR alert gate still reports 117 critical alerts relative to its base, the same
+aggregate count as `e592b610`; that is not a new full SARIF identity/delta audit or a green gate.
+
 The [provider run on `e592b610`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171708813)
 is **successful**, including final evidence assembly. Normal native and complete-cache HTTPS
 commands reconstruct 2,097,275 bytes from two independent authenticated provider nodes. A separate

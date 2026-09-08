@@ -68,6 +68,8 @@ pub enum ExitForwardOperation {
     MpquicSessionStart = 12,
     /// Adjacent receiving data Relay's signed download budget; never a client-hop operation.
     AdjacentReceiveBudget = 13,
+    /// Retained data Relay forwards a session-signed retirement; never a client-control hop.
+    RouteRetire = 14,
 }
 
 /// Endpoint-bearing data-Relay request for the selected Exit's private readiness phase.
@@ -336,23 +338,16 @@ impl ExitForwardRequest {
                 .map_err(|_| ForwardingRpcError::InvalidFrame)?;
             }
             ExitForwardOperation::MptcpSessionStart => {
-                validate_fixed_nonzero::<NODE_ID_LENGTH>(&self.exit_node_id)?;
-                if self.exit_node_id == self.control_relay_node_id {
-                    return Err(ForwardingRpcError::InvalidFrame);
-                }
-                decode_canonical::<crate::MptcpSessionStartRequest>(
-                    &self.canonical_request,
-                    frame_limit(),
-                )
-                .map_err(|_| ForwardingRpcError::InvalidFrame)?
-                .validate()
-                .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+                validate_mptcp_session_request(self)?;
             }
             ExitForwardOperation::MpquicSessionStart => {
                 validate_mpquic_session_request(self)?;
             }
             ExitForwardOperation::AdjacentReceiveBudget => {
                 validate_adjacent_receive_request(self)?;
+            }
+            ExitForwardOperation::RouteRetire => {
+                validate_retire_request(self)?;
             }
             ExitForwardOperation::Unspecified => {
                 return Err(ForwardingRpcError::InvalidOperation(self.operation));
@@ -363,7 +358,10 @@ impl ExitForwardRequest {
 
     pub(super) fn validate_client_hop(&self) -> Result<(), ForwardingRpcError> {
         if !self.control_advertisement.is_empty()
-            || self.validated_operation()? == ExitForwardOperation::AdjacentReceiveBudget
+            || matches!(
+                self.validated_operation()?,
+                ExitForwardOperation::AdjacentReceiveBudget | ExitForwardOperation::RouteRetire
+            )
         {
             return Err(ForwardingRpcError::InvalidFrame);
         }
@@ -477,6 +475,26 @@ fn validate_mpquic_session_request(request: &ExitForwardRequest) -> Result<(), F
     decode_canonical::<crate::MpquicSessionStartRequest>(&request.canonical_request, frame_limit())
         .map_err(|_| ForwardingRpcError::InvalidFrame)?
         .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_mptcp_session_request(request: &ExitForwardRequest) -> Result<(), ForwardingRpcError> {
+    validate_fixed_nonzero::<NODE_ID_LENGTH>(&request.exit_node_id)?;
+    if request.exit_node_id == request.control_relay_node_id {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    decode_canonical::<crate::MptcpSessionStartRequest>(&request.canonical_request, frame_limit())
+        .map_err(|_| ForwardingRpcError::InvalidFrame)?
+        .validate()
+        .map_err(|_| ForwardingRpcError::InvalidFrame)
+}
+
+fn validate_retire_request(request: &ExitForwardRequest) -> Result<(), ForwardingRpcError> {
+    validate_fixed_nonzero::<NODE_ID_LENGTH>(&request.exit_node_id)?;
+    if request.exit_node_id == request.control_relay_node_id {
+        return Err(ForwardingRpcError::InvalidFrame);
+    }
+    crate::route_retire::validate_request(&request.canonical_request, request.deadline_unix_ms)
         .map_err(|_| ForwardingRpcError::InvalidFrame)
 }
 
@@ -601,7 +619,18 @@ impl ExitForwardResponse {
         validate_peer_id(&self.exit_peer_id)?;
         let operation = self.validated_operation()?;
         match self.validated_status()? {
-            ForwardStatus::Granted => validate_granted_responses(operation, &self.signed_responses),
+            ForwardStatus::Granted => {
+                validate_granted_responses(operation, &self.signed_responses)?;
+                if operation == ExitForwardOperation::RouteRetire {
+                    crate::route_retire::validate_receipt(
+                        &self.signed_responses[0],
+                        &self.exit_node_id,
+                        false,
+                    )
+                    .map_err(|_| ForwardingRpcError::InvalidFrame)?;
+                }
+                Ok(())
+            }
             ForwardStatus::Rejected | ForwardStatus::Unavailable
                 if self.signed_responses.is_empty() =>
             {
@@ -849,9 +878,10 @@ impl request_response::Codec for ExitForwardCodec {
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
         let response = read_response(io).await?;
-        if response.validated_operation().map_err(invalid_data)?
-            == ExitForwardOperation::AdjacentReceiveBudget
-        {
+        if matches!(
+            response.validated_operation().map_err(invalid_data)?,
+            ExitForwardOperation::AdjacentReceiveBudget | ExitForwardOperation::RouteRetire
+        ) {
             return Err(invalid_data(ForwardingRpcError::InvalidFrame));
         }
         Ok(response)
@@ -881,9 +911,10 @@ impl request_response::Codec for ExitForwardCodec {
         T: AsyncWrite + Unpin + Send,
     {
         require_protocol(protocol, EXIT_FORWARD_PROTOCOL)?;
-        if response.validated_operation().map_err(invalid_data)?
-            == ExitForwardOperation::AdjacentReceiveBudget
-        {
+        if matches!(
+            response.validated_operation().map_err(invalid_data)?,
+            ExitForwardOperation::AdjacentReceiveBudget | ExitForwardOperation::RouteRetire
+        ) {
             return Err(invalid_data(ForwardingRpcError::InvalidFrame));
         }
         write_response(io, &response).await
@@ -1042,6 +1073,9 @@ fn validate_granted_responses(
             responses,
             &[ControlMessageType::AdjacentReceiveBudgetReceipt],
         ),
+        ExitForwardOperation::RouteRetire => {
+            validate_exact_types(responses, &[ControlMessageType::RetirementReceipt])
+        }
         ExitForwardOperation::Unspecified => Err(ForwardingRpcError::InvalidOperation(0)),
     }
 }
@@ -1151,6 +1185,7 @@ fn request_type(operation: ExitForwardOperation) -> Result<ControlMessageType, F
         ExitForwardOperation::AdjacentReceiveBudget => {
             Ok(ControlMessageType::AdjacentReceiveBudget)
         }
+        ExitForwardOperation::RouteRetire => Ok(ControlMessageType::RouteRetire),
         ExitForwardOperation::FetchExitAdvertisement
         | ExitForwardOperation::NativeProbeAuthorize
         | ExitForwardOperation::NativeProbeReady

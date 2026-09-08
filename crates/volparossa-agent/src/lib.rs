@@ -263,6 +263,9 @@ impl Agent {
             None
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Discovery carries route-retirement RPCs after local producers have stopped. It must
+        // not consume the producers' shutdown signal before their retained routes settle.
+        let (discovery_shutdown_tx, discovery_shutdown_rx) = watch::channel(false);
         let mut sharing_task = tokio::spawn(UplinkSharingRuntime::monitor(
             sharing.as_ref().map(Arc::clone),
             shutdown_rx.clone(),
@@ -287,7 +290,7 @@ impl Agent {
         ));
         let discovery_state = Arc::clone(&self.state);
         let mut discovery_task =
-            tokio::spawn(self.discovery.run(discovery_state, shutdown_rx.clone()));
+            tokio::spawn(self.discovery.run(discovery_state, discovery_shutdown_rx));
         let maintenance_state = Arc::clone(&self.state);
         let maintenance_config = Arc::clone(&self.config);
         let maintenance_trust = self.paths.policy_trust.clone();
@@ -344,11 +347,10 @@ impl Agent {
             _ = &mut sharing_task => Err(AgentError::UplinkSharing),
             _ = &mut mesh_task => Err(AgentError::WifiMesh),
         };
-        // Withdraw and close explicit application listeners before stopping discovery.
-        let _ = self.content.stop(&self.discovery_control).await;
+        // Stop new operations first. Discovery remains live while ingress/control operations
+        // unwind and the exact client route receives its remote destruction acknowledgements.
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
-        stop_task(&mut discovery_task).await;
         stop_task(&mut maintenance_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
@@ -357,7 +359,13 @@ impl Agent {
         stop_task(&mut dns_tcp_ingress_task).await;
         stop_task(&mut sharing_task).await;
         stop_task(&mut mesh_task).await;
-        routes.disconnect().await;
+        let _ = self.content.stop(&self.discovery_control).await;
+        let route_cleanup = stop_discovery_after_retirement(
+            routes.disconnect_confirmed(),
+            &discovery_shutdown_tx,
+            &mut discovery_task,
+        )
+        .await;
         if let Some(client_ingress) = client_ingress {
             let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
                 let _ = self.helper.cleanup_owned().await;
@@ -396,6 +404,9 @@ impl Agent {
         // Retain the exclusive daemon socket through sharing/ingress retirement, so a new
         // participant cannot start between teardown and the last owned-resource cleanup.
         drop(socket_guard);
+        if route_cleanup.is_err() {
+            return Err(AgentError::ShutdownCleanup);
+        }
         run_result
     }
 }
@@ -1362,6 +1373,19 @@ async fn stop_task<T>(task: &mut JoinHandle<T>) {
     }
 }
 
+/// The retirement future has its own bounded result; unsuccessful cleanup is never converted
+/// into success merely because the remaining actor was subsequently stopped.
+async fn stop_discovery_after_retirement<E>(
+    retirement: impl Future<Output = Result<(), E>>,
+    shutdown: &watch::Sender<bool>,
+    discovery: &mut JoinHandle<()>,
+) -> Result<(), E> {
+    let result = retirement.await;
+    let _ = shutdown.send(true);
+    stop_task(discovery).await;
+    result
+}
+
 async fn run_metrics_endpoint(
     enabled: bool,
     port: u16,
@@ -1636,6 +1660,35 @@ mod tests {
         assert_eq!((&mut task).await.expect("actor task"), 7);
 
         stop_task(&mut task).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_discovery_available_until_retirement_finishes() {
+        for confirmed in [true, false] {
+            let (shutdown, mut stopped) = watch::channel(false);
+            let (request, received) = tokio::sync::oneshot::channel();
+            let (reply, acknowledged) = tokio::sync::oneshot::channel();
+            let mut discovery = tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => panic!("discovery stopped before route retirement"),
+                    _ = received => { let _ = reply.send(()); }
+                }
+                wait_for_shutdown(&mut stopped).await;
+            });
+            let retirement = async move {
+                request
+                    .send(())
+                    .expect("retirement dispatcher still available");
+                acknowledged.await.expect("remote cleanup response");
+                if confirmed { Ok(()) } else { Err(()) }
+            };
+            let result =
+                stop_discovery_after_retirement(retirement, &shutdown, &mut discovery).await;
+            assert_eq!(result.is_ok(), confirmed);
+            assert!(*shutdown.borrow());
+            assert!(discovery.is_finished());
+        }
     }
 
     #[test]

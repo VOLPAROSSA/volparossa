@@ -61,6 +61,13 @@ publication/shared-cache bytes can be visible to their holders. Chunk identifier
 replica placement and timing can reveal known content or interests even without a plaintext URL;
 hashed URLs are not private discovery keys. Do not publish a durable user-to-content association.
 
+An explicitly configured replica cache now persists original public manifests and retained
+chunk IDs in a private cache-bound journal, so a later explicit service start can restore them.
+It records no provider contacts or browsing history and grants no new publisher/origin trust.
+Manifest metadata is not encrypted merely because the directory is private. Service stop
+withdraws availability but keeps owned chunks and metadata; expiry stops serving, not guaranteed
+deletion from disk or from other nodes. No background cache or boot service starts by default.
+
 Private messages must be encrypted for their recipient before replication, with separate
 authorization, quotas and expiry. Ciphertext still exposes size, timing and availability, and
 replication does not guarantee anonymity, delivery or deletion of every remote copy. Public

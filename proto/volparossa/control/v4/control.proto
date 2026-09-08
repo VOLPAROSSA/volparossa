@@ -44,6 +44,28 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_NATIVE_ROUTE_CREDENTIAL_DELIVERY = 26;
   CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET = 27;
   CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET_RECEIPT = 28;
+  CONTROL_MESSAGE_TYPE_ROUTE_RETIRE = 29;
+  CONTROL_MESSAGE_TYPE_RETIREMENT_RECEIPT = 30;
+}
+
+// A fresh session-signed destruction request. Ownership is matched against retained grants.
+// Timestamps, expiry (maximum 15 seconds), nonce and signer are in SignedEnvelope.
+message RouteRetire {
+  bytes route_context_id = 1;
+  bytes reservation_id = 2;
+  bytes policy_hash = 3;
+  bytes client_session_id = 4;
+  bytes client_session_public_key = 5;
+}
+
+// At most 4096 encoded bytes, with at most one nonnested signed Exit receipt.
+message RetirementReceipt {
+  bytes route_context_id = 1;
+  bytes reservation_id = 2;
+  bytes request_hash = 3;
+  bytes provider_node_id = 4;
+  bool confirmed_destroyed = 5;
+  bytes signed_exit_receipt = 6;
 }
 
 enum Transport {

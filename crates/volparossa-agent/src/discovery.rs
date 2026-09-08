@@ -5,6 +5,7 @@ mod downlink;
 mod native_ready;
 mod preselection_observation;
 mod preselection_sampler;
+mod route_retire;
 
 pub(crate) use content::ContentDiscoveryError;
 
@@ -519,6 +520,7 @@ impl DiscoveryControlHandle {
 #[allow(dead_code, reason = "typed route boundary")]
 enum DiscoveryCommand {
     Content(content::ContentCommand),
+    RetireRoute(route_retire::RetireCommand),
     SetRoles {
         expected: RolesConfig,
         candidate: RolesConfig,
@@ -915,6 +917,9 @@ struct PendingMpquicExitSession {
 
 /// Cancellation never drops an affine runtime; completion precedes exact helper cleanup retry.
 struct ExitRuntimeRetirement {
+    // Original Exit-issued authority survives the move into a transport task. It is used only
+    // to authenticate exact destruction requests; it never renews the reservation or policy.
+    signed_exit_reservation: Vec<u8>,
     shutdown: watch::Sender<bool>,
     completed: oneshot::Receiver<()>,
     cleanup: crate::helper::RuntimeBoundContextCleanup,
@@ -1701,6 +1706,7 @@ pub struct DiscoveryRuntime {
     exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
     downlink: downlink::DownlinkBridge,
     content: content::ContentBridge,
+    route_retire: route_retire::RouteRetireBridge,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
     client_preselection: ClientPreselectionOwner,
@@ -1899,6 +1905,7 @@ impl DiscoveryRuntime {
             exit_runtime_retirements: HashMap::new(),
             downlink: downlink::DownlinkBridge::default(),
             content: content::ContentBridge::default(),
+            route_retire: route_retire::RouteRetireBridge::default(),
             metrics,
             role_commands,
             client_preselection,
@@ -2298,6 +2305,7 @@ impl DiscoveryRuntime {
                 request,
                 reply,
             } => self.begin_client_forward(control_relay_peer, request, reply),
+            DiscoveryCommand::RetireRoute(command) => self.begin_route_retire(command),
             DiscoveryCommand::RequestDatapathRelay {
                 relay_peer,
                 request,
@@ -3525,6 +3533,7 @@ impl DiscoveryRuntime {
     }
 
     fn fail_all_outbound_reservations(&mut self, error: OutboundReservationError) {
+        self.shutdown_route_retirement();
         for (_, pending) in self.pending_client_forwards.drain() {
             for waiter in pending.waiters {
                 let _ = waiter.send(Err(error));
@@ -3574,6 +3583,7 @@ impl DiscoveryRuntime {
         while let Ok(command) = self.role_commands.try_recv() {
             match command {
                 DiscoveryCommand::Content(command) => command.reject(ContentDiscoveryError::Closed),
+                DiscoveryCommand::RetireRoute(command) => command.reject(),
                 DiscoveryCommand::RequestExitForward { reply, .. } => {
                     let _ = reply.send(Err(OutboundReservationError::Shutdown));
                 }
@@ -3605,6 +3615,7 @@ impl DiscoveryRuntime {
     }
 
     fn purge_completed_at(&mut self, now_ms: u64) {
+        self.maintain_route_retirement(now_ms);
         self.completed_client_forwards
             .retain(|_, entry| entry.expires_at_ms > now_ms);
         self.completed_relay_forwards
@@ -4241,12 +4252,14 @@ impl DiscoveryRuntime {
         &mut self,
         context_id: [u8; FORWARD_ID_BYTES],
         cleanup: crate::helper::RuntimeBoundContextCleanup,
+        signed_exit_reservation: Vec<u8>,
     ) -> (watch::Receiver<bool>, oneshot::Sender<()>) {
         let (shutdown, receiver) = watch::channel(false);
         let (completion, completed) = oneshot::channel();
         let previous = self.exit_runtime_retirements.insert(
             context_id,
             ExitRuntimeRetirement {
+                signed_exit_reservation,
                 shutdown,
                 completed,
                 cleanup,
@@ -5648,6 +5661,12 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
+                if self
+                    .complete_route_retire_upstream(request_id, peer, &response)
+                    .await
+                {
+                    return;
+                }
                 if self.complete_downlink_budget(request_id, peer, &response) {
                     return;
                 }
@@ -5658,6 +5677,9 @@ impl DiscoveryRuntime {
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
+                if self.fail_route_retire_upstream(request_id) {
+                    return;
+                }
                 if self.fail_downlink_budget(request_id) {
                     return;
                 }
@@ -5681,12 +5703,28 @@ impl DiscoveryRuntime {
         match event {
             request_response::Event::Message {
                 peer: authenticated_client_peer,
+                connection_id,
                 message:
                     request_response::Message::Request {
                         request, channel, ..
                     },
                 ..
             } => {
+                if request.validated_operation() == Ok(DatapathRelayOperation::RouteRetire) {
+                    self.answer_route_retire(
+                        authenticated_client_peer,
+                        connection_id,
+                        &request,
+                        channel,
+                    );
+                    return;
+                }
+                if self.retired_relay_datapath(&request) {
+                    if let Ok(operation) = request.validated_operation() {
+                        self.send_native_datapath_unavailable(&request, operation, channel);
+                    }
+                    return;
+                }
                 match request.validated_operation() {
                     Ok(DatapathRelayOperation::ExecuteProbe) => {
                         self.answer_production_execute_probe(
@@ -5791,12 +5829,18 @@ impl DiscoveryRuntime {
                     },
                 ..
             } => {
+                if self.complete_route_retire_client(request_id, peer, &response) {
+                    return;
+                }
                 let outcome = self.complete_datapath(request_id, peer, &response);
                 log_outbound_event(state, outcome).await;
             }
             request_response::Event::OutboundFailure {
                 peer, request_id, ..
             } => {
+                if self.fail_route_retire_client(request_id) {
+                    return;
+                }
                 let outcome = self.fail_datapath(request_id, peer);
                 log_outbound_event(state, outcome).await;
             }
@@ -6113,6 +6157,9 @@ impl DiscoveryRuntime {
         ) else {
             reject!("PRODUCTION_RELAY_RESERVATION_HELPER_SCOPE_REJECTED");
         };
+        if !self.retain_relay_retirement(authenticated_client_peer, &relay_request) {
+            reject!("PRODUCTION_RELAY_RESERVATION_RETIREMENT_SCOPE_REJECTED");
+        }
         let Some(client_session_id) = fixed_bytes::<32>(&authorization.client_session_id) else {
             reject!("PRODUCTION_RELAY_RESERVATION_TRAVERSAL_SCOPE_REJECTED");
         };
@@ -7967,6 +8014,9 @@ impl DiscoveryRuntime {
             reject!("EXIT_FORWARD_RELAY_CAPACITY");
         }
         let attempt_deadline = rpc_deadline(operation_expires_at_ms, EXIT_FORWARD_UPSTREAM_TIMEOUT);
+        if !self.retain_control_retirement(authenticated_client_peer, request) {
+            reject!("EXIT_FORWARD_RELAY_RETIREMENT_SCOPE_REJECTED");
+        }
         let Ok(outbound_id) = self
             .service
             .request_exit_forward_upstream(&exit_peer, upstream)
@@ -9236,6 +9286,19 @@ impl DiscoveryRuntime {
         let Ok(operation) = request.validated_operation() else {
             reject!("EXIT_FORWARD_EXIT_FRAME_REJECTED");
         };
+        if operation == ExitForwardOperation::RouteRetire {
+            self.answer_exit_route_retire(
+                authenticated_control_relay,
+                connection_id,
+                &request,
+                channel,
+            )
+            .await;
+            return;
+        }
+        if self.retired_exit_forward(&request) {
+            reject!("EXIT_FORWARD_EXIT_RETIRED_CONTEXT");
+        }
         if operation == ExitForwardOperation::AdjacentReceiveBudget {
             self.answer_downlink_budget(
                 authenticated_control_relay,
@@ -9520,6 +9583,7 @@ impl DiscoveryRuntime {
             | ExitForwardOperation::MptcpSessionStart
             | ExitForwardOperation::MpquicSessionStart
             | ExitForwardOperation::AdjacentReceiveBudget
+            | ExitForwardOperation::RouteRetire
             | ExitForwardOperation::Unspecified => None,
         };
         let response = responses
@@ -9579,6 +9643,7 @@ impl DiscoveryRuntime {
         let route_context_id = fixed_bytes::<FORWARD_ID_BYTES>(&finalize.route_context_id)?;
         let capability =
             decoded_signed_payload::<ClientSessionCapability>(&finalize.client_session_capability)?;
+        self.retain_exit_retirement(request)?;
 
         // Kernel MPTCP owns a fresh per-route incarnation. Both userspace native QUIC modes must
         // instead sign the real process instance observed during preflight.
@@ -9865,6 +9930,7 @@ impl DiscoveryRuntime {
         let (shutdown, completed) = self.retain_exit_runtime(
             route_context_id,
             route.helper_owner.retain_cleanup_authority(),
+            route.bundle.signed_exit_reservation().to_vec(),
         );
         let native_scope = route.bundle.accepted().native_route_authorization_scope();
         let activated = self
@@ -10231,6 +10297,7 @@ impl DiscoveryRuntime {
         let (shutdown, completed) = self.retain_exit_runtime(
             route_context_id,
             route.helper_owner.retain_cleanup_authority(),
+            route.bundle.signed_exit_reservation().to_vec(),
         );
         let paths = scope
             .paths
@@ -10806,14 +10873,24 @@ impl DiscoveryRuntime {
         else {
             return;
         };
+        let Ok(start) = decode_canonical::<MptcpSessionStartRequest>(
+            &active.canonical_start,
+            usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
+        ) else {
+            return;
+        };
+        let signed_exit_reservation = start.signed_exit_reservation().to_vec();
         let Some(runtime) = active.runtime.take() else {
             return;
         };
         active.runtime_started = true;
         let events = self.mptcp_exit_runtime_events.clone();
         let reservation_id = active.reservation_id;
-        let (shutdown, completed) =
-            self.retain_exit_runtime(route_context_id, runtime.retain_cleanup_authority());
+        let (shutdown, completed) = self.retain_exit_runtime(
+            route_context_id,
+            runtime.retain_cleanup_authority(),
+            signed_exit_reservation,
+        );
         tokio::spawn(async move {
             let completion = runtime
                 .run_until_shutdown(shutdown, |succeeded| {
@@ -14169,7 +14246,7 @@ fn datapath_request_scope_matches(
                         && request.deadline_unix_ms() <= path.expires_at_ms
                 })
         }
-        DatapathRelayOperation::Unspecified => false,
+        DatapathRelayOperation::Unspecified | DatapathRelayOperation::RouteRetire => false,
     }
 }
 
@@ -15700,6 +15777,7 @@ fn forward_request_scope_matches(
         }
         ExitForwardOperation::FetchExitAdvertisement
         | ExitForwardOperation::AdjacentReceiveBudget
+        | ExitForwardOperation::RouteRetire
         | ExitForwardOperation::Unspecified => false,
     }
 }
@@ -16724,6 +16802,16 @@ mod tests {
         (fixture.runtime, fixture.state, fixture.directory)
     }
 
+    pub(super) fn retirement_runtime_fixture()
+    -> (DiscoveryRuntime, Arc<RwLock<AgentState>>, TempDir) {
+        let fixture = fixture(RolesConfig {
+            client: true,
+            relay: true,
+            exit: true,
+        });
+        (fixture.runtime, fixture.state, fixture.directory)
+    }
+
     #[tokio::test]
     async fn direct_local_endpoint_observations_keep_transport_and_actor_bindings() {
         let mut fixture = fixture(test_client_roles());
@@ -16908,7 +16996,7 @@ mod tests {
         }
     }
 
-    async fn connect_runtime_client_to_control(
+    pub(super) async fn connect_runtime_client_to_control(
         runtime: &mut DiscoveryRuntime,
         control: &mut DiscoveryService,
     ) {
@@ -19970,9 +20058,11 @@ mod tests {
                 leases: Vec::new(),
             },
         );
-        let (shutdown, completed) = fixture
-            .runtime
-            .retain_exit_runtime(context, owner.retain_cleanup_authority());
+        let (shutdown, completed) = fixture.runtime.retain_exit_runtime(
+            context,
+            owner.retain_cleanup_authority(),
+            Vec::new(),
+        );
         let replacement = Some(EgressObservation {
             ifindex: 8,
             ipv4: true,

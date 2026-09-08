@@ -455,6 +455,23 @@ must settle helper-owned state before coordinator resources or remote reservatio
 released. Ambiguous or failed destruction keeps the route quarantined; expiry is not permission to
 forget network state.
 
+The new remote-retirement integration retains the original session authority and exact selected
+control/data relays before a request can create a remote route. Local Destroy precedes parallel
+remote requests; coordinator resources are released only after independently verified Relay and
+Exit confirmations. A slow peer does not prevent attempts to retire other selected peers.
+Role disable or policy replacement does not authorize new traffic, but does not by itself block
+destruction of an exactly retained old context.
+Normal daemon shutdown stops new operations first and keeps discovery available during the
+bounded retirement attempt. It reports `ShutdownCleanup` if route destruction remains unconfirmed;
+stopping discovery afterwards does not turn failed cleanup into success.
+
+Current development limitation: remote retirement scopes, including completed ones, are retained
+in memory under a hard 1,024-context bound per role. New scope admission fails when that bound is
+full. They cannot safely be evicted merely because the original route expired: another selected
+relay may still need its Exit confirmation. Capacity reclamation and restart recovery of these
+remote scopes remain separate unfinished work; neither missing memory state nor restarting an
+agent is treated as proof that remote network resources were removed.
+
 The helper's boot-scoped v3 ownership journal and systemd descriptor custody are live. Startup
 revalidates the journal and complete inherited inventory before serving requests; supported recovery
 uses the authenticated restart reaper and exact namespace/descriptor ownership rather than names

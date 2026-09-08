@@ -123,7 +123,10 @@ use crate::{
     paths::DEFAULT_MPQUIC_SOCKET,
     state::AgentState,
 };
-use retirement::{PreparedContextOwner, RetirementOutcome, RetirementSink, RetirementSupervisor};
+use retirement::{
+    PreparedContextOwner, RemoteRetirementDispatcher, RemoteRetirementScope, RetirementOutcome,
+    RetirementSink, RetirementSupervisor,
+};
 
 const MAXIMUM_SETUP_DURATION: Duration = Duration::from_secs(30);
 const MAXIMUM_CALL_DURATION: Duration = Duration::from_secs(12);
@@ -4212,6 +4215,9 @@ trait ReservationTransport: Send + 'static {
 
     fn ambiguous_after_dispatch(error: &Self::Error) -> bool;
 
+    /// Retain a destruction-only dispatcher independently of the live setup future.
+    fn retirement_dispatcher(&self) -> RemoteRetirementDispatcher;
+
     fn endpoint_traversal_hints(
         &mut self,
         bindings: Vec<EndpointTraversalBinding>,
@@ -4281,6 +4287,19 @@ impl ReservationTransport for DiscoveryControlHandle {
 
     fn ambiguous_after_dispatch(error: &Self::Error) -> bool {
         *error == OutboundReservationError::AmbiguousAfterDispatch
+    }
+
+    fn retirement_dispatcher(&self) -> RemoteRetirementDispatcher {
+        let discovery = self.clone();
+        Box::new(move |relay, exit, signed| {
+            let discovery = discovery.clone();
+            Box::pin(async move {
+                discovery
+                    .retire_route(relay, exit, signed)
+                    .await
+                    .map_err(|_| ())
+            })
+        })
     }
 
     async fn endpoint_traversal_hints(
@@ -4458,6 +4477,13 @@ trait ClientReservationProtocol: Send + 'static {
     ) -> Result<PublicWireGuardEndpoint, RouteSetupError>;
 
     fn release(&mut self, reservation_id: [u8; ID_BYTES]) -> usize;
+
+    fn sign_route_retire(
+        &mut self,
+        scope: &RemoteRetirementScope,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, RouteSetupError>;
 }
 
 struct ReservationSession {
@@ -4764,6 +4790,23 @@ impl ClientReservationProtocol for ReservationSession {
 
     fn release(&mut self, reservation_id: [u8; ID_BYTES]) -> usize {
         self.coordinator.release(reservation_id)
+    }
+
+    fn sign_route_retire(
+        &mut self,
+        scope: &RemoteRetirementScope,
+        timestamp_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, RouteSetupError> {
+        self.coordinator
+            .sign_route_retire(
+                scope.route_context_id,
+                scope.reservation_id,
+                scope.policy_hash,
+                timestamp_ms,
+                expires_at_ms,
+            )
+            .map_err(|_| RouteSetupError::ReservationProtocol(RouteSetupPhase::Retiring))
     }
 }
 
@@ -7117,6 +7160,23 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             P::finalize_request_bytes(&finalize).to_vec(),
             expires_at_ms,
         )?;
+        // Arm the exact remote ownership before dispatch, including an ambiguous response or
+        // cancellation. The control relay retains the upstream Finalize owner even when no
+        // selected datapath relay has received its ReservePath request yet.
+        self.prepared
+            .as_mut()
+            .ok_or(RouteSetupError::HelperCorrelation)?
+            .arm_remote_retirement(
+                RemoteRetirementScope {
+                    route_context_id: self.request.parameters.route_context_id,
+                    reservation_id: self.request.parameters.reservation_id,
+                    policy_hash: self.request.parameters.policy_hash,
+                    exit_peer_id: self.authorities.exit.exit_peer_id,
+                },
+                self.authorities.control.peer_id,
+                transport.retirement_dispatcher(),
+            )
+            .map_err(|()| RouteSetupError::RetirementUnavailable)?;
         let finalize_response = retry_exit_forward(
             transport,
             &self.authorities.control,
@@ -7175,6 +7235,11 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
                 Vec::new(),
                 expires_at_ms,
             )?;
+            self.prepared
+                .as_mut()
+                .ok_or(RouteSetupError::HelperCorrelation)?
+                .retain_remote_relay(relay.peer_id)
+                .map_err(|()| RouteSetupError::RetirementUnavailable)?;
             let response = retry_datapath(
                 transport,
                 relay,
@@ -7356,6 +7421,10 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
 
     async fn rollback(mut self, cause: RouteSetupError) -> RouteSetupFailure {
         self.phase = RouteSetupPhase::Retiring;
+        let remote_owned = self
+            .prepared
+            .as_ref()
+            .is_some_and(PreparedContextOwner::owns_remote_retirement);
         let outcome = match self.prepared.take() {
             Some(owner) => Some(owner.retire().await),
             None => None,
@@ -7371,7 +7440,7 @@ impl<P: ClientReservationProtocol> RouteSetupTransaction<P> {
             cause,
             cleanup,
             released_local_leases,
-            remote_grants_expire_only: self.remote_grants_possible,
+            remote_grants_expire_only: self.remote_grants_possible && !remote_owned,
         }
     }
 }
@@ -8580,6 +8649,9 @@ mod tests {
     )]
     struct FakeState {
         events: Vec<String>,
+        remote_retirement_attempts: Vec<(Libp2pPeerId, Libp2pPeerId)>,
+        fail_remote_retirement: Option<Libp2pPeerId>,
+        stalled_remote_retirement: Option<Libp2pPeerId>,
         selected_paths: Vec<u32>,
         finalized_probe_tokens: Vec<(u64, u32)>,
         session_tokens: Vec<u64>,
@@ -9446,6 +9518,15 @@ mod tests {
             self.shared.record("protocol.release");
             self.shared.selected_paths().len()
         }
+
+        fn sign_route_retire(
+            &mut self,
+            scope: &RemoteRetirementScope,
+            _timestamp_ms: u64,
+            _expires_at_ms: u64,
+        ) -> Result<Vec<u8>, RouteSetupError> {
+            Ok(scope.route_context_id.to_vec())
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9463,6 +9544,27 @@ mod tests {
 
         fn ambiguous_after_dispatch(error: &Self::Error) -> bool {
             *error == FakeTransportError::Ambiguous
+        }
+
+        fn retirement_dispatcher(&self) -> RemoteRetirementDispatcher {
+            let shared = Arc::clone(&self.shared);
+            Box::new(move |relay, exit, _signed| {
+                let shared = Arc::clone(&shared);
+                Box::pin(async move {
+                    let (stalled, failed) = {
+                        let mut state = shared.state.lock().expect("fake state");
+                        state.remote_retirement_attempts.push((relay, exit));
+                        (
+                            state.stalled_remote_retirement == Some(relay),
+                            state.fail_remote_retirement == Some(relay),
+                        )
+                    };
+                    if stalled {
+                        std::future::pending::<()>().await;
+                    }
+                    if failed { Err(()) } else { Ok(()) }
+                })
+            })
         }
 
         async fn endpoint_traversal_hints(
@@ -9561,6 +9663,7 @@ mod tests {
                 | ExitForwardOperation::MptcpSessionStart
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
+                | ExitForwardOperation::RouteRetire
                 | ExitForwardOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -9677,6 +9780,7 @@ mod tests {
                 | DatapathRelayOperation::UdpSessionStart
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
+                | DatapathRelayOperation::RouteRetire
                 | DatapathRelayOperation::Unspecified => {
                     return Err(FakeTransportError::Definitive);
                 }
@@ -9798,6 +9902,27 @@ mod tests {
             false
         }
 
+        fn retirement_dispatcher(&self) -> RemoteRetirementDispatcher {
+            // This socket-free protocol fixture has no remote helper/network owners. Actual
+            // helper destruction and signed receipts are exercised by the discovery actor tests.
+            let events = Arc::clone(&self.scope_events);
+            Box::new(move |_relay, _exit, signed| {
+                let events = Arc::clone(&events);
+                Box::pin(async move {
+                    let envelope: SignedEnvelope =
+                        decode_canonical(&signed, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
+                    if envelope.message_type != ControlMessageType::RouteRetire as i32 {
+                        return Err(());
+                    }
+                    events
+                        .lock()
+                        .expect("scope events")
+                        .push("remote.retire".to_owned());
+                    Ok(())
+                })
+            })
+        }
+
         async fn endpoint_traversal_hints(
             &mut self,
             _bindings: Vec<EndpointTraversalBinding>,
@@ -9911,6 +10036,7 @@ mod tests {
                 | ExitForwardOperation::MptcpSessionStart
                 | ExitForwardOperation::MpquicSessionStart
                 | ExitForwardOperation::AdjacentReceiveBudget
+                | ExitForwardOperation::RouteRetire
                 | ExitForwardOperation::Unspecified => return Err(RealTransportError),
             };
             ExitForwardResponse::granted(
@@ -10010,6 +10136,7 @@ mod tests {
                 | DatapathRelayOperation::UdpSessionStart
                 | DatapathRelayOperation::MptcpSessionStart
                 | DatapathRelayOperation::MpquicSessionStart
+                | DatapathRelayOperation::RouteRetire
                 | DatapathRelayOperation::Unspecified => return Err(RealTransportError),
             };
             DatapathRelayResponse::granted(
@@ -10166,6 +10293,210 @@ mod tests {
             .await
             .expect("established fake route");
         (established, manager, shared)
+    }
+
+    #[tokio::test]
+    async fn remote_retirement_keeps_unconfirmed_peer_and_releases_only_after_all_receipts() {
+        let (route, manager, shared) = established_fake_route().await;
+        let exit = route.request.exit.peer_id;
+        let mut expected = BTreeSet::from([route.request.control.identity.peer_id]);
+        expected.extend(route.relay_authorities.iter().map(|relay| relay.peer_id));
+        let failed = *expected.first().expect("control target");
+        shared
+            .state
+            .lock()
+            .expect("fake state")
+            .fail_remote_retirement = Some(failed);
+        let state = Arc::clone(manager.retirement_state());
+        assert_eq!(route.teardown().await, RetirementOutcome::Quarantined);
+        assert_eq!(state.outstanding(), 1);
+        assert_eq!(state.quarantined(), 1);
+        {
+            let observed = shared.state.lock().expect("fake state");
+            assert_eq!(
+                observed
+                    .remote_retirement_attempts
+                    .iter()
+                    .map(|(peer, _)| *peer)
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            assert!(
+                observed
+                    .remote_retirement_attempts
+                    .iter()
+                    .all(|(_, observed_exit)| *observed_exit == exit)
+            );
+            assert_eq!(
+                observed
+                    .events
+                    .iter()
+                    .filter(|event| *event == "local.destroy")
+                    .count(),
+                1
+            );
+            assert!(
+                !observed
+                    .events
+                    .iter()
+                    .any(|event| event == "protocol.release")
+            );
+        }
+        shared
+            .state
+            .lock()
+            .expect("fake state")
+            .fail_remote_retirement = None;
+        manager
+            .shutdown()
+            .await
+            .expect("retained remote retry settles");
+        let observed = shared.state.lock().expect("fake state");
+        assert_eq!(state.outstanding(), 0);
+        assert_eq!(state.quarantined(), 0);
+        for peer in expected {
+            let calls = observed
+                .remote_retirement_attempts
+                .iter()
+                .filter(|(target, _)| *target == peer)
+                .count();
+            if peer == failed {
+                assert!(calls >= 2);
+            } else {
+                assert_eq!(calls, 1);
+            }
+        }
+        assert_eq!(
+            observed.remote_retirement_attempts.last(),
+            Some(&(failed, exit))
+        );
+        assert_eq!(
+            observed
+                .events
+                .iter()
+                .filter(|event| *event == "local.destroy")
+                .count(),
+            1
+        );
+        assert_eq!(
+            observed
+                .events
+                .iter()
+                .filter(|event| *event == "protocol.release")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_retirement_stalled_first_peer_does_not_starve_other_owners() {
+        let (route, manager, shared) = established_fake_route().await;
+        let exit = route.request.exit.peer_id;
+        let mut expected = BTreeSet::from([route.request.control.identity.peer_id]);
+        expected.extend(route.relay_authorities.iter().map(|relay| relay.peer_id));
+        let stalled = *expected.first().expect("first sorted target");
+        shared
+            .state
+            .lock()
+            .expect("fake state")
+            .stalled_remote_retirement = Some(stalled);
+        assert_eq!(route.teardown().await, RetirementOutcome::Quarantined);
+        {
+            let observed = shared.state.lock().expect("fake state");
+            assert_eq!(
+                observed
+                    .remote_retirement_attempts
+                    .iter()
+                    .map(|(peer, _)| *peer)
+                    .collect::<BTreeSet<_>>(),
+                expected
+            );
+            assert!(
+                !observed
+                    .events
+                    .iter()
+                    .any(|event| event == "protocol.release")
+            );
+        }
+        shared
+            .state
+            .lock()
+            .expect("fake state")
+            .stalled_remote_retirement = None;
+        manager
+            .shutdown()
+            .await
+            .expect("only stalled target remains");
+        let observed = shared.state.lock().expect("fake state");
+        for peer in expected {
+            let calls = observed
+                .remote_retirement_attempts
+                .iter()
+                .filter(|(target, _)| *target == peer)
+                .count();
+            if peer == stalled {
+                assert!(calls >= 2);
+            } else {
+                assert_eq!(calls, 1);
+            }
+        }
+        assert_eq!(
+            observed.remote_retirement_attempts.last(),
+            Some(&(stalled, exit))
+        );
+        assert_eq!(
+            observed
+                .events
+                .iter()
+                .filter(|event| *event == "local.destroy")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_retirement_owns_ambiguous_finalize_before_any_relay_prepare() {
+        let fixture = fixture(MAXIMUM_RETIREMENT_OWNERS);
+        let control = fixture.transaction.transaction.authorities.control.peer_id;
+        let exit = fixture
+            .transaction
+            .transaction
+            .authorities
+            .exit
+            .exit_peer_id;
+        fixture
+            .shared
+            .state
+            .lock()
+            .expect("fake state")
+            .ambiguous_exit = Some((ExitForwardOperation::FinalizeReservation as i32, usize::MAX));
+        let failure = fixture
+            .manager
+            .spawn(fixture.transaction, fixture.transport, fixture.clock)
+            .wait()
+            .await
+            .expect_err("ambiguous remote Finalize");
+        assert_eq!(failure.cleanup, CleanupStatus::Destroyed);
+        assert!(!failure.remote_grants_expire_only);
+        assert_eq!(
+            fixture
+                .shared
+                .state
+                .lock()
+                .expect("fake state")
+                .remote_retirement_attempts,
+            [(control, exit)]
+        );
+        assert_before(
+            &fixture.shared.events(),
+            "local.destroy",
+            "protocol.release",
+        );
+        fixture
+            .manager
+            .shutdown()
+            .await
+            .expect("rollback owns remote teardown");
     }
 
     #[tokio::test]

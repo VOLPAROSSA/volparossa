@@ -151,16 +151,22 @@ The explicit provider runtime can be checked with focused `volparossa-content --
 `volparossa-local-control content` and `volparossa content` Cargo tests. Run socket-bearing tests
 only in a disposable namespace/VM. These checks cover signed offers, exact-manifest selection,
 independent partial stores, connection/correlation bounds and typed CLI/control operations;
-they do not substitute for the pending independent-node `content-provider` KVM scenario.
+they do not substitute for the independent-node `content-provider` KVM scenario. That scenario
+now passes on `e592b610`; consult implementation status for its exact scope and retained evidence.
 
 The separate `content-replication` scenario uses the normal agents and CLI: only Relay5 starts
 with public objects P and Q; Relay4 fetches P and picks up Q into a new replica cache after a
-second foreground fetch. Relay5's agent is then stopped, and a separate Client fetches Q from
-Relay4 over its own two-relay MPTCP route. The runner checks independent publisher trust, actual
+second foreground fetch. Relay5's agent is then stopped. The next fixture explicitly stops
+Relay4's cache service and reopens it with `--reuse-replica-cache`, supplying only P's manifest.
+Q's original registration must be restored from the owned journal before a separate Client
+fetches Q from Relay4 over its own two-relay MPTCP route. This is service-runtime recreation,
+not an automatically restarted agent or boot-service claim. The runner checks independent publisher trust, actual
 new cache bytes, exact output hashes, full five-role captures for both phases, original-agent
 shutdown and complete cleanup. Run it through the same guarded KVM runner with
 `--scenario content-replication`; `--preview` performs no network changes. The evidence checker
-and capture classifier have focused tests; the first live run is still pending. This one chain
+and capture classifier have focused tests. The `e592b610` run completes uptake and re-serving,
+but fails the final capture gate because retired remote route owners survive local disconnect;
+the explicit reopen extension still needs its live run after that teardown fix. This one chain
 does not establish full C03/C04, durable retention, generic browser support or a speed gain.
 
 ## Helper-boundary evidence
