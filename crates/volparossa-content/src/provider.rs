@@ -5,11 +5,13 @@
 //! provider key and supplies a policy-authorized protected stream. This module never dials,
 //! listens, discovers peers, or adopts a directory named by a network request.
 
+pub mod named;
 pub mod replication;
 
 use std::{
     collections::BTreeMap,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +24,8 @@ use tokio::{
 };
 
 use crate::{
-    CacheLimits, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, Validity, VerifiedManifest,
+    CacheLimits, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, SignedManifest, Validity,
+    VerifiedManifest,
     transfer::{
         TransferError, TransferLimits, TransferProgress, pull_from_peer_with_progress, serve_peer,
     },
@@ -261,10 +264,12 @@ impl VerifiedProviderOffer {
 #[derive(Clone, Default)]
 pub struct PublicationRegistry {
     entries: BTreeMap<[u8; 32], RegisteredPublication>,
+    name_lookup: bool,
 }
 #[derive(Clone)]
 struct RegisteredPublication {
     manifest: VerifiedManifest,
+    signed: Option<Arc<SignedManifest>>,
     root: PathBuf,
     limits: CacheLimits,
     replication: Option<replication::SharedPublication>,
@@ -274,6 +279,35 @@ impl PublicationRegistry {
     /// Construct an empty registry; nothing is served until explicitly registered.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Explicitly enable public publisher/name queries for this service snapshot.
+    /// Defaults off; no DHT index, background replication or private-message lookup is enabled.
+    pub fn set_name_lookup(&mut self, enabled: bool) {
+        self.name_lookup = enabled;
+    }
+
+    /// Register the original independently verified envelope without opting into replication.
+    /// Retaining these bounded bytes alone does not enable name lookup.
+    ///
+    /// # Errors
+    /// Rejects wrong signatures/publishers and the same ownership, expiry and bounds as register.
+    pub fn register_signed(
+        &mut self,
+        signed: SignedManifest,
+        trusted: &VerifyingKey,
+        root: PathBuf,
+        limits: CacheLimits,
+        now_unix: u64,
+    ) -> Result<(), ProviderError> {
+        let manifest = signed.verify(trusted, now_unix)?;
+        let id = *manifest.manifest_id();
+        self.register(manifest, root, limits, now_unix)?;
+        self.entries
+            .get_mut(&id)
+            .ok_or(ProviderError::Registry)?
+            .signed = Some(Arc::new(signed));
+        Ok(())
     }
     /// Register one verified publication and an existing caller-owned absolute cache root.
     ///
@@ -306,6 +340,7 @@ impl PublicationRegistry {
             id,
             RegisteredPublication {
                 manifest,
+                signed: None,
                 root,
                 limits,
                 replication: None,
@@ -432,6 +467,12 @@ where
         let selector: Selector = timeout_at(session.selector_deadline, read_frame(stream))
             .await
             .map_err(|_| ProviderError::Timeout)??;
+        if selector.version == named::VERSION
+            && selector.operation == named::OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            return named::serve(stream, registry, &session).await;
+        }
         if selector.version == replication::VERSION
             && selector.operation == replication::OPERATION
             && selector.manifest_id.is_empty()

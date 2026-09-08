@@ -27,10 +27,8 @@ pub struct Metadata {
 
 impl Metadata {
     fn validate(&self) -> Result<(), Error> {
-        if self.name.is_empty()
-            || self.name.len() > MAX_METADATA_BYTES
-            || self.name.chars().any(char::is_control)
-            || self.revision == 0
+        validate_name(&self.name)?;
+        if self.revision == 0
             || self.content_type.is_empty()
             || self.content_type.len() > MAX_METADATA_BYTES
             || !self
@@ -42,6 +40,13 @@ impl Metadata {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() || name.len() > MAX_METADATA_BYTES || name.chars().any(char::is_control) {
+        return Err(Error::InvalidManifest);
+    }
+    Ok(())
 }
 
 /// Signed Unix-time validity. Reuse never renews this interval.

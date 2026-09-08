@@ -79,7 +79,29 @@ def fixture(control_node="relay2"):
     evidence["https"] = runpy.run_path(str(HERE / "test-content-provider-https-smoke.py"))["fixture"](
         control_node, evidence["publication"])
     evidence["ordinary_publication"] = user_fixture(evidence)
+    evidence["named_publication"] = named_fixture(evidence)
     return evidence
+
+
+def named_fixture(base):
+    return dict(success=True, selected_route=copy.deepcopy(base["selected_route"]),
+                privacy=copy.deepcopy(base["privacy"]),
+                control_privacy=copy.deepcopy(base["control_underlay"]["capture"]),
+                cleanup=dict(user_output_removed=True, user_directory_removed=True),
+                serves={node: dict(serving=True, publications=1, replication_enabled=False)
+                        for node in base["layout"]["provider_nodes"]},
+                fetch=dict(operation="named_content_download", publisher_key=base["publication"]["publisher_hex"],
+                    name="disposable-native-network-publication", revision=1, manifest_id="d" * 64,
+                    sha256=CHECK["SHA"], bytes=CHECK["BYTES"], chunks=9, providers_used=2,
+                    provider_peer_ids=base["fetch"]["provider_peer_ids"], peer_bytes=CHECK["BYTES"],
+                    control_relay_peer_id=base["layout"]["control_relay_peer_id"],
+                    origin_authenticated=False, globally_latest=False, local_delivery=True,
+                    output_mode="0600", ownership_changed=False, local_output="/user/named.bin", cache="/agent/named"),
+                output=dict(sha256=CHECK["SHA"], bytes=CHECK["BYTES"], path="/user/named.bin", agent_cache="/agent/named",
+                    user_uid=1001, agent_uid=1002, control_gid=1003, agent_gid=1002,
+                    output_mode="0600", cache_mode="0700", fresh_cache=True, client_manifest_removed=True,
+                    no_manifest_argument=True, agent_mount_positive_control=True, agent_cannot_read_user_output=True,
+                    client_cannot_read_provider_caches=True, no_clobber_verified=True))
 
 
 def user_fixture(base):
@@ -121,6 +143,24 @@ def user_fixture(base):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_name_lookup_requires_exact_object_no_manifest_and_both_real_providers(self):
+        base = fixture()
+        for mutate in (
+            lambda item: item["fetch"].update(name="different-name"),
+            lambda item: item["fetch"].update(manifest_id="e" * 64),
+            lambda item: item["fetch"].update(globally_latest=True),
+            lambda item: item["fetch"].update(providers_used=1),
+            lambda item: item["output"].update(client_manifest_removed=False),
+            lambda item: item["output"].update(user_uid=item["output"]["agent_uid"]),
+            lambda item: item["cleanup"].update(user_output_removed=False),
+            lambda item: item["privacy"]["exit"].update(outbound_client_discovery_attempt_packets=1),
+        ):
+            named = copy.deepcopy(base["named_publication"])
+            mutate(named)
+            with self.assertRaises(ValueError):
+                CHECK["validate_named_publication"](named, base["publication"], base["expected_peers"],
+                                                     base["layout"], base["selected_route"]["route_context_id"])
+
     def test_user_publication_builder_reads_the_exact_cli_and_capture_files(self):
         ordinary = fixture()["ordinary_publication"]
         with tempfile.TemporaryDirectory() as directory:
@@ -164,6 +204,14 @@ class ContentProviderContract(unittest.TestCase):
         }
         files = {f"content-provider-{suffix}.json": evidence[key] for key, suffix in names.items()}
         files["a01-expected-peers.json"] = evidence["expected_peers"]
+        named = evidence["named_publication"]
+        for key, suffix in (("fetch", "fetch"), ("output", "output"), ("cleanup", "cleanup"),
+                            ("selected_route", "selection"), ("control_privacy", "control")):
+            files[f"content-provider-named-{suffix}.json"] = named[key]
+        for role, capture in named["privacy"].items():
+            files[f"content-provider-named-privacy-{role}.json"] = capture
+        for node, receipt in named["serves"].items():
+            files[f"content-provider-named-{node}-serve.json"] = receipt
         files["content-provider-control-privacy.json"] = evidence["control_underlay"]["capture"]
         for node, routes in evidence["control_underlay"]["routes"].items():
             for direction, rows in routes.items():
@@ -211,7 +259,7 @@ class ContentProviderContract(unittest.TestCase):
 
     def test_exact_scoped_report(self):
         report = dict(report_kind="volparossa-native-content-providers", source_revision="a" * 40,
-                      explicit_origin_authenticated_https=True, normal_user_publication=True,
+                      explicit_origin_authenticated_https=True, normal_user_publication=True, native_name_retrieval=True,
                       success=True, runner_exit_status=0, cleanup=dict(complete=True, remaining_owned_objects=0),
                       host_state=dict(unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64),
                       transfer=fixture(), **{name: False for name in CHECK["SCOPE"]})

@@ -1,6 +1,7 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
 mod content;
+pub(crate) use content::DiscoveredContentProvider;
 mod dns_cache;
 mod downlink;
 mod native_ready;

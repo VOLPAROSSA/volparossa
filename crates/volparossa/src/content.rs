@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 
 mod handoff;
 mod https_download;
+mod named_download;
 mod private_message;
 
 #[derive(Debug, Subcommand)]
@@ -42,6 +43,8 @@ pub(crate) enum Command {
     Serve(Serve),
     /// Ask the agent to discover providers and retrieve through real protected MPTCP routes.
     Fetch(Fetch),
+    /// Resolve an explicit public publisher/name and stream verified bytes to your new local file.
+    FetchName(FetchName),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
     /// Withdraw and stop the agent's content service, retaining owned cache files.
@@ -67,6 +70,9 @@ pub(crate) struct Serve {
     /// DNS hostname for this service, which must already be allowed by the signed Exit policy.
     #[arg(long)]
     advertised_hostname: String,
+    /// Explicitly answer publisher/name queries for this registered public publication.
+    #[arg(long)]
+    name_lookup: bool,
     #[command(flatten)]
     limits: Limits,
     #[command(flatten)]
@@ -146,6 +152,30 @@ pub(crate) struct Fetch {
     /// New output path writable by the agent account; no existing entry is overwritten.
     #[arg(long)]
     output: PathBuf,
+    #[command(flatten)]
+    limits: Limits,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FetchName {
+    /// Independently trusted publisher public key; provider discovery cannot establish trust.
+    #[arg(long, value_parser = parse_publisher_key)]
+    publisher_key: VerifyingKey,
+    /// Exact publisher-local name (1 through 128 UTF-8 bytes, without control characters).
+    #[arg(long, value_parser = parse_content_name)]
+    name: String,
+    /// Reject revisions below this floor; this does not guarantee a globally latest revision.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    min_revision: Option<u64>,
+    /// New agent-owned cache directory, or an existing owned cache with --reuse-cache.
+    #[arg(long)]
+    cache: PathBuf,
+    /// Reopen verified owned chunks and preserve the cache's observed revision floor.
+    #[arg(long)]
+    reuse_cache: bool,
+    /// New 0600 output owned by your account; its path is never sent to the agent.
+    #[arg(long)]
+    local_output: PathBuf,
     #[command(flatten)]
     limits: Limits,
 }
@@ -286,6 +316,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 advertised_hostname: args.advertised_hostname,
                 limits: Some(args.limits.wire_limits()),
                 replication,
+                name_lookup: args.name_lookup,
             });
             return super::print_response(super::control::request(socket, operation).await?);
         }
@@ -300,6 +331,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             });
             return super::print_response(super::control::request(socket, operation).await?);
         }
+        Command::FetchName(args) => return named_download::run(&args, socket).await,
         Command::FetchHttps(args) => {
             if let Some(output) = &args.local_output {
                 return https_download::run(&args, socket, output).await;
@@ -320,6 +352,13 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
+}
+
+fn parse_content_name(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("expected 1 through 128 UTF-8 bytes without control characters".into());
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_origin_url(value: &str) -> Result<String, String> {
@@ -622,6 +661,8 @@ mod tests {
             Ok::<_, clap::Error>(serve)
         };
         let inert = parse(&[]).expect("existing serve command remains inert");
+        assert!(!inert.name_lookup);
+        assert!(parse(&["--name-lookup"]).unwrap().name_lookup);
         assert!(
             inert
                 .replication
@@ -712,6 +753,47 @@ mod tests {
                 "limits alone must not silently enable replication"
             );
         }
+    }
+
+    #[test]
+    fn content_name_cli_requires_explicit_trust_name_and_local_output() {
+        let key = hex::encode(
+            SigningKey::generate(&mut rand_core::OsRng)
+                .verifying_key()
+                .to_bytes(),
+        );
+        let base = [
+            "volparossa",
+            "content",
+            "fetch-name",
+            "--publisher-key",
+            &key,
+            "--name",
+            "notes.résumé",
+            "--cache",
+            "agent-cache",
+            "--local-output",
+            "user.bin",
+        ];
+        let parsed = crate::Cli::try_parse_from(base).unwrap();
+        let crate::CliCommand::Content { command } = parsed.command else {
+            panic!("content command expected");
+        };
+        let Command::FetchName(args) = *command else {
+            panic!("named fetch expected");
+        };
+        assert_eq!(args.name, "notes.résumé");
+        assert_eq!(args.min_revision, None);
+        assert!(!args.reuse_cache);
+        assert!(crate::Cli::try_parse_from(&base[..base.len() - 2]).is_err());
+        assert!(
+            crate::Cli::try_parse_from(base.into_iter().chain(["--min-revision", "0"])).is_err()
+        );
+        assert!(
+            crate::Cli::try_parse_from(base.into_iter().chain(["--manifest", "peer.pb"])).is_err()
+        );
+        assert!(parse_content_name("name\nother").is_err());
+        assert!(parse_content_name(&"a".repeat(129)).is_err());
     }
 
     #[test]

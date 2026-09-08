@@ -20,7 +20,7 @@ use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
 pub use manifest::{Chunk, Metadata, Publication, SignedManifest, Validity, VerifiedManifest};
-pub use store::{CacheLimits, CacheUsage, ChunkStore};
+pub use store::{CacheLimits, CacheUsage, ChunkStore, RevisionPin};
 
 /// Maximum bytes in a chunk; reconstruction needs only one chunk buffer at a time.
 pub const CHUNK_BYTES: usize = 256 * 1024;
@@ -75,6 +75,12 @@ pub enum Error {
     /// A peer supplied a manifest from a publisher other than the pre-established key.
     #[error("native content publisher is not the expected publisher")]
     WrongPublisher,
+    /// A trusted named publication is older than this owned cache's retained revision floor.
+    #[error("native content revision would roll back a retained observation")]
+    NameRollback,
+    /// The same trusted publisher/name/revision has two distinct signed envelope identities.
+    #[error("native content revision has conflicting signed manifests")]
+    NameConflict,
     /// The expected publisher did not authenticate these exact manifest bytes.
     #[error("invalid native content publisher signature")]
     InvalidSignature,

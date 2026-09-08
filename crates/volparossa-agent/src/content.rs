@@ -4,6 +4,7 @@
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
 mod https;
+mod named;
 mod replication;
 mod replication_budget;
 #[cfg(test)]
@@ -32,8 +33,8 @@ use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, Veri
 use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
 use volparossa_identity::Identity;
 use volparossa_local_control::{
-    ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentServeRequest,
-    HttpsContentFetchRequest,
+    ContentCacheLimits, ContentFetchNameRequest, ContentFetchRequest, ContentReceipt,
+    ContentServeRequest, HttpsContentFetchRequest,
 };
 use zeroize::Zeroizing;
 
@@ -52,6 +53,10 @@ pub(crate) enum ContentError {
     Busy,
     #[error("content policy or role does not permit this operation")]
     Policy,
+    #[error("native publisher name has conflicting signed revisions")]
+    NameConflict,
+    #[error("native publisher name would roll back a retained revision")]
+    NameRollback,
 }
 
 /// In-memory lifecycle, sharing the existing node identity without exporting its private key.
@@ -71,6 +76,7 @@ struct Service {
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
     replication: Option<Arc<ReplicationRuntime>>,
+    name_lookup: bool,
 }
 
 impl ContentRuntime {
@@ -126,7 +132,11 @@ impl ContentRuntime {
             .map_err(|_| ContentError::Policy)?;
         let cache_limits = limits(request.limits)?;
         if let Some(active) = service.as_ref() {
-            if active.bind != bind || active.endpoint != endpoint || active.task.is_finished() {
+            if active.bind != bind
+                || active.endpoint != endpoint
+                || active.task.is_finished()
+                || active.name_lookup != request.name_lookup
+            {
                 return Err(ContentError::Busy);
             }
             if !match (&active.replication, &request.replication) {
@@ -188,6 +198,7 @@ impl ContentRuntime {
             stop,
             task,
             replication,
+            name_lookup: request.name_lookup,
         });
         Ok(receipt)
     }
@@ -364,6 +375,30 @@ impl ContentRuntime {
         result
     }
 
+    pub(crate) async fn fetch_name(
+        &self,
+        request: ContentFetchNameRequest,
+        context: &ControlContext,
+        stream: &mut tokio::net::UnixStream,
+        request_id: &[u8],
+        ready_sent: &mut bool,
+    ) -> Result<(), ContentError> {
+        let foreground = self.foreground.enter();
+        let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
+        let result = timeout(
+            OPERATION_TIMEOUT,
+            named::download(request, context, stream, request_id, ready_sent),
+        )
+        .await
+        .map_err(|_| ContentError::Unavailable)?;
+        drop(retrieval);
+        drop(foreground);
+        if result.is_ok() {
+            self.start_replication(context).await;
+        }
+        result
+    }
+
     async fn start_replication(&self, context: &ControlContext) {
         let Ok(service) = self.service.try_lock() else {
             return;
@@ -469,6 +504,17 @@ impl ContentRuntime {
             .discover_content_providers(control_peer, 16)
             .await
             .map_err(|_| ContentError::Unavailable)?;
+        Self::pull_providers(context, manifest, store, policy, providers).await
+    }
+
+    /// Reuse the same bounded provider set after a name-metadata round; no second discovery.
+    async fn pull_providers(
+        context: &ControlContext,
+        manifest: &VerifiedManifest,
+        store: &mut ChunkStore,
+        policy: &volparossa_policy::VerifiedManifest,
+        providers: Vec<crate::discovery::DiscoveredContentProvider>,
+    ) -> Result<(Vec<String>, u64), ContentError> {
         let mut used = HashSet::new();
         let mut peer_bytes = 0_u64;
         for provider in providers {
@@ -572,10 +618,22 @@ fn register(
         let signed =
             SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
         registry.register_shareable(signed, &key, root, cache_limits, now())
+    } else if request.name_lookup {
+        let key: [u8; 32] = request
+            .publisher_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ContentError::Invalid)?;
+        let key = VerifyingKey::from_bytes(&key).map_err(|_| ContentError::Invalid)?;
+        let signed =
+            SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
+        registry.register_signed(signed, &key, root, cache_limits, now())
     } else {
         registry.register(manifest, root, cache_limits, now())
     };
-    result.map_err(|_| ContentError::Invalid)
+    result.map_err(|_| ContentError::Invalid)?;
+    registry.set_name_lookup(request.name_lookup);
+    Ok(())
 }
 
 fn make_offer(

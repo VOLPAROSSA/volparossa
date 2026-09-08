@@ -141,7 +141,7 @@ pub struct ReplicationProgress {
 
 #[derive(Clone)]
 pub(super) struct SharedPublication {
-    signed: SignedManifest,
+    signed: std::sync::Arc<SignedManifest>,
     hops: u8,
 }
 
@@ -169,11 +169,12 @@ impl PublicationRegistry {
     ) -> Result<(), ProviderError> {
         let manifest = signed.verify(trusted, now_unix)?;
         let id = *manifest.manifest_id();
-        self.register(manifest, root, limits, now_unix)?;
-        self.entries
-            .get_mut(&id)
-            .ok_or(ProviderError::Registry)?
-            .replication = Some(SharedPublication { signed, hops: 0 });
+        self.register_signed(signed, trusted, root, limits, now_unix)?;
+        let entry = self.entries.get_mut(&id).ok_or(ProviderError::Registry)?;
+        entry.replication = Some(SharedPublication {
+            signed: entry.signed.clone().ok_or(ProviderError::Registry)?,
+            hops: 0,
+        });
         Ok(())
     }
 
@@ -205,11 +206,11 @@ impl PublicationRegistry {
         drop(store);
         let id = *replica.checked.manifest_id();
         self.register(replica.checked, root, limits, now_unix)?;
-        self.entries
-            .get_mut(&id)
-            .ok_or(ProviderError::Registry)?
-            .replication = Some(SharedPublication {
-            signed: replica.signed,
+        let signed = std::sync::Arc::new(replica.signed);
+        let entry = self.entries.get_mut(&id).ok_or(ProviderError::Registry)?;
+        entry.signed = Some(std::sync::Arc::clone(&signed));
+        entry.replication = Some(SharedPublication {
+            signed,
             hops: replica.hops,
         });
         Ok(())

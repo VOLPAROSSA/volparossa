@@ -235,6 +235,10 @@ content_provider_run() {
     content_provider_https_run
     # Add one normal operator publication without replacing the 5+4/HTTPS fixture authority.
     content_publication_run
+    # Public publisher-key/name retrieval needs no manifest file at the consumer.
+    # shellcheck source=tests/integration/content-named-smoke.sh
+    . "$source_directory/tests/integration/content-named-smoke.sh"
+    content_named_run
     PHASE=content-provider-stop
     for provider_node in "$provider_node_a" "$provider_node_b"; do
         "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node/control/agent.sock" \
@@ -282,6 +286,7 @@ content_provider_finalize_report() {
        general_nat_reachability_claimed:false,full_c02_claimed:false,
        explicit_origin_authenticated_https:($evidence.https.success == true),
        normal_user_publication:($evidence.ordinary_publication.success == true),
+       native_name_retrieval:($evidence.named_publication.success == true),
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1

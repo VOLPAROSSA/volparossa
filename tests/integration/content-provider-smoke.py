@@ -95,6 +95,51 @@ def build_user_publication(work):
     return evidence
 
 
+def validate_named_publication(evidence, publication, peers, layout, context):
+    fetch, output = evidence["fetch"], evidence["output"]
+    nodes = layout["provider_nodes"]
+    require(evidence["success"] is True and fetch["operation"] == "named_content_download"
+            and fetch["publisher_key"] == publication["publisher_hex"]
+            and fetch["name"] == "disposable-native-network-publication" and fetch["revision"] == 1
+            and fetch["manifest_id"] == publication["manifest_id"]
+            and fetch["sha256"] == output["sha256"] == SHA
+            and fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
+            and fetch["providers_used"] == 2 and len(fetch["provider_peer_ids"]) == 2
+            and set(fetch["provider_peer_ids"]) == {peers[node] for node in nodes}
+            and fetch["peer_bytes"] == BYTES and fetch["control_relay_peer_id"] == layout["control_relay_peer_id"]
+            and fetch["origin_authenticated"] is False and fetch["globally_latest"] is False,
+            "exact named object was not independently resolved and reconstructed through both providers")
+    require(fetch["local_delivery"] is True and fetch["output_mode"] == "0600"
+            and fetch["ownership_changed"] is False and fetch["local_output"] == output["path"]
+            and fetch["cache"] == output["agent_cache"] and output["path"] != output["agent_cache"]
+            and output["user_uid"] > 0 and output["agent_uid"] > 0
+            and output["user_uid"] != output["agent_uid"] and output["control_gid"] != output["agent_gid"]
+            and output["output_mode"] == "0600" and output["cache_mode"] == "0700"
+            and all(output[key] is True for key in ("fresh_cache", "client_manifest_removed", "no_manifest_argument",
+                "agent_mount_positive_control", "agent_cannot_read_user_output",
+                "client_cannot_read_provider_caches", "no_clobber_verified"))
+            and evidence["cleanup"] == dict(user_output_removed=True, user_directory_removed=True)
+            and evidence["selected_route"]["route_context_id"] == context,
+            "name retrieval bypassed manifest-free operation, account isolation, route or cleanup")
+    require(set(evidence["serves"]) == set(nodes)
+            and all(s["serving"] is True and s["publications"] == 1 and s["replication_enabled"] is False
+                    for s in evidence["serves"].values()), "explicit name-only serving missing")
+    path_check = runpy.run_path(str(Path(__file__).with_name("content-provider-https-smoke.py")))
+    path_check["validate_path"](evidence, peers, nodes, False)
+    control_node = next(node for node in PUBLIC_IPS if peers[node] == layout["control_relay_peer_id"])
+    path_check["validate_control"](evidence["control_privacy"], control_node, nodes, False)
+
+
+def build_named_publication(work, nodes):
+    return dict(success=True, fetch=read(work / "content-provider-named-fetch.json"),
+                output=read(work / "content-provider-named-output.json"),
+                selected_route=read(work / "content-provider-named-selection.json"),
+                cleanup=read(work / "content-provider-named-cleanup.json"),
+                privacy={r: read(work / f"content-provider-named-privacy-{r}.json") for r in ROLES},
+                control_privacy=read(work / "content-provider-named-control.json"),
+                serves={node: read(work / f"content-provider-named-{node}-serve.json") for node in nodes})
+
+
 def validate_transfer(evidence):
     publication, output, fetch = evidence["publication"], evidence["output"], evidence["fetch"]
     require(publication["bytes"] == output["bytes"] == fetch["bytes"] == BYTES
@@ -206,6 +251,8 @@ def validate_transfer(evidence):
             and ordinary["output"]["route_context_id"] == selected["route_context_id"]
             and ordinary["publish"]["publisher_key_hex"] != publication["publisher_hex"],
             "ordinary publication reused fixture publisher or changed the established topology")
+    validate_named_publication(evidence["named_publication"], publication, peers, layout,
+                               selected["route_context_id"])
 
 
 def build_evidence(work):
@@ -223,6 +270,7 @@ def build_evidence(work):
                     fetch=read(work / "content-provider-fetch.json"),
                     https=read(work / "content-provider-https-evidence.json"),
                     ordinary_publication=read(work / "content-provider-user-publication.json"),
+                    named_publication=build_named_publication(work, layout["provider_nodes"]),
                     expected_peers=read(work / "a01-expected-peers.json"),
                     selected_route=read(work / "content-provider-live-selection.json"),
                     privacy={r: read(work / f"content-provider-privacy-{r}.json") for r in ROLES},
@@ -275,6 +323,7 @@ def validate_report(report, revision):
             and report["runner_exit_status"] == 0
             and report["explicit_origin_authenticated_https"] is True
             and report["normal_user_publication"] is True
+            and report["native_name_retrieval"] is True
             and report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"]

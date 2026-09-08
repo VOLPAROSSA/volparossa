@@ -134,6 +134,14 @@ The [extended public-file VM on `49b6a7d1`](https://github.com/VOLPAROSSA/volpar
 also passes, including default refusal, exact reconstruction and cleanup. This does not authenticate arbitrary HTTPS content.
 See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
 before serving or assembling a publication held by another account.
+Public native content now also has `content fetch-name`: supply an independently trusted
+publisher key and exact publication name, with no manifest file at the consumer. Providers
+explicitly enable `serve --name-lookup`; retrieval uses the existing protected routes and
+delivers a new user-owned file. A reused cache remembers observed revisions and rejects
+conflicts or downgrades. This does not guarantee the globally newest version, automatic
+website hosting or permanent retention. See the
+[name-retrieval instructions](docs/OPERATIONS.md#retrieving-a-native-publication-by-publisher-and-name)
+and source-specific evidence in the implementation status.
 The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
 also passes: publish, import, serve, protected retrieval, export and recipient opening after
 the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet

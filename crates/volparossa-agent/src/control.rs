@@ -166,16 +166,37 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
-    if let Some(control_request::Operation::ContentDownloadHttps(download)) = &request.operation {
+    if matches!(
+        request.operation.as_ref(),
+        Some(
+            control_request::Operation::ContentDownloadHttps(_)
+                | control_request::Operation::ContentFetchName(_)
+        )
+    ) {
         let mut ready_sent = false;
-        let result = Box::pin(context.content.download_https(
-            download.clone(),
-            &context,
-            &mut stream,
-            &request.request_id,
-            &mut ready_sent,
-        ))
-        .await;
+        let result = match request.operation.as_ref() {
+            Some(control_request::Operation::ContentDownloadHttps(download)) => {
+                Box::pin(context.content.download_https(
+                    download.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::ContentFetchName(download)) => {
+                Box::pin(context.content.fetch_name(
+                    download.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            _ => return Err(ControlServerError::InvalidFrame),
+        };
         return match result {
             Ok(()) => Ok(()),
             Err(_) if ready_sent => Err(ControlServerError::InvalidFrame),
@@ -224,6 +245,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
     match operation {
         control_request::Operation::ContentImport(_)
         | control_request::Operation::ContentExport(_)
+        | control_request::Operation::ContentFetchName(_)
         | control_request::Operation::ContentDownloadHttps(_) => {
             // These require the same authorized stream, never a second socket or generic dispatch.
             response(
@@ -346,6 +368,12 @@ fn content_response(
                 ContentError::Unavailable => (ControlResult::Unavailable, "CONTENT_UNAVAILABLE"),
                 ContentError::Busy => (ControlResult::InvalidState, "CONTENT_BUSY"),
                 ContentError::Policy => (ControlResult::Policy, "CONTENT_POLICY"),
+                ContentError::NameConflict => {
+                    (ControlResult::InvalidState, "CONTENT_NAME_CONFLICT")
+                }
+                ContentError::NameRollback => {
+                    (ControlResult::InvalidState, "CONTENT_NAME_ROLLBACK")
+                }
             };
             response(
                 request_id,

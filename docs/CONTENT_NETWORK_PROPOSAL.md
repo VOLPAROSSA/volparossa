@@ -158,7 +158,14 @@ and C06 remains open. The newer
 [normal-user run on `10f63244`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
 also passes publication/import, service serving, independent protected retrieval and user
 export/assembly of the exact signed object across separate accounts. This does not supply
-stable-name discovery, retention repair or general website hosting.
+stable-name discovery, retention repair or general website hosting. The new explicit
+`fetch-name` slice adds publisher-local name retrieval over those same protected provider
+streams: original signed envelopes, highest observed revision, durable cache-bound conflict/
+rollback floors, and caller-owned output without a prior manifest file. Public serving must
+opt in; names stay out of DHT records and private-message metadata stays excluded. Focused
+source-specific evidence and the pending separate live name phase are recorded in
+[implementation status](IMPLEMENTATION_STATUS.md); no globally newest-version, retention or
+general website-hosting claim is implied.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.
 

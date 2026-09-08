@@ -393,7 +393,7 @@ if [ "$scenario" = content-replication ]; then
 fi
 if [ "$scenario" = content-provider ]; then
     for provider_fixture in content-provider-smoke.sh content-provider-smoke.py content-network-smoke.py \
-        content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh; do
+        content-provider-https-smoke.sh content-provider-https-smoke.py content-publication-smoke.sh content-named-smoke.sh; do
         if [ ! -f "$source_directory/tests/integration/$provider_fixture" ] \
             || [ -L "$source_directory/tests/integration/$provider_fixture" ]; then
             printf '%s\n' 'content provider fixture unavailable' >&2
@@ -1174,6 +1174,9 @@ cleanup() {
     fi
     if [ "$scenario" = content-provider ] && command -v content_provider_https_cleanup >/dev/null 2>&1; then
         content_provider_https_cleanup || original_status=1
+    fi
+    if [ "$scenario" = content-provider ] && command -v content_named_cleanup >/dev/null 2>&1; then
+        content_named_cleanup || original_status=1
     fi
     capture_worker_network_diagnostics
 
@@ -4410,7 +4413,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-user-privacy)
+        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-user-privacy|content-provider-named-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

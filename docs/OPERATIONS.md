@@ -505,8 +505,42 @@ Status inspects only retained local state, including `control_relay_peer_id`; it
 network connection or route. Fetch's receipt binds that same control identity. Stop withdraws the offer and
 closes the listener but retains the owned cache files. Primary publications must be explicitly
 registered again; this is not automatic publication retention. Without the replica configuration below, these commands start
-no background copying. They never capture browsing, resolve latest publication names or promise
-faster retrieval.
+no background copying. They never capture browsing or promise faster retrieval.
+
+#### Retrieving a native publication by publisher and name
+
+Public native publications can also be retrieved without distributing a manifest file first.
+The provider must explicitly enable name lookup when starting its service:
+
+```sh
+volparossa content serve --name-lookup \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache /agent-owned/replica-cache --bind PROVIDER_BIND_IP:18080 \
+  --advertised-hostname provider.example
+
+volparossa content fetch-name \
+  --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX --name notes --min-revision 1 \
+  --cache /agent-owned/new-named-cache --local-output ./notes.pdf
+```
+
+Use the exact name originally supplied to `publish`, including case and UTF-8 bytes.
+The publisher key must be authenticated independently; providers never supply that trust.
+`--name-lookup` is a service-wide choice, unchanged across additional registrations; stop and
+restart to change it. It does not enable background replication or expose private-message names.
+Existing hash-only serving remains the default.
+
+The agent asks at most 16 existing providers over its protected route, verifies their original
+signed manifests, and retrieves the highest valid **observed** revision. Names are not put in
+the DHT. This is not a globally newest-version guarantee. Every newly signed publication must
+use a higher revision: two different signed envelopes at the same publisher/name/revision are
+a conflict, even when the underlying bytes are identical.
+The explicit agent-owned cache retains up to 64 revision floors separately from chunk eviction
+and manifest expiry. Use `--reuse-cache` to retain these observations across downloads; a new or
+deliberately deleted cache starts a new observation scope. A higher observation is saved before
+chunk retrieval, so missing new chunks do not silently trigger an older-version fallback.
+The caller receives a verified `0600` file through the same local socket; no user-output path
+is sent to the agent. An offline publisher is usable only while reachable replicas retain valid
+metadata and all required chunks. This is not yet general website hosting or a message mailbox.
 
 For cooperative HTTPS origins, `content fetch-https` first obtains fresh authenticated
 same-origin metadata, uses matching peer chunks and fills missing ranges from that origin.
@@ -528,8 +562,8 @@ not create a second cache, change ownership, or save a reusable HTTPS authority 
 The origin must support the documented anonymous binary-content descriptor and satisfy the
 normal signed Exit policy. Debian's normal public CA bundle is used unless an explicit public
 `--ca-file` is supplied for this operation. This is not interception or generic browser caching.
-The CLI/process and origin-library checks pass; the updated different-UID network proof remains
-pending, as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+The CLI/process, origin-library and different-UID network checks pass, as recorded in
+[implementation status](IMPLEMENTATION_STATUS.md).
 
 For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
 to `content serve`. By default the directory must be new, private to the agent and different from

@@ -148,6 +148,67 @@ pub struct ContentServeRequest {
     /// Explicit opt-in to bounded background replication; absence preserves prior behavior.
     #[prost(message, optional, tag = "7")]
     pub replication: Option<ContentReplicationConfig>,
+    /// Explicit service-wide publisher/name metadata lookup; false preserves exact-ID serving.
+    #[prost(bool, tag = "8")]
+    pub name_lookup: bool,
+}
+
+/// Resolve a native publisher-local name and deliver verified bytes on this same local socket.
+/// A cache-local revision floor prevents silent rollback; no global latest-version claim.
+#[derive(Clone, PartialEq, Message)]
+pub struct ContentFetchNameRequest {
+    /// Publisher key independently trusted by the caller, never adopted from a provider.
+    #[prost(bytes = "vec", tag = "1")]
+    pub publisher_key: Vec<u8>,
+    /// Exact publisher-local UTF-8 label, not a DNS name or URL.
+    #[prost(string, tag = "2")]
+    pub name: String,
+    /// Optional positive initial floor, in addition to the cache's retained observations.
+    #[prost(uint64, optional, tag = "3")]
+    pub min_revision: Option<u64>,
+    /// Private agent-owned cache; no user output path is sent to the agent.
+    #[prost(string, tag = "4")]
+    pub cache: String,
+    /// Explicit cache budget.
+    #[prost(message, optional, tag = "5")]
+    pub limits: Option<ContentCacheLimits>,
+    /// Reopen only a previously owned cache, preserving its durable observed revision floor.
+    #[prost(bool, tag = "6")]
+    pub reuse_cache: bool,
+}
+
+impl ContentFetchNameRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.publisher_key.len() != 32
+            || self.name.is_empty()
+            || self.name.len() > 128
+            || self.name.chars().any(char::is_control)
+            || self.min_revision == Some(0)
+        {
+            return Err(ControlProtocolError::Invalid("invalid native name request"));
+        }
+        validate_path(&self.cache)?;
+        validate_limits(self.limits)
+    }
+}
+
+/// Original signed envelope for this request's following bounded local transfer, not completion.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct NamedContentTransferReady {
+    /// Caller verifies this against its original publisher key, exact name and minimum revision.
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest: Vec<u8>,
+}
+
+impl NamedContentTransferReady {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.manifest.is_empty() || self.manifest.len() > 64 * 1024 {
+            return Err(ControlProtocolError::Invalid(
+                "invalid native name readiness",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Discover providers and reconstruct one exact independently authenticated native publication.
@@ -421,6 +482,73 @@ mod tests {
     };
 
     #[test]
+    fn named_content_request_and_ready_are_bounded_and_opt_in() {
+        let named = ContentFetchNameRequest {
+            publisher_key: vec![2; 32],
+            name: "Exact Naam".into(),
+            min_revision: Some(3),
+            cache: "/private/name-cache".into(),
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            }),
+            reuse_cache: true,
+        };
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![3; 16],
+            operation: Some(Operation::ContentFetchName(named.clone())),
+        };
+        assert_eq!(
+            decode_request(&encode_request(&request).unwrap()).unwrap(),
+            request
+        );
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![3; 16],
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "NAMED_CONTENT_TRANSFER_READY".into(),
+            payload: Some(Payload::NamedContentTransferReady(
+                NamedContentTransferReady {
+                    manifest: vec![4; 1024],
+                },
+            )),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
+        for invalid in ["", "line\nbreak", &"é".repeat(65)] {
+            let mut changed = named.clone();
+            changed.name = invalid.into();
+            assert!(changed.validate().is_err());
+        }
+        let mut changed = named;
+        changed.min_revision = Some(0);
+        assert!(changed.validate().is_err());
+        changed.min_revision = None;
+        assert!(changed.validate().is_ok());
+        assert!(
+            NamedContentTransferReady {
+                manifest: vec![0; 64 * 1024 + 1]
+            }
+            .validate()
+            .is_err()
+        );
+        let mut serve = ContentServeRequest::default();
+        assert!(
+            !ContentServeRequest::decode(serve.encode_to_vec().as_slice())
+                .unwrap()
+                .name_lookup
+        );
+        let mut original = serve.encode_to_vec();
+        original.extend([0x40, 1]);
+        serve.name_lookup = true;
+        assert_eq!(serve.encode_to_vec(), original);
+    }
+
+    #[test]
     fn content_ciphertext_handoff_has_distinct_ready_and_unchanged_frame_limit() {
         let import = ContentImportRequest {
             manifest: vec![1; 256],
@@ -525,6 +653,7 @@ mod tests {
             advertised_hostname: "provider.example".into(),
             limits: fetch.limits,
             replication: None,
+            name_lookup: false,
         };
         for operation in [
             Operation::ContentFetch(fetch.clone()),
@@ -792,6 +921,7 @@ mod tests {
             advertised_hostname: "provider.example".into(),
             limits: Some(limits),
             replication: None,
+            name_lookup: false,
         };
         let mut resumed = replication.clone();
         resumed.reuse_replica_cache = true;

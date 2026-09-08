@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{CHUNK_BYTES, ChunkId, Error, MAX_CHUNKS};
 
+mod names;
+pub use names::RevisionPin;
+
 const MAX_CACHE_ENTRIES: usize = 65_536;
 const OWNER_FILE: &str = ".volparossa-owner-v1";
 const INDEX_FILE: &str = ".volparossa-index-v1";
@@ -147,6 +150,7 @@ impl ChunkStore {
             healthy: true,
         };
         store.load_index(&index)?;
+        store.check_name_metadata()?;
         store.check_free_space(0)?;
         for (id, length) in &store.entries {
             let file = open_private_file(&store.directory, &id.to_string(), CHUNK_BYTES as u64)?;

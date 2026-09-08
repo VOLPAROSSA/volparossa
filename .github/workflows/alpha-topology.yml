@@ -81,6 +81,7 @@ jobs:
           sh -n tests/integration/content-https-smoke.sh
           python3 -B tests/integration/test-content-https-smoke.py
           sh -n tests/integration/content-provider-smoke.sh
+          sh -n tests/integration/content-named-smoke.sh
           python3 -B tests/integration/test-content-provider-smoke.py
           sh -n tests/integration/content-provider-https-smoke.sh
           python3 -B tests/integration/test-content-provider-https-smoke.py

@@ -75,6 +75,13 @@ the existing topology's one-second admission cadence within its original 180-sec
 this does not retry failed DNS queries or prove that route setup succeeds. This run also cleans
 up completely with unchanged raw guest state; artifact SHA-256
 `334fdf8d1680297d4e2803db0fc422982e84357e0bb2f76f249981278215c693`.
+The [paced `7f36438d` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34185521557)
+does select a real route and passes the staged, capability-dropped public-root preflight for
+both families, including local reuse with 356 seconds remaining. It then fails the first normal
+protected A request (`DNS_CACHE_PROTECTED_APPLICATION_FAILED`); no positive peer-cache pass is
+claimed. Cleanup is complete with zero owned objects and unchanged raw guest state, SHA-256
+`2b6f3c3bc3611255cfa16bfcb1d792b1a8c039e72f1a788fbf0515f7c92909fe`.
+Artifact SHA-256: `2e568572744980b81a006bd54bbd3a942dd9c5ed6c9c6ccf8c9c0af0d35643f9`.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -89,6 +96,25 @@ after warming A, not a fixed delay. Already propagated or in-flight DHT hints ca
 and cause a dial; no complete recall or general combined-role unlinkability is claimed.
 
 ## Latest content integration checkpoint
+
+The new native `content fetch-name` command resolves an independently trusted publisher key
+and exact name without a prior manifest file at the consumer. Providers explicitly enable
+`serve --name-lookup`; original signatures are retained separately from optional replication,
+and private-message manifests are excluded. One bounded round of at most 16 existing providers
+supplies metadata and chunks through the normal protected route; no names enter the DHT.
+The chosen revision is the highest valid one actually observed, not globally latest. Up to
+64 durable cache-bound revision floors survive chunk eviction, expiry and restart; conflicting
+same-revision envelopes and silent downgrades are refused, even when newer chunks are missing.
+Two real library stream/cache tests, four prior provider tests and three replica-persistence
+tests pass, together with strict content Clippy. Two agent observation/reopen tests and one
+typed-wire test also pass, as does strict agent/local-control/CLI Clippy. Two real CLI-process/
+Unixstream tests in capability-dropped namespaces and two parser checks pass: independent
+key/name/minimum-revision/expiry, exact streaming, correlated completion and private no-clobber
+output. Ten network-checker tests and targeted shell checks pass; they are not a live name-fetch pass.
+The additive network phase reopens both original 5+4 providers with name lookup, removes the
+Client's old manifest copy, and requires fresh-cache retrieval into a separate user's `0600`
+output plus the same full boundary captures and cleanup. Its live result is pending; this is
+not yet complete C06, generic website hosting, a mailbox or guaranteed offline availability.
 
 The normal HTTPS command now also supports `--local-output`: the agent keeps its fresh origin
 authorization alive while streaming verified chunks over the same authorized Unix connection,
