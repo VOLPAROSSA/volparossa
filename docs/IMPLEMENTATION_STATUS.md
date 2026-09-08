@@ -34,6 +34,12 @@ config tests and exact schema check pass. The actor executes inside a disposable
 proves a signed cache miss without triggering an upstream lookup, not a positive peer hit.
 The bounded public-wire recorder/replayer and preflight runner have four socket-free evidence
 tests and shell checks passing; no fresh public fixture could be obtained in this environment.
+The normal resolver now exports only aggregate local/peer/upstream/fallback counters through the
+existing loopback-only metrics endpoint, plus signed cache-miss replies queued by the actor.
+No names, addresses or peer labels are added. Targeted cache/source-accounting, actor, metrics
+and exact development-policy flag tests pass. A source-bound GitHub preflight builds first,
+then fetches fresh public DNS wire data and validates it with the actual unchanged-root collector
+inside the same capability-dropped namespace runner; merely preparing this workflow is not a pass.
 
 **C05 remains incomplete.** Current public-chain collection/validation and the ordinary two-Exit
 upstream/peer/local-hit/fallback network sequence have not passed yet. CNAME/negative-answer

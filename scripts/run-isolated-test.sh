@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run one exact test without ever opening its sockets in the caller's network namespace.
+# Run one exact test or explicit command without opening sockets in the caller's network namespace.
 # Kernel PID-namespace teardown reaps descendants; no named namespace or host state is created.
 set -eu
 
@@ -8,16 +8,28 @@ fail() {
     exit 1
 }
 
-[ "$#" -eq 4 ] || fail 'expected TEST_EXECUTABLE TEST_NAME PARENT_NETNS_MARKER none|loopback'
+test_mode=exact
+if [ "${1:-}" = --command ]; then test_mode='command'; shift; fi
+[ "$#" -ge 4 ] || fail 'expected [--command] EXECUTABLE LABEL PARENT_NETNS_MARKER none|loopback [COMMAND_ARGS...]'
 test_executable=$1
 test_name=$2
 test_marker=$3
 test_network=$4
+shift 4
+if [ "$test_mode" = exact ]; then
+    [ "$#" -eq 0 ] || fail 'exact-test mode accepts no extra arguments'
+    set -- --exact "$test_name" --nocapture
+else
+    [ "$#" -le 16 ] || fail 'command argument count exceeds its bound'
+    for test_argument do
+        [ "${#test_argument}" -le 8192 ] || fail 'command argument length exceeds its bound'
+    done
+fi
 case "$test_executable" in /*) ;; *) fail 'test executable must be absolute' ;; esac
 if [ ! -f "$test_executable" ] || [ ! -x "$test_executable" ]; then fail 'test executable is unavailable'; fi
 case "$test_name" in ''|*[!a-zA-Z0-9_:]*) fail 'invalid exact test name' ;; esac
 case "$test_marker" in
-    VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS) ;;
+    VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS|VOLPAROSSA_DNS_COLLECTOR_PARENT_NETNS|VOLPAROSSA_DNS_CACHE_PARENT_NETNS|VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS) ;;
     *) fail 'unsupported namespace marker' ;;
 esac
 case "$test_network" in none|loopback) ;; *) fail 'unsupported disposable network setup' ;; esac
@@ -40,9 +52,11 @@ target_gid=$2
 parent_net=$3
 marker=$4
 executable=$5
-exact_test=$6
-expected_groups=$7
+expected_groups=$6
+shift 6
 [ "$(/usr/bin/readlink /proc/self/ns/net)" != "$parent_net" ] || exit 121
+# Keep opaque command arguments outside the status-parser positional parameters.
+(
 ids=0
 groups=0
 caps=0
@@ -62,7 +76,8 @@ while IFS= read -r status_line; do
     esac
 done < /proc/self/status
 [ "$ids" = 2 ] && [ "$groups" = 1 ] && [ "$caps" = 5 ] && [ "$nnp" = 1 ] || exit 126
-exec /usr/bin/env "$marker=$parent_net" "$executable" --exact "$exact_test" --nocapture
+)
+exec /usr/bin/env "$marker=$parent_net" "$executable" "$@"
 '
 
 # Only this fixed trampoline runs before privilege removal in the opt-in sudo path.
@@ -76,9 +91,9 @@ parent_net=$3
 marker=$4
 network=$5
 executable=$6
-exact_test=$7
 verify=$8
 group_mode=$9
+shift 9
 [ "$(/usr/bin/readlink /proc/self/ns/net)" != "$parent_net" ] || exit 120
 if [ "$network" = loopback ]; then
     if [ -x /usr/bin/ip ]; then /usr/bin/ip link set dev lo up
@@ -90,25 +105,27 @@ case "$group_mode" in
         # Unprivileged gid_map requires setgroups=deny. Preserve only the exact
         # existing mapped groups; clearing them is forbidden by that kernel gate.
         group_option=--keep-groups
-        while IFS= read -r status_line; do
-            case "$status_line" in Groups:*) set -- $status_line; shift; expected_groups="$*" ;; esac
-        done < /proc/self/status ;;
+        expected_groups=$(
+            while IFS= read -r status_line; do
+                case "$status_line" in Groups:*) set -- $status_line; shift; printf "%s" "$*" ;; esac
+            done < /proc/self/status
+        ) ;;
     clear) group_option=--clear-groups ;;
     *) exit 127 ;;
 esac
 exec /usr/bin/setpriv --reuid="$target_uid" --regid="$target_gid" "$group_option" \
     --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
     /bin/sh -c "$verify" isolated-test-dropped "$target_uid" "$target_gid" "$parent_net" \
-    "$marker" "$executable" "$exact_test" "$expected_groups"
+    "$marker" "$executable" "$expected_groups" "$@"
 '
 
-printf 'isolated-test: new disposable user/network/PID namespaces; loopback=%s; preserve kernel-restricted mapped groups, clear capabilities; exact test %s\n' \
-    "$test_network" "$test_name"
+printf 'isolated-test: new disposable user/network/PID namespaces; loopback=%s; preserve kernel-restricted mapped groups, clear capabilities; %s %s\n' \
+    "$test_network" "$test_mode" "$test_name"
 # Probe only namespace creation, never the actual test: a test failure cannot cause a rerun.
 if /usr/bin/timeout --kill-after=1s 5s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- /usr/bin/true; then
     exec /usr/bin/timeout --kill-after=5s 120s /usr/bin/unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- \
         /bin/sh -c "$test_trampoline" isolated-test 0 0 "$test_parent" "$test_marker" \
-        "$test_network" "$test_executable" "$test_name" "$test_verify" keep
+        "$test_network" "$test_executable" "$test_name" "$test_verify" keep "$@"
 fi
 
 [ "${VOLPAROSSA_TEST_ALLOW_SUDO_NETNS:-0}" = 1 ] ||
@@ -119,4 +136,4 @@ printf 'isolated-test: explicit sudo fallback creates only disposable network/PI
     "$test_network" "$test_uid" "$test_gid"
 exec /usr/bin/timeout --kill-after=5s 120s /usr/bin/sudo -n -- /usr/bin/unshare --net --pid --fork --kill-child=KILL -- \
     /bin/sh -c "$test_trampoline" isolated-test "$test_uid" "$test_gid" "$test_parent" \
-    "$test_marker" "$test_network" "$test_executable" "$test_name" "$test_verify" clear
+    "$test_marker" "$test_network" "$test_executable" "$test_name" "$test_verify" clear "$@"

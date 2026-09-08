@@ -6,7 +6,8 @@ use std::{env, error::Error, fs, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use volparossa_udp::{
-    DnsAnswerSource, DnsQueryType, DnsQuestion, DnsResolutionScope, ExitResolver,
+    DnsAnswerSource, DnsQueryType, DnsQuestion, DnsResolutionCounts, DnsResolutionScope,
+    ExitResolver,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -57,6 +58,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             cached.ttl_seconds(),
             bundle.expires_at_unix_ms(),
         );
+    }
+    if resolver.counts()
+        != (DnsResolutionCounts {
+            local_validated: 2,
+            upstream_validated: 2,
+            ..DnsResolutionCounts::default()
+        })
+    {
+        return Err("actual resolution source accounting differs".into());
     }
     Ok(())
 }

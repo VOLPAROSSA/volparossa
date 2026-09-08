@@ -14,7 +14,10 @@ pub use types::{
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -48,6 +51,27 @@ struct Cache {
     first_seen: BTreeMap<([u8; 32], [u8; 32]), (Instant, Instant)>,
 }
 
+/// Process-local totals only: no question, address, peer or route label can be retained.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DnsResolutionCounts {
+    /// Completed resolutions from independently validated local evidence.
+    pub local_validated: u64,
+    /// Completed resolutions from newly validated peer evidence.
+    pub peer_validated: u64,
+    /// Completed resolutions from newly validated recursive evidence.
+    pub upstream_validated: u64,
+    /// Completed existing-resolver fallbacks, never a DNSSEC validation claim.
+    pub trusted_fallback: u64,
+}
+
+#[derive(Default)]
+struct ResolutionCounters {
+    local: AtomicU64,
+    peer: AtomicU64,
+    upstream: AtomicU64,
+    fallback: AtomicU64,
+}
+
 /// One shared in-memory resolver. Clones retain the same cache and replay deadlines.
 #[derive(Clone)]
 pub struct ExitResolver {
@@ -55,6 +79,7 @@ pub struct ExitResolver {
     peers: Option<Arc<dyn DnsPeerBackend>>,
     cache: Arc<Mutex<Cache>>,
     pending: Arc<Semaphore>,
+    counts: Arc<ResolutionCounters>,
 }
 
 impl Default for ExitResolver {
@@ -72,7 +97,31 @@ impl ExitResolver {
             peers,
             cache: Arc::default(),
             pending: Arc::new(Semaphore::new(32)),
+            counts: Arc::default(),
         }
+    }
+
+    /// Snapshot successful resolution sources without any browsing history or identifiers.
+    pub fn counts(&self) -> DnsResolutionCounts {
+        DnsResolutionCounts {
+            local_validated: self.counts.local.load(Ordering::Relaxed),
+            peer_validated: self.counts.peer.load(Ordering::Relaxed),
+            upstream_validated: self.counts.upstream.load(Ordering::Relaxed),
+            trusted_fallback: self.counts.fallback.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record(&self, answer: ValidatedDnsAnswer) -> ValidatedDnsAnswer {
+        let counter = match answer.source() {
+            DnsAnswerSource::LocalValidated => &self.counts.local,
+            DnsAnswerSource::PeerValidated => &self.counts.peer,
+            DnsAnswerSource::UpstreamValidated => &self.counts.upstream,
+            DnsAnswerSource::TrustedFallback => &self.counts.fallback,
+        };
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            Some(count.saturating_add(1))
+        });
+        answer
     }
 
     /// Resolve one positive address family within one five-second deadline.
@@ -88,7 +137,7 @@ impl ExitResolver {
     ) -> Result<ValidatedDnsAnswer, DnsResolverError> {
         let deadline = Instant::now() + RESOLUTION_TIMEOUT;
         if let Some(answer) = self.cached_answer(question, scope.policy_hash()) {
-            return Ok(answer);
+            return Ok(self.record(answer));
         }
         let _permit = self
             .pending
@@ -109,7 +158,7 @@ impl ExitResolver {
                                 scope.policy_hash(),
                                 DnsAnswerSource::PeerValidated,
                             ) {
-                                return Ok(answer);
+                                return Ok(self.record(answer));
                             }
                         }
                     }
@@ -128,7 +177,7 @@ impl ExitResolver {
                     scope.policy_hash(),
                     DnsAnswerSource::UpstreamValidated,
                 ) {
-                    return Ok(answer);
+                    return Ok(self.record(answer));
                 }
             }
         }
@@ -145,11 +194,11 @@ impl ExitResolver {
         addresses.sort_unstable();
         addresses.dedup();
         addresses.truncate(16);
-        Ok(ValidatedDnsAnswer::new(
+        Ok(self.record(ValidatedDnsAnswer::new(
             addresses,
             Instant::now() + Duration::from_secs(30),
             DnsAnswerSource::TrustedFallback,
-        ))
+        )))
     }
 
     /// Return only independently validated, unexpired cached evidence. Never resolves a miss.

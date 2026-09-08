@@ -27,7 +27,8 @@ pub use authorization::{AuthorizedUdpFlow, PinnedUdpFlow, UdpAuthorizationScope}
 pub use bridge::{DatagramLimits, ExitUdpBridge, UdpBridgeStats};
 pub use dns::resolver::{
     DnsAnswerSource, DnsPeerBackend, DnsPeerFuture, DnsProofBundle, DnsQuestion,
-    DnsResolutionScope, DnsResolverError, ExitResolver, MAX_DNS_PROOF_BYTES, ValidatedDnsAnswer,
+    DnsResolutionCounts, DnsResolutionScope, DnsResolverError, ExitResolver, MAX_DNS_PROOF_BYTES,
+    ValidatedDnsAnswer,
 };
 pub use dns::{
     BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query,

@@ -228,6 +228,19 @@ async fn received_rrsig_ttl_and_original_first_seen_deadline_never_renew() {
             <= unix_millis().unwrap() + 2000
     );
     assert!(resolver.cached_bundle(&question, &[2; 32]).is_none());
+    assert_eq!(
+        resolver.counts(),
+        super::super::DnsResolutionCounts::default()
+    );
+    let scope = DnsResolutionScope::without_peers(policy);
+    let resolved = resolver.clone().resolve(&question, &scope).await.unwrap();
+    assert_eq!(resolved.source(), DnsAnswerSource::LocalValidated);
+    assert_eq!(resolver.counts().local_validated, 1);
+    assert_eq!(
+        resolver.counts().peer_validated,
+        0,
+        "retention is not a peer resolution"
+    );
     assert!(!DnsResolutionScope::without_peers(policy).permits_peers());
     assert!(DnsResolutionScope::new(policy, Vec::new()).is_err());
 }

@@ -9,6 +9,9 @@ usage() {
         '       dns-cache-proof.sh --execute --yes --fixture ABSOLUTE_DIR --binary ABSOLUTE_BUILT_EXAMPLE --output NEW_ABSOLUTE_DIR' \
         'Uses only previously collected public DNS data; downloads no binaries or code.' \
         'Creates one disposable user/network namespace; enables only its loopback.' \
+        'If user namespaces are denied, explicit VOLPAROSSA_TEST_ALLOW_SUDO_NETNS=1' \
+        'permits sudo only to create network/PID namespaces and drop back to the original UID.' \
+        'The replay server and validator run with every capability cleared and no-new-privileges.' \
         'Starts bounded loopback TCP1053 replay, executes the unchanged-root Rust collector,' \
         'requires A+AAAA root validation and local cache reuse, then closes the listener.' \
         'Does not change host DNS, routes, firewall, sysctls, interfaces, or root anchors.' \
@@ -31,20 +34,20 @@ done
 case $fixture:$binary:$output in /*:/*:/*) ;; *) usage >&2; exit 64 ;; esac
 [ -d "$fixture" ] && [ ! -L "$fixture" ] && [ -f "$binary" ] && [ ! -L "$binary" ] \
     && [ -x "$binary" ] && [ ! -e "$output" ] && [ ! -L "$output" ] || exit 64
-for dependency in python3 unshare ip timeout readlink; do
+for dependency in python3 timeout readlink; do
     command -v "$dependency" >/dev/null 2>&1 || exit 69
 done
 script_directory=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repository_root=$(CDPATH='' cd -- "$script_directory/../.." && pwd -P)
 usage
 umask 077
 mkdir -m 0700 -- "$output"
-VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS=$(readlink /proc/self/ns/net)
-export VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS
-
-# No fallback to host sockets or changes to host userns/AppArmor policy.
+# The shared runner checks namespace identity and drops privileges before this
+# command. A failed test never retries through the explicit CI-only sudo path.
 # shellcheck disable=SC2016 # Positional arguments expand only inside the isolated child shell.
 timeout --signal=TERM --kill-after=5s 40s \
-    unshare --user --map-root-user --net --pid --fork --kill-child=KILL -- sh -eu -c '
+    "$repository_root/scripts/run-isolated-test.sh" --command /bin/sh dns_cache_builtin_root \
+        VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS loopback -eu -c '
         fixture=$1; binary=$2; output=$3; scripts=$4
         server_pid=
         stop_server() {
@@ -58,7 +61,6 @@ timeout --signal=TERM --kill-after=5s 40s \
         trap "exit 130" INT
         trap "exit 143" TERM
         [ "$(readlink /proc/self/ns/net)" != "$VOLPAROSSA_DNS_FIXTURE_PARENT_NETNS" ]
-        ip link set lo up
         python3 -B "$scripts/dns-cache-fixture.py" serve "$fixture" \
             127.0.0.1:1053 "$output/replay.json" "$output/replay-ready.json" \
             --max-seconds 30 >"$output/replay.stdout" 2>"$output/replay.stderr" &

@@ -1,7 +1,9 @@
 //! Generate one short-lived, threshold-signed development policy for the disposable acceptance
 //! topology. It permits only the topology's exact A02 TCP, A05 UDP echo, A06/A07 HTTP/3 and
 //! A08 visible-name TLS destinations. The explicit `--content-providers` option additionally
-//! permits three exact provider names on TCP 18080. The fixed keys are test material and are never
+//! permits three exact provider names on TCP 18080. `--dns-cache` permits the exact public DNSSEC
+//! fixture name for the ordinary protected DNS route, without replacing its public answers.
+//! The fixed keys are test material and are never
 //! accepted in production.
 
 use std::{
@@ -26,15 +28,9 @@ const ACCEPTANCE_POLICY_LIFETIME_MS: u64 = 60 * 60 * 1_000;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os().skip(1);
     let directory = arguments.next().ok_or("missing fixture directory")?;
-    let content_providers = match arguments.next() {
-        None => false,
-        Some(option) if option == "--content-providers" => true,
-        Some(_) => {
-            return Err("usage: acceptance-policy-fixture ROOT [--content-providers]".into());
-        }
-    };
-    if arguments.next().is_some() || !Path::new(&directory).is_absolute() {
-        return Err("usage: acceptance-policy-fixture ROOT [--content-providers]".into());
+    let (content_providers, dns_cache) = fixture_flags(arguments)?;
+    if !Path::new(&directory).is_absolute() {
+        return Err("fixture directory must be absolute".into());
     }
     let keys = [
         SigningKey::from_bytes(&[0x41; 32]),
@@ -84,6 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?)?;
         }
     }
+    if dns_cache {
+        specification.add_rule(DestinationRule::exact_domain(
+            "iana.org",
+            [ProtocolPort::new(TransportProtocol::Tcp, 443)?],
+        )?)?;
+    }
     let signers = keys.iter().collect::<Vec<_>>();
     let manifest = sign_manifest(&specification, &trust, &signers)?;
     write_private(
@@ -107,6 +109,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn fixture_flags(
+    arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(bool, bool), &'static str> {
+    let (mut content, mut dns) = (false, false);
+    for option in arguments {
+        if option == "--content-providers" && !content {
+            content = true;
+        } else if option == "--dns-cache" && !dns {
+            dns = true;
+        } else {
+            return Err(
+                "usage: acceptance-policy-fixture ROOT [--content-providers] [--dns-cache]",
+            );
+        }
+    }
+    Ok((content, dns))
+}
+
 fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut file = fs::OpenOptions::new()
@@ -126,4 +146,17 @@ fn encode_hex(bytes: &[u8]) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+#[test]
+fn explicit_fixture_flags_are_exact_and_composable() {
+    let flags = |args: &[&str]| fixture_flags(args.iter().map(std::ffi::OsString::from));
+    assert_eq!(flags(&[]).unwrap(), (false, false));
+    assert_eq!(flags(&["--dns-cache"]).unwrap(), (false, true));
+    assert_eq!(
+        flags(&["--content-providers", "--dns-cache"]).unwrap(),
+        (true, true)
+    );
+    assert!(flags(&["--dns-cache", "--dns-cache"]).is_err());
+    assert!(flags(&["--dns-cache", "--unknown"]).is_err());
 }

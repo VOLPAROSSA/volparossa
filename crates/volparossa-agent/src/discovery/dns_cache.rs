@@ -394,6 +394,7 @@ impl DiscoveryRuntime {
                         .cached_bundle(&question, &policy)
                         .map(|b| b.encode())
                         .unwrap_or_default();
+                    let cache_miss = bundle.is_empty();
                     let reply = DnsCacheReply {
                         request_hash: dns_cache_request_hash(request.signed()).to_vec(),
                         bundle,
@@ -402,9 +403,14 @@ impl DiscoveryRuntime {
                         .sign_dns(&reply, verified.expires_at_ms())
                         .and_then(|bytes| DnsCacheResponse::new(bytes).ok())
                     {
-                        let _ =
-                            self.service
-                                .respond_dns_cache(peer, connection_id, channel, response);
+                        if self
+                            .service
+                            .respond_dns_cache(peer, connection_id, channel, response)
+                            .is_ok()
+                            && cache_miss
+                        {
+                            self.metrics.record_dns_cache_miss_reply();
+                        }
                     }
                 }
                 request_response::Message::Response {
@@ -486,6 +492,15 @@ impl DiscoveryRuntime {
         }
     }
     pub(super) fn maintain_dns_cache(&mut self) {
+        if let Some(resolver) = &self.dns_cache.resolver {
+            let counts = resolver.counts();
+            self.metrics.set_dns_resolution_counts(
+                counts.local_validated,
+                counts.peer_validated,
+                counts.upstream_validated,
+                counts.trusted_fallback,
+            );
+        }
         if self.dns_cache.advertised && !(self.roles.client || self.roles.relay || self.roles.exit)
         {
             let _ = self.service.stop_providing(capability::DNSSEC_CACHE);
@@ -647,6 +662,8 @@ mod tests {
         }).await.unwrap();
         assert!(result.is_none());
         assert_eq!(cache_requests, 1);
+        assert_eq!(cache.metrics.snapshot().dns_cache_miss_replies, 1);
+        assert_eq!(exit.metrics.snapshot().dns_cache_miss_replies, 0);
         assert_eq!(cache.dns_cache.replay.len(), 1);
         assert_eq!(
             exit.dns_cache.replay.len(),
