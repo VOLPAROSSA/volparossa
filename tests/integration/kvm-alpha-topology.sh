@@ -35,6 +35,7 @@ print_plan() {
         printf '%s\n' \
             'VOLPAROSSA live MPQUIC path-growth smoke plan:' \
             '  use normal discovery/reservations for two active paths and one authorized warm path;' \
+            '  give R3 32Mbps relay capacity and a reachable Exit bootstrap contact for a distinct control relay;' \
             '  carry real 32MiB upload and download through the same Exit and original relay grants;' \
             '  apply fixed 15% loss only on one owned disposable Relay exit-facing veth;' \
             '  require actual native two-to-three payload growth and all six WireGuard legs;' \
@@ -1999,6 +2000,14 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
+    if [ "$scenario" = mpquic-growth ] && [ "$node" = relay3 ]; then
+        # Three eligible data relays also need a fourth eligible, distinct control relay.
+        # The ordinary 1Mbps provider fixture cannot meet this route's signed 8Mbps minimum.
+        # Existing r3x/xr3 links and exact reciprocal routes carry this replaceable contact;
+        # no selector result is pinned, and Client still has no direct Exit connectivity.
+        relay_capacity=32
+        bootstrap_three="/ip4/46.162.3.1/udp/41000/quic-v1/p2p/$EXIT_PEER"
+    fi
     if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
         case $node in
             client|relay0|relay2|exit)

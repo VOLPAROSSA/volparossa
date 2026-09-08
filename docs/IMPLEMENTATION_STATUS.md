@@ -623,8 +623,15 @@ The [first `fbd070aa` growth VM](https://github.com/VOLPAROSSA/volparossa/action
 [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34234801937) passes.
 The last native snapshot contains two active paths through R2/R1, but not the required reserved
 warm row. Normal contexts did establish and disconnect during bounded retries, so this is not
-evidence that all connection attempts failed. Selection, warm ownership and CLI projection must
-be distinguished before fixing the cause. No three-path payload proof was reached.
+evidence that all connection attempts failed. Source diagnosis identifies an impossible fixture:
+only R0/R1/R2 advertised at least the Client's required eight Mbps, and the genuine selector
+excludes its separately chosen control Relay from data paths. Three eligible Relays therefore
+left at most two data candidates, never two active plus one warm. Warm retention and CLI
+projection have no demonstrated bug here. The scenario-only correction gives existing R3
+sufficient advertised capacity and a real Exit bootstrap contact over its already present link.
+Normal selection, distinct-control rules and bounded retries remain unchanged; no particular
+draw or successful growth is manufactured. The corrected live result is pending.
+No three-path payload proof was reached on `fbd070aa`.
 Global disposable cleanup reports zero objects and byte-identical guest state, but the Client
 log separately contains `SHUTDOWN_CLEANUP_FAILED`; that is not a clean-agent-shutdown result.
 Artifact ZIP SHA-256: `258fcb219e0da713a3b3ad5cbbd3bd45b967507dc967b6104c8f9727574de8b7`.
