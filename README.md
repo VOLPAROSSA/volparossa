@@ -332,9 +332,11 @@ and drains surplus streams at chunk boundaries. Discovery/control admission now 
 current resources instead of a permanent 384-total/256-per-direction connection ceiling, without
 filling that allowance speculatively or breaking existing routes when it shrinks. See
 [adaptive control connections](docs/OPERATIONS.md#adaptive-control-connections). Wi-Fi-neighbor
-and native transport path limits remain separate unfinished work. HTTPS automatic source plans
-still select at most two providers; real three-provider protected-network verification and
-broader adaptive connection management remain in progress.
+and native transport path limits remain separate unfinished work. The
+[three-provider network run on `d0251a27`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
+passes: all fifteen unique chunks arrive from three overlapping provider streams through the
+protected route, with no origin body. HTTPS automatic source plans still select at most two
+providers; broader adaptive connection management remains in progress.
 
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the

@@ -449,7 +449,7 @@ released, and a last-moment resource refusal opening no stream. Three resource-a
 and strict agent all-targets/all-features Clippy pass. These use backpressured duplex streams
 and deterministic resource samples, not physical network or operating-system pressure measurements.
 
-The actual three-provider protected-network proof remains pending. Existing HTTPS source plans
+The actual three-provider protected-network proof now passes on `d0251a27`, recorded below. Existing HTTPS source plans
 still select pairs; sixteen is still the bounded discovery-message input, not an adaptive active
 target. The subsequent control-admission slice is described below; local/Wi-Fi neighbors and
 native MPTCP/MPQUIC backend ceilings have not been generalized. These are bounded integrations,
@@ -472,7 +472,7 @@ Client filter are retained; no production selection rule or host network is chan
 seed/reopen test and strict example Clippy pass, as do four new evidence tests, fifteen parent
 tests, ten observer tests and targeted shell checks. A disposable user/network namespace accepts
 and removes the exact nft filter, ending with an empty ruleset; this carries no payload.
-The actual three-provider VM result remains pending; earlier source-scoped reports do not gain
+The actual three-provider result is recorded below; earlier source-scoped reports do not gain
 this new required proof retroactively.
 
 The [first `8247ebcd` attempt](https://github.com/VOLPAROSSA/volparossa/actions/runs/34229670864)
@@ -495,6 +495,31 @@ requires an actual automatic peer hit as well as lower elapsed time before setti
 All 65 captures / 306 interface records are completely drained with zero drops or forbidden
 traffic, the limiter is unchanged and removed, and cleanup succeeds with byte-identical guest
 state (SHA-256 `be814e7f2f5d2a2e18973f042ec2970383e82936475a90b93655c727d2bb37bd`).
+
+The [corrected `d0251a27` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
+and its [full Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34231982302)
+**pass**. All five committed checker modules rebuild the complete parent and its HTTPS,
+publication, site and adaptive components exactly equal to the report and raw evidence.
+The new phase obtains all **3,932,160 bytes / fifteen unique chunks from three providers**, with
+zero origin body. Each of R3/R4/R5 supplies five chunks; their actual kernel-timestamped bulk
+windows overlap for **106.684345 ms**. The independent original publisher is gone, the Client
+cannot read provider stores, and the fresh normal route retains its actual control peer R0,
+same Exit and two data relays until explicit disconnect. The complete object hash is the
+expected `26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011`.
+
+All earlier native/browser/missing/digest/publication/named/site and later cache-only phases
+also pass. Limited Auto chooses the origin in this sample: 6.382 seconds versus 6.325 seconds
+OriginOnly and 4.280 seconds PeersFirst, so `automatic_peer_hit` and `benefit_passed` are both
+false. No source choice is relabelled to manufacture cache benefit. All 94 captures / 445
+interface rows are completely drained with zero drops, truncation or forbidden traffic;
+166,432 summed boundary frames are not unique packets. Cleanup leaves zero owned objects and
+byte-identical guest state, SHA-256
+`09068fcbeb42213c76320b3ecb8643e335d36720b1d414eab23d03666522b68f`.
+Artifact ZIP SHA-256: `d825a7bba395dd2ccf7ee8455cb67f865bdb22fc053b89bf96876b75a6722eca`;
+canonical parent raw rebuild SHA-256:
+`7ff232ca17b5615c08688afb3ecf4a91a1bd673a963a66fe0bc2c48e53efe5eb`.
+This is real three-provider missing-content growth, not general speedup, more than two active
+MPQUIC paths or a complete expanded-alpha certificate.
 
 ### Adaptive control-connection admission
 
@@ -522,8 +547,38 @@ without closing those 385 or invalidating the original binding. An exact subsequ
 retires only its own lineage. A separate queued-event test preserves the original public-prefix
 witness across lowering and verifies no allocation proportional to the ceiling. Strict discovery
 and agent all-target/all-feature Clippy and formatting pass. This is authenticated local control
-transport evidence, not WAN throughput or 385 payload routes. The earlier VM proofs do not
-establish the newly integrated actor's runtime behavior.
+transport evidence, not WAN throughput or 385 payload routes. The `d0251a27` provider VM above
+also passes with this production actor, but its small topology does not establish 385 WAN peers.
+
+### Warm MPQUIC growth integration
+
+The browser-route owner can now activate an exact retained warm descriptor without first
+removing either of its two payload-carrying paths. Two successive health observations with
+fresh progress on both paths and sustained loss on one justify the bounded failover probe.
+Native `AddPath` retains the original context/Exit/grants and signed two-path minimum; a Ready
+reply alone does not prove the third path carries bytes. Later native deltas must demonstrate
+actual third-path contribution. Without continuing failover value the added path retires after
+the existing ten-second grace; a stalled weak path can instead retire once the other two really
+carry data. The controller does not infer a throughput gain or change the backend eight-path cap.
+
+Path-health maintenance now has its own joined one-second task, independent of the existing
+thirty-second policy refresh. It skips missed ticks rather than overlapping calls, stops before
+route teardown and checks current policy/client-role ownership before native work. The new
+`mpquic-growth` scenario uses ordinary discovery and reservations for two active plus one warm
+R0/R1/R2 path, with bounded retries rather than a production selector override. Its real HTTP/3
+fixture sends 32 MiB each way without artificial application sleeps. Fixed 15% loss on one owned
+Relay exit-facing veth must cause live growth; fresh three-path counters and physical captures
+must then prove all six WireGuard legs, followed by exact payload hashes and complete cleanup.
+The scenario is separate from A01–A15 and throughput comparisons. Its first exact-source VM
+result remains pending; injected health tests and an executable fixture do not make it a pass.
+
+Local verification passes: two growth lifecycle cases, two independent-cadence/shutdown checks,
+the existing warm replacement and policy/role-revocation regressions, and strict agent
+all-targets/all-features Clippy. The HTTP/3 case/profile test and strict example Clippy pass.
+The wrapper's static contract, non-mutating previews, syntax and warning-level ShellCheck pass;
+three pure evidence checks also pass. One disposable user/network namespace accepts the exact
+15% netem JSON profile and restores its owned veth to `noqueue`; that schema/cleanup check carries
+no payload. These local checks are not live MPQUIC payload evidence.
 
 ### Native publication/site cache-only reopen
 

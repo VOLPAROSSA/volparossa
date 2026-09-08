@@ -16,6 +16,7 @@ on:
           - reciprocity
           - local-link
           - mixed-link
+          - mpquic-growth
           - sharing
           - download-sharing
           - wifi-mesh
@@ -72,6 +73,8 @@ jobs:
           test -x tests/integration/run-alpha-topology-vm.sh
           sh -n tests/integration/kvm-alpha-topology.sh
           sh -n tests/integration/run-alpha-topology-vm.sh
+          sh -n tests/integration/mpquic-growth-smoke.sh
+          python3 -B tests/integration/test-mpquic-growth-smoke.py
           python3 tests/integration/test-wifi-mesh-smoke.py
           python3 tests/integration/test-wifi-link-smoke.py
           python3 -B tests/integration/test-uplink-link-smoke.py
@@ -373,6 +376,23 @@ jobs:
             fi
             exit 0
           fi
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = mpquic-growth; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/mpquic-growth-smoke.json"
+            if test -f "$report"; then
+              jq -r '
+                "live two-to-three MPQUIC payload growth succeeded: \(.success)",
+                "phase: \(.phase)",
+                "observed blocker: \(.observed_blocker // "none")",
+                "cleanup complete: \(.cleanup.complete)",
+                "guest host state unchanged: \(.host_state.unchanged)",
+                "This scenario is not a throughput or complete-alpha claim."
+              ' "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              printf '%s\n' 'The VM did not publish MPQUIC path-growth evidence.' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = mixed-link; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/mixed-link-smoke.json"
             if test -f "$report"; then
@@ -505,7 +525,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -800,6 +820,20 @@ jobs:
             .cleanup.complete and .cleanup.remaining_owned_objects == 0 and .host_state.unchanged
           ' "$report" >/dev/null
 
+      - name: Require real two-to-three MPQUIC payload growth
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mpquic-growth'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/mpquic-growth-smoke.json"
+          python3 -B tests/integration/mpquic-growth-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
       - name: Require real mixed LAN/public MPQUIC evidence
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'mixed-link'
         env:
@@ -967,7 +1001,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

@@ -791,6 +791,13 @@ HTTPS source-selection plans still use pairs, and the current signed discovery i
 to sixteen candidates. Control-connection admission is described below; local neighbors and
 native transport path limits remain separate unfinished adaptive integrations.
 
+The [exact `d0251a27` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
+passes the three-provider extension: disjoint R3/R4/R5 caches each supply five unique chunks,
+reconstructing all 3,932,160 bytes after the original publisher exits. Actual kernel-observed
+bulk windows overlap across all three providers; both selected WireGuard relay paths carry
+traffic. Complete captures and cleanup preserve the guest's original network state. This is
+useful missing-content growth, not a threefold speedup or arbitrary-provider-count guarantee.
+
 ### Adaptive control connections
 
 The agent samples resource headroom before initial normal/mesh dialing and on its existing
@@ -815,6 +822,24 @@ already-admitted events and live witness generations. The separate 64-pending-pe
 four-connections-per-peer and 1,024-peer address-cache guards remain; this does not claim an
 unbounded DHT catalogue, adaptive radio neighbors or more WireGuard/MPTCP/MPQUIC route paths.
 No configuration or host network changes are needed.
+
+### Warm MPQUIC path growth
+
+An existing two-path browser route can now consume one of its already authorized warm paths
+without removing either currently useful path. Independent one-second health maintenance
+requires continuing payload on both paths and sustained measured loss on one; this is a
+failover-value probe, not a throughput prediction from an idle connection. The added path must
+then deliver new payload alongside the existing paths. If that value disappears, the probe
+retires after the existing ten-second grace; if the weak path stops progressing and the new
+path really contributes, the weak path retires instead. Policy, expiry, Exit, original relay
+grants, descriptor ownership and the signed minimum remain unchanged.
+
+The separate `mpquic-growth` VM scenario starts with two active paths and one reserved backup,
+uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only to one owned
+Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
+route retirement and unchanged guest state. Its first live result is still pending; local
+state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
+ceiling and other transport limits are not removed by this bounded integration.
 
 ### Automatic public-content contribution
 

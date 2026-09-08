@@ -1,5 +1,7 @@
 //! Callable ownership seam for the native multipath QUIC client process.
 
+mod growth;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,

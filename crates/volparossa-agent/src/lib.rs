@@ -80,6 +80,7 @@ pub use paths::{
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const PATH_HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
 const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK: usize = 64;
@@ -330,6 +331,12 @@ impl Agent {
             dns_routes.clone(),
             shutdown_rx,
         ));
+        let mut path_health_task = tokio::spawn(run_path_maintenance(
+            Arc::clone(&self.state),
+            routes.clone(),
+            dns_routes.clone(),
+            shutdown_tx.subscribe(),
+        ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
             self.config.privacy.metrics_enabled,
             self.config.privacy.metrics_port,
@@ -362,6 +369,7 @@ impl Agent {
             },
             _ = &mut discovery_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
+            _ = &mut path_health_task => Err(AgentError::Task),
             result = &mut contribution_task => match result {
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
@@ -382,6 +390,7 @@ impl Agent {
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
         stop_task(&mut maintenance_task).await;
+        stop_task(&mut path_health_task).await;
         stop_task(&mut contribution_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
@@ -1535,34 +1544,88 @@ async fn run_maintenance(
                     }
                     continue;
                 }
-                match routes.maintain_path_health(now_ms).await {
-                    Ok(ClientPathMaintenance::Unchanged) => {}
-                    Ok(ClientPathMaintenance::Reconfigured) => {
-                        state.write().await.log(
-                            LogLevel::Warn,
-                            "MPQUIC_PATH_RECONFIGURED",
-                            now_ms,
-                        );
-                    }
-                    Err(_) => {
-                        routes.disconnect().await;
-                        state.write().await.log(
-                            LogLevel::Error,
-                            "MPQUIC_PATH_FAIL_CLOSED",
-                            now_ms,
-                        );
-                    }
-                }
-                if dns_routes.maintain_path_health(now_ms).await.is_err() {
-                    dns_routes.disconnect().await;
-                    state.write().await.log(
-                        LogLevel::Error,
-                        "DNS_PATH_FAIL_CLOSED",
-                        now_ms,
-                    );
-                }
             }
         }
+    }
+}
+
+/// Native health must not wait for policy-file I/O or a Discovery policy-refresh RPC. The
+/// separately joined task never reloads policy, creates a route or overlaps maintenance calls.
+async fn run_path_maintenance(
+    state: Arc<RwLock<AgentState>>,
+    routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
+    shutdown: watch::Receiver<bool>,
+) {
+    run_path_health_ticks(shutdown, || {
+        maintain_client_paths(&state, &routes, &dns_routes)
+    })
+    .await;
+}
+
+async fn run_path_health_ticks<F: Future<Output = ()>>(
+    mut shutdown: watch::Receiver<bool>,
+    mut maintain: impl FnMut() -> F,
+) {
+    let mut interval = tokio::time::interval(PATH_HEALTH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            _ = interval.tick() => maintain().await,
+        }
+    }
+}
+
+async fn maintain_client_paths(
+    state: &Arc<RwLock<AgentState>>,
+    routes: &ClientRouteControl,
+    dns_routes: &ClientRouteControl,
+) {
+    let now_ms = unix_millis();
+    let allowed = {
+        let state = state.read().await;
+        state.roles().client && state.active_policy(now_ms).is_some()
+    };
+    if !allowed {
+        if control::disconnect_client_routes(routes, dns_routes)
+            .await
+            .is_err()
+        {
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "CLIENT_CLEANUP_PENDING", now_ms);
+        }
+        return;
+    }
+    match routes.maintain_path_health(now_ms).await {
+        Ok(ClientPathMaintenance::Unchanged) => {}
+        Ok(ClientPathMaintenance::Reconfigured) => {
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "MPQUIC_PATH_RECONFIGURED", now_ms);
+        }
+        Err(_) => {
+            routes.disconnect().await;
+            state
+                .write()
+                .await
+                .log(LogLevel::Error, "MPQUIC_PATH_FAIL_CLOSED", now_ms);
+        }
+    }
+    if dns_routes
+        .maintain_path_health(unix_millis())
+        .await
+        .is_err()
+    {
+        dns_routes.disconnect().await;
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "DNS_PATH_FAIL_CLOSED", unix_millis());
     }
 }
 
@@ -1886,6 +1949,73 @@ mod tests {
 
         assert!(refresh_failure.contains("continue;"));
         assert!(!refresh_failure.contains("break;"));
+    }
+
+    #[tokio::test]
+    async fn path_health_maintenance_ticks_independently_and_stops_without_a_final_call() {
+        let (shutdown, stopped) = watch::channel(false);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(6),
+            run_path_health_ticks(stopped, || async {
+                let mut calls = calls.lock().unwrap();
+                calls.push(tokio::time::Instant::now());
+                if calls.len() == 3 {
+                    shutdown.send(true).unwrap();
+                }
+            }),
+        )
+        .await
+        .expect("three ordinary one-second ticks, not the thirty-second policy cadence");
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                3,
+                "no trailing health invocation after shutdown"
+            );
+            assert!(calls[1].duration_since(started) >= Duration::from_millis(950));
+            assert!(calls[2].duration_since(started) >= Duration::from_millis(1_950));
+        }
+        run_path_health_ticks(shutdown.subscribe(), || async {
+            panic!("already stopped owner must not execute its immediate interval tick");
+        })
+        .await;
+    }
+
+    #[test]
+    fn path_health_maintenance_has_one_joined_owner_and_no_policy_refresh() {
+        let source = include_str!("lib.rs");
+        let policy = source
+            .split_once("async fn run_maintenance(")
+            .unwrap()
+            .1
+            .split_once("async fn run_path_maintenance(")
+            .unwrap()
+            .0;
+        assert!(!policy.contains("maintain_path_health("));
+        assert!(policy.contains("load_active_policy("));
+        let health = source
+            .split_once("async fn run_path_maintenance(")
+            .unwrap()
+            .1
+            .split_once("fn client_policy_revoked(")
+            .unwrap()
+            .0;
+        assert!(!health.contains("load_active_policy("));
+        assert!(!health.contains("discovery.apply_policy("));
+        assert_eq!(health.matches(".maintain_path_health(").count(), 2);
+        assert!(health.contains("MissedTickBehavior::Skip"));
+        let runtime = source
+            .split_once("let mut path_health_task =")
+            .unwrap()
+            .1
+            .split_once("if let Some(client_ingress) = client_ingress {")
+            .unwrap()
+            .0;
+        assert!(runtime.contains("_ = &mut path_health_task => Err(AgentError::Task)"));
+        assert!(runtime.contains("stop_task(&mut path_health_task).await"));
     }
 
     #[test]

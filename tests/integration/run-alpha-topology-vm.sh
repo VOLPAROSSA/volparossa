@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
 }
 
@@ -95,6 +95,11 @@ print_plan() {
         printf '%s\n' \
             'Wi-Fi mesh scenario: install one exact hash-verified official generic guest kernel and reboot once;' \
             '  real MeshOwner hwsim association, UDP/counters and cleanup, not physical Wi-Fi or full overlay proof.'
+    elif [ "$scenario" = mpquic-growth ]; then
+        printf '%s\n' \
+            'MPQUIC-growth scenario: same-route real HTTP/3, two active paths plus one reserved warm path;' \
+            '  fixed 15% loss on one owned Relay veth, actual two-to-three payload growth and all six WireGuard legs;' \
+            '  exact hashes, route retirement and unchanged guest state; no speed or full-alpha claim.'
     elif [ "$scenario" = mixed-link ]; then
         printf '%s\n' \
             'Mixed-link scenario: real HTTP/3 over genuine two-path MPQUIC through LAN/public Relays;' \
@@ -136,7 +141,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -384,7 +389,7 @@ NODES = ("client", "bootstrap1", "bootstrap2", "relay0", "relay1", "relay2",
 SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-phase",
               "worker-network-diagnostics.txt", "host-state-before.json", "host-state-after.json",
               "report.json", "local-link-smoke.json", "wifi-link-smoke.json",
-              "reciprocity-smoke.json", "mixed-link-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
+              "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
               "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
@@ -514,7 +519,7 @@ def collect(home, opt, revision, scenario, guest_status,
 if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
-    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link",
+    if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth",
                            "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-replication", "content-mailbox", "dns-cache"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
@@ -542,7 +547,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -657,7 +662,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

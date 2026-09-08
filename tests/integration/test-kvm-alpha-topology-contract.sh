@@ -21,6 +21,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario reciprocity | grep -Fi 'recipro' >/dev/null
     "$script" --preview --scenario local-link | grep -Fi 'local-link' >/dev/null
     "$script" --preview --scenario mixed-link | grep -Fi 'mixed-link' >/dev/null
+    "$script" --preview --scenario mpquic-growth | grep -Fi 'MPQUIC' >/dev/null
     "$script" --preview --scenario sharing | grep -Fi 'sharing' >/dev/null
     "$script" --preview --scenario uplink-link | grep -Fi 'uplink-link' >/dev/null
     "$script" --preview --scenario crash-recovery | grep -Fi 'crash-recovery' >/dev/null

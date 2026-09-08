@@ -44,6 +44,7 @@ enum AcceptanceCase {
     A07,
     MixedSingle,
     MixedAggregate,
+    MpquicGrowth,
 }
 
 impl AcceptanceCase {
@@ -53,6 +54,7 @@ impl AcceptanceCase {
             "a07" => Ok(Self::A07),
             "mixed-single" => Ok(Self::MixedSingle),
             "mixed-aggregate" => Ok(Self::MixedAggregate),
+            "mpquic-growth" => Ok(Self::MpquicGrowth),
             _ => Err("unknown bounded HTTP/3 fixture case".into()),
         }
     }
@@ -63,14 +65,29 @@ impl AcceptanceCase {
             Self::A07 => "a07",
             Self::MixedSingle => "mixed-single",
             Self::MixedAggregate => "mixed-aggregate",
+            Self::MpquicGrowth => "mpquic-growth",
         }
     }
 
     const fn response_bytes(self) -> usize {
         match self {
             Self::A06 => A06_RESPONSE_BYTES,
-            Self::A07 | Self::MixedSingle | Self::MixedAggregate => A07_RESPONSE_BYTES,
+            Self::A07 | Self::MixedSingle | Self::MixedAggregate | Self::MpquicGrowth => {
+                A07_RESPONSE_BYTES
+            }
         }
+    }
+
+    const fn request_bytes(self) -> usize {
+        if matches!(self, Self::MpquicGrowth) {
+            32 * 1024 * 1024
+        } else {
+            REQUEST_BYTES
+        }
+    }
+
+    const fn requires_release(self) -> bool {
+        matches!(self, Self::A07 | Self::MixedSingle | Self::MixedAggregate)
     }
 }
 
@@ -82,6 +99,7 @@ fn server_cases(profile: Option<&str>) -> FixtureResult<&'static [AcceptanceCase
             AcceptanceCase::MixedSingle,
             AcceptanceCase::MixedAggregate,
         ]),
+        Some("mpquic-growth") => Ok(&[AcceptanceCase::MpquicGrowth]),
         Some(_) => Err("unknown HTTP/3 fixture server profile".into()),
     }
 }
@@ -248,7 +266,7 @@ async fn run_server(
                 request_bytes = request_bytes
                     .checked_add(chunk.len())
                     .ok_or("HTTP/3 request length overflow")?;
-                if request_bytes > REQUEST_BYTES {
+                if request_bytes > case.request_bytes() {
                     return Err("HTTP/3 request exceeded its bound".into());
                 }
                 request_hash.update(chunk);
@@ -256,16 +274,14 @@ async fn run_server(
                 data.advance(consumed);
             }
         }
-        let expected_request_hash = payload_sha256(&request_seed, REQUEST_BYTES);
-        if request_bytes != REQUEST_BYTES
+        let expected_request_hash = payload_sha256(&request_seed, case.request_bytes());
+        if request_bytes != case.request_bytes()
             || request_hash.finalize().as_slice() != expected_request_hash
         {
             return Err("HTTP/3 request payload was incomplete or substituted".into());
         }
 
-        let release_observed = if case == AcceptanceCase::A06 {
-            false
-        } else {
+        let release_observed = if case.requires_release() {
             let active_path = coordination.join(format!("{}-active.ready", case.label()));
             let release_path = coordination.join(format!("{}.release", case.label()));
             write_new(&active_path, b"request-body-complete\n")?;
@@ -279,6 +295,8 @@ async fn run_server(
                 }
                 sleep(Duration::from_millis(50)).await;
             }
+        } else {
+            false
         };
 
         let response_ready_stats = inner_quic_stats(&connection.stats());
@@ -403,7 +421,7 @@ async fn run_client(
         .uri(request_path)
         .version(Version::HTTP_3)
         .header("content-type", "application/octet-stream")
-        .header("content-length", REQUEST_BYTES)
+        .header("content-length", case.request_bytes())
         .body(())?;
 
     let exchange_connection = connection.clone();
@@ -412,8 +430,8 @@ async fn run_client(
         let mut stream = sender.send_request(request).await?;
         let request_seed = payload_seed(case, run_id, b"request");
         let mut offset = 0_usize;
-        while offset < REQUEST_BYTES {
-            let length = CHUNK_BYTES.min(REQUEST_BYTES - offset);
+        while offset < case.request_bytes() {
+            let length = CHUNK_BYTES.min(case.request_bytes() - offset);
             stream
                 .send_data(payload_chunk(&request_seed, offset, length))
                 .await?;
@@ -493,8 +511,8 @@ async fn run_client(
             "hostname": TLS_SERVER_NAME,
             "application": {"ip": local.ip().to_string(), "port": local.port()},
             "destination": {"ip": remote.ip().to_string(), "port": remote.port()},
-            "request_bytes": REQUEST_BYTES,
-            "request_sha256": hex::encode(payload_sha256(&request_seed, REQUEST_BYTES)),
+            "request_bytes": case.request_bytes(),
+            "request_sha256": hex::encode(payload_sha256(&request_seed, case.request_bytes())),
             "response_bytes": received_bytes,
             "response_sha256": hex::encode(received_hash),
             "response_duration_ns": u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
@@ -634,6 +652,23 @@ fn inner_quic_stats(stats: &quinn::ConnectionStats) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mpquic_growth_profile_is_one_unpaused_32_mib_exchange_in_each_direction() {
+        let case = AcceptanceCase::parse("mpquic-growth").unwrap();
+        assert_eq!(server_cases(Some("mpquic-growth")).unwrap(), &[case]);
+        assert_eq!(case.request_bytes(), 32 * 1024 * 1024);
+        assert_eq!(case.response_bytes(), case.request_bytes());
+        assert!(!case.requires_release());
+        assert_ne!(case, AcceptanceCase::A07, "no paced A07 response branch");
+        assert_eq!(AcceptanceCase::A06.request_bytes(), REQUEST_BYTES);
+        assert_eq!(AcceptanceCase::A07.request_bytes(), REQUEST_BYTES);
+        assert!(AcceptanceCase::A07.requires_release());
+        assert_ne!(
+            payload_sha256(&payload_seed(case, [1; 16], b"request"), CHUNK_BYTES),
+            payload_sha256(&payload_seed(case, [1; 16], b"response"), CHUNK_BYTES)
+        );
+    }
 
     #[tokio::test]
     async fn endpoint_drain_reports_budget_exhaustion_without_claiming_idle() {

@@ -12,6 +12,7 @@
 )]
 
 mod browser_failure;
+mod path_growth;
 mod path_telemetry;
 mod retirement;
 mod selection_bridge;
@@ -21,6 +22,7 @@ pub(crate) use selection_bridge::{
 };
 
 use browser_failure::BrowserFailureStage;
+use path_growth::{GrowthDecision, WarmPathGrowth};
 use path_telemetry::PathTelemetry;
 
 use std::{
@@ -265,6 +267,7 @@ struct ActiveProductionMpquicRoute {
     health: ProductionMpquicPathHealth,
     browser_flows: Vec<BrowserQuicFlowBinding>,
     telemetry: PathTelemetry,
+    growth: WarmPathGrowth,
 }
 
 #[derive(Clone, Copy)]
@@ -636,6 +639,44 @@ impl ActiveProductionMpquicRoute {
             .health
             .observe(&statuses, now)
             .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        let warm = (self.session.minimum_paths() == 2 && !self.browser_flows.is_empty())
+            .then(|| self.session.warm_path_ids().next())
+            .flatten();
+        match self
+            .growth
+            .observe(&statuses, &self.health, Instant::now(), now, warm)
+        {
+            GrowthDecision::Unchanged => {}
+            GrowthDecision::Hold => return Ok(ClientPathMaintenance::Unchanged),
+            GrowthDecision::Activate { warm, risky } => {
+                self.session
+                    .activate_warm_path(warm, now_ms, MPQUIC_READY_WAIT)
+                    .await
+                    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                self.health
+                    .record_activation(warm, now)
+                    .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                self.growth.activated(warm, risky, Instant::now());
+                return self.confirm_reconfigured(now).await;
+            }
+            GrowthDecision::Retire { path, recovered } => {
+                self.session
+                    .remove_active_path(path, now_ms, MPQUIC_READY_WAIT)
+                    .await
+                    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                self.health.retire(path);
+                if let Some(path) = recovered {
+                    self.health
+                        .statuses
+                        .get_mut(&path)
+                        .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?
+                        .transition(SelectionPathState::Active, now)
+                        .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+                }
+                self.growth.retired(path);
+                return self.confirm_reconfigured(now).await;
+            }
+        }
         let Some(unhealthy_path_id) = unhealthy.first().copied() else {
             return Ok(ClientPathMaintenance::Unchanged);
         };
@@ -673,7 +714,14 @@ impl ActiveProductionMpquicRoute {
                 .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
             self.health.retire(unhealthy_path_id);
         }
+        self.growth.retired(unhealthy_path_id);
+        self.confirm_reconfigured(now).await
+    }
 
+    async fn confirm_reconfigured(
+        &mut self,
+        now: UnixTime,
+    ) -> Result<ClientPathMaintenance, ClientRouteConnectError> {
         let statuses = self
             .session
             .path_statuses()
@@ -959,6 +1007,10 @@ impl ProductionMpquicPathHealth {
         now: UnixTime,
     ) -> Result<(), ()> {
         self.retire(unhealthy_path_id);
+        self.record_activation(warm_path_id, now)
+    }
+
+    fn record_activation(&mut self, warm_path_id: u32, now: UnixTime) -> Result<(), ()> {
         let warm = self.statuses.get_mut(&warm_path_id).ok_or(())?;
         warm.transition(SelectionPathState::Active, now)
             .map_err(|_| ())?;
@@ -2451,6 +2503,25 @@ impl ClientRouteControl {
         let ClientTransportState::Mpquic(active) = &mut established.transport else {
             return Ok(ClientPathMaintenance::Unchanged);
         };
+        let now_ms = now_ms.max(crate::unix_millis());
+        if let Some(agent_state) = &self.agent_state {
+            // The independent health tick may race a policy refresh. Compare the actual owned
+            // route under its lock, not a previous task-local policy snapshot. No state lock is
+            // held while native I/O runs; Exit policy remains independently authoritative.
+            let agent_state = agent_state.read().await;
+            let policy = agent_state
+                .active_policy(now_ms)
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            let route = established
+                .route
+                .as_ref()
+                .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+            if !agent_state.roles().client
+                || route.established.request.parameters.policy_hash != *policy.policy_hash()
+            {
+                return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
+            }
+        }
         let outcome = active.maintain(now_ms).await?;
         let paths = active.path_summaries().await?;
         self.replace_agent_mpquic_paths(paths).await?;
@@ -2929,6 +3000,7 @@ async fn admit_completed_native_route(
                             health,
                             browser_flows: Vec::new(),
                             telemetry: PathTelemetry::default(),
+                            growth: WarmPathGrowth::default(),
                         },
                     )),
                     tcp_flow: None,
