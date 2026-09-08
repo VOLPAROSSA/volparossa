@@ -7,13 +7,14 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rcgen::generate_simple_self_signed;
+use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{Value, json};
@@ -60,7 +61,10 @@ async fn main() -> Result<()> {
         [mode, root, origin, cert, peer, variant, report] if mode == "consume" => {
             consume(Path::new(root), origin.parse()?, Path::new(cert), peer.parse()?, variant, Path::new(report)).await
         }
-        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT".into()),
+        [mode, parent, origin, cert, report] if mode == "origin-baseline" => {
+            timeout(DEADLINE, origin_baseline(Path::new(parent), origin.parse()?, Path::new(cert), Path::new(report))).await?
+        }
+        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
     }
 }
 
@@ -444,6 +448,97 @@ async fn consume(
             "metadata_elapsed_ms":metadata_elapsed,"total_elapsed_ms":start.elapsed().as_millis(),
             "origin_authenticated_before_peers":true,"tls_interception_ca_installed":false,
             "origin_authority_persisted":false,"browser_integration_claimed":false,
+        }),
+    )
+}
+
+/// An ordinary HTTPS application in the disposable Client namespace: the kernel's existing
+/// transparent ingress must carry these sockets. No peer, cached descriptor or local origin
+/// files enter the reference fetch. The surrounding harness proves the actual protected path.
+async fn origin_baseline(
+    parent: &Path,
+    origin: SocketAddr,
+    cert_path: &Path,
+    report: &Path,
+) -> Result<()> {
+    let effective_uid = fs::metadata("/proc/self")?.uid();
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir()
+        || metadata.uid() != effective_uid
+        || metadata.permissions().mode() & 0o777 != 0o700
+        || effective_uid == 0
+    {
+        return Err("origin baseline requires a private unprivileged fixture directory".into());
+    }
+    let namespace = fs::read_link("/proc/self/ns/net")?;
+    let certificates = read_bounded(cert_path, 64 * 1024)?;
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(&certificates) {
+        roots.add(certificate?)?;
+    }
+    if roots.len() != 1 {
+        return Err("baseline expects exactly one explicit fixture root".into());
+    }
+    let client = OriginClient::new(roots, OriginLimits::default())?;
+    let directory = tempfile::Builder::new()
+        .prefix("volparossa-origin-baseline-")
+        .tempdir_in(parent)?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let mut store = ChunkStore::create(&directory.path().join("cache"), limits())?;
+    if store.usage().bytes != 0 {
+        return Err("reference cache was not cold".into());
+    }
+    let start = Instant::now();
+    let authorized = client
+        .authenticate_manifest(
+            TcpStream::connect(origin).await?,
+            &OriginRequest::new(RESOURCE, METADATA)?,
+            now()?,
+        )
+        .await?;
+    let metadata_elapsed = start.elapsed();
+    let body_start = Instant::now();
+    let received = client
+        .fill_from_origin(
+            TcpStream::connect(origin).await?,
+            &authorized,
+            &mut store,
+            now()?,
+        )
+        .await?;
+    let body_elapsed = body_start.elapsed();
+    let reconstruct_start = Instant::now();
+    let output = directory.path().join("object.bin");
+    let bytes = authorized.reassemble_to_file(&mut [&mut store], now()?, &output)?;
+    let digest = ChunkId::digest(&read_bounded(&output, OBJECT_BYTES)?).to_string();
+    let output_metadata = fs::symlink_metadata(&output)?;
+    if received != bytes
+        || bytes != OBJECT_BYTES as u64
+        || digest != OBJECT_SHA256
+        || !output_metadata.is_file()
+        || output_metadata.uid() != effective_uid
+        || output_metadata.permissions().mode() & 0o777 != 0o600
+    {
+        return Err("origin-only reference output failed verification".into());
+    }
+    let reconstruct_elapsed = reconstruct_start.elapsed();
+    let total_elapsed = start.elapsed();
+    let chunks = authorized.manifest().chunks().len();
+    drop((store, authorized));
+    directory.close()?;
+    write_report(
+        report,
+        &json!({
+            "report_kind":"volparossa-https-origin-baseline", "pid":std::process::id(),
+            "effective_uid":effective_uid, "network_namespace":namespace.to_str().ok_or("namespace encoding")?,
+            "bytes":bytes, "chunks":chunks, "object_sha256":digest,
+            "origin_body_bytes":received, "peer_bytes":0, "metadata_requests":1, "body_requests":1,
+            "metadata_elapsed_ns":metadata_elapsed.as_nanos(), "body_elapsed_ns":body_elapsed.as_nanos(),
+            "reconstruct_elapsed_ns":reconstruct_elapsed.as_nanos(), "total_elapsed_ns":total_elapsed.as_nanos(),
+            "origin_authenticated":true, "origin_authority_persisted":false,
+            "reference_cache_initially_empty":true, "private_spool_removed":true,
+            "output_mode":"0600", "application_socket":"ordinary_tcp_transparent_ingress",
+            "scope":"same-overlay origin-only reference; not direct Internet or universal speedup",
         }),
     )
 }
