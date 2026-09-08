@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import runpy
 import socket
+import struct
 import tempfile
 import unittest
 
@@ -39,6 +40,11 @@ def fixture(control_node="relay2"):
             client_public_packets=0, outbound_client_discovery_attempt_packets=0,
             client_leg_wireguard_data_datagrams=900, exit_leg_wireguard_data_datagrams=900,
             provider_application=application)
+    privacy["exit"]["provider_payload_timing"] = dict(
+        enabled=True, clock="linux-so-timestampns-new", errors=0,
+        milestones_bytes=[65536, 983040],
+        providers={node: [100 + 50 * provider_nodes.index(node), 300 + 50 * provider_nodes.index(node)]
+                   if node in provider_nodes else [0, 0] for node in CHECK["CANDIDATES"]})
     control_capture = dict(
         capture_role="content-control", content_provider_mode=True, truncated=False,
         observed_frames=40, packet_socket_drops=0, interfaces=["cp0", "cp1"],
@@ -56,7 +62,7 @@ def fixture(control_node="relay2"):
         back=[dict(dst=CHECK["PUBLIC_IPS"][control_node], prefsrc=CHECK["PUBLIC_IPS"][node],
                    dev=f"pc{i}", gateway=f"10.241.{80+i}.1")])
         for i, node in enumerate(provider_nodes)}
-    evidence = dict(success=True,
+    evidence = dict(success=True, provider_payload_overlap_ns=150,
         control_underlay=dict(capture=control_capture, routes=control_routes),
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=peers[control_node]),
         status_before=dict(control_relay_peer_id=peers[control_node]),
@@ -143,6 +149,68 @@ def user_fixture(base):
 
 
 class ContentProviderContract(unittest.TestCase):
+    def test_parallel_proof_requires_overlapping_kernel_bulk_not_handshake_or_drain_times(self):
+        evidence = fixture()
+        nodes = evidence["layout"]["provider_nodes"]
+        capture = evidence["privacy"]["exit"]
+        self.assertEqual(CHECK["provider_payload_overlap"](capture, nodes), 150)
+        for mutate in (
+            lambda value: value.update(enabled=False),
+            lambda value: value.update(clock="userspace-recv-time"),
+            lambda value: value.update(errors=1),
+            lambda value: value.update(milestones_bytes=[1, 100]),
+            lambda value: value["providers"].update({nodes[1]: [0, 0]}),
+            lambda value: value["providers"].update({nodes[1]: [300, 400]}),
+            lambda value: value["providers"].update({nodes[1]: [400, 500]}),
+            lambda value: value["providers"].update({nodes[1]: [300, 200]}),
+        ):
+            bad = copy.deepcopy(capture)
+            mutate(bad["provider_payload_timing"])
+            with self.assertRaises(ValueError):
+                CHECK["provider_payload_overlap"](bad, nodes)
+        evidence["provider_payload_overlap_ns"] = 151
+        with self.assertRaises(ValueError):
+            CHECK["validate_transfer"](evidence)
+
+    def test_actual_kernel_timestamp_decoder_and_bounded_bulk_milestones(self):
+        text = (HERE / "kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        embedded = text.split('cat >"$WORK/bin/privacy-observer.py" <<\'PYTHON\'\n', 1)[1].split("\nPYTHON\n", 1)[0]
+        names = {"decode_packet_timestamp", "record_provider_payload_timing", "record_provider_application"}
+        functions = [node for node in ast.parse(embedded).body
+                     if isinstance(node, ast.FunctionDef) and node.name in names]
+        environment = dict(socket=socket, struct=struct, SO_TIMESTAMPNS_NEW=64,
+            provider_timing_enabled=True, content_provider_mode=True, frame_timestamp_ns=0,
+            provider_addresses={"49.165.5.1": "relay4"}, unexpected_provider_application_packets=0,
+            provider_application={"relay4": dict(request_packets=0, response_packets=0, response_payload_bytes=0)},
+            provider_payload_timing=dict(milestones_bytes=[65536, 983040], errors=0, providers={"relay4": [0, 0]}),
+            provider_last_timestamp={"relay4": 0})
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "actual-packet-timing", "exec"), environment)
+        decode = environment["decode_packet_timestamp"]
+        ancillary = (socket.SOL_SOCKET, 64, struct.pack("=qq", 2200000000, 123))
+        timestamp = decode([ancillary], 0)
+        self.assertEqual(timestamp, 2200000000000000123)
+        for records, flags in (
+            ([], 0), ([ancillary, ancillary], 0), ([ancillary], socket.MSG_CTRUNC),
+            ([ancillary], socket.MSG_TRUNC), ([(socket.SOL_SOCKET, 64, bytes(8))], 0),
+            ([(socket.SOL_SOCKET, 64, bytes(24))], 0),
+            ([(socket.SOL_SOCKET, 64, struct.pack("=qq", 1, 1000000000))], 0),
+        ):
+            self.assertEqual(decode(records, flags), 0)
+        environment["frame_timestamp_ns"] = timestamp
+        record = environment["record_provider_application"]
+        # ACKs and a small TLS handshake cannot establish a useful-data timing window.
+        for size in (0, 2000, 0):
+            record("exit", socket.IPPROTO_TCP, "49.165.5.1", 18080, "46.162.3.1", 32000, size)
+        timing = environment["provider_payload_timing"]
+        self.assertEqual(timing["providers"]["relay4"], [0, 0])
+        bulk = environment["record_provider_payload_timing"]
+        bulk("relay4", 65536, timestamp + 1)
+        bulk("relay4", 983040, timestamp + 2)
+        self.assertEqual(timing["providers"]["relay4"], [timestamp + 1, timestamp + 2])
+        bulk("relay4", 1000000, 0)
+        bulk("relay4", 1000000, timestamp)
+        self.assertEqual(timing["errors"], 2)
+
     def test_name_lookup_requires_exact_object_no_manifest_and_both_real_providers(self):
         base = fixture()
         for mutate in (
@@ -311,7 +379,7 @@ class ContentProviderContract(unittest.TestCase):
         tree = ast.parse(embedded)
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                         and node.name == "record_provider_application")
-        environment = dict(socket=socket, content_provider_mode=True,
+        environment = dict(socket=socket, content_provider_mode=True, provider_timing_enabled=False,
                            provider_addresses={"49.165.5.1": "relay4", "50.166.6.1": "relay5",
                                                "48.164.4.1": "relay3"},
                            provider_application={name: dict(request_packets=0, response_packets=0,

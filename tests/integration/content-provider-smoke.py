@@ -30,6 +30,30 @@ def read_route(path):
     return rows
 
 
+def provider_payload_overlap(capture, nodes):
+    timing = capture["provider_payload_timing"]
+    require(capture["capture_role"] == "exit" and timing["enabled"] is True
+            and timing["clock"] == "linux-so-timestampns-new" and timing["errors"] == 0
+            and timing["milestones_bytes"] == [65536, 983040]
+            and set(timing["providers"]) == set(CANDIDATES)
+            and len(nodes) == len(set(nodes)) == 2,
+            "exact kernel-arrival bulk-payload timing is unavailable")
+    windows = []
+    for node, window in timing["providers"].items():
+        require(isinstance(window, list) and len(window) == 2
+                and all(type(value) is int for value in window), "invalid provider timing shape")
+        if node in nodes:
+            require(0 < window[0] < window[1]
+                    and capture["provider_application"][node]["response_payload_bytes"] >= 1048576,
+                    "provider bulk milestones or useful bytes missing")
+            windows.append(window)
+        else:
+            require(window == [0, 0], "unselected provider has a payload window")
+    overlap = min(window[1] for window in windows) - max(window[0] for window in windows)
+    require(overlap > 0, "two actual provider bulk-payload windows did not overlap")
+    return overlap
+
+
 def validate_user_publication(evidence):
     output, publish = evidence["output"], evidence["publish"]
     imported, exported = evidence["import"], evidence["export"]
@@ -195,6 +219,8 @@ def validate_transfer(evidence):
             "same-Exit two-Relay MPTCP route or independent destination providers not proven")
     privacy = evidence["privacy"]
     require(set(privacy) == set(ROLES), "privacy coverage incomplete")
+    require(evidence["provider_payload_overlap_ns"] == provider_payload_overlap(privacy["exit"], provider_nodes),
+            "reported provider overlap differs from captured packet-arrival milestones")
     for role, capture in privacy.items():
         require(capture["capture_role"] == role and capture["content_provider_mode"] is True
                 and capture["truncated"] is False and capture["observed_frames"] > 0
@@ -277,6 +303,8 @@ def build_evidence(work):
                     providers={node: dict(serve=read(work / f"content-provider-{node}-serve.json"),
                                           stop=read(work / f"content-provider-{node}-stop.json"))
                                for node in CANDIDATES if node in layout["provider_nodes"]})
+    evidence["provider_payload_overlap_ns"] = provider_payload_overlap(
+        evidence["privacy"]["exit"], layout["provider_nodes"])
     validate_transfer(evidence)
     return evidence
 

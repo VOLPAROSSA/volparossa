@@ -3060,6 +3060,17 @@ unexpected_outer_tuples = {}
 provider_addresses = {"49.165.5.1": "relay4", "50.166.6.1": "relay5", "48.164.4.1": "relay3"}
 provider_application = {node: dict(request_packets=0, response_packets=0, response_payload_bytes=0)
                         for node in provider_addresses.values()}
+provider_timing_enabled = (content_provider_mode and role == "exit"
+                          and os.path.basename(output_path) == "content-provider-privacy-exit.json")
+# Linux UAPI SO_TIMESTAMPNS_NEW reports __kernel_timespec, two signed 64-bit fields.
+# Capture packet arrival, not socket-drain time: fair queue draining can reorder interfaces.
+# https://docs.kernel.org/networking/timestamping.html#so-timestampns-also-so-timestampns-old-and-so-timestampns-new
+SO_TIMESTAMPNS_NEW = 64
+provider_payload_timing = dict(enabled=provider_timing_enabled, clock="linux-so-timestampns-new",
+    milestones_bytes=[65536, 983040], errors=0,
+    providers={node: [0, 0] for node in provider_addresses.values()})
+provider_last_timestamp = {node: 0 for node in provider_addresses.values()}
+frame_timestamp_ns = 0
 unexpected_provider_application_packets = 0
 content_control_packets = {interface: dict(outbound=0, inbound=0) for interface in content_control_pairs}
 unexpected_provider_control_packets = 0
@@ -3084,6 +3095,35 @@ def record_provider_application(capture_role, protocol, source, source_port,
     counters_for_node["request_packets" if request else "response_packets"] += 1
     if response:
         counters_for_node["response_payload_bytes"] += payload_bytes
+        if provider_timing_enabled and payload_bytes > 0:
+            record_provider_payload_timing(provider_addresses[endpoint],
+                                           counters_for_node["response_payload_bytes"],
+                                           frame_timestamp_ns)
+
+
+def decode_packet_timestamp(ancillary, flags):
+    if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+        return 0
+    matches = [data for level, kind, data in ancillary
+               if level == socket.SOL_SOCKET and kind == SO_TIMESTAMPNS_NEW]
+    if len(matches) != 1 or len(matches[0]) != 16:
+        return 0
+    seconds, nanos = struct.unpack("=qq", matches[0])
+    if seconds <= 0 or not 0 <= nanos < 1000000000:
+        return 0
+    return seconds * 1000000000 + nanos
+
+
+def record_provider_payload_timing(node, received, timestamp):
+    # Interior bulk milestones avoid handshake-only and final close/ACK overlap. They count
+    # observed TCP payload, not unique plaintext/goodput; hash and byte proofs stay separate.
+    if timestamp <= 0 or timestamp < provider_last_timestamp[node]:
+        provider_payload_timing["errors"] += 1
+        return
+    provider_last_timestamp[node] = timestamp
+    for index, milestone in enumerate(provider_payload_timing["milestones_bytes"]):
+        if received >= milestone and provider_payload_timing["providers"][node][index] == 0:
+            provider_payload_timing["providers"][node][index] = timestamp
 
 
 def record_provider_control(interface, protocol, source, source_port, destination, destination_port):
@@ -3098,7 +3138,13 @@ def record_provider_control(interface, protocol, source, source_port, destinatio
 
 
 def receive_frame(capture, interface):
+    global frame_timestamp_ns
+    frame_timestamp_ns = 0
     try:
+        if provider_timing_enabled:
+            frame, ancillary, flags, _address = capture.recvmsg(65535, socket.CMSG_SPACE(16))
+            frame_timestamp_ns = decode_packet_timestamp(ancillary, flags)
+            return frame
         return capture.recv(65535)
     except BlockingIOError:
         return None
@@ -3177,6 +3223,9 @@ interface_statistics = {}
 for interface in interfaces:
     # Protocol zero initially receives nothing: size the queue before starting this exact link.
     capture = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0)
+    if provider_timing_enabled:
+        # Unsupported kernel timestamping fails this capture; never substitute recv() time.
+        capture.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS_NEW, 1)
     interface_statistics[interface] = {
         "receive_buffer_bytes": configure_capture_buffer(capture), "observed_frames": 0,
         "intake_stopped": False,
@@ -3454,6 +3503,7 @@ with open(output_path, "x", encoding="ascii") as output:
             "expected_link_down_interfaces": link_down_interfaces,
             "content_provider_mode": content_provider_mode,
             "provider_application": provider_application,
+            "provider_payload_timing": provider_payload_timing,
             "unexpected_provider_application_packets": unexpected_provider_application_packets,
             "content_control_pairs": content_control_pairs,
             "content_control_packets": content_control_packets,

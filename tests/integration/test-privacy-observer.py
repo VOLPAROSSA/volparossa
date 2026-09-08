@@ -40,6 +40,7 @@ def environment(role="relay1", marker=True):
     namespace = {
         "errno": errno, "role": role, "expected_down_marker": "fixture-marker",
         "output_path": "capture.json",
+        "provider_timing_enabled": False,
         "os": SimpleNamespace(path=SimpleNamespace(exists=lambda _: marker,
             basename=os.path.basename, dirname=os.path.dirname, join=os.path.join)),
         "time": SimpleNamespace(sleep=pauses.append),
@@ -304,10 +305,10 @@ def live_stop_intake():
         raise RuntimeError("requires disposable unshare --user --map-root-user --net, never host")
     print("Disposable namespace only: create privacy0<->privacy1 veth; preserve queued frames, "
           "stop capture intake, send 400 later frames; delete the exact owned pair.", flush=True)
-    stop_node = next(node for node in TREE.body
-                     if isinstance(node, ast.FunctionDef) and node.name == "stop_capture_intake")
-    namespace = {"ctypes": ctypes, "socket": socket}
-    exec(compile(ast.Module(body=[stop_node], type_ignores=[]), "privacy-stop", "exec"), namespace)
+    functions = [node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"stop_capture_intake", "decode_packet_timestamp"}]
+    namespace = {"ctypes": ctypes, "socket": socket, "struct": struct, "SO_TIMESTAMPNS_NEW": 64}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "privacy-stop", "exec"), namespace)
 
     def ip(*args):
         subprocess.run(["ip", *args], check=True, capture_output=True)
@@ -318,6 +319,7 @@ def live_stop_intake():
             ip("link", "set", interface, "up")
         with (socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0) as capture,
               socket.socket(socket.AF_PACKET, socket.SOCK_RAW, 0) as sender):
+            capture.setsockopt(socket.SOL_SOCKET, 64, 1)
             capture.bind(("privacy0", 3))
             capture.setblocking(False)
             sender.bind(("privacy1", 3))
@@ -336,7 +338,8 @@ def live_stop_intake():
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 try:
-                    frame = capture.recv(65535)
+                    frame, ancillary, flags, _address = capture.recvmsg(65535, socket.CMSG_SPACE(16))
+                    assert namespace["decode_packet_timestamp"](ancillary, flags) > 0
                 except BlockingIOError:
                     break
                 frame_count += 1
@@ -353,7 +356,7 @@ def live_stop_intake():
             print(json.dumps({"success": True, "same_capture_fd": True, "queued_markers": 4,
                               "post_stop_markers": 0, "packet_socket_packets": packets,
                               "observed_frames": frame_count, "packet_socket_drops": drops,
-                              "later_statistics_stable": True}))
+                              "later_statistics_stable": True, "kernel_timestampns_new_verified": True}))
     finally:
         ip("link", "delete", "privacy0")
 
