@@ -391,7 +391,9 @@ if [ "$scenario" = dns-cache ]; then
         || { printf '%s\n' 'built-in DNS root validator unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-replication ]; then
-    for replication_fixture in content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+    for replication_fixture in content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py \
+        content-contribution-publish-smoke.sh content-contribution-publish-smoke.py \
+        content-provider-site-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$replication_fixture" ] \
             || [ -L "$source_directory/tests/integration/$replication_fixture" ]; then
             printf '%s\n' 'content replication fixture unavailable' >&2
@@ -1196,6 +1198,9 @@ cleanup() {
     if [ "$scenario" = content-replication ] && command -v content_replication_cleanup >/dev/null 2>&1; then
         content_replication_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-replication ] && command -v content_contribution_publish_cleanup >/dev/null 2>&1; then
+        content_contribution_publish_cleanup || original_status=1
+    fi
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
@@ -1538,6 +1543,8 @@ fi
 if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-replication-smoke.sh
     . "$source_directory/tests/integration/content-replication-smoke.sh"
+    # shellcheck source=tests/integration/content-contribution-publish-smoke.sh
+    . "$source_directory/tests/integration/content-contribution-publish-smoke.sh"
 fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
@@ -1815,9 +1822,10 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
-    if { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ]; } \
+    if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ]; } \
         && { [ "$node" = client ] \
-            || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; then
+            || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
+        || { [ "$scenario" = content-replication ] && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
         # Match package access without adding the operator to the private service group.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \

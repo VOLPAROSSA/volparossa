@@ -177,7 +177,6 @@ fn encode_record(replica: &Replica) -> Vec<u8> {
 fn decode_record(bytes: &[u8]) -> Result<Replica, Error> {
     let record = Record::decode(bytes).map_err(|_| Error::InvalidStore)?;
     if record.encode_to_vec() != bytes
-        || record.chunk_ids.is_empty()
         || record.chunk_ids.len() > MAX_CHUNKS * 32
         || record.chunk_ids.len() % 32 != 0
         || !(1..=u32::from(MAX_HOPS)).contains(&record.hops)
@@ -219,7 +218,7 @@ fn decode_record(bytes: &[u8]) -> Result<Replica, Error> {
 }
 
 fn check_shape(replica: &Replica) -> Result<(), Error> {
-    if replica.chunk_ids.is_empty()
+    if (replica.chunk_ids.is_empty() && !replica.is_empty_publication())
         || replica.chunk_ids.len() > MAX_CHUNKS
         || !(1..=MAX_HOPS).contains(&replica.hops)
     {

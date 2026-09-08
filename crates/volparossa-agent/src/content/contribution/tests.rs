@@ -7,7 +7,9 @@ use volparossa_content::transfer::TransferLimits;
 use volparossa_content::{CHUNK_BYTES, Metadata, Publication, Validity, publish, reassemble};
 use volparossa_identity::Identity;
 
-fn fixture(root: &std::path::Path) -> (Arc<ContributionRuntime>, PublicationRegistry, CacheLimits) {
+pub(super) fn fixture(
+    root: &std::path::Path,
+) -> (Arc<ContributionRuntime>, PublicationRegistry, CacheLimits) {
     let config = ContentContributionConfig {
         enabled: true,
         cache: root.to_string_lossy().into_owned(),
@@ -39,7 +41,7 @@ fn fixture(root: &std::path::Path) -> (Arc<ContributionRuntime>, PublicationRegi
     )
 }
 
-fn publication(
+pub(super) fn publication(
     store: &mut ChunkStore,
     key: &SigningKey,
     mut payload: &[u8],

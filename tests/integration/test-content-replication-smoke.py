@@ -125,10 +125,97 @@ def fixture(control_node="relay1"):
         for path in automatic["phases"][name]["route"]["paths"]:
             path["route_context_id"] = context
     evidence["automatic_contribution"] = automatic
+    evidence["public_publication"] = publication_fixture(evidence)
     return evidence
 
 
+def publication_fixture(evidence):
+    helper = CHECK["publication_module"]()
+    auto = evidence["automatic_contribution"]
+    site = helper["SITE"]
+    source = {f"{index + 1:064x}": 262144 if index < 8 else helper["BYTES"] - 8 * 262144 for index in range(9)}
+    initial = dict(auto["cache_after"], staging_absent=True,
+                   chunks={f"{10 + index:064x}": size for index, size in enumerate((262144, 262144, 321))})
+    before = dict(initial, chunks=dict(initial["chunks"], **source), journal_sha256="e" * 64, journal_bytes=2048)
+    status = dict(serving=True, replication_enabled=True, publications=2,
+                  replica_publications=2, replica_chunks=12, replica_bytes=helper["BYTES"] + CHECK["P_BYTES"])
+    publish = dict(operation="content_publish", network_publication=True, serving=True, publications=2,
+        bytes=helper["BYTES"], chunks=9, manifest_id="6" * 64, publisher_key_hex="7" * 64,
+        cache="/user/site-publisher/source-cache", expires_unix_seconds=5000,
+        private_keys_transferred=False, ownership_changed=False, origin_authenticated=False)
+    phase = copy.deepcopy(auto["phases"]["reserve-fetch"])
+    phase["route"]["route_context_id"] = "f" * 32
+    for path in phase["route"]["paths"]:
+        path["route_context_id"] = "f" * 32
+    for role in ("exit", "provider"):
+        phase["captures"][role]["provider_response_payload_bytes"] = helper["BYTES"] + 4096
+    final = dict(auto["final_fetch"], operation="named_content_download", publisher_key=publish["publisher_key_hex"],
+        name=site["NAME"], revision=1, manifest_id=publish["manifest_id"],
+        publication_expires_unix_seconds=5000, bytes=helper["BYTES"], peer_bytes=helper["BYTES"], chunks=9,
+        sha256=helper["SHA"], cache_only=False, globally_latest=False)
+    boundary = dict(user_uid=985, user_gid=985, control_gid=1001, client_namespace=True,
+                    outside_parent_namespace=True, all_capabilities_dropped=True, no_new_privileges=True)
+    return dict(input=dict(name=site["NAME"], content_type=site["CONTENT_TYPE"], assets=site["inventory"](),
+        bytes=helper["BYTES"], sha256=helper["SHA"], manifest_id=publish["manifest_id"],
+        source_chunks=source, source_cache=publish["cache"]), publish=publish,
+        pack=dict(operation="site_pack", assets=4, bytes=helper["BYTES"], content_type=site["CONTENT_TYPE"], network_published=False),
+        cache_initial=initial, cache_before=before, cache_after=copy.deepcopy(before),
+        before=copy.deepcopy(auto["restored"]), after=status, restored=copy.deepcopy(status),
+        startup=dict(auto["restart"], pid_before=102, pid_after=103),
+        restart=dict(auto["restart"], pid_before=103, pid_after=104),
+        phase=phase, application=dict(final=final, consumer=boundary, cli=dict(boundary), bytes=helper["BYTES"],
+            sha256=helper["SHA"], output_mode="0600", no_manifest_argument=True, browser_engine_executed=False),
+        isolation=dict(user_uid=985, user_gid=985, agent_uid=987, agent_gid=987, control_gid=1001,
+            fresh_client_cache=True, agent_mount_positive_control=True, client_cannot_read_provider_cache=True,
+            agent_cannot_read_user_source=True, user_cannot_read_agent_cache=True,
+            publisher_process_exited_before_fetch=True, publisher_node_offline_claimed=False),
+        publisher_cleanup=dict(publisher_files_removed=True, source_cache_removed=True, manifest_removed=True),
+        cleanup=dict(user_directory_removed=True), stop=dict(serving=False, publications=0))
+
+
 class ReplicationEvidence(unittest.TestCase):
+    def test_explicit_publication_requires_real_complete_admission_restart_and_independent_name_fetch(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        for path, wrong in (
+            (("publish", "network_publication"), False), (("publish", "serving"), False),
+            (("publish", "manifest_id"), "0" * 64), (("publish", "private_keys_transferred"), True),
+            (("cache_before", "chunks", "0000000000000000000000000000000000000000000000000000000000000001"), 1),
+            (("cache_after", "journal_sha256"), "a" * 64), (("cache_after", "inode"), 99),
+            (("cache_before", "staging_absent"), False), (("restored", "replica_chunks"), 7),
+            (("restart", "pid_after"), 103), (("publisher_cleanup", "source_cache_removed"), False),
+            (("application", "final", "publication_expires_unix_seconds"), 5001),
+            (("application", "final", "peer_bytes"), 0), (("application", "final", "origin_body_bytes"), 1),
+            (("application", "final", "provider_peer_ids"), ["peer-relay5"]),
+            (("application", "cli", "all_capabilities_dropped"), False),
+            (("isolation", "client_cannot_read_provider_cache"), False),
+            (("phase", "captures", "provider", "provider_response_payload_bytes"), 0),
+            (("cleanup", "user_directory_removed"), False),
+        ):
+            bad = copy.deepcopy(value)
+            cursor = bad["public_publication"]
+            for key in path[:-1]: cursor = cursor[key]
+            cursor[path[-1]] = wrong
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](bad)
+        incomplete = copy.deepcopy(value)
+        del incomplete["public_publication"]
+        with self.assertRaises(KeyError): CHECK["validate_evidence"](incomplete)
+        script = (HERE / "content-replication-smoke.sh").read_text()
+        self.assertLess(script.index("    content_replication_automatic_run\n"), script.index("    content_contribution_publish_run\n"))
+        subscript = (HERE / "content-contribution-publish-smoke.sh").read_text()
+        self.assertIn("content publish --contribute", subscript)
+        self.assertNotIn("content import", subscript)
+        self.assertNotIn("content serve", subscript)
+        # Real initial owner-probe staging has only these two scripts, not the later
+        # publication/site helpers. Importing it must not perform publication setup.
+        with tempfile.TemporaryDirectory(prefix="volparossa-owner-staging-") as directory:
+            staged = Path(directory)
+            for name in ("content-replication-smoke.py", "content-replication-capture.py"):
+                (staged / name).write_bytes((HERE / name).read_bytes())
+            module = runpy.run_path(str(staged / "content-replication-smoke.py"))
+            self.assertTrue(callable(module["owner_process"]))
+
     def test_automatic_restart_is_available_without_the_skipped_a01_block(self):
         # Dependency regression only: reach the fixed systemd restart request and deliberately
         # fail it. No host service is touched and no successful restart evidence is fabricated.

@@ -248,7 +248,7 @@ The integrated harness now replaces only provider B's registration after the ori
 retaining its same four-chunk cache and original publication expiry. Its next digest retrieval
 must use both independently indexed providers, reconstruct every byte and fetch no origin body.
 Three fixture tests, twelve HTTPS checker tests, fourteen parent checker tests and narrow shell
-checks pass; the actual new VM execution remains pending.
+checks pass; the actual new VM result follows below.
 
 The earlier `f3abee8e` logs identify **5.146 seconds** of discovery inside the 9.230-second digest
 peer operation. Both offers were already verified before another **5.034 seconds** waiting for
@@ -257,8 +257,67 @@ The remaining 4.084 seconds cannot be attributed solely to payload from the avai
 Explicit peers-first now tries freshly revalidated route/policy-scoped hints within one second,
 then bounded generic discovery/pairs if needed under its original thirty-second deadline.
 No full-object origin race is started; actual verified progress survives successive pairs.
-Automatic mode retains its existing measured budget without generic discovery fallback. The
-network benefit of these newer changes remains unproved; C08 is still open.
+Automatic mode retains its existing measured budget without generic discovery fallback.
+
+The [exact `3357169e` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
+and [full Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218225907) now **pass**.
+The raw rebuild equals the report using the committed checker archive. Provider B keeps its
+same cache (`65025:27140`) and four original chunks / 1,048,576 bytes while registering only
+its independently signed index. Both original layouts and expiries match. A fresh origin HEAD
+plus both providers reconstructs all 2,097,275 bytes / nine chunks with zero origin body/ranges,
+SHA-256 `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+Both selected R2/R1 WireGuard paths carry the protected MPTCP transfer. Earlier native,
+browser-download, missing-range, named, site and cache-only phases remain green.
+
+Actual recent lookup replies arrive 42/64 ms after dispatch, without the earlier five-second
+DHT wait. Whole digest retrieval takes **4.914942182 seconds** versus **2.544424960 seconds**
+origin-only: still no latency win, automatic peer-selection proof or complete C08. All seventy
+captures / 332 interface rows are fully accounted and zero-drop/forbidden; 123,514 summed
+boundary frames are not unique packets. Cleanup leaves zero owned objects and unchanged guest
+state, SHA-256 `cd650c0f9e48bcb705ab61fe7c96f1ffe584283053bc39d09d1a60aba0ba635c`.
+Artifact ZIP SHA-256: `5aa3343a1242fd2a88807897b0931f8253caad107d6ef11d8fd4ae1487777b5e`;
+canonical raw rebuild SHA-256: `3cd6f47de03e6eb6bea06e8b84cf40bd1a52b5bd7be43d8531c0fecb4237901b`.
+The fixture-only route-network discriminator correction also passes in this full Quality run;
+the original `4e6cc308` failure remains recorded below. These results do not certify subsequent
+explicit-publication changes or resolve separate CodeQL review findings.
+
+### Explicit complete publication through the configured service
+
+`content publish --contribute` now links local signing to the existing configured provider,
+including ordinary `site pack` bundles. Offline publication remains the default. The CLI
+retains the original signed/verified envelope in memory, saves its local manifest first and
+releases signing-key ownership before IPC. It streams bytes from its private user cache over
+the existing authorized Unix socket. No key, user-source path, replacement endpoint or caller
+quota is handed to the agent. Ready echoes the exact contribution mode; legacy agents and
+ordinary handoffs cannot silently substitute one mode for another.
+
+The agent requires its already configured healthy public contribution service, receives into
+bounded private staging, and holds the existing foreground/background-writer ownership across
+admission. Only complete verified bytes are non-evictingly admitted into the actual configured
+cache and durable original-envelope journal before live registration and offer announcement.
+Final `network_publication` requires the complete original object, a live service and unchanged
+expiry. Empty public objects are supported; private messages are excluded. Failed/partial
+admission does not produce a publication acknowledgment or delete the completed user copy.
+Staging closes and is removed on completion/cancellation. This is local publication and restart
+restoration, not external custody, replica repair or guaranteed offline website availability.
+
+Four targeted core admission tests pass, including complete/idempotent/repeated-chunk/empty
+restore, quota-prefix refusal, non-eviction and private/expired rejection. A wire test confirms
+the additive mode/receipt fields and forbids caller-selected service storage. Three real CLI
+process tests, the explicit parser test, the existing offline publication test and strict
+content/CLI Clippy pass. CLI tests use a simulated authorized agent endpoint, not a network
+substitute. Three new agent tests and three existing import/export tests also pass, including
+actual original-object transfer after journal restoration over the v1 duplex stream, a real
+Unix mode exchange, empty-object support and staging/lease cleanup. Strict agent Clippy passes
+for the normal production library and all targets/features. The existing pinned `tempfile`
+workspace dependency is promoted from agent test-only use to production staging; no package
+or lockfile version changes. The final targeted provider group (eleven tests), local-control
+content group (thirteen tests), workspace formatting and diff checks also pass. The additive
+network fixture retains the earlier P/Q and automatic-contribution phases, then uses the normal
+CLI to publish a site, removes its private source, restarts the actual configured provider and
+fetches by publisher/name from an independent client with fresh path captures. Nine checker
+tests and narrow shell checks pass, including the earlier two-file owner-probe staging. Its
+real publish/restart/network execution remains pending.
 
 ### Native publication/site cache-only reopen
 

@@ -1,6 +1,8 @@
 //! Explicitly configured, automatic storage-only contribution after verified public downloads.
 //! Queue entries contain no URL, recipient key, output path or reusable HTTPS authority.
 
+mod publication;
+
 use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{

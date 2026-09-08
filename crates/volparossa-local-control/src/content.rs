@@ -22,6 +22,10 @@ pub struct ContentImportRequest {
     /// Explicitly allow ordinary native publications; never confers HTTPS-origin authority.
     #[prost(bool, tag = "5")]
     pub allow_public_content: bool,
+    /// Publish public bytes through the already configured contribution service. In this mode
+    /// cache and limits must be absent: the service's existing storage consent supplies both.
+    #[prost(bool, tag = "6")]
+    pub contribute: bool,
 }
 
 /// Explicit transfer from an existing agent-owned cache to the user; private by default.
@@ -56,11 +60,23 @@ pub struct ContentTransferReady {
     /// Expected complete ordered chunk count, not chunks already transferred.
     #[prost(uint32, tag = "3")]
     pub chunks: u32,
+    /// Exact echo of the configured-service import mode; readiness is not publication success.
+    #[prost(bool, tag = "4")]
+    pub contribute: bool,
 }
 
 impl ContentImportRequest {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
         validate_publication(&self.manifest, &self.publisher_key)?;
+        if self.contribute {
+            return if self.allow_public_content && self.cache.is_empty() && self.limits.is_none() {
+                Ok(())
+            } else {
+                Err(ControlProtocolError::Invalid(
+                    "invalid configured content contribution",
+                ))
+            };
+        }
         validate_path(&self.cache)?;
         validate_limits(self.limits)
     }
@@ -327,6 +343,10 @@ impl HttpsContentTransferReady {
 
 /// Actual successful content work, separate from route or generic alpha readiness.
 #[derive(Clone, PartialEq, Eq, Message)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent additive protobuf receipt fields"
+)]
 pub struct ContentReceipt {
     /// Fully reconstructed output bytes, zero for service management.
     #[prost(uint64, tag = "1")]
@@ -373,6 +393,10 @@ pub struct ContentReceipt {
     /// Actual replica publications registered for re-serving.
     #[prost(uint32, tag = "15")]
     pub replica_publications: u32,
+    /// This exact explicitly imported public object is complete, journaled and registered by
+    /// the configured local provider. Not an external replica receipt or availability promise.
+    #[prost(bool, tag = "16")]
+    pub network_publication: bool,
 }
 
 impl ContentReplicationConfig {
@@ -650,6 +674,7 @@ mod tests {
                 min_free_bytes: 0,
             }),
             allow_public_content: false,
+            contribute: false,
         };
         let export = ContentExportRequest {
             manifest: import.manifest.clone(),
@@ -693,6 +718,7 @@ mod tests {
             manifest_id: vec![4; 32],
             bytes: 4 * 1024 * 1024 + 64,
             chunks: 17,
+            contribute: false,
         };
         let response = ControlResponse {
             protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -719,6 +745,76 @@ mod tests {
         invalid.cache = "relative".into();
         assert!(invalid.validate().is_err());
         assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
+    }
+
+    #[test]
+    fn configured_contribution_has_explicit_mode_and_no_caller_selected_storage() {
+        let request = ContentImportRequest {
+            manifest: vec![1; 256],
+            publisher_key: vec![2; 32],
+            cache: String::new(),
+            limits: None,
+            allow_public_content: true,
+            contribute: true,
+        };
+        assert!(request.validate().is_ok());
+        let mut previous = request.clone();
+        previous.contribute = false;
+        let mut expected = previous.encode_to_vec();
+        expected.extend([0x30, 1]);
+        assert_eq!(request.encode_to_vec(), expected);
+        assert_eq!(
+            ContentImportRequest::decode(expected.as_slice()).unwrap(),
+            request
+        );
+        assert!(
+            !ContentImportRequest::decode(previous.encode_to_vec().as_slice())
+                .unwrap()
+                .contribute
+        );
+        for invalid in [
+            ContentImportRequest {
+                allow_public_content: false,
+                ..request.clone()
+            },
+            ContentImportRequest {
+                cache: "/caller/chosen".into(),
+                ..request.clone()
+            },
+            ContentImportRequest {
+                limits: Some(ContentCacheLimits {
+                    quota_bytes: 1024,
+                    max_entries: 1,
+                    min_free_bytes: 0,
+                }),
+                ..request.clone()
+            },
+            previous,
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+        let mut ready = ContentTransferReady {
+            manifest_id: vec![3; 32],
+            bytes: 17,
+            chunks: 1,
+            contribute: false,
+        };
+        let mut encoded = ready.encode_to_vec();
+        assert!(
+            !ContentTransferReady::decode(encoded.as_slice())
+                .unwrap()
+                .contribute
+        );
+        ready.contribute = true;
+        encoded.extend([0x20, 1]);
+        assert_eq!(ready.encode_to_vec(), encoded);
+        assert!(ready.validate().is_ok());
+        let receipt = ContentReceipt {
+            network_publication: true,
+            ..ContentReceipt::default()
+        };
+        assert_eq!(receipt.encode_to_vec(), [0x80, 0x01, 0x01]);
+        assert!(!ContentReceipt::decode(&[][..]).unwrap().network_publication);
     }
 
     #[test]

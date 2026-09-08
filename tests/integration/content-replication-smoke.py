@@ -51,6 +51,12 @@ def read(path):
     return json.loads(data)
 
 
+def publication_module():
+    # The early capless owner probe deliberately stages only this file and CAPTURE.
+    # Additional publication helpers are needed only by the final evidence checker.
+    return runpy.run_path(str(Path(__file__).with_name("content-contribution-publish-smoke.py")))
+
+
 def configure_automatic(path):
     """Append only the explicit disposable R4 consent; preserve its existing role/budget config."""
     metadata = path.lstat()
@@ -453,6 +459,20 @@ def validate_evidence(evidence):
             "native replica registration, genuine MPTCP completion or forwarded discovery missing")
     validate_contention(evidence)
     validate_automatic(evidence)
+    public = evidence["public_publication"]
+    publication = publication_module()
+    require(public["publish"]["publisher_key_hex"] != seed["foreground"]["publisher_hex"],
+            "ordinary publisher reused the earlier fixture's signing identity")
+    publication["validate_evidence"](public, evidence["automatic_contribution"], peers)
+    validate_phase(public["phase"], "reserve-fetch", peers, publication["BYTES"])
+    receipt = public["application"]["final"]
+    validate_fetch(receipt, publication["BYTES"], 9, peers["relay4"], {peers[node] for node in RELAY_NODES})
+    require(receipt["control_relay_peer_id"] not in
+            {slot["relay_peer_id"] for slot in public["phase"]["route"]["benchmark_slots"]},
+            "public publication control relay overlaps a carrying data relay")
+    old_phases = (*evidence["phases"].values(), *evidence["automatic_contribution"]["phases"].values())
+    require(public["phase"]["route"]["route_context_id"] not in
+            {phase["route"]["route_context_id"] for phase in old_phases}, "public fetch reused an earlier route")
 
 
 def build_evidence(work):
@@ -501,6 +521,7 @@ def build_evidence(work):
     require((work / "content-replication-automatic-origin-listeners.txt").stat().st_size == 0,
             "original provider listener survives automatic contribution phase")
     evidence["automatic_contribution"] = automatic
+    evidence["public_publication"] = publication_module()["build_evidence"](work)
     validate_evidence(evidence)
     return evidence
 

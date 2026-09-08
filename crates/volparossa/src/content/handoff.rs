@@ -1,6 +1,9 @@
 //! Explicit native-content transfer between independently owned user and agent stores.
 //! Recipient-encrypted messages remain the default; ordinary native objects require opt-in.
 
+mod contribution;
+pub(super) use contribution::run as contribute;
+
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
@@ -16,8 +19,8 @@ use volparossa_content::{
     transfer::{TransferLimits, pull_from_peer, serve_peer},
 };
 use volparossa_local_control::{
-    ContentExportRequest, ContentImportRequest, ControlResponse, control_request::Operation,
-    control_response::Payload,
+    ContentExportRequest, ContentImportRequest, ContentReceipt, ControlResponse,
+    control_request::Operation, control_response::Payload,
 };
 
 use super::{
@@ -84,6 +87,7 @@ pub(super) async fn run(
             cache: absolute_path(&args.agent_cache)?,
             limits: Some(args.limits.wire_limits()),
             allow_public_content: args.public_content,
+            contribute: false,
         }),
         Direction::Export => Operation::ContentExport(ContentExportRequest {
             manifest: encoded,
@@ -96,14 +100,8 @@ pub(super) async fn run(
     let transfer = async {
         let (mut stream, request_id, ready) =
             crate::control::begin_request(socket, operation).await?;
-        validate_ready(&ready, &manifest)?;
-        let limits = TransferLimits {
-            exchange_timeout: Duration::from_secs(5),
-            session_timeout: Duration::from_secs(30),
-            // Empty native objects exchange only the normal finish frame, no chunk body.
-            max_requests: manifest.chunks().len().max(1),
-            max_bytes: manifest.length().max(1),
-        };
+        validate_ready(&ready, &manifest, false)?;
+        let limits = transfer_limits(&manifest);
         let progress = match direction {
             Direction::Import => {
                 serve_peer(
@@ -125,18 +123,8 @@ pub(super) async fn run(
             }
         };
         let complete = crate::control::finish_request(&mut stream, &request_id).await?;
-        validate_complete(&complete, &manifest)?;
-        let unique_chunks: BTreeMap<_, _> = manifest
-            .chunks()
-            .iter()
-            .map(|chunk| (*chunk.id(), u64::from(chunk.length())))
-            .collect();
-        if progress.bytes != unique_chunks.values().sum::<u64>()
-            || progress.chunks != unique_chunks.len()
-            || progress.missing != 0
-        {
-            bail!("content handoff did not transfer the complete verified object");
-        }
+        validate_complete(&complete, &manifest, false)?;
+        validate_progress(&manifest, progress)?;
         Ok::<(), anyhow::Error>(())
     };
     timeout(Duration::from_secs(30), transfer)
@@ -199,7 +187,39 @@ fn verify_complete(manifest: &VerifiedManifest, store: &mut ChunkStore) -> Resul
     Ok(())
 }
 
-fn validate_ready(response: &ControlResponse, manifest: &VerifiedManifest) -> Result<()> {
+fn transfer_limits(manifest: &VerifiedManifest) -> TransferLimits {
+    TransferLimits {
+        exchange_timeout: Duration::from_secs(5),
+        session_timeout: Duration::from_secs(30),
+        // Empty native objects exchange only the normal finish frame, no chunk body.
+        max_requests: manifest.chunks().len().max(1),
+        max_bytes: manifest.length().max(1),
+    }
+}
+
+fn validate_progress(
+    manifest: &VerifiedManifest,
+    progress: volparossa_content::transfer::TransferProgress,
+) -> Result<()> {
+    let unique_chunks: BTreeMap<_, _> = manifest
+        .chunks()
+        .iter()
+        .map(|chunk| (*chunk.id(), u64::from(chunk.length())))
+        .collect();
+    if progress.bytes != unique_chunks.values().sum::<u64>()
+        || progress.chunks != unique_chunks.len()
+        || progress.missing != 0
+    {
+        bail!("content handoff did not transfer the complete verified object");
+    }
+    Ok(())
+}
+
+fn validate_ready(
+    response: &ControlResponse,
+    manifest: &VerifiedManifest,
+    contribute: bool,
+) -> Result<()> {
     let Some(Payload::ContentTransferReady(ready)) = &response.payload else {
         bail!("agent did not explicitly accept the content stream handoff");
     };
@@ -207,21 +227,31 @@ fn validate_ready(response: &ControlResponse, manifest: &VerifiedManifest) -> Re
         || ready.manifest_id != manifest.manifest_id()
         || ready.bytes != manifest.length()
         || usize::try_from(ready.chunks)? != manifest.chunks().len()
+        || ready.contribute != contribute
     {
         bail!("agent content handoff does not match the exact trusted manifest");
     }
     Ok(())
 }
 
-fn validate_complete(response: &ControlResponse, manifest: &VerifiedManifest) -> Result<()> {
+fn validate_complete<'a>(
+    response: &'a ControlResponse,
+    manifest: &VerifiedManifest,
+    contribute: bool,
+) -> Result<&'a ContentReceipt> {
     let Some(Payload::Content(receipt)) = &response.payload else {
         bail!("agent returned no final content transfer receipt");
     };
     if response.diagnostic_code != "CONTENT_OK"
         || receipt.bytes != manifest.length()
         || usize::try_from(receipt.chunks)? != manifest.chunks().len()
+        || receipt.network_publication != contribute
+        || (contribute
+            && (!receipt.serving
+                || receipt.publications == 0
+                || now_seconds()? >= manifest.validity().expires))
     {
         bail!("agent final receipt does not confirm the complete content object");
     }
-    Ok(())
+    Ok(receipt)
 }

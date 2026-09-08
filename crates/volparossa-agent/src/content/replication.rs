@@ -139,6 +139,16 @@ impl ReplicationRuntime {
         Arc::clone(&self.background).try_lock_owned().ok()
     }
 
+    /// Foreground publication waits briefly for an already cancelled optional writer to exit.
+    pub(super) async fn publication_slot(&self) -> Result<OwnedMutexGuard<()>, ContentError> {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            Arc::clone(&self.background).lock_owned(),
+        )
+        .await
+        .map_err(|_| ContentError::Busy)
+    }
+
     pub(super) fn matches(&self, config: &ContentReplicationConfig) -> bool {
         let mut requested = config.clone();
         requested.reuse_replica_cache = self.config.reuse_replica_cache;

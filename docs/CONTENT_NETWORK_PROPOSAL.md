@@ -143,8 +143,16 @@ directory adoption. Corrupt/incomplete mutations are refused without a recovery 
 The normal CLI now exposes explicit offline publication and reconstruction: `content publish`
 uses the existing encrypted node identity, and `content assemble` requires an independently
 trusted publisher key and explicit local cache paths. Both have real separate-invocation
-roundtrip evidence, but do not announce a provider, distribute chunks or resolve a public name.
+roundtrip evidence. By default they do not announce a provider, distribute chunks or resolve a public name.
 See the [operational commands](OPERATIONS.md#offline-content-commands).
+
+Explicit `content publish --contribute` now adds complete publication through an already
+configured contribution service: the authorized local stream carries bytes from the user's
+private cache, and success requires the original full object in the actual configured cache,
+durable ownership and live registration. No hand-written `serve` step or filesystem ownership
+change is needed; `site pack` bundles use the same command. Local checks pass and a new
+publish/restart/independent-consumer network proof is being integrated. This is one complete
+local copy, not the outstanding external retention, replica repair or global availability promise.
 
 The integrated runtime provides explicit `content serve` / `content fetch` / `content stop`.
 A provider signs only a short-lived generic service location. A consumer asks its current
@@ -385,7 +393,11 @@ chunk lists, whole digest, length and public type must agree; the final own-orig
 still authorizes output. One writer distributes missing chunks across at most two workers at
 a time, each selecting its provider's original index. Native/named exact-index behavior and
 private-content exclusion remain unchanged. Real local complementary-provider tests and
-targeted agent checks pass; a new network proof and speed comparison remain pending.
+targeted agent checks pass. The [new network proof on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
+also passes with both independent indexes, complete reconstruction and zero origin body.
+Recent lookup replies arrive in 42/64 ms; the entire peers-first operation takes 4.915 seconds
+versus 2.544 seconds origin-only. Eliminating the earlier DHT wait does not yet make this
+fixture faster than its origin or complete C08.
 
 ### Bounded post-download redistribution
 

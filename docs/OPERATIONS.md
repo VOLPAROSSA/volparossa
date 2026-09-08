@@ -304,7 +304,7 @@ initial positive-answer implementation. See the source-bound
 
 ## Offline content commands
 
-`content publish` and `content assemble` work locally without starting services, opening network
+By default, `content publish` and `content assemble` work locally without starting services, opening network
 listeners or contacting peers. Run them as the existing identity/cache owner in caller-chosen local
 directories. Publishing unlocks the existing encrypted Ed25519 identity; it neither generates a new
 permanent identity nor exports a private key. These commands authenticate native publisher content,
@@ -323,7 +323,8 @@ The command prompts for the existing passphrase without echo. Alternatively, `--
 may name an already provisioned strict `0600` regular file; never put the secret itself in arguments
 or environment variables. Omitting `--identity` uses the normal node identity path. Successful JSON
 output includes the publisher's public key, byte/chunk count and expiry, with
-`network_publication: false`.
+`network_publication: false`. The explicit [`--contribute` option](#publishing-through-the-configured-contribution-service)
+adds a confirmed handoff to an already configured service after that local publication succeeds.
 
 Defaults are a 24-hour signed lifetime (`--lifetime-seconds`, maximum 31 days), a 256-MiB payload
 quota per cache (`--quota-bytes`), 4096 indexed chunks (`--max-entries`, maximum 65536), and a 64-MiB
@@ -748,9 +749,11 @@ whole hash, length, public media type and complete ordered chunk layout agree. I
 re-sign either index or change the final origin-authority check. Explicit `peers-first` refreshes
 recent route/policy-bound offers first, then falls back to bounded discovery if needed; up to
 two workers run at once within the same original thirty-second peer budget. Already verified
-progress is retained across attempts. This new path has targeted local checks, not a new
-network speed claim yet. Automatic mode keeps its measured budget and does not gain an
-unbounded discovery fallback.
+progress is retained across attempts. The
+[independent-index run on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
+passes with both providers and zero origin body; recent lookup replies take 42/64 ms.
+The complete operation still takes 4.91 seconds versus 2.54 seconds origin-only, not a speed
+win. Automatic mode keeps its measured budget and does not gain unbounded discovery fallback.
 
 ### Automatic public-content contribution
 
@@ -793,6 +796,42 @@ promise, global fairness measurement or guarantee that other clients can always 
 entire object. `content status` reports the same service and replica counters as manual serving;
 `content stop` stops the current service, and the explicit configuration takes effect again at
 the next agent start.
+
+### Publishing through the configured contribution service
+
+With the preceding contribution configuration already enabled and its policy-authorized service
+running, publish an explicit public file without a separate `import` or `serve` command:
+
+```sh
+volparossa content publish --contribute \
+  --identity /path/to/existing/identity.key \
+  --input ./notes.pdf --cache ./content-cache --manifest ./notes.v1.pb \
+  --name notes --revision 1 --content-type application/pdf
+```
+
+For a site, first use `content site pack`, then publish its bundle with `--contribute` and
+`--content-type application/vnd.volparossa.site.v1`. Consumers can use the existing `fetch-name`
+or `site open` with your independently authenticated public publisher key and exact name.
+
+The CLI completes and saves the original local publication before opening the authorized Unix
+control socket. It streams chunks from your private cache; the agent never needs access to that
+directory, a signing key, or a caller-selected destination/listener. Its existing configuration
+selects the contribution cache, quota and endpoint. A private temporary receiving cache is
+removed on completion or cancellation. Admission does not evict existing live contribution
+data, and foreground publication pauses the same optional background writer.
+
+`network_publication: true` is returned only after complete hash verification, durable original
+manifest/chunk ownership, registration in that configured service and its service announcement.
+The same journal restores the original publication after restart, with unchanged expiry and
+name lookup. Empty public objects are supported; private-message content is refused. Missing
+configuration, insufficient quota or a busy/failed service returns an error while retaining the
+completed local manifest/cache. Without `--contribute`, the old offline behavior is unchanged.
+
+This confirms a complete **local provider publication**, not that other nodes have retained
+copies or promised storage until expiry. The publisher's node must remain reachable unless
+other peers have actually received the required chunks. Opportunistic propagation remains
+best effort; no permanent website availability, HTTPS authority or external custody is implied.
+Targeted local checks cover this new path; its additive publish/restart/network proof is pending.
 
 ### One-shot browser download
 

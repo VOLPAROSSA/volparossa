@@ -633,6 +633,7 @@ content_replication_run() {
     done
     install -o root -g root -m 0600 "$WORK/agent-relay5.log" "$WORK/content-replication-legacy-agent-relay5.log"
     content_replication_automatic_run
+    content_contribution_publish_run
     python3 -B "$source_directory/tests/integration/content-replication-smoke.py" evidence \
         "$WORK" "$WORK/content-replication-evidence.json" || fail CONTENT_REPLICATION_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
@@ -664,7 +665,7 @@ content_replication_finalize_report() {
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host.unchanged),
        transfer:$evidence,cleanup:{complete:$complete,remaining_owned_objects:$remaining},
        host_state:($host | del(.acceptance_id)),
-       scope:"explicit P/Q objects; bounded owner contention and replica resume; explicit reopen; automatic public-download contribution, agent restart and protected independent re-serving",
+       scope:"explicit P/Q objects; bounded owner contention and replica resume; explicit reopen; automatic public-download contribution, agent restart and protected independent re-serving; ordinary public site publication, configured-cache restart and independent named retrieval",
        full_c03_claimed:false,full_c04_claimed:false,speed_improvement_claimed:false,
        browser_integration_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-replication-smoke.json" || return 1

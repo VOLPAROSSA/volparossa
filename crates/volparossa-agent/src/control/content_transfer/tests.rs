@@ -18,6 +18,91 @@ fn limits() -> CacheLimits {
         min_free_bytes: 0,
     }
 }
+
+#[tokio::test]
+async fn public_publication_handoff_echoes_mode_without_private_or_missing_service_success() {
+    let fixture = Fixture::new();
+    let request = ContentImportRequest {
+        manifest: fixture.signed.encode(),
+        publisher_key: fixture.sender.verifying_key().to_bytes().to_vec(),
+        cache: String::new(),
+        limits: None,
+        allow_public_content: true,
+        contribute: true,
+    };
+    assert!(
+        publication_manifest(&request).is_err(),
+        "private sentinel cannot publish"
+    );
+    let mut source =
+        ChunkStore::create(&fixture.root.path().join("public-source"), limits()).unwrap();
+    let signed = publish(
+        &mut b"a complete ordinary public publication".as_slice(),
+        Publication {
+            length: 38,
+            metadata: Metadata {
+                name: "public-publish".into(),
+                revision: 1,
+                content_type: "application/octet-stream".into(),
+            },
+            validity: Validity {
+                created: now(),
+                expires: now() + 60,
+            },
+        },
+        &fixture.sender,
+        &mut source,
+    )
+    .unwrap();
+    let request = ContentImportRequest {
+        manifest: signed.encode(),
+        ..request
+    };
+    let (_, manifest) = publication_manifest(&request).unwrap();
+    let control = ControlRequest {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: vec![9; 16],
+        operation: Some(Operation::ContentImport(request)),
+    };
+    let (mut client, task) = begin(&control).await;
+    assert_ne!(
+        read_response(&mut client).await.unwrap().result,
+        ControlResult::Ok as i32,
+        "no configured service cannot become a legacy import success"
+    );
+    task.await.unwrap().unwrap();
+    let mut destination =
+        ChunkStore::create(&fixture.root.path().join("private-staging"), limits()).unwrap();
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let checked = manifest.clone();
+    let task = tokio::spawn(async move {
+        assert!(
+            exchange(
+                &mut server,
+                &[9; 16],
+                &checked,
+                &mut destination,
+                true,
+                true
+            )
+            .await
+            .unwrap()
+        );
+    });
+    ready_mode(&mut client, &manifest, true).await;
+    serve_peer(
+        &mut client,
+        &manifest,
+        &mut source,
+        transfer_limits(&manifest),
+    )
+    .await
+    .unwrap();
+    task.await.unwrap();
+    // Chunk completion alone emits no network-publication final receipt; that is the separate
+    // configured service owner's durable commit/registration/advertisement responsibility.
+    assert!(read_response(&mut client).await.is_err());
+}
 fn wire_limits() -> ContentCacheLimits {
     ContentCacheLimits {
         quota_bytes: limits().max_bytes,
@@ -75,6 +160,7 @@ impl Fixture {
                 cache,
                 limits: Some(wire_limits()),
                 allow_public_content: false,
+                contribute: false,
             })
         } else {
             Operation::ContentExport(ContentExportRequest {
@@ -110,7 +196,7 @@ async fn begin(
         let request = read_request(&mut server)
             .await
             .expect("bounded initial control request");
-        process(server, request).await
+        process(server, request, None).await
     });
     write_request(&mut client, request).await.expect("request");
     (client, task)
@@ -126,6 +212,10 @@ fn allow_public(mut request: ControlRequest) -> ControlRequest {
 }
 
 async fn ready(stream: &mut UnixStream, manifest: &VerifiedManifest) {
+    ready_mode(stream, manifest, false).await;
+}
+
+async fn ready_mode(stream: &mut UnixStream, manifest: &VerifiedManifest, contribute: bool) {
     let response = read_response(stream).await.expect("Ready response");
     assert_eq!(response.request_id, vec![9; 16]);
     assert_eq!(response.result, ControlResult::Ok as i32);
@@ -135,6 +225,7 @@ async fn ready(stream: &mut UnixStream, manifest: &VerifiedManifest) {
     };
     assert_eq!(value.manifest_id, manifest.manifest_id());
     assert_eq!(value.bytes, manifest.length());
+    assert_eq!(value.contribute, contribute);
     assert_eq!(
         usize::try_from(value.chunks).expect("chunks"),
         manifest.chunks().len()
@@ -154,6 +245,7 @@ async fn final_receipt(stream: &mut UnixStream, manifest: &VerifiedManifest) {
         manifest.chunks().len()
     );
     assert!(!value.serving);
+    assert!(!value.network_publication);
 }
 
 #[tokio::test]

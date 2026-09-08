@@ -7,7 +7,9 @@
 mod admission;
 mod expiry;
 mod persistence;
-pub use admission::{LocalReplicaLimits, admit_public_replica, restore_public_replicas};
+pub use admission::{
+    LocalReplicaLimits, admit_public_publication, admit_public_replica, restore_public_replicas,
+};
 pub use expiry::ReplicaReclamation;
 pub use persistence::{persist_replicas, restore_replicas};
 
@@ -103,6 +105,14 @@ pub struct Replica {
 }
 
 impl Replica {
+    fn is_empty_publication(&self) -> bool {
+        self.checked.chunks().is_empty()
+            && self.checked.length() == 0
+            && self.checked.metadata().content_type
+                != crate::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+            && self.checked.object_sha256() == ChunkId::digest(&[]).as_bytes()
+    }
+
     /// Signed media type, for storage admission only; not independent content authority.
     pub fn content_type(&self) -> &str {
         &self.checked.metadata().content_type
@@ -161,6 +171,14 @@ impl PublicationRegistry {
         self.entries.contains_key(manifest_id)
     }
 
+    /// Whether this exact registration uses the caller's already selected cache root.
+    /// This checks registry binding, not filesystem identity or current chunk completeness.
+    pub fn contains_at(&self, manifest_id: &[u8; 32], root: &std::path::Path) -> bool {
+        self.entries
+            .get(manifest_id)
+            .is_some_and(|entry| entry.root == root)
+    }
+
     /// Explicitly opt a caller-authenticated publication into scarce extra-chunk export.
     ///
     /// Ordinary [`Self::register`] entries are not exported by this protocol. The caller must
@@ -203,7 +221,10 @@ impl PublicationRegistry {
         now_unix: u64,
     ) -> Result<(), ProviderError> {
         replica.checked.check_time(now_unix)?;
-        if replica.hops == 0 || replica.hops > MAX_HOPS || replica.chunk_ids.is_empty() {
+        if replica.hops == 0
+            || replica.hops > MAX_HOPS
+            || (replica.chunk_ids.is_empty() && !replica.is_empty_publication())
+        {
             return Err(ProviderError::Registry);
         }
         let mut store = ChunkStore::open(&root, limits)?;

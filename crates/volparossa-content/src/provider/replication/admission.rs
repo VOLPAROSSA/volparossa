@@ -123,6 +123,76 @@ pub fn admit_public_replica(
     Ok(progress)
 }
 
+/// Admit a complete explicitly published public object into the configured owned cache.
+///
+/// Unlike an opportunistic batch, this foreground operation succeeds only after complete
+/// source/destination hash verification and durable original-envelope ownership. It uses the
+/// same non-evicting insertion and journal, so background limits and network framing do not
+/// change. Empty public objects retain their original signed metadata without claiming bytes.
+/// Existing matching references and their original hop count/expiry are preserved.
+///
+/// # Errors
+/// Rejects private/mailbox content, wrong authority, incomplete/corrupt sources, expiry,
+/// capacity exhaustion and the existing bounded storage errors. An interrupted or failed
+/// admission may leave a verified journaled prefix, never a completed-publication receipt.
+/// Callers must recheck current role/policy/time before registering or announcing the result.
+pub fn admit_public_publication(
+    signed: &SignedManifest,
+    authorized: &VerifiedManifest,
+    source: &mut ChunkStore,
+    destination: &mut ChunkStore,
+    now_unix: u64,
+) -> Result<Replica, ProviderError> {
+    authorized.check_time(now_unix)?;
+    let key = VerifyingKey::from_bytes(authorized.publisher())
+        .map_err(|_| ProviderError::WrongProvider)?;
+    let checked = signed.verify(&key, now_unix)?;
+    if checked.manifest_id() != authorized.manifest_id()
+        || checked.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
+        || source.read_mailbox_metadata()?.is_some()
+        || destination.read_mailbox_metadata()?.is_some()
+    {
+        return Err(ProviderError::Registry);
+    }
+    crate::reassemble(
+        authorized,
+        &mut [&mut *source],
+        now_unix,
+        &mut std::io::sink(),
+    )?;
+    let mut replica = retained_replica(destination, signed, checked, now_unix)?;
+    let mut progress = ReplicationProgress::default();
+    let copied = copy_batch(
+        source,
+        destination,
+        &mut replica,
+        LocalReplicaLimits {
+            max_chunks: crate::MAX_CHUNKS,
+            max_bytes: crate::MAX_OBJECT_BYTES,
+        },
+        &mut progress,
+    );
+    if !replica.chunk_ids.is_empty() || replica.is_empty_publication() {
+        persistence::persist_replicas(destination, std::slice::from_ref(&replica), now_unix)?;
+    }
+    copied?;
+    let expected: BTreeSet<_> = authorized
+        .chunks()
+        .iter()
+        .map(|chunk| *chunk.id())
+        .collect();
+    if replica.chunk_ids.iter().copied().collect::<BTreeSet<_>>() != expected {
+        return Err(Error::Quota.into());
+    }
+    crate::reassemble(
+        authorized,
+        &mut [destination],
+        now_unix,
+        &mut std::io::sink(),
+    )?;
+    Ok(replica)
+}
+
 fn retained_replica(
     destination: &mut ChunkStore,
     signed: &SignedManifest,

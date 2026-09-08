@@ -164,6 +164,19 @@ created under its receiving account. No ownership change, permission grant, netw
 private key transfer or decryption is part of either operation. Syntactic envelope validation
 does not prove that a malicious local publisher actually encrypted the bytes it supplied.
 
+Explicit `ContentImport.contribute` at bool tag 6 selects complete public admission into the
+already configured contribution service. It requires `allow_public_content=true`, empty `cache`
+and absent `limits`; destination and quota come only from agent configuration. Private-message
+content is refused in this mode. `ContentTransferReady.contribute` at tag 4 echoes the exact
+mode before the same bounded chunk exchange; absent/false preserves ordinary handoff behavior.
+The new `ContentReceipt.network_publication` bool at tag 16 becomes true only after complete
+hash verification, non-evicting admission, original-envelope journal persistence, registration
+and service announcement. Clients require that flag, active serving, a nonzero registration
+count and the exact object counts. It is not an external replica receipt or new origin authority.
+The bounded replica journal also accepts zero retained chunk references only for a valid signed
+empty public object with the correct empty-object hash. Ordinary partial background uptake
+still never turns zero transferred chunks into a completed-publication claim.
+
 ### Recipient-encrypted native message object (development v1)
 
 The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,

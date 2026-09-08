@@ -374,13 +374,20 @@ impl PublicationRegistry {
         self.entries.is_empty()
     }
 
-    /// Whether a nonempty, currently valid publication is explicitly registered.
+    /// Whether a currently valid publication is explicitly registered, including a correctly
+    /// hashed empty public object. An empty registry never counts as available content.
     ///
     /// Metadata only: this never scans a directory or creates authority. Automatic services
     /// must first restore/admit and verify actual replica chunks; a mailbox is separate.
     pub fn has_live_publications(&self, now_unix: u64) -> bool {
         self.entries.values().any(|entry| {
-            !entry.manifest.chunks().is_empty() && entry.manifest.check_time(now_unix).is_ok()
+            entry.manifest.check_time(now_unix).is_ok()
+                && (!entry.manifest.chunks().is_empty()
+                    || (entry.manifest.length() == 0
+                        && entry.manifest.metadata().content_type
+                            != crate::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+                        && entry.manifest.object_sha256()
+                            == crate::ChunkId::digest(&[]).as_bytes()))
         })
     }
 }

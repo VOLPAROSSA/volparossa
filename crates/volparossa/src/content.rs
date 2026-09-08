@@ -34,7 +34,7 @@ pub(crate) enum Command {
     /// Explicit two-provider encrypted mailbox invitations, deposits and inbox retrieval.
     #[command(subcommand)]
     Mailbox(mailbox::Command),
-    /// Chunk and sign an explicit local file; does NOT distribute it to any network.
+    /// Chunk and sign a local file; optionally contribute it through the configured agent.
     Publish(Publish),
     /// Show the public message-recipient key of an existing encrypted node identity.
     RecipientKey(private_message::Unlock),
@@ -263,6 +263,10 @@ pub(crate) struct Publish {
     /// Reuse only a verified owned cache; quota enforcement may evict its older chunks.
     #[arg(long)]
     reuse_cache: bool,
+    /// Explicitly hand this public publication to the agent's configured contribution service.
+    /// Keeps your local manifest/cache; no endpoint, signing key or file ownership is transferred.
+    #[arg(long, default_value_t = false)]
+    contribute: bool,
     /// New canonical manifest file; existing entries are never overwritten.
     #[arg(long)]
     manifest: PathBuf,
@@ -339,7 +343,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Site(args) => return site::run(args, socket).await,
         Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
-        Command::Publish(args) => publish(&args)?,
+        Command::Publish(args) => publish_command(&args, socket).await?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,
         Command::PublishMessage(args) => private_message::publish_message(&args)?,
         Command::OpenMessage(args) => private_message::open_message(&args)?,
@@ -501,7 +505,40 @@ fn verified_manifest_bytes(path: &Path, publisher: &VerifyingKey) -> Result<Vec<
     Ok(bytes)
 }
 
-fn publish(args: &Publish) -> Result<serde_json::Value> {
+#[derive(Debug)]
+struct Published {
+    report: serde_json::Value,
+    signed: SignedManifest,
+    verified: volparossa_content::VerifiedManifest,
+}
+
+async fn publish_command(args: &Publish, socket: &Path) -> Result<serde_json::Value> {
+    // This synchronous stage releases the signing key and source store before any IPC.
+    let mut published = publish(args)?;
+    if args.contribute {
+        let receipt = handoff::contribute(
+            &published.signed, &published.verified, &args.cache, args.limits.cache_limits()?, socket,
+        )
+        .await
+        .context("network contribution was not confirmed; local publication retained in the requested manifest and cache; no permissions or ownership were changed")?;
+        published.report["operation"] = "content_publish".into();
+        published.report["network_publication"] = true.into();
+        published.report["serving"] = receipt.serving.into();
+        published.report["publications"] = receipt.publications.into();
+        published.report["manifest_id"] = hex::encode(published.verified.manifest_id()).into();
+        published.report["private_keys_transferred"] = false.into();
+        published.report["ownership_changed"] = false.into();
+        published.report["origin_authenticated"] = false.into();
+    }
+    Ok(published.report)
+}
+
+fn publish(args: &Publish) -> Result<Published> {
+    if args.contribute
+        && args.content_type == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+    {
+        bail!("--contribute accepts only native public content, never private messages");
+    }
     ensure_new_output(&args.manifest)?;
     let mut input = open_regular(&args.input, MAX_OBJECT_BYTES)?;
     let length = input.metadata()?.len();
@@ -544,7 +581,7 @@ fn publish(args: &Publish) -> Result<serde_json::Value> {
         .persist_noclobber(&args.manifest)
         .map_err(|error| error.error)
         .context("cannot publish new manifest without overwriting an existing entry")?;
-    Ok(serde_json::json!({
+    let report = serde_json::json!({
         "operation": "offline_content_publish",
         "network_publication": false,
         "manifest": args.manifest,
@@ -553,7 +590,12 @@ fn publish(args: &Publish) -> Result<serde_json::Value> {
         "bytes": verified.length(),
         "chunks": verified.chunks().len(),
         "expires_unix_seconds": expires,
-    }))
+    });
+    Ok(Published {
+        report,
+        signed: manifest,
+        verified,
+    })
 }
 
 fn unlock_signer(
@@ -1137,6 +1179,7 @@ mod tests {
             input: root.join("input.bin"),
             cache: root.join("publisher-cache"),
             reuse_cache: false,
+            contribute: false,
             manifest: root.join("manifest.pb"),
             name: "offline fixture".into(),
             revision: 1,
@@ -1147,7 +1190,7 @@ mod tests {
             limits: limits(),
         };
         fs::write(&publish_args.input, &bytes).expect("fixture content");
-        let report = publish(&publish_args).expect("offline publication");
+        let report = publish(&publish_args).expect("offline publication").report;
         assert_eq!(report["network_publication"], false);
         assert_eq!(report["publisher_key_hex"], hex::encode(public.to_bytes()));
         let manifest_bytes = fs::read(&publish_args.manifest).expect("manifest");
@@ -1269,6 +1312,39 @@ mod tests {
         publish_args.identity = Some(root.join("must-not-create-identity.key"));
         assert!(publish(&publish_args).is_err());
         assert!(!publish_args.identity.as_ref().expect("path").exists());
+    }
+
+    #[test]
+    fn public_publish_contribution_is_explicit_cli_opt_in() {
+        for contribute in [false, true] {
+            let mut args = vec![
+                "volparossa",
+                "content",
+                "publish",
+                "--input",
+                "input.bin",
+                "--cache",
+                "owned",
+                "--manifest",
+                "new.pb",
+                "--name",
+                "public-file",
+                "--revision",
+                "1",
+            ];
+            if contribute {
+                args.push("--contribute");
+            }
+            let crate::CliCommand::Content { command } =
+                crate::Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("content command expected");
+            };
+            let Command::Publish(args) = *command else {
+                panic!("publish expected");
+            };
+            assert_eq!(args.contribute, contribute);
+        }
     }
 
     #[test]

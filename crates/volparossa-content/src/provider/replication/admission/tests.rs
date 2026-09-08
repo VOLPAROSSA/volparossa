@@ -1,5 +1,7 @@
 //! Actual owned-store copies and reopen; explicit library-clock expiry, not elapsed VM time.
 
+mod explicit;
+
 use std::path::PathBuf;
 
 use ed25519_dalek::SigningKey;

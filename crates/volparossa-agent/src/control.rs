@@ -232,7 +232,7 @@ async fn process_connection(
                 | control_request::Operation::ContentExport(_)
         )
     ) {
-        return content_transfer::process(stream, request).await;
+        return Box::pin(content_transfer::process(stream, request, Some(&context))).await;
     }
     let response = Box::pin(handle_request(request, &context)).await;
     timeout(CONTROL_TIMEOUT, write_response(&mut stream, &response))

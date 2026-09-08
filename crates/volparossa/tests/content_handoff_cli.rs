@@ -2,6 +2,9 @@
 //! Actual CLI processes and chunk framing against a local protocol peer, in a disposable netns.
 //! This is not a different-UID, packaged-agent, overlay, or message-delivery proof.
 
+#[path = "content_handoff_cli/publication.rs"]
+mod publication;
+
 use std::{
     fs,
     path::Path,
@@ -38,6 +41,14 @@ fn public_content_handoff_cli_is_explicit_streamed_and_empty_safe() {
     isolated(
         "public_content_handoff_cli_is_explicit_streamed_and_empty_safe",
         public_scenario(),
+    );
+}
+
+#[test]
+fn public_publish_contribution_requires_explicit_live_service_receipt() {
+    isolated(
+        "public_publish_contribution_requires_explicit_live_service_receipt",
+        publication::scenario(),
     );
 }
 
@@ -132,6 +143,7 @@ enum Fault {
     None,
     WrongReady,
     WrongFinal,
+    UnexpectedContribution,
 }
 
 #[allow(clippy::too_many_lines)] // Keep the exact Ready/chunks/final protocol transcript together.
@@ -150,13 +162,16 @@ async fn exchange(
             .expect("bounded control request");
         let (encoded, key, cache, importing, allow_public_content) =
             match request.operation.expect("operation") {
-                Operation::ContentImport(value) => (
-                    value.manifest,
-                    value.publisher_key,
-                    value.cache,
-                    true,
-                    value.allow_public_content,
-                ),
+                Operation::ContentImport(value) => {
+                    assert!(!value.contribute, "ordinary import never opts into serving");
+                    (
+                        value.manifest,
+                        value.publisher_key,
+                        value.cache,
+                        true,
+                        value.allow_public_content,
+                    )
+                }
                 Operation::ContentExport(value) => (
                     value.manifest,
                     value.publisher_key,
@@ -194,10 +209,11 @@ async fn exchange(
                 manifest_id: ready_id,
                 bytes: manifest.length(),
                 chunks: u32::try_from(manifest.chunks().len()).expect("bounded chunks"),
+                contribute: matches!(fault, Fault::UnexpectedContribution),
             })),
         };
         write_response(&mut stream, &response).await.expect("Ready");
-        if matches!(fault, Fault::WrongReady) {
+        if matches!(fault, Fault::WrongReady | Fault::UnexpectedContribution) {
             assert_eq!(
                 stream
                     .read(&mut [0; 1])
@@ -366,6 +382,21 @@ async fn scenario() {
     .await;
     assert!(!rejected.status.success());
     assert!(!root.join("bad-ready").exists());
+    let rejected = exchange(
+        root,
+        arguments(
+            root,
+            "export",
+            "unexpected-contribution",
+            "agent-cache",
+            &key,
+        ),
+        &manifest,
+        Fault::UnexpectedContribution,
+    )
+    .await;
+    assert!(!rejected.status.success() && rejected.stdout.is_empty());
+    assert!(!root.join("unexpected-contribution").exists());
     let rejected = exchange(
         root,
         arguments(root, "export", "bad-final", "agent-cache", &key),

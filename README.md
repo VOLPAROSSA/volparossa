@@ -105,7 +105,13 @@ MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authentica
 checkpoint C01, not automatic distributed discovery or a complete offline website service.
 The normal CLI now provides `volparossa content publish` and `volparossa content assemble`:
 explicit local files are signed with the existing encrypted node identity and reconstructed
-from explicitly selected owned caches. Those two commands remain offline. New `content serve`,
+from explicitly selected owned caches. They remain offline by default. Explicit
+[`content publish --contribute`](docs/OPERATIONS.md#publishing-through-the-configured-contribution-service)
+now publishes a public file or packed website through an already configured agent service,
+without a separate `import`/`serve` step. Success requires complete storage, original-manifest
+journaling and registration; it does not promise external replicas or permanent availability.
+Its targeted local checks pass; the additive publish/restart/network proof is pending.
+New `content serve`,
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
 reconstruct the same object from two independent providers; missing HTTPS chunks use exact
@@ -299,9 +305,10 @@ The [protected-network proof on `f3abee8e`](https://github.com/VOLPAROSSA/volpar
 passes: two providers deliver every payload byte with zero origin body transfer after a fresh
 origin HEAD. In this fixture peers-first takes 9.23 seconds versus 2.58 seconds origin-only;
 server payload is saved, but latency does not improve. This is not arbitrary-site compatibility.
-The next retrieval implementation first refreshes recent authenticated peers and can combine
-compatible copies with different original transport-manifest IDs. Its targeted local checks
-pass; network performance and independent-index integration still need their own new run.
+The [independent-index follow-up on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
+also passes: freshly revalidated recent peers deliver the complete object using their different
+original indexes, with no origin body. Lookup replies arrive in 42/64 ms; the complete peer
+operation takes 4.91 seconds versus 2.54 seconds origin-only, so no latency win is claimed.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
