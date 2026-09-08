@@ -12,7 +12,10 @@ use std::{
 
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
-use tokio::{io::AsyncReadExt as _, net::UnixListener};
+use tokio::{
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
+    net::{TcpStream, UnixListener},
+};
 use volparossa_content::{
     CHUNK_BYTES, CacheLimits, ChunkId, ChunkStore, Metadata, Publication, SignedManifest, Validity,
     VerifiedManifest, publish,
@@ -44,6 +47,10 @@ fn https_local_output_is_not_published_before_valid_ready_and_final() {
 }
 
 fn isolated(test: &str, scenario: impl Future<Output = ()>) {
+    isolated_network(test, scenario, "none");
+}
+
+fn isolated_network(test: &str, scenario: impl Future<Output = ()>, network: &str) {
     if let Some(parent) = std::env::var_os(MARKER) {
         assert_ne!(
             fs::read_link("/proc/self/ns/net").unwrap().as_os_str(),
@@ -61,7 +68,7 @@ fn isolated(test: &str, scenario: impl Future<Output = ()>) {
         "/../../scripts/run-isolated-test.sh"
     ))
     .arg(std::env::current_exe().unwrap())
-    .args([test, MARKER, "none"])
+    .args([test, MARKER, network])
     .output()
     .expect("isolated test runner");
     assert!(
@@ -369,4 +376,166 @@ async fn rejected_downloads() {
             "a rejected exchange must leave neither output nor a secondary user cache/tempfile"
         );
     }
+}
+
+#[test]
+fn browser_download_cli_is_single_use_and_requires_complete_origin_authorized_delivery() {
+    isolated_network(
+        "browser_download_cli_is_single_use_and_requires_complete_origin_authorized_delivery",
+        browser_downloads(),
+        "loopback",
+    );
+}
+
+async fn browser_downloads() {
+    let mut fixture = Fixture::new();
+    let root = fixture.directory.path().to_owned();
+    fs::create_dir(root.join("temporary")).unwrap();
+    for fault in [Fault::None, Fault::WrongFinal, Fault::ExpiredReady] {
+        let listener = UnixListener::bind(root.join("control.sock")).unwrap();
+        let expected = fixture.bytes.clone();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(
+                fixture.serve(&listener, fault, 127),
+                browser_process(&root, fault, &expected)
+            );
+        })
+        .await
+        .expect("bounded actual browser-command proof");
+        drop(listener);
+        fs::remove_file(root.join("control.sock")).unwrap();
+        assert!(
+            directory_names(&root.join("temporary")).is_empty(),
+            "private spool not removed"
+        );
+    }
+}
+
+async fn browser_process(root: &Path, fault: Fault, expected: &[u8]) {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_volparossa"))
+        .arg("--control-socket")
+        .arg(root.join("control.sock"))
+        .args([
+            "content",
+            "browser-download",
+            "--url",
+            RESOURCE,
+            "--metadata-path",
+            "/metadata",
+            "--cache",
+        ])
+        .arg(root.join("agent-cache"))
+        .args(["--min-free-bytes", "0"])
+        .env("TMPDIR", root.join("temporary"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    let count = stdout.read_line(&mut line).await.unwrap();
+    if !matches!(fault, Fault::None) {
+        assert_eq!(
+            count, 0,
+            "no browser URL before valid readiness and final receipt"
+        );
+        assert!(!child.wait_with_output().await.unwrap().status.success());
+        return;
+    }
+    let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ready["operation"], "browser_download_ready");
+    assert_eq!(ready["authentication_scope"], "cooperative-origin");
+    assert!(ready["expires_unix_seconds"].as_u64().unwrap() <= now() + 300);
+    let directories = directory_names(&root.join("temporary"));
+    assert_eq!(directories.len(), 1);
+    let directory = root.join("temporary").join(&directories[0]);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let files = directory_names(&directory);
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        fs::metadata(directory.join(&files[0]))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let address = consume_browser_link(&ready, expected).await;
+    line.clear();
+    assert!(stdout.read_line(&mut line).await.unwrap() > 0);
+    let completed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(completed["operation"], "browser_content_download");
+    assert_eq!(completed["bytes"].as_u64().unwrap(), expected.len() as u64);
+    assert_eq!(
+        completed["sha256"],
+        hex::encode(ChunkId::digest(expected).as_bytes())
+    );
+    assert_eq!(
+        completed["peer_bytes"].as_u64().unwrap(),
+        expected.len() as u64 - 127
+    );
+    assert_eq!(completed["origin_body_bytes"], 127);
+    assert_eq!(completed["origin_range_requests"], 1);
+    assert_eq!(completed["private_spool_removed"], true);
+    assert_eq!(completed["https_origin_privileges"], false);
+    assert!(child.wait_with_output().await.unwrap().status.success());
+    assert!(
+        TcpStream::connect(&address).await.is_err(),
+        "single-use listener still exists"
+    );
+}
+
+async fn consume_browser_link(ready: &serde_json::Value, expected: &[u8]) -> String {
+    let url = ready["download_url"].as_str().unwrap();
+    let (address, token) = url
+        .strip_prefix("http://")
+        .unwrap()
+        .split_once('/')
+        .unwrap();
+    assert!(address.starts_with("127.0.0.1:"));
+    assert_eq!(token.len(), 64);
+    assert_eq!(hex::decode(token).unwrap().len(), 32);
+    let path = format!("/{token}");
+    for (host, target) in [
+        ("attacker.example", path.as_str()),
+        (address, "/wrong-token"),
+    ] {
+        let response = browser_get(address, host, target).await;
+        assert!(response.starts_with(b"HTTP/1.1 404"));
+        assert!(response.ends_with(b"\r\n\r\n"));
+    }
+    let response = browser_get(address, address, &path).await;
+    let offset = response
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+    let headers = std::str::from_utf8(&response[..offset]).unwrap();
+    assert!(headers.contains("Content-Disposition: attachment;"));
+    assert!(headers.contains("Content-Type: application/octet-stream"));
+    assert!(headers.contains("Cache-Control: no-store"));
+    assert!(headers.contains("X-Content-Type-Options: nosniff"));
+    assert_eq!(&response[offset..], expected);
+    address.to_owned()
+}
+
+async fn browser_get(address: &str, host: &str, path: &str) -> Vec<u8> {
+    let mut socket = TcpStream::connect(address).await.unwrap();
+    socket
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    socket
+        .take(1024 * 1024)
+        .read_to_end(&mut response)
+        .await
+        .unwrap();
+    response
 }

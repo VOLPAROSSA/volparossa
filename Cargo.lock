@@ -4518,6 +4518,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
+ "httparse",
  "libc",
  "nix",
  "rand_core 0.6.4",

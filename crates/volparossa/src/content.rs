@@ -18,6 +18,7 @@ use volparossa_content::{
 use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
+mod browser_download;
 mod handoff;
 mod https_download;
 mod mailbox;
@@ -51,6 +52,8 @@ pub(crate) enum Command {
     FetchName(FetchName),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
+    /// Offer one verified cooperative-HTTPS object as a short-lived localhost browser download.
+    BrowserDownload(browser_download::Arguments),
     /// Withdraw and stop the agent's content service, retaining owned cache files.
     Stop,
     /// Inspect explicit content service and the current route's control Relay; no network I/O.
@@ -301,6 +304,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         ContentFetchRequest, ContentServeRequest, Empty, control_request::Operation,
     };
     let report = match command {
+        Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
         Command::Publish(args) => publish(&args)?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,

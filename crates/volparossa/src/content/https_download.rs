@@ -19,14 +19,62 @@ use super::{FetchHttps, ensure_new_output, https_fetch_request, now_seconds, out
 
 pub(super) async fn run(args: &FetchHttps, socket: &Path, output: &Path) -> Result<()> {
     ensure_new_output(output)?;
-    let receipt = timeout(Duration::from_secs(600), download(args, socket, output))
-        .await
-        .context("HTTPS download deadline exceeded; verified agent cache chunks may remain")??;
+    let download = prepare(args, socket, output_parent(output)).await?;
+    let receipt = report(download.receipt(), output, &args.cache, download.manifest());
+    download.check_live()?;
+    download
+        .temporary
+        .persist_noclobber(output)
+        .map_err(|error| error.error)
+        .context("cannot publish local HTTPS output without overwriting an existing entry")?;
     println!("{}", serde_json::to_string(&receipt)?);
     Ok(())
 }
 
-async fn download(args: &FetchHttps, socket: &Path, output: &Path) -> Result<serde_json::Value> {
+/// Only constructed after exact same-operation origin readiness, full bytes and final receipt.
+pub(super) struct VerifiedDownload {
+    temporary: tempfile::NamedTempFile,
+    manifest: VerifiedManifest,
+    receipt: ContentReceipt,
+    expires: u64,
+    authority_deadline: Instant,
+}
+
+impl VerifiedDownload {
+    pub(super) fn file(&self) -> &std::fs::File {
+        self.temporary.as_file()
+    }
+    pub(super) fn manifest(&self) -> &VerifiedManifest {
+        &self.manifest
+    }
+    pub(super) fn receipt(&self) -> &ContentReceipt {
+        &self.receipt
+    }
+    pub(super) fn expires(&self) -> u64 {
+        self.expires
+    }
+    pub(super) fn authority_deadline(&self) -> Instant {
+        self.authority_deadline
+    }
+    pub(super) fn check_live(&self) -> Result<()> {
+        if Instant::now() >= self.authority_deadline || now_seconds()? >= self.expires {
+            bail!("HTTPS authorization expired before local delivery");
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn prepare(
+    args: &FetchHttps,
+    socket: &Path,
+    directory: &Path,
+) -> Result<VerifiedDownload> {
+    timeout(Duration::from_secs(600), download(args, socket, directory))
+        .await
+        .context("HTTPS download deadline exceeded; verified agent cache chunks may remain")?
+}
+
+async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<VerifiedDownload> {
     let request = https_fetch_request(args)?;
     if !request.output.is_empty() {
         bail!("local HTTPS output must not be sent to the agent");
@@ -46,8 +94,9 @@ async fn download(args: &FetchHttps, socket: &Path, output: &Path) -> Result<ser
         .filter(|seconds| *seconds > 0)
         .context("HTTPS authority expired before local delivery")?;
     let lifetime = Duration::from_secs(remaining);
-    let deadline = Instant::now() + lifetime.min(Duration::from_secs(30));
-    let mut temporary = tempfile::NamedTempFile::new_in(output_parent(output))?;
+    let authority_deadline = Instant::now() + lifetime;
+    let deadline = authority_deadline.min(Instant::now() + Duration::from_secs(30));
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))?;
@@ -86,11 +135,13 @@ async fn download(args: &FetchHttps, socket: &Path, output: &Path) -> Result<ser
     if Instant::now() >= deadline || now_seconds()? >= ready.expires_unix_seconds {
         bail!("HTTPS authorization expired before local output publication");
     }
-    temporary
-        .persist_noclobber(output)
-        .map_err(|error| error.error)
-        .context("cannot publish local HTTPS output without overwriting an existing entry")?;
-    Ok(report(&receipt, output, &args.cache, &manifest))
+    Ok(VerifiedDownload {
+        temporary,
+        manifest,
+        receipt,
+        expires: ready.expires_unix_seconds,
+        authority_deadline,
+    })
 }
 
 fn verified_ready(ready: &HttpsContentTransferReady, resource: &str) -> Result<VerifiedManifest> {
