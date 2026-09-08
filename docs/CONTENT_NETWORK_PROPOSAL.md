@@ -325,6 +325,12 @@ expiry and chunk hashes. A storage-only replica checks signature self-consistenc
 it does **not** establish a trusted publisher, web origin or recipient. A later consumer still
 supplies independent native authority or obtains its own origin-authenticated HTTPS descriptor.
 
+Foreground native, named and cooperative-HTTPS downloads now use at most two concurrent provider
+streams. A production-protocol test over backpressured streams proves overlapping progress,
+exclusive in-flight chunk ownership and bounded reassignment after missing/failed chunks;
+reconnection does not reset the original deadline or request budget. Focused tests and strict
+Clippy pass. This is local functionality, not measured speedup or a parallel-download VM pass.
+
 An explicitly configured agent replica cache can pick up other chunks from a recently used
 provider after a successful foreground download. No new provider discovery or route is created
 for this job. One job is allowed at a time, with at most four chunks and 1 MiB of content-protocol
@@ -353,9 +359,14 @@ cache-ID-bound, atomically replaced journal (at most 64 records / 8 MiB). Subseq
 with previous valid records; partial replicas retain their original expiry. Explicit
 `content serve --reuse-replica-cache` validates the original signature, cache ownership and live
 chunks before registering them. Missing metadata grants no authority; foreign/corrupt records
-are refused. Expired records are skipped without deleting chunks. No boot service, retention
-repair, expiry reclamation or storage-peer publisher authority is introduced.
-Quota exhaustion still pauses uptake; those remaining C03/C04 mechanisms stay open.
+are refused. Before another uptake attempt, bounded maintenance now reclaims only expired
+journaled chunks without live replica or explicit foreground references. It preserves unknown
+files, refuses mailbox-owned stores and uses measured remaining capacity; it neither renews
+expiry nor evicts live content. Two core tests and one runtime filter pass, including real uptake
+after a full cache releases an expired unshared chunk. These advance an explicit library clock,
+not wall-clock or VM time. Quota still pauses uptake when no eligible capacity can be reclaimed.
+No boot service, retention repair or storage-peer publisher authority is introduced; full C03/C04
+and an expiry-maintenance network sequence remain unproved.
 
 Five focused duplex tests pass, including actual uptake followed by re-serving, quota without
 eviction, exclusions/duplicates, original expiry/hops, malformed data and a hard deadline.

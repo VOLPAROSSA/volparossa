@@ -38,8 +38,8 @@ capability-dropped disposable namespaces: they delete the sender identity, input
 reopen both providers, discover/Get/decrypt/acknowledge the inbox, check private output and
 no-clobber, reject wrong identities and mismatched final responses, and exercise one-provider
 List failure with explicit degraded readout. Those providers use the real store/protocol behind
-Unix/duplex streams, not the production network. The CLI parser test passes. The normal protected
-network mailbox scenario is still pending; no complete mailbox/C07, automatic contact discovery,
+Unix/duplex streams, not the production network. The CLI parser test passes. The first protected
+network result and its distinct checker failure are recorded below; no complete mailbox/C07, automatic contact discovery,
 retention repair, speedup or global offline-availability claim is made.
 
 The additive `content-mailbox` KVM scenario is now executable: two independent provider agents,
@@ -48,8 +48,32 @@ one provider store stopped/reopened, then private listing/Get/decryption/two ack
 and an empty repeat on a fresh protected route. Two application identities share one Client
 agent; this does not claim an independently offline sender node. It requires two real MPTCP
 relay paths, both providers' signed receipts, complete physical/control captures and unchanged
-guest cleanup. Its source-bound checker and shell/runner contracts pass locally; live proof is
-pending. The [initial `891f86f5` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34190575234)
+guest cleanup. Its source-bound checker and shell/runner contracts pass locally.
+The [first exact `d1fd6d1f` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191416065)
+completes the actual sequence: two providers retain the 2,097,332-byte ciphertext, the sender's
+keys/input/manifest are removed, one store reopens with the same inode, and a fresh receiving
+route retrieves/decrypts 2,097,275 bytes without a manifest/ID input. Both signed acknowledgements
+are present; a repeated inbox is empty. Plaintext SHA-256 is
+`add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+Four send and seven receive MPTCP Exit flows complete; all ten physical and two control capture
+windows are drained, zero-drop and free of forbidden packets. Cleanup leaves zero owned objects;
+raw guest-state files are identical, SHA-256
+`fc1509ab8ac8456b91548347b7e5dd02af59d2ea0a493ee406c85cfd249c6794`.
+
+The workflow nevertheless **fails** at its final checker: `prost::Enumeration` defaults to the
+first variant, `Register = 1`, so canonical Register receipts omit tag 3. The checker wrongly
+requires that field. The `d19e0d82` checker correction accepts its omission and rejects explicitly
+encoded default 1; no signed bytes, runtime validation or privacy gate change. Both checker tests
+and a complete rebuild from the original raw artifact pass. Original ZIP SHA-256:
+`214e1eb7145cf65c6013dec9e11611c85c4eabb37f4cfb65199b1e6f800d7ac7`;
+corrected raw-evidence rebuild SHA-256:
+`a8aa78f7271ad1f5d9849c043ef1f3757726f793da8a988ec10dc5147b4faaf7`.
+The historical workflow stays failed; the
+[fresh mailbox run on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
+is pending. This is two application identities behind one Client, not an independently offline
+sender node or full C07.
+
+The [initial `891f86f5` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34190575234)
 stopped at formatting because the new mailbox/manifest module declarations were out of order;
 that two-line ordering is corrected without changing behavior. No full Quality pass is claimed.
 
@@ -163,6 +187,16 @@ All 15 required role captures validate as complete/drained with zero drops or fo
 cleanup leaves zero owned objects. Raw guest-state files are byte-identical, SHA-256
 `0cef40bb226a7c3151fbc5d404392ec7c30809becc7b9260da49912c0c08852d`.
 Artifact SHA-256: `dc105e10a2d8557ecaa28b140cd45482fe1154e6d3955301d87740b7825effd4`.
+The `d468069` signed-RPC correction now selects and retains the actual authenticated direct
+connection instead of refusing every peer with two current connections. A real disposable-namespace
+actor test fails before the correction and passes afterward: two concurrent RPCs use two distinct
+authenticated connections, and a validly signed response or failure on the wrong sibling cannot
+consume the pending request or replay state. Exact peer, connection, request ID and signed request
+hash remain bound. Three actor checks, four adapter checks, the codec test and strict agent/discovery
+Clippy pass. This reproduces and fixes the two-connection boundary, not an exclusive explanation
+of the older VM or a positive peer-DNSSEC proof. The
+[new exact `b172d11f` DNS VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
+is pending; original roots, TTLs, relay exclusions and source-accounting requirements are unchanged.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -177,6 +211,27 @@ after warming A, not a fixed delay. Already propagated or in-flight DHT hints ca
 and cause a dial; no complete recall or general combined-role unlinkability is claimed.
 
 ## Latest content integration checkpoint
+
+Foreground native, named and cooperative-HTTPS downloads now use at most two concurrent provider
+streams (`b172d11f`). The backpressured production-protocol test proves actual overlap: the fast
+peer delivers three unique chunks while the other remains partway through its first response;
+four unique cache inserts reconstruct five ordered chunks with one repeated hash. Missing or
+failed chunks are reassigned only after their in-flight ownership is released. The idle-timeout
+case permits one reconnect without resetting the original deadline or request budget. That test's
+four variants, four existing provider tests, four stream-transfer tests and strict content/agent
+Clippy pass. This is local stream evidence, not network timing, speedup, full C02 or a new VM pass.
+The forthcoming provider VM also has a bounded physical-packet overlap requirement. Twelve checker
+and ten observer tests, plus a real disposable-veth timestamp test, pass locally; no live overlap
+or throughput result is inferred from that observer preparation.
+
+Replica capacity reclamation (`665fbfb4`) now runs before a new optional uptake attempt. It removes
+only expired journaled chunks without live journal or explicit foreground references, preserves
+unknown files and refuses mailbox-owned stores. Original expiry is never renewed; measured store
+usage replaces guessed quota credit. Two core tests and one runtime filter pass, including a full
+cache that rejects uptake, releases only the expired unshared chunk, then accepts real v3 uptake.
+They advance an explicit library clock, not wall-clock or VM time. Strict content/agent/discovery
+Clippy passes. This adds bounded local expiry reclamation, not retention repair, eviction of live
+data, automatic boot service or full C03/C04.
 
 The new native `content fetch-name` command resolves an independently trusted publisher key
 and exact name without a prior manifest file at the consumer. Providers explicitly enable
@@ -379,6 +434,18 @@ targeted test passes locally. All three [CodeQL analyses on this head](https://g
 pass, while the [separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101939846881)
 still reports 126 critical results. This is not a complete Quality pass or a new alert-identity audit.
 
+The [exact `d1fd6d1f` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191408128)
+passes formatting and strict Clippy, then fails
+`content_provider::tests::content_discovery_codec_roundtrip_and_bounds` with `Correlation`:
+its maximum-size response fixture clones one provider identity sixteen times, violating the
+response's required uniqueness (160 other discovery tests pass). The test-only correction uses
+sixteen distinct identities and explicitly retains duplicate rejection; its targeted test and
+strict content/agent/discovery Clippy pass, with production validation unchanged.
+This is not the older formatting, namespace or DNS timestamp failure. New-head Quality
+is pending. All [d1 CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191404475)
+complete, but the [separate PR alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101950158074)
+fails with 126 critical results. An equal count is not a fresh alert-identity audit or a clean gate.
+
 ### Preceding replica diagnostics and retirement integration
 
 The [source-bound C03 run on `97e478a2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175385789)
@@ -493,8 +560,10 @@ two agent tests, one CLI test, one typed wire test and combined strict content/a
 Clippy pass. The C03 fixture explicitly stops/reopens R4's service after R5 is offline, without
 supplying Q's manifest to R4, then requires Q to be retrieved from that restored registration.
 Three evidence-checker tests and shell syntax pass; `603cec9d` now confirms both restored
-registration and subsequent retrieval, following the earlier failures recorded above. Automatic
-boot service, retention repair, expiry reclamation, full C03 and full C04 remain incomplete.
+registration and subsequent retrieval, following the earlier failures recorded above. At that
+checkpoint, automatic boot service, retention repair, expiry reclamation and full C03/C04 remain
+incomplete; the later bounded local reclamation in `665fbfb4` is recorded above, not attributed
+to this older VM.
 
 Exact `e592b610` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171679274) and
 [CodeQL analysis](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171677187) pass. The separate

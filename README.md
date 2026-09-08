@@ -153,8 +153,14 @@ The new `content mailbox` commands add a known-contact inbox: invite one sender,
 independently trusted providers, deposit encrypted messages, then receive without supplying a
 message manifest or ID. Providers persist bounded inbox metadata and ciphertext; acknowledgements
 prevent a sender retry from putting an already received message back into that inbox. Local
-store-reopen and authenticated-stream delivery tests pass; the normal protected-network mailbox
-scenario is still pending. This is not automatic contact discovery, SMTP, retention repair or a
+store-reopen and authenticated-stream delivery tests pass. The
+[first mailbox VM on `d1fd6d1f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191416065)
+completes two-provider deposit, store reopen and private receive/acknowledgement, but its final
+checker rejects a valid omitted protobuf enum default. The corrected checker passes the original
+raw receipts, captures and cleanup; the historical workflow remains failed. A
+[fresh run on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
+is pending. Sender and recipient are separate application identities behind one Client, not
+independent network nodes. This is not automatic contact discovery, SMTP, retention repair or a
 guarantee that a provider stays online. See the [mailbox commands](docs/OPERATIONS.md#known-contact-mailboxes).
 That `10f63244` run also joins the normal commands end to end: user publication/import,
 agent serving, independent protected retrieval, then user export/assembly. The complete
@@ -176,6 +182,13 @@ This proves one uptake/offline-provider/reopen/re-serving sequence, not full C03
 boot service, retention repair, retirement-scope reclamation or general owner-priority sharing.
 A complete mailbox, retention repair, shared DNS, full owner-priority behavior and browser integration remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
+Native, named and cooperative-HTTPS chunk downloads now use up to two concurrent providers.
+A real backpressured-stream test proves overlapping progress without duplicate chunk requests,
+including bounded reassignment after missing or failed chunks. This is local functional evidence,
+not a measured network speedup or a new parallel-download VM pass.
+Replica maintenance can now reclaim expired, unshared journaled chunks before another uptake
+attempt. Live references, explicit foreground publications and mailbox stores remain protected;
+local expiry/reuse tests pass, not a new expiry-maintenance VM sequence.
 The first positive DNSSEC cache is now connected to the ordinary agent's TCP, UDP and protected
 DNS resolution. It independently validates peer evidence, excludes involved route relays and
 retains the existing resolver when evidence is missing or unsupported. Combined compilation and
@@ -187,13 +200,19 @@ proves ordinary A/AAAA requests through the protected route. The
 [subsequent `5ac9bb0e` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34189965926)
 also reaches the second Exit and returns a correct answer, but from the trusted fallback rather
 than the peer cache. That source requirement remains unmet.
+The signed DNS RPC now pins its actual authenticated connection when two direct connections to
+the same peer exist; a real two-connection actor test passes. This is not yet a positive peer-DNSSEC
+network result: the [new `b172d11f` DNS run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
+is pending.
 Protected DNS now owns a separate bounded client route instead of contending with the general
 datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
 See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
-On `2459833a`, the helper fixture passes, but general Quality fails in a DNS cache deadline
-assertion. The test now compares against the retained expiry and monotone deadline instead of
-independently rounded exported timestamps; its targeted check passes, not yet full CI.
-CodeQL analysis completes, but its separate PR alert gate remains red with 126 results.
+The [latest completed Quality run on `d1fd6d1f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191408128)
+passes formatting and strict Clippy but fails a codec test whose maximum-size fixture repeats
+one provider identity sixteen times. The uniqueness check correctly rejects that fixture;
+the test-only correction and targeted strict Clippy pass while preserving duplicate rejection.
+New-head Quality is pending.
+The `d1fd6d1f` CodeQL analysis completes, but its separate PR alert gate remains red with 126 results.
 These failures are separate from the passing VM scenarios; see the exact
 [CI checkpoint](docs/IMPLEMENTATION_STATUS.md).
 
