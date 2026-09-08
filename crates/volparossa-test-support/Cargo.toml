@@ -10,14 +10,23 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+bytes.workspace = true
 ed25519-dalek.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 hex.workspace = true
+http.workspace = true
 libp2p-identity.workspace = true
+quinn.workspace = true
 rand_core.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 volparossa-policy = { path = "../volparossa-policy", version = "=0.1.0" }
 volparossa-protocol = { path = "../volparossa-protocol", version = "=0.1.0" }
 volparossa-wireguard = { path = "../volparossa-wireguard", version = "=0.1.0" }

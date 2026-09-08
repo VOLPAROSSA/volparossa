@@ -16,7 +16,8 @@ extern "C" {
 #define VMP_MQVPN_EXIT_SESSION_ID 2U
 #define VMP_MQVPN_EXIT_MIN_PACKET_MTU 1280U
 #define VMP_MQVPN_EXIT_PACKET_MTU 1420U
-#define VMP_MQVPN_EXIT_MAX_PACKETS 8U
+/* Absorb one bounded HTTP/3 uplink burst between control-plane drains. */
+#define VMP_MQVPN_EXIT_MAX_PACKETS 128U
 #define VMP_MQVPN_EXIT_MAX_BYTES (256U * 1024U)
 
 /* A dependency-free copy of the evidence fields supplied by an mqvpn server

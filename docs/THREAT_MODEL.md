@@ -5,7 +5,7 @@
 VOLPAROSSA v1 aims to separate a client's public address and permanent identity from the Internet
 destination and exit. The client first chooses one control relay; every exit advertisement and exit
 RPC uses that relay on both forwarding hops. Every datapath then places exactly one independently
-selected relay between client and exit. The design also aims to prevent volunteer relays from
+selected relay between client and exit. The design also aims to prevent contributing relays from
 becoming egress proxies, prevent exits from reaching destinations outside a threshold-signed
 whitelist, keep control messages authenticated and short-lived, and confine privileged network
 mutations to scoped, reversible helper operations.
@@ -139,8 +139,10 @@ NAT can expose endpoint metadata, make mappings unstable, or let an attacker rac
 hole punching. Endpoint candidates and reservations are authenticated and bounded; reachability must
 be proven before activation and keepalive is limited. libp2p Circuit Relay v2 is control-plane
 connectivity only; it is legitimate alongside privacy-v4 but never an implicit WireGuard dataplane
-fallback. Paths that cannot establish an authorized direct dataplane are rejected. The production
-two-leg probe producer does not exist yet, so the current runtime fails closed before this claim.
+fallback. Paths that cannot establish an authorized direct dataplane are rejected. Real two-leg
+probes and agent/helper routing participate in the `482e33d0` acceptance checkpoint; that
+disposable topology does not prove arbitrary NAT traversal, physical Wi-Fi compatibility or
+every later local-link configuration.
 
 ### Local root compromise
 
@@ -148,6 +150,27 @@ Root can inspect memory, steal identity and session keys, change binaries or pol
 firewall state, observe all destinations, and impersonate the node. Encrypted-at-rest identity,
 0600 permissions, privilege separation, systemd hardening, ephemeral keys, and redacted persistence
 help against accidents and lesser local users, not a hostile root.
+
+### Malicious content, naming and storage peers (planned extension)
+
+The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) adds untrusted chunk holders,
+manifests, publication names and replicated encrypted messages. Attackers may substitute bytes,
+replay old versions, forge availability or publisher claims, poison DNS, withhold replicas, or
+exhaust bandwidth/storage. Chunk hashes detect substitution only against an authenticated
+manifest; a peer-provided key, digest or signature does not authenticate an HTTPS origin.
+Representation, security metadata, freshness and authorization must remain bound through
+reassembly and origin fallback. A cache hit must not bypass the Internet policy or browser
+same-origin/CSP/credential rules. Independently validated DNS records retain their own TTL and
+signature limits; arbitrary peer assertions do not become authoritative DNS.
+
+An optional witnessed-HTTPS experiment additionally trusts a specifically configured witness
+not to collude with the uploader. Peer identity or a peer majority is insufficient, and no
+mandatory central/default witness is introduced. No interception CA or TLS bypass is permitted.
+Public chunk discovery can expose interests; private messages must remain recipient-encrypted,
+with bounded retention and anti-spam/resource controls. Neither encryption nor replication
+guarantees availability, traffic-analysis resistance or deletion from malicious holders.
+Owner-priority quotas limit replication pressure. Local store/reassembly evidence does not yet
+validate these network, publishing, messaging or HTTPS integrations.
 
 ### Denial of service
 
@@ -163,7 +186,9 @@ The required namespace acceptance suite includes policy denials, malicious/missi
 exit packet captures, crash cleanup, and byte-for-byte unchanged host state. In particular, A12 must
 prove from an exit-namespace packet capture that the exit sees incoming relays rather than the
 client's public address, and A13 must combine client capture and routing evidence to prove no direct
-client-exit control or dataplane path exists. The probe producer, helper backend, agent route
-orchestration, and client ingress remain blocked. Until those tests pass and are checked in
-[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md), the mitigations above are design requirements
-rather than release claims.
+client-exit control or dataplane path exists. The unchanged `482e33d0` build passed all A01--A15,
+including that real probe/helper/agent/ingress chain, complete privacy captures and crash cleanup
+with zero owned objects and unchanged guest state. The exact revision, artifact and subsequent
+failures are recorded in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). These are scoped
+functional results, not a release-security audit, proof against every adversary above, or a pass
+for the newer sharing/content extensions.

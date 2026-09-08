@@ -66,6 +66,7 @@ fn candidate(index: u8, role: ServiceRole, measurement_count: u32) -> Candidate 
                 sample_window_seconds: 15,
             },
             network: NetworkMetadata {
+                uplink: volparossa_core::NetworkUplink::IndependentInternet,
                 operator_id: OperatorId::new(format!("operator-{index}")).expect("valid id"),
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
@@ -346,6 +347,247 @@ fn prefix_native_prospective_diversity_collides_on_ipv6_48_only() {
             .len(),
         2
     );
+}
+
+#[test]
+fn scoped_local_lan_relay_selection_preserves_prefix_collisions() {
+    for (first, adjacent, family) in [
+        (
+            ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
+            ObservedNetworkPrefix::local_ipv4_24([192, 168, 2]),
+            IpFamily::Ipv4,
+        ),
+        (
+            ObservedNetworkPrefix::local_ipv6_48([0xfd, 1, 2, 3, 4, 5]),
+            ObservedNetworkPrefix::local_ipv6_48([0xfd, 1, 2, 3, 4, 6]),
+            IpFamily::Ipv6,
+        ),
+    ] {
+        assert_eq!(
+            select_two_prefix_native_relays([first, adjacent], family)
+                .expect("distinct scoped LAN relay observations")
+                .relays()
+                .len(),
+            2
+        );
+        assert_eq!(
+            select_two_prefix_native_relays([first, first], family),
+            Err(SelectionError::InsufficientDiversePaths {
+                required: 2,
+                available: 1,
+            })
+        );
+    }
+}
+
+#[test]
+fn scoped_local_lan_anchor_requires_explicit_relay_scope_and_real_asn() {
+    let value = prospective_candidate(1, 10);
+    let local = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+    let network = &value.advertisement.network;
+    assert!(
+        DiversityAnchor::from_direct_relay_prefix(
+            value.advertisement.node_id.clone(),
+            value.advertisement.peer_id.clone(),
+            network.operator_id.clone(),
+            network.asn.expect("real fixture ASN"),
+            local,
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        DiversityAnchor::from_observed_prefix(
+            value.advertisement.node_id.clone(),
+            value.advertisement.peer_id.clone(),
+            network.operator_id.clone(),
+            network.asn.expect("real fixture ASN"),
+            local,
+        ),
+        Err(SelectionError::InvalidDiversityAnchors)
+    );
+    assert_eq!(
+        DiversityAnchor::from_direct_relay_prefix(
+            value.advertisement.node_id,
+            value.advertisement.peer_id,
+            network.operator_id.clone(),
+            0,
+            local,
+        ),
+        Err(SelectionError::InvalidDiversityAnchors)
+    );
+}
+
+#[test]
+fn scoped_local_lan_projection_accepts_explicit_unknown_relay_and_known_exit() {
+    let local = ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]);
+    let mut relay = prospective_candidate(1, 10);
+    relay.evidence.observed_network_origin = None;
+    let required = requirements(ServiceRole::Relay);
+    assert!(prefix_projection(&relay, local, &required).is_ok());
+    assert!(
+        prefix_projection(
+            &relay,
+            ObservedNetworkPrefix::ipv4_24([192, 168, 1]),
+            &required,
+        )
+        .is_err()
+    );
+
+    relay.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+    relay.advertisement.network.asn = None;
+    relay.advertisement.network.ipv4_prefix_hint = None;
+    relay.advertisement.network.ipv6_prefix_hint = None;
+    assert!(prefix_projection(&relay, local, &required).is_ok());
+    assert!(
+        prefix_projection(
+            &relay,
+            ObservedNetworkPrefix::ipv4_24([45, 1, 2]),
+            &required
+        )
+        .is_err()
+    );
+
+    let mut unscoped = relay.clone();
+    unscoped.evidence.observed_network_origin = Some(ObservedNetworkOrigin {
+        address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+    });
+    assert!(
+        hard_filter(&unscoped, &required).is_err(),
+        "LocalOnly needs explicit scoped evidence"
+    );
+
+    let mut exit = public_exit_candidate(2, 10);
+    exit.evidence.observed_network_origin = None;
+    let observed = [PrefixObservedCandidate::new(&exit, local).expect("normalized prefix")];
+    assert!(
+        select_exit_with_observed_prefixes(
+            &observed,
+            &requirements(ServiceRole::Exit),
+            SelectionMix::default(),
+            &mut ChaCha8Rng::seed_from_u64(91),
+        )
+        .is_ok()
+    );
+    exit.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+    exit.advertisement.network.asn = None;
+    exit.advertisement.network.ipv4_prefix_hint = None;
+    let observed = [PrefixObservedCandidate::new(&exit, local).expect("normalized prefix")];
+    assert!(
+        select_exit_with_observed_prefixes(
+            &observed,
+            &requirements(ServiceRole::Exit),
+            SelectionMix::default(),
+            &mut ChaCha8Rng::seed_from_u64(91),
+        )
+        .is_err()
+    );
+}
+
+fn local_only_candidate(index: u8) -> Candidate {
+    let mut value = prospective_candidate(index, 10);
+    value.evidence.observed_network_origin = None;
+    value.advertisement.network.uplink = volparossa_core::NetworkUplink::LocalOnly;
+    value.advertisement.network.asn = None;
+    value.advertisement.network.ipv4_prefix_hint = None;
+    value.advertisement.network.ipv6_prefix_hint = None;
+    value
+}
+
+#[test]
+fn local_only_selection_has_one_unknown_origin_slot_including_control_anchor() {
+    let values = [local_only_candidate(1), local_only_candidate(2)];
+    let prefixes = [
+        ObservedNetworkPrefix::local_ipv4_24([192, 168, 1]),
+        ObservedNetworkPrefix::local_ipv4_24([192, 168, 2]),
+    ];
+    let observed = prefix_observed_candidates(&values, &prefixes);
+    let mut required = requirements(ServiceRole::Relay);
+    required.address_family = Some(IpFamily::Ipv4);
+    let select = |anchors: &[DiversityAnchor], minimum| {
+        select_prospective_relays_with_observed_prefixes(
+            &observed,
+            &required,
+            anchors,
+            ProspectiveRelayPolicy::new(minimum, 2, SelectionMix::default()).expect("policy"),
+            &mut ChaCha8Rng::seed_from_u64(91),
+        )
+    };
+    let anchors = prefix_native_prospective_anchors();
+    assert_eq!(
+        select(&anchors, 1)
+            .expect("one honest unknown relay")
+            .relays()
+            .len(),
+        1
+    );
+    assert_eq!(
+        select(&anchors, 2),
+        Err(SelectionError::InsufficientDiversePaths {
+            required: 2,
+            available: 1,
+        })
+    );
+    let control = local_only_candidate(3);
+    let local_anchor = DiversityAnchor::from_scoped_prefix(
+        control.advertisement.node_id,
+        control.advertisement.peer_id,
+        control.advertisement.network.operator_id,
+        None,
+        ObservedNetworkPrefix::local_ipv4_24([192, 168, 3]),
+        ServiceRole::Relay,
+    )
+    .expect("explicit local-only control anchor");
+    assert_eq!(
+        select(&[local_anchor, anchors[1].clone()], 1),
+        Err(SelectionError::InsufficientDiversePaths {
+            required: 1,
+            available: 0
+        })
+    );
+}
+
+#[test]
+fn local_only_complete_path_selection_does_not_aggregate_two_unknown_origins() {
+    let values = [local_only_candidate(1), local_only_candidate(2)];
+    let required = requirements(ServiceRole::Relay);
+    let projections = values
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            prefix_projection(
+                candidate,
+                ObservedNetworkPrefix::local_ipv4_24([
+                    192,
+                    168,
+                    u8::try_from(index).expect("bounded fixture"),
+                ]),
+                &required,
+            )
+            .expect("honest local-only projection")
+        })
+        .collect::<Vec<_>>();
+    let paths = [
+        projected_path(&projections[0], &public_relay_path(1)),
+        projected_path(&projections[1], &public_relay_path(2)),
+    ];
+    assert!(matches!(
+        select_projected_relay_paths(
+            &paths,
+            &required,
+            RelaySelectionPolicy {
+                active_paths: 2,
+                minimum_paths: 2,
+                maximum_paths: 2,
+                warm_backup_paths: 0,
+                ..RelaySelectionPolicy::default()
+            },
+            &mut ChaCha8Rng::seed_from_u64(91),
+        ),
+        Err(SelectionError::InsufficientDiversePaths {
+            required: 2,
+            available: 1
+        })
+    ));
 }
 
 #[test]

@@ -1,0 +1,136 @@
+name: DNS cache built-in-root preflight
+run-name: Public DNSSEC chain — collector and local cache only
+
+on:
+  # A new dispatch workflow is unavailable until it exists on the default branch.
+  # This narrow branch/path trigger runs its first proof on the exact pushed source.
+  push:
+    branches:
+      - feature/alpha-final-evidence
+    paths:
+      - .github/workflows/dns-cache-proof.yml
+      - scripts/run-isolated-test.sh
+      - crates/volparossa-udp/src/dns/**
+      - crates/volparossa-udp/src/dns.rs
+      - crates/volparossa-udp/Cargo.toml
+      - crates/volparossa-udp/examples/dns-cache-proof.rs
+      - tests/integration/dns-cache-proof.sh
+      - tests/integration/dns-cache-fixture.py
+      - tests/integration/test-dns-cache-fixture.py
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-character source revision to prove
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dns-cache-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  builtin-root:
+    name: Fresh public A and AAAA chain, unchanged built-in anchors
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Bind exact source and prepare bounded evidence directory
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          umask 077
+          export VOLPAROSSA_DNS_PROOF_OUTPUT="$RUNNER_TEMP/dns-cache-proof-$GITHUB_RUN_ID"
+          mkdir -m 0700 -- "$VOLPAROSSA_DNS_PROOF_OUTPUT"
+          printf 'VOLPAROSSA_DNS_PROOF_OUTPUT=%s\n' "$VOLPAROSSA_DNS_PROOF_OUTPUT" >>"$GITHUB_ENV"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ["VOLPAROSSA_DNS_PROOF_OUTPUT"])
+          source = {
+              "schema_version": 1,
+              "source_sha": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "cargo_lock_sha256": hashlib.sha256(pathlib.Path("Cargo.lock").read_bytes()).hexdigest(),
+              "upstream_lock_sha256": hashlib.sha256(pathlib.Path("third_party/upstream.lock.json").read_bytes()).hexdigest(),
+              "scope": "builtin-anchor-collector-and-local-cache-only",
+              "peer_cache_proven": False,
+              "normal_client_route_proven": False,
+          }
+          with (root / "source.json").open("x") as stream:
+              json.dump(source, stream, sort_keys=True)
+              stream.write("\n")
+          PY
+
+      - name: Install pinned Rust toolchain and verify namespace tools
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal
+          for tool in python3 jq pkg-config unshare setpriv sudo ip timeout; do
+            command -v "$tool"
+          done
+          rustc --version --verbose >"$VOLPAROSSA_DNS_PROOF_OUTPUT/rustc.txt"
+          cargo --version --verbose >"$VOLPAROSSA_DNS_PROOF_OUTPUT/cargo.txt"
+
+      - name: Build the actual DNSSEC collector before collecting expiring data
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo build --locked --offline -p volparossa-udp --example dns-cache-proof
+          git diff --exit-code
+          sha256sum target/debug/examples/dns-cache-proof \
+            >"$VOLPAROSSA_DNS_PROOF_OUTPUT/binary.sha256"
+
+      - name: Collect fresh public DNS wire data from the explicit test-only DoH source
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -B tests/integration/dns-cache-fixture.py collect \
+            "$VOLPAROSSA_DNS_PROOF_OUTPUT/fixture" \
+            2>"$VOLPAROSSA_DNS_PROOF_OUTPUT/collect.stderr" \
+            | tee "$VOLPAROSSA_DNS_PROOF_OUTPUT/collect.json"
+
+      - name: Validate real public root chains and local reuse in a disposable network
+        env:
+          # Namespace creation only. The runner drops to the original UID/GID and
+          # all capabilities before it runs either replay or the Rust validator.
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
+        run: |
+          set -euo pipefail
+          tests/integration/dns-cache-proof.sh --execute --yes \
+            --fixture "$VOLPAROSSA_DNS_PROOF_OUTPUT/fixture" \
+            --binary "$GITHUB_WORKSPACE/target/debug/examples/dns-cache-proof" \
+            --output "$VOLPAROSSA_DNS_PROOF_OUTPUT/proof"
+          jq -e '.success == true and
+            .scope == "builtin-anchor-collector-and-local-cache-only" and
+            .peer_cache_proven == false and .normal_client_route_proven == false and
+            (.core | length) == 2' "$VOLPAROSSA_DNS_PROOF_OUTPUT/proof/proof.json"
+
+      - name: Upload exact-source public wire and bounded collector evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dns-cache-builtin-root-${{ github.run_id }}
+          path: ${{ env.VOLPAROSSA_DNS_PROOF_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 7

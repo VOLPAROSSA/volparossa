@@ -15,16 +15,21 @@ fi
 set -- \
     packaging/test-collect-cargo-licenses.sh \
     packaging/build-deb.sh \
+    packaging/volparossa-mpquic-launch \
     packaging/collect-cargo-licenses.sh \
     packaging/debian/postinst \
     packaging/debian/postrm \
     packaging/debian/prerm \
+    tests/packaging/debian13-package-lifecycle.sh \
+    tests/packaging/test-package-lifecycle-contract.sh \
+    tests/packaging/test-native-launcher.sh \
     scripts/bootstrap-debian13-dev.sh \
     scripts/check-rust-dependencies.sh \
     scripts/check-shell.sh \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
     scripts/run-fuzz.sh \
+    scripts/run-isolated-test.sh \
     tests/helper/lib/live-worker-proof-capture.sh \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/lib/restart-exact-present-launcher.sh \
@@ -45,6 +50,12 @@ set -- \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
+    tests/integration/dns-cache-proof.sh \
+    tests/integration/dns-cache-smoke.sh \
+    tests/integration/content-message-publication-smoke.sh \
+    tests/integration/content-mailbox-smoke.sh \
+    tests/integration/generate-alpha-acceptance-report.sh \
+    tests/integration/test-alpha-acceptance-report.sh \
     tests/integration/test-harness.sh \
     tests/integration/validate-report.sh \
     tests/netns/run-benchmarks.sh \

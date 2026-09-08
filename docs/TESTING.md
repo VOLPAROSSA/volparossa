@@ -7,6 +7,11 @@ acceptance report.
 
 ## Unprivileged quality gate
 
+During functional development, run the narrowest formatter/compile check and relevant executable
+smoke for the changed slice. The following broad gate belongs at integration checkpoints/CI and
+release preparation; do not repeat it for every small edit. Retained real datapath and disposable
+cleanup evidence is still required before claiming a networking feature works.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -18,11 +23,11 @@ cargo clippy --manifest-path fuzz/Cargo.toml --locked --offline --all-targets --
 ```
 The dependency script verifies exact crates.io archives, reviewed local
 security changes, unchanged license files, complete vendor-tree hashes, and
-the locked root and standalone fuzz feature graphs before running cargo-deny's
-license/ban/source checks and no-fetch `cargo-audit >= 0.22.1` scans of both
-lockfiles. It records the local RustSec database commit. Debian's cargo-deny
-0.18.3 rejects CVSS 4.0 vectors; a successful licenses/bans/sources subset
-alone does not replace the advisory gate. See `third_party/rust/README.md` for
+the locked root and standalone fuzz feature graphs before running pinned
+`cargo-deny 0.18.6` all-in-one checks and independent no-fetch
+`cargo-audit 0.22.1` scans of both lockfiles. Cargo-deny is built with its
+pinned Rust 1.88 toolchain; the product remains pinned to Rust 1.85. The gate
+records the local RustSec database commit. See `third_party/rust/README.md` for
 the narrowly scoped local backports, single-backend Yamux hardening, and
 scanner exemptions.
 
@@ -30,7 +35,7 @@ The package-license regression proves all three reviewed path overrides and
 the exact `yamux 0.13.10` release-tag license fallback enter the distributable
 notices while workspace and arbitrary path packages do not.
 
-Focused unit/property tests cover canonical protobuf, all eighteen signed
+Focused unit/property tests cover canonical protobuf, versioned signed
 control payloads, signatures/key binding, replay/TTL/skew, advertisements, two-hop forwarding,
 direct datapath-relay framing, policy normalization/thresholds, peerstore privacy,
 selection/diversity/capacity, reservation expiry and exact retries, route contexts/LRU,
@@ -41,8 +46,8 @@ idempotent cleanup planning. These tests are not dataplane or privacy evidence.
 among three real libp2p swarms over process-local MemoryTransport. It proves a client cannot send an
 exit request directly to the exit, then carries the same canonical wrapper client -> control relay
 -> exit and the signed response back. Its probe case proves
-`/volparossa/datapath-relay/4` framing while the production handler returns a received
-fail-closed `Unavailable` without exposing a fake probe event.
+`/volparossa/datapath-relay/4` framing and exact delivery to the authenticated local relay
+handler. It is not a WireGuard probe or the complete production topology.
 
 Discovery unit tests prove `/volparossa/advertisement/4` canonical bounds and reject request
 versions 1, 2, 3, and future values plus the retired direct-reservation v2 identifiers. Protocol,
@@ -51,25 +56,139 @@ confirmation/receipt binding, exact successful retries, replay/expiry, capacity 
 removal of permanent client Peer ID fields. Test-only exact evidence verifiers do not make a real
 probe producer.
 
-The production agent route state machine is not yet proven end to end. The no-argument production
-helper can execute at most one live context at a time, containing either one matching-role
-Client/Exit WireGuard lease or the exact ordered `RelayClient` + `RelayExit` pair, through Bind,
-Prepare, signed-authority-bound Activate, correlated Probe/Commit and Destroy. Unit and
-failure-injection tests prove complete-batch preflight, rollback after partial Prepare/Activate,
-rejection of role/path/peer substitution before mutation, no partial pair Commit, and complete-pair
-Destroy retry. Commit requires a handshake no older than activation plus strict RX and TX growth for
-every lease and caches the exact successful receipt for an identical retry. The same helper-internal
-seam can forward the exact Relay pair and hand off one unconnected QUIC UDP descriptor per valid
-committed Client/Exit Acquire request. MPTCP/Relay socket acquisition, a production route/transport
-caller, simultaneous end-to-end probing, client ingress and live relay/exit publication remain fail
-closed. Relay authority tests verify one five-record replay transaction comprising the
-outer client-signed request, its embedded signed ClientSessionCapability and ExitReservation, the
-relay-signed response commitment and exact nested RelayAuthorization. They reject signer, TTL,
-replay, capability/exit/authorization scope and endpoint substitution before mutation, but do not
-provide an independent discovery/connection trust anchor. The unprivileged tests above
-create no WireGuard device or host route; the separate disposable gate below confines its network
-fixtures to private namespaces and does not satisfy an acceptance case without retained exact-main
-evidence.
+The integrated production route/helper/transport sequence passed all A01--A15 on unchanged
+`482e33d0`, including real MPTCP/MPQUIC, privacy captures and crash cleanup. See
+[implementation status](IMPLEMENTATION_STATUS.md) for the retained run and artifact, and the
+separate results/failures of newer extensions. Unit coverage of signed authority, complete-pair
+prepare/activate/commit, descriptor custody and destruction is supporting evidence, not a
+replacement for that live run. Network-backed tests remain confined to disposable namespaces;
+ordinary parser/state-machine tests do not alter host networking. The historical helper-boundary
+gate below is a narrower proof, not the current complete feature inventory.
+
+## Native content-storage foundation
+
+The initial content slice can be checked independently:
+
+```sh
+cargo fmt -p volparossa-content -- --check
+cargo test --locked -p volparossa-content
+cargo clippy --locked -p volparossa-content --all-targets -- -D warnings
+cargo run --locked -p volparossa-content --example offline_publication
+```
+
+The example creates only temporary local directories. It signs a native publication, distributes
+its chunks over two separate disk stores, removes the publisher store and reconstructs the exact
+object from those remaining stores. This is real local storage, not multiple network peers or
+offline website availability. Focused tests cover integrity, independently trusted publisher keys,
+expiry, missing pieces, bounded storage and output publication. There is no automatic browsing
+capture, browser integration or DNS sharing. The separate cooperative-origin HTTPS slice is
+described below; it is not generic existing-site compatibility. The
+[content proposal](CONTENT_NETWORK_PROPOSAL.md) separates verified C01 from incomplete C02--C08.
+
+The normal CLI's offline publish/assemble integration can be checked narrowly with
+`cargo test --locked -p volparossa content::tests --bin volparossa`. Its two tests exercise
+the existing encrypted identity, reconstruction from two partial stores after input deletion,
+explicit owned-cache reuse, missing/wrong-publisher rejection and no-clobber output. Separate
+CLI invocations also pass for an 18,742-byte exact-hash file. These commands open no sockets;
+their verification is not package installation or automatic content distribution evidence.
+
+Fourteen crate tests now include persistent reopen/ownership/quota checks and real bounded
+stream transfers from two partial stores, corruption rejection, oversized-prefix refusal and
+timeouts. The `content-acceptance-fixture` example also runs as separate processes: seed removes
+the original publisher; two sequential replicas supply disjoint pieces; a restarted consumer
+reopens its cache and downloads only missing chunks before atomically reconstructing the object.
+The disposable-loopback process proof passes for 2,097,275 bytes / nine chunks. Loopback is not
+MPTCP/overlay evidence, even though it exercises real application sockets.
+
+The `content` choice in the **Alpha production-helper topology** workflow runs the same
+application through existing transparent ingress inside the Debian 13 guest. Its gate requires
+two distinct provider processes, a partial first fetch, exact complete second reconstruction,
+both WireGuard legs, complete privacy captures, exact cleanup and unchanged guest state.
+It retains the ordinary destination policy and does not add a direct-peer egress exception.
+The [live run on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
+passes. Providers share one authorized destination in this first scenario;
+the test does not claim provider-node diversity, distributed discovery, HTTPS authentication,
+automatic redistribution or durable retention. Run socket fixtures only in disposable namespaces.
+
+Five additional `private_message` tests cover encrypted offline reconstruction, wrong keys,
+tampering/rebinding, expiry, fresh encapsulation and 4-MiB limits. The fixture's `recipient-init`,
+`seed-private` and `open-message` modes reuse the same two-process transfer with ciphertext.
+Its disposable-loopback proof passes. The separate
+`content-message` workflow choice adds recipient decryption, wrong-recipient rejection, recipient
+UID/mode isolation and independent plaintext hash/length checks to the existing network gate.
+Only this explicit fixture persists a temporary recipient key (0600 in a 0700 directory) and
+known test plaintext; both are removed on success and through the interruption/error cleanup.
+Artifacts contain neither file. The library has no private-key persistence or mailbox service.
+The [live run on `b1082645`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)
+passes; this is configured encrypted-transfer evidence, not a complete mailbox or all alpha.
+
+Seven `origin_https` tests perform real TLS over bounded in-memory duplex streams: correct
+origin authority and reconstruction, full same-version fallback, wrong CA/name/plain peer
+bytes, changed signatures/resources, HTTP sharing/freshness/framing rejection, changed origin
+bytes and monotonic expiry/deadlines. The separate `https-content-acceptance-fixture` executable
+performs actual socket exchanges inside a disposable namespace. Its `complete` case fetches
+777 metadata payload bytes via HTTPS and all 2,097,275 body bytes from two partial caches;
+`missing` gets one partial cache then one complete, manifest-checked origin response. Both
+outputs match the fixed test hash. This is not a speed test or a production certificate setup.
+The new `content-https` workflow scenario uses the existing protected ingress and independently
+authorized HTTPS (18443) and peer (18080) flows; its
+[live full-body-fallback run on `2de8209f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34150683819)
+passes with ten complete zero-drop boundary captures and unchanged guest state. No system
+CA is installed, and generic browser compatibility or C08 completion is not claimed.
+
+The newer Range version has eleven focused real-TLS tests (the original seven plus four range
+cases): disjoint/contiguous missing runs, exact 206 responses, an ignored Range/200 counted at
+full size, no I/O on completion, and incorrect/stale/corrupt/truncated responses, quota and
+deadline rejection. Its separate-process disposable-loopback proof receives exactly four missing
+chunks / 1,048,576 origin bytes after the 1,048,699-byte partial replica, with the same complete
+output hash. The extended `content-https` scenario now requires six missing-case protected flows
+(metadata, peer and four ranges), plus the three complete-case flows. The
+[newer network proof on `6cf2394b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34151753705)
+passes; the retained `2de8209f` report still proves only the earlier full-body fallback.
+
+The explicit provider runtime can be checked with focused `volparossa-content --test provider`,
+`volparossa-discovery content_provider`, `volparossa-agent --lib discovery::content::tests`,
+`volparossa-local-control content` and `volparossa content` Cargo tests. Run socket-bearing tests
+only in a disposable namespace/VM. These checks cover signed offers, exact-manifest selection,
+independent partial stores, connection/correlation bounds and typed CLI/control operations;
+they do not substitute for the independent-node `content-provider` KVM scenario. That scenario
+now passes on `e592b610`; consult implementation status for its exact scope and retained evidence.
+
+The separate `content-replication` scenario uses the normal agents and CLI: only Relay5 starts
+with public objects P and Q; Relay4 fetches P and picks up Q into a new replica cache after a
+second foreground fetch. Relay5's agent is then stopped. The next fixture explicitly stops
+Relay4's cache service and reopens it with `--reuse-replica-cache`, supplying only P's manifest.
+Q's original registration must be restored from the owned journal before a separate Client
+fetches Q from Relay4 over its own two-relay MPTCP route. This is service-runtime recreation,
+not an automatically restarted agent or boot-service claim. The runner checks independent publisher trust, actual
+new cache bytes, exact output hashes, full five-role captures for both phases, original-agent
+shutdown and complete cleanup. Run it through the same guarded KVM runner with
+`--scenario content-replication`; `--preview` performs no network changes. The evidence checker
+and capture classifier have focused tests. The `e592b610` run completes uptake and re-serving,
+but fails the final capture gate because retired remote route owners survive local disconnect;
+the explicit reopen extension still needs its live run after that teardown fix. This one chain
+does not establish full C03/C04, durable retention, generic browser support or a speed gain.
+
+The `content-message` scenario also runs normal `publish-message`, `import`, `export` and
+`open-message` across the disposable operator/service UID boundary. The operator has only the
+control group; private stores and keys remain unreadable to the other account. This separate
+local handoff uses the existing protected Unix socket and must leave the provider service off.
+It does not turn that scenario's fixture network publisher into a normal publisher or prove a
+mailbox. That different-UID VM proof passes on `ec091bdd`, with private caches/output, unchanged
+identity files and complete cleanup. The next source additionally publishes an explicitly public
+fixture file, rejects default import before creating a destination, then uses `--public-content`
+for import/export and normal `assemble`. Its checker requires exact hashes, distinct account
+ownership and no false ciphertext, HTTPS-origin or network-service claim. Local >4-MiB/empty-object
+CLI/agent probes and seven checker tests pass. The public-file VM proof now also passes on
+`49b6a7d1`, with exact 2,097,275-byte reconstruction, account isolation and complete cleanup.
+
+The next `content-provider` source additionally performs the complete normal user chain:
+`publish -> import --public-content -> serve -> remote fetch -> export --public-content -> assemble`.
+The publisher key is independent of the original fixture authority. Only the control group is
+granted access; provider and Client service caches remain mutually inaccessible through their
+actual mount namespaces. New receipts, exact bytes, selected provider, drained two-leg captures
+and secret cleanup are required. Original 5+4-provider and HTTPS fallback evidence is retained;
+this new chain has not yet obtained a live VM pass.
 
 ## Helper-boundary evidence
 

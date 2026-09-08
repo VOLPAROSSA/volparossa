@@ -16,7 +16,7 @@ const ROLE_STATE_VERSION: u32 = 1;
 const MAX_ROLE_FILE_BYTES: u64 = 4_096;
 const MAX_ROLE_FILE_LENGTH: usize = 4_096;
 
-/// Versioned role state. Client operation remains enabled in v1.
+/// Versioned role state for independently enabled node roles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedRoles {
@@ -37,7 +37,7 @@ impl PersistedRoles {
     }
 
     fn into_config(self) -> Result<RolesConfig, RoleStoreError> {
-        if self.schema_version != ROLE_STATE_VERSION || !self.client {
+        if self.schema_version != ROLE_STATE_VERSION {
             return Err(RoleStoreError::Invalid);
         }
         Ok(RolesConfig {
@@ -61,7 +61,11 @@ impl RoleStore {
         Self { path }
     }
 
-    /// Loads existing state, or durably records the safe configuration default.
+    /// Validates existing state and durably mirrors the configured role snapshot.
+    ///
+    /// The YAML configuration is authoritative across service restarts. The private state file is
+    /// retained as an atomic audit snapshot, but must not silently override a deliberate operator
+    /// edit after the first start.
     pub fn load_or_initialize(
         &self,
         configured: RolesConfig,
@@ -84,9 +88,13 @@ impl RoleStore {
                 if bytes.is_empty() || bytes.len() > MAX_ROLE_FILE_LENGTH {
                     return Err(RoleStoreError::Invalid);
                 }
-                serde_json::from_slice::<PersistedRoles>(&bytes)
+                let persisted = serde_json::from_slice::<PersistedRoles>(&bytes)
                     .map_err(|_| RoleStoreError::Invalid)?
-                    .into_config()
+                    .into_config()?;
+                if persisted != configured {
+                    self.persist(configured)?;
+                }
+                Ok(configured)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.persist(configured)?;
@@ -98,9 +106,6 @@ impl RoleStore {
 
     /// Atomically persists one fully validated role snapshot.
     pub fn persist(&self, roles: RolesConfig) -> Result<(), RoleStoreError> {
-        if !roles.client {
-            return Err(RoleStoreError::Invalid);
-        }
         let parent = self.path.parent().ok_or(RoleStoreError::Invalid)?;
         validate_private_directory(parent)?;
         if let Ok(metadata) = fs::symlink_metadata(&self.path) {
@@ -197,7 +202,7 @@ pub enum RoleStoreError {
     /// Existing role file is not a single regular `0600` file.
     #[error("role-state file is unsafe")]
     UnsafeFile,
-    /// Versioned state is malformed or would disable the client role.
+    /// Versioned state is malformed.
     #[error("role-state contents are invalid")]
     Invalid,
 }
@@ -210,7 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_state_and_updates_survive_reopen() {
+    fn configured_roles_replace_stale_persisted_snapshot_on_reopen() {
         let directory = tempdir().expect("tempdir");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
         let store = RoleStore::new(directory.path().join("roles.json"));
@@ -229,13 +234,39 @@ mod tests {
             exit: false,
         };
         store.persist(updated).expect("persist");
-        assert_eq!(store.load_or_initialize(initial).expect("reload"), updated);
+        assert_eq!(store.load_or_initialize(initial).expect("reload"), initial);
         assert_eq!(
             fs::symlink_metadata(directory.path().join("roles.json"))
                 .expect("metadata")
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn service_only_config_replaces_stale_persisted_snapshot() {
+        let directory = tempdir().expect("tempdir");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        let store = RoleStore::new(directory.path().join("roles.json"));
+        let relay_only = RolesConfig {
+            client: false,
+            relay: true,
+            exit: false,
+        };
+        assert_eq!(
+            store.load_or_initialize(relay_only).expect("initialize"),
+            relay_only
+        );
+        let exit_only = RolesConfig {
+            client: false,
+            relay: false,
+            exit: true,
+        };
+        store.persist(exit_only).expect("persist");
+        assert_eq!(
+            store.load_or_initialize(relay_only).expect("reload"),
+            relay_only
         );
     }
 }

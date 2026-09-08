@@ -14,7 +14,11 @@ extern "C" {
 #endif
 
 #define VMP_MQVPN_BACKEND_MAX_PATHS VMP_MAX_PATHS
-#define VMP_MQVPN_REVERSE_MAX_PACKETS 8U
+/* The negotiated tunnel assignment is capped at 1420 bytes. Keeping compact
+ * slots lets the client absorb a bounded HTTP/3 burst without the former
+ * eight-datagram cliff or allocating a 64 KiB protocol frame per slot. */
+#define VMP_MQVPN_REVERSE_PACKET_BYTES 1420U
+#define VMP_MQVPN_REVERSE_MAX_PACKETS 128U
 #define VMP_MQVPN_REVERSE_MAX_BYTES (256U * 1024U)
 
 /* These phases deliberately mirror only the mqvpn client phases consumed by
@@ -58,7 +62,7 @@ typedef enum vmp_mqvpn_backend_result {
 } vmp_mqvpn_backend_result_t;
 
 typedef struct vmp_mqvpn_reverse_packet {
-    uint8_t bytes[VMP_MAX_INNER_PACKET];
+    uint8_t bytes[VMP_MQVPN_REVERSE_PACKET_BYTES];
     size_t len;
 } vmp_mqvpn_reverse_packet_t;
 

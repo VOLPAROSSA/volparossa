@@ -122,10 +122,37 @@ impl MptcpListener {
         expected_local: SocketAddr,
     ) -> io::Result<Self> {
         validate_concrete_address(expected_local)?;
+        Self::from_owned_fd_at(descriptor, expected_local, false)
+    }
+
+    /// Adopts an MPTCP listener bound to the wildcard address for an authorised concrete tuple.
+    ///
+    /// Linux requires a wildcard-bound listening meta-socket when `MP_JOIN` subflows target
+    /// additional locally signalled addresses. The concrete address still authorises the address
+    /// family and nonzero port; only the kernel-reported bind address is expected to be wildcard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the authority is concrete and the descriptor is an exact
+    /// wildcard-bound, listening `IPPROTO_MPTCP` socket in the same family and on the same port.
+    pub fn from_wildcard_owned_fd(
+        descriptor: OwnedFd,
+        authorised_local: SocketAddr,
+    ) -> io::Result<Self> {
+        validate_concrete_address(authorised_local)?;
+        Self::from_owned_fd_at(descriptor, wildcard_address(authorised_local), true)
+    }
+
+    fn from_owned_fd_at(
+        descriptor: OwnedFd,
+        expected_local: SocketAddr,
+        require_ipv6_only: bool,
+    ) -> io::Result<Self> {
         let socket = Socket::from(descriptor);
         if socket.r#type()? != Type::STREAM
             || socket.protocol()? != Some(Protocol::MPTCP)
             || !socket.is_listener()?
+            || (require_ipv6_only && expected_local.is_ipv6() && !socket.only_v6()?)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -259,6 +286,17 @@ fn domain_for(address: SocketAddr) -> Domain {
     }
 }
 
+fn wildcard_address(authorised_local: SocketAddr) -> SocketAddr {
+    match authorised_local {
+        SocketAddr::V4(address) => {
+            SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, address.port()))
+        }
+        SocketAddr::V6(address) => {
+            SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, address.port()))
+        }
+    }
+}
+
 fn validate_concrete_address(address: SocketAddr) -> io::Result<()> {
     if address.ip().is_unspecified() || address.port() == 0 {
         return Err(io::Error::new(
@@ -274,6 +312,18 @@ mod tests {
     use std::{io, net::TcpListener, os::fd::OwnedFd, thread};
 
     use super::{MptcpListener, MptcpStream};
+
+    #[test]
+    fn wildcard_listener_address_preserves_only_family_and_port() {
+        assert_eq!(
+            super::wildcard_address("10.1.2.3:44443".parse().expect("IPv4 authority")),
+            "0.0.0.0:44443".parse().expect("IPv4 wildcard")
+        );
+        assert_eq!(
+            super::wildcard_address("[fd76::4]:44443".parse().expect("IPv6 authority")),
+            "[::]:44443".parse().expect("IPv6 wildcard")
+        );
+    }
 
     #[tokio::test]
     async fn adopted_ordinary_tcp_descriptor_is_rejected_and_closed() {

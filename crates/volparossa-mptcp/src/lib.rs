@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 pub use netlink::MptcpNetlinkClient;
 pub use socket::{MptcpListener, MptcpStream, connect, listen, probe_kernel_support};
-pub use volparossa_linux_uapi::MptcpInfo;
+pub use volparossa_linux_uapi::{MptcpInfo, mptcp_info};
 
 /// Upper bound imposed by the v1 protocol and configuration.
 pub const MAX_PATHS: u8 = 8;
@@ -96,6 +96,8 @@ pub struct MptcpEndpoint {
     pub if_index: u32,
     /// Kernel path-manager flags.
     pub flags: EndpointFlags,
+    /// Optional TCP listener port carried only by an address-only `SIGNAL` endpoint.
+    pub listener_port: Option<u16>,
 }
 
 impl MptcpEndpoint {
@@ -143,6 +145,13 @@ impl MptcpEndpoint {
         if behaviours == 0 || flags & !allowed != 0 {
             return Err(MptcpError::Invalid(
                 "endpoint flags are outside the closed signal/subflow/backup set".into(),
+            ));
+        }
+        if self.listener_port.is_some_and(|port| port == 0)
+            || (self.listener_port.is_some() && self.flags != EndpointFlags::SIGNAL)
+        {
+            return Err(MptcpError::Invalid(
+                "endpoint listener port requires an address-only signal endpoint".into(),
             ));
         }
         Ok(())
@@ -212,6 +221,16 @@ pub trait MptcpPathManagerBackend: Send + Sync {
 pub struct KernelMptcpPathManager {
     contexts: ManagedContexts,
     kernel: Arc<dyn MptcpKernelBackend>,
+}
+
+/// Kernel path-manager facade for an externally serialized, single-threaded worker.
+///
+/// Unlike [`KernelMptcpPathManager`]'s async implementation, these operations execute generic
+/// netlink on the calling thread. This is intended for the privileged helper child, whose seccomp
+/// policy deliberately forbids creating threads after sandbox installation. The same namespace
+/// ownership registry and rollback states are retained; only the execution mechanism differs.
+pub struct SynchronousKernelMptcpPathManager {
+    backend: KernelMptcpPathManager,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -351,6 +370,331 @@ impl KernelMptcpPathManager {
             contexts: contexts_for_namespace(registry, namespace, maximum_namespaces)?,
             kernel,
         })
+    }
+}
+
+impl SynchronousKernelMptcpPathManager {
+    /// Creates a synchronous backend bound to the calling thread's current network namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the namespace cannot be identified or the bounded namespace registry
+    /// cannot admit it.
+    pub fn new() -> Result<Self, MptcpError> {
+        Ok(Self {
+            backend: KernelMptcpPathManager::new()?,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_kernel(kernel: Arc<dyn MptcpKernelBackend>) -> Self {
+        Self {
+            backend: KernelMptcpPathManager::with_kernel(kernel),
+        }
+    }
+
+    /// Reserves namespace-global limits and applies them without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or conflicting ownership and for kernel netlink failures.
+    pub fn prepare_context(
+        &self,
+        route_context_id: &str,
+        limits: MptcpLimits,
+    ) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        limits.validate()?;
+        {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            if !contexts.is_empty() {
+                return Err(MptcpError::Invalid(
+                    "backend already owns its namespace context".into(),
+                ));
+            }
+            contexts.insert(
+                route_context_id.to_owned(),
+                ManagedContext::Preparing(limits),
+            );
+        }
+
+        let result = self.backend.kernel.set_limits(limits);
+        let mut contexts = self.backend.contexts.blocking_lock();
+        match result {
+            Ok(())
+                if matches!(
+                    contexts.get(route_context_id),
+                    Some(ManagedContext::Preparing(current)) if *current == limits
+                ) =>
+            {
+                contexts.insert(
+                    route_context_id.to_owned(),
+                    ManagedContext::Active(HashMap::new()),
+                );
+                Ok(())
+            }
+            Ok(()) => Err(MptcpError::CleanupIncomplete(
+                "prepared context state changed before limits commit",
+            )),
+            Err(error) => {
+                if matches!(contexts.get(route_context_id), Some(ManagedContext::Preparing(current)) if *current == limits)
+                {
+                    contexts.remove(route_context_id);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Adds one selected WireGuard-bound endpoint without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid ownership, kernel mutation failure, or incomplete rollback.
+    pub fn add_path(
+        &self,
+        route_context_id: &str,
+        endpoint: MptcpEndpoint,
+    ) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        endpoint.validate()?;
+        {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+                return Err(MptcpError::Invalid(
+                    "route context is absent or busy".into(),
+                ));
+            };
+            if let Some(current) = endpoints.get(&endpoint.id) {
+                return if matches!(current, ManagedEndpoint::Active(_))
+                    && current.endpoint() == &endpoint
+                {
+                    Ok(())
+                } else {
+                    Err(MptcpError::Invalid(
+                        "endpoint id has a conflicting or pending owner".into(),
+                    ))
+                };
+            }
+            if endpoints.len() >= usize::from(MAX_PATHS) {
+                return Err(MptcpError::Invalid(
+                    "route context path limit reached".into(),
+                ));
+            }
+            endpoints.insert(endpoint.id, ManagedEndpoint::Adding(endpoint.clone()));
+        }
+
+        if let Err(error) = self.backend.kernel.add_endpoint(&endpoint) {
+            if is_errno(&error, libc::EEXIST) {
+                let mut contexts = self.backend.contexts.blocking_lock();
+                if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                {
+                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
+                    {
+                        endpoints.remove(&endpoint.id);
+                    }
+                }
+                return Err(error);
+            }
+            if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
+                let mut contexts = self.backend.contexts.blocking_lock();
+                if let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id)
+                {
+                    if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint)
+                    {
+                        endpoints.remove(&endpoint.id);
+                    }
+                }
+                return Err(error);
+            }
+            let _cleanup_state = self.mark_add_cleanup_required(route_context_id, endpoint);
+            return Err(MptcpError::CleanupIncomplete(
+                "failed endpoint add could not be rolled back",
+            ));
+        }
+
+        let committed = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            match contexts.get_mut(route_context_id) {
+                Some(ManagedContext::Active(endpoints)) if matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Adding(current)) if current == &endpoint) =>
+                {
+                    endpoints.insert(endpoint.id, ManagedEndpoint::Active(endpoint.clone()));
+                    true
+                }
+                Some(_) | None => false,
+            }
+        };
+        if committed {
+            return Ok(());
+        }
+        if self.backend.kernel.delete_endpoint(&endpoint).is_ok() {
+            return Err(MptcpError::Worker(
+                "endpoint state commit failed; exact kernel rollback completed".into(),
+            ));
+        }
+        let _cleanup_state = self.mark_add_cleanup_required(route_context_id, endpoint);
+        Err(MptcpError::CleanupIncomplete(
+            "endpoint state commit and exact rollback failed",
+        ))
+    }
+
+    fn mark_add_cleanup_required(
+        &self,
+        route_context_id: &str,
+        endpoint: MptcpEndpoint,
+    ) -> Result<(), MptcpError> {
+        let mut contexts = self.backend.contexts.blocking_lock();
+        match contexts.get_mut(route_context_id) {
+            Some(ManagedContext::Active(endpoints)) => {
+                endpoints.insert(endpoint.id, ManagedEndpoint::CleanupRequired(endpoint));
+            }
+            Some(ManagedContext::Cleaning(endpoints)) => {
+                endpoints.insert(endpoint.id, endpoint);
+            }
+            Some(ManagedContext::Preparing(_)) | None => {
+                return Err(MptcpError::CleanupIncomplete(
+                    "route context vanished while retaining endpoint ownership",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes one owned endpoint without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid ownership or when exact endpoint cleanup remains pending.
+    pub fn remove_path(&self, route_context_id: &str, endpoint_id: u8) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        if endpoint_id == 0 || endpoint_id > MAX_PATHS {
+            return Err(MptcpError::Invalid("invalid endpoint id".into()));
+        }
+        let endpoint = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+                return Err(MptcpError::Invalid(
+                    "route context is absent or busy".into(),
+                ));
+            };
+            let Some(current) = endpoints.get(&endpoint_id).cloned() else {
+                return Ok(());
+            };
+            let endpoint = match current {
+                ManagedEndpoint::Active(endpoint) | ManagedEndpoint::CleanupRequired(endpoint) => {
+                    endpoint
+                }
+                ManagedEndpoint::Adding(_) | ManagedEndpoint::Removing(_) => {
+                    return Err(MptcpError::Invalid(
+                        "endpoint mutation is already pending".into(),
+                    ));
+                }
+            };
+            endpoints.insert(endpoint_id, ManagedEndpoint::Removing(endpoint.clone()));
+            endpoint
+        };
+        let result = self.backend.kernel.delete_endpoint(&endpoint);
+        let mut contexts = self.backend.contexts.blocking_lock();
+        let Some(ManagedContext::Active(endpoints)) = contexts.get_mut(route_context_id) else {
+            return Err(MptcpError::CleanupIncomplete(
+                "context state changed during endpoint removal",
+            ));
+        };
+        if !matches!(endpoints.get(&endpoint.id), Some(ManagedEndpoint::Removing(current)) if current == &endpoint)
+        {
+            return Err(MptcpError::CleanupIncomplete(
+                "endpoint state changed during removal",
+            ));
+        }
+        match result {
+            Ok(()) => {
+                endpoints.remove(&endpoint.id);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(endpoint_id, %error, "MPTCP endpoint removal will be retried");
+                endpoints.insert(endpoint.id, ManagedEndpoint::CleanupRequired(endpoint));
+                Err(MptcpError::CleanupIncomplete(
+                    "endpoint removal failed and remains owned",
+                ))
+            }
+        }
+    }
+
+    /// Removes all endpoints owned by one context without creating an executor task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error while any exact endpoint cleanup remains pending.
+    pub fn cleanup_context(&self, route_context_id: &str) -> Result<(), MptcpError> {
+        validate_context_id(route_context_id)?;
+        let endpoints = {
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(context) = contexts.get_mut(route_context_id) else {
+                return Ok(());
+            };
+            match context {
+                ManagedContext::Preparing(_) => {
+                    return Err(MptcpError::Invalid(
+                        "context preparation is still pending".into(),
+                    ));
+                }
+                ManagedContext::Active(endpoints) => {
+                    if endpoints.values().any(|state| {
+                        matches!(
+                            state,
+                            ManagedEndpoint::Adding(_) | ManagedEndpoint::Removing(_)
+                        )
+                    }) {
+                        return Err(MptcpError::Invalid(
+                            "endpoint mutation is still pending".into(),
+                        ));
+                    }
+                    let owned = endpoints
+                        .values()
+                        .map(|state| (state.endpoint().id, state.endpoint().clone()))
+                        .collect::<HashMap<_, _>>();
+                    *context = ManagedContext::Cleaning(owned.clone());
+                    owned
+                }
+                ManagedContext::Cleaning(endpoints) => endpoints.clone(),
+            }
+        };
+
+        let mut endpoints = endpoints.into_values().collect::<Vec<_>>();
+        endpoints.sort_unstable_by_key(|endpoint| endpoint.id);
+        for endpoint in endpoints {
+            let endpoint_id = endpoint.id;
+            if let Err(error) = self.backend.kernel.delete_endpoint(&endpoint) {
+                tracing::warn!(endpoint_id, %error, "MPTCP cleanup will be retried");
+                return Err(MptcpError::CleanupIncomplete(
+                    "context endpoint cleanup failed",
+                ));
+            }
+            let mut contexts = self.backend.contexts.blocking_lock();
+            let Some(ManagedContext::Cleaning(remaining)) = contexts.get_mut(route_context_id)
+            else {
+                return Err(MptcpError::CleanupIncomplete(
+                    "context cleanup state changed unexpectedly",
+                ));
+            };
+            if remaining.get(&endpoint_id) != Some(&endpoint) {
+                return Err(MptcpError::CleanupIncomplete(
+                    "owned endpoint changed during cleanup",
+                ));
+            }
+            remaining.remove(&endpoint_id);
+        }
+        let mut contexts = self.backend.contexts.blocking_lock();
+        if matches!(contexts.get(route_context_id), Some(ManagedContext::Cleaning(remaining)) if remaining.is_empty())
+        {
+            contexts.remove(route_context_id);
+            Ok(())
+        } else {
+            Err(MptcpError::CleanupIncomplete(
+                "context retained endpoint ownership after cleanup",
+            ))
+        }
     }
 }
 
@@ -721,7 +1065,21 @@ fn validate_context_id(value: &str) -> Result<(), MptcpError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env, fs,
+        io::{BufRead as _, BufReader, Read as _, Write as _},
+        net::SocketAddr,
+        process::{Command, Stdio},
+        time::Duration,
+    };
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::*;
+
+    const LIVE_MULTIPATH_ROLE: &str = "VOLPAROSSA_MPTCP_LIVE_MULTIPATH_ROLE";
+    const LIVE_MULTIPATH_TEST: &str =
+        "tests::kernel_backend_drives_two_data_carrying_subflows_in_disposable_namespaces";
 
     fn overlay_address(path_id: u8, host: u16) -> IpAddr {
         IpAddr::V6(std::net::Ipv6Addr::new(
@@ -762,6 +1120,21 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_listener_port_requires_an_address_only_signal() {
+        let mut endpoint = selected_endpoint(2).with_flags(EndpointFlags::SIGNAL);
+        endpoint.listener_port = Some(44_443);
+        endpoint.validate().expect("signal listener endpoint");
+
+        endpoint.flags = EndpointFlags::SIGNAL | EndpointFlags::SUBFLOW;
+        assert!(endpoint.validate().is_err());
+        endpoint.flags = EndpointFlags::SUBFLOW;
+        assert!(endpoint.validate().is_err());
+        endpoint.flags = EndpointFlags::SIGNAL;
+        endpoint.listener_port = Some(0);
+        assert!(endpoint.validate().is_err());
+    }
+
+    #[test]
     fn endpoint_requires_structured_overlay_address_and_signed_linux_ifindex() {
         let valid = selected_endpoint(1);
         valid.validate().expect("client overlay endpoint");
@@ -793,6 +1166,644 @@ mod tests {
         assert!(validate_context_id("../../host").is_err());
         assert!(validate_context_id("route;shutdown").is_err());
         assert!(validate_context_id(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn kernel_backend_drives_two_data_carrying_subflows_in_disposable_namespaces() {
+        match env::var(LIVE_MULTIPATH_ROLE).as_deref() {
+            Ok("server") => {
+                tokio::runtime::Runtime::new()
+                    .expect("server runtime")
+                    .block_on(live_multipath_server());
+                return;
+            }
+            Ok("client") => {
+                tokio::runtime::Runtime::new()
+                    .expect("client runtime")
+                    .block_on(live_multipath_client());
+                return;
+            }
+            Ok("orchestrator") => {
+                run_live_multipath_topology();
+                return;
+            }
+            Ok(_) => panic!("invalid live multipath role"),
+            Err(_) => {}
+        }
+
+        let executable = env::current_exe().expect("current MPTCP test executable");
+        let output = Command::new("/usr/bin/timeout")
+            .args([
+                "60",
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--mount",
+                "--net",
+                "--fork",
+            ])
+            .arg(executable)
+            .arg("--exact")
+            .arg(LIVE_MULTIPATH_TEST)
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(LIVE_MULTIPATH_ROLE, "orchestrator")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn disposable MPTCP topology");
+        let denied = output.status.code() == Some(1)
+            && output.stdout.is_empty()
+            && matches!(
+                output.stderr.as_slice(),
+                b"unshare: unshare failed: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/uid_map: Operation not permitted\n"
+                    | b"unshare: write failed /proc/self/gid_map: Operation not permitted\n"
+            );
+        if denied {
+            eprintln!("skipped live MPTCP topology: user namespaces denied by policy");
+            return;
+        }
+        assert!(
+            output.status.success(),
+            "live MPTCP topology failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn command(program: &str, arguments: &[&str]) {
+        let output = Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("run {program} {arguments:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {arguments:?} failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn netns_command(namespace: &str, arguments: &[&str]) {
+        let mut command_arguments = vec!["netns", "exec", namespace, "ip"];
+        command_arguments.extend_from_slice(arguments);
+        command("ip", &command_arguments);
+    }
+
+    fn create_link(
+        left_namespace: &str,
+        left_name: &str,
+        left_address: &str,
+        right_namespace: &str,
+        right_name: &str,
+        right_address: &str,
+    ) {
+        let temporary_left = format!("t{left_name}");
+        let temporary_right = format!("t{right_name}");
+        command(
+            "ip",
+            &[
+                "link",
+                "add",
+                &temporary_left,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                &temporary_right,
+            ],
+        );
+        command(
+            "ip",
+            &["link", "set", &temporary_left, "netns", left_namespace],
+        );
+        command(
+            "ip",
+            &["link", "set", &temporary_right, "netns", right_namespace],
+        );
+        netns_command(
+            left_namespace,
+            &["link", "set", &temporary_left, "name", left_name],
+        );
+        netns_command(
+            right_namespace,
+            &["link", "set", &temporary_right, "name", right_name],
+        );
+        netns_command(
+            left_namespace,
+            &["address", "add", left_address, "dev", left_name, "nodad"],
+        );
+        netns_command(
+            right_namespace,
+            &["address", "add", right_address, "dev", right_name, "nodad"],
+        );
+        netns_command(left_namespace, &["link", "set", left_name, "up"]);
+        netns_command(right_namespace, &["link", "set", right_name, "up"]);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the disposable topology is intentionally linear so setup mirrors teardown"
+    )]
+    fn run_live_multipath_topology() {
+        command("mount", &["--make-rprivate", "/"]);
+        command(
+            "mount",
+            &[
+                "-t",
+                "tmpfs",
+                "-o",
+                "mode=0755,nosuid,nodev",
+                "tmpfs",
+                "/run",
+            ],
+        );
+        fs::create_dir_all("/run/netns").expect("create private netns directory");
+        for namespace in ["vp-c", "vp-r1", "vp-r2", "vp-x"] {
+            command("ip", &["netns", "add", namespace]);
+            netns_command(namespace, &["link", "set", "lo", "up"]);
+        }
+        create_link("vp-c", "c1", "fd42:1::1/64", "vp-r1", "r1c", "fd42:1::2/64");
+        create_link("vp-r1", "r1x", "fd42:2::1/64", "vp-x", "x1", "fd42:2::2/64");
+        create_link("vp-c", "c2", "fd42:3::1/64", "vp-r2", "r2c", "fd42:3::2/64");
+        create_link("vp-r2", "r2x", "fd42:4::1/64", "vp-x", "x2", "fd42:4::2/64");
+        let client_one = "fd76:6f6c:7061:1111:2222:1:3333:1";
+        let client_two = "fd76:6f6c:7061:1111:2222:2:3333:1";
+        let exit_one = "fd76:6f6c:7061:1111:2222:1:3333:4";
+        let exit_two = "fd76:6f6c:7061:1111:2222:3:3333:4";
+        netns_command(
+            "vp-c",
+            &[
+                "address",
+                "add",
+                &format!("{client_one}/128"),
+                "dev",
+                "c1",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "address",
+                "add",
+                &format!("{client_two}/128"),
+                "dev",
+                "c2",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "address",
+                "add",
+                &format!("{exit_one}/128"),
+                "dev",
+                "x1",
+                "nodad",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "address",
+                "add",
+                &format!("{exit_two}/128"),
+                "dev",
+                "x2",
+                "nodad",
+            ],
+        );
+        for relay in ["vp-r1", "vp-r2"] {
+            command(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    relay,
+                    "/bin/sh",
+                    "-c",
+                    "printf 1 >/proc/sys/net/ipv6/conf/all/forwarding",
+                ],
+            );
+        }
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:1::2",
+                "dev",
+                "c1",
+                "src",
+                client_one,
+                "cwnd",
+                "2",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "rule",
+                "add",
+                "from",
+                &format!("{client_one}/128"),
+                "table",
+                "101",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "101",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:1::2",
+                "dev",
+                "c1",
+                "src",
+                client_one,
+                "cwnd",
+                "2",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "rule",
+                "add",
+                "from",
+                &format!("{client_two}/128"),
+                "table",
+                "102",
+            ],
+        );
+        netns_command(
+            "vp-c",
+            &[
+                "-6",
+                "route",
+                "add",
+                "table",
+                "102",
+                &format!("{exit_two}/128"),
+                "via",
+                "fd42:3::2",
+                "dev",
+                "c2",
+                "src",
+                client_two,
+            ],
+        );
+        netns_command(
+            "vp-r1",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_one}/128"),
+                "via",
+                "fd42:1::1",
+                "dev",
+                "r1c",
+            ],
+        );
+        netns_command(
+            "vp-r1",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_one}/128"),
+                "via",
+                "fd42:2::2",
+                "dev",
+                "r1x",
+            ],
+        );
+        netns_command(
+            "vp-r2",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_two}/128"),
+                "via",
+                "fd42:3::1",
+                "dev",
+                "r2c",
+            ],
+        );
+        netns_command(
+            "vp-r2",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{exit_two}/128"),
+                "via",
+                "fd42:4::2",
+                "dev",
+                "r2x",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_one}/128"),
+                "via",
+                "fd42:2::1",
+                "dev",
+                "x1",
+            ],
+        );
+        netns_command(
+            "vp-x",
+            &[
+                "-6",
+                "route",
+                "add",
+                &format!("{client_two}/128"),
+                "via",
+                "fd42:4::1",
+                "dev",
+                "x2",
+            ],
+        );
+
+        let executable = env::current_exe().expect("current MPTCP test executable");
+        let mut server = Command::new("ip")
+            .args(["netns", "exec", "vp-x", "env"])
+            .arg(format!("{LIVE_MULTIPATH_ROLE}=server"))
+            .args(["/usr/bin/timeout", "25"])
+            .arg(&executable)
+            .args([
+                "--exact",
+                LIVE_MULTIPATH_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn MPTCP Exit server");
+        let mut server_stdout = BufReader::new(server.stdout.take().expect("server stdout"));
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if server_stdout
+                .read_line(&mut line)
+                .expect("server readiness")
+                == 0
+            {
+                let mut error = String::new();
+                server
+                    .stderr
+                    .take()
+                    .expect("server stderr")
+                    .read_to_string(&mut error)
+                    .expect("read server stderr");
+                panic!("MPTCP Exit exited before readiness: {error}");
+            }
+            if line.contains("MPTCP_SERVER_READY") {
+                break;
+            }
+        }
+        let client = Command::new("ip")
+            .args(["netns", "exec", "vp-c", "env"])
+            .arg(format!("{LIVE_MULTIPATH_ROLE}=client"))
+            .args(["/usr/bin/timeout", "20"])
+            .arg(&executable)
+            .args([
+                "--exact",
+                LIVE_MULTIPATH_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run MPTCP Client proof");
+        assert!(
+            client.status.success(),
+            "client failed: {}",
+            String::from_utf8_lossy(&client.stderr)
+        );
+        let server_status = server.wait().expect("wait MPTCP Exit server");
+        let mut remaining_server_output = String::new();
+        server_stdout
+            .read_to_string(&mut remaining_server_output)
+            .expect("remaining server output");
+        assert!(
+            server_status.success(),
+            "server failed: {remaining_server_output}"
+        );
+        for namespace in ["vp-c", "vp-r1", "vp-r2", "vp-x"] {
+            command("ip", &["netns", "delete", namespace]);
+        }
+    }
+
+    async fn live_multipath_server() {
+        let address: SocketAddr = "[::]:40123".parse().expect("Exit address");
+        let manager = KernelMptcpPathManager::new().expect("kernel MPTCP path manager");
+        manager
+            .prepare_context(
+                "live_exit_signal",
+                MptcpLimits {
+                    accepted_addrs: 4,
+                    subflows: 4,
+                },
+            )
+            .await
+            .expect("prepare Exit kernel path manager");
+        let listener = listen(address, 8).expect("MPTCP listener");
+        println!("MPTCP_SERVER_READY");
+        std::io::stdout().flush().expect("flush server readiness");
+        let (mut stream, _) = listener.accept().await.expect("accept genuine MPTCP");
+        eprintln!("server: accepted MPTCP");
+        let mut initial_block = vec![0_u8; 1024 * 1024];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut initial_block)
+            .await
+            .expect("initial path data");
+        assert!(initial_block.iter().all(|byte| *byte == 0x51));
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&[1])
+            .await
+            .expect("initial acknowledgement");
+        manager
+            .add_path(
+                "live_exit_signal",
+                MptcpEndpoint {
+                    id: 3,
+                    address: "fd76:6f6c:7061:1111:2222:3:3333:4"
+                        .parse()
+                        .expect("Exit path two"),
+                    if_index: fs::read_to_string("/sys/class/net/x2/ifindex")
+                        .expect("Exit path ifindex")
+                        .trim()
+                        .parse()
+                        .expect("numeric Exit path ifindex"),
+                    flags: EndpointFlags::SIGNAL,
+                    listener_port: None,
+                },
+            )
+            .await
+            .expect("signal Exit MPTCP address");
+        let mut second_block = vec![0_u8; 64 * 1024 * 1024];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut second_block)
+            .await
+            .expect("second path data");
+        assert!(second_block.iter().all(|byte| *byte == 0xa2));
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&[2])
+            .await
+            .expect("second acknowledgement");
+        manager
+            .cleanup_context("live_exit_signal")
+            .await
+            .expect("Exit MPTCP endpoint cleanup");
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the live client proof keeps ordered socket, subflow, and byte evidence together"
+    )]
+    async fn live_multipath_client() {
+        let client_one: SocketAddr = "[fd76:6f6c:7061:1111:2222:1:3333:1]:40124"
+            .parse()
+            .expect("Client path one");
+        let remote: SocketAddr = "[fd76:6f6c:7061:1111:2222:1:3333:4]:40123"
+            .parse()
+            .expect("Exit address");
+        let manager = KernelMptcpPathManager::new().expect("kernel MPTCP path manager");
+        manager
+            .prepare_context(
+                "live_two_subflows",
+                MptcpLimits {
+                    accepted_addrs: 4,
+                    subflows: 4,
+                },
+            )
+            .await
+            .expect("prepare kernel path manager");
+        eprintln!("client: path manager prepared");
+        for (id, address, interface) in [(
+            2,
+            "fd76:6f6c:7061:1111:2222:2:3333:1"
+                .parse()
+                .expect("Client path two"),
+            "c2",
+        )] {
+            let if_index = fs::read_to_string(format!("/sys/class/net/{interface}/ifindex"))
+                .expect("path ifindex")
+                .trim()
+                .parse()
+                .expect("numeric ifindex");
+            manager
+                .add_path(
+                    "live_two_subflows",
+                    MptcpEndpoint {
+                        id,
+                        address,
+                        if_index,
+                        flags: EndpointFlags::SUBFLOW,
+                        listener_port: None,
+                    },
+                )
+                .await
+                .expect("register selected MPTCP subflow path");
+            eprintln!("client: registered path {id}");
+        }
+        let c1_before = interface_counter("c1", "tx_bytes");
+        let c2_before = interface_counter("c2", "tx_bytes");
+        let mut stream = connect(remote, Some(client_one), Duration::from_secs(5))
+            .await
+            .expect("connect genuine MPTCP");
+        eprintln!("client: MPTCP connected");
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&vec![0x51; 1024 * 1024])
+            .await
+            .expect("initial path payload");
+        let mut acknowledgement = [0_u8; 1];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut acknowledgement)
+            .await
+            .expect("initial acknowledgement");
+        assert_eq!(acknowledgement, [1]);
+        let c1_after_initial = interface_counter("c1", "tx_bytes");
+        assert!(
+            c1_after_initial.saturating_sub(c1_before) > 512 * 1024,
+            "initial subflow carried no application-scale data"
+        );
+        let evidence = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let info = stream.require_negotiated().expect("genuine MPTCP");
+                if info.total_subflows >= 2 {
+                    break info;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("second MPTCP subflow");
+        assert!(evidence.total_subflows >= 2 && !evidence.fallback);
+        eprintln!("client: {} subflows active", evidence.total_subflows);
+
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&vec![0xa2; 64 * 1024 * 1024])
+            .await
+            .expect("second path payload");
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut acknowledgement)
+            .await
+            .expect("second acknowledgement");
+        assert_eq!(acknowledgement, [2]);
+        let c2_after = interface_counter("c2", "tx_bytes");
+        assert!(
+            c2_after.saturating_sub(c2_before) > 1024 * 1024,
+            "second subflow carried no application-scale data"
+        );
+        let final_info = stream
+            .require_negotiated()
+            .expect("MPTCP remained negotiated");
+        assert!(final_info.bytes_sent >= 65 * 1024 * 1024);
+        manager
+            .cleanup_context("live_two_subflows")
+            .await
+            .expect("MPTCP endpoint cleanup");
+    }
+
+    fn interface_counter(interface: &str, counter: &str) -> u64 {
+        fs::read_to_string(format!("/sys/class/net/{interface}/statistics/{counter}"))
+            .expect("interface counter")
+            .trim()
+            .parse()
+            .expect("numeric interface counter")
     }
 
     #[derive(Default)]
@@ -938,6 +1949,7 @@ mod tests {
             address: overlay_address(id, 1),
             if_index: u32::from(id) + 20,
             flags: EndpointFlags::SUBFLOW,
+            listener_port: None,
         }
     }
 
@@ -967,6 +1979,50 @@ mod tests {
         let second = current_network_namespace_key().expect("network namespace");
         assert_eq!(first, second);
         assert_ne!(first.inode, 0);
+    }
+
+    #[test]
+    fn synchronous_backend_needs_no_runtime_and_preserves_exact_cleanup_ownership() {
+        let kernel = Arc::new(FakeKernel::default());
+        let manager = SynchronousKernelMptcpPathManager::with_kernel(kernel.clone());
+        manager
+            .prepare_context("worker-route", limits())
+            .expect("prepare synchronously");
+
+        let first = selected_endpoint(1);
+        manager
+            .add_path("worker-route", first.clone())
+            .expect("add synchronously");
+        manager
+            .remove_path("worker-route", first.id)
+            .expect("remove synchronously");
+
+        let retained = selected_endpoint(2);
+        kernel.fail_next_add();
+        kernel.fail_next_delete();
+        assert!(matches!(
+            manager.add_path("worker-route", retained.clone()),
+            Err(MptcpError::CleanupIncomplete(_))
+        ));
+        assert_eq!(
+            kernel.state.lock().expect("state").active.get(&retained.id),
+            None
+        );
+        assert!(matches!(
+            manager
+                .backend
+                .contexts
+                .blocking_lock()
+                .get("worker-route"),
+            Some(ManagedContext::Active(endpoints))
+                if matches!(endpoints.get(&retained.id), Some(ManagedEndpoint::CleanupRequired(endpoint)) if endpoint == &retained)
+        ));
+
+        manager
+            .cleanup_context("worker-route")
+            .expect("retry retained cleanup synchronously");
+        assert!(manager.backend.contexts.blocking_lock().is_empty());
+        assert!(kernel.state.lock().expect("state").active.is_empty());
     }
 
     #[tokio::test]

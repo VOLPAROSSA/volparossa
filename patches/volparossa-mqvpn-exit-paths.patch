@@ -1,0 +1,119 @@
+diff --git a/include/libmqvpn.h b/include/libmqvpn.h
+index c7fedee..ba0a186 100644
+--- a/include/libmqvpn.h
++++ b/include/libmqvpn.h
+@@ -840,6 +840,13 @@ MQVPN_API int mqvpn_server_stop(mqvpn_server_t *server);
+ MQVPN_API int mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t *pkt,
+                                           size_t len, const struct sockaddr *peer,
+                                           socklen_t peer_len);
++/* Feed one packet with its exact path-local address. Multi-address server
++ * integrations retain and poll the UDP descriptors themselves; xquic must
++ * observe the actual local tuple to distinguish the paths. */
++MQVPN_API int mqvpn_server_on_path_socket_recv(
++    mqvpn_server_t *server, const uint8_t *pkt, size_t len,
++    const struct sockaddr *local, socklen_t local_len,
++    const struct sockaddr *peer, socklen_t peer_len);
+ 
+ /* Platform calls this when a previously-registered egress fd (via
+  * egress_fd_register) becomes readable and/or writable. fd_ctx is the
+diff --git a/src/mqvpn_server.c b/src/mqvpn_server.c
+index 548f220..7297e21 100644
+--- a/src/mqvpn_server.c
++++ b/src/mqvpn_server.c
+@@ -606,9 +606,16 @@ svr_admission_unlink(svr_conn_t *conn)
+ }
+ 
+ static ssize_t
+-svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
++svr_do_send(mqvpn_server_t *s, mqvpn_path_handle_t path_id,
++            const unsigned char *buf, size_t size,
+             const struct sockaddr *peer, socklen_t peerlen)
+ {
++    if (s->cbs.send_packet != NULL) {
++        s->cbs.send_packet(path_id, buf, size, peer, peerlen,
++                           s->user_ctx);
++        s->bytes_tx += (uint64_t)size;
++        return (ssize_t)size;
++    }
+     if (s->udp_fd < 0) return XQC_SOCKET_ERROR;
+     const struct sockaddr *destination = peer;
+     socklen_t destination_len = peerlen;
+@@ -641,15 +648,16 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
+                 socklen_t peerlen, void *conn_user_data)
+ {
+     svr_conn_t *conn = (svr_conn_t *)conn_user_data;
+-    return svr_do_send(conn->server, buf, size, peer, peerlen);
++    return svr_do_send(conn->server, 0, buf, size, peer, peerlen);
+ }
+ 
+ static ssize_t
+ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
+                    const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
+ {
+-    (void)path_id;
+-    return cb_write_socket(buf, size, peer, peerlen, conn_user_data);
++    svr_conn_t *conn = (svr_conn_t *)conn_user_data;
++    return svr_do_send(conn->server, (mqvpn_path_handle_t)path_id,
++                       buf, size, peer, peerlen);
+ }
+ 
+ static ssize_t
+@@ -657,7 +665,7 @@ cb_write_before_accept(const unsigned char *buf, size_t size, const struct socka
+                        socklen_t peerlen, void *user_data)
+ {
+     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
+-    return svr_do_send(s, buf, size, peer, peerlen);
++    return svr_do_send(s, 0, buf, size, peer, peerlen);
+ }
+ 
+ static int
+@@ -2360,10 +2368,25 @@ mqvpn_server_stop(mqvpn_server_t *s)
+ int
+ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
+                             const struct sockaddr *peer, socklen_t peer_len)
++{
++    return mqvpn_server_on_path_socket_recv(
++        s, pkt, len, (const struct sockaddr *)&s->local_addr,
++        s->local_addrlen, peer, peer_len);
++}
++
++int
++mqvpn_server_on_path_socket_recv(
++    mqvpn_server_t *s, const uint8_t *pkt, size_t len,
++    const struct sockaddr *local, socklen_t local_len,
++    const struct sockaddr *peer, socklen_t peer_len)
+ {
+     if (!s || !pkt || len == 0 || len > 65536 || !peer || peer_len == 0) {
+         return MQVPN_ERR_INVALID_ARG;
+     }
++    if (!local || (local->sa_family != AF_INET &&
++                   local->sa_family != AF_INET6) || local_len == 0) {
++        return MQVPN_ERR_INVALID_ARG;
++    }
+     ASSERT_TICK_THREAD(s);
+     if (!s->engine) return MQVPN_ERR_ENGINE;
+     if (s->peer_pin.configured &&
+@@ -2374,8 +2397,8 @@ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
+ 
+     uint64_t recv_time = now_us();
+     xqc_int_t ret = xqc_engine_packet_process(
+-        s->engine, pkt, len, (struct sockaddr *)&s->local_addr, s->local_addrlen, peer,
+-        peer_len, (xqc_usec_t)recv_time, s);
++        s->engine, pkt, len, (struct sockaddr *)local, local_len,
++        peer, peer_len, (xqc_usec_t)recv_time, s);
+     if (ret != XQC_OK) {
+         LOG_D(s, "packet_process: %d", ret);
+     }
+diff --git a/src/mqvpn_server.c b/src/mqvpn_server.c
+index 548f220..7297e21 100644
+--- a/src/mqvpn_server.c
++++ b/src/mqvpn_server.c
+@@ -735,7 +735,7 @@ cb_stateless_reset(const unsigned char *buf, size_t size, const struct sockaddr *
+     (void)local;
+     (void)locallen;
+     mqvpn_server_t *s = (mqvpn_server_t *)user_data;
+-    return svr_do_send(s, buf, size, peer, peerlen);
++    return svr_do_send(s, 0, buf, size, peer, peerlen);
+ }
+ 
+ /* ─── Multipath callbacks ─── */

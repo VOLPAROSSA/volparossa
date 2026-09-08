@@ -1,0 +1,38 @@
+# name\tversion\tlicense-expression\tvcs-sha1\tlicense-directory
+asn1-rs-impl	0.2.0	MIT/Apache-2.0	a20e5f7319c896737ad0f2557037817b91ad854f	asn1-rs-a20e5f73
+base256emoji	1.0.2	MIT	f7cf4ae2c15123376d6634ca7aed005034b396ec	-
+blake3	1.8.5	CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception	93a431c78a52d7ccf0f366f106467f5070e6075e	blake3-93a431c7
+const-str	0.4.3	MIT	a549b512ced97f5ec6569823dbce08916cd611f3	const-str-a549b512
+futures-bounded	0.2.4	MIT	7a9b5a96663835c1234df5251fe88df75d26fb86	-
+if-watch	3.2.2	MIT OR Apache-2.0	f6271229b3505bb1e245aad3d078bf571bb4e20e	-
+jsonschema-regex	0.50.1	MIT	60a563d3e7a3e9b4facb2abb15c6b30687e06050	jsonschema-60a563d3
+jsonschema-value	0.50.1	MIT	60a563d3e7a3e9b4facb2abb15c6b30687e06050	jsonschema-60a563d3
+libp2p	0.56.0	MIT	2ac0ca97a82e161a4bf56ecdfc3a46dd69af302c	rust-libp2p
+libp2p-allow-block-list	0.6.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-autonat	0.15.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-connection-limits	0.6.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-core	0.43.2	MIT	e10ce4c1704a529161f62e8538e55a106e4ec2d6	rust-libp2p
+libp2p-dcutr	0.14.1	MIT	4682e735cbdfd8f2b59f5478591a4e8ae552fa68	rust-libp2p
+libp2p-dns	0.44.0	MIT	d92dabcbb87c4796d46e3d312b7fa042af10279a	rust-libp2p
+libp2p-identify	0.47.0	MIT	c9bd92ba2d4727d79b0c2623c20c998a4e60995a	rust-libp2p
+libp2p-identity	0.2.14	MIT	817ed75a388f11b48c5e305492871c13a3c021e9	rust-libp2p
+libp2p-kad	0.48.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-mdns	0.48.0	MIT	c9bd92ba2d4727d79b0c2623c20c998a4e60995a	rust-libp2p
+libp2p-noise	0.46.1	MIT	d92dabcbb87c4796d46e3d312b7fa042af10279a	rust-libp2p
+libp2p-ping	0.47.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-quic	0.13.1	MIT	7b64d614aa5e97333e491c9cb13c840153cdb19c	rust-libp2p
+libp2p-relay	0.21.1	MIT	4682e735cbdfd8f2b59f5478591a4e8ae552fa68	rust-libp2p
+libp2p-request-response	0.29.0	MIT	7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23	rust-libp2p
+libp2p-swarm	0.47.1	MIT	4682e735cbdfd8f2b59f5478591a4e8ae552fa68	rust-libp2p
+libp2p-swarm-derive	0.35.1	MIT	d92dabcbb87c4796d46e3d312b7fa042af10279a	rust-libp2p
+libp2p-tcp	0.44.1	MIT	4682e735cbdfd8f2b59f5478591a4e8ae552fa68	rust-libp2p
+libp2p-tls	0.6.2	MIT	c9bd92ba2d4727d79b0c2623c20c998a4e60995a	rust-libp2p
+match-lookup	0.1.2	MIT	52a9278249565b0dad80c27e9cb8470272bf7c2d	-
+multistream-select	0.13.0	MIT	42566869b2ab3d1903d164c84da3308e7e890b8b	rust-libp2p
+quick-protobuf	0.8.1	MIT	3db41b4b6b42e69cb20ee0857f6898f053ed8ee7	quick-protobuf-3db41b4b
+quick-protobuf-codec	0.3.1	MIT	ce24938048cdb9c29f0b8218364557783cecd44a	rust-libp2p
+rw-stream-sink	0.4.0	MIT	42566869b2ab3d1903d164c84da3308e7e890b8b	rust-libp2p
+uint	0.10.0	MIT OR Apache-2.0	63c5afbf8e0e903439d3c127c59b0e4a7991000b	parity-common-63c5afbf
+uuid-simd	0.8.0	MIT	d74c030d9dc4f3cae02146d1f497ff62726ef09a	simd-d74c030d
+vsimd	0.8.0	MIT	d74c030d9dc4f3cae02146d1f497ff62726ef09a	simd-d74c030d
+yasna	0.5.2	MIT OR Apache-2.0	b7e65f9a4c317494cce2d18ea02b3d6eaaea7985	yasna-b7e65f9a

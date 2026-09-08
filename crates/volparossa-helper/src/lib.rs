@@ -5,13 +5,13 @@
 //! Prepare/Activate/Probe-Commit/Destroy lifecycle for one process-owned functional-alpha Client,
 //! Exit, or atomic Relay endpoint pair. Workers use private network namespaces, kernel `WireGuard`
 //! UAPI and, for Relay contexts, an exact namespace-local forwarding fence. This is not yet a
-//! complete client-to-destination datapath or crash/restart recovery path. The public
+//! complete client-to-destination datapath or general crash/restart recovery path. The public
 //! [`HelperEngine::new`] constructor remains fail-closed with `Unavailable`, so only the production
 //! server selects the functional backend. Production owns the canonical durable journal actor as a
-//! startup/shutdown barrier but still refuses `MayOwnPrepare` recovery; it has no restart-stable
-//! pidfd/network-namespace custody or restart reaper. It can only retire an already durable
-//! `CleanupConfirmed` restart set after exact present-pair removals and a fresh exact-empty manager
-//! observation. Leader retirement still does not own descendants.
+//! startup/shutdown barrier. It can retire an already durable `CleanupConfirmed` restart set and
+//! can reap exactly one same-boot, same-image, single-path `MayOwnCustody` or active
+//! `MayOwnPrepare` namespace before reusing that removal chain. Broader restart shapes remain
+//! fail-closed. Leader retirement still does not own descendants.
 
 #![cfg(target_os = "linux")]
 
@@ -57,11 +57,49 @@ pub const INTERNAL_WORKER_V3_ARGUMENT: &str = worker_v3::INTERNAL_WORKER_V3_ARGU
 pub const INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT: &str =
     worker_v3::INTERNAL_WORKER_V3_LIVE_PROOF_ARGUMENT;
 
+/// Fixed private selector for cleanup after one exact functional worker generation was reaped.
+#[doc(hidden)]
+pub const INTERNAL_DEAD_WORKER_REAPER_ARGUMENT: &str =
+    worker_v3::INTERNAL_DEAD_WORKER_REAPER_ARGUMENT;
+
+/// Fixed private restart-reaper selector; it accepts no additional argument.
+#[doc(hidden)]
+pub const INTERNAL_RESTART_REAPER_ARGUMENT: &str = worker_v3::INTERNAL_RESTART_REAPER_ARGUMENT;
+
+/// Fixed private restart-reaper fail-stop proof selector; it accepts no additional argument.
+#[doc(hidden)]
+pub const INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT: &str =
+    worker_v3::INTERNAL_RESTART_REAPER_FAIL_STOP_LIVE_PROOF_ARGUMENT;
+
 /// Runs the isolated worker-v3 child entry after its parent-authentication checks.
 #[doc(hidden)]
 #[must_use]
 pub fn run_internal_worker_v3_entry() -> bool {
     worker_v3::run_internal_worker_v3_entry()
+}
+
+/// Runs the fixed dead-worker namespace cleanup child entry.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_dead_worker_reaper_entry() -> bool {
+    worker_v3::run_internal_dead_worker_reaper_entry()
+}
+
+/// Run the fixed single-thread restart-reaper child entry.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_restart_reaper_entry() -> bool {
+    worker_v3::run_internal_restart_reaper_entry()
+}
+
+/// Runs the fixed real-reaper stopped-child manager fail-stop proof.
+///
+/// A successful proof terminates the calling process with a fixed nonzero status and therefore
+/// never returns `true`; `false` reports rejection before reaching that terminal witness.
+#[doc(hidden)]
+#[must_use]
+pub fn run_internal_restart_reaper_fail_stop_live_proof() -> bool {
+    worker_v3::run_internal_restart_reaper_fail_stop_live_proof()
 }
 
 /// Runs one fixed production-image worker bootstrap and proves bounded retirement.

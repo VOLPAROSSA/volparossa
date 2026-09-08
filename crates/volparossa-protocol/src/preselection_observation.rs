@@ -17,8 +17,8 @@ use volparossa_core::ObservedNetworkPrefix;
 use crate::envelope::fixed_array;
 use crate::{
     ControlMessageType, ControlPayload, MAX_CONTROL_MESSAGE_SIZE, PROTOCOL_VERSION, ProtocolError,
-    ReplayCache, SignedEnvelope, TimePolicy, Transport, VerifiedControlMessage, decode_canonical,
-    node_id_from_public_key, verify_control_message,
+    ReplayCache, SignedEnvelope, TimePolicy, Transport, UnderlayScope, VerifiedControlMessage,
+    decode_canonical, node_id_from_public_key, verify_control_message,
 };
 
 const KEY_LENGTH: usize = 32;
@@ -30,8 +30,12 @@ pub const MAX_PRESELECTION_REQUEST_SIZE: usize = 4 * 1024;
 pub const MAX_PRESELECTION_RECEIPT_SIZE: usize = 4 * 1024;
 /// Maximum exact canonical signed forwarded preselection attestation size.
 pub const MAX_FORWARDED_ATTESTATION_SIZE: usize = 8 * 1024;
-const MAX_CHALLENGE_LIFETIME_MS: u64 = 5 * 1_000;
-const MAX_OBSERVATION_LIFETIME_MS: u64 = 60 * 1_000;
+// The request-response stream remains capped independently at five seconds. The signed one-shot
+// challenge must, however, remain usable by the affine native sampler and the subsequent bounded
+// production route setup. Both phases can take thirty seconds on the supported KVM topology.
+const MAX_CHALLENGE_LIFETIME_MS: u64 = 120 * 1_000;
+// Receipt and forwarded-attestation evidence share the same bounded route-setup headroom.
+const MAX_OBSERVATION_LIFETIME_MS: u64 = 120 * 1_000;
 const REQUEST_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-request/v4\0";
 const RECEIPT_HASH_DOMAIN: &[u8] = b"volparossa/preselection-observation-receipt/v4\0";
 
@@ -138,7 +142,7 @@ pub struct PreselectionObservationReceipt {
     pub nonce: Vec<u8>,
 }
 
-/// Endpoint-free public /24 or /48 claim signed by a forwarding control relay.
+/// Endpoint-free scope-tagged /24 or /48 claim, distinct from on-link kernel authority.
 ///
 /// A future handler must derive the claim from the exact authenticated upstream
 /// connection. The control signature is not proof that a malicious control
@@ -150,6 +154,8 @@ pub struct ObservationNetworkPrefix {
     pub address_family: i32,
     #[prost(bytes = "vec", tag = "2")]
     pub network_prefix: Vec<u8>,
+    #[prost(enumeration = "UnderlayScope", tag = "3")]
+    pub scope: i32,
 }
 
 /// Control-signed wrapper around one exact exit-signed observation receipt.
@@ -238,7 +244,7 @@ impl DirectPreselectionFreshnessProof {
 /// Terminal forwarded-Exit transcript proof retained only for private freshness minting.
 ///
 /// The projection is affine and retains only the joint signed validity ceiling and the normalized
-/// public /24 or /48 observed by the authenticated control Relay. It exposes no actor identity,
+/// scope-tagged /24 or /48 observed by the authenticated control Relay. It exposes no actor identity,
 /// request, signature, nonce, full endpoint, or wire bytes.
 #[must_use = "a forwarded preselection freshness proof must be consumed by its private owner"]
 pub struct ForwardedPreselectionFreshnessProof {
@@ -253,7 +259,7 @@ impl ForwardedPreselectionFreshnessProof {
         self.valid_until_ms
     }
 
-    /// Return the endpoint-free public prefix cryptographically bound by the control Relay.
+    /// Return the endpoint-free scoped prefix cryptographically bound by the control Relay.
     #[must_use]
     pub const fn upstream_network_prefix(&self) -> ObservedNetworkPrefix {
         self.upstream_network_prefix
@@ -367,29 +373,42 @@ impl PreselectionObservationRequest {
 
 impl ObservationNetworkPrefix {
     pub(crate) fn validated_normalized(&self) -> Result<ObservedNetworkPrefix, ProtocolError> {
+        let scope = UnderlayScope::try_from(self.scope)
+            .map_err(|_| ProtocolError::InvalidField("observation network scope"))?;
         let family = ObservationAddressFamily::try_from(self.address_family)
             .map_err(|_| ProtocolError::InvalidField("observation network prefix"))?;
-        let prefix =
-            match family {
-                ObservationAddressFamily::Ipv4 => {
-                    let prefix_octets: [u8; 3] =
-                        self.network_prefix.as_slice().try_into().map_err(|_| {
-                            ProtocolError::InvalidField("observation network prefix")
-                        })?;
-                    ObservedNetworkPrefix::ipv4_24(prefix_octets)
+        let prefix = match family {
+            ObservationAddressFamily::Ipv4 => {
+                let prefix_octets: [u8; 3] = self
+                    .network_prefix
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidField("observation network prefix"))?;
+                match scope {
+                    UnderlayScope::PublicInternet => ObservedNetworkPrefix::ipv4_24(prefix_octets),
+                    UnderlayScope::DirectLocalLan => {
+                        ObservedNetworkPrefix::local_ipv4_24(prefix_octets)
+                    }
                 }
-                ObservationAddressFamily::Ipv6 => {
-                    let prefix_octets: [u8; 6] =
-                        self.network_prefix.as_slice().try_into().map_err(|_| {
-                            ProtocolError::InvalidField("observation network prefix")
-                        })?;
-                    ObservedNetworkPrefix::ipv6_48(prefix_octets)
+            }
+            ObservationAddressFamily::Ipv6 => {
+                let prefix_octets: [u8; 6] = self
+                    .network_prefix
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidField("observation network prefix"))?;
+                match scope {
+                    UnderlayScope::PublicInternet => ObservedNetworkPrefix::ipv6_48(prefix_octets),
+                    UnderlayScope::DirectLocalLan => {
+                        ObservedNetworkPrefix::local_ipv6_48(prefix_octets)
+                    }
                 }
-                ObservationAddressFamily::Unspecified => {
-                    return Err(ProtocolError::InvalidField("observation network prefix"));
-                }
-            };
-        if !prefix.is_public_routable() {
+            }
+            ObservationAddressFamily::Unspecified => {
+                return Err(ProtocolError::InvalidField("observation network prefix"));
+            }
+        };
+        if !prefix.is_public_routable() && !prefix.is_local_lan() {
             return Err(ProtocolError::InvalidField("observation network prefix"));
         }
         Ok(prefix)
@@ -635,7 +654,7 @@ pub fn verify_direct_preselection_transcript(
 /// Verify a control wrapper first, then its exact nested exit receipt.
 ///
 /// Both replay entries are committed only when the request, actor, scope,
-/// timestamps, nested bytes, and public prefix all cross-bind. A nested failure
+/// timestamps, nested bytes, and scope-tagged prefix all cross-bind. A nested failure
 /// rolls back only the already accepted outer entry.
 ///
 /// # Errors
@@ -816,7 +835,7 @@ pub fn consume_bound_direct_preselection_transcript_for_freshness(
 /// Purpose-consume one exact bound forwarded-Exit transcript for private freshness minting.
 ///
 /// The returned affine projection carries only the earlier signed validity ceiling and the
-/// endpoint-free public prefix in the authenticated control-Relay wrapper. It cannot recover any
+/// endpoint-free scoped prefix in the authenticated control-Relay wrapper. It cannot recover any
 /// identity, request, signature, nonce, full endpoint, response bytes, or dispatch capability.
 ///
 /// # Errors
@@ -1146,6 +1165,38 @@ mod tests {
 
     use super::*;
     use crate::{sign_control_message, verify_control_message};
+
+    #[test]
+    fn local_observation_prefix_requires_scope_and_is_never_public() {
+        for (family, bytes) in [
+            (ObservationAddressFamily::Ipv4, vec![192, 168, 42]),
+            (
+                ObservationAddressFamily::Ipv6,
+                vec![0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a],
+            ),
+        ] {
+            let mut prefix = ObservationNetworkPrefix {
+                address_family: family as i32,
+                network_prefix: bytes,
+                scope: UnderlayScope::PublicInternet as i32,
+            };
+            assert!(prefix.validated_normalized().is_err());
+            prefix.scope = UnderlayScope::DirectLocalLan as i32;
+            let normalized = prefix
+                .validated_normalized()
+                .expect("explicit local observation");
+            assert!(normalized.is_local_lan());
+            assert!(!normalized.is_public_routable());
+            prefix.scope = 42;
+            assert!(prefix.validated_normalized().is_err());
+        }
+        let public_as_local = ObservationNetworkPrefix {
+            address_family: ObservationAddressFamily::Ipv4 as i32,
+            network_prefix: vec![8, 8, 8],
+            scope: UnderlayScope::DirectLocalLan as i32,
+        };
+        assert!(public_as_local.validated_normalized().is_err());
+    }
 
     fn signed_receipt(key_byte: u8, peer_byte: u8, nonce_byte: u8) -> (Vec<u8>, SigningKey) {
         let key = SigningKey::from_bytes(&[key_byte; 32]);

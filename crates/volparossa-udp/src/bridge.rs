@@ -1,6 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use socket2::SockRef;
 use tokio::net::UdpSocket;
+use volparossa_core::CONTRIBUTION_SOCKET_PRIORITY;
+use volparossa_linux_uapi::IndependentEgress;
 
 use crate::{PinnedUdpFlow, QuicUdpAssociation, UdpError};
 
@@ -73,12 +76,28 @@ impl ExitUdpBridge {
     ///
     /// # Errors
     ///
-    /// Fails for a flow-ID mismatch, stale pin, or socket bind/connect error.
+    /// Fails for a flow-ID mismatch, stale pin, or socket bind/priority/connect error.
     pub async fn connect(
         association: QuicUdpAssociation,
         pinned: PinnedUdpFlow,
         now_ms: u64,
         limits: DatagramLimits,
+    ) -> Result<Self, UdpError> {
+        Self::connect_with_egress(association, pinned, now_ms, limits, None).await
+    }
+
+    /// Connect the exact policy-pinned destination through a selected independent uplink.
+    ///
+    /// # Errors
+    ///
+    /// In addition to normal binding checks, an unavailable or unbindable selected uplink fails
+    /// closed without trying another interface. The system DNS resolver is unchanged.
+    pub async fn connect_with_egress(
+        association: QuicUdpAssociation,
+        pinned: PinnedUdpFlow,
+        now_ms: u64,
+        limits: DatagramLimits,
+        independent_egress: Option<&IndependentEgress>,
     ) -> Result<Self, UdpError> {
         if now_ms >= pinned.expires_at_ms() {
             return Err(UdpError::Expired);
@@ -91,12 +110,21 @@ impl ExitUdpBridge {
             IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
         };
         let socket = UdpSocket::bind(bind_address).await?;
+        SockRef::from(&socket).set_priority(CONTRIBUTION_SOCKET_PRIORITY)?;
+        if let Some(egress) = independent_egress {
+            egress.bind_new_socket(&socket)?;
+        }
         socket.connect(pinned.destination()).await?;
         Ok(Self {
             association,
             destination_socket: socket,
             limits,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destination_socket_priority(&self) -> std::io::Result<u32> {
+        SockRef::from(&self.destination_socket).priority()
     }
 
     /// Forward complete datagrams in both directions until QUIC closes, the
@@ -110,35 +138,55 @@ impl ExitUdpBridge {
     /// Returns an association, socket, size, or datagram-count error and closes
     /// the QUIC association fail closed.
     pub async fn run(self) -> Result<UdpBridgeStats, UdpError> {
-        let mut buffer = vec![0_u8; self.limits.maximum_payload_bytes];
+        let Self {
+            association,
+            destination_socket,
+            limits,
+        } = self;
+        let mut buffer = vec![0_u8; limits.maximum_payload_bytes];
         let mut statistics = UdpBridgeStats::default();
 
-        let result = loop {
-            tokio::select! {
-                tunneled = self.association.receive_payload() => {
+        let result = async {
+            loop {
+                tokio::select! {
+                tunneled = association.receive_payload() => {
                     let payload = tunneled?;
-                    if payload.len() > self.limits.maximum_payload_bytes {
-                        break Err(UdpError::ResourceLimit);
+                    if payload.len() > limits.maximum_payload_bytes {
+                        return Err(UdpError::ResourceLimit);
                     }
                     increment(
                         &mut statistics.tunnel_to_destination_datagrams,
-                        self.limits.maximum_tunnel_to_destination_datagrams,
+                        limits.maximum_tunnel_to_destination_datagrams,
                     )?;
-                    self.destination_socket.send(&payload).await?;
+                    destination_socket.send(&payload).await?;
                     add_bytes(&mut statistics.tunnel_to_destination_bytes, payload.len())?;
                 }
-                received = self.destination_socket.recv(&mut buffer) => {
+                received = destination_socket.recv(&mut buffer) => {
                     let length = received?;
                     increment(
                         &mut statistics.destination_to_tunnel_datagrams,
-                        self.limits.maximum_destination_to_tunnel_datagrams,
+                        limits.maximum_destination_to_tunnel_datagrams,
                     )?;
-                    self.association.send_payload(&buffer[..length])?;
+                    association.send_payload(&buffer[..length])?;
                     add_bytes(&mut statistics.destination_to_tunnel_bytes, length)?;
                 }
+                }
+                if statistics.tunnel_to_destination_datagrams
+                    == limits.maximum_tunnel_to_destination_datagrams
+                    && statistics.destination_to_tunnel_datagrams
+                        == limits.maximum_destination_to_tunnel_datagrams
+                {
+                    // The final QUIC DATAGRAM is only queued by `send_payload`.
+                    // Retain the connection until the Client observes it and
+                    // closes, rather than racing an immediate application close
+                    // against delivery of the bounded final response.
+                    association.wait_closed().await;
+                    return Ok(());
+                }
             }
-        };
-        self.association.close();
+        }
+        .await;
+        association.close();
         result.map(|()| statistics)
     }
 }

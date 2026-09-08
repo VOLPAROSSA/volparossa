@@ -325,6 +325,7 @@ impl SignedRouteFixture {
                 masque_context_id: 1,
                 client_native_instance_id: random_nonzero::<KEY_BYTES>().to_vec(),
                 exit_native_instance_id: random_nonzero::<KEY_BYTES>().to_vec(),
+                credential_hpke_public_key: random_nonzero::<KEY_BYTES>().to_vec(),
             }),
         };
         let exit_reservation = sign_control_message(
@@ -481,6 +482,7 @@ impl SignedRouteFixture {
                 control_relay_peer_id: authorization.control_relay_peer_id.clone(),
                 exit_peer_id: authorization.exit_peer_id.clone(),
                 signed_client_relay_request_sha256: signed_client_relay_request_sha256.to_vec(),
+                receive_budget_required: false,
             };
             relay_reservations.push(sign_control_message(
                 &relay,
@@ -649,6 +651,7 @@ impl SignedRouteFixture {
             timestamp_ms: now_ms,
             expires_at_ms,
             nonce: nonce.to_vec(),
+            destination_ip: Vec::new(),
         };
         sign_control_message(
             &payload,
@@ -716,6 +719,7 @@ impl SignedRouteFixture {
 }
 fn test_endpoint(public_key: &[u8; 32], listen_port: u16) -> WireguardEndpoint {
     WireguardEndpoint {
+        underlay_scope: 0,
         public_key: public_key.to_vec(),
         underlay_ip: vec![8, 8, 4, 1],
         listen_port: u32::from(listen_port),

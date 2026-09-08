@@ -61,7 +61,34 @@ The mqvpn patch adds `src/spki_pin.c`, `src/spki_pin.h`,
 existing Apache-2.0 upstream files preserve their upstream license and
 notices.
 
-No local patch is applied to lwIP or BoringSSL. The builder checks both patch
+The additional GPL-3.0-only `patches/volparossa-xquic-edt.patch`
+(`21472637e2b8e48c16af835a10137a67f450e07b565bb87241aa3f8895452a80`)
+retains bounded initial exploration (2 MiB ACKed per path, at most 8 MiB attempt
+debt plus one packet), then selects by live delivery cost and congestion.
+It does not continuously equalise historical path bytes. Outstanding bytes
+without ACK progress add bounded overdue time to the delivery estimate after
+the normal RTT/variance/peer ACK-delay allowance. This uses xquic's actual
+ACK-progress timestamp, which resets on send-from-idle; it changes neither
+congestion control nor path state and sends no extra packets. The exact
+callback contract covers the previously tested black hole and the measured
+warm stale-fast-LAN state from mixed-link run `34139658819`: 32 low-rate
+selections use the live slower WAN, real ACK progress restores fast-path
+selection, and idle or sole-writable paths remain usable. The new regression
+fails with the previous patch and passes with this patch. This is deterministic
+scheduler evidence, not a live failover or bandwidth acceptance claim.
+The explicit, default-off `VMP_DEV_EDT_TRACE=1` fixture option emits at most
+64 sparse `NATIVE_EDT_SAMPLE` lines per connection, from 10 seconds inclusive
+to 20 seconds exclusive after the first non-startup application selection.
+This is a scheduling-relative window, not an HTTP-response marker. Each line
+contains at most eight eligible local path numbers, their existing EDT costs
+and sendability, bounded-counter metric snapshots, and the selected path;
+the total eligible count makes truncation visible. There are no endpoints,
+connection identities, payloads, general debug logs, or selection changes.
+The callback test covers default-off and exact option parsing, the window,
+sample spacing/cap, unchanged costs/winner and a congestion-blocked candidate.
+Upstream revisions and original licenses are unchanged.
+
+No local patch is applied to lwIP or BoringSSL. The builder checks all patch
 hashes, runs `git apply --check`, and applies them only to fresh
 `git archive` exports. The locked source checkouts remain unchanged.
 
@@ -333,7 +360,7 @@ The following required contracts and evidence remain unresolved:
    independent signed-reservation verification, preverified affine replay
    handoff, and cryptographic certificate/key/name/SPKI consistency over the
    in-message TLS material;
-5. the exact replaceable VOLPAROSSA estimated-delivery-time scheduler;
+5. disposable-topology proof of the patched EDT scheduler over real relay paths;
 6. disposable-topology proof that an exit-originated inner datagram traverses
    the native queue/poll boundary and reaches the Rust client;
 7. end-to-end dynamic path removal and failover across real relay paths; and
@@ -379,8 +406,8 @@ The complete sources, patch review notes, resulting tree hashes, test
 contract, and removal condition are in `third_party/rust/README.md`.
 `scripts/check-rust-dependencies.sh` reconstructs all three trees from the exact
 archives, applies the locked patches, byte-compares the result, verifies
-unchanged licenses and the feature graph, runs cargo-deny
-license/ban/source checks, and performs a no-fetch cargo-audit scan against a
+unchanged licenses and the feature graph, runs CVSS 4.0-capable cargo-deny
+advisory/license/ban/source checks, and performs an independent no-fetch cargo-audit scan against a
 local RustSec checkout. It prints that checkout's exact commit.
 
 The GPL-3.0-only harness under `third_party/rust/backport-regressions` has a
@@ -397,13 +424,17 @@ RustSec scanners still identify the unchanged semantic versions as affected.
 `RUSTSEC-2026-0009`, `RUSTSEC-2026-0118`, and
 `RUSTSEC-2026-0119` are narrowly exempted only after reconstruction
 establishes the local fixes. These are locally remediated advisory-version
-matches, not accepted vulnerable upstream artifacts. The production feature
-graph also keeps both Hickory DNSSEC features disabled; the NSEC3 fix is
-nevertheless present and tested.
+matches, not accepted vulnerable upstream artifacts. The bounded positive
+A/AAAA DNS-proof resolver explicitly enables the existing `dnssec-ring`
+backend; its feature guard still forbids the unused aws-lc backend and the
+regression-only adapter. The NSEC3 fix and its isolated regression remain
+mandatory, and no vendor source, root-anchor, or license bytes are changed.
+The standalone fuzz graph, which does not include this UDP resolver, still
+excludes both DNSSEC backends.
 
-The dependency gate requires a CVSS 4.0-capable `cargo-audit >= 0.22.1`.
-Debian cargo-deny 0.18.3 remains authoritative for licenses, bans, and sources
-but cannot parse the current CVSS 4.0 advisory database.
+The dependency gate requires CVSS 4.0-capable `cargo-deny >= 0.18.6` and
+`cargo-audit >= 0.22.1`; the former runs all four checks while the latter
+provides an independent advisory scan.
 
 Candidate packaging excludes workspace members and admits path dependencies
 only at the three exact verified vendor paths above.
@@ -424,6 +455,7 @@ is rejected.
 | serde, serde_json, serde_yaml, prost | configuration and wire encoding | MIT or Apache-2.0/MIT |
 | rust-libp2p and Quinn | decentralised control plane and QUIC | MIT |
 | rustls, ring, ed25519-dalek, x25519-dalek, Argon2 | transport, identity, and key protection | mixed permissive licenses; inspect every resolved crate |
+| `hpke` 0.14.0 (`rust-hpke`) | RFC 9180 route-credential sealing, exact crates.io pin in `Cargo.lock` | MIT/Apache-2.0; upstream `https://github.com/rozbb/rust-hpke` |
 | rusqlite and SQLite bundle | bounded local peer/session state | MIT for wrapper; SQLite is public domain |
 | rtnetlink, netlink-sys, wireguard-uapi, nix, libc | Linux networking and OS boundary | mixed permissive licenses; inspect every resolved crate |
 

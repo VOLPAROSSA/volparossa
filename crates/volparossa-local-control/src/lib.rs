@@ -7,12 +7,22 @@
 
 #![forbid(unsafe_code)]
 
+mod content;
+mod mailbox;
+pub use content::{
+    ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
+    ContentImportRequest, ContentReceipt, ContentReplicationConfig, ContentServeRequest,
+    ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
+    NamedContentTransferReady,
+};
+pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
+
 use prost::Message;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Local control protocol version implemented by v1.
-pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub const CONTROL_PROTOCOL_VERSION: u32 = 2;
 /// Maximum complete local control payload.
 pub const MAX_CONTROL_FRAME: usize = 256 * 1024;
 /// Maximum list entries returned in one response.
@@ -34,7 +44,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -43,7 +53,11 @@ pub struct ControlRequest {
 pub mod control_request {
     use prost::Oneof;
 
-    use super::{Empty, LogQuery, RoleChange};
+    use super::{
+        ConnectRequest, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
+        ContentImportRequest, ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery,
+        MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+    };
 
     /// Exactly one supported CLI-to-agent operation.
     #[derive(Clone, PartialEq, Oneof)]
@@ -53,7 +67,7 @@ pub mod control_request {
         Status(Empty),
         /// Establish route contexts according to current policy.
         #[prost(message, tag = "11")]
-        Connect(Empty),
+        Connect(ConnectRequest),
         /// Drain and remove all route contexts.
         #[prost(message, tag = "12")]
         Disconnect(Empty),
@@ -78,6 +92,39 @@ pub mod control_request {
         /// Return a bounded recent in-memory log window.
         #[prost(message, tag = "19")]
         Logs(LogQuery),
+        /// Explicitly register a native publication and enable its unprivileged provider service.
+        #[prost(message, tag = "20")]
+        ContentServe(ContentServeRequest),
+        /// Discover providers and fetch one exact publication over protected MPTCP.
+        #[prost(message, tag = "21")]
+        ContentFetch(ContentFetchRequest),
+        /// Withdraw and stop the local content listener without deleting cache data.
+        #[prost(message, tag = "22")]
+        ContentStop(Empty),
+        /// Inspect explicit content service and current route control without network I/O.
+        #[prost(message, tag = "23")]
+        ContentStatus(Empty),
+        /// Authenticate origin metadata and retrieve peer chunks with protected origin fallback.
+        #[prost(message, tag = "24")]
+        ContentFetchHttps(HttpsContentFetchRequest),
+        /// Upgrade this same protected local socket for explicit ciphertext import.
+        #[prost(message, tag = "25")]
+        ContentImport(ContentImportRequest),
+        /// Upgrade this same protected local socket for explicit ciphertext export.
+        #[prost(message, tag = "26")]
+        ContentExport(ContentExportRequest),
+        /// Fresh HTTPS retrieval followed by same-socket delivery; output must be empty.
+        #[prost(message, tag = "27")]
+        ContentDownloadHttps(HttpsContentFetchRequest),
+        /// Resolve a trusted native publisher/name and deliver on this same local socket.
+        #[prost(message, tag = "28")]
+        ContentFetchName(ContentFetchNameRequest),
+        /// Explicitly start a durable mailbox provider using an owned cache.
+        #[prost(message, tag = "29")]
+        MailboxServe(MailboxServeRequest),
+        /// Bridge one invitation-scoped signed operation on this same local socket.
+        #[prost(message, tag = "30")]
+        MailboxRemote(MailboxRemoteRequest),
     }
 }
 
@@ -85,11 +132,22 @@ pub mod control_request {
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct Empty {}
 
-/// Independently configurable node role.
+/// Explicit transport requested for a new client route.
+///
+/// The optional field keeps decoding older empty Connect messages deterministic; current clients
+/// always send a value so multipath and single-path route evidence cannot be confused.
+#[derive(Clone, Copy, PartialEq, Eq, Message)]
+pub struct ConnectRequest {
+    /// Requested product transport, or absent for the legacy configured-profile selection.
+    #[prost(enumeration = "SessionTransport", optional, tag = "1")]
+    pub transport: Option<i32>,
+}
+
+/// Node role subject to agent-side participation prerequisites and restart requirements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
 #[repr(i32)]
 pub enum NodeRole {
-    /// Local client role, always enabled in v1 production configuration.
+    /// Local client role; production use requires relay and exit contribution.
     Client = 0,
     /// Relay forwarding role.
     Relay = 1,
@@ -152,7 +210,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -162,8 +220,9 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        Empty, LogList, PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList,
-        StatusSnapshot,
+        ContentReceipt, ContentTransferReady, Empty, HttpsContentTransferReady, LogList,
+        MailboxReady, NamedContentTransferReady, PathList, PeerList, PolicySnapshot, RoleSnapshot,
+        SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -193,6 +252,21 @@ pub mod control_response {
         /// Recent in-memory privacy-safe logs.
         #[prost(message, tag = "17")]
         Logs(LogList),
+        /// Successful explicit native-content work.
+        #[prost(message, tag = "18")]
+        Content(ContentReceipt),
+        /// Validated scope for a following bounded same-socket chunk exchange; not success.
+        #[prost(message, tag = "19")]
+        ContentTransferReady(ContentTransferReady),
+        /// Ephemeral local HTTPS authority for this connection's following chunk exchange.
+        #[prost(message, tag = "20")]
+        HttpsContentTransferReady(HttpsContentTransferReady),
+        /// Original native signed envelope for the exact correlated publisher/name request.
+        #[prost(message, tag = "21")]
+        NamedContentTransferReady(NamedContentTransferReady),
+        /// Original signed provider challenge, never a completed mailbox operation.
+        #[prost(message, tag = "22")]
+        MailboxReady(MailboxReady),
     }
 }
 
@@ -302,6 +376,10 @@ pub struct PathSummary {
     /// Bytes carried in this context without durable destination metadata.
     #[prost(uint64, tag = "7")]
     pub user_bytes: u64,
+    /// Cumulative acknowledged native QUIC packet bytes, not unique inner application bytes.
+    /// Zero for paths without this native transport measurement (including warm paths).
+    #[prost(uint64, tag = "8")]
+    pub acked_transport_bytes: u64,
 }
 
 /// Bounded path response.
@@ -322,6 +400,8 @@ pub enum SessionTransport {
     SinglePathUdp = 1,
     /// MASQUE over genuine Multipath QUIC.
     MultipathQuic = 2,
+    /// Dedicated protected DNS association through one relay, separate from general UDP.
+    ProtectedDns = 4,
 }
 
 /// One ephemeral local session without destination metadata.
@@ -581,14 +661,23 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         .as_ref()
         .ok_or(ControlProtocolError::Invalid("missing operation"))?
     {
-        control_request::Operation::SetRole(change) => {
-            let role = NodeRole::try_from(change.role)
-                .map_err(|_| ControlProtocolError::Invalid("role"))?;
-            if role == NodeRole::Client && !change.enabled {
-                return Err(ControlProtocolError::Invalid(
-                    "client role cannot be disabled",
-                ));
+        control_request::Operation::Connect(connect) => {
+            if let Some(transport) = connect.transport {
+                SessionTransport::try_from(transport)
+                    .map_err(|_| ControlProtocolError::Invalid("connect transport"))?;
             }
+        }
+        control_request::Operation::ContentServe(request) => request.validate()?,
+        control_request::Operation::ContentFetch(request) => request.validate()?,
+        control_request::Operation::ContentFetchHttps(request) => request.validate()?,
+        control_request::Operation::ContentDownloadHttps(request) => request.validate_download()?,
+        control_request::Operation::ContentFetchName(request) => request.validate()?,
+        control_request::Operation::MailboxServe(request) => request.validate()?,
+        control_request::Operation::MailboxRemote(request) => request.validate()?,
+        control_request::Operation::ContentImport(request) => request.validate()?,
+        control_request::Operation::ContentExport(request) => request.validate()?,
+        control_request::Operation::SetRole(change) => {
+            NodeRole::try_from(change.role).map_err(|_| ControlProtocolError::Invalid("role"))?;
         }
         control_request::Operation::Logs(query) => {
             if !(1..=1_000).contains(&query.maximum_records) {
@@ -596,13 +685,14 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::Status(_)
-        | control_request::Operation::Connect(_)
         | control_request::Operation::Disconnect(_)
         | control_request::Operation::Peers(_)
         | control_request::Operation::Paths(_)
         | control_request::Operation::Sessions(_)
         | control_request::Operation::PolicyStatus(_)
-        | control_request::Operation::Roles(_) => {}
+        | control_request::Operation::Roles(_)
+        | control_request::Operation::ContentStop(_)
+        | control_request::Operation::ContentStatus(_) => {}
     }
     Ok(())
 }
@@ -676,9 +766,46 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
                 }
             }
         }
+        control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
+        control_response::Payload::ContentTransferReady(ready) => ready.validate()?,
+        control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,
+        control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
+        control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_content_receipt(receipt: &ContentReceipt) -> Result<(), ControlProtocolError> {
+    if receipt.bytes > 256 * 1024 * 1024
+        // Disjoint 206 ranges may precede one valid full 200 response: at most two
+        // object budgets, without falsely dropping the already transferred bytes.
+        || receipt.origin_body_bytes > 512 * 1024 * 1024
+        || receipt.peer_bytes > 256 * 1024 * 1024
+        || receipt.origin_range_requests > 1024
+        || (!receipt.origin_authenticated
+            && (receipt.origin_body_bytes != 0 || receipt.origin_range_requests != 0))
+        || receipt.chunks > 1024
+        || receipt.providers_used > 16
+        || receipt.publications > 64
+        || receipt.replica_chunks > 65_536
+        || receipt.replica_bytes > 256 * 1024 * 1024
+        || receipt.replica_publications > 64
+        || receipt.provider_peer_ids.len() != receipt.providers_used as usize
+    {
+        return Err(ControlProtocolError::Invalid("invalid content receipt"));
+    }
+    let mut unique = std::collections::HashSet::new();
+    if !receipt.control_relay_peer_id.is_empty() {
+        peer_id(&receipt.control_relay_peer_id)?;
+    }
+    for provider in &receipt.provider_peer_ids {
+        peer_id(provider)?;
+        if !unique.insert(provider) || *provider == receipt.control_relay_peer_id {
+            return Err(ControlProtocolError::Invalid("duplicate content provider"));
+        }
     }
     Ok(())
 }
@@ -748,20 +875,68 @@ mod tests {
     fn request_round_trip_is_bounded_and_typed() {
         let encoded = encode_request(&status_request()).expect("valid request");
         assert_eq!(decode_request(&encoded).expect("decode"), status_request());
+
+        let connect = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![8; 16],
+            operation: Some(control_request::Operation::Connect(ConnectRequest {
+                transport: Some(SessionTransport::MultipathQuic as i32),
+            })),
+        };
+        let encoded = encode_request(&connect).expect("typed connect request");
+        assert_eq!(decode_request(&encoded).expect("decode connect"), connect);
     }
 
     #[test]
-    fn rejects_unknown_version_and_client_disable() {
+    fn protected_dns_connect_is_additive_and_typed() {
+        assert_eq!(SessionTransport::ProtectedDns as i32, 4);
+        for transport in [None, Some(0), Some(1), Some(2), Some(4)] {
+            let mut request = status_request();
+            request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+                transport,
+            }));
+            let wire = encode_request(&request).expect("supported connect purpose");
+            assert_eq!(decode_request(&wire).expect("bounded request"), request);
+        }
+        let mut request = status_request();
+        request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+            transport: Some(3),
+        }));
+        assert!(encode_request(&request).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_versions_roles_and_transports() {
         let mut request = status_request();
         request.protocol_version = CONTROL_PROTOCOL_VERSION + 1;
         assert!(encode_request(&request).is_err());
 
         request.protocol_version = CONTROL_PROTOCOL_VERSION;
         request.operation = Some(control_request::Operation::SetRole(RoleChange {
-            role: NodeRole::Client as i32,
+            role: 99,
             enabled: false,
         }));
         assert!(encode_request(&request).is_err());
+
+        request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+            transport: Some(99),
+        }));
+        assert!(encode_request(&request).is_err());
+    }
+
+    #[test]
+    fn every_explicit_role_toggle_round_trips_for_agent_side_validation() {
+        for role in [NodeRole::Client, NodeRole::Relay, NodeRole::Exit] {
+            for enabled in [false, true] {
+                let mut request = status_request();
+                request.operation = Some(control_request::Operation::SetRole(RoleChange {
+                    role: role as i32,
+                    enabled,
+                }));
+                let bytes = encode_request(&request).expect("valid role toggle");
+                assert_eq!(decode_request(&bytes).expect("role toggle"), request);
+            }
+        }
     }
 
     #[test]

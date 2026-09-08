@@ -4,6 +4,11 @@
 
 #include <string.h>
 
+_Static_assert(
+    sizeof(((vmp_mqvpn_backend_state_t *)0)->reverse_queue) <=
+        VMP_MQVPN_REVERSE_MAX_BYTES,
+    "reverse FIFO storage exceeds its hard byte bound");
+
 static bool phase_is_valid(vmp_mqvpn_observed_phase_t phase)
 {
     switch (phase) {
@@ -113,7 +118,8 @@ static bool reverse_fifo_is_valid(
             VMP_MQVPN_REVERSE_MAX_PACKETS;
         const vmp_mqvpn_reverse_packet_t *entry =
             &state->reverse_queue[index];
-        if (entry->len == 0U || entry->len > VMP_MAX_INNER_PACKET ||
+        if (entry->len == 0U ||
+            entry->len > VMP_MQVPN_REVERSE_PACKET_BYTES ||
             entry->len > VMP_MQVPN_REVERSE_MAX_BYTES - byte_sum ||
             !vmp_tunnel_assignment_packet_destination_is_owned(
                 &state->assignment, entry->bytes, entry->len)) {
@@ -413,7 +419,8 @@ vmp_mqvpn_backend_result_t vmp_mqvpn_backend_state_enqueue_reverse(
     if (state->lifecycle != VMP_MQVPN_BACKEND_ACTIVE ||
         state->observed_phase != VMP_MQVPN_PHASE_ESTABLISHED ||
         state->terminal != VMP_MQVPN_TERMINAL_NONE || packet == NULL ||
-        packet_len == 0U || packet_len > VMP_MAX_INNER_PACKET ||
+        packet_len == 0U ||
+        packet_len > VMP_MQVPN_REVERSE_PACKET_BYTES ||
         !vmp_tunnel_assignment_packet_destination_is_owned(
             &state->assignment, packet, packet_len) ||
         !reverse_fifo_metadata_is_bounded(state)) {

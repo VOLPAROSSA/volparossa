@@ -25,6 +25,22 @@ pub enum Tls13MptcpStream {
     Server(ServerTlsStream<TcpStream>),
 }
 
+impl Tls13MptcpStream {
+    /// Read current kernel MPTCP negotiation and subflow evidence without unwrapping TLS.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel `MPTCP_INFO` error when the protected stream is no longer a genuine
+    /// MPTCP socket.
+    pub fn negotiation_info(&self) -> std::io::Result<volparossa_mptcp::MptcpInfo> {
+        let stream = match self {
+            Self::Client(stream) => stream.get_ref().0,
+            Self::Server(stream) => stream.get_ref().0,
+        };
+        volparossa_mptcp::mptcp_info(stream)
+    }
+}
+
 /// TLS 1.3-only client transport over a helper-acquired route-namespace MPTCP socket.
 #[derive(Clone)]
 pub struct Tls13MptcpClient {

@@ -14,6 +14,17 @@ extern "C" {
 #endif
 
 #define VMP_MAX_REQUESTS_PER_CONNECTION UINT32_C(1)
+#define VMP_MAX_WAIT_FDS (32U * VMP_MAX_PATHS)
+
+/* A single-threaded, read-only borrow, valid only until the next pump or
+ * dispatch. No ownership transfer: the waiter never closes these descriptors.
+ * UINT32_MAX means no timer; otherwise the delay must be positive. */
+typedef struct vmp_io_interest {
+    int read_fds[VMP_MAX_WAIT_FDS];
+    size_t count;
+    uint32_t next_timer_ms;
+} vmp_io_interest_t;
+
 typedef enum vmp_server_error {
     VMP_SERVER_OK = 0,
     VMP_SERVER_IO,
@@ -25,6 +36,8 @@ typedef enum vmp_server_error {
 } vmp_server_error_t;
 
 typedef vmp_server_error_t (*vmp_pump_fn)(void *context);
+typedef vmp_server_error_t (*vmp_interest_fn)(void *context,
+                                             vmp_io_interest_t *out);
 
 /* The server pre-populates version, echoed nonce, and the exact canonical
  * request digest. The dispatcher owns result, diagnostic_code, process
@@ -61,7 +74,16 @@ typedef struct vmp_server_options {
     uint32_t pump_interval_ms;
     vmp_pump_fn pump;
     void *pump_context;
+    vmp_interest_fn interest;
 } vmp_server_options_t;
+
+/* Wait once on control plus current engine interests, then pump. EINTR returns
+ * OK with no control events so the daemon can inspect its stop flag. The caller
+ * retains its absolute deadline; engine activity never renews it. */
+vmp_server_error_t vmp_wait_control(int control_fd, short events,
+                                    uint32_t maximum_wait_ms,
+                                    const vmp_server_options_t *options,
+                                    short *out_events);
 
 /* Serves exactly one request on a connected AF_UNIX SOCK_STREAM socket.
  * Linux SO_PEERCRED must match expected_peer_uid. Before the framed request,

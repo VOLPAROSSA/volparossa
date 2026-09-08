@@ -1,5 +1,5 @@
 [Unit]
-Description=VOLPAROSSA isolated native Multipath QUIC transport
+Description=VOLPAROSSA isolated native Multipath QUIC role workers
 Documentation=file:/usr/share/doc/volparossa/OPERATIONS.md
 Before=volparossa-agent.service
 After=network.target
@@ -17,6 +17,7 @@ Restart=on-failure
 RestartSec=3s
 TimeoutStartSec=30s
 TimeoutStopSec=30s
+KillMode=control-group
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -24,6 +25,7 @@ AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateMounts=yes
 PrivateDevices=yes
 ProtectControlGroups=yes
 ProtectKernelModules=yes

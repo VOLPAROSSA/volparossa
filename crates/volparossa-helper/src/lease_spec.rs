@@ -35,11 +35,14 @@ impl WireguardLeaseSpec {
         let path_id = u8::try_from(path_id).map_err(|_| LeaseSpecError)?;
         let endpoint_role = allowed_endpoint_role(context_role, role).ok_or(LeaseSpecError)?;
         let prefix = overlay_prefix(route_context_id, path_id).map_err(|_| LeaseSpecError)?;
+        // Terminal peers must cryptokey-route the unchanged end-to-end packet, not only the
+        // adjacent Relay interface address. Relay peers still authorize the terminal address on
+        // their respective leg. This gives both WireGuard legs the same ::1 <-> ::4 inner tuple.
         let (local_host, peer_host): (u16, u16) = match endpoint_role {
-            EndpointRole::Client => (1, 2),
+            EndpointRole::Client => (1, 4),
             EndpointRole::RelayClient => (2, 1),
             EndpointRole::RelayExit => (3, 4),
-            EndpointRole::Exit => (4, 3),
+            EndpointRole::Exit => (4, 1),
         };
         let mut local = prefix.network().octets();
         local[14..].copy_from_slice(&local_host.to_be_bytes());
@@ -74,7 +77,7 @@ impl WireguardLeaseSpec {
         self.local_address
     }
 
-    /// Exact topology-derived address of the opposite endpoint on this link.
+    /// Exact end-to-end address authorized through this `WireGuard` peer.
     pub(crate) const fn peer_address(&self) -> Ipv6Addr {
         self.peer_address
     }
@@ -146,7 +149,7 @@ mod tests {
         assert_eq!(client.key(), (1, WireguardRole::Client as i32));
         assert!(client.interface().starts_with("vpc1"));
         assert_eq!(client.local_address().octets()[14..], [0, 1]);
-        assert_eq!(client.peer_address().octets()[14..], [0, 2]);
+        assert_eq!(client.peer_address().octets()[14..], [0, 4]);
 
         assert!(
             WireguardLeaseSpec::derive(route, ContextRole::Client, 1, WireguardRole::Exit as i32,)
@@ -164,10 +167,10 @@ mod tests {
     }
 
     #[test]
-    fn peer_derivation_is_exhaustive_symmetric_and_prefix_bound() {
+    fn allowed_address_derivation_preserves_the_end_to_end_tuple_on_both_legs() {
         let route = [7; 16];
         let cases = [
-            (ContextRole::Client, WireguardRole::Client, [0, 1], [0, 2]),
+            (ContextRole::Client, WireguardRole::Client, [0, 1], [0, 4]),
             (
                 ContextRole::Relay,
                 WireguardRole::RelayClient,
@@ -175,7 +178,7 @@ mod tests {
                 [0, 1],
             ),
             (ContextRole::Relay, WireguardRole::RelayExit, [0, 3], [0, 4]),
-            (ContextRole::Exit, WireguardRole::Exit, [0, 4], [0, 3]),
+            (ContextRole::Exit, WireguardRole::Exit, [0, 4], [0, 1]),
         ];
         let specifications = cases.map(|(context_role, role, local_host, peer_host)| {
             let specification = WireguardLeaseSpec::derive(route, context_role, 1, role as i32)
@@ -190,7 +193,7 @@ mod tests {
 
         assert_eq!(
             specifications[0].peer_address(),
-            specifications[1].local_address()
+            specifications[3].local_address()
         );
         assert_eq!(
             specifications[1].peer_address(),
@@ -202,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             specifications[3].peer_address(),
-            specifications[2].local_address()
+            specifications[0].local_address()
         );
     }
 

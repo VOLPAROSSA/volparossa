@@ -2,27 +2,28 @@
 
 This directory contains a bounded process boundary around exact, locally
 patched mqvpn/xquic source. The build produces a real `volparossa-mpquic`
-executable and links the pinned libraries from source. Native API version 6
+executable and links the pinned libraries from source. Native API version 7
 provides bounded request-driven bidirectional datagrams, per-route
 credentials and TLS server names, an independent local association identifier,
 explicit multipath and single-path modes, descriptor-only path adoption, and a
-fail-closed descriptor-bound single-path exit-listener contract. API v6 also
-binds every operational request to a native-generated process incarnation,
+fail-closed descriptor-bound single-path exit-listener contract. It retains the v6 binding of
+every operational request to a native-generated process incarnation,
 correlates responses to the exact canonical request digest, carries the
 fields derived from the exit-signed route scope without verifying that
 signature itself. The client adapter retains a strictly validated
 tunnel assignment, exposes it only after `ESTABLISHED`, and enforces packet
-address ownership.
-It is still not a proven VOLPAROSSA dataplane: the exit lifecycle, exact scheduler, honest
-unique-payload metric, trusted helper origin for path descriptors, and
-disposable namespace acceptance remain incomplete and fail closed where
-applicable.
+address ownership. API v7 adds an explicit per-path acknowledged-transport byte counter;
+v6 binaries fail preflight rather than silently presenting an unavailable metric as zero.
+This boundary's metrics alone do not prove an end-to-end VOLPAROSSA datapath.
+Current source-bound network evidence is recorded in
+[`IMPLEMENTATION_STATUS.md`](../../docs/IMPLEMENTATION_STATUS.md); unique inner-payload
+delivery is not inferred from acknowledged transport counters.
 
 ## What is implemented and tested
 
-- An allocation-free, strict decoder for native API version 6 requests and a
+- An allocation-free, strict decoder for native API version 7 requests and a
   bounded request/response encoder compatible with the `volparossa-quic`
-  messages. Versions 1 through 5 and unknown versions are rejected. Canonical field
+  messages. Versions 1 through 6 and unknown versions are rejected. Canonical field
   order and minimal varints are required.
 - A fixed 32-byte descriptor-binding record followed by a four-byte big-endian
   frame boundary capped at 1 MiB before allocation. Each control-socket contact
@@ -64,7 +65,7 @@ applicable.
   not executable measurement, binary attestation, or authentication against an
   untrusted same-UID agent.
 - Every decodable response carries SHA-256 over
-  `VOLPAROSSA-MPQUIC-REQUEST-V6\0`, the four-byte canonical request length,
+  `VOLPAROSSA-MPQUIC-REQUEST-V7\0`, the four-byte canonical request length,
   and the exact unframed request. Nonces, request hashes, role, and incarnation
   therefore form one response-correlation contract.
 - A bounded runtime of 32 sessions and eight paths per session. `StartSession`
@@ -103,9 +104,9 @@ applicable.
   cookie consistently across a session. A matching cookie proves only session
   namespace consistency, not that the helper created the descriptor.
 - `AddPath` and `StartExitSession` each transfer exactly one descriptor only
-  with a 32-byte SHA-256 binding over their separate API-v6 domains,
-  `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6` and
-  `VOLPAROSSA-MPQUIC-START-EXIT-FD-V6`, plus canonical request length and
+  with a 32-byte SHA-256 binding over their separate API-v7 domains,
+  `VOLPAROSSA-MPQUIC-ADD-PATH-FD-V7` and
+  `VOLPAROSSA-MPQUIC-START-EXIT-FD-V7`, plus canonical request length and
   canonical request. Every other operation requires the all-zero binding and
   zero descriptors. The fixed binding prefix may be fragmented by `SOCK_STREAM`
   and is assembled safely; missing, extra, incomplete, truncated, late,
@@ -138,8 +139,15 @@ applicable.
 
 There is no mock production dispatcher and no ordinary-QUIC fallback.
 `SendDatagram` and request-driven reverse polling cross the real mqvpn adapter
-for an active client session. `GetStatus` still fails closed rather than
-relabeling ACKed QUIC transport bytes as uniquely delivered payload.
+for an active client session. `GetStatus` returns the exact current client path
+set only when every path has a valid native state and complete RTT, loss,
+congestion-window, in-flight, estimated-rate, and ACKed-transport metrics.
+`data_carrying` means that xquic has ACKed transport bytes on that path;
+`acked_transport_bytes` (native path tag 9) exposes that actual cumulative counter. Health
+and warm-path probes use its fresh deltas, rejecting regressions for an unchanged path.
+`delivered_bytes` remains zero because that counter is not unique inner
+payload delivery. The ACK counter includes QUIC framing and possible retransmissions;
+complete application hashes and independent path captures remain separate acceptance gates.
 
 ## Executable contract
 
@@ -151,10 +159,10 @@ volparossa-mpquic --mode client --socket ABSOLUTE_PATH
 volparossa-mpquic --mode exit --socket ABSOLUTE_PATH
 ~~~
 
-`--api-version` is a side-effect-free offline probe: it writes exactly `6\n`
+`--api-version` is a side-effect-free offline probe: it writes exactly `7\n`
 and opens no socket or runtime. The control socket path must satisfy the
 ownership and mode checks above. Authentication and the TLS server name arrive
-only in bounded API-v6 route-session messages. Client and exit roles are
+only in bounded API-v7 route-session messages. Client and exit roles are
 separate process modes; a node enabling both eventually needs two separately
 orchestrated instances and control sockets.
 
@@ -318,7 +326,11 @@ patches close ten concrete integration seams:
     Request close, H3 close, refusal, and defensive destroy share idempotent
     session-table, address, callback, and admission cleanup.
 
-API version 6 retains the bounded reverse/session contracts and strict
+The following historical API-v6 foundation notes are not current completion claims;
+the repository implementation status records later integrated datapath evidence. API
+version 7 additionally exposes the transport counter described above.
+
+API version 6 retained the bounded reverse/session contracts and strict
 single-path exit-listener handoff while adding process-incarnation targeting,
 exact request-digest correlation, signed route-scope fields, and a canonical
 tunnel-assignment response plus client retention policy. It preserves the
@@ -363,9 +375,9 @@ The following gates remain hard blockers:
    adoption remains blocked until an affine helper-to-native capability binds
    each descriptor to the attested helper acquisition.
 2. **No unique payload-delivery metric.** xquic's counter includes QUIC
-   transport overhead and retransmission. It cannot satisfy
-   `NativePathStatus.delivered_bytes`, which promises uniquely delivered
-   payload. `GetStatus` returns `unique_delivery_metric_unsupported`.
+   transport overhead and retransmission. `GetStatus` uses it only to prove
+   per-path transport activity and leaves `NativePathStatus.delivered_bytes`
+   zero; it never relabels those bytes as unique delivered payload.
 3. **No operational exit lifecycle.** The patched mqvpn server can report a
    session-correlated inbound packet and can initialize xquic from bounded
    in-memory TLS candidate material without a caller-supplied secret pathname.
@@ -398,9 +410,12 @@ The following gates remain hard blockers:
    belongs to the exact namespace, production caller, or disposable-topology
    packet evidence, so this client-side state must not be reported as an
    operational tunnel.
-6. **No exact VOLPAROSSA EDT scheduler.** mqvpn's WLB is congestion-aware but
-   is not the required replaceable delivery-time formula. FEC, XOR, and
-   reinjection remain disabled; that does not make WLB an EDT implementation.
+6. **EDT lacks live-topology acceptance.** Production multipath client and
+   exit sessions use the dedicated VOLPAROSSA xquic callback, which chooses
+   exactly one writable path from live RTT, bytes in flight, bandwidth, cwnd,
+   and recent loss. A deterministic native contract test covers both healthy
+   choices and a congested/lossy loser. No disposable topology has yet proved
+   the expected distribution or failover with real relay paths.
 7. **No real reverse-dataplane acceptance.** Unit tests prove queue/poll
    framing, correlation, overflow, and wiping, but no disposable topology has
    yet proved an exit-originated inner datagram reaches the Rust client.

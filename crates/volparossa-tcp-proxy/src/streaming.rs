@@ -168,9 +168,15 @@ async fn timed_write<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    time::timeout(timeout, writer.write_all(bytes))
-        .await
-        .map_err(|_| TcpProxyError::IdleTimeout)??;
+    time::timeout(timeout, async {
+        writer.write_all(bytes).await?;
+        // TLS can accept plaintext while its final encrypted record is still buffered
+        // by transport backpressure. Deliver it before waiting for another read; the
+        // peer may be waiting for this exact request before producing any response.
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| TcpProxyError::IdleTimeout)??;
     Ok(())
 }
 

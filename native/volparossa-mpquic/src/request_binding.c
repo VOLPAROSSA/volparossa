@@ -8,11 +8,11 @@
 #include <string.h>
 
 static const uint8_t vmp_add_path_binding_domain[] =
-    "VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6";
+    "VOLPAROSSA-MPQUIC-ADD-PATH-FD-V7";
 static const uint8_t vmp_start_exit_binding_domain[] =
-    "VOLPAROSSA-MPQUIC-START-EXIT-FD-V6";
+    "VOLPAROSSA-MPQUIC-START-EXIT-FD-V7";
 static const uint8_t vmp_request_digest_domain[] =
-    "VOLPAROSSA-MPQUIC-REQUEST-V6";
+    "VOLPAROSSA-MPQUIC-REQUEST-V7";
 static const uint8_t vmp_auth_commitment_domain[] =
     "VOLPAROSSA-NATIVE-ROUTE-AUTH-COMMITMENT-V4";
 

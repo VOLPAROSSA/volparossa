@@ -125,6 +125,55 @@ while IFS="	" read -r crate_name crate_version license_expression license_file m
     fi
 
     if [ "$copied" -ne 1 ]; then
+        fallback_table=$repository_root/third_party/rust/licenses/registry-fallbacks.tsv
+        fallback=$(awk -F '\t' -v name="$crate_name" -v version="$crate_version" \
+            -v license="$license_expression" '
+            $1 == name && $2 == version && $3 == license { print; found++ }
+            END { if (found != 1) exit 1 }
+        ' "$fallback_table") || fallback=
+        if [ -n "$fallback" ]; then
+            fallback_sha=$(printf '%s\n' "$fallback" | cut -f 4)
+            fallback_directory=$(printf '%s\n' "$fallback" | cut -f 5)
+            vcs_info=$crate_directory/.cargo_vcs_info.json
+            jq -e --arg sha "$fallback_sha" '.git.sha1 == $sha' "$vcs_info" \
+                >/dev/null 2>&1 || {
+                printf '%s %s has unexpected or missing VCS provenance.\n' \
+                    "$crate_name" "$crate_version" >&2
+                exit 1
+            }
+            if [ "$fallback_directory" != - ]; then
+                fallback_root=$repository_root/third_party/rust/licenses/registry-fallback/$fallback_directory
+                [ -d "$fallback_root" ] || {
+                    printf 'Reviewed license fallback is absent: %s %s\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                }
+                if [ ! -f "$fallback_root/SHA256SUMS" ] \
+                    || ! (cd "$fallback_root" && sha256sum -c SHA256SUMS >/dev/null); then
+                    printf 'Reviewed license fallback hash failed: %s %s\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                fi
+                fallback_copied=0
+                for fallback_path in "$fallback_root"/*; do
+                    [ -f "$fallback_path" ] || continue
+                    [ "${fallback_path##*/}" != SHA256SUMS ] || continue
+                    install -m 0644 "$fallback_path" \
+                        "$crate_destination/$(basename -- "$fallback_path")"
+                    fallback_copied=1
+                done
+                [ "$fallback_copied" -eq 1 ] || {
+                    printf 'Reviewed license fallback is empty: %s %s\n' \
+                        "$crate_name" "$crate_version" >&2
+                    exit 1
+                }
+            fi
+            copied=1
+            source_label="crates.io+vcs-license-$fallback_sha"
+        fi
+    fi
+
+    if [ "$copied" -ne 1 ]; then
         printf 'Resolved crate has no distributable top-level license/notice file: %s %s (%s)\n' \
             "$crate_name" "$crate_version" "$license_expression" >&2
         exit 1

@@ -2,6 +2,9 @@
 d      /var/lib/volparossa     0700 volparossa volparossa         -
 d      /etc/volparossa         0750 root        volparossa         -
 d      /run/volparossa         0750 root        volparossa         -
+# Control users may traverse this ancestor, not list it or access helper/native files.
+# An access ACL (not a default/inherited ACL) preserves the helper's exact 0750 mode.
+a+     /run/volparossa         -    -           -                  - group:volparossa-users:--x,mask::r-x
 d      /run/volparossa/control 0750 volparossa  volparossa-users   -
 d      /run/volparossa/native  0700 volparossa  volparossa         -
 z      /etc/volparossa/config.yaml 0640 root    volparossa         -

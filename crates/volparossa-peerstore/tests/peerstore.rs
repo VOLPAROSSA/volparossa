@@ -49,6 +49,7 @@ fn advertisement(sequence: u64, expiry: u64) -> NodeAdvertisement {
             sample_window_seconds: 15,
         },
         network: NetworkMetadata {
+            uplink: volparossa_core::NetworkUplink::IndependentInternet,
             operator_id: OperatorId::new("operator-a").expect("valid"),
             region: "eu-west".to_owned(),
             country_code: "NL".to_owned(),

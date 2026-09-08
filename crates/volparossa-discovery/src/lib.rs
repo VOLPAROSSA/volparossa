@@ -1,17 +1,30 @@
 //! Decentralised libp2p discovery for VOLPAROSSA.
 
+mod address_scope;
 mod advertisement_budget;
 #[cfg(test)]
 mod advertisement_tests;
 mod advertisements;
+mod connection_capacity;
 mod connection_provenance;
+mod content_connection;
+mod content_provider;
+#[cfg(test)]
+mod content_provider_address_tests;
+mod dns_cache;
 mod forwarding;
+mod listener_recovery;
+mod mpquic_session;
+mod mptcp_session;
 mod peerlink;
 mod preselection_forwarder;
 mod preselection_responder;
 mod preselection_transaction;
 mod preselection_wire;
+mod quic_lan;
 mod reservations;
+mod route_retire;
+mod udp_session;
 
 use std::{
     collections::HashMap,
@@ -19,7 +32,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::StreamExt;
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder, Transport as _, autonat,
     connection_limits,
@@ -32,6 +44,7 @@ use libp2p::{
 };
 use thiserror::Error;
 
+use address_scope::{ScopedBehaviour, private_address_is_local};
 use advertisement_budget::AdvertisementBudgets;
 pub use advertisements::{
     ADVERTISEMENT_PROTOCOL, ADVERTISEMENT_RPC_VERSION, AdvertisementRequest, AdvertisementResponse,
@@ -41,17 +54,40 @@ pub use advertisements::{
     advertisement_envelope_matches_peer,
 };
 use advertisements::{AdvertisementCodec, advertisement_behaviour};
-pub use connection_provenance::BoundNativeProbeControlConnection;
+pub use connection_provenance::{
+    BoundNativeProbeControlConnection, BoundNativeProbeDataRelayConnection,
+    ContentControlConnectionState,
+};
 use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceEvent};
+use content_connection::ContentConnectionBehaviour;
+pub use content_provider::{
+    CONTENT_DISCOVERY_PROTOCOL, CONTENT_REQUEST_TIMEOUT, CONTENT_SERVICE_PROTOCOL,
+    ContentDiscoveryRequest, ContentDiscoveryResponse, ContentProviderOffer,
+    ContentProviderRpcError, ContentServiceRequest, ContentServiceResponse,
+    MAX_CONTENT_DISCOVERY_FRAME_BYTES, MAX_CONTENT_OFFER_BYTES, MAX_CONTENT_OFFERS,
+    MAX_PENDING_CONTENT_REQUESTS,
+};
+use content_provider::{ContentProviderState, ContentServiceCodec};
+pub use dns_cache::{DNS_CACHE_PROTOCOL, DNS_CACHE_RPC_TIMEOUT, DnsCacheRequest, DnsCacheResponse};
+use dns_cache::{DnsCacheCodec, DnsCacheState};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
     FORWARDING_RPC_VERSION, ForwardStatus, ForwardingRpcError, MAX_CONCURRENT_FORWARDING_STREAMS,
-    MAX_FORWARDING_FRAME_BYTES, UpstreamExitForwardRequest, UpstreamExitForwardResponse,
+    MAX_FORWARDING_FRAME_BYTES, NativeProbeReadyForwardRequest, UpstreamExitForwardRequest,
+    UpstreamExitForwardResponse,
 };
 use forwarding::{
     ExitForwardCodec, UpstreamExitForwardCodec, exit_forward_behaviour,
     exit_forward_upstream_behaviour,
+};
+use listener_recovery::ConfiguredListeners;
+pub use mpquic_session::{
+    ExitMpquicSessionSignal, MpquicSessionFrameError, MpquicSessionPathProof,
+    MpquicSessionStartRequest,
+};
+pub use mptcp_session::{
+    ExitMptcpSessionSignal, MptcpSessionFrameError, MptcpSessionPathProof, MptcpSessionStartRequest,
 };
 pub use peerlink::{PeerLink, PeerLinkError};
 use preselection_forwarder::PreselectionForwarderState;
@@ -91,6 +127,7 @@ pub use reservations::{
     MAX_DATAPATH_RELAY_FRAME_BYTES,
 };
 use reservations::{DatapathRelayCodec, datapath_relay_behaviour};
+pub use udp_session::{UdpExitSessionSignal, UdpSessionFrameError, UdpSessionStartRequest};
 use volparossa_protocol::{
     MAX_CONTROL_MESSAGE_SIZE, SignedEnvelope, decode_canonical, node_id_from_public_key,
 };
@@ -112,11 +149,11 @@ pub const MAX_KADEMLIA_PACKET_BYTES: usize = 16 * 1_024;
 pub const MAX_PENDING_INBOUND_CONNECTIONS: u32 = 64;
 /// Maximum concurrent outbound connection attempts.
 pub const MAX_PENDING_OUTBOUND_CONNECTIONS: u32 = 64;
-/// Maximum established inbound connections.
+/// Initial established inbound ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_INBOUND_CONNECTIONS: u32 = 256;
-/// Maximum established outbound connections.
+/// Initial established outbound ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_OUTBOUND_CONNECTIONS: u32 = 256;
-/// Maximum established connections in both directions.
+/// Initial established total ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_CONNECTIONS: u32 = 384;
 /// Maximum established connections to one authenticated peer.
 pub const MAX_ESTABLISHED_CONNECTIONS_PER_PEER: u32 = 4;
@@ -197,6 +234,10 @@ pub mod capability {
     pub const MPTCP: &str = "/volparossa/v1/provider/mptcp";
     /// Genuine Multipath-QUIC-capable providers.
     pub const MPQUIC: &str = "/volparossa/v1/provider/mpquic";
+    /// Explicit public content services, without a content or browser-history index.
+    pub const CONTENT: &str = "/volparossa/v1/provider/content";
+    /// Generic positive DNSSEC cache service; no DNS names or history in the index.
+    pub const DNSSEC_CACHE: &str = "/volparossa/v1/provider/dnssec-cache";
 
     /// Builds a bounded region capability key.
     pub fn region(role: &str, region: &str) -> Option<String> {
@@ -268,6 +309,12 @@ pub struct DiscoveryBehaviour {
     pub relay_server: relay::Behaviour,
     /// Direct relay/control-relay advertisement retrieval.
     pub advertisements: request_response::Behaviour<AdvertisementCodec>,
+    /// Control relay to public content provider; content interests are never encoded here.
+    content_service: request_response::Behaviour<ContentServiceCodec>,
+    /// Client to its already authenticated control relay for public service offers.
+    content_discovery: ContentConnectionBehaviour,
+    /// Direct authenticated Exit-to-cache peer exchange; never control-relay forwarding.
+    dns_cache: ContentConnectionBehaviour<DnsCacheCodec>,
     /// Client-to-control-relay forwarding hop.
     pub exit_forward: request_response::Behaviour<ExitForwardCodec>,
     /// Control-relay-to-exit forwarding hop.
@@ -314,9 +361,17 @@ impl DiscoveryBehaviour {
         kad_config.set_kbucket_inserts(kad::BucketInserts::Manual);
         kad_config.set_record_ttl(Some(Duration::from_secs(300)));
         kad_config.set_provider_record_ttl(Some(Duration::from_secs(300)));
-        kad_config.set_provider_publication_interval(Some(Duration::from_secs(180)));
-        let kademlia =
+        // Retry capability publication inside the same bounded window as LAN discovery. A
+        // successful initial AddProvider exchange can still precede full routing convergence.
+        kad_config.set_provider_publication_interval(Some(Duration::from_secs(10)));
+        let mut kademlia =
             kad::Behaviour::with_config(local_peer_id, MemoryStore::new(local_peer_id), kad_config);
+        // Voluntary service nodes and role-less bootstrap contacts are explicit private-overlay
+        // DHT servers. Waiting for libp2p's public external-address heuristic leaves a
+        // disposable/private topology permanently in client mode, while making bootstrap-only
+        // contacts clients leaves Relay and Exit provider records with no shared storage hop.
+        // Bootstrap contacts still carry no authority: they store signed capability indexes only.
+        kademlia.set_mode(Some(kademlia_mode_for_roles(protocol_roles)));
         let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
         let dcutr = dcutr::Behaviour::new(local_peer_id);
         let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
@@ -338,6 +393,14 @@ impl DiscoveryBehaviour {
             protocol_roles.client(),
             protocol_roles.relay(),
         ));
+        let content_service = content_provider::service_behaviour(protocol_support(
+            protocol_roles.relay(),
+            protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
+        ));
+        let content_discovery =
+            ContentConnectionBehaviour::new(content_provider::discovery_behaviour(
+                protocol_support(protocol_roles.client(), protocol_roles.relay()),
+            ));
         Self {
             connection_limits,
             connection_provenance,
@@ -352,10 +415,24 @@ impl DiscoveryBehaviour {
             relay_client,
             relay_server,
             advertisements,
+            content_service,
+            content_discovery,
+            dns_cache: ContentConnectionBehaviour::new(dns_cache::behaviour(protocol_support(
+                protocol_roles.exit(),
+                protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
+            ))),
             exit_forward,
             exit_forward_upstream,
             datapath_relay,
         }
+    }
+}
+
+const fn kademlia_mode_for_roles(roles: DiscoveryProtocolRoles) -> kad::Mode {
+    if roles.relay() || roles.exit() || !roles.client() {
+        kad::Mode::Server
+    } else {
+        kad::Mode::Client
     }
 }
 
@@ -385,6 +462,12 @@ pub enum BehaviourEvent {
     RelayServer(relay::Event),
     /// Advertisement protocol event.
     Advertisements(request_response::Event<AdvertisementRequest, AdvertisementResponse>),
+    /// Nonce-checked upstream signed content-service offer or transport failure.
+    ContentService(request_response::Event<ContentServiceRequest, ContentServiceResponse>),
+    /// Inbound client query or exactly correlated forwarded content-service offers.
+    ContentDiscovery(request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>),
+    /// Signed cache-only DNSSEC request or bounded correlated reply.
+    DnsCache(request_response::Event<DnsCacheRequest, DnsCacheResponse>),
     /// Client-hop A1c event; the client-side outbound attempt owner remains absent.
     PreselectionObservation(
         request_response::Event<
@@ -409,6 +492,136 @@ pub enum BehaviourEvent {
     DatapathRelay(request_response::Event<DatapathRelayRequest, DatapathRelayResponse>),
 }
 
+/// Detail-free reason exact authenticated connection provenance could not be bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionProvenanceReject {
+    RegistryPoisoned,
+    ExactConnectionMissing,
+    MultipleSiblingConnections,
+    FamilyPrefix,
+    BindGeneration,
+}
+
+/// Detail-free class emitted when an owned preselection responder rejects a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    missing_docs,
+    reason = "variant names are the complete privacy-neutral diagnostic contract"
+)]
+#[non_exhaustive]
+pub enum PreselectionResponderReject {
+    DirectRole,
+    DirectRequest,
+    DirectAuthority,
+    DirectProvenance(PreselectionProvenanceReject),
+    DirectReplay,
+    DirectResourceLimit,
+    DirectTime,
+    DirectSigning,
+    DirectResponseChannel,
+    ForwardedRequest,
+    ForwardedAuthority,
+    ForwardedTransaction,
+    ForwardedProof,
+    ForwardedReplay,
+    ForwardedResourceLimit,
+    ForwardedTime,
+    ForwardedSigning,
+    ForwardedResponseChannel,
+    ForwardedUpstreamTransport,
+    UpstreamRole,
+    UpstreamRequest,
+    UpstreamAuthority,
+    UpstreamProvenance(PreselectionProvenanceReject),
+    UpstreamReplay,
+    UpstreamResourceLimit,
+    UpstreamTime,
+    UpstreamSigning,
+    UpstreamResponseChannel,
+}
+
+impl PreselectionResponderReject {
+    /// Stable privacy-neutral event code. No peer, address, request, or payload detail is exposed.
+    #[must_use]
+    pub const fn event_code(self) -> &'static str {
+        match self {
+            Self::DirectRole => "PRESELECTION_RESPONDER_DIRECT_ROLE_REJECTED",
+            Self::DirectRequest => "PRESELECTION_RESPONDER_DIRECT_REQUEST_REJECTED",
+            Self::DirectAuthority => "PRESELECTION_RESPONDER_DIRECT_AUTHORITY_REJECTED",
+            Self::DirectProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::DirectProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_DIRECT_PROVENANCE_BIND_GENERATION"
+            }
+            Self::DirectReplay => "PRESELECTION_RESPONDER_DIRECT_REPLAY_REJECTED",
+            Self::DirectResourceLimit => "PRESELECTION_RESPONDER_DIRECT_RESOURCE_LIMIT_REJECTED",
+            Self::DirectTime => "PRESELECTION_RESPONDER_DIRECT_TIME_REJECTED",
+            Self::DirectSigning => "PRESELECTION_RESPONDER_DIRECT_SIGNING_REJECTED",
+            Self::DirectResponseChannel => {
+                "PRESELECTION_RESPONDER_DIRECT_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedRequest => "PRESELECTION_RESPONDER_FORWARDED_REQUEST_REJECTED",
+            Self::ForwardedAuthority => "PRESELECTION_RESPONDER_FORWARDED_AUTHORITY_REJECTED",
+            Self::ForwardedTransaction => "PRESELECTION_RESPONDER_FORWARDED_TRANSACTION_REJECTED",
+            Self::ForwardedProof => "PRESELECTION_RESPONDER_FORWARDED_PROOF_REJECTED",
+            Self::ForwardedReplay => "PRESELECTION_RESPONDER_FORWARDED_REPLAY_REJECTED",
+            Self::ForwardedResourceLimit => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::ForwardedTime => "PRESELECTION_RESPONDER_FORWARDED_TIME_REJECTED",
+            Self::ForwardedSigning => "PRESELECTION_RESPONDER_FORWARDED_SIGNING_REJECTED",
+            Self::ForwardedResponseChannel => {
+                "PRESELECTION_RESPONDER_FORWARDED_RESPONSE_CHANNEL_REJECTED"
+            }
+            Self::ForwardedUpstreamTransport => {
+                "PRESELECTION_RESPONDER_FORWARDED_UPSTREAM_TRANSPORT_REJECTED"
+            }
+            Self::UpstreamRole => "PRESELECTION_RESPONDER_UPSTREAM_ROLE_REJECTED",
+            Self::UpstreamRequest => "PRESELECTION_RESPONDER_UPSTREAM_REQUEST_REJECTED",
+            Self::UpstreamAuthority => "PRESELECTION_RESPONDER_UPSTREAM_AUTHORITY_REJECTED",
+            Self::UpstreamProvenance(PreselectionProvenanceReject::RegistryPoisoned) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_REGISTRY_POISONED"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::ExactConnectionMissing) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_CONNECTION_MISSING"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::MultipleSiblingConnections) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_MULTIPLE_CONNECTIONS"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::FamilyPrefix) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_FAMILY_PREFIX"
+            }
+            Self::UpstreamProvenance(PreselectionProvenanceReject::BindGeneration) => {
+                "PRESELECTION_RESPONDER_UPSTREAM_PROVENANCE_BIND_GENERATION"
+            }
+            Self::UpstreamReplay => "PRESELECTION_RESPONDER_UPSTREAM_REPLAY_REJECTED",
+            Self::UpstreamResourceLimit => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESOURCE_LIMIT_REJECTED"
+            }
+            Self::UpstreamTime => "PRESELECTION_RESPONDER_UPSTREAM_TIME_REJECTED",
+            Self::UpstreamSigning => "PRESELECTION_RESPONDER_UPSTREAM_SIGNING_REJECTED",
+            Self::UpstreamResponseChannel => {
+                "PRESELECTION_RESPONDER_UPSTREAM_RESPONSE_CHANNEL_REJECTED"
+            }
+        }
+    }
+}
+
 /// Sanitized public discovery event.
 ///
 /// Preselection request messages remain entirely service-owned. Responses for the exact active
@@ -422,6 +635,8 @@ pub enum DiscoveryEvent {
     ClientPreselectionResponse(ClientPreselectionResponseArrival),
     /// Service-sealed response to an outbound relay-to-exit observation request.
     UpstreamPreselectionResponse(UpstreamPreselectionResponseArrival),
+    /// Detail-free reason an owned preselection request was rejected before response handoff.
+    PreselectionResponderRejected(PreselectionResponderReject),
     /// Any event other than a preselection request or response message.
     Other(libp2p::swarm::SwarmEvent<BehaviourEvent>),
 }
@@ -479,6 +694,27 @@ impl From<relay::Event> for BehaviourEvent {
 impl From<request_response::Event<AdvertisementRequest, AdvertisementResponse>> for BehaviourEvent {
     fn from(value: request_response::Event<AdvertisementRequest, AdvertisementResponse>) -> Self {
         Self::Advertisements(value)
+    }
+}
+impl From<request_response::Event<ContentServiceRequest, ContentServiceResponse>>
+    for BehaviourEvent
+{
+    fn from(value: request_response::Event<ContentServiceRequest, ContentServiceResponse>) -> Self {
+        Self::ContentService(value)
+    }
+}
+impl From<request_response::Event<DnsCacheRequest, DnsCacheResponse>> for BehaviourEvent {
+    fn from(value: request_response::Event<DnsCacheRequest, DnsCacheResponse>) -> Self {
+        Self::DnsCache(value)
+    }
+}
+impl From<request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>>
+    for BehaviourEvent
+{
+    fn from(
+        value: request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>,
+    ) -> Self {
+        Self::ContentDiscovery(value)
     }
 }
 impl
@@ -559,6 +795,9 @@ pub enum DiscoveryError {
     /// A direct-advertisement frame violates its canonical v4 bounds.
     #[error(transparent)]
     AdvertisementRpc(#[from] AdvertisementRpcError),
+    /// A content-service discovery frame violates its bounds or request correlation.
+    #[error(transparent)]
+    ContentProviderRpc(#[from] ContentProviderRpcError),
     /// A forwarding-hop frame violates its canonical v4 bounds.
     #[error(transparent)]
     ForwardingRpc(#[from] ForwardingRpcError),
@@ -707,6 +946,19 @@ impl AddressAdmissions {
         }
         removed
     }
+
+    fn forget_peer(&mut self, peer: &PeerId) -> Vec<Multiaddr> {
+        self.by_peer
+            .remove(peer)
+            .map(|addresses| {
+                addresses
+                    .into_iter()
+                    .map(|admitted| admitted.address)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn contains_peer(&self, peer: &PeerId) -> bool {
         self.by_peer.contains_key(peer)
     }
@@ -714,9 +966,12 @@ impl AddressAdmissions {
 
 /// Running decentralised discovery service.
 pub struct DiscoveryService {
-    swarm: Swarm<DiscoveryBehaviour>,
+    swarm: Swarm<ScopedBehaviour>,
+    configured_listeners: ConfiguredListeners,
     local_advertisement: Option<Vec<u8>>,
     advertisement_budgets: AdvertisementBudgets,
+    content_provider: ContentProviderState,
+    dns_cache: DnsCacheState,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
     preselection_forwarder: PreselectionForwarderState,
@@ -745,7 +1000,13 @@ impl DiscoveryService {
         protocol_roles: DiscoveryProtocolRoles,
     ) -> Result<Self, DiscoveryError> {
         let local_peer_id = keypair.public().to_peer_id();
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+        // A lost startup multicast must not leave a directly attached Relay undiscoverable for
+        // libp2p-mDNS's five-minute default interval.
+        let mdns_config = mdns::Config {
+            query_interval: Duration::from_secs(10),
+            ..mdns::Config::default()
+        };
+        let mdns = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
         let memory_noise = noise::Config::new(&keypair)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?;
@@ -757,7 +1018,8 @@ impl DiscoveryService {
                 yamux::Config::default,
             )
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
-            .with_quic()
+            .with_other_transport(quic_lan::transport)
+            .map_err(|never| -> DiscoveryError { match never {} })?
             .with_other_transport(move |_| {
                 MemoryTransport::default()
                     .upgrade(upgrade::Version::V1)
@@ -770,7 +1032,12 @@ impl DiscoveryService {
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
             .with_behaviour(move |keypair, relay_client| {
-                DiscoveryBehaviour::new(keypair, relay_client, mdns, protocol_roles)
+                ScopedBehaviour(DiscoveryBehaviour::new(
+                    keypair,
+                    relay_client,
+                    mdns,
+                    protocol_roles,
+                ))
             })
             .map_err(|error| DiscoveryError::Build(error.to_string()))?
             .with_swarm_config(|config| {
@@ -779,9 +1046,12 @@ impl DiscoveryService {
             .build();
         Ok(Self {
             swarm,
+            configured_listeners: ConfiguredListeners::default(),
             protocol_roles,
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
+            content_provider: ContentProviderState::default(),
+            dns_cache: DnsCacheState::default(),
             address_admissions: AddressAdmissions::default(),
             preselection_forwarder: PreselectionForwarderState::new()
                 .map_err(|error| DiscoveryError::Build(error.to_string()))?,
@@ -796,22 +1066,56 @@ impl DiscoveryService {
         self.swarm.local_peer_id()
     }
 
+    /// Return an advisory LAN prefix agreed by current authenticated direct peer connections.
+    ///
+    /// Conflicting prefixes, relayed or non-LAN endpoints and poisoned lineage yield no hint.
+    /// This copies no endpoint or connection authority and creates no affine proof: selection
+    /// must still obtain its normal signed, exact-connection freshness evidence before admission.
+    #[must_use]
+    pub fn authenticated_local_peer_prefix(
+        &self,
+        peer: PeerId,
+    ) -> Option<volparossa_core::ObservedNetworkPrefix> {
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .advisory_local_prefix(peer)
+    }
+
     /// Returns the immutable local protocol roles.
     #[must_use]
     pub const fn protocol_roles(&self) -> DiscoveryProtocolRoles {
         self.protocol_roles
     }
 
-    /// Starts listening on a validated multiaddress.
+    /// Starts and retains one exact, locally configured listener request.
+    ///
+    /// Unexpected listener closure is retried with bounded backoff by the event pump. Repeated
+    /// calls for the same request do not create extra listeners or bypass an existing backoff.
     ///
     /// # Errors
     ///
-    /// Returns an error when libp2p rejects the listen address.
+    /// Returns an error when libp2p rejects the listen address, its bound is exceeded, or listener
+    /// shutdown has begun.
     pub fn listen_on(&mut self, address: Multiaddr) -> Result<(), DiscoveryError> {
-        self.swarm
-            .listen_on(address)
-            .map(|_| ())
-            .map_err(|error| DiscoveryError::Swarm(error.to_string()))
+        self.configured_listeners
+            .listen_on(&mut self.swarm, address)
+    }
+
+    /// Permanently disable listener recovery without interrupting established connections.
+    ///
+    /// Call this before graceful actor retirement, then [`Self::stop_listening`] after draining
+    /// transactions. The latter also closes QUIC endpoints and their established connections.
+    pub fn stop_listener_recovery(&mut self) {
+        self.configured_listeners.stop_recovery();
+    }
+
+    /// Permanently stop configured listeners and cancel every pending listener-recovery retry.
+    ///
+    /// This does not destroy route contexts or mutate the host network. The service's owner
+    /// remains responsible for draining transactions before closing their control connections.
+    pub fn stop_listening(&mut self) {
+        self.configured_listeners.stop(&mut self.swarm);
     }
 
     /// Dials a peerlink whose address is cryptographically bound to its expected Peer ID.
@@ -820,6 +1124,9 @@ impl DiscoveryService {
     ///
     /// Returns an error when libp2p rejects the peer-bound dial address.
     pub fn dial_peerlink(&mut self, peerlink: &PeerLink) -> Result<(), DiscoveryError> {
+        if !private_address_is_local(&peerlink.dial_address()) {
+            return Err(DiscoveryError::PeerAddress);
+        }
         self.swarm
             .dial(peerlink.dial_address())
             .map_err(|error| DiscoveryError::Swarm(error.to_string()))
@@ -855,6 +1162,9 @@ impl DiscoveryService {
         canonical: Multiaddr,
         source: AddressSource,
     ) -> Result<Multiaddr, DiscoveryError> {
+        if !private_address_is_local(&canonical) {
+            return Err(DiscoveryError::PeerAddress);
+        }
         let is_new = self
             .address_admissions
             .admit_prepared(peer_id, canonical.clone(), source)?;
@@ -898,19 +1208,44 @@ impl DiscoveryService {
         }
     }
 
-    fn refresh_identify_addresses(&mut self, peer_id: PeerId, info: &identify::Info) {
+    fn refresh_identify_addresses(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        info: &identify::Info,
+    ) {
+        if !identify_supports_private_kademlia(peer_id, info) {
+            // mDNS is observed before authenticated Identify and may therefore have admitted a
+            // client-only peer temporarily. Purge every source, including Known and mDNS, so a
+            // private-DHT server cannot retain or redistribute that client's public address.
+            self.address_admissions.forget_peer(&peer_id);
+            let _ = self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+            return;
+        }
+
+        // A peer reached through Circuit Relay v2 may advertise a directly dialable public
+        // listener. Importing it would silently upgrade a deliberately relayed relationship to a
+        // direct one. Bind Identify address authority to the exact non-relayed connection that
+        // carried the event; unknown or poisoned connection lineage fails closed.
+        if !self
+            .swarm
+            .behaviour()
+            .connection_provenance
+            .allows_identify_address_import(peer_id, connection_id)
+        {
+            return;
+        }
+
         let mut retained = Vec::new();
-        if identify_supports_private_kademlia(peer_id, info) {
-            for address in bounded_prefix(&info.listen_addrs, MAX_DISCOVERY_ADDRESSES_PER_EVENT) {
-                if retained.len() >= MAX_DISCOVERY_ADDRESSES_PER_PEER {
-                    break;
-                }
-                if let Ok(canonical) =
-                    prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
-                {
-                    if !retained.contains(&canonical) {
-                        retained.push(canonical);
-                    }
+        for address in bounded_prefix(&info.listen_addrs, MAX_DISCOVERY_ADDRESSES_PER_EVENT) {
+            if retained.len() >= MAX_DISCOVERY_ADDRESSES_PER_PEER {
+                break;
+            }
+            if let Ok(canonical) =
+                prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
+            {
+                if private_address_is_local(&canonical) && !retained.contains(&canonical) {
+                    retained.push(canonical);
                 }
             }
         }
@@ -939,6 +1274,7 @@ impl DiscoveryService {
         let mut rejected = Vec::new();
         for address in addresses.iter() {
             let valid = valid_count < MAX_DISCOVERY_ADDRESSES_PER_PEER
+                && private_address_is_local(address)
                 && prepare_discovery_address(self.swarm.local_peer_id(), peer_id, address)
                     .is_ok_and(|canonical| canonical == *address);
             if valid {
@@ -995,14 +1331,19 @@ impl DiscoveryService {
     pub fn find_providers(&mut self, capability_key: &str) -> Result<kad::QueryId, DiscoveryError> {
         validate_capability_key(capability_key)?;
         let swarm = &mut self.swarm;
-        self.advertisement_budgets
+        let id = self
+            .advertisement_budgets
             .provider_query_or_insert(capability_key, || {
                 swarm
                     .behaviour_mut()
                     .kademlia
                     .get_providers(kad::RecordKey::new(&capability_key))
             })
-            .ok_or(DiscoveryError::ResourceLimit)
+            .ok_or(DiscoveryError::ResourceLimit)?;
+        if capability_key == capability::CONTENT {
+            self.content_provider.provider_query = Some(id);
+        }
+        Ok(id)
     }
 
     /// Begins Kademlia bootstrap using every currently known routing peer.
@@ -1029,19 +1370,36 @@ impl DiscoveryService {
             return Err(DiscoveryError::ProtocolRole);
         }
         AdvertisementResponse::new(envelope.clone())?;
-        self.local_advertisement = Some(envelope);
+        self.preselection_responder
+            .install_local_advertisement(&mut self.local_advertisement, envelope);
         Ok(())
     }
 
     /// Stops serving a previously configured local advertisement immediately.
     pub fn clear_local_advertisement(&mut self) {
-        self.local_advertisement = None;
+        self.preselection_responder
+            .clear_local_advertisements(&mut self.local_advertisement);
     }
 
     /// Reports whether a signed local advertisement is installed.
     #[must_use]
     pub fn is_serving_local_advertisement(&self) -> bool {
         self.local_advertisement.is_some()
+    }
+
+    /// Borrows the bounded set of signed local advertisements that may still authorize an
+    /// in-flight operation, newest first.
+    ///
+    /// The first item is the advertisement currently being served. The remaining items are the
+    /// bounded, most-recently-served lineage retained by the preselection responder. These bytes
+    /// carry no authority by themselves: callers must independently verify the signature,
+    /// lifetime, policy and exact actor binding for their operation.
+    pub fn bounded_local_advertisements(&self) -> impl Iterator<Item = &[u8]> {
+        self.local_advertisement.iter().map(Vec::as_slice).chain(
+            self.preselection_responder
+                .local_advertisement_lineage()
+                .rev(),
+        )
     }
 
     /// Requests a selected relay's current signed advertisement.
@@ -1092,7 +1450,7 @@ impl DiscoveryService {
         if !self.protocol_roles.client() {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
+        request.validate_client_hop()?;
         let wrapper_relay = peer_id_from_wire(request.control_relay_peer_id())?;
         let wrapper_exit = peer_id_from_wire(request.exit_peer_id())?;
         if wrapper_relay != *control_relay_peer
@@ -1144,10 +1502,13 @@ impl DiscoveryService {
         exit_peer: &PeerId,
         request: UpstreamExitForwardRequest,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
-        if !self.protocol_roles.relay() {
+        request.validate()?;
+        if !self.protocol_roles.relay()
+            && request.as_forward_request().validated_operation()?
+                != ExitForwardOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
         let canonical = request.as_forward_request();
         let wrapper_relay = peer_id_from_wire(canonical.control_relay_peer_id())?;
         let wrapper_exit = peer_id_from_wire(canonical.exit_peer_id())?;
@@ -1191,6 +1552,53 @@ impl DiscoveryService {
             .ok_or(DiscoveryError::ProtocolPeer)
     }
 
+    /// Bind the exact authenticated data-Relay connection carrying a native authorization chain.
+    ///
+    /// This is distinct from control-Relay Permit provenance and grants no datapath authority.
+    /// The affine token can be consumed only while replying through this service.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, self connection, or stale, closed, foreign, or
+    /// otherwise untracked connection lineage.
+    pub fn bind_native_probe_data_relay_connection(
+        &self,
+        authenticated_data_relay: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> Result<BoundNativeProbeDataRelayConnection, DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        if authenticated_data_relay == *self.local_peer_id() {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour()
+            .connection_provenance
+            .bind_native_probe_data_relay(authenticated_data_relay, connection_id)
+            .ok_or(DiscoveryError::ProtocolPeer)
+    }
+
+    /// Check exact live authenticated lineage for destruction of an already retained route.
+    ///
+    /// This remains available after roles are disabled. It grants no new route/prefix authority,
+    /// chooses no sibling connection and performs no dial. The caller must independently verify
+    /// the signed retirement request and its complete retained ownership scope.
+    #[must_use]
+    pub fn route_retirement_connection_live(
+        &self,
+        peer: PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) -> bool {
+        peer != *self.local_peer_id()
+            && self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .bind_native_probe_data_relay(peer, connection_id)
+                .is_some()
+    }
+
     /// Sends one canonical exit response to the authenticated control relay.
     ///
     /// # Errors
@@ -1202,10 +1610,13 @@ impl DiscoveryService {
         channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
         response: UpstreamExitForwardResponse,
     ) -> Result<(), DiscoveryError> {
-        if !self.protocol_roles.exit() {
+        response.validate()?;
+        if !self.protocol_roles.exit()
+            && response.as_forward_response().validated_operation()?
+                != ExitForwardOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        response.validate()?;
         if peer_id_from_wire(response.as_forward_response().exit_peer_id())?
             != *self.local_peer_id()
         {
@@ -1258,6 +1669,115 @@ impl DiscoveryService {
             })
     }
 
+    /// Consume exact authenticated data-Relay lineage while returning one native authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-authorization response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_authorization_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeAuthorize
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe authorization response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native Exit result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-result response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_result_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeResult
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| {
+                DiscoveryError::Swarm("native-probe result response channel closed".into())
+            })
+    }
+
+    /// Consume exact authenticated data-Relay lineage while returning one native Exit readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a disabled Exit role, a non-readiness response, stale connection
+    /// lineage, non-local Exit identity, or a closed response channel.
+    pub fn send_native_probe_ready_response(
+        &mut self,
+        connection: BoundNativeProbeDataRelayConnection,
+        authenticated_data_relay: PeerId,
+        channel: request_response::ResponseChannel<UpstreamExitForwardResponse>,
+        response: UpstreamExitForwardResponse,
+    ) -> Result<(), DiscoveryError> {
+        if !self.protocol_roles.exit() {
+            return Err(DiscoveryError::ProtocolRole);
+        }
+        response.validate()?;
+        let canonical = response.as_forward_response();
+        if canonical.validated_operation()? != ExitForwardOperation::NativeProbeReady
+            || peer_id_from_wire(canonical.exit_peer_id())? != *self.local_peer_id()
+            || !self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .consume_bound_native_probe_data_relay(connection, authenticated_data_relay)
+        {
+            return Err(DiscoveryError::ProtocolPeer);
+        }
+        self.swarm
+            .behaviour_mut()
+            .exit_forward_upstream
+            .send_response(channel, response)
+            .map_err(|_| DiscoveryError::Swarm("native-probe Ready response channel closed".into()))
+    }
+
     /// Sends one canonical request directly to a selected datapath relay.
     ///
     /// # Errors
@@ -1269,10 +1789,12 @@ impl DiscoveryService {
         relay_peer: &PeerId,
         request: DatapathRelayRequest,
     ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
-        if !self.protocol_roles.client() {
+        request.validate()?;
+        if !self.protocol_roles.client()
+            && request.validated_operation()? != DatapathRelayOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        request.validate()?;
         let wrapper_relay = peer_id_from_wire(request.relay_peer_id())?;
         if wrapper_relay != *relay_peer || wrapper_relay == *self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
@@ -1295,10 +1817,12 @@ impl DiscoveryService {
         channel: request_response::ResponseChannel<DatapathRelayResponse>,
         response: DatapathRelayResponse,
     ) -> Result<(), DiscoveryError> {
-        if !self.protocol_roles.relay() {
+        response.validate()?;
+        if !self.protocol_roles.relay()
+            && response.validated_operation()? != DatapathRelayOperation::RouteRetire
+        {
             return Err(DiscoveryError::ProtocolRole);
         }
-        response.validate()?;
         if peer_id_from_wire(response.relay_peer_id())? != *self.local_peer_id() {
             return Err(DiscoveryError::ProtocolPeer);
         }
@@ -1375,7 +1899,10 @@ impl DiscoveryService {
     #[allow(clippy::too_many_lines, reason = "single composed swarm event pump")]
     async fn next_internal_event(&mut self) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
         loop {
-            let event = self.swarm.select_next_some().await;
+            let event = self.configured_listeners.next_event(&mut self.swarm).await;
+            let Some(event) = self.handle_content_event(event) else {
+                continue;
+            };
             match event {
                 libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Advertisements(
                     request_response::Event::Message {
@@ -1416,20 +1943,10 @@ impl DiscoveryService {
                             },
                     },
                 )) => {
-                    if !self.protocol_roles.relay()
+                    if (!self.protocol_roles.relay()
+                        && request.validated_operation() != Ok(DatapathRelayOperation::RouteRetire))
                         || !datapath_request_targets_local_relay(&request, self.local_peer_id())
                     {
-                        continue;
-                    }
-                    if request.validated_operation() == Ok(DatapathRelayOperation::ExecuteProbe) {
-                        if let Ok(response) = DatapathRelayResponse::unavailable(
-                            request.request_id().to_vec(),
-                            DatapathRelayOperation::ExecuteProbe,
-                            request.relay_node_id().to_vec(),
-                            request.relay_peer_id().to_vec(),
-                        ) {
-                            let _ = self.send_datapath_relay_response(channel, response);
-                        }
                         continue;
                     }
                     return libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::DatapathRelay(
@@ -1446,6 +1963,35 @@ impl DiscoveryService {
                 }
                 event => {
                     match &event {
+                        libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint,
+                            ..
+                        } => {
+                            let remote = endpoint.get_remote_address();
+                            // Opt-in diagnostics distinguish an authenticated transport peer
+                            // from the separately gated signed-advertisement candidate cache.
+                            // Do not retain hostnames or application data, even at debug level.
+                            if remote.len() <= MAX_DISCOVERY_ADDRESS_BYTES
+                                && matches!(
+                                    remote.iter().next(),
+                                    Some(
+                                        libp2p::multiaddr::Protocol::Ip4(_)
+                                            | libp2p::multiaddr::Protocol::Ip6(_)
+                                    )
+                                )
+                            {
+                                tracing::debug!(
+                                    target: "volparossa_discovery::authenticated_link",
+                                    event = "DISCOVERY_AUTHENTICATED_LINK",
+                                    %peer_id,
+                                    %connection_id,
+                                    remote_endpoint = %remote,
+                                    "authenticated control-plane connection"
+                                );
+                            }
+                        }
                         libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::ExitForward(
                             request_response::Event::Message {
                                 message: request_response::Message::Request { request, .. },
@@ -1549,9 +2095,13 @@ impl DiscoveryService {
                             }
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(BehaviourEvent::Identify(
-                            identify::Event::Received { peer_id, info, .. },
+                            identify::Event::Received {
+                                peer_id,
+                                connection_id,
+                                info,
+                            },
                         )) => {
-                            self.refresh_identify_addresses(*peer_id, info);
+                            self.refresh_identify_addresses(*peer_id, *connection_id, info);
                         }
                         _ => {}
                     }
@@ -1734,7 +2284,33 @@ fn validate_capability_key(value: &str) -> Result<(), DiscoveryError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use libp2p::{
+        core::{ConnectedPoint, Endpoint, transport::PortUse},
+        swarm::{FromSwarm, behaviour::ConnectionEstablished},
+    };
+    use tokio::time::{Duration, timeout};
+
     use super::*;
+
+    static NEXT_TEST_MEMORY_ADDRESS: AtomicU64 = AtomicU64::new(8_000_000);
+
+    #[test]
+    fn service_and_bootstrap_roles_are_private_kademlia_servers() {
+        assert_eq!(
+            kademlia_mode_for_roles(DiscoveryProtocolRoles::new(true, false, false)),
+            kad::Mode::Client
+        );
+        for roles in [
+            DiscoveryProtocolRoles::new(false, true, false),
+            DiscoveryProtocolRoles::new(false, false, true),
+            DiscoveryProtocolRoles::new(false, false, false),
+            DiscoveryProtocolRoles::new(true, true, true),
+        ] {
+            assert_eq!(kademlia_mode_for_roles(roles), kad::Mode::Server);
+        }
+    }
 
     #[test]
     fn advertisement_protocol_matrix_never_serves_an_exit_only_node_directly() {
@@ -1819,7 +2395,7 @@ mod tests {
             bounded_prefix(&values, MAX_DISCOVERY_ADDRESSES_PER_EVENT).len(),
             MAX_DISCOVERY_ADDRESSES_PER_EVENT
         );
-        assert_eq!(bounded_prefix(&values, 0), &[]);
+        assert!(bounded_prefix(&values, 0).is_empty());
     }
 
     #[test]
@@ -1955,6 +2531,37 @@ mod tests {
     }
 
     #[test]
+    fn address_admission_forget_peer_purges_every_source() {
+        let local = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let remote = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let first =
+            prepare_discovery_address(&local, remote, &test_address(4_001)).expect("first address");
+        let second = prepare_discovery_address(&local, remote, &test_address(4_002))
+            .expect("second address");
+        let mut admissions = AddressAdmissions::new(2, 2);
+
+        assert!(
+            admissions
+                .admit_prepared(remote, first.clone(), AddressSource::Mdns)
+                .expect("mDNS admission")
+        );
+        assert!(
+            !admissions
+                .admit_prepared(remote, first.clone(), AddressSource::Known)
+                .expect("cross-source admission")
+        );
+        assert!(
+            admissions
+                .admit_prepared(remote, second.clone(), AddressSource::Identify)
+                .expect("Identify admission")
+        );
+
+        assert_eq!(admissions.forget_peer(&remote), vec![first, second]);
+        assert!(!admissions.contains_peer(&remote));
+        assert!(admissions.forget_peer(&remote).is_empty());
+    }
+
+    #[test]
     fn identify_admission_requires_authenticated_peer_and_private_kademlia_protocol() {
         let keypair = identity::Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
@@ -1966,6 +2573,186 @@ mod tests {
             identify_info(&keypair, vec![StreamProtocol::new("/volparossa/not-kad/1")]);
         assert!(!identify_supports_private_kademlia(peer_id, &unsupported));
     }
+
+    #[tokio::test]
+    async fn identify_refresh_retains_supported_peer_and_purges_unsupported_peer() {
+        let local = identity::Keypair::generate_ed25519();
+        let local_peer = local.public().to_peer_id();
+        let remote = identity::Keypair::generate_ed25519();
+        let remote_peer = remote.public().to_peer_id();
+        let address = prepare_discovery_address(&local_peer, remote_peer, &test_address(4_001))
+            .expect("canonical mDNS address");
+        let mut service = DiscoveryService::new(local).expect("discovery service");
+        service
+            .add_prepared_kademlia_address(remote_peer, address, AddressSource::Mdns)
+            .expect("mDNS admission");
+        let connection_id = libp2p::swarm::ConnectionId::new_unchecked(1);
+
+        let supported = identify_info(&remote, vec![StreamProtocol::new(KADEMLIA_PROTOCOL)]);
+        service.refresh_identify_addresses(remote_peer, connection_id, &supported);
+        assert!(service.address_admissions.contains_peer(&remote_peer));
+
+        let unsupported =
+            identify_info(&remote, vec![StreamProtocol::new("/volparossa/not-kad/1")]);
+        service.refresh_identify_addresses(remote_peer, connection_id, &unsupported);
+        assert!(!service.address_admissions.contains_peer(&remote_peer));
+        assert!(
+            service
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .kbuckets()
+                .all(|bucket| bucket
+                    .iter()
+                    .all(|entry| entry.node.key.preimage() != &remote_peer))
+        );
+    }
+
+    #[tokio::test]
+    async fn relayed_identify_cannot_import_direct_listeners() {
+        let local = identity::Keypair::generate_ed25519();
+        let remote = identity::Keypair::generate_ed25519();
+        let remote_peer = remote.public().to_peer_id();
+        let circuit_relay = identity::Keypair::generate_ed25519().public().to_peer_id();
+        let mut service = DiscoveryService::new(local).expect("discovery service");
+        let relayed_endpoint = ConnectedPoint::Listener {
+            local_addr: format!("/ip4/8.8.8.8/tcp/443/p2p/{circuit_relay}/p2p-circuit")
+                .parse()
+                .expect("relayed local endpoint"),
+            send_back_addr: "/ip4/1.1.1.1/udp/41000/quic-v1"
+                .parse()
+                .expect("remote endpoint"),
+        };
+        let direct_endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/1.1.1.1/udp/41000/quic-v1"
+                .parse()
+                .expect("direct endpoint"),
+            role_override: Endpoint::Dialer,
+            port_use: PortUse::New,
+        };
+        let relayed_id = libp2p::swarm::ConnectionId::new_unchecked(1);
+        let direct_id = libp2p::swarm::ConnectionId::new_unchecked(2);
+        let info = identify_info(&remote, vec![StreamProtocol::new(KADEMLIA_PROTOCOL)]);
+
+        service
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id: remote_peer,
+                connection_id: relayed_id,
+                endpoint: &relayed_endpoint,
+                failed_addresses: &[],
+                other_established: 0,
+            }));
+        service.refresh_identify_addresses(remote_peer, relayed_id, &info);
+        assert!(!service.address_admissions.contains_peer(&remote_peer));
+
+        service
+            .swarm
+            .behaviour_mut()
+            .connection_provenance
+            .on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+                peer_id: remote_peer,
+                connection_id: direct_id,
+                endpoint: &direct_endpoint,
+                failed_addresses: &[],
+                other_established: 1,
+            }));
+        service.refresh_identify_addresses(remote_peer, direct_id, &info);
+        let admitted = &service.address_admissions.by_peer[&remote_peer];
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].sources, AddressSource::Identify.mask());
+
+        let mut changed_info = info;
+        changed_info.listen_addrs = vec![test_address(4_003)];
+        service.refresh_identify_addresses(remote_peer, relayed_id, &changed_info);
+        let retained = &service.address_admissions.by_peer[&remote_peer];
+        assert_eq!(retained.len(), 1);
+        assert!(retained[0].address.to_string().contains("/tcp/4001/"));
+    }
+
+    async fn next_other_event(
+        service: &mut DiscoveryService,
+    ) -> libp2p::swarm::SwarmEvent<BehaviourEvent> {
+        loop {
+            if let DiscoveryEvent::Other(event) = service.next_event().await {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn client_mode_identify_excludes_private_kademlia_server_protocol() {
+        let client_key = identity::Keypair::generate_ed25519();
+        let client_peer = client_key.public().to_peer_id();
+        let exit_key = identity::Keypair::generate_ed25519();
+        let mut client = DiscoveryService::new_with_protocol_roles(
+            client_key,
+            DiscoveryProtocolRoles::new(true, false, false),
+        )
+        .expect("client discovery");
+        let mut exit = DiscoveryService::new_with_protocol_roles(
+            exit_key,
+            DiscoveryProtocolRoles::new(false, false, true),
+        )
+        .expect("exit discovery");
+        let memory_id = NEXT_TEST_MEMORY_ADDRESS.fetch_add(1, Ordering::Relaxed);
+        client
+            .listen_on(
+                format!("/memory/{memory_id}")
+                    .parse()
+                    .expect("memory listener"),
+            )
+            .expect("listen");
+        let listen_address = timeout(Duration::from_secs(10), async {
+            loop {
+                if let libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } =
+                    next_other_event(&mut client).await
+                {
+                    break address;
+                }
+            }
+        })
+        .await
+        .expect("listener timeout");
+        exit.dial_peerlink(&PeerLink::new(client_peer, listen_address).expect("client peerlink"))
+            .expect("dial client");
+
+        let info = timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    event = next_other_event(&mut exit) => {
+                        if let libp2p::swarm::SwarmEvent::Behaviour(
+                            BehaviourEvent::Identify(identify::Event::Received {
+                                peer_id,
+                                info,
+                                ..
+                            }),
+                        ) = event
+                        {
+                            if peer_id == client_peer {
+                                break info;
+                            }
+                        }
+                    }
+                    _ = next_other_event(&mut client) => {}
+                }
+            }
+        })
+        .await
+        .expect("Identify timeout");
+
+        assert_eq!(info.public_key.to_peer_id(), client_peer);
+        assert!(
+            !info
+                .protocols
+                .iter()
+                .any(|protocol| protocol.as_ref() == KADEMLIA_PROTOCOL)
+        );
+        assert!(!identify_supports_private_kademlia(client_peer, &info));
+    }
+
     #[test]
     fn connection_limits_reject_excess_pending_inbound_without_bypasses() {
         let mut behaviour = connection_limits_behaviour();
