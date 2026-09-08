@@ -386,6 +386,11 @@ impl VerifiedManifest {
         self.length
     }
 
+    /// Signed SHA-256 of the complete ordered object, not an HTTPS origin proof.
+    pub fn object_sha256(&self) -> &[u8; 32] {
+        &self.whole_hash
+    }
+
     /// Authenticated chunk order and lengths.
     pub fn chunks(&self) -> &[Chunk] {
         &self.chunks

@@ -118,6 +118,28 @@ def validate_path(phase, peers, provider_nodes, missing):
                     "provider application data escaped its protected path")
 
 
+def validate_local_output(phase):
+    fetch, output = phase["fetch"], phase["output"]
+    require(fetch["operation"] == "https_content_download" and fetch["local_delivery"] is True
+            and fetch["output_mode"] == "0600" and fetch["ownership_changed"] is False
+            and fetch["origin_authority_persisted"] is False
+            and fetch["sha256"] == output["sha256"] == SHA
+            and fetch["local_output"] == output["path"]
+            and fetch["cache"] == output["agent_cache"]
+            and fetch["local_output"] != fetch["cache"]
+            and output["user_uid"] > 0 and output["agent_uid"] > 0
+            and output["user_uid"] != output["agent_uid"]
+            and output["control_gid"] > 0 and output["control_gid"] != output["agent_gid"]
+            and output["output_mode"] == "0600" and output["directory_mode"] == "0700"
+            and output["agent_cache_mode"] == "0700"
+            and all(output[key] is True for key in (
+                "local_output_initially_absent", "no_clobber_verified", "no_clobber_rejected_before_network",
+                "agent_mount_positive_control", "agent_cannot_read_user_output_directory"))
+            and phase["status"]["serving"] is False
+            and phase["status"]["control_relay_peer_id"] == fetch["control_relay_peer_id"],
+            "same-operation HTTPS result was not delivered privately to the actual user account")
+
+
 def validate_evidence(evidence):
     publication, original = evidence["publication"], evidence["native_publication"]
     require(evidence["success"] is True
@@ -175,15 +197,19 @@ def validate_evidence(evidence):
                 and fetch["providers_used"] == len(active)
                 and len(fetch["provider_peer_ids"]) == len(active)
                 and set(fetch["provider_peer_ids"]) == {peers[node] for node in active}
-                and fetch["control_relay_peer_id"] == control and fetch["serving"] is False
+                and fetch["control_relay_peer_id"] == control
                 and output["client_cache_initially_absent"] is True
                 and output["client_mount_cannot_read_origin"] is True,
                 "normal CLI did not authenticate/reconstruct the expected peer-plus-origin bytes")
+        validate_local_output(phase)
         validate_path(phase, peers, provider_nodes, missing)
         validate_control(phase["control"], control_node, provider_nodes, missing)
     require(cases["complete"]["selected_route"]["route_context_id"]
                 == cases["missing"]["selected_route"]["route_context_id"],
             "HTTPS cases changed the carrying route context")
+    require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
+            explicit_fixture_ca_removed=True, user_directory_removed=True),
+            "temporary user outputs and explicit public CA were not cleaned up")
 
 
 def build_evidence(work):
@@ -192,6 +218,7 @@ def build_evidence(work):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
             fetch=read(work / f"{prefix}-fetch.json"),
+            status=read(work / f"{prefix}-status.json"),
             output=read(work / f"{prefix}-output.json"),
             selected_route=read(work / f"{prefix}-live-selection.json"),
             privacy={role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES},
@@ -202,6 +229,7 @@ def build_evidence(work):
         layout=read(work / "content-provider-layout.json"),
         expected_peers=read(work / "a01-expected-peers.json"),
         origin=read(work / "content-provider-https-origin.json"),
+        user_cleanup=read(work / "content-provider-https-user-cleanup.json"),
         missing_provider_stop=read(work / "content-provider-https-provider-stop.json"),
         withdrawal=read(work / "content-provider-https-withdrawal.json"))
     validate_evidence(evidence)

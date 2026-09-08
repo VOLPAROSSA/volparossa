@@ -3,8 +3,12 @@
 """Synthetic HTTPS-provider gate tests; not evidence of an actual network transfer."""
 
 import copy
+import json
+import os
 from pathlib import Path
 import runpy
+import subprocess
+import tempfile
 import unittest
 
 HERE = Path(__file__).parent
@@ -58,12 +62,21 @@ def fixture(control_node="relay2", native_publication=None):
             provider_application={node: dict(request_packets=0, response_packets=0,
                 response_payload_bytes=0) for node in CHECK["CANDIDATES"]})
         cases[name] = dict(
-            fetch=dict(bytes=CHECK["BYTES"], chunks=9, serving=False,
+            fetch=dict(bytes=CHECK["BYTES"], chunks=9, operation="https_content_download",
+                local_delivery=True, output_mode="0600", ownership_changed=False,
+                origin_authority_persisted=False, sha256=CHECK["SHA"],
+                local_output=f"/user/{name}.bin", cache=f"/agent/{name}-cache",
                 providers_used=len(active), provider_peer_ids=[peers[node] for node in active],
                 control_relay_peer_id=control_peer, origin_authenticated=True,
                 peer_bytes=1048699 if index else CHECK["BYTES"],
                 origin_body_bytes=1048576 if index else 0, origin_range_requests=4 if index else 0),
-            output=dict(bytes=CHECK["BYTES"], sha256=CHECK["SHA"],
+            status=dict(serving=False, control_relay_peer_id=control_peer),
+            output=dict(bytes=CHECK["BYTES"], sha256=CHECK["SHA"], path=f"/user/{name}.bin",
+                agent_cache=f"/agent/{name}-cache", user_uid=1001, agent_uid=1002,
+                control_gid=1003, agent_gid=1002, output_mode="0600", directory_mode="0700",
+                agent_cache_mode="0700", local_output_initially_absent=True,
+                no_clobber_verified=True, no_clobber_rejected_before_network=True,
+                agent_mount_positive_control=True, agent_cannot_read_user_output_directory=True,
                 client_cache_initially_absent=True, client_mount_cannot_read_origin=True),
             selected_route=copy.deepcopy(route), privacy=privacy, control=control)
     origin = dict(pid=300, connections=[
@@ -76,6 +89,7 @@ def fixture(control_node="relay2", native_publication=None):
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
+        user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
 
@@ -90,6 +104,46 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_https_local_delivery_requires_actual_owner_and_no_clobber_not_native_export(self):
+        evidence = fixture()
+        for field, wrong in (
+            ("user_uid", 1002), ("control_gid", 1002), ("output_mode", "0644"),
+            ("agent_cannot_read_user_output_directory", False), ("agent_mount_positive_control", False),
+            ("no_clobber_verified", False), ("no_clobber_rejected_before_network", False),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(evidence, ("cases", "complete", "output", field), wrong))
+        for field, wrong in (
+            ("operation", "content_export"), ("local_delivery", False),
+            ("origin_authority_persisted", True), ("ownership_changed", True),
+            ("local_output", "/agent/complete-cache"), ("cache", "/user/complete.bin"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(evidence, ("cases", "missing", "fetch", field), wrong))
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](changed(evidence, ("user_cleanup", "user_outputs_removed"), False))
+
+    def test_user_output_cleanup_is_exact_and_idempotent(self):
+        script = str(HERE.joinpath("content-provider-https-smoke.sh").resolve())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "client-fixtures/https-output"
+            output.mkdir(parents=True, mode=0o700)
+            for name in ("origin.pem", "complete-object.bin", "missing-object.bin"):
+                path = output / name
+                path.write_bytes(b"known public cleanup fixture")
+                path.chmod(0o400 if name == "origin.pem" else 0o600)
+            unrelated = root / "unrelated.txt"
+            unrelated.write_text("preserve", encoding="ascii")
+            environment = dict(os.environ, WORK=str(root), WORKER_UID=str(os.getuid()), WORKER_GID=str(os.getgid()))
+            for _ in range(2):
+                subprocess.run(["sh", "-eu", "-c", '. "$1"; content_provider_https_cleanup', "sh", script],
+                               env=environment, check=True, capture_output=True, timeout=5)
+            self.assertFalse(output.exists())
+            self.assertEqual(unrelated.read_text(encoding="ascii"), "preserve")
+            self.assertEqual(json.loads(root.joinpath("content-provider-https-user-cleanup.json").read_text()),
+                             fixture()["user_cleanup"])
+
     def test_exact_shared_publication_origin_authority_ranges_and_peer_receipts(self):
         for control in CHECK["PUBLIC_IPS"]:
             CHECK["validate_evidence"](fixture(control))

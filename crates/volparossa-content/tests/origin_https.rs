@@ -24,6 +24,18 @@ const METADATA: &str = "/.well-known/volparossa/content/asset";
 async fn https_metadata_authorizes_replica_reconstruction_and_same_version_origin_fallback() {
     let mut fixture = Fixture::new();
     let authorized = fixture.authenticate().await;
+    assert_eq!(authorized.native_manifest_bytes(), fixture.signed.encode());
+    assert_eq!(authorized.check_validity(NOW).unwrap(), NOW + 200);
+    assert_eq!(
+        authorized.verify_cached(&mut fixture.source, NOW).unwrap(),
+        fixture.content.len() as u64
+    );
+    assert!(authorized.check_validity(NOW + 200).is_err());
+    assert!(
+        authorized
+            .verify_cached(&mut fixture.source, NOW + 200)
+            .is_err()
+    );
     let mut first = fixture.store("replica-a");
     let mut second = fixture.store("replica-b");
     for (index, chunk) in authorized.manifest().chunks().iter().enumerate() {

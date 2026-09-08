@@ -340,6 +340,30 @@ impl ContentRuntime {
         result
     }
 
+    pub(crate) async fn download_https(
+        &self,
+        request: HttpsContentFetchRequest,
+        context: &ControlContext,
+        stream: &mut tokio::net::UnixStream,
+        request_id: &[u8],
+        ready_sent: &mut bool,
+    ) -> Result<(), ContentError> {
+        let foreground = self.foreground.enter();
+        let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
+        let result = timeout(
+            OPERATION_TIMEOUT,
+            https::download(request, context, stream, request_id, ready_sent),
+        )
+        .await
+        .map_err(|_| ContentError::Unavailable)?;
+        drop(retrieval);
+        drop(foreground);
+        if result.is_ok() {
+            self.start_replication(context).await;
+        }
+        result
+    }
+
     async fn start_replication(&self, context: &ControlContext) {
         let Ok(service) = self.service.try_lock() else {
             return;

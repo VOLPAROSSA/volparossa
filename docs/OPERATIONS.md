@@ -508,6 +508,29 @@ registered again; this is not automatic publication retention. Without the repli
 no background copying. They never capture browsing, resolve latest publication names or promise
 faster retrieval.
 
+For cooperative HTTPS origins, `content fetch-https` first obtains fresh authenticated
+same-origin metadata, uses matching peer chunks and fills missing ranges from that origin.
+To receive the result in the calling user's account instead of creating an agent-owned output:
+
+```sh
+volparossa content fetch-https \
+  --url https://downloads.example/asset.bin \
+  --metadata-path /.well-known/volparossa/content/asset \
+  --cache /agent-owned/new-https-cache --local-output ./asset.bin
+```
+
+Use exactly one of `--local-output` (caller-owned) and the existing `--output` (agent-owned).
+The cache still belongs to the agent. Local delivery uses the same authorized control connection;
+the user path is never passed to the agent. The CLI verifies the complete object and correlated
+final receipt, then atomically publishes a new `0600` file without overwriting anything. It does
+not create a second cache, change ownership, or save a reusable HTTPS authority document.
+`--reuse-cache` still requires fresh origin authorization; an offline origin is not bypassed.
+The origin must support the documented anonymous binary-content descriptor and satisfy the
+normal signed Exit policy. Debian's normal public CA bundle is used unless an explicit public
+`--ca-file` is supplied for this operation. This is not interception or generic browser caching.
+The CLI/process and origin-library checks pass; the updated different-UID network proof remains
+pending, as recorded in [implementation status](IMPLEMENTATION_STATUS.md).
+
 For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
 to `content serve`. By default the directory must be new, private to the agent and different from
 the existing publication cache. To restart this service with an existing owned replica store,

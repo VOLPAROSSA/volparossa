@@ -19,6 +19,7 @@ use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
 mod handoff;
+mod https_download;
 mod private_message;
 
 #[derive(Debug, Subcommand)]
@@ -164,8 +165,16 @@ pub(crate) struct FetchHttps {
     #[arg(long)]
     reuse_cache: bool,
     /// New output path writable by the agent account; no existing entry is overwritten.
-    #[arg(long)]
-    output: PathBuf,
+    #[arg(
+        long,
+        required_unless_present = "local_output",
+        conflicts_with = "local_output"
+    )]
+    output: Option<PathBuf>,
+    /// New 0600 output owned by your account; stream the freshly authorized result locally.
+    /// Its path is never sent to the agent, and no reusable HTTPS proof is saved.
+    #[arg(long, required_unless_present = "output", conflicts_with = "output")]
+    local_output: Option<PathBuf>,
     /// Explicit public PEM trust roots (at most 128 KiB); otherwise Debian system roots.
     /// Used only for this request: no installation, interception CA, or TLS bypass.
     #[arg(long)]
@@ -292,6 +301,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             return super::print_response(super::control::request(socket, operation).await?);
         }
         Command::FetchHttps(args) => {
+            if let Some(output) = &args.local_output {
+                return https_download::run(&args, socket, output).await;
+            }
             let operation = Operation::ContentFetchHttps(https_fetch_request(&args)?);
             return super::print_response(super::control::request(socket, operation).await?);
         }
@@ -342,7 +354,12 @@ fn https_fetch_request(
         resource_url: args.url.clone(),
         metadata_path: args.metadata_path.clone(),
         cache: absolute_path(&args.cache)?,
-        output: absolute_path(&args.output)?,
+        output: args
+            .output
+            .as_deref()
+            .map(absolute_path)
+            .transpose()?
+            .unwrap_or_default(),
         limits: Some(args.limits.wire_limits()),
         ca_certificates_pem,
         reuse_cache: args.reuse_cache,
@@ -713,6 +730,13 @@ mod tests {
             "new.bin",
         ];
         assert!(crate::Cli::try_parse_from(args).is_ok());
+        let mut local = args;
+        local[9] = "--local-output";
+        assert!(crate::Cli::try_parse_from(local).is_ok());
+        assert!(crate::Cli::try_parse_from(&args[..9]).is_err());
+        let mut conflicting = args.to_vec();
+        conflicting.extend(["--local-output", "caller.bin"]);
+        assert!(crate::Cli::try_parse_from(conflicting).is_err());
         let mut explicit_ca = args.to_vec();
         explicit_ca.extend(["--ca-file", "explicit-public-roots.pem"]);
         assert!(crate::Cli::try_parse_from(explicit_ca).is_ok());
@@ -806,7 +830,8 @@ mod tests {
             url: "https://origin.example/object.bin".into(),
             metadata_path: "/metadata".into(),
             cache: root.join("new-cache"),
-            output: root.join("new.bin"),
+            output: Some(root.join("new.bin")),
+            local_output: None,
             ca_file: None,
             limits: limits(),
         };
@@ -814,7 +839,7 @@ mod tests {
         assert!(default.ca_certificates_pem.is_empty());
         assert_eq!(default.resource_url, args.url);
         assert_eq!(default.metadata_path, args.metadata_path);
-        assert!(!args.cache.exists() && !args.output.exists());
+        assert!(!args.cache.exists() && !args.output.as_ref().unwrap().exists());
         let pem = b"-----BEGIN CERTIFICATE-----\nZmFrZSBwdWJsaWMgdGVzdCBjZXJ0\n-----END CERTIFICATE-----\n";
         let path = root.join("roots.pem");
         fs::write(&path, pem).expect("public parser fixture only, not a TLS test");
@@ -841,7 +866,7 @@ mod tests {
         assert!(https_fetch_request(&args).is_err());
         args.ca_file = Some(root.into());
         assert!(https_fetch_request(&args).is_err());
-        assert!(!args.cache.exists() && !args.output.exists());
+        assert!(!args.cache.exists() && !args.output.as_ref().unwrap().exists());
     }
 
     #[test]

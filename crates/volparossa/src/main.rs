@@ -641,8 +641,8 @@ fn print_response(response: ControlResponse) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("agent returned no typed payload"))?
     {
         Payload::Ack(_) => println!("ok"),
-        Payload::ContentTransferReady(_) => {
-            anyhow::bail!("unexpected content stream handoff outside import/export")
+        Payload::ContentTransferReady(_) | Payload::HttpsContentTransferReady(_) => {
+            anyhow::bail!("unexpected content stream handoff outside an explicit transfer")
         }
         Payload::Content(receipt) => println!(
             "{}",

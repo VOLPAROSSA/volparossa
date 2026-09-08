@@ -93,7 +93,10 @@ generic provider capability locates caches; DNS names never enter provider recor
 replies use the existing signed control envelope over an exact authenticated direct connection,
 excluding the local node and every retained control/data relay for the original route. A cache
 miss never makes the serving peer perform a recursive lookup. Each receiving Exit still applies
-its own policy and independently validates the proof before using it.
+its own policy and independently validates the proof before using it. Capability publication now
+requires at least one actual unexpired RAM proof for the active policy, not merely a configured
+resolver or enabled role. Cold Clients therefore publish no empty cache offer. Local withdrawal
+does not recall already propagated or in-flight DHT hints; cache misses still never recurse.
 
 `dns_cache.enabled` defaults to true but activates no roles or new listener. Optional
 `dns_cache.upstream` selects an operator-specified existing recursive TCP/53 endpoint for proof
@@ -214,8 +217,11 @@ In that `4c4c8954` run the sender remains a fixture; neither automatic key disco
 mailbox is introduced. The additive `f0936007` harness now composes normal private
 publish/import/serve/fetch/export/open, with the new sender's key and input removed before
 remote retrieval. Its local checks pass; its
-[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) is still in progress,
-not a completed normal-sender or full C07 network claim.
+[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) reaches successful
+transfer and recipient opening but fails the final privacy check: an empty DNS-cache provider
+advertisement causes three outgoing Exit-to-Client discovery attempts. The availability correction
+passes targeted checks but needs a fresh network run; the original run stays failed, not a
+completed normal-sender or full C07 network claim.
 
 Five focused tests, strict crate Clippy and an isolated separate-process transfer/decryption
 proof pass. The [`content-message` protected-route KVM scenario](https://github.com/VOLPAROSSA/volparossa/actions/runs/34149009080)

@@ -201,6 +201,19 @@ impl ExitResolver {
         )))
     }
 
+    /// Whether this RAM cache can currently share a verified proof under exactly this policy.
+    /// This reveals no question or answer, performs no resolution and never renews a deadline.
+    pub fn has_shareable_proof(&self, policy_hash: &[u8; 32]) -> bool {
+        let Ok(mut cache) = self.cache.lock() else {
+            return false;
+        };
+        Self::prune(&mut cache);
+        cache
+            .entries
+            .keys()
+            .any(|(policy, _, _)| policy == policy_hash)
+    }
+
     /// Return only independently validated, unexpired cached evidence. Never resolves a miss.
     pub fn cached_bundle(
         &self,

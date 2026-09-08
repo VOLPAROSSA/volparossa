@@ -1172,6 +1172,9 @@ cleanup() {
     if [ "$scenario" = content-provider ] && command -v content_publication_cleanup >/dev/null 2>&1; then
         content_publication_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-provider ] && command -v content_provider_https_cleanup >/dev/null 2>&1; then
+        content_provider_https_cleanup || original_status=1
+    fi
     capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
@@ -1574,6 +1577,17 @@ if [ "$scenario" = dns-cache ]; then
     install -o root -g root -m 0555 "$binary_directory/examples/dns-cache-proof" "$WORK/bin/examples/dns-cache-proof"
     for dns_client_script in dns-cache-smoke.py dns-cache-fixture.py dns-cache-capture.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$dns_client_script" "$WORK/bin/$dns_client_script"
+    done
+    # The preflight runs as capability-dropped root, not the vpci checkout owner.
+    # Preserve the scripts' relative layout in this exact root-owned staging tree;
+    # no traversal of vpci's private source directory or retained DAC capability.
+    install -d -o root -g root -m 0700 "$WORK/dns-preflight-tools/scripts" \
+        "$WORK/dns-preflight-tools/tests/integration"
+    install -o root -g root -m 0555 "$source_directory/scripts/run-isolated-test.sh" \
+        "$WORK/dns-preflight-tools/scripts/run-isolated-test.sh"
+    for dns_preflight_script in dns-cache-proof.sh dns-cache-fixture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$dns_preflight_script" \
+            "$WORK/dns-preflight-tools/tests/integration/$dns_preflight_script"
     done
 fi
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/client-fixtures"

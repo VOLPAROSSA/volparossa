@@ -108,6 +108,11 @@ an existing owned cache, retrieving only missing chunks. HTTPS still obtains fre
 authorization; cached bytes do not renew expiry or count as newly received peer traffic.
 See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
 [source-scoped results](docs/IMPLEMENTATION_STATUS.md).
+For cooperative HTTPS downloads, new `content fetch-https --local-output ./asset.bin` delivers
+directly to a new `0600` file owned by the calling user, while the cache remains agent-owned.
+Fresh origin authority and the final transfer receipt are checked before publication; no
+ownership change or reusable HTTPS proof is introduced. Local process checks pass; the updated
+cross-account network proof is still pending. Existing agent-side `--output` remains available.
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 Normal `content recipient-key`, `content publish-message` and `content open-message` commands

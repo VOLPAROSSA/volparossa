@@ -166,6 +166,31 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
+    if let Some(control_request::Operation::ContentDownloadHttps(download)) = &request.operation {
+        let mut ready_sent = false;
+        let result = Box::pin(context.content.download_https(
+            download.clone(),
+            &context,
+            &mut stream,
+            &request.request_id,
+            &mut ready_sent,
+        ))
+        .await;
+        return match result {
+            Ok(()) => Ok(()),
+            Err(_) if ready_sent => Err(ControlServerError::InvalidFrame),
+            Err(error) => timeout(
+                CONTROL_TIMEOUT,
+                write_response(
+                    &mut stream,
+                    &content_response(request.request_id, Err(error)),
+                ),
+            )
+            .await
+            .map_err(|_| ControlServerError::Timeout)?
+            .map_err(|_| ControlServerError::InvalidFrame),
+        };
+    }
     if matches!(
         request.operation.as_ref(),
         Some(
@@ -198,7 +223,8 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
     };
     match operation {
         control_request::Operation::ContentImport(_)
-        | control_request::Operation::ContentExport(_) => {
+        | control_request::Operation::ContentExport(_)
+        | control_request::Operation::ContentDownloadHttps(_) => {
             // These require the same authorized stream, never a second socket or generic dispatch.
             response(
                 request_id,

@@ -11,7 +11,7 @@ mod content;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchRequest, ContentImportRequest,
     ContentReceipt, ContentReplicationConfig, ContentServeRequest, ContentTransferReady,
-    HttpsContentFetchRequest,
+    HttpsContentFetchRequest, HttpsContentTransferReady,
 };
 
 use prost::Message;
@@ -41,7 +41,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -109,6 +109,9 @@ pub mod control_request {
         /// Upgrade this same protected local socket for explicit ciphertext export.
         #[prost(message, tag = "26")]
         ContentExport(ContentExportRequest),
+        /// Fresh HTTPS retrieval followed by same-socket delivery; output must be empty.
+        #[prost(message, tag = "27")]
+        ContentDownloadHttps(HttpsContentFetchRequest),
     }
 }
 
@@ -194,7 +197,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -204,8 +207,8 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ContentReceipt, ContentTransferReady, Empty, LogList, PathList, PeerList, PolicySnapshot,
-        RoleSnapshot, SessionList, StatusSnapshot,
+        ContentReceipt, ContentTransferReady, Empty, HttpsContentTransferReady, LogList, PathList,
+        PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -241,6 +244,9 @@ pub mod control_response {
         /// Validated scope for a following bounded same-socket chunk exchange; not success.
         #[prost(message, tag = "19")]
         ContentTransferReady(ContentTransferReady),
+        /// Ephemeral local HTTPS authority for this connection's following chunk exchange.
+        #[prost(message, tag = "20")]
+        HttpsContentTransferReady(HttpsContentTransferReady),
     }
 }
 
@@ -638,6 +644,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentServe(request) => request.validate()?,
         control_request::Operation::ContentFetch(request) => request.validate()?,
         control_request::Operation::ContentFetchHttps(request) => request.validate()?,
+        control_request::Operation::ContentDownloadHttps(request) => request.validate_download()?,
         control_request::Operation::ContentImport(request) => request.validate()?,
         control_request::Operation::ContentExport(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
@@ -732,6 +739,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         }
         control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
         control_response::Payload::ContentTransferReady(ready) => ready.validate()?,
+        control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

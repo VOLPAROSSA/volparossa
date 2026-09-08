@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Instant, timeout_at};
 
@@ -260,6 +261,83 @@ where
     session.check_deadline()?;
     check_time(manifest)?;
     Ok(())
+}
+
+/// Pull one complete ordered object directly to a caller-owned writer using the existing frames.
+///
+/// Buffers at most one chunk; verifies every chunk and the complete hash without a second cache.
+/// The writer may contain a verified prefix on failure: publish it only after success and any
+/// enclosing HTTPS authorization/final-receipt checks. The manifest's trust belongs to the caller.
+///
+/// # Errors
+/// Rejects missing/corrupt data, expiry, framing, output errors and bounded deadlines/budgets.
+pub async fn pull_to_writer<S, W>(
+    stream: &mut S,
+    manifest: &VerifiedManifest,
+    writer: &mut W,
+    limits: TransferLimits,
+) -> Result<TransferProgress, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    W: std::io::Write,
+{
+    let mut session = Session::new(limits)?;
+    let mut progress = TransferProgress::default();
+    let mut whole_hash = Sha256::new();
+    for chunk in manifest.chunks() {
+        session.check_deadline()?;
+        check_time(manifest)?;
+        session.reserve(chunk.length())?;
+        let request = Request {
+            version: VERSION,
+            hash: chunk.id().as_bytes().to_vec(),
+            length: chunk.length(),
+            finish: false,
+        };
+        let response: Response = timeout_at(session.exchange_deadline(), async {
+            write_frame(stream, &request, MAX_REQUEST_BYTES).await?;
+            read_frame(stream, MAX_RESPONSE_BYTES).await
+        })
+        .await
+        .map_err(|_| TransferError::Timeout)??;
+        check_time(manifest)?;
+        if response.version != VERSION
+            || response.hash != request.hash
+            || response.length != request.length
+            || !response.found
+            || response.data.len() as u64 != u64::from(chunk.length())
+        {
+            return Err(TransferError::Protocol);
+        }
+        if ChunkId::digest(&response.data) != *chunk.id() {
+            return Err(crate::Error::Integrity(*chunk.id()).into());
+        }
+        writer.write_all(&response.data)?;
+        whole_hash.update(&response.data);
+        progress.chunks += 1;
+        progress.bytes += u64::from(chunk.length());
+    }
+    if progress.bytes != manifest.length()
+        || <[u8; 32]>::from(whole_hash.finalize()) != manifest.whole_hash
+    {
+        return Err(TransferError::Protocol);
+    }
+    let finish = Request {
+        version: VERSION,
+        hash: Vec::new(),
+        length: 0,
+        finish: true,
+    };
+    session.check_deadline()?;
+    timeout_at(
+        session.exchange_deadline(),
+        write_frame(stream, &finish, MAX_REQUEST_BYTES),
+    )
+    .await
+    .map_err(|_| TransferError::Timeout)??;
+    session.check_deadline()?;
+    check_time(manifest)?;
+    Ok(progress)
 }
 
 /// Serve only pieces named by one explicitly approved, verified native publication.

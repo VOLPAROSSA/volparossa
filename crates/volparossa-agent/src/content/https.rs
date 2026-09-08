@@ -3,16 +3,21 @@
 //! Origin trust is authenticated before any provider lookup, and remains in memory until
 //! atomic output reconstruction. Cached native signatures never substitute for HTTPS authority.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use tokio::io::AsyncReadExt;
+use tokio::{net::UnixStream, time::timeout};
 use volparossa_content::ChunkStore;
 use volparossa_content::origin_https::{
     OriginAuthorizedManifest, OriginClient, OriginLimits, OriginRequest,
 };
-use volparossa_local_control::{ContentReceipt, HttpsContentFetchRequest};
+use volparossa_content::transfer::{TransferLimits, serve_peer};
+use volparossa_local_control::{
+    CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
+    HttpsContentFetchRequest, HttpsContentTransferReady, control_response::Payload, write_response,
+};
 use volparossa_policy::{TransportProtocol, VerifiedManifest as VerifiedPolicy};
 
 use super::{ContentError, ContentRuntime, download_cache, limits, now};
@@ -29,6 +34,30 @@ pub(super) async fn fetch(
     request: HttpsContentFetchRequest,
     context: &ControlContext,
 ) -> Result<ContentReceipt, ContentError> {
+    let output = PathBuf::from(&request.output);
+    if output.try_exists().map_err(|_| ContentError::Invalid)? {
+        return Err(ContentError::Invalid);
+    }
+    let mut download = retrieve(request, context).await?;
+    download.receipt.bytes = download
+        .authorized
+        .reassemble_to_file(&mut [&mut download.store], now(), &output)
+        .map_err(|_| ContentError::Unavailable)?;
+    Ok(download.receipt)
+}
+
+struct PreparedDownload {
+    origin: OriginRequest,
+    policy: VerifiedPolicy,
+    authorized: OriginAuthorizedManifest,
+    store: ChunkStore,
+    receipt: ContentReceipt,
+}
+
+async fn retrieve(
+    request: HttpsContentFetchRequest,
+    context: &ControlContext,
+) -> Result<PreparedDownload, ContentError> {
     let origin = OriginRequest::new(&request.resource_url, &request.metadata_path)
         .map_err(|_| ContentError::Invalid)?;
     let client = OriginClient::new(
@@ -36,10 +65,6 @@ pub(super) async fn fetch(
         OriginLimits::default(),
     )
     .map_err(|_| ContentError::Invalid)?;
-    let output = PathBuf::from(request.output);
-    if output.try_exists().map_err(|_| ContentError::Invalid)? {
-        return Err(ContentError::Invalid);
-    }
     let cache_limits = limits(request.limits)?;
     let policy = {
         let state = context.state.read().await;
@@ -94,11 +119,8 @@ pub(super) async fn fetch(
     let (origin_body_bytes, origin_range_requests) =
         fill_missing(context, &client, &origin, &authorized, &policy, &mut store).await?;
     checked_policy(context, &origin, &policy).await?;
-    let bytes = authorized
-        .reassemble_to_file(&mut [&mut store], now(), &output)
-        .map_err(|_| ContentError::Unavailable)?;
-    Ok(ContentReceipt {
-        bytes,
+    let receipt = ContentReceipt {
+        bytes: authorized.manifest().length(),
         chunks: u32::try_from(authorized.manifest().chunks().len())
             .map_err(|_| ContentError::Invalid)?,
         providers_used: u32::try_from(providers.len()).map_err(|_| ContentError::Invalid)?,
@@ -109,7 +131,113 @@ pub(super) async fn fetch(
         peer_bytes,
         origin_range_requests,
         ..ContentReceipt::default()
+    };
+    Ok(PreparedDownload {
+        origin,
+        policy,
+        authorized,
+        store,
+        receipt,
     })
+}
+
+/// Complete fresh origin authorization and deliver directly from the owned cache.
+/// `ready_sent` prevents a later error from being injected into unfinished chunk framing.
+pub(super) async fn download(
+    request: HttpsContentFetchRequest,
+    context: &ControlContext,
+    stream: &mut UnixStream,
+    request_id: &[u8],
+    ready_sent: &mut bool,
+) -> Result<(), ContentError> {
+    if !request.output.is_empty() {
+        return Err(ContentError::Invalid);
+    }
+    let resource_url = request.resource_url.clone();
+    let mut download = retrieve(request, context).await?;
+    download.receipt.bytes = download
+        .authorized
+        .verify_cached(&mut download.store, now())
+        .map_err(|_| ContentError::Unavailable)?;
+    let expires = download
+        .authorized
+        .check_validity(now())
+        .map_err(|_| ContentError::Unavailable)?;
+    let remaining = expires
+        .checked_sub(now())
+        .filter(|seconds| *seconds > 0)
+        .ok_or(ContentError::Unavailable)?;
+    timeout(Duration::from_secs(remaining.min(30)), async {
+        let ready = HttpsContentTransferReady {
+            manifest: download.authorized.native_manifest_bytes().to_vec(),
+            publisher_key: download.authorized.manifest().publisher().to_vec(),
+            resource_url,
+            expires_unix_seconds: expires,
+        };
+        checked_policy(context, &download.origin, &download.policy).await?;
+        *ready_sent = true;
+        send_local_response(
+            stream,
+            request_id,
+            "HTTPS_CONTENT_TRANSFER_READY",
+            Payload::HttpsContentTransferReady(ready),
+        )
+        .await?;
+        let manifest = download.authorized.manifest();
+        let progress = serve_peer(
+            stream,
+            manifest,
+            &mut download.store,
+            TransferLimits {
+                exchange_timeout: Duration::from_secs(5),
+                session_timeout: Duration::from_secs(30),
+                max_requests: manifest.chunks().len().max(1),
+                max_bytes: manifest.length().max(1),
+            },
+        )
+        .await
+        .map_err(|_| ContentError::Unavailable)?;
+        if progress.missing != 0
+            || progress.bytes != manifest.length()
+            || progress.chunks != manifest.chunks().len()
+        {
+            return Err(ContentError::Unavailable);
+        }
+        download
+            .authorized
+            .check_validity(now())
+            .map_err(|_| ContentError::Unavailable)?;
+        checked_policy(context, &download.origin, &download.policy).await?;
+        send_local_response(
+            stream,
+            request_id,
+            "CONTENT_OK",
+            Payload::Content(download.receipt),
+        )
+        .await
+    })
+    .await
+    .map_err(|_| ContentError::Unavailable)?
+}
+
+async fn send_local_response(
+    stream: &mut UnixStream,
+    request_id: &[u8],
+    code: &str,
+    payload: Payload,
+) -> Result<(), ContentError> {
+    write_response(
+        stream,
+        &ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: request_id.to_vec(),
+            result: ControlResult::Ok as i32,
+            diagnostic_code: code.into(),
+            payload: Some(payload),
+        },
+    )
+    .await
+    .map_err(|_| ContentError::Unavailable)
 }
 
 async fn checked_policy(

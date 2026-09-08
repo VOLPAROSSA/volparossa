@@ -222,7 +222,7 @@ dns_cache_run() {
     if grep -Eq '(^|[[:space:]])iana\.org([[:space:]]|$)' /etc/hosts; then fail DNS_CACHE_PUBLIC_HOSTS_SHORTCUT; fi
     python3 -B "$source_directory/tests/integration/dns-cache-fixture.py" collect "$WORK/dns-cache-fixture" \
         >"$WORK/dns-cache-collect.log" 2>&1 || fail DNS_CACHE_FRESH_PUBLIC_CHAIN_UNAVAILABLE
-    sh "$source_directory/tests/integration/dns-cache-proof.sh" --execute --yes \
+    sh "$WORK/dns-preflight-tools/tests/integration/dns-cache-proof.sh" --execute --yes \
         --fixture "$WORK/dns-cache-fixture" --binary "$binary_directory/examples/dns-cache-proof" \
         --output "$WORK/dns-cache-preflight" >"$WORK/dns-cache-preflight.log" 2>&1 \
         || fail DNS_CACHE_BUILTIN_ANCHOR_VALIDATION_FAILED
@@ -234,6 +234,19 @@ dns_cache_run() {
       other_nodes_cache_disabled:true,production_root_anchors_unchanged:true}' >"$WORK/dns-cache-config.json"
     dns_cache_phase warm-a-a exit A upstream_validated
     dns_cache_phase warm-a-aaaa exit AAAA upstream_validated
+    # Both caches begin cold and must not advertise an empty service. Wait for the actual
+    # successful availability publication after A's genuine validation, without refreshing TTLs.
+    dc_available=no; dc_availability_deadline=$(($(date +%s) + 30))
+    while [ "$(date +%s)" -lt "$dc_availability_deadline" ]; do
+        if timeout --signal=TERM --kill-after=1s 2s "$binary_directory/volparossa" \
+            --control-socket "$WORK/runtime-exit/control/agent.sock" logs --limit 400 \
+            >"$WORK/dns-cache-provider-availability.txt" \
+            && grep -F 'event=DNS_CACHE_PROVIDER_AVAILABLE' "$WORK/dns-cache-provider-availability.txt" >/dev/null; then
+            dc_available=yes; break
+        fi
+        sleep 0.1
+    done
+    [ "$dc_available" = yes ] || fail DNS_CACHE_PROVIDER_PUBLICATION_UNAVAILABLE
     dns_cache_phase peer-b-a exit2 A peer_validated
     dns_cache_phase peer-b-aaaa exit2 AAAA peer_validated
     dns_cache_phase unsigned-b exit2 A trusted_fallback
@@ -254,6 +267,24 @@ dns_cache_run() {
 
 dns_cache_finalize_report() {
     dc_final_status=$1
+    # Keep the actual validator/namespace error even when preflight fails before
+    # its success-only receipts are copied. These fixed files contain public DNS
+    # wire data or bounded fixture diagnostics, never agent identities or traffic.
+    for dc_diagnostic in namespace.stdout namespace.stderr core.jsonl core.stderr \
+        replay.stdout replay.stderr replay.json replay-ready.json proof.json; do
+        dc_source=$WORK/dns-cache-preflight/$dc_diagnostic
+        if [ -f "$dc_source" ] && [ ! -L "$dc_source" ]; then
+            [ "$(stat -c '%s' "$dc_source")" -le 131072 ] || return 1
+            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$dc_source" \
+                "$output_directory/dns-cache-preflight-$dc_diagnostic" || return 1
+        fi
+    done
+    dc_source=$WORK/dns-cache-fixture/recording.json
+    if [ -f "$dc_source" ] && [ ! -L "$dc_source" ]; then
+        [ "$(stat -c '%s' "$dc_source")" -le 131072 ] || return 1
+        install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$dc_source" \
+            "$output_directory/dns-cache-recording.json" || return 1
+    fi
     for dc_artifact in "$WORK"/dns-cache-*.json "$WORK"/dns-cache-*.txt \
         "$WORK"/dns-cache-*.out "$WORK"/dns-cache-*.err "$WORK"/dns-cache-*.log; do
         [ ! -f "$dc_artifact" ] || [ -L "$dc_artifact" ] || \

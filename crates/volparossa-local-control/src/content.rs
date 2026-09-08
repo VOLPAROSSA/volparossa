@@ -200,6 +200,40 @@ pub struct HttpsContentFetchRequest {
     pub reuse_cache: bool,
 }
 
+/// Same-operation local handoff after the agent's own fresh HTTPS authorization.
+/// Never a transferable origin proof or authority accepted from storage peers/disk.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct HttpsContentTransferReady {
+    /// Original canonical native manifest authenticated by the requested HTTPS origin.
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest: Vec<u8>,
+    /// Publisher key from that origin authorization, not a separate peer trust anchor.
+    #[prost(bytes = "vec", tag = "2")]
+    pub publisher_key: Vec<u8>,
+    /// Exact resource from the correlated local request.
+    #[prost(string, tag = "3")]
+    pub resource_url: String,
+    /// Original HTTP/manifest expiry, never renewed by this local transfer.
+    #[prost(uint64, tag = "4")]
+    pub expires_unix_seconds: u64,
+}
+
+impl HttpsContentTransferReady {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        validate_publication(&self.manifest, &self.publisher_key)?;
+        if self.resource_url.len() > 4096
+            || !self.resource_url.starts_with("https://")
+            || self.resource_url.bytes().any(|b| b.is_ascii_control())
+            || self.expires_unix_seconds == 0
+        {
+            return Err(ControlProtocolError::Invalid(
+                "invalid local HTTPS readiness",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Actual successful content work, separate from route or generic alpha readiness.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct ContentReceipt {
@@ -311,6 +345,21 @@ impl ContentFetchRequest {
 
 impl HttpsContentFetchRequest {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        self.validate_common()?;
+        validate_path(&self.output)
+    }
+
+    pub(crate) fn validate_download(&self) -> Result<(), ControlProtocolError> {
+        self.validate_common()?;
+        if !self.output.is_empty() {
+            return Err(ControlProtocolError::Invalid(
+                "local HTTPS download must not send an output path",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_common(&self) -> Result<(), ControlProtocolError> {
         if self.resource_url.len() > 4096
             || !self.resource_url.starts_with("https://")
             || self.resource_url.bytes().any(|b| b.is_ascii_control())
@@ -327,7 +376,6 @@ impl HttpsContentFetchRequest {
         }
         // Full URL/metadata canonicalization is repeated by the CLI and agent's OriginRequest.
         validate_path(&self.cache)?;
-        validate_path(&self.output)?;
         validate_limits(self.limits)
     }
 }
@@ -553,6 +601,45 @@ mod tests {
             }),
             ca_certificates_pem: Vec::new(),
         }
+    }
+
+    #[test]
+    fn https_local_download_has_distinct_operation_ready_and_no_user_path() {
+        let mut fetch = https_request();
+        assert!(fetch.validate().is_ok());
+        assert!(fetch.validate_download().is_err());
+        fetch.output.clear();
+        assert!(fetch.validate().is_err());
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![7; 16],
+            operation: Some(Operation::ContentDownloadHttps(fetch.clone())),
+        };
+        assert_eq!(
+            decode_request(&encode_request(&request).unwrap()).unwrap(),
+            request
+        );
+        let mut ready = HttpsContentTransferReady {
+            manifest: vec![1; 256],
+            publisher_key: vec![2; 32],
+            resource_url: fetch.resource_url,
+            expires_unix_seconds: 1,
+        };
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: request.request_id,
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+            payload: Some(Payload::HttpsContentTransferReady(ready.clone())),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
+        ready.manifest = vec![0; 64 * 1024 + 1];
+        assert!(ready.validate().is_err());
+        assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
+        assert_eq!(CONTROL_PROTOCOL_VERSION, 2);
     }
 
     #[test]

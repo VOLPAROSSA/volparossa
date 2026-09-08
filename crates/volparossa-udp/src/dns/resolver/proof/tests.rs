@@ -233,8 +233,8 @@ async fn received_rrsig_ttl_and_original_first_seen_deadline_never_renew() {
         super::super::DnsResolutionCounts::default()
     );
     let scope = DnsResolutionScope::without_peers(policy);
-    let resolved = resolver.clone().resolve(&question, &scope).await.unwrap();
-    assert_eq!(resolved.source(), DnsAnswerSource::LocalValidated);
+    let answer = resolver.clone().resolve(&question, &scope).await.unwrap();
+    assert_eq!(answer.source(), DnsAnswerSource::LocalValidated);
     assert_eq!(resolver.counts().local_validated, 1);
     assert_eq!(
         resolver.counts().peer_validated,
@@ -243,6 +243,71 @@ async fn received_rrsig_ttl_and_original_first_seen_deadline_never_renew() {
     );
     assert!(!DnsResolutionScope::without_peers(policy).permits_peers());
     assert!(DnsResolutionScope::new(policy, Vec::new()).is_err());
+}
+
+#[tokio::test]
+async fn shareable_availability_requires_current_policy_and_both_original_deadlines() {
+    let fixture = fixture(DnsQueryType::A);
+    let resolver = ExitResolver::default();
+    let policy = [3; 32];
+    assert!(!resolver.has_shareable_proof(&policy));
+    let proof = validate_with_anchors(fixture.bundle.clone(), Arc::clone(&fixture.anchors))
+        .await
+        .unwrap();
+    let question = proof.bundle.question().clone();
+    resolver
+        .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+        .unwrap();
+    let original_expiry = resolver
+        .cached_bundle(&question, &policy)
+        .unwrap()
+        .expires_at_unix_ms();
+    assert!(resolver.has_shareable_proof(&policy));
+    assert!(!resolver.has_shareable_proof(&[4; 32]));
+    assert!(
+        resolver
+            .cached_bundle(&question, &policy)
+            .unwrap()
+            .expires_at_unix_ms()
+            <= original_expiry
+    );
+    assert!(!ExitResolver::default().has_shareable_proof(&policy));
+    // Monotone expiry withdraws availability even when signed wall-clock expiry is in the future.
+    resolver
+        .cache
+        .lock()
+        .unwrap()
+        .entries
+        .values_mut()
+        .next()
+        .unwrap()
+        .deadline = Instant::now();
+    assert!(!resolver.has_shareable_proof(&policy));
+    assert!(resolver.cached_bundle(&question, &policy).is_none());
+    let proof = validate_with_anchors(fixture.bundle, fixture.anchors)
+        .await
+        .unwrap();
+    resolver
+        .retain(proof, &policy, DnsAnswerSource::PeerValidated)
+        .unwrap();
+    // Wall-clock expiry independently withdraws a still-monotonically-live retained entry.
+    resolver
+        .cache
+        .lock()
+        .unwrap()
+        .entries
+        .values_mut()
+        .next()
+        .unwrap()
+        .proof
+        .bundle
+        .bound_expiry(unix_millis().unwrap().saturating_sub(1));
+    assert!(!resolver.has_shareable_proof(&policy));
+    assert!(resolver.cached_bundle(&question, &policy).is_none());
+    assert_eq!(
+        resolver.counts(),
+        super::super::DnsResolutionCounts::default()
+    );
 }
 
 #[test]

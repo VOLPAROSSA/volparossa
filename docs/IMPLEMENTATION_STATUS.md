@@ -54,12 +54,40 @@ has not passed yet. Its disposable `dns-cache` scenario is now executable: fresh
 wire records, normal protected requests to each selected Exit, seven source-accounted phases,
 peer shutdown and 35 physical capture windows. Four checker/classifier tests, four existing
 public-fixture tests and shell/topology-contract checks pass; these are not a live peer-cache pass.
+Its [first `1c9c759d` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34183233474)
+fails during preflight, before the normal DNS phases. Public wire collection succeeds, but nested
+validator diagnostics were not exported. Source review finds the replay script still under the
+`vpci`-owned private checkout, unreadable to capability-dropped root; the binary was already
+correctly staged. The fixture now stages script/replay/runner together in a root-owned tree and
+retains bounded nested diagnostics. No DNSSEC root, signed record or TTL rule is loosened, and
+the correction still needs a new live run. Cleanup leaves zero owned objects and raw guest state
+unchanged, SHA-256 `dc55803ed7a7fb55413bf488dbb6b3fa7a98e4179b34f8007bea64e72e459cec`.
+Artifact SHA-256: `9e0e9d67392ea71ab159a637503d63e4f2c63fe963b5a1d6bdb764ec56a39ba0`.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
 is claimed. The older content VM successes below do not verify this newer DNS-integrated build.
 
+The empty-cache advertisement defect identified by the private-message run is now corrected
+locally: DNS capability publication requires an actual unexpired RAM proof for the currently
+active policy. A cold pure Client publishes no cache offer; expiry, policy change and RAM reset
+withdraw the local offer. One real signed-proof availability test, two isolated actor tests and
+strict agent/UDP Clippy pass. The C05 fixture waits for an actual Kademlia publication completion
+after warming A, not a fixed delay. Already propagated or in-flight DHT hints can still be stale
+and cause a dial; no complete recall or general combined-role unlinkability is claimed.
+
 ## Latest content integration checkpoint
+
+The normal HTTPS command now also supports `--local-output`: the agent keeps its fresh origin
+authorization alive while streaming verified chunks over the same authorized Unix connection,
+then sends a correlated final receipt. The CLI verifies exact bytes/hash, original expiry and
+receipt before atomically publishing a new user-owned `0600` file. It sends no user-output path,
+creates no second cache or extra agent-output file, and retains no reusable HTTPS proof.
+Existing `--output` and its wire operation remain unchanged. Two isolated real CLI-process tests,
+three CLI argument tests, twelve origin-TLS/Range library tests, the new wire test and strict
+four-crate Clippy pass. The existing complete/missing HTTPS topology cases now use separate
+operator/service accounts, with exact output ownership, no-clobber and cleanup requirements;
+their new network result remains pending, not inferred from the local control fixture.
 
 Explicit local `content import`/`content export` now bridge user-owned and service-owned private
 message caches through the same authorized Unix control connection. Typed Ready/final receipts
@@ -82,12 +110,20 @@ This is normal local sender/account integration plus the existing fixture-publis
 not a complete normal sender network runtime, mailbox or C07. Exact CodeQL analysis passes;
 Quality was cancelled by a newer head, not reported as passed.
 The additive normal private-network harness is now committed as `f0936007` and its
-[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) is in progress,
-not passed. It preserves the earlier complementary-replica proof, then uses normal
+[exact VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182554210) **failed** its final
+privacy evidence check. It preserves the earlier complementary-replica proof, then uses normal
 publish-message/import/serve/fetch/export/open across separate operator/service accounts.
 The new sender identity and plaintext input are removed before remote retrieval; the recipient
 supplies its trusted key independently. Its local checks pass, including the positive Client-mount
-access control before rejecting fixture-local cache shortcuts. A mailbox/full C07 is not claimed.
+access control before rejecting fixture-local cache shortcuts. The actual new transfer retrieves
+2,097,332 ciphertext bytes and opens the exact 2,097,275-byte plaintext, but the Exit capture
+records three outbound discovery attempts to the Client. Source tracing identifies empty
+DNS-cache capability advertisements: a pure Client with no reusable proof is incorrectly offered
+to an Exit's DNS peer lookup. The new availability-based publication correction is described
+above; the boundary check is not weakened and this run remains failed. Cleanup leaves zero owned objects and raw
+guest state unchanged, SHA-256 `c2864ace57362c8967429aa614de19b6c1660eeeae853ed12ce1ecc3c21e5a73`.
+Artifact SHA-256: `fa73a1b1d77be63e177466e8b8ec03fad1dee96d30f4b4045a8aaad2196d83f6`.
+A mailbox/full C07 or general combined-role unlinkability is not claimed.
 
 The installed runtime ancestor now gives only search permission to the control group through a
 non-inherited ACL, retaining the helper's required `0750` mode and private socket permissions.

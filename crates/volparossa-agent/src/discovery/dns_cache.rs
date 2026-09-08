@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{RwLock, oneshot};
 use volparossa_discovery::{
     BehaviourEvent, ContentControlConnectionState, DnsCacheRequest, DnsCacheResponse, capability,
 };
@@ -21,6 +21,7 @@ use volparossa_udp::{
 };
 
 use super::{DiscoveryCommand, DiscoveryControlHandle, DiscoveryRuntime, unix_millis};
+use crate::{AgentState, LogLevel};
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const COLLECTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -101,6 +102,8 @@ struct Pending {
 pub(super) struct DnsBridge {
     pub(super) resolver: Option<Arc<ExitResolver>>,
     advertised: bool,
+    advertisement_query: Option<kad::QueryId>,
+    publication_ready: bool,
     lookups: HashMap<u64, Lookup>,
     outbound: HashMap<OutboundId, Pending>,
     provider_query: Option<(kad::QueryId, Instant)>,
@@ -113,6 +116,8 @@ impl Default for DnsBridge {
         Self {
             resolver: None,
             advertised: false,
+            advertisement_query: None,
+            publication_ready: false,
             lookups: HashMap::new(),
             outbound: HashMap::new(),
             provider_query: None,
@@ -151,6 +156,7 @@ fn exclusions(scope: &DnsResolutionScope) -> Option<HashSet<PeerId>> {
 impl DiscoveryRuntime {
     /// Configure during synchronous agent construction; capability publication waits for `run()`.
     pub(crate) fn configure_dns_cache(&mut self, resolver: Arc<ExitResolver>) {
+        self.stop_dns_cache();
         if let Some(service) = &mut self.exit_service {
             service.set_dns_resolver(Arc::clone(&resolver));
         }
@@ -297,6 +303,17 @@ impl DiscoveryRuntime {
         event: SwarmEvent<BehaviourEvent>,
     ) -> Option<SwarmEvent<BehaviourEvent>> {
         match event {
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
+                    id,
+                    result: kad::QueryResult::StartProviding(result),
+                    ..
+                },
+            )) if self.dns_cache.advertisement_query == Some(id) => {
+                self.dns_cache.advertisement_query = None;
+                self.dns_cache.publication_ready = result.is_ok();
+                None
+            }
             SwarmEvent::Behaviour(BehaviourEvent::DnsCache(event)) => {
                 self.handle_dns_rpc(event);
                 None
@@ -491,7 +508,7 @@ impl DiscoveryRuntime {
             let _ = self.service.finish_dns_cache_provider_query(query);
         }
     }
-    pub(super) fn maintain_dns_cache(&mut self) {
+    pub(super) async fn maintain_dns_cache(&mut self, state: &Arc<RwLock<AgentState>>) {
         if let Some(resolver) = &self.dns_cache.resolver {
             let counts = resolver.counts();
             self.metrics.set_dns_resolution_counts(
@@ -501,16 +518,43 @@ impl DiscoveryRuntime {
                 counts.trusted_fallback,
             );
         }
-        if self.dns_cache.advertised && !(self.roles.client || self.roles.relay || self.roles.exit)
-        {
+        // Having a resolver configured is not an offer: a cold consumer must not publish its
+        // permanent identity/address as an empty cache for unrelated Exits to dial.
+        let available = (self.roles.client || self.roles.relay || self.roles.exit)
+            && state
+                .read()
+                .await
+                .active_policy(unix_millis())
+                .is_some_and(|policy| {
+                    self.dns_cache
+                        .resolver
+                        .as_ref()
+                        .is_some_and(|resolver| resolver.has_shareable_proof(policy.policy_hash()))
+                });
+        if self.dns_cache.advertised && !available {
             let _ = self.service.stop_providing(capability::DNSSEC_CACHE);
             self.dns_cache.advertised = false;
+            self.dns_cache.advertisement_query = None;
+            self.dns_cache.publication_ready = false;
+            state.write().await.log(
+                LogLevel::Info,
+                "DNS_CACHE_PROVIDER_WITHDRAWN",
+                unix_millis(),
+            );
         }
-        if self.dns_cache.resolver.is_some()
-            && !self.dns_cache.advertised
-            && (self.roles.client || self.roles.relay || self.roles.exit)
-        {
-            self.dns_cache.advertised = self.service.provide(capability::DNSSEC_CACHE).is_ok();
+        if available && !self.dns_cache.advertised {
+            self.dns_cache.advertisement_query =
+                self.service.provide(capability::DNSSEC_CACHE).ok();
+            self.dns_cache.advertised = self.dns_cache.advertisement_query.is_some();
+        }
+        if available && std::mem::take(&mut self.dns_cache.publication_ready) {
+            // Kademlia completed its publication query; this is not a remote receipt or a
+            // guarantee that an already propagated provider record can be recalled on expiry.
+            state.write().await.log(
+                LogLevel::Info,
+                "DNS_CACHE_PROVIDER_AVAILABLE",
+                unix_millis(),
+            );
         }
         let now = Instant::now();
         if self
@@ -562,6 +606,8 @@ impl DiscoveryRuntime {
         self.finish_dns_query();
         let _ = self.service.stop_providing(capability::DNSSEC_CACHE);
         self.dns_cache.advertised = false;
+        self.dns_cache.advertisement_query = None;
+        self.dns_cache.publication_ready = false;
     }
 }
 
@@ -612,10 +658,29 @@ mod tests {
         if run_actor_test_in_isolated_namespace() {
             return;
         }
-        let (mut exit, _, _exit_dir) = super::super::tests::retirement_runtime_fixture();
-        let (mut cache, _, _cache_dir) = super::super::tests::retirement_runtime_fixture();
+        let (mut exit, exit_state, _exit_dir) = super::super::tests::retirement_runtime_fixture();
+        let (mut cache, cache_state, _cache_dir) =
+            super::super::tests::retirement_runtime_fixture();
         super::super::tests::connect_runtime_client_to_control(&mut exit, &mut cache.service).await;
         cache.configure_dns_cache(Arc::new(ExitResolver::new(None, None)));
+        // A real cold resolver on a pure fixture Client cannot publish DNSSEC_CACHE. Also
+        // withdraw an actual old provider operation, including its late completion event.
+        cache.roles = volparossa_config::RolesConfig {
+            client: true,
+            relay: false,
+            exit: false,
+        };
+        cache.maintain_dns_cache(&cache_state).await;
+        assert!(!cache.dns_cache.advertised);
+        assert!(cache.dns_cache.advertisement_query.is_none());
+        let old_query = cache.service.provide(capability::DNSSEC_CACHE).unwrap();
+        cache.dns_cache.advertised = true;
+        cache.dns_cache.advertisement_query = Some(old_query);
+        cache.dns_cache.publication_ready = true;
+        cache.maintain_dns_cache(&cache_state).await;
+        assert!(!cache.dns_cache.advertised);
+        assert!(cache.dns_cache.advertisement_query.is_none());
+        assert!(!cache.dns_cache.publication_ready);
         let peer = *cache.service.local_peer_id();
         let question = DnsQuestion::new("www.example.org", DnsQueryType::A).unwrap();
         // Both self and the live cache peer are genuinely excluded; no DNS-bearing RPC exists.
@@ -629,7 +694,7 @@ mod tests {
         exit.choose_dns_peers();
         assert!(exit.dns_cache.outbound.is_empty());
         exit.finish_dns_query();
-        exit.maintain_dns_cache();
+        exit.maintain_dns_cache(&exit_state).await;
         assert!(response.await.unwrap().unwrap().is_none());
 
         let other = libp2p::identity::Keypair::generate_ed25519()
@@ -649,7 +714,7 @@ mod tests {
         let mut cache_requests = 0;
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                exit.maintain_dns_cache();
+                exit.maintain_dns_cache(&exit_state).await;
                 tokio::select! {
                     result = &mut response => break result.unwrap().unwrap(),
                     event = exit.service.next_event() => if let DiscoveryEvent::Other(event) = event { let _ = exit.handle_dns_event(event); },

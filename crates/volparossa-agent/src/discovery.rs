@@ -2006,7 +2006,7 @@ impl DiscoveryRuntime {
         loop {
             self.maintain_client_preselection();
             self.maintain_content();
-            self.maintain_dns_cache();
+            self.maintain_dns_cache(&state).await;
             let content_deadline = self.content_deadline().min(self.dns_deadline());
             let responder_policy = {
                 let now_ms = unix_millis();
@@ -2016,7 +2016,7 @@ impl DiscoveryRuntime {
             tokio::select! {
                 () = tokio::time::sleep_until(content_deadline) => {
                     self.maintain_content();
-                    self.maintain_dns_cache();
+                    self.maintain_dns_cache(&state).await;
                 }
                 _ = downlink_maintenance.tick() => {
                     if Box::pin(self.maintain_downlink(&state)).await.is_err() {
@@ -2233,6 +2233,7 @@ impl DiscoveryRuntime {
                 }
                 self.service.cancel_preselection_forwarding();
                 state.write().await.set_policy(policy);
+                self.maintain_dns_cache(state).await;
                 self.synchronize_exit_policy(state).await;
                 self.publish_local(state).await;
                 #[cfg(test)]

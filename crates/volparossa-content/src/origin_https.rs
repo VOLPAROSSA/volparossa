@@ -219,6 +219,7 @@ impl OriginClient {
             Ok(OriginAuthorizedManifest {
                 request: request.clone(),
                 manifest,
+                signed_manifest: descriptor.signed_manifest,
                 expires,
                 clock,
             })
@@ -437,11 +438,41 @@ where
 pub struct OriginAuthorizedManifest {
     request: OriginRequest,
     manifest: VerifiedManifest,
+    signed_manifest: Vec<u8>,
     expires: u64,
     clock: Clock,
 }
 
 impl OriginAuthorizedManifest {
+    /// Check this live authorization and return its original expiry for bounded local delivery.
+    /// This timestamp is not a transferable or independently reusable HTTPS proof.
+    ///
+    /// # Errors
+    /// Rejects expired HTTP/native authority or invalid caller time.
+    pub fn check_validity(&self, now_unix: u64) -> Result<u64, OriginError> {
+        self.check_time(now_unix)?;
+        Ok(self.expires)
+    }
+
+    /// Original native manifest bytes for a same-operation trusted local handoff.
+    /// These bytes alone convey no HTTP identity/freshness and must not be persisted as one.
+    #[must_use]
+    pub fn native_manifest_bytes(&self) -> &[u8] {
+        &self.signed_manifest
+    }
+
+    /// Verify the whole cached resource without creating an agent output file.
+    /// Callers must keep this authorization alive and recheck it before completing delivery.
+    ///
+    /// # Errors
+    /// Rejects missing/corrupt chunks, wrong whole-object hash and expired origin authority.
+    pub fn verify_cached(&self, store: &mut ChunkStore, now_unix: u64) -> Result<u64, OriginError> {
+        let now = self.check_time(now_unix)?;
+        let bytes = crate::reassemble(&self.manifest, &mut [store], now, &mut std::io::sink())?;
+        self.check_time(now_unix)?;
+        Ok(bytes)
+    }
+
     /// Native chunk authority for the existing protected-stream transfer protocol.
     ///
     /// This reference alone does not carry HTTP freshness/identity. Use this wrapper's
