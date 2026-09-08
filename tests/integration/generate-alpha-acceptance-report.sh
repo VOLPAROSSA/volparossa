@@ -66,7 +66,7 @@ jq -e '
   .topology.client_exit_route_absent == true and
   .production_helpers.ready == true and
   .native_mpquic.ready == true and
-  .native_mpquic.api_version == 6 and
+  .native_mpquic.api_version == 7 and
   .agents_ready == true and
   .destination_ready == true and
   .client_connect.requested == true and

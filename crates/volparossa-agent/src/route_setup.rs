@@ -273,6 +273,7 @@ struct ActiveProductionMpquicRoute {
 #[derive(Clone, Copy)]
 struct NativePathCounters {
     delivered_bytes: u64,
+    acked_transport_bytes: u64,
     packets_lost: u64,
     last_progress_at: UnixTime,
 }
@@ -500,6 +501,7 @@ impl CommittedSingleUdpRouteIdentity {
             // payload actually received is counted; send-queue acceptance is not delivery.
             smoothed_rtt_micros: 0,
             user_bytes: received_bytes,
+            acked_transport_bytes: 0,
         }
     }
 
@@ -525,6 +527,7 @@ impl CommittedSingleUdpRouteIdentity {
             } as i32,
             smoothed_rtt_micros: status.smoothed_rtt_us,
             user_bytes: status.delivered_bytes,
+            acked_transport_bytes: status.acked_transport_bytes,
         })
     }
 }
@@ -639,13 +642,17 @@ impl ActiveProductionMpquicRoute {
             .health
             .observe(&statuses, now)
             .map_err(|()| ClientRouteConnectError::TransportRuntimeUnavailable)?;
-        let warm = (self.session.minimum_paths() == 2 && !self.browser_flows.is_empty())
+        let warm = (!self.browser_flows.is_empty())
             .then(|| self.session.warm_path_ids().next())
             .flatten();
-        match self
-            .growth
-            .observe(&statuses, &self.health, Instant::now(), now, warm)
-        {
+        match self.growth.observe(
+            &statuses,
+            &self.health,
+            Instant::now(),
+            now,
+            warm,
+            self.session.minimum_paths(),
+        ) {
             GrowthDecision::Unchanged => {}
             GrowthDecision::Hold => return Ok(ClientPathMaintenance::Unchanged),
             GrowthDecision::Activate { warm, risky } => {
@@ -775,6 +782,7 @@ impl CommittedRelayRouteIdentity {
                 state: PathState::Reachable as i32,
                 smoothed_rtt_micros: 0,
                 user_bytes: 0,
+                acked_transport_bytes: 0,
             })
             .collect::<Vec<_>>();
         paths.sort_unstable_by_key(|path| path.path_id);
@@ -838,6 +846,7 @@ impl CommittedRelayRouteIdentity {
                 },
                 smoothed_rtt_micros: status.smoothed_rtt_us,
                 user_bytes: status.delivered_bytes,
+                acked_transport_bytes: status.acked_transport_bytes,
             });
         }
         for path_id in warm_path_ids {
@@ -852,6 +861,7 @@ impl CommittedRelayRouteIdentity {
                 state: PathState::Backup as i32,
                 smoothed_rtt_micros: 0,
                 user_bytes: 0,
+                acked_transport_bytes: 0,
             });
         }
         summaries.sort_unstable_by_key(|path| path.path_id);
@@ -908,6 +918,7 @@ impl ProductionMpquicPathHealth {
         for status in native {
             if let Some(previous) = self.counters.get(&status.path_id) {
                 if status.delivered_bytes < previous.delivered_bytes
+                    || status.acked_transport_bytes < previous.acked_transport_bytes
                     || status.packets_lost < previous.packets_lost
                 {
                     return Err(());
@@ -915,24 +926,26 @@ impl ProductionMpquicPathHealth {
             }
         }
         let route_progressed = native.iter().any(|status| {
-            self.counters
-                .get(&status.path_id)
-                .is_some_and(|previous| status.delivered_bytes > previous.delivered_bytes)
+            self.counters.get(&status.path_id).is_some_and(|previous| {
+                status.acked_transport_bytes > previous.acked_transport_bytes
+            })
         });
         for status in native {
             let previous = self.counters.get(&status.path_id).copied();
-            let delivered_delta =
-                previous.map_or(0, |value| status.delivered_bytes - value.delivered_bytes);
+            let acked_delta = previous.map_or(0, |value| {
+                status.acked_transport_bytes - value.acked_transport_bytes
+            });
             let lost_delta = previous.map_or(0, |value| status.packets_lost - value.packets_lost);
             let last_progress_at = previous.map_or(now, |value| {
-                if delivered_delta != 0 || !route_progressed {
+                if acked_delta != 0 || !route_progressed {
                     now
                 } else {
                     value.last_progress_at
                 }
             });
-            let delivered_packets = delivered_delta.saturating_add(1_199) / 1_200;
-            let observed_packets = delivered_packets.saturating_add(lost_delta);
+            // An explicitly approximate transport-loss signal, not an application goodput count.
+            let acked_packets = acked_delta.saturating_add(1_199) / 1_200;
+            let observed_packets = acked_packets.saturating_add(lost_delta);
             #[allow(clippy::cast_precision_loss)]
             let packet_loss_ratio = if observed_packets == 0 {
                 0.0
@@ -960,6 +973,7 @@ impl ProductionMpquicPathHealth {
                 status.path_id,
                 NativePathCounters {
                     delivered_bytes: status.delivered_bytes,
+                    acked_transport_bytes: status.acked_transport_bytes,
                     packets_lost: status.packets_lost,
                     last_progress_at,
                 },
@@ -8423,6 +8437,7 @@ mod tests {
             bytes_in_flight: 512,
             delivery_rate_bps: 8_000_000,
             data_carrying,
+            acked_transport_bytes: 0,
         }
     }
 
@@ -8537,6 +8552,7 @@ mod tests {
                 && path.state == PathState::Reachable as i32
                 && path.smoothed_rtt_micros == 0
                 && path.user_bytes == 0
+                && path.acked_transport_bytes == 0
         }));
         for invalid in [&[1][..], &[1, 1], &[1, 4], &[0, 1]] {
             assert!(identity.selected_mptcp_paths(invalid).is_err());
@@ -8568,6 +8584,7 @@ mod tests {
         observation.record_received(60).unwrap();
         let active = observation.project();
         assert_eq!(active.user_bytes, 132);
+        assert_eq!(active.acked_transport_bytes, 0);
         assert_eq!(active.smoothed_rtt_micros, 0);
         assert_eq!(active.state, PathState::Active as i32);
         assert_eq!(active.route_context_id, ready.route_context_id);
@@ -8594,11 +8611,10 @@ mod tests {
             ],
         };
 
+        let mut active = native_path_status(2, true);
+        active.acked_transport_bytes = 65_536;
         let summaries = identity
-            .project(
-                &[native_path_status(2, true), native_path_status(1, false)],
-                std::iter::empty(),
-            )
+            .project(&[active, native_path_status(1, false)], std::iter::empty())
             .expect("exact status projection");
 
         assert_eq!(summaries.len(), 2);
@@ -8610,6 +8626,8 @@ mod tests {
         assert_eq!(summaries[1].state, PathState::Active as i32);
         assert_eq!(summaries[1].smoothed_rtt_micros, 2_000);
         assert!(summaries.iter().all(|summary| summary.user_bytes == 0));
+        assert_eq!(summaries[0].acked_transport_bytes, 0);
+        assert_eq!(summaries[1].acked_transport_bytes, 65_536);
     }
 
     #[test]
@@ -8629,12 +8647,13 @@ mod tests {
         assert_eq!(reachable.state, PathState::Reachable as i32);
         assert_eq!(reachable.user_bytes, 0);
         let mut active = native_path_status(1, true);
-        active.delivered_bytes = 1234;
+        active.acked_transport_bytes = 1234;
         let projected = identity
             .project(std::slice::from_ref(&active))
             .expect("native active path");
         assert_eq!(projected.state, PathState::Active as i32);
-        assert_eq!(projected.user_bytes, 1234);
+        assert_eq!(projected.user_bytes, 0);
+        assert_eq!(projected.acked_transport_bytes, 1234);
         assert_eq!(projected.smoothed_rtt_micros, active.smoothed_rtt_us);
         assert!(identity.project(&[]).is_err());
         assert!(identity.project(&[native_path_status(2, true)]).is_err());
@@ -8691,6 +8710,7 @@ mod tests {
         assert_eq!(summaries[2].path_id, 3);
         assert_eq!(summaries[2].state, PathState::Backup as i32);
         assert_eq!(summaries[2].user_bytes, 0);
+        assert_eq!(summaries[2].acked_transport_bytes, 0);
     }
 
     #[test]
@@ -8702,7 +8722,7 @@ mod tests {
         assert!(health.observe(&initial, start).expect("initial").is_empty());
 
         let mut progressed = initial;
-        progressed[0].delivered_bytes = 2_400;
+        progressed[0].acked_transport_bytes = 2_400;
         let degraded_at = UnixTime::from_secs(1_011);
         assert_eq!(
             health.observe(&progressed, degraded_at).expect("metrics"),
@@ -8720,6 +8740,38 @@ mod tests {
                 .expect("post replacement")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn native_ack_transport_health_rejects_counter_rollback_without_user_bytes() {
+        let now = UnixTime::from_secs(1_000);
+        let mut health = ProductionMpquicPathHealth::new(&[1, 2], [3], now).unwrap();
+        let mut paths = [native_path_status(1, true), native_path_status(2, true)];
+        paths[0].acked_transport_bytes = 12_000;
+        paths[1].acked_transport_bytes = 24_000;
+        health.observe(&paths, now).unwrap();
+        paths[0].acked_transport_bytes += 12_000;
+        paths[1].acked_transport_bytes += 12_000;
+        paths[0].packets_lost = 1;
+        health.observe(&paths, UnixTime::from_secs(1_001)).unwrap();
+        assert!(paths.iter().all(|path| path.delivered_bytes == 0));
+        let mut decreased = paths.clone();
+        decreased[1].acked_transport_bytes -= 1;
+        // Even independently increasing user-byte accounting cannot disguise transport rollback.
+        decreased[1].delivered_bytes = 1_000_000;
+        assert!(
+            health
+                .observe(&decreased, UnixTime::from_secs(1_002))
+                .is_err()
+        );
+        decreased = paths.clone();
+        decreased[0].packets_lost = 0;
+        assert!(
+            health
+                .observe(&decreased, UnixTime::from_secs(1_002))
+                .is_err()
+        );
+        health.observe(&paths, UnixTime::from_secs(1_002)).unwrap();
     }
 
     #[test]

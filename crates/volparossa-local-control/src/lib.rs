@@ -376,6 +376,10 @@ pub struct PathSummary {
     /// Bytes carried in this context without durable destination metadata.
     #[prost(uint64, tag = "7")]
     pub user_bytes: u64,
+    /// Cumulative acknowledged native QUIC packet bytes, not unique inner application bytes.
+    /// Zero for paths without this native transport measurement (including warm paths).
+    #[prost(uint64, tag = "8")]
+    pub acked_transport_bytes: u64,
 }
 
 /// Bounded path response.

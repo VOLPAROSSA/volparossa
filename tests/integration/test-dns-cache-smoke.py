@@ -76,7 +76,7 @@ class DnsNetworkEvidenceTests(unittest.TestCase):
     def test_seven_phase_contract_and_exact_exit_selection(self):
         CHECK.validate_evidence(fixture())
         peers = fixture()["expected_peers"]
-        row = f"context={'a' * 32} path=1 relay=peer-relay0 exit=peer-exit2 state=1 rtt_us=0 bytes=0\n"
+        row = f"context={'a' * 32} path=1 relay=peer-relay0 exit=peer-exit2 state=1 rtt_us=0 bytes=0 acked_transport_bytes=0\n"
         self.assertEqual(CHECK.selection(row, peers, "exit2")[0], 0)
         self.assertEqual(CHECK.selection(row, peers, "exit")[0], 2)
         self.assertEqual(CHECK.selection("", peers, "exit")[0], 1)

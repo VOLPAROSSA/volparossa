@@ -21,7 +21,7 @@ def fixture():
         rows = [dict(route_context_id=context, path_id=i + 1, relay_peer_id=peers[f"relay{i}"],
                      exit_peer_id=peers["exit"], state=4 if i == 2 and stage < 2 else 3,
                      smoothed_rtt_us=0 if i == 2 and stage < 2 else 10000,
-                     native_acked_bytes=0 if i == 2 and stage < 2 else stage * 100000)
+                     user_bytes=0, acked_transport_bytes=0 if i == 2 and stage < 2 else stage * 100000)
                 for i in range(3)]
         snapshots.append(dict(route_context_id=context, paths=rows, observed_monotonic_ns=stage + 1))
     captures = {}
@@ -70,7 +70,8 @@ def raw_files(evidence):
         files[f"{prefix}-{suffix}.txt"] = "".join(
             f"context={row['route_context_id']} path={row['path_id']} relay={row['relay_peer_id']} "
             f"exit={row['exit_peer_id']} state={row['state']} rtt_us={row['smoothed_rtt_us']} "
-            f"bytes={row['native_acked_bytes']}\n" for row in evidence[key]["paths"])
+            f"bytes={row['user_bytes']} acked_transport_bytes={row['acked_transport_bytes']}\n"
+            for row in evidence[key]["paths"])
     for phase, captures in evidence["privacy"].items():
         for role, capture in captures.items():
             files[f"{prefix}-{phase}-privacy-{role}.json"] = capture
@@ -132,8 +133,8 @@ class GrowthEvidence(unittest.TestCase):
     def test_nominal_ids_stale_bytes_loss_config_and_app_close_cannot_substitute(self):
         for mutation in (
                 lambda e: e["expanded"]["paths"][2].update(state=4),
-                lambda e: e["expanded_progress"]["paths"][2].update(native_acked_bytes=200000),
-                lambda e: e["before_loss"]["paths"][0].update(native_acked_bytes=0),
+                lambda e: e["expanded_progress"]["paths"][2].update(acked_transport_bytes=200000),
+                lambda e: e["before_loss"]["paths"][0].update(acked_transport_bytes=0, user_bytes=9000000),
                 lambda e: e["expanded_progress"]["paths"][2].update(relay_peer_id="wrong-peer"),
                 lambda e: e["injection"]["during"][0].update(drops=0),
                 lambda e: e["injection"]["during"][0]["options"].update(delay=dict(delay=0.1)),
@@ -148,6 +149,18 @@ class GrowthEvidence(unittest.TestCase):
             mutation(evidence)
             with self.assertRaises(ValueError):
                 CHECK["validate"](evidence)
+
+    def test_transport_counter_is_explicit_and_never_borrowed_from_user_bytes(self):
+        row = (f"context={'a' * 32} path=1 relay=r1 exit=x state=3 rtt_us=1 "
+               "bytes=9000000 acked_transport_bytes=0\n")
+        second = row.replace("path=1 relay=r1", "path=2 relay=r2")
+        result = CHECK["paths"](row + second)
+        self.assertTrue(all(path["acked_transport_bytes"] == 0 and path["user_bytes"] == 9000000
+                            for path in result["paths"]))
+        for invalid in ((row + second).replace(" acked_transport_bytes=0", ""),
+                        (row + second).replace("acked_transport_bytes=0", f"acked_transport_bytes={2**64}")):
+            with self.assertRaises(ValueError):
+                CHECK["paths"](invalid)
 
 
 if __name__ == "__main__":

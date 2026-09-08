@@ -28,15 +28,17 @@ def text(path):
 
 def paths(value):
     pattern = re.compile(r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-                         r"state=([0-6]) rtt_us=([0-9]+) bytes=([0-9]+)")
+                         r"state=([0-6]) rtt_us=([0-9]+) bytes=([0-9]+) acked_transport_bytes=([0-9]+)")
     rows = []
     for line in value.splitlines():
         match = pattern.fullmatch(line)
         require(match is not None, "malformed native path row")
-        context, path, relay, exit_peer, state, rtt, count = match.groups()
+        context, path, relay, exit_peer, state, rtt, user_count, transport_count = match.groups()
+        require(all(int(value) <= 2**64 - 1 for value in (rtt, user_count, transport_count)),
+                "native path counters exceed their u64 representation")
         rows.append(dict(route_context_id=context, path_id=int(path), relay_peer_id=relay,
                          exit_peer_id=exit_peer, state=int(state), smoothed_rtt_us=int(rtt),
-                         native_acked_bytes=int(count)))
+                         user_bytes=int(user_count), acked_transport_bytes=int(transport_count)))
     require(2 <= len(rows) <= 3 and len({row["path_id"] for row in rows}) == len(rows)
             and len({row["relay_peer_id"] for row in rows}) == len(rows)
             and len({row["route_context_id"] for row in rows}) == 1
@@ -51,7 +53,7 @@ def initial(snapshot, peers):
     require(len(rows) == 3 and sorted(row["state"] for row in rows) == [3, 3, 4]
             and {row["relay_peer_id"] for row in rows} == {peers[f"relay{i}"] for i in range(3)}
             and {row["exit_peer_id"] for row in rows} == {peers["exit"]}
-            and all(row["native_acked_bytes"] == row["smoothed_rtt_us"] == 0
+            and all(row["acked_transport_bytes"] == row["smoothed_rtt_us"] == 0
                     for row in rows if row["state"] == 4),
             "need two actual native paths and one reserved backup on exactly R0/R1/R2")
 
@@ -71,8 +73,8 @@ def progress(before, after, count):
     require(len(active) == count and after["observed_monotonic_ns"] > before["observed_monotonic_ns"],
             "wrong active baseline or non-forward observation time")
     require(all(path in current and current[path]["state"] == 3
-                and current[path]["native_acked_bytes"] - row["native_acked_bytes"] >= MIN_DELTA
-                for path, row in active.items()), "every active native path needs fresh substantial payload progress")
+                and current[path]["acked_transport_bytes"] - row["acked_transport_bytes"] >= MIN_DELTA
+                for path, row in active.items()), "every active native path needs fresh substantial ACKed transport progress")
 
 
 def payload_hash(run_id, direction):

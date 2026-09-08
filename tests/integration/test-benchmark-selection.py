@@ -18,7 +18,7 @@ spec.loader.exec_module(paths_module)
 
 
 def row(relay, path=1, context="11" * 16, state=1):
-    return f"context={context} path={path} relay={relay} exit=X state={state} rtt_us=0 bytes=0\n"
+    return f"context={context} path={path} relay={relay} exit=X state={state} rtt_us=0 bytes=0 acked_transport_bytes=0\n"
 
 
 class SelectionTests(unittest.TestCase):
@@ -68,6 +68,12 @@ class SelectionTests(unittest.TestCase):
             "multipath-quic", lan_pair=True)[1]
         before = paths_module.native_paths(text, selected, "both")
         self.assertEqual(before["benchmark_slots"][0]["relay_node"], "relay1")
+        legacy = text.replace(" bytes=0 ", " bytes=9000000 ").replace(" acked_transport_bytes=0", "")
+        self.assertTrue(all(path["native_acked_bytes"] == 0
+                            for path in paths_module.native_paths(legacy, selected, "both")["paths"]))
+        measured = text.replace("acked_transport_bytes=0", "acked_transport_bytes=4096")
+        self.assertTrue(all(path["native_acked_bytes"] == 4096
+                            for path in paths_module.native_paths(measured, selected, "both")["paths"]))
         after = paths_module.native_paths(row("R0", state=3), selected, "relay2")
         self.assertEqual(after["benchmark_slots"], before["benchmark_slots"])
         self.assertEqual(after["paths"][0]["relay"], "relay2")

@@ -105,7 +105,7 @@ grep -F 'launch_mpquic exit2 "$EXIT2_NODE" exit' "$GUEST" >/dev/null
 if grep -Eq 'launch_mpquic relay[012]' "$GUEST"; then exit 1; fi
 grep -F 'native_socket=/run/volparossa/native/mpquic.sock' "$GUEST" >/dev/null
 grep -F -- '--socket "$native_socket"' "$GUEST" >/dev/null
-grep -F 'native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records}' \
+grep -F 'native_mpquic:{ready:$mpquic,api_version:7,instances:$mpquic_records}' \
     "$GUEST" >/dev/null
 grep -F 'and ($destination.peer_completion_observed == true)' "$GUEST" >/dev/null
 grep -F 'DIRECT_CLIENT_EXIT_REACHABLE' "$GUEST" >/dev/null
@@ -237,7 +237,7 @@ grep -F 'destination == "47.163.4.2" and destination_port == 443' "$GUEST" \
     >/dev/null
 grep -F 'capture_native_mpquic_paths()' "$GUEST" >/dev/null
 grep -F 'native ACK/accounting counter, not independent unique payload evidence' "$HERE/benchmark-paths.py" >/dev/null
-grep -F 'native_acked_bytes=int(count)' "$HERE/benchmark-paths.py" >/dev/null
+grep -F 'native_acked_bytes=int(acked_count or "0")' "$HERE/benchmark-paths.py" >/dev/null
 grep -F 'agent local-control native MPQUIC status' "$HERE/benchmark-paths.py" >/dev/null
 grep -F 'native_bind_slots "$WORK/a06-selection.json"' "$GUEST" >/dev/null
 grep -F 'acceptance_id:"A06",success:$success' "$GUEST" >/dev/null

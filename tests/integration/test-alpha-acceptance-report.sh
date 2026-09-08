@@ -56,7 +56,7 @@ jq -S -c -n --slurpfile evidence "$WORK/evidence.json" \
     topology:{ready:true,direct_client_exit_adjacency:false,
       client_exit_route_absent:true},
     production_helpers:{ready:true},
-    native_mpquic:{ready:true,api_version:6},
+    native_mpquic:{ready:true,api_version:7},
     agents_ready:true,
     destination_ready:true,
     client_connect:{requested:true,succeeded:true,exit_status:0,
@@ -103,6 +103,14 @@ jq -e '
 ' "$WORK/acceptance-report.json" >/dev/null
 
 rm -f -- "$WORK/acceptance-report.json"
+jq '.native_mpquic.api_version = 6' "$WORK/report.json" >"$WORK/report-api6.json"
+if "$HERE/generate-alpha-acceptance-report.sh" \
+    "$WORK/report-api6.json" "$WORK/acceptance-report.json" >/dev/null 2>&1; then
+    printf '%s\n' 'old native API produced a current normative PASS report' >&2
+    exit 1
+fi
+[ ! -e "$WORK/acceptance-report.json" ]
+
 jq '.a06_http3_mpquic.evidence.success = false' "$WORK/report.json" \
     >"$WORK/report-tampered.json"
 mv -- "$WORK/report-tampered.json" "$WORK/report.json"

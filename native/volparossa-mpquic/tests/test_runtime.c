@@ -841,6 +841,7 @@ static void test_required_multipath_and_honest_failures(void)
     assert(response.paths[0].smoothed_rtt_us == UINT64_C(101));
     assert(response.paths[0].packets_lost == UINT64_C(102));
     assert(response.paths[0].delivered_bytes == 0U);
+    assert(response.paths[0].acked_transport_bytes == UINT64_C(4096));
     assert(response.paths[0].congestion_window_bytes == UINT64_C(103));
     assert(response.paths[0].bytes_in_flight == UINT64_C(104));
     assert(response.paths[0].delivery_rate_bps == UINT64_C(840));
@@ -849,6 +850,7 @@ static void test_required_multipath_and_honest_failures(void)
     assert(response.paths[1].smoothed_rtt_us == UINT64_C(201));
     assert(response.paths[1].packets_lost == UINT64_C(202));
     assert(response.paths[1].delivered_bytes == 0U);
+    assert(response.paths[1].acked_transport_bytes == 0U);
     assert(response.paths[1].congestion_window_bytes == UINT64_C(203));
     assert(response.paths[1].bytes_in_flight == UINT64_C(204));
     assert(response.paths[1].delivery_rate_bps == UINT64_C(1640));

@@ -23,4 +23,4 @@ pub use scheduler::{
 };
 
 /// Native control API version spoken by this Rust release.
-pub const NATIVE_API_VERSION: u32 = 6;
+pub const NATIVE_API_VERSION: u32 = 7;

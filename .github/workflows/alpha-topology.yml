@@ -123,7 +123,7 @@ jobs:
             native/volparossa-mpquic/scripts/build-upstream.sh
           test -f "$native_binary"
           test -x "$native_binary"
-          test "$("$native_binary" --api-version)" = 6
+          test "$("$native_binary" --api-version)" = 7
           native_size=$(stat -Lc '%s' "$native_binary")
           test "$native_size" -gt 0
           test "$native_size" -le 67108864

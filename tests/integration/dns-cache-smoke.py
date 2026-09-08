@@ -114,7 +114,7 @@ def selection(text, peers, wanted):
     if not rows:
         return 1, None
     require(len(rows) == 1, "DNS route must have exactly one relay")
-    match = re.fullmatch(r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) state=([1-4]) rtt_us=([0-9]+) bytes=([0-9]+)", rows[0])
+    match = re.fullmatch(r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) state=([1-4]) rtt_us=([0-9]+) bytes=([0-9]+)(?: acked_transport_bytes=0)?", rows[0])
     require(match is not None, "DNS selected route shape")
     context, path, relay, exit_peer, state, rtt, count = match.groups()
     exits = {peers[node]: node for node in ("exit", "exit2")}

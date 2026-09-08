@@ -1896,6 +1896,7 @@ static void dispatch_status(vmp_runtime_t *runtime,
         status->delivery_rate_bps =
             snapshot->estimated_rate_bytes_per_sec * 8U;
         status->data_carrying = snapshot->acked_transport_bytes > 0U;
+        status->acked_transport_bytes = snapshot->acked_transport_bytes;
     }
     for (size_t index = 1U; index < snapshot_count; ++index) {
         vmp_path_status_t current = paths[index];

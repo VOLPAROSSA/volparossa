@@ -12,7 +12,7 @@ def selected_paths(text, relay0, relay1, relay2, exit_peer, transport, any_pair=
         return 3, None
     pattern = re.compile(
         r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-        r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
+        r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)(?: acked_transport_bytes=[0-9]+)?"
     )
     paths = []
     for line in text.splitlines():
@@ -69,23 +69,24 @@ def native_paths(text, selected, requirement):
     if len(slots) != 2 or len({slot["relay_peer_id"] for slot in slots}) != 2:
         raise ValueError("invalid selected native slots")
     pattern = re.compile(r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-                         r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)")
+                         r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)(?: acked_transport_bytes=([0-9]+))?")
     records = []
     for line in text.splitlines():
         match = pattern.fullmatch(line)
         if match is None:
             raise ValueError("malformed native row")
-        context, path, relay, exit_peer, state, rtt, count = match.groups()
+        context, path, relay, exit_peer, state, rtt, _user_count, acked_count = match.groups()
         slot = next((slot for slot in slots if slot["relay_peer_id"] == relay), None)
         if (context != selected["route_context_id"] or exit_peer != selected["exact_selected_exit"]
                 or slot is None or slot["path_id"] != int(path)
                 or any(record["relay_peer_id"] == relay for record in records)):
             raise ValueError("native status changed selected identity")
-        # This is the native ACK/accounting counter, not independent unique payload evidence.
+        # Only the explicit transport field supplies ACK accounting. Legacy CLI text has
+        # no such measurement; its user-byte field must never be relabelled as transport ACKs.
         records.append(dict(path_id=int(path), relay=f"relay{slot['slot']}",
                             relay_node=slot["relay_node"], relay_peer_id=relay,
                             exit_peer_id=exit_peer, state=int(state), smoothed_rtt_us=int(rtt),
-                            native_acked_bytes=int(count)))
+                            native_acked_bytes=int(acked_count or "0")))
     required = {"relay1", "relay2"} if requirement == "both" else {"relay2"}
     if not required <= {record["relay"] for record in records}:
         raise ValueError("required selected native path missing")

@@ -311,7 +311,7 @@ The [independent-index follow-up on `3357169e`](https://github.com/VOLPAROSSA/vo
 also passes: freshly revalidated recent peers deliver the complete object using their different
 original indexes, with no origin body. Lookup replies arrive in 42/64 ms; the complete peer
 operation takes 4.91 seconds versus 2.54 seconds origin-only, so no latency win is claimed.
-Source selection now overlaps both index requests and includes their measured cost in automatic
+Source selection now overlaps resource-admitted index requests and includes their measured cost in automatic
 admission. The [fixed 4-Mbps-origin run on `2769761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34223916952)
 completed an actual automatic peer hit: 4.09 seconds for the full command versus 6.31 seconds
 origin-only, with zero origin body. The workflow **failed in its evidence checker**, not during
@@ -320,6 +320,10 @@ passes. The [complete corrected workflow on `6d3f44d`](https://github.com/VOLPAR
 now passes, including the later publication/name/site/cache-only phases. Its automatic command
 takes 4.32 seconds versus 6.39 seconds origin-only, again with zero origin body. These constrained-
 uplink samples do not replace the earlier faster-origin results or promise a general speedup.
+A successful cold peer-only download now also teaches its complete batch cost, instead of scaling
+each partial provider's fixed setup to a whole object. Reuse requires the same authorized object,
+provider set, route/policy, fresh original deadlines and sufficient current resources. Unknown or
+changed conditions retain conservative origin fallback; a new network comparison remains pending.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
@@ -345,7 +349,10 @@ resources, observed channel load and actual new-peer progress govern gradual exp
 Missing radio measurements trigger slower exploration, not a claim of spare airtime. Existing
 peers are not forcibly removed by a lower allowance. The defensive 512-station observation
 bound and native transport path ceilings remain; this is not unlimited allocation or physical
-radio/throughput proof. See [adaptive mesh admission](docs/OPERATIONS.md#adaptive-mesh-admission).
+radio/throughput proof. The
+[Linux simulated-radio proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238191689)
+passes admission changes with established-link retention and 131,072 bytes each way; full-agent
+adaptive growth is separate. See [adaptive mesh admission](docs/OPERATIONS.md#adaptive-mesh-admission).
 
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the

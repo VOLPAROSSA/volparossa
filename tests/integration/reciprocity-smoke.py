@@ -39,7 +39,7 @@ NODES = {
 DESTINATION = ("10.241.31.2", 18081)
 PATH_PATTERN = re.compile(
     r"context=([0-9a-f]{32}) path=([1-8]) relay=(\S+) exit=(\S+) "
-    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)"
+    r"state=([0-9]+) rtt_us=([0-9]+) bytes=([0-9]+)(?: acked_transport_bytes=[0-9]+)?"
 )
 running = True
 

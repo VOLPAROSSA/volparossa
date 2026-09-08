@@ -541,6 +541,18 @@ order, a timed-out sibling's cleanup, and source-cost accounting for one/two/thr
 The earlier three-provider native VM does **not** establish three-provider HTTPS delivery;
 that expanded live application proof remains pending.
 
+Whole completed-batch cost now complements the conservative individual-provider extrapolation.
+The writer retains its existing joined-worker wall measurement only when all sources genuinely
+contribute, every close completes, and the batch supplies the entire cold object. Digest retrieval
+verifies the complete fresh origin hash before learning the sample. It binds the exact origin
+equality key, digest/length, provider set, route/policy, available worker credits and earliest
+original offer/measurement expiry. Actual aggregate index setup is counted once before lookup,
+then excluded from the predicted remainder after the new lookup has really elapsed. Partial,
+cached-prefix, failed or unused-worker attempts cannot teach or refresh this sample;
+unknown/changed conditions keep the previous conservative fallback and unchanged twenty-percent
+margin. Eleven HTTPS, five parallel-worker and four recent-provider tests pass for this slice;
+the comparison on an actual changed-build network remains pending.
+
 ### Adaptive mesh-neighbor integration
 
 Wi-Fi configuration now uses zero as the default optional operator ceiling, replacing the
@@ -556,8 +568,21 @@ limits effective admission; no unlimited peer count or physical-radio benefit is
 Eighteen targeted checks pass: four agent admission/Unix-owner lifecycle checks, eleven helper
 checks (including six pure kernel cases), two configuration checks and one routing-wire check.
 Combined agent/helper/configuration/routing all-targets/all-features strict Clippy and formatting
-pass. The existing guarded hwsim-owner test now includes ESTAB -> admission zero -> two -> original
-payload, but this live extension has not yet run; the absent local module was not loaded.
+pass. The absent development-host hwsim module was not loaded.
+
+The [exact `e146b560` simulated-radio VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238191689)
+**passes** on the pinned Linux 6.12.107 kernel. Both original owners read back admission zero,
+then two, retain their established peer and exchange 131,072 bytes in each direction with
+matching cross-peer SHA-256 values and increasing actual station byte/packet counters.
+Normal idempotent deletion and socket-loss cleanup pass. The executed guest script compares
+its original network/namespace snapshots and reports zero owned objects plus unchanged state;
+those temporary snapshots are not exported, so independent retained-byte comparison is unavailable.
+The raw owner logs preserve admission -> payload -> removal ordering. This is real kernel
+behavior on two simulated radios, not full-agent adaptive growth, large-mesh throughput or
+physical-radio proof. Artifact ZIP SHA-256:
+`301c535bc313a3b773869de381c3d81c4c1bb648fd0a6396e444df22b9ca2af5`.
+The exact committed checker reproduces the owner/admission/payload evidence and report;
+canonical report SHA-256: `99c234f73e39cc54ed753f8deee80e86f2859586648ef003b71509df033c8d3b`.
 
 ### Adaptive control-connection admission
 
@@ -591,13 +616,14 @@ also passes with this production actor, but its small topology does not establis
 ### Warm MPQUIC growth integration
 
 The browser-route owner can now activate an exact retained warm descriptor without first
-removing either of its two payload-carrying paths. Two successive health observations with
-fresh progress on both paths and sustained loss on one justify the bounded failover probe.
-Native `AddPath` retains the original context/Exit/grants and signed two-path minimum; a Ready
-reply alone does not prove the third path carries bytes. Later native deltas must demonstrate
-actual third-path contribution. Without continuing failover value the added path retires after
-the existing ten-second grace; a stalled weak path can instead retire once the other two really
-carry data. The controller does not infer a throughput gain or change the backend eight-path cap.
+removing its existing carrying paths. Two successive health observations with fresh transport-ACK
+progress on every active path and sustained loss on one justify the bounded failover probe.
+Growth is N -> N+1 rather than special-cased to two paths. Native `AddPath` retains the original
+context/Exit/grants and signed minimum; a Ready reply alone does not prove the added path carries
+bytes. Later native deltas must demonstrate actual contribution. Without continuing failover
+value the added path retires after the existing ten-second grace; a stalled weak path can instead
+retire once the others really carry data, never below the signed minimum. The controller does
+not infer unique application bytes or throughput gain, or change the backend eight-path cap.
 
 Path-health maintenance now has its own joined one-second task, independent of the existing
 thirty-second policy refresh. It skips missed ticks rather than overlapping calls, stops before
@@ -618,6 +644,12 @@ three pure evidence checks also pass. One disposable user/network namespace acce
 15% netem JSON profile and restores its owned veth to `noqueue`; that schema/cleanup check carries
 no payload. These local checks are not live MPQUIC payload evidence.
 
+The API7 follow-up passes 29 focused Rust checks across wire/FD bindings, exact native status,
+counter rollback, health projection and three growth cases, including four-to-five with a signed
+minimum of three. Three native C protocol/runtime/binding checks and joint strict Clippy for
+quic/agent/local-control/CLI pass. The evidence parser rejects missing ACK counters and does not
+substitute user bytes. These checks do not establish live three- or five-path growth.
+
 The [first `fbd070aa` growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34234984155)
 **fails at selection**, before HTTP/3, loss injection or payload captures; its separate
 [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34234801937) passes.
@@ -630,11 +662,26 @@ left at most two data candidates, never two active plus one warm. Warm retention
 projection have no demonstrated bug here. The scenario-only correction gives existing R3
 sufficient advertised capacity and a real Exit bootstrap contact over its already present link.
 Normal selection, distinct-control rules and bounded retries remain unchanged; no particular
-draw or successful growth is manufactured. The corrected live result is pending.
+draw or successful growth is manufactured. The corrected live result is recorded below.
 No three-path payload proof was reached on `fbd070aa`.
 Global disposable cleanup reports zero objects and byte-identical guest state, but the Client
 log separately contains `SHUTDOWN_CLEANUP_FAILED`; that is not a clean-agent-shutdown result.
 Artifact ZIP SHA-256: `258fcb219e0da713a3b3ad5cbbd3bd45b967507dc967b6104c8f9727574de8b7`.
+
+The [corrected `32b985ba` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238873161)
+**passes selection but fails before loss injection**: it obtains two active native paths and
+one genuine warm row, then the progress gate observes zero `delivered_bytes` for 68.465 seconds.
+The five complete initial captures show traffic on both WireGuard legs of both active relays
+and at the destination, with zero drops/forbidden traffic. This is not a failure to start networking,
+but no complete application receipt/hash or three-path result was reached.
+The exact native source intentionally exports zero unique-inner `delivered_bytes`; it already
+has acknowledged transport bytes but previously exposes only their nonzero boolean. The growth
+controller/checker consumed the wrong measurement. API7 adds a separate explicit transport-ACK
+counter instead of relabelling transport bytes as unique user bytes.
+Cleanup leaves zero owned objects and byte-identical retained guest state; this run has no
+Client shutdown error in its empty Client log. Its [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238544971)
+passes. Artifact ZIP SHA-256:
+`b5c27e689c53fe71fd184578ea7d2d2484ec0aab08551b66c8e995f07e469990`.
 
 ### Native publication/site cache-only reopen
 

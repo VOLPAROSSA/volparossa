@@ -747,18 +747,27 @@ or speed gain is claimed. This does not verify the later cache-only native-site 
 The newer digest consumer can use each provider's own original transport index when the
 whole hash, length, public media type and complete ordered chunk layout agree. It does not
 re-sign either index or change the final origin-authority check. Explicit `peers-first` refreshes
-recent route/policy-bound offers first, then falls back to bounded discovery if needed; up to
-two workers run at once within the same original thirty-second peer budget. Already verified
+recent route/policy-bound offers first, then falls back to bounded discovery if needed; workers
+grow adaptively within resource limits and the original thirty-second peer budget. Already verified
 progress is retained across attempts. The
 [independent-index run on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
 passes with both providers and zero origin body; recent lookup replies take 42/64 ms.
 The complete operation still takes 4.91 seconds versus 2.54 seconds origin-only, not a speed
 win. Automatic mode keeps its measured budget and does not gain unbounded discovery fallback.
-Digest index requests now overlap at most two at a time. For automatic mode, recent payload
+Digest index requests now overlap in resource-sized batches. For automatic mode, recent payload
 measurements must also have a fresh successful digest-index measurement; missing measurements
 prefer the origin. Admission includes that fixed setup cost and is checked again after the
 actual index round, using only the selected peers and the original remaining deadline. These
 RAM-only costs expire within sixty seconds and do not renew offers or establish content trust.
+
+A complete, cold, peer-only digest retrieval can now retain its actual joined-batch completion
+cost. Every participating worker must contribute verified bytes and complete its close; partial,
+cached-prefix, failed or unused-worker attempts cannot teach this sample. Reuse requires the same
+origin-equality key, fresh authorized digest/length, route/policy, exact providers and enough
+current worker credits. The earliest original offer/measurement expiry still applies. Index setup
+is counted once before fresh indexes, then only actual spent time plus remaining payload cost
+after them. The original twenty-percent admission margin is unchanged. Otherwise automatic mode
+uses the existing conservative estimate or the origin; no speed improvement is presumed.
 The fixed 4-Mbps-origin comparison on `2769761c` completed a genuine automatic hit with two
 providers and zero origin body: 4.092074725 seconds for the full command versus 6.307903196
 seconds origin-only. That workflow failed in the checker; retained HTTPS raw evidence passes
@@ -853,26 +862,31 @@ the helper checks the exact owned runtime/interface/wiphy/network namespace, cha
 
 The helper's bounded station dump currently supports 512 observations and limits effective
 admission accordingly; it is a defensive representation boundary, not proven hardware capacity.
-Physical-radio and large-mesh performance remain untested. The existing guarded simulated-radio
-test now checks established-peer retention while admission changes from zero to two before its
-normal payload exchange; that extension still needs a live run.
+Physical-radio and large-mesh performance remain untested. The
+[simulated-radio run on `e146b560`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238191689)
+passes established-peer retention while admission changes from zero to two, then transfers
+131,072 bytes each way with matching hashes and normal/socket-loss cleanup. This exercises the
+real Linux kernel backend on simulated radios, not the full adaptive agent or physical capacity.
 
 ### Warm MPQUIC path growth
 
-An existing two-path browser route can now consume one of its already authorized warm paths
-without removing either currently useful path. Independent one-second health maintenance
-requires continuing payload on both paths and sustained measured loss on one; this is a
+An existing multipath browser route can now consume one of its already authorized warm paths
+without removing its currently useful paths. Independent one-second health maintenance
+requires continuing acknowledged transport on every active path and sustained measured loss on one; this is a
 failover-value probe, not a throughput prediction from an idle connection. The added path must
 then deliver new payload alongside the existing paths. If that value disappears, the probe
 retires after the existing ten-second grace; if the weak path stops progressing and the new
 path really contributes, the weak path retires instead. Policy, expiry, Exit, original relay
-grants, descriptor ownership and the signed minimum remain unchanged.
+grants, descriptor ownership and the signed minimum remain unchanged. Growth is N -> N+1,
+and retirement cannot cross that signed minimum. Native API7 exposes `acked_transport_bytes`
+separately from the CLI's unchanged `bytes` user counter; transport ACKs are not unique user bytes.
 
 The separate `mpquic-growth` VM scenario starts with two active paths and one reserved backup,
 uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only to one owned
 Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
-route retirement and unchanged guest state. Its first live result is still pending; local
-state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
+route retirement and unchanged guest state. The first two runs found fixture selection and
+native-counter integration faults; both are corrected in source, with the API7 rerun pending.
+Local state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
 ceiling and other transport limits are not removed by this bounded integration.
 
 ### Automatic public-content contribution

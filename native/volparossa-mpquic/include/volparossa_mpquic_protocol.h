@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define VMP_API_VERSION UINT32_C(6)
+#define VMP_API_VERSION UINT32_C(7)
 #define VMP_MAX_CONTROL_FRAME (UINT32_C(1024) * UINT32_C(1024))
 #define VMP_CONTEXT_ID_LEN 16U
 #define VMP_RESERVATION_ID_LEN 16U
@@ -183,6 +183,8 @@ typedef struct vmp_path_status {
     uint64_t bytes_in_flight;
     uint64_t delivery_rate_bps;
     bool data_carrying;
+    /* ACKed QUIC transport bytes, not unique inner-payload delivery. */
+    uint64_t acked_transport_bytes;
 } vmp_path_status_t;
 
 typedef struct vmp_received_datagram {

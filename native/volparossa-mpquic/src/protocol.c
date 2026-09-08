@@ -998,6 +998,8 @@ static size_t encoded_path_len(const vmp_path_status_t *path)
     if (path->bytes_in_flight != 0) len += 1 + varint_len(path->bytes_in_flight);
     if (path->delivery_rate_bps != 0) len += 1 + varint_len(path->delivery_rate_bps);
     if (path->data_carrying) len += 2;
+    if (path->acked_transport_bytes != 0)
+        len += 1 + varint_len(path->acked_transport_bytes);
     return len;
 }
 
@@ -1022,6 +1024,8 @@ static vmp_protocol_error_t write_path(encoder_t *encoder,
         error = write_varint_field(encoder, 7, path->delivery_rate_bps);
     if (error == VMP_PROTOCOL_OK && path->data_carrying)
         error = write_varint_field(encoder, 8, 1);
+    if (error == VMP_PROTOCOL_OK && path->acked_transport_bytes != 0)
+        error = write_varint_field(encoder, 9, path->acked_transport_bytes);
     return error;
 }
 

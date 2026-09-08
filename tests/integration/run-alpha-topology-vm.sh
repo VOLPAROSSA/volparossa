@@ -256,7 +256,7 @@ if [ -n "$mpquic_path" ]; then
 MPQUIC_SIZE=$(stat -Lc '%s' "$mpquic_path")
 case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 64 ;; esac
 [ "$MPQUIC_SIZE" -le 67108864 ] || exit 64
-[ "$("$mpquic_path" --api-version)" = 6 ] || exit 64
+[ "$("$mpquic_path" --api-version)" = 7 ] || exit 64
 MPQUIC_SHA256=$(sha256sum "$mpquic_path" | awk '{ print $1 }')
 fi
 PACKAGE_SHA256=none
@@ -578,7 +578,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-[ "$(./volparossa-mpquic --api-version)" = 6 ]
+[ "$(./volparossa-mpquic --api-version)" = 7 ]
 test "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
 test "$(uname -m)" = x86_64

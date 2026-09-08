@@ -79,10 +79,10 @@ def receive(stream, length):
 
 def exchange(path, target, operation, nested, expected_result):
     nonce = os.urandom(16)
-    request = (b"\x08\x06" + blob(2, nonce)
+    request = (b"\x08\x07" + blob(2, nonce)
                + (blob(3, target) if operation != 18 else b"") + blob(operation, nested))
     length = len(request).to_bytes(4, "big")
-    digest = hashlib.sha256(b"VOLPAROSSA-MPQUIC-REQUEST-V6\0" + length + request).digest()
+    digest = hashlib.sha256(b"VOLPAROSSA-MPQUIC-REQUEST-V7\0" + length + request).digest()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
         stream.settimeout(5)
         stream.connect(str(path))
@@ -99,7 +99,7 @@ def exchange(path, target, operation, nested, expected_result):
         if stream.recv(1):
             raise ValueError("trailing response")
     identity = decode(response[7])
-    if (response[1] != 6 or response[2] != nonce or response[8] != digest
+    if (response[1] != 7 or response[2] != nonce or response[8] != digest
             or response.get(3, 0) != expected_result or identity[1] != 1
             or len(identity[2]) != 32 or not any(identity[2])
             or (operation != 18 and identity[2] != target)):

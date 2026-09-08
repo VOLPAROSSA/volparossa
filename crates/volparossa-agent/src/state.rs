@@ -562,6 +562,7 @@ mod tests {
             state: state as i32,
             smoothed_rtt_micros: 1_000_u64.saturating_mul(u64::from(path_id)),
             user_bytes: 0,
+            acked_transport_bytes: 0,
         }
     }
 

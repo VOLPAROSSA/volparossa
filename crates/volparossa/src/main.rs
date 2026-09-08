@@ -686,14 +686,15 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::Paths(list) => {
             for path in list.paths {
                 println!(
-                    "context={} path={} relay={} exit={} state={} rtt_us={} bytes={}",
+                    "context={} path={} relay={} exit={} state={} rtt_us={} bytes={} acked_transport_bytes={}",
                     hex::encode(path.route_context_id),
                     path.path_id,
                     path.relay_peer_id,
                     path.exit_peer_id,
                     path.state,
                     path.smoothed_rtt_micros,
-                    path.user_bytes
+                    path.user_bytes,
+                    path.acked_transport_bytes
                 );
             }
         }

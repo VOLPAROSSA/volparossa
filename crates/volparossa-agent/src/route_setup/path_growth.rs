@@ -40,6 +40,7 @@ impl WarmPathGrowth {
         monotonic_now: Instant,
         wall_now: UnixTime,
         warm: Option<u32>,
+        minimum_paths: usize,
     ) -> GrowthDecision {
         // The owner has already checked exact native IDs and monotonic counters. A first
         // snapshot is a baseline, not evidence of fresh traffic from before this observation.
@@ -50,19 +51,30 @@ impl WarmPathGrowth {
                     && self
                         .previous
                         .get(&path.path_id)
-                        .is_some_and(|old| path.delivered_bytes > *old))
+                        .is_some_and(|old| path.acked_transport_bytes > *old))
                 .then_some(path.path_id)
             })
             .collect::<BTreeSet<_>>();
         self.previous = native
             .iter()
-            .map(|path| (path.path_id, path.delivered_bytes))
+            .map(|path| (path.path_id, path.acked_transport_bytes))
             .collect();
         if let Some(probe) = self.probe {
-            return self.observe_probe(probe, health, &progressed, monotonic_now, wall_now);
+            return self.observe_probe(
+                probe,
+                health,
+                &progressed,
+                monotonic_now,
+                wall_now,
+                minimum_paths,
+            );
         }
         let candidate = warm.and_then(|warm| {
-            if native.len() != 2 || progressed.len() != 2 {
+            if minimum_paths < 2
+                || native.len() < minimum_paths
+                || progressed.len() != native.len()
+                || self.previous.contains_key(&warm)
+            {
                 return None;
             }
             let risky = native
@@ -99,7 +111,7 @@ impl WarmPathGrowth {
             }
             _ => self.candidate = Some((risky, monotonic_now)),
         }
-        // One maintenance interval confirms sustained loss while retaining both useful paths.
+        // One maintenance interval confirms sustained loss while retaining every useful path.
         GrowthDecision::Hold
     }
 
@@ -110,6 +122,7 @@ impl WarmPathGrowth {
         progressed: &BTreeSet<u32>,
         now: Instant,
         wall_now: UnixTime,
+        minimum_paths: usize,
     ) -> GrowthDecision {
         let policy = HysteresisPolicy::default();
         let grace = Duration::from_secs(policy.degraded_after_seconds);
@@ -117,6 +130,8 @@ impl WarmPathGrowth {
             self.probe = None;
             return GrowthDecision::Unchanged;
         };
+        let can_retire =
+            minimum_paths >= 2 && self.previous.len().saturating_sub(1) >= minimum_paths;
         let replacement_useful = progressed.contains(&probe.added)
             && health
                 .statuses
@@ -131,7 +146,8 @@ impl WarmPathGrowth {
                 .all(|(id, status)| {
                     progressed.contains(id) && status.state == SelectionPathState::Active
                 });
-        if replacement_useful
+        if can_retire
+            && replacement_useful
             && (risky.state == SelectionPathState::Dead
                 || risky.metrics.last_progress_at.age_at(wall_now) >= policy.degraded_after_seconds)
         {
@@ -144,15 +160,15 @@ impl WarmPathGrowth {
             && progressed.contains(&probe.risky)
             && risky.metrics.packet_loss_ratio >= policy.degraded_loss_ratio
         {
-            // Three actual payload contributors and a still-observed weak path justify a
-            // failover reserve in use. This does not prove aggregate throughput improvement.
+            // Fresh acknowledged transport on every current path and a still-observed weak path
+            // justify a failover reserve in use, not an aggregate throughput or unique-byte claim.
             self.probe = Some(Probe {
                 last_useful: now,
                 ..probe
             });
             return GrowthDecision::Hold;
         }
-        if now.duration_since(probe.last_useful) >= grace {
+        if can_retire && now.duration_since(probe.last_useful) >= grace {
             let recovered = (progressed.contains(&probe.risky)
                 && risky.state == SelectionPathState::Degraded
                 && risky.metrics.packet_loss_ratio < policy.degraded_loss_ratio)

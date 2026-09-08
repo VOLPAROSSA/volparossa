@@ -1190,6 +1190,27 @@ rollback, or live datapath is connected.
 
 ## Agent-to-native MPQUIC API
 
+### Current API7 transport-progress boundary
+
+The current native process API is version 7. Preflight rejects older executables before route
+setup; there is no downgrade. Canonical request and both descriptor-binding domains use `V7`.
+`NativePathStatus` adds `acked_transport_bytes` (u64, tag 9), the cumulative acknowledged QUIC
+packet bytes from the pinned backend. It is independent of `delivered_bytes`, which remains zero
+when unique inner-payload accounting is unavailable. Both counters are independently checked for
+regression. Path-health/growth uses actual transport-ACK progress, not a fabricated inner count.
+The local `PathSummary` adds the same explicitly named u64 at tag 8, printed as
+`acked_transport_bytes=` beside the unchanged `bytes=` user counter. Warm/non-native paths have
+no such native measurement and report zero. Transport counters alone prove neither unique
+application bytes nor useful aggregate throughput; complete application hashes and carrying-path
+evidence remain necessary. See the [native implementation contract](../native/volparossa-mpquic/README.md)
+and [current integration status](IMPLEMENTATION_STATUS.md#warm-mpquic-growth-integration).
+
+### Historical API6 implementation notes
+
+The following API6 design/checkpoint notes predate the current integrated runtime. Their old
+version/domain literals and statements about dormant backends are historical, not current API7
+configuration or completion claims; current code and the integration status above take precedence.
+
 `NativeRequest` contains canonical API version 6, a nonzero 16-byte nonce, a target native-process
 instance, and one operation. Versions 1 through 5 and every future version are rejected before
 dispatch. One control-socket contact carries exactly one request, with one total deadline and a

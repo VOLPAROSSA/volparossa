@@ -507,7 +507,7 @@ MPQUIC_SIZE=$(stat -Lc '%s' "$mpquic_binary")
 case $MPQUIC_SIZE in ''|0|*[!0-9]*) exit 69 ;; esac
 [ "$MPQUIC_SIZE" -le 67108864 ] \
     || { printf '%s\n' 'pinned native MPQUIC executable is oversized' >&2; exit 69; }
-[ "$("$mpquic_binary" --api-version)" = 6 ] \
+[ "$("$mpquic_binary" --api-version)" = 7 ] \
     || { printf '%s\n' 'pinned native MPQUIC API mismatch' >&2; exit 69; }
 [ -f "$source_directory/packaging/systemd/volparossa.sysusers" ] \
     || { printf '%s\n' 'production service identity declaration unavailable' >&2; exit 69; }
@@ -1105,7 +1105,7 @@ write_report() {
             roles:["client","bootstrap1","bootstrap2","relay0","relay1",
               "relay2","relay3","relay4","relay5","exit","exit2","destination"]},
           production_helpers:{ready:$helpers,instances:$helper_records},
-          native_mpquic:{ready:$mpquic,api_version:6,instances:$mpquic_records},
+          native_mpquic:{ready:$mpquic,api_version:7,instances:$mpquic_records},
           agents_ready:$agents,destination_ready:$destination,
           client_connect:{requested:$requested,succeeded:$connected,
             exit_status:$connect_status,observed_blocker:$blocker},
@@ -2452,7 +2452,7 @@ verify_mpquic() {
         --arg namespace_identity "$process_net" --argjson pid "$mpquic_pid" \
         '{node:$node,unit:$unit,mode:$mode,main_pid:$pid,
           network_namespace:$namespace,network_namespace_identity:$namespace_identity,
-          api_version:6,socket_verified:true}' >"$native_record"
+          api_version:7,socket_verified:true}' >"$native_record"
 }
 
 if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario" = sharing ]; then
