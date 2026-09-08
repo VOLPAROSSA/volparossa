@@ -21213,6 +21213,8 @@ mod tests {
         )
         .await;
         let other_relay = Identity::generate();
+        // Network hints derive from nonce[0]; this positive lineage fixture needs
+        // an additional relay distinct from the existing control and Exit.
         assert!(
             ingest_direct_snapshot_advertisement(
                 &mut fixture,
@@ -21223,7 +21225,7 @@ mod tests {
                     exit: false,
                 },
                 1,
-                generate_nonce(),
+                generated_nonce_with_unique_network_discriminator(),
                 initial_ms,
             )
             .await
@@ -21265,8 +21267,7 @@ mod tests {
             .await
             .expect("live control lineage remains in the route snapshot");
         assert_eq!(lineage_snapshot.forwarded_exits().len(), 1);
-        assert!(
-            narrow_route_candidate_snapshot(
+        narrow_route_candidate_snapshot(
                 lineage_snapshot,
                 PreselectionSamplingScope::new(
                     Transport::UdpSinglePath,
@@ -21276,9 +21277,8 @@ mod tests {
                     1,
                 ),
             )
-            .is_ok(),
-            "a newer signed control advertisement from the same identity and policy must not hide the Exit"
-        );
+            .map_err(|failure| failure.error)
+            .expect("a newer signed control advertisement from the same identity and policy must not hide the Exit");
 
         fixture.runtime.exit_provider_peers.insert(
             exit_peer,
