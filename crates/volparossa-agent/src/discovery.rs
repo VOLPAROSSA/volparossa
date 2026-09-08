@@ -25309,6 +25309,9 @@ mod tests {
         let mut fixture = Box::new(fixture(test_client_roles()));
         let now_ms = unix_millis();
         let exit = Identity::generate();
+        let mut exit_nonce = generate_nonce();
+        // Test network diversity derives from this byte; the relays use 40..43.
+        exit_nonce[0] = 43;
         let exit_peer = *exit.peer_id();
         let deadline = now_ms.saturating_add(20_000);
         fixture
@@ -25323,7 +25326,7 @@ mod tests {
             },
             &fixture.policy,
             1,
-            generate_nonce(),
+            exit_nonce,
             now_ms,
             &fixture.directory,
             PreselectionTestCapabilities::all(),
