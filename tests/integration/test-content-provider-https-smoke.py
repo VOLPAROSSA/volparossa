@@ -220,6 +220,20 @@ class ProviderHttpsEvidence(unittest.TestCase):
                     CHECK["browser_http_get"](dict(download_url=url, expires_unix_seconds=expiry),
                                               Path("/unused-test-output"), 0)
 
+    def test_baseline_capture_prefix_is_registered_only_for_provider_scenario(self):
+        source = HERE.joinpath("kvm-alpha-topology.sh").read_text(encoding="utf-8")
+        # Execute only the existing prefix guard, never any observer or namespace operation.
+        registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
+        script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
+        for scenario in ("content-provider", "content-https", "content-message", "dns-cache"):
+            for suffix in ("complete", "missing", "baseline", "unregistered"):
+                with self.subTest(scenario=scenario, suffix=suffix):
+                    prefix = f"content-provider-https-{suffix}-privacy"
+                    result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
+                                            capture_output=True, timeout=2, check=False)
+                    self.assertEqual(result.returncode == 0,
+                                     scenario == "content-provider" and suffix != "unregistered")
+
     def test_https_local_delivery_requires_actual_owner_and_no_clobber_not_native_export(self):
         evidence = fixture()
         for field, wrong in (
