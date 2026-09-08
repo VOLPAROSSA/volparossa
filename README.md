@@ -110,7 +110,9 @@ from explicitly selected owned caches. They remain offline by default. Explicit
 now publishes a public file or packed website through an already configured agent service,
 without a separate `import`/`serve` step. Success requires complete storage, original-manifest
 journaling and registration; it does not promise external replicas or permanent availability.
-Its targeted local checks pass; the additive publish/restart/network proof is pending.
+The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
+passes: an independent client retrieves the complete original site by name after source-file
+removal and provider restart. This is not a promise that the provider machine can disappear.
 New `content serve`,
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
@@ -309,6 +311,9 @@ The [independent-index follow-up on `3357169e`](https://github.com/VOLPAROSSA/vo
 also passes: freshly revalidated recent peers deliver the complete object using their different
 original indexes, with no origin body. Lookup replies arrive in 42/64 ms; the complete peer
 operation takes 4.91 seconds versus 2.54 seconds origin-only, so no latency win is claimed.
+The next source-selection integration overlaps both index requests and includes their measured
+cost in automatic admission. A separate fixed-bandwidth comparison remains pending; it does
+not replace the earlier fast-origin results.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

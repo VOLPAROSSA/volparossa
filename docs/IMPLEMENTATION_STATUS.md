@@ -317,7 +317,65 @@ network fixture retains the earlier P/Q and automatic-contribution phases, then 
 CLI to publish a site, removes its private source, restarts the actual configured provider and
 fetches by publisher/name from an independent client with fresh path captures. Nine checker
 tests and narrow shell checks pass, including the earlier two-file owner-probe staging. Its
-real publish/restart/network execution remains pending.
+real publish/restart/network execution is now verified below.
+
+The [exact `ac782769` publication VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
+and [full Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221442109) **pass**.
+The complete raw rebuild equals the report using all six transitively required Python sources
+from that exact commit. The normal CLI acknowledges 2,097,628 site bytes / nine chunks. The
+same configured R4 cache (`65025:27281`) retains its earlier P and now contains two publications,
+twelve chunks / 2,622,237 bytes. After removing the publisher's identity, source, manifest and
+cache, the actual provider PID changes 23288 to 23395 in the same namespace. Its original
+1,621-byte journal remains byte-identical, SHA-256
+`71aae7d80815ad33433320dda75fb6c6cc472deca421178c69cba28a8643f43d`.
+
+An independent capability-dropped Client supplies only the publisher key and name and receives
+the complete site from R4, with manifest
+`e748a051bc61a913033045b9482227f47f5fd5fc89f9b990babadc5887bf4434`, original expiry 1788954885
+and bundle SHA-256 `5e3012170ca5335e4f8b7e419fda3ae4ddf59e7603eeabb6a9c2544ea6088a04`.
+Its fresh context `49623c6bb9c5859bc1f172a5b7d65d21` uses both R1/R2 WireGuard paths. Earlier
+Q redistribution and automatic P uptake/restart/retrieval still pass. All twenty-five captures
+/ 196 interface rows are complete, drained, accounted and zero-drop/forbidden/direct; the
+37,759 summed boundary frames are not unique packets. Cleanup leaves zero owned objects and
+unchanged guest-state SHA-256 `3e79745caded681ddac6cd2fdd3d1f11481f7ae0c0f929d86d734cb51fdf0679`.
+Artifact ZIP SHA-256: `22aa51325ed41ee6953f083eea0cb7be3662a7cfd025005564a87f7f79026ae6`;
+canonical raw rebuild SHA-256: `041b71ef4ab8a5442411cc83f21edb7dca046e0407ef804e6a4ef78bf7d92323`.
+This proves publisher-application exit, not power-off of the provider node, a browser engine,
+external custody or the later cost-aware source-selection changes.
+
+### Cost-aware automatic digest retrieval
+
+At most two digest-index lookups now execute together under the same original absolute
+deadline. Results remain in input-provider order, preserving each original index and the
+sixteen-provider bound; timeout/drop does not leave detached lookup owners. A real duplex
+selector barrier proves both requests arrived before either response, with sibling retention
+and deadline cleanup. The previous compatibility/private-index test also passes.
+
+Digest Auto now requires a successful recent index-cost measurement alongside the existing
+protected payload measurement. Only complete origin-verified delivery can attach this fixed
+cost to an already useful exact-scope/provider hint. Its sixty-second age starts at the index
+operation, not later attachment; no offer, payload age or content authority is renewed.
+Initial admission adds the slower parallel index cost to the conservative payload estimate.
+After fresh indexes actually arrive, it checks the selected peers' remaining payload estimate
+against the same original deadline, without counting index time twice. The measured-peer
+event follows that check; ordinary native/cooperative prediction remains unchanged.
+
+Three final targeted tests and strict agent all-targets/all-features Clippy pass, alongside
+formatting. The additive comparison uses one predefined 4-Mbps disposable origin uplink for
+origin-only calibration/reference, peers-first calibration and a cold automatic download,
+without replacing earlier fast-origin or missing-chunk tests. Actual automatic peer delivery
+and any whole-command latency benefit remain unproved until the next network execution;
+C08 stays open.
+
+Thirteen HTTPS and fourteen parent checker tests pass. Shell syntax and targeted ShellCheck
+also pass. One local disposable user/network namespace checks the actual iproute2 schema and
+exact cleanup (`noqueue -> TBF 804: -> noqueue`); it carries no test payload and proves no
+throughput. The new fixture requires fresh HEAD authorization, both independent providers,
+zero origin body, unchanged original indexes/expiry and one common window under sixty seconds.
+Its separate `benefit_passed` field is calculated only from the complete command durations;
+a slower automatic sample remains false. The limiter is removed before the earlier fast-origin
+tests and through the existing failure cleanup. The origin's original 31-connection cap stays
+unchanged; four additional raw records are explicitly accounted.
 
 ### Native publication/site cache-only reopen
 

@@ -1,6 +1,6 @@
 //! Own-origin whole-object digest retrieval; provider signatures are only transport indexes.
 
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, future::Future, path::PathBuf, time::Duration};
 
 use libp2p::PeerId;
 use tokio::time::{Instant, timeout_at};
@@ -15,12 +15,16 @@ use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
 use super::super::{
     ContentError, content_event, download_cache, limits, now, parallel,
-    recent::RecentProviderScope, tls,
+    recent::{DigestIndexCost, RecentProviderScope},
+    tls,
 };
 use super::{
     Authorization, PreparedDownload, checked_policy, load_roots, open_origin_stream, sources,
 };
 use crate::{control::ControlContext, discovery::DiscoveredContentProvider, unix_millis};
+
+#[cfg(test)]
+mod parallel_lookup_tests;
 
 pub(super) async fn retrieve(
     request: HttpsContentFetchRequest,
@@ -170,8 +174,7 @@ async fn peers(
     strategy: HttpsSourceStrategy,
 ) -> Result<(Option<SignedManifest>, Vec<String>, u64), ContentError> {
     let started = Instant::now();
-    let Some((providers, deadline)) =
-        initial_peers(context, origin, authority, scope, strategy, started).await
+    let Some(initial) = initial_peers(context, origin, authority, scope, strategy, started).await
     else {
         return Ok((None, Vec::new(), 0));
     };
@@ -181,23 +184,25 @@ async fn peers(
         authority,
         policy,
         scope,
-        deadline,
+        deadline: initial.deadline,
+        started,
+        auto: initial.auto,
         expected: None,
         looked_up: BTreeSet::new(),
         used: BTreeSet::new(),
         bytes: 0,
     };
-    let mut complete = attempt.pull(providers, store).await?;
+    let mut complete = attempt.pull(initial.providers, store).await?;
     if !complete
         && strategy == HttpsSourceStrategy::PeersFirst
         && attempt.looked_up.len() < 16
-        && Instant::now() < deadline
+        && Instant::now() < attempt.deadline
     {
         checked_policy(context, origin, policy).await?;
         // No renewed deadline or parallel origin race: retain the earlier writer's chunks
         // and receipts, then explore the remaining bounded offer pool only if necessary.
         if let Ok(Ok(providers)) = timeout_at(
-            deadline,
+            attempt.deadline,
             context
                 .discovery
                 .discover_content_providers(scope.control_peer, 16),
@@ -220,6 +225,12 @@ async fn peers(
     ))
 }
 
+struct InitialPeers {
+    providers: Vec<DiscoveredContentProvider>,
+    deadline: Instant,
+    auto: Option<sources::PeerPlan>,
+}
+
 async fn initial_peers(
     context: &ControlContext,
     origin: &OriginRequest,
@@ -227,7 +238,7 @@ async fn initial_peers(
     scope: RecentProviderScope,
     strategy: HttpsSourceStrategy,
     started: Instant,
-) -> Option<(Vec<DiscoveredContentProvider>, Instant)> {
+) -> Option<InitialPeers> {
     match strategy {
         HttpsSourceStrategy::OriginOnly => {
             content_event(context, "CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN").await;
@@ -247,7 +258,11 @@ async fn initial_peers(
             )
             .await
             .unwrap_or_default();
-            Some((providers, deadline))
+            Some(InitialPeers {
+                providers,
+                deadline,
+                auto: None,
+            })
         }
         HttpsSourceStrategy::Auto => {
             let estimate = context.content.source_costs.lock().await.estimate_origin(
@@ -261,7 +276,9 @@ async fn initial_peers(
                 return None;
             };
             let hints = context.content.recent_provider_hints(scope).await;
-            let Some(plan) = sources::PeerPlan::new(estimate, authority.length(), &hints) else {
+            let Some(plan) =
+                sources::PeerPlan::new_digest(estimate, authority.length(), &hints, Instant::now())
+            else {
                 content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED").await;
                 return None;
             };
@@ -269,15 +286,26 @@ async fn initial_peers(
                 .content
                 .refresh_recent_provider_hints(scope, &context.discovery, plan.lookup_budget)
                 .await;
-            let refreshed = hints
+            let refreshed = context
+                .content
+                .recent_provider_hints(scope)
+                .await
                 .into_iter()
                 .filter(|hint| providers.iter().any(|peer| peer.peer_id == hint.peer_id))
                 .collect::<Vec<_>>();
-            if !plan.admits_refreshed(authority.length(), &refreshed, started.elapsed()) {
+            if !plan.admits_digest_refreshed(
+                authority.length(),
+                &refreshed,
+                started.elapsed(),
+                Instant::now(),
+            ) {
                 return None;
             }
-            content_event(context, "CONTENT_HTTPS_SOURCE_MEASURED_PEERS").await;
-            Some((providers, started + plan.total_budget))
+            Some(InitialPeers {
+                providers,
+                deadline: started + plan.total_budget,
+                auto: Some(plan),
+            })
         }
     }
 }
@@ -289,10 +317,24 @@ struct PeerAttempt<'a> {
     policy: &'a VerifiedPolicy,
     scope: RecentProviderScope,
     deadline: Instant,
+    started: Instant,
+    auto: Option<sources::PeerPlan>,
     expected: Option<(SignedManifest, VerifiedManifest)>,
     looked_up: BTreeSet<PeerId>,
     used: BTreeSet<String>,
     bytes: u64,
+}
+
+struct IndexedProvider {
+    provider: DiscoveredContentProvider,
+    manifest: VerifiedManifest,
+    index_cost: Option<DigestIndexCost>,
+}
+
+struct LookupResult {
+    signed: SignedManifest,
+    manifest: VerifiedManifest,
+    cost: Option<DigestIndexCost>,
 }
 
 impl PeerAttempt<'_> {
@@ -305,35 +347,64 @@ impl PeerAttempt<'_> {
             return Err(ContentError::Invalid);
         }
         let mut pair = Vec::new();
-        for provider in providers {
-            if Instant::now() >= self.deadline || self.looked_up.len() >= 16 {
+        let mut providers = providers.into_iter();
+        while Instant::now() < self.deadline && self.looked_up.len() < 16 {
+            let mut batch = Vec::new();
+            for provider in providers.by_ref() {
+                if self.looked_up.len() >= 16 {
+                    break;
+                }
+                if self.looked_up.insert(provider.peer_id) {
+                    batch.push(provider);
+                }
+                if batch.len() == 2 - pair.len() {
+                    break;
+                }
+            }
+            if batch.is_empty() {
                 break;
             }
-            if !self.looked_up.insert(provider.peer_id) {
-                continue;
-            }
-            let result = timeout_at(
-                self.deadline,
-                lookup(self.context, self.authority, self.policy, &provider),
-            )
-            .await;
-            let Ok(Ok(Some((signed, manifest)))) = result else {
-                self.context
-                    .content
-                    .forget_recent_provider(self.scope, provider.peer_id)
-                    .await;
-                continue;
+            let first = async {
+                lookup(self.context, self.authority, self.policy, batch.first()?)
+                    .await
+                    .ok()
+                    .flatten()
             };
-            if let Some((_, expected)) = &self.expected {
-                if !compatible_transport(expected, &manifest) {
+            let second = async {
+                lookup(self.context, self.authority, self.policy, batch.get(1)?)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let results = Box::pin(lookup_pair_until(first, second, self.deadline)).await;
+            // Stable input order, not completion timing, determines the original expected index.
+            // An error/deadline in one future never discards its sibling's completed result.
+            for (provider, result) in batch.into_iter().zip(results) {
+                let Some(Some(LookupResult {
+                    signed,
+                    manifest,
+                    cost,
+                })) = result
+                else {
+                    self.context
+                        .content
+                        .forget_recent_provider(self.scope, provider.peer_id)
+                        .await;
                     continue;
+                };
+                if let Some((_, expected)) = &self.expected {
+                    if !compatible_transport(expected, &manifest) {
+                        continue;
+                    }
+                } else {
+                    self.expected = Some((signed, manifest.clone()));
                 }
-            } else {
-                self.expected = Some((signed, manifest.clone()));
+                pair.push(IndexedProvider {
+                    provider,
+                    manifest,
+                    index_cost: cost,
+                });
             }
-            // Each index belongs to the peer that just supplied it. Distinct manifest IDs,
-            // keys or publisher-local names do not become origin or publisher authority.
-            pair.push((provider, manifest));
             if pair.len() == 2 && self.pull_pair(std::mem::take(&mut pair), store).await? {
                 return Ok(true);
             }
@@ -343,7 +414,7 @@ impl PeerAttempt<'_> {
 
     async fn pull_pair(
         &mut self,
-        pair: Vec<(DiscoveredContentProvider, VerifiedManifest)>,
+        pair: Vec<IndexedProvider>,
         store: &mut ChunkStore,
     ) -> Result<bool, ContentError> {
         let Some((_, expected)) = &self.expected else {
@@ -355,17 +426,26 @@ impl PeerAttempt<'_> {
         if pair.is_empty() || Instant::now() >= self.deadline {
             return Ok(false);
         }
+        if !self.admits_pair(&pair).await {
+            return Ok(false);
+        }
         checked_policy(self.context, self.origin, self.policy).await?;
         let attempted = pair
             .iter()
-            .map(|(peer, _)| peer.peer_id)
+            .map(|source| (source.provider.peer_id, source.index_cost))
             .collect::<Vec<_>>();
+        if self.auto.is_some() {
+            // Digest admission includes the real completed index round, not just old metrics.
+            content_event(self.context, "CONTENT_HTTPS_SOURCE_MEASURED_PEERS").await;
+        }
         let received = parallel::pull_indexed_with_budget(
             self.context,
             expected,
             store,
             self.policy,
-            pair,
+            pair.into_iter()
+                .map(|source| (source.provider, source.manifest))
+                .collect(),
             self.deadline.saturating_duration_since(Instant::now()),
         )
         .await;
@@ -378,9 +458,19 @@ impl PeerAttempt<'_> {
         self.used.extend(providers);
         self.bytes = self.bytes.checked_add(bytes).ok_or(ContentError::Invalid)?;
         if self.authority.verify_cached(expected, store, now()).is_ok() {
+            // Only a real, fully checked object can augment the useful payload measurement.
+            // Failed/unused workers cannot create hints through their metadata exchange.
+            for (peer, cost) in attempted {
+                if let Some(cost) = cost.filter(|_| self.used.contains(&peer.to_string())) {
+                    self.context
+                        .content
+                        .attach_digest_index_cost(self.scope, peer, cost)
+                        .await;
+                }
+            }
             return Ok(true);
         }
-        for peer in attempted {
+        for (peer, _) in attempted {
             self.context
                 .content
                 .forget_recent_provider(self.scope, peer)
@@ -388,6 +478,34 @@ impl PeerAttempt<'_> {
         }
         Ok(false)
     }
+
+    async fn admits_pair(&self, pair: &[IndexedProvider]) -> bool {
+        let Some(plan) = &self.auto else {
+            return true;
+        };
+        let hints = self.context.content.recent_provider_hints(self.scope).await;
+        let selected = pair
+            .iter()
+            .map(|source| source.provider.peer_id)
+            .collect::<Vec<_>>();
+        plan.admits_after_index(
+            self.authority.length(),
+            &hints,
+            &selected,
+            self.started.elapsed(),
+        )
+    }
+}
+
+/// No tasks outlive this call: each protected lookup owns its flow until completion/drop.
+/// Separate timers retain completed siblings without extending the caller's shared deadline.
+async fn lookup_pair_until<T>(
+    first: impl Future<Output = T>,
+    second: impl Future<Output = T>,
+    deadline: Instant,
+) -> [Option<T>; 2] {
+    let (first, second) = tokio::join!(timeout_at(deadline, first), timeout_at(deadline, second));
+    [first.ok(), second.ok()]
 }
 
 fn compatible_transport(expected: &VerifiedManifest, candidate: &VerifiedManifest) -> bool {
@@ -403,7 +521,8 @@ async fn lookup(
     authority: &OriginAuthorizedDigest,
     policy: &VerifiedPolicy,
     provider: &DiscoveredContentProvider,
-) -> Result<Option<(SignedManifest, VerifiedManifest)>, ContentError> {
+) -> Result<Option<LookupResult>, ContentError> {
+    let started = Instant::now();
     if !context
         .routes
         .content_provider_is_distinct(&provider.peer_id)
@@ -437,7 +556,11 @@ async fn lookup(
     let manifest = authority
         .verify_candidate(candidate.signed(), now())
         .map_err(|_| ContentError::Invalid)?;
-    Ok(Some((candidate.signed().clone(), manifest)))
+    Ok(Some(LookupResult {
+        signed: candidate.signed().clone(),
+        manifest,
+        cost: DigestIndexCost::new(started.elapsed(), started),
+    }))
 }
 
 #[cfg(test)]

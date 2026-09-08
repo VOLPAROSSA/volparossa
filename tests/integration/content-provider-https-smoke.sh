@@ -11,6 +11,7 @@ content_provider_https_cli() {
 }
 
 content_provider_https_cleanup() {
+    content_provider_https_limited_remove || return 1
     # Exact owned public fixture files only; never sweep caches or arbitrary directories.
     ph_cleanup_root=$WORK/client-fixtures/https-output
     [ ! -L "$ph_cleanup_root" ] || return 1
@@ -18,7 +19,7 @@ content_provider_https_cleanup() {
         [ -d "$ph_cleanup_root" ] \
             && [ "$(stat -Lc '%a:%u:%g' "$ph_cleanup_root")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin digest-origin-only-object.bin digest-peers-first-object.bin; do
+        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin digest-origin-only-object.bin digest-peers-first-object.bin limited-origin-only-object.bin limited-peers-first-object.bin limited-auto-object.bin; do
             ph_cleanup_mode=600
             [ "$ph_cleanup_name" != origin.pem ] || ph_cleanup_mode=400
             ph_cleanup_file=$ph_cleanup_root/$ph_cleanup_name
@@ -43,6 +44,9 @@ content_provider_https_phase() {
         origin-only|auto) ph_strategy=$ph_case ;;
         digest-origin-only) ph_strategy=origin-only ;;
         digest-peers-first) ph_strategy=peers-first ;;
+        limited-origin-only) ph_strategy=origin-only ;;
+        limited-peers-first) ph_strategy=peers-first ;;
+        limited-auto) ph_strategy=auto ;;
         *) fail PROVIDER_HTTPS_SOURCE_STRATEGY_INVALID ;;
     esac
     ph_prefix=content-provider-https-$ph_case
@@ -82,7 +86,7 @@ content_provider_https_phase() {
     # This is the existing local-output command's no-clobber guard, also for the file
     # obtained via HTTP. It is not an invented browser-download output-path option.
     case $ph_case in
-        digest-*) set -- --origin-digest ;;
+        digest-*|limited-*) set -- --origin-digest ;;
         *) set -- --metadata-path /.well-known/volparossa/content/asset ;;
     esac
     if content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
@@ -112,6 +116,60 @@ content_provider_https_phase() {
           no_clobber_rejected_before_network:true,agent_mount_positive_control:true,
           agent_cannot_read_user_output_directory:true,client_mount_cannot_read_origin:true}' \
         >"$WORK/$ph_prefix-output.json"
+}
+
+content_provider_https_limited_remove() {
+    [ "${PH_LIMITED_QDISC_OWNED:-no}" = yes ] || return 0
+    ip netns exec "$DEST" tc -j -s qdisc show dev dx >"$WORK/content-provider-https-limited-qdisc-final.json" || return 1
+    jq -e 'length == 1 and .[0].kind == "tbf" and .[0].handle == "804:"
+        and .[0].root == true and .[0].options.rate == 500000' \
+        "$WORK/content-provider-https-limited-qdisc-final.json" >/dev/null || return 1
+    printf '%s\n' "Removing only owned TBF 804: from disposable namespace $DEST interface dx."
+    ip netns exec "$DEST" tc qdisc del dev dx root handle 804: || return 1
+    ip netns exec "$DEST" tc -j qdisc show dev dx >"$WORK/content-provider-https-limited-qdisc-after.json" || return 1
+    jq -e 'length == 1 and .[0].kind == "noqueue" and .[0].root == true' \
+        "$WORK/content-provider-https-limited-qdisc-after.json" >/dev/null || return 1
+    PH_LIMITED_QDISC_OWNED=no
+}
+
+content_provider_https_limited_run() {
+    # One predefined bandwidth condition, never per-request sleeps or rate tuning.
+    PHASE=content-provider-https-limited-setup
+    [ "${PH_LIMITED_QDISC_OWNED:-no}" = no ] || fail PROVIDER_HTTPS_QDISC_ALREADY_OWNED
+    ip netns exec "$DEST" tc -j qdisc show dev dx >"$WORK/content-provider-https-limited-qdisc-before.json" \
+        || fail PROVIDER_HTTPS_QDISC_UNAVAILABLE
+    jq -e 'length == 1 and .[0].kind == "noqueue" and .[0].root == true' \
+        "$WORK/content-provider-https-limited-qdisc-before.json" >/dev/null || fail PROVIDER_HTTPS_QDISC_NOT_EMPTY
+    printf '%s\n' "Adding fixed TBF 804: rate 4mbit burst 128kb latency 250ms to disposable namespace $DEST interface dx; remove before existing missing/origin phases."
+    ip netns exec "$DEST" tc qdisc add dev dx root handle 804: tbf rate 4mbit burst 128kb latency 250ms \
+        || fail PROVIDER_HTTPS_QDISC_INSTALL_FAILED
+    PH_LIMITED_QDISC_OWNED=yes
+    ph_limited_started=$(python3 -B -c 'import time; print(time.monotonic_ns())')
+    ph_limited_parent=$(readlink /proc/self/ns/net)
+    ph_limited_namespace=$(ip netns exec "$DEST" readlink /proc/self/ns/net) || fail PROVIDER_HTTPS_QDISC_NAMESPACE
+    [ "$ph_limited_parent" != "$ph_limited_namespace" ] || fail PROVIDER_HTTPS_QDISC_NAMESPACE
+    for ph_limited_case in limited-origin-only limited-peers-first limited-auto; do
+        ip netns exec "$DEST" tc -j -s qdisc show dev dx >"$WORK/content-provider-https-$ph_limited_case-qdisc-before.json" \
+            || fail PROVIDER_HTTPS_QDISC_UNAVAILABLE
+        timeout 5s "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" logs --limit 400 \
+            >"$WORK/content-provider-https-$ph_limited_case-events-before.txt" || fail PROVIDER_HTTPS_SOURCE_EVENTS_UNAVAILABLE
+        content_provider_https_phase "$ph_limited_case"
+        timeout 5s "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" logs --limit 400 \
+            >"$WORK/content-provider-https-$ph_limited_case-events-after.txt" || fail PROVIDER_HTTPS_SOURCE_EVENTS_UNAVAILABLE
+        ip netns exec "$DEST" tc -j -s qdisc show dev dx >"$WORK/content-provider-https-$ph_limited_case-qdisc-after.json" \
+            || fail PROVIDER_HTTPS_QDISC_UNAVAILABLE
+    done
+    ph_limited_finished=$(python3 -B -c 'import time; print(time.monotonic_ns())')
+    jq -n --arg namespace "$ph_limited_namespace" --arg parent "$ph_limited_parent" \
+        --argjson started "$ph_limited_started" --argjson finished "$ph_limited_finished" '
+        {profile:"fixed-origin-uplink-4mbit",interface:"dx",origin_address:"47.163.4.2",handle:"804:",
+         rate_bits_per_second:4000000,burst_bytes:131072,queue_latency_ms:250,
+         namespace:$namespace,parent_namespace:$parent,started_monotonic_ns:$started,
+         completed_monotonic_ns:$finished,window_ns:($finished-$started),application_sleeps:false,
+         adaptive_rate:false}' >"$WORK/content-provider-https-limited-profile.json"
+    content_provider_https_limited_remove || fail PROVIDER_HTTPS_QDISC_CLEANUP_FAILED
+    [ "$((ph_limited_finished - ph_limited_started))" -lt 60000000000 ] \
+        || fail PROVIDER_HTTPS_COST_WINDOW_EXPIRED
 }
 
 content_provider_https_baseline() {
@@ -275,6 +333,7 @@ content_provider_https_run() {
     content_provider_https_phase digest-origin-only
     content_provider_https_independent_index
     content_provider_https_phase digest-peers-first
+    content_provider_https_limited_run
     PHASE=content-provider-https-withdraw-one
     "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \
         content stop >"$WORK/content-provider-https-provider-stop.json" \

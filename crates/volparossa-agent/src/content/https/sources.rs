@@ -114,6 +114,19 @@ impl PeerPlan {
         hints: &[RecentProviderHint],
     ) -> Option<Self> {
         let transfer = estimate_peers(object_bytes, hints)?;
+        Self::with_transfer_cost(origin, transfer)
+    }
+
+    pub(super) fn new_digest(
+        origin: Duration,
+        object_bytes: u64,
+        hints: &[RecentProviderHint],
+        at: Instant,
+    ) -> Option<Self> {
+        Self::with_transfer_cost(origin, estimate_digest_peers(object_bytes, hints, at)?)
+    }
+
+    fn with_transfer_cost(origin: Duration, transfer: Duration) -> Option<Self> {
         // Require a projected 20% margin. This is an admission rule, not a promise
         // that real network conditions will remain equal to a recent measurement.
         let total_budget = scale(origin, 4, 5)?.min(MAX_PEER_ATTEMPT);
@@ -134,12 +147,58 @@ impl PeerPlan {
         hints: &[RecentProviderHint],
         spent: Duration,
     ) -> bool {
-        estimate_peers(object_bytes, hints).is_some_and(|transfer| {
+        self.admits_cost(estimate_peers(object_bytes, hints), spent)
+    }
+
+    pub(super) fn admits_digest_refreshed(
+        &self,
+        object_bytes: u64,
+        hints: &[RecentProviderHint],
+        spent: Duration,
+        at: Instant,
+    ) -> bool {
+        self.admits_cost(estimate_digest_peers(object_bytes, hints, at), spent)
+    }
+
+    pub(super) fn admits_after_index(
+        &self,
+        object_bytes: u64,
+        hints: &[RecentProviderHint],
+        selected: &[libp2p::PeerId],
+        spent: Duration,
+    ) -> bool {
+        let retained = hints
+            .iter()
+            .filter(|hint| selected.contains(&hint.peer_id))
+            .copied()
+            .collect::<Vec<_>>();
+        // Lookup has now actually elapsed. Only the selected, still-useful payload hints
+        // predict the remaining work; adding the old index estimate would count it twice.
+        retained.len() == selected.len() && self.admits_refreshed(object_bytes, &retained, spent)
+    }
+
+    fn admits_cost(&self, cost: Option<Duration>, spent: Duration) -> bool {
+        cost.is_some_and(|transfer| {
             spent
                 .checked_add(transfer)
                 .is_some_and(|total| total < self.total_budget)
         })
     }
+}
+
+fn estimate_digest_peers(
+    object_bytes: u64,
+    hints: &[RecentProviderHint],
+    at: Instant,
+) -> Option<Duration> {
+    let transfer = estimate_peers(object_bytes, hints)?;
+    let mut index = Duration::ZERO;
+    for hint in hints {
+        index = index.max(hint.digest_index?.elapsed(at)?);
+    }
+    // At most two index lookups overlap, followed by the protected payload workers.
+    // Setup is fixed, not scaled by object size or optimistically divided by peers.
+    transfer.checked_add(index)
 }
 
 fn estimate_peers(object_bytes: u64, hints: &[RecentProviderHint]) -> Option<Duration> {
@@ -249,6 +308,7 @@ mod tests {
             peer_id: libp2p::PeerId::random(),
             verified_bytes: 1024 * 1024,
             elapsed: Duration::from_millis(100),
+            digest_index: None,
         }];
         let size = 2 * 1024 * 1024;
         assert!(PeerPlan::new(Duration::from_secs(2), size, &[]).is_none());
@@ -261,5 +321,45 @@ mod tests {
         assert!(PeerPlan::new(Duration::from_secs(2), size, &hints).is_none());
         hints[0].elapsed = Duration::ZERO;
         assert!(PeerPlan::new(Duration::from_secs(2), size, &hints).is_none());
+    }
+
+    #[test]
+    fn digest_index_cost_is_fixed_fresh_and_rechecked_only_for_selected_payloads() {
+        use crate::content::recent::DigestIndexCost;
+
+        let at = Instant::now();
+        let size = 2 * 1024 * 1024;
+        let origin = Duration::from_secs(2);
+        let mut hints = [100, 200].map(|millis| RecentProviderHint {
+            peer_id: libp2p::PeerId::random(),
+            verified_bytes: 1024 * 1024,
+            elapsed: Duration::from_millis(millis),
+            digest_index: None,
+        });
+        assert!(PeerPlan::new(origin, size, &hints).is_some());
+        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        hints[0].digest_index = DigestIndexCost::new(Duration::from_millis(400), at);
+        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        hints[1].digest_index = DigestIndexCost::new(Duration::from_millis(700), at);
+        assert_eq!(
+            estimate_digest_peers(size, &hints, at),
+            Some(Duration::from_millis(1100)),
+            "parallel index max700 + conservative payload max400, no index scaling"
+        );
+        let plan = PeerPlan::new_digest(origin, size, &hints, at).unwrap();
+        assert!(plan.admits_digest_refreshed(size, &hints, Duration::from_millis(100), at));
+        assert!(!plan.admits_digest_refreshed(size, &hints, Duration::from_millis(600), at));
+        let selected = hints.map(|hint| hint.peer_id);
+        assert!(plan.admits_after_index(size, &hints, &selected, Duration::from_secs(1)));
+        assert!(!plan.admits_after_index(size, &hints, &selected, Duration::from_millis(1300)));
+        assert!(plan.admits_after_index(size, &hints, &selected[..1], Duration::from_millis(1300)));
+        assert!(!plan.admits_after_index(size, &hints[..1], &selected, Duration::ZERO));
+        hints[1].digest_index = DigestIndexCost::new(Duration::from_secs(2), at);
+        assert!(PeerPlan::new_digest(origin, size, &hints, at).is_none());
+        assert!(
+            PeerPlan::new(origin, size, &hints).is_some(),
+            "native cost is unchanged"
+        );
+        assert!(PeerPlan::new_digest(origin, size, &hints, at + COST_LIFETIME).is_none());
     }
 }

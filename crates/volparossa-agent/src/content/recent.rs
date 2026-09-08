@@ -44,11 +44,36 @@ impl RecentProviderScope {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct DigestIndexCost {
+    elapsed: Duration,
+    deadline: Instant,
+}
+
+impl DigestIndexCost {
+    pub(super) fn new(elapsed: Duration, started: Instant) -> Option<Self> {
+        if elapsed.is_zero() {
+            return None;
+        }
+        Some(Self {
+            elapsed,
+            // Age starts with the actual index operation, not later payload completion.
+            deadline: started.checked_add(MAX_MEASUREMENT_AGE)?,
+        })
+    }
+
+    pub(super) fn elapsed(self, at: Instant) -> Option<Duration> {
+        (at < self.deadline).then_some(self.elapsed)
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct RecentProviderHint {
     pub(super) peer_id: PeerId,
     pub(super) verified_bytes: u64,
     /// Actual protected setup, transfer and successful close; not a predicted throughput.
     pub(super) elapsed: Duration,
+    /// Optional preceding digest selector cost; never part of native payload prediction.
+    pub(super) digest_index: Option<DigestIndexCost>,
 }
 
 struct Entry {
@@ -81,8 +106,36 @@ impl RecentProviders {
         self.0
             .iter()
             .filter(|entry| entry.scope == scope)
-            .map(|entry| entry.hint)
+            .map(|entry| {
+                let mut hint = entry.hint;
+                hint.digest_index = hint
+                    .digest_index
+                    .filter(|cost| cost.elapsed(clock).is_some());
+                hint
+            })
             .collect()
+    }
+
+    fn attach_digest_index(
+        &mut self,
+        scope: RecentProviderScope,
+        peer: PeerId,
+        cost: DigestIndexCost,
+        wall: u64,
+        clock: Instant,
+    ) {
+        self.prune(wall, clock);
+        if cost.elapsed(clock).is_none() {
+            return;
+        }
+        if let Some(entry) = self
+            .0
+            .iter_mut()
+            .find(|entry| entry.scope == scope && entry.hint.peer_id == peer)
+        {
+            // Metadata alone cannot create a useful-peer hint, renew its offer, or reset age.
+            entry.hint.digest_index = Some(cost);
+        }
     }
 
     fn forget(&mut self, scope: RecentProviderScope, peer: PeerId) {
@@ -125,6 +178,18 @@ impl ContentRuntime {
 
     pub(super) async fn forget_recent_provider(&self, scope: RecentProviderScope, peer: PeerId) {
         self.recent.lock().await.forget(scope, peer);
+    }
+
+    pub(super) async fn attach_digest_index_cost(
+        &self,
+        scope: RecentProviderScope,
+        peer: PeerId,
+        cost: DigestIndexCost,
+    ) {
+        self.recent
+            .lock()
+            .await
+            .attach_digest_index(scope, peer, cost, now(), Instant::now());
     }
 
     pub(super) async fn observe_recent_provider(
@@ -225,6 +290,7 @@ mod tests {
                 peer_id: peer,
                 verified_bytes: 262_144,
                 elapsed: Duration::from_millis(80),
+                digest_index: None,
             },
             expires: 130,
             deadline: clock + Duration::from_secs(30),
@@ -299,5 +365,60 @@ mod tests {
         .await;
         assert_eq!(result, [Some(7), None]);
         assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn digest_index_cost_attaches_only_to_useful_scope_without_renewing_any_deadline() {
+        let clock = Instant::now();
+        let peer = PeerId::random();
+        let scope = RecentProviderScope::new(PeerId::random(), [7; 32], [8; 16]);
+        let mut cache = RecentProviders::default();
+        let cost = DigestIndexCost::new(Duration::from_millis(500), clock).unwrap();
+        assert!(DigestIndexCost::new(Duration::ZERO, clock).is_none());
+        cache.attach_digest_index(scope, peer, cost, 100, clock);
+        assert!(cache.0.is_empty(), "an index alone cannot create a hint");
+        let measured_at = clock + Duration::from_secs(20);
+        let mut sample = entry(scope, peer, measured_at);
+        sample.deadline = clock + Duration::from_secs(70);
+        cache.observe(sample, 100, measured_at);
+        for other_scope in [
+            RecentProviderScope::new(PeerId::random(), [7; 32], [8; 16]),
+            RecentProviderScope::new(scope.control_peer, [9; 32], [8; 16]),
+            RecentProviderScope::new(scope.control_peer, [7; 32], [9; 16]),
+        ] {
+            cache.attach_digest_index(other_scope, peer, cost, 100, measured_at);
+        }
+        cache.attach_digest_index(scope, PeerId::random(), cost, 100, measured_at);
+        assert!(
+            cache.hints(scope, 100, measured_at)[0]
+                .digest_index
+                .is_none()
+        );
+        cache.attach_digest_index(scope, peer, cost, 100, clock + Duration::from_secs(25));
+        assert_eq!(cache.0[0].expires, 130);
+        assert_eq!(cache.0[0].deadline, clock + Duration::from_secs(70));
+        assert_eq!(cache.0[0].measured_at, measured_at);
+        assert_eq!(
+            cache.hints(scope, 100, measured_at)[0]
+                .digest_index
+                .unwrap()
+                .elapsed(measured_at),
+            Some(Duration::from_millis(500))
+        );
+        let expired_index = clock + MAX_MEASUREMENT_AGE;
+        let hints = cache.hints(scope, 100, expired_index);
+        assert_eq!(hints.len(), 1, "payload sample is still recent");
+        assert!(hints[0].digest_index.is_none(), "index age was not renewed");
+        cache.attach_digest_index(scope, peer, cost, 100, expired_index);
+        assert!(
+            cache.hints(scope, 100, expired_index)[0]
+                .digest_index
+                .is_none()
+        );
+        assert!(
+            cache
+                .hints(scope, 100, clock + Duration::from_secs(70))
+                .is_empty()
+        );
     }
 }

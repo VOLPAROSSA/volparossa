@@ -754,6 +754,12 @@ progress is retained across attempts. The
 passes with both providers and zero origin body; recent lookup replies take 42/64 ms.
 The complete operation still takes 4.91 seconds versus 2.54 seconds origin-only, not a speed
 win. Automatic mode keeps its measured budget and does not gain unbounded discovery fallback.
+Digest index requests now overlap at most two at a time. For automatic mode, recent payload
+measurements must also have a fresh successful digest-index measurement; missing measurements
+prefer the origin. Admission includes that fixed setup cost and is checked again after the
+actual index round, using only the selected peers and the original remaining deadline. These
+RAM-only costs expire within sixty seconds and do not renew offers or establish content trust.
+The new cost-aware automatic-hit/bandwidth comparison is pending, not a speed guarantee.
 
 ### Automatic public-content contribution
 
@@ -831,7 +837,10 @@ This confirms a complete **local provider publication**, not that other nodes ha
 copies or promised storage until expiry. The publisher's node must remain reachable unless
 other peers have actually received the required chunks. Opportunistic propagation remains
 best effort; no permanent website availability, HTTPS authority or external custody is implied.
-Targeted local checks cover this new path; its additive publish/restart/network proof is pending.
+The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
+passes: an ordinary publisher supplies a site through this command, its source files are
+removed, the provider restarts with the same journal, and an independent client fetches all
+2,097,628 bytes by trusted publisher/name. The provider node remains online for that retrieval.
 
 ### One-shot browser download
 

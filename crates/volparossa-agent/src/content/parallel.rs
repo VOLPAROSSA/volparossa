@@ -255,6 +255,7 @@ async fn record_pair(
                         peer_id: provider.peer_id,
                         verified_bytes: received.bytes,
                         elapsed,
+                        digest_index: None,
                     });
             remember_measurement(
                 context,

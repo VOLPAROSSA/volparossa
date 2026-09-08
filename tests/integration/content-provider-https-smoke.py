@@ -33,7 +33,8 @@ RANGES = ((262144, 524287), (786432, 1048575),
           (1310720, 1572863), (1835008, 2097151))
 RANGE_BYTES = 262144
 DIGEST_CASES = ("digest-origin-only", "digest-peers-first")
-CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIGEST_CASES)
+LIMITED_CASES = ("limited-origin-only", "limited-peers-first", "limited-auto")
+CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIGEST_CASES, *LIMITED_CASES)
 REPR_DIGEST = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:"
 
 
@@ -147,9 +148,9 @@ def consumer_command(case, binary, control, cache, user_directory, output):
                "browser-download" if case == "complete" else "fetch-https",
                "--url", "https://destination.volparossa.test:18443/asset.bin",
                "--ca-file", str(user_directory / "origin.pem"), "--cache", cache,
-               "--source-strategy", case.removeprefix("digest-") if case in DIGEST_CASES
+               "--source-strategy", case.split("-", 1)[1] if case in (*DIGEST_CASES, *LIMITED_CASES)
                    else case if case in ("origin-only", "auto") else "peers-first"]
-    command.extend(["--origin-digest"] if case in DIGEST_CASES
+    command.extend(["--origin-digest"] if case in (*DIGEST_CASES, *LIMITED_CASES)
                    else ["--metadata-path", "/.well-known/volparossa/content/asset"])
     if case != "complete":
         command.extend(["--local-output", str(output)])
@@ -169,6 +170,7 @@ def consume(arguments):
             and not list(user_directory.glob("volparossa-origin-baseline-*")), "consumer storage is not fresh")
     command = consumer_command(case, binary, control, cache, user_directory, output)
     started, deadline = time.monotonic_ns(), time.monotonic() + 110
+    started_unix_ms = time.time_ns() // 1_000_000
     process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
                                env=dict(os.environ, TMPDIR=str(user_directory)))
     previous = {}
@@ -205,7 +207,10 @@ def consume(arguments):
                           ready_elapsed_ns=ready_elapsed, browser_engine_executed=False)
         require(process.wait(timeout=max(0.1, deadline - time.monotonic())) == 0
                 and process.stdout.read(1) == b"", "CLI failed or emitted unexpected trailing data")
-        report["elapsed_ns"] = time.monotonic_ns() - started
+        finished = time.monotonic_ns()
+        report.update(elapsed_ns=finished - started, started_monotonic_ns=started,
+                      completed_monotonic_ns=finished, started_unix_ms=started_unix_ms,
+                      completed_unix_ms=time.time_ns() // 1_000_000)
         require(not list(user_directory.glob("volparossa-browser-*"))
                 and not list(user_directory.glob("volparossa-origin-baseline-*")),
                 "private application spool remained")
@@ -609,12 +614,20 @@ def validate_digest_cases(evidence, records, control_node):
                 and record["object_sha256"] == SHA
                 and all(record[key] is None for key in ("range_start", "range_end", "range_total")),
                 "digest HEAD or ordinary GET represented another body, range or digest")
-    peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
     for name in DIGEST_CASES:
-        phase = cases[name]
-        fetch, output, application = phase["fetch"], phase["output"], phase["application"]
         from_origin = name == "digest-origin-only"
-        require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
+        validate_digest_phase(evidence, cases[name], from_origin, name.removeprefix("digest-"), control_node, original_ids)
+    all_phases = (*evidence["cases"].values(), *evidence["source_strategy_cases"].values(), *cases.values(),
+                  *evidence["limited_uplink"]["cases"].values())
+    require(len({phase["output"]["path"] for phase in all_phases}) == len(all_phases)
+            and len({phase["output"]["agent_cache"] for phase in all_phases}) == len(all_phases),
+            "digest phases reused an earlier output or agent cache")
+
+
+def validate_digest_phase(evidence, phase, from_origin, strategy, control_node, original_ids):
+    peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
+    fetch, output, application = phase["fetch"], phase["output"], phase["application"]
+    require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
                 and fetch["origin_authenticated"] is True
                 and fetch["authentication_scope"] == "origin-repr-digest"
                 and fetch["origin_digest"] is True
@@ -632,18 +645,105 @@ def validate_digest_cases(evidence, records, control_node):
                 and phase["selected_route"]["route_context_id"]
                     == evidence["cases"]["complete"]["selected_route"]["route_context_id"],
                 "digest CLI authority, exact body accounting or cold protected route not proven")
-        if not from_origin:
-            require(fetch["transport_manifest_id"] in original_ids,
-                    "digest peer lookup did not retain either provider's original envelope")
-        validate_local_output(phase)
-        validate_application(phase, browser=False, source_strategy=name.removeprefix("digest-"))
-        validate_path(phase, peers, nodes, missing=False, origin_only=from_origin)
-        validate_control(phase["control"], control_node, nodes, missing=False,
-                         require_contacts=not from_origin)
-    all_phases = (*evidence["cases"].values(), *evidence["source_strategy_cases"].values(), *cases.values())
-    require(len({phase["output"]["path"] for phase in all_phases}) == len(all_phases)
-            and len({phase["output"]["agent_cache"] for phase in all_phases}) == len(all_phases),
-            "digest phases reused an earlier output or agent cache")
+    if not from_origin:
+        require(fetch["transport_manifest_id"] in original_ids,
+                "digest peer lookup did not retain either provider's original envelope")
+    validate_local_output(phase)
+    validate_application(phase, browser=False, source_strategy=strategy)
+    validate_path(phase, peers, nodes, missing=False, origin_only=from_origin)
+    validate_control(phase["control"], control_node, nodes, missing=False, require_contacts=not from_origin)
+
+
+def limited_comparison(cases):
+    origin = cases["limited-origin-only"]["application"]["elapsed_ns"]
+    automatic = cases["limited-auto"]["application"]["elapsed_ns"]
+    return dict(reference="product-origin-only-fixed-4mbit-origin-uplink", samples_per_case=1,
+        complete_command_duration=True, rate_tuned_after_measurement=False,
+        origin_to_auto_command_ratio=origin / automatic, benefit_passed=automatic < origin,
+        measurements={name: dict(command_elapsed_ns=phase["application"]["elapsed_ns"],
+            peer_bytes=phase["fetch"]["peer_bytes"], origin_body_bytes=phase["fetch"]["origin_body_bytes"],
+            providers_used=phase["fetch"]["providers_used"]) for name, phase in cases.items()})
+
+
+def tbf(qdiscs):
+    require(len(qdiscs) == 1 and qdiscs[0]["kind"] == "tbf" and qdiscs[0]["handle"] == "804:"
+            and qdiscs[0]["root"] is True and qdiscs[0]["options"]["rate"] == 500000
+            and qdiscs[0]["options"]["burst"] == 131072 and qdiscs[0]["options"]["lat"] == 250000
+            and qdiscs[0]["bytes"] >= 0 and qdiscs[0]["drops"] >= 0, "wrong fixed TBF or missing actual counters")
+    return qdiscs[0]
+
+
+def validate_limited(evidence, records, control_node):
+    value = evidence["limited_uplink"]
+    profile, cases = value["profile"], value["cases"]
+    require(set(cases) == set(LIMITED_CASES)
+            and profile["profile"] == "fixed-origin-uplink-4mbit" and profile["interface"] == "dx"
+            and profile["origin_address"] == "47.163.4.2" and profile["handle"] == "804:"
+            and profile["rate_bits_per_second"] == 4000000 and profile["burst_bytes"] == 131072
+            and profile["queue_latency_ms"] == 250
+            and re.fullmatch(r"net:\[[0-9]+\]", profile["namespace"])
+            and profile["namespace"] != profile["parent_namespace"]
+            and profile["application_sleeps"] is False and profile["adaptive_rate"] is False
+            and 0 < profile["window_ns"] == profile["completed_monotonic_ns"] - profile["started_monotonic_ns"]
+                < 60_000_000_000, "wrong network condition or expired common cost window")
+    for name in ("before", "after"):
+        qdiscs = value["qdisc_" + name]
+        require(len(qdiscs) == 1 and qdiscs[0]["kind"] == "noqueue" and qdiscs[0]["root"] is True,
+                "origin link was not initially unshaped or its owned limiter survived cleanup")
+    require([record["kind"] for record in records] == ["digest_head", "body", "digest_head", "digest_head"],
+            "limited cases require exactly fresh HEAD+GET, HEAD, HEAD with no fallback body")
+    for index, record in enumerate(records):
+        body = index == 1
+        require(record["method"] == ("GET" if body else "HEAD") and record["status"] == 200
+                and record["payload_bytes"] == (BYTES if body else 0) and record["content_length"] == BYTES
+                and record["representation_digest"] == REPR_DIGEST and record["object_sha256"] == SHA
+                and all(record[key] is None for key in ("range_start", "range_end", "range_total")),
+                "limited origin altered TLS-authorized representation or duplicated payload")
+    ids = validate_digest_indexes(evidence)
+    expiry = evidence["digest_provider_indexes"]["publication"]["original"]["expires_unix_seconds"]
+    last_clock, last_bytes, options = profile["started_monotonic_ns"], 0, None
+    for name in LIMITED_CASES:
+        phase = cases[name]
+        strategy = name.removeprefix("limited-")
+        validate_digest_phase(evidence, phase, strategy == "origin-only", strategy, control_node, ids)
+        app = phase["application"]
+        require(last_clock <= app["started_monotonic_ns"] < app["completed_monotonic_ns"]
+                <= profile["completed_monotonic_ns"]
+                and app["elapsed_ns"] == app["completed_monotonic_ns"] - app["started_monotonic_ns"]
+                and 0 < app["started_unix_ms"] <= app["completed_unix_ms"] < expiry * 1000,
+                "commands overlap, exceeded the common window or renewed the transport expiry")
+        last_clock = app["completed_monotonic_ns"]
+        for position in ("before", "after"):
+            current = tbf(phase["qdisc_" + position])
+            require(current["bytes"] >= last_bytes and (options is None or current["options"] == options),
+                    "origin limiter was reset or tuned between comparisons")
+            options, last_bytes = current["options"], current["bytes"]
+        fresh = phase["source_events"]
+        expected = {"origin-only":"CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN",
+                    "peers-first":"CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS",
+                    "auto":"CONTENT_HTTPS_SOURCE_MEASURED_PEERS"}[strategy]
+        require(len(fresh) == 1 and fresh[0]["event"] == expected
+                and app["started_unix_ms"] <= fresh[0]["unix_ms"] <= app["completed_unix_ms"],
+                "current source-choice event is absent, historical or disagrees with actual command")
+    final = tbf(value["qdisc_final"])
+    require(final["options"] == options and final["bytes"] >= last_bytes >= BYTES,
+            "actual origin response did not pass through the unchanged measured limiter")
+    require(value["comparison"] == limited_comparison(cases), "invented benefit or command timing ratio")
+
+
+def source_events(work, prefix):
+    def lines(suffix):
+        with (work / f"{prefix}-events-{suffix}.txt").open("rb") as source:
+            data = source.read(2 * 1024 * 1024 + 1)
+        require(len(data) <= 2 * 1024 * 1024, "oversized bounded event ring")
+        return set(data.decode("utf-8").splitlines())
+    before = lines("before")
+    events = []
+    for line in sorted(lines("after") - before):
+        found = re.match(r"([0-9]+)\s+.*?\bevent=(CONTENT_HTTPS_SOURCE_[A-Z_]+)(?:\s|$)", line)
+        if found:
+            events.append(dict(unix_ms=int(found[1]), event=found[2]))
+    return events
 
 
 def validate_evidence(evidence):
@@ -679,8 +779,9 @@ def validate_evidence(evidence):
     # Digest phases run after complete; B's independent index replaces only its registration.
     # Keep every raw record; validate their exact slice independently, never ignore extras.
     digest_records = raw_records[1:4]
-    records = raw_records[:1] + raw_records[4:]
-    require(origin["pid"] > 0 and 15 <= len(raw_records) <= 31
+    limited_records = raw_records[4:8]
+    records = raw_records[:1] + raw_records[8:]
+    require(origin["pid"] > 0 and 19 <= len(raw_records) <= 31
             and origin["request_limit"] == 31 and origin["stop_requested"] is True
             and origin["listener_closed"] is True and origin["inflight_drained"] is True
             and [r["kind"] for r in records[:8]] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
@@ -727,6 +828,7 @@ def validate_evidence(evidence):
             "reported comparison is not the actual single-sample monotone timing ratio")
     validate_strategies(evidence, records, control_node)
     validate_digest_cases(evidence, digest_records, control_node)
+    validate_limited(evidence, limited_records, control_node)
     require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
             explicit_fixture_ca_removed=True, user_directory_removed=True),
             "temporary user outputs and explicit public CA were not cleaned up")
@@ -734,7 +836,7 @@ def validate_evidence(evidence):
 
 def build_evidence(work):
     cases = {}
-    for name in ("complete", "missing", "origin-only", "auto", *DIGEST_CASES):
+    for name in ("complete", "missing", "origin-only", "auto", *DIGEST_CASES, *LIMITED_CASES):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
             fetch=read(work / f"{prefix}-fetch.json"),
@@ -746,8 +848,18 @@ def build_evidence(work):
             control=read(work / f"{prefix}-control.json"))
     strategies = {mode: cases.pop(mode) for mode in ("origin-only", "auto")}
     digests = {mode: cases.pop(mode) for mode in DIGEST_CASES}
+    limited = {mode: cases.pop(mode) for mode in LIMITED_CASES}
+    for mode, phase in limited.items():
+        prefix = f"content-provider-https-{mode}"
+        phase.update(source_events=source_events(work, prefix),
+            qdisc_before=read(work / f"{prefix}-qdisc-before.json"),
+            qdisc_after=read(work / f"{prefix}-qdisc-after.json"))
     evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
         origin_digest_cases=digests,
+        limited_uplink=dict(cases=limited, comparison=limited_comparison(limited),
+            profile=read(work / "content-provider-https-limited-profile.json"),
+            **{"qdisc_" + position: read(work / f"content-provider-https-limited-qdisc-{position}.json")
+               for position in ("before", "after", "final")}),
         digest_provider_indexes={key: read(work / f"content-provider-https-index-{suffix}.json")
             for key, suffix in (("publication", "publication"), ("binding", "binding"),
                                 ("a_status", "a-status"), ("b_stop", "b-stop"), ("b_serve", "b-serve"))},

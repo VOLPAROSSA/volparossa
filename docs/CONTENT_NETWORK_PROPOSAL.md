@@ -150,8 +150,9 @@ Explicit `content publish --contribute` now adds complete publication through an
 configured contribution service: the authorized local stream carries bytes from the user's
 private cache, and success requires the original full object in the actual configured cache,
 durable ownership and live registration. No hand-written `serve` step or filesystem ownership
-change is needed; `site pack` bundles use the same command. Local checks pass and a new
-publish/restart/independent-consumer network proof is being integrated. This is one complete
+change is needed; `site pack` bundles use the same command. The
+[publish/restart/independent-consumer proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
+passes with all 2,097,628 site bytes and the original manifest/expiry. This is one complete
 local copy, not the outstanding external retention, replica repair or global availability promise.
 
 The integrated runtime provides explicit `content serve` / `content fetch` / `content stop`.
@@ -398,6 +399,13 @@ also passes with both independent indexes, complete reconstruction and zero orig
 Recent lookup replies arrive in 42/64 ms; the entire peers-first operation takes 4.915 seconds
 versus 2.544 seconds origin-only. Eliminating the earlier DHT wait does not yet make this
 fixture faster than its origin or complete C08.
+
+The next automatic-selection implementation also accounts for the separately measured digest
+index flows. Two lookups overlap under the original deadline; successful complete delivery may
+attach their short-lived cost to the exact useful provider hints without creating new hints or
+renewing validity. Automatic admission requires this measurement and rechecks remaining payload
+cost after the actual index round. A new fixed 4-Mbps origin-uplink comparison is separate from
+the existing fast-origin trials; its network outcome and any measured benefit remain pending.
 
 ### Bounded post-download redistribution
 

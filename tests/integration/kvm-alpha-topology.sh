@@ -70,6 +70,7 @@ print_plan() {
             '  fetch via genuine MPTCP/TLS/two-leg WireGuard after publisher removal;' \
             '  deny Client mount access to replica files, require exact bytes and both provider IDs;' \
             '  fetch the same cooperative-origin HTTPS object from complete peers and missing origin ranges;' \
+            '  compare three cold digest commands under fixed DEST/dx TBF4mbit; remove only that limiter before existing fast-origin cases;' \
             '  then publish/import/serve a normal user file, remotely fetch/export/assemble it across service UIDs;' \
             '  grant only control-group traversal and remove the exact temporary publisher identity/passphrase;' \
             '  pack/publish a normal signed static site, import two replicas, remove original publisher files;' \
@@ -4522,7 +4523,7 @@ start_privacy_observers() {
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
             [ "$scenario" = content-https ] || return 1 ;;
-        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
+        content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-https-baseline-privacy|content-provider-https-origin-only-privacy|content-provider-https-auto-privacy|content-provider-https-digest-origin-only-privacy|content-provider-https-digest-peers-first-privacy|content-provider-https-limited-origin-only-privacy|content-provider-https-limited-peers-first-privacy|content-provider-https-limited-auto-privacy|content-provider-user-privacy|content-provider-named-privacy|content-provider-site-privacy|content-provider-site-cache-only-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
         content-message-publication-privacy)
             [ "$scenario" = content-message ] || return 1 ;;

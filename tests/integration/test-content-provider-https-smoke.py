@@ -178,16 +178,51 @@ def fixture(control_node="relay2", native_publication=None):
             tls13=True, alpn_http11=True, source="47.163.4.1:32100", status=200,
             range_start=None, range_end=None, range_total=None)
         for index in range(3)]
+    origin["connections"][4:4] = [copy.deepcopy(origin["connections"][index]) for index in (1, 2, 3, 3)]
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
         origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
         source_strategy_cases=strategies, source_strategy_comparison=CHECK["strategy_comparison"](strategies),
         origin_digest_cases=digests,
+        limited_uplink=limited_fixture(digests),
         digest_provider_indexes=independent_indexes(original, provider_nodes[1], peers),
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
+
+
+def limited_fixture(digests):
+    profile = dict(profile="fixed-origin-uplink-4mbit", interface="dx", origin_address="47.163.4.2",
+        handle="804:", rate_bits_per_second=4000000, burst_bytes=131072, queue_latency_ms=250,
+        namespace="net:[123]", parent_namespace="net:[124]", started_monotonic_ns=1_000_000_000,
+        completed_monotonic_ns=30_000_000_000, window_ns=29_000_000_000,
+        application_sleeps=False, adaptive_rate=False)
+    cases, sent = {}, 0
+    def qdisc(byte_count):
+        return [dict(kind="tbf", handle="804:", root=True, bytes=byte_count, drops=0,
+                     options=dict(rate=500000, burst=131072, lat=250000))]
+    for index, name in enumerate(CHECK["LIMITED_CASES"]):
+        mode = name.removeprefix("limited-")
+        phase = copy.deepcopy(digests["digest-origin-only" if index == 0 else "digest-peers-first"])
+        phase["fetch"].update(local_output=f"/user/{name}.bin", cache=f"/agent/{name}-cache")
+        phase["output"].update(path=f"/user/{name}.bin", agent_cache=f"/agent/{name}-cache")
+        elapsed = (6, 4, 3)[index] * 1_000_000_000
+        started = (2 + index * 9) * 1_000_000_000
+        wall = 1_022_000 + index * 9000
+        phase["application"].update(final=copy.deepcopy(phase["fetch"]), requested_source_strategy=mode,
+            started_monotonic_ns=started, completed_monotonic_ns=started + elapsed,
+            elapsed_ns=elapsed, started_unix_ms=wall, completed_unix_ms=wall + elapsed // 1_000_000)
+        phase["qdisc_before"] = qdisc(sent)
+        sent += CHECK["BYTES"] + 16384 if index == 0 else 16384
+        phase["qdisc_after"] = qdisc(sent)
+        phase["source_events"] = [dict(unix_ms=wall + 100,
+            event=("CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN", "CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS",
+                   "CONTENT_HTTPS_SOURCE_MEASURED_PEERS")[index])]
+        cases[name] = phase
+    return dict(profile=profile, cases=cases, comparison=CHECK["limited_comparison"](cases),
+        qdisc_before=[dict(kind="noqueue", root=True)], qdisc_after=[dict(kind="noqueue", root=True)],
+        qdisc_final=qdisc(sent))
 
 
 def independent_indexes(original, node, peers):
@@ -226,6 +261,44 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_fixed_origin_uplink_requires_actual_auto_hit_and_does_not_invent_latency_benefit(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        self.assertTrue(value["limited_uplink"]["comparison"]["benefit_passed"])
+        slower = copy.deepcopy(value)
+        app = slower["limited_uplink"]["cases"]["limited-auto"]["application"]
+        app.update(elapsed_ns=7_000_000_000, completed_monotonic_ns=app["started_monotonic_ns"] + 7_000_000_000,
+                   completed_unix_ms=app["started_unix_ms"] + 7000)
+        slower["limited_uplink"]["comparison"] = CHECK["limited_comparison"](slower["limited_uplink"]["cases"])
+        CHECK["validate_evidence"](slower)
+        self.assertFalse(slower["limited_uplink"]["comparison"]["benefit_passed"])
+        for path, wrong in (
+            (("profile", "rate_bits_per_second"), 2000000), (("profile", "adaptive_rate"), True),
+            (("profile", "namespace"), "net:[124]"), (("profile", "window_ns"), 60_000_000_000),
+            (("qdisc_after", 0, "kind"), "tbf"), (("qdisc_final", 0, "drops"), -1),
+            (("comparison", "benefit_passed"), False),
+            (("cases", "limited-auto", "source_events", 0, "event"), "CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS"),
+            (("cases", "limited-auto", "source_events", 0, "unix_ms"), 1),
+            (("cases", "limited-auto", "application", "requested_source_strategy"), "peers-first"),
+            (("cases", "limited-auto", "fetch", "origin_body_bytes"), 1),
+            (("cases", "limited-auto", "fetch", "providers_used"), 1),
+            (("cases", "limited-auto", "output", "client_cache_initially_absent"), False),
+            (("cases", "limited-auto", "qdisc_before", 0, "bytes"), 0),
+            (("cases", "limited-auto", "qdisc_after", 0, "options", "rate"), 250000),
+            (("cases", "limited-auto", "privacy", "exit", "provider_application", "relay4", "response_payload_bytes"), 0),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, ("limited_uplink", *path), wrong))
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](changed(value, ("origin", "connections", 7, "payload_bytes"), 1))
+        for case in CHECK["LIMITED_CASES"]:
+            command = CHECK["consumer_command"](case, "/bin/volparossa", "/socket", "/cache", Path("/user"), Path("/user/output"))
+            self.assertEqual(command[command.index("--source-strategy") + 1], case.removeprefix("limited-"))
+            self.assertIn("--origin-digest", command)
+            self.assertNotIn("--metadata-path", command)
+        script = (HERE / "content-provider-https-smoke.sh").read_text()
+        self.assertLess(script.index("    content_provider_https_phase digest-peers-first\n"), script.index("    content_provider_https_limited_run\n"))
+        self.assertLess(script.index("    content_provider_https_limited_run\n"), script.index("    PHASE=content-provider-https-withdraw-one\n"))
     def test_digest_combines_only_original_independent_indexes_over_unchanged_partial_cache(self):
         value = fixture()
         CHECK["validate_evidence"](value)
@@ -346,11 +419,11 @@ class ProviderHttpsEvidence(unittest.TestCase):
         phase["application"]["final"] = copy.deepcopy(phase["fetch"])
         phase["privacy"] = copy.deepcopy(missing["privacy"])
         phase["privacy"]["exit"]["provider_application"]["relay4"]["response_payload_bytes"] = 1050000
-        alternate["origin"]["connections"][14:] = copy.deepcopy(alternate["origin"]["connections"][5:9])
+        alternate["origin"]["connections"][18:] = copy.deepcopy(alternate["origin"]["connections"][9:13])
         alternate["source_strategy_comparison"] = CHECK["strategy_comparison"](alternate["source_strategy_cases"])
         CHECK["validate_evidence"](alternate)
         duplicate = copy.deepcopy(alternate)
-        duplicate["origin"]["connections"][15] = copy.deepcopy(duplicate["origin"]["connections"][14])
+        duplicate["origin"]["connections"][19] = copy.deepcopy(duplicate["origin"]["connections"][18])
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](duplicate)
 
@@ -383,9 +456,9 @@ class ProviderHttpsEvidence(unittest.TestCase):
                 CHECK["validate_evidence"](changed(value, ("origin_baseline", *path), wrong))
         for path, wrong in (
             (("comparison", "origin_to_browser_command_ratio"), 9),
-            (("origin", "connections", 9, "kind"), "body_range"),
-            (("origin", "connections", 10, "payload_bytes"), 0),
-            (("origin", "connections", 10, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 13, "kind"), "body_range"),
+            (("origin", "connections", 14, "payload_bytes"), 0),
+            (("origin", "connections", 14, "source"), "43.159.1.1:32100"),
         ):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 CHECK["validate_evidence"](changed(value, path, wrong))
@@ -431,7 +504,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
         registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
         script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
         for scenario in ("content-provider", "content-https", "content-message", "dns-cache"):
-            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", *CHECK["DIGEST_CASES"], "unregistered"):
+            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", *CHECK["DIGEST_CASES"], *CHECK["LIMITED_CASES"], "unregistered"):
                 with self.subTest(scenario=scenario, suffix=suffix):
                     prefix = f"content-provider-https-{suffix}-privacy"
                     result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
@@ -493,12 +566,12 @@ class ProviderHttpsEvidence(unittest.TestCase):
             (("withdrawal", "provider_node"), "relay4"),
             (("missing_provider_stop", "serving"), True),
             (("origin", "connections", 0, "tls13"), False),
-            (("origin", "connections", 4, "source"), "43.159.1.1:32100"),
-            (("origin", "connections", 4, "source"), "46.162.3.1:32100"),
-            (("origin", "connections", 5, "status"), 200),
-            (("origin", "connections", 6, "range_start"), 0),
-            (("origin", "connections", 7, "range_end"), 1572864),
-            (("origin", "connections", 8, "range_total"), CHECK["BYTES"] - 1),
+            (("origin", "connections", 8, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 8, "source"), "46.162.3.1:32100"),
+            (("origin", "connections", 9, "status"), 200),
+            (("origin", "connections", 10, "range_start"), 0),
+            (("origin", "connections", 11, "range_end"), 1572864),
+            (("origin", "connections", 12, "range_total"), CHECK["BYTES"] - 1),
             (("cases", "complete", "fetch", "origin_authenticated"), False),
             (("cases", "complete", "fetch", "origin_body_bytes"), CHECK["BYTES"]),
             (("cases", "complete", "fetch", "provider_peer_ids"), ["peer-relay4", "peer-relay4"]),
