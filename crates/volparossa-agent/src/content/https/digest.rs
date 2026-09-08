@@ -1,14 +1,15 @@
 //! Own-origin whole-object digest retrieval; provider signatures are only transport indexes.
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
+use libp2p::PeerId;
 use tokio::time::{Instant, timeout_at};
 use volparossa_content::origin_https::{
     OriginAuthorizedDigest, OriginClient, OriginLimits, OriginRequest,
 };
 use volparossa_content::provider::digest::{DigestQuery, lookup_publication};
 use volparossa_content::transfer::TransferLimits;
-use volparossa_content::{ChunkStore, SignedManifest};
+use volparossa_content::{ChunkStore, SignedManifest, VerifiedManifest};
 use volparossa_local_control::{ContentReceipt, HttpsContentFetchRequest, HttpsSourceStrategy};
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
@@ -169,28 +170,84 @@ async fn peers(
     strategy: HttpsSourceStrategy,
 ) -> Result<(Option<SignedManifest>, Vec<String>, u64), ContentError> {
     let started = Instant::now();
-    let (providers, deadline) = match strategy {
+    let Some((providers, deadline)) =
+        initial_peers(context, origin, authority, scope, strategy, started).await
+    else {
+        return Ok((None, Vec::new(), 0));
+    };
+    let mut attempt = PeerAttempt {
+        context,
+        origin,
+        authority,
+        policy,
+        scope,
+        deadline,
+        expected: None,
+        looked_up: BTreeSet::new(),
+        used: BTreeSet::new(),
+        bytes: 0,
+    };
+    let mut complete = attempt.pull(providers, store).await?;
+    if !complete
+        && strategy == HttpsSourceStrategy::PeersFirst
+        && attempt.looked_up.len() < 16
+        && Instant::now() < deadline
+    {
+        checked_policy(context, origin, policy).await?;
+        // No renewed deadline or parallel origin race: retain the earlier writer's chunks
+        // and receipts, then explore the remaining bounded offer pool only if necessary.
+        if let Ok(Ok(providers)) = timeout_at(
+            deadline,
+            context
+                .discovery
+                .discover_content_providers(scope.control_peer, 16),
+        )
+        .await
+        {
+            complete = attempt.pull(providers, store).await?;
+        }
+    }
+    if !complete && attempt.expected.is_some() {
+        content_event(context, "CONTENT_HTTPS_DIGEST_PEERS_INCOMPLETE").await;
+    }
+    Ok((
+        attempt
+            .expected
+            .filter(|_| complete)
+            .map(|(signed, _)| signed),
+        attempt.used.into_iter().collect(),
+        attempt.bytes,
+    ))
+}
+
+async fn initial_peers(
+    context: &ControlContext,
+    origin: &OriginRequest,
+    authority: &OriginAuthorizedDigest,
+    scope: RecentProviderScope,
+    strategy: HttpsSourceStrategy,
+    started: Instant,
+) -> Option<(Vec<DiscoveredContentProvider>, Instant)> {
+    match strategy {
         HttpsSourceStrategy::OriginOnly => {
             content_event(context, "CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN").await;
-            return Ok((None, Vec::new(), 0));
+            None
         }
         HttpsSourceStrategy::PeersFirst => {
             content_event(context, "CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS").await;
             let deadline = started + Duration::from_secs(30);
-            let Ok(Ok(providers)) = timeout_at(
-                deadline,
-                context
-                    .discovery
-                    .discover_content_providers(scope.control_peer, 16),
+            let refresh_deadline = deadline.min(Instant::now() + Duration::from_secs(1));
+            let providers = timeout_at(
+                refresh_deadline,
+                context.content.refresh_recent_provider_hints(
+                    scope,
+                    &context.discovery,
+                    refresh_deadline.saturating_duration_since(Instant::now()),
+                ),
             )
             .await
-            else {
-                return Ok((None, Vec::new(), 0));
-            };
-            if providers.len() > 16 {
-                return Err(ContentError::Invalid);
-            }
-            (providers, deadline)
+            .unwrap_or_default();
+            Some((providers, deadline))
         }
         HttpsSourceStrategy::Auto => {
             let estimate = context.content.source_costs.lock().await.estimate_origin(
@@ -201,12 +258,12 @@ async fn peers(
             );
             let Some(estimate) = estimate else {
                 content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_UNMEASURED").await;
-                return Ok((None, Vec::new(), 0));
+                return None;
             };
             let hints = context.content.recent_provider_hints(scope).await;
             let Some(plan) = sources::PeerPlan::new(estimate, authority.length(), &hints) else {
                 content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED").await;
-                return Ok((None, Vec::new(), 0));
+                return None;
             };
             let providers = context
                 .content
@@ -217,53 +274,128 @@ async fn peers(
                 .filter(|hint| providers.iter().any(|peer| peer.peer_id == hint.peer_id))
                 .collect::<Vec<_>>();
             if !plan.admits_refreshed(authority.length(), &refreshed, started.elapsed()) {
-                return Ok((None, Vec::new(), 0));
+                return None;
             }
             content_event(context, "CONTENT_HTTPS_SOURCE_MEASURED_PEERS").await;
-            (providers, started + plan.total_budget)
-        }
-    };
-    let mut candidate = None;
-    for provider in &providers {
-        if Instant::now() >= deadline {
-            break;
-        }
-        let result = timeout_at(deadline, lookup(context, authority, policy, provider)).await;
-        if let Ok(Ok(Some(signed))) = result {
-            candidate = Some(signed);
-            break;
+            Some((providers, started + plan.total_budget))
         }
     }
-    let Some(signed) = candidate else {
-        return Ok((None, Vec::new(), 0));
-    };
-    checked_policy(context, origin, policy).await?;
-    let manifest = authority
-        .verify_candidate(&signed, now())
-        .map_err(|_| ContentError::Unavailable)?;
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Ok((None, Vec::new(), 0));
+}
+
+struct PeerAttempt<'a> {
+    context: &'a ControlContext,
+    origin: &'a OriginRequest,
+    authority: &'a OriginAuthorizedDigest,
+    policy: &'a VerifiedPolicy,
+    scope: RecentProviderScope,
+    deadline: Instant,
+    expected: Option<(SignedManifest, VerifiedManifest)>,
+    looked_up: BTreeSet<PeerId>,
+    used: BTreeSet<String>,
+    bytes: u64,
+}
+
+impl PeerAttempt<'_> {
+    async fn pull(
+        &mut self,
+        providers: Vec<DiscoveredContentProvider>,
+        store: &mut ChunkStore,
+    ) -> Result<bool, ContentError> {
+        if providers.len() > 16 {
+            return Err(ContentError::Invalid);
+        }
+        let mut pair = Vec::new();
+        for provider in providers {
+            if Instant::now() >= self.deadline || self.looked_up.len() >= 16 {
+                break;
+            }
+            if !self.looked_up.insert(provider.peer_id) {
+                continue;
+            }
+            let result = timeout_at(
+                self.deadline,
+                lookup(self.context, self.authority, self.policy, &provider),
+            )
+            .await;
+            let Ok(Ok(Some((signed, manifest)))) = result else {
+                self.context
+                    .content
+                    .forget_recent_provider(self.scope, provider.peer_id)
+                    .await;
+                continue;
+            };
+            if let Some((_, expected)) = &self.expected {
+                if !compatible_transport(expected, &manifest) {
+                    continue;
+                }
+            } else {
+                self.expected = Some((signed, manifest.clone()));
+            }
+            // Each index belongs to the peer that just supplied it. Distinct manifest IDs,
+            // keys or publisher-local names do not become origin or publisher authority.
+            pair.push((provider, manifest));
+            if pair.len() == 2 && self.pull_pair(std::mem::take(&mut pair), store).await? {
+                return Ok(true);
+            }
+        }
+        self.pull_pair(pair, store).await
     }
-    let attempted = providers
-        .iter()
-        .map(|peer| peer.peer_id)
-        .collect::<Vec<_>>();
-    let received =
-        parallel::pull_with_budget(context, &manifest, store, policy, providers, remaining).await;
-    let (providers, bytes) = match received {
-        Ok(progress) => progress,
-        Err(ContentError::Unavailable) => (Vec::new(), 0),
-        Err(error) => return Err(error),
-    };
-    if authority.verify_cached(&manifest, store, now()).is_ok() {
-        return Ok((Some(signed), providers, bytes));
+
+    async fn pull_pair(
+        &mut self,
+        pair: Vec<(DiscoveredContentProvider, VerifiedManifest)>,
+        store: &mut ChunkStore,
+    ) -> Result<bool, ContentError> {
+        let Some((_, expected)) = &self.expected else {
+            return Ok(false);
+        };
+        if self.authority.verify_cached(expected, store, now()).is_ok() {
+            return Ok(true);
+        }
+        if pair.is_empty() || Instant::now() >= self.deadline {
+            return Ok(false);
+        }
+        checked_policy(self.context, self.origin, self.policy).await?;
+        let attempted = pair
+            .iter()
+            .map(|(peer, _)| peer.peer_id)
+            .collect::<Vec<_>>();
+        let received = parallel::pull_indexed_with_budget(
+            self.context,
+            expected,
+            store,
+            self.policy,
+            pair,
+            self.deadline.saturating_duration_since(Instant::now()),
+        )
+        .await;
+        let (providers, bytes) = match received {
+            // The writer returns its verified prefix even when a worker times out or fails.
+            Ok(progress) => progress,
+            Err(ContentError::Unavailable) => (Vec::new(), 0),
+            Err(error) => return Err(error),
+        };
+        self.used.extend(providers);
+        self.bytes = self.bytes.checked_add(bytes).ok_or(ContentError::Invalid)?;
+        if self.authority.verify_cached(expected, store, now()).is_ok() {
+            return Ok(true);
+        }
+        for peer in attempted {
+            self.context
+                .content
+                .forget_recent_provider(self.scope, peer)
+                .await;
+        }
+        Ok(false)
     }
-    for peer in attempted {
-        context.content.forget_recent_provider(scope, peer).await;
-    }
-    content_event(context, "CONTENT_HTTPS_DIGEST_PEERS_INCOMPLETE").await;
-    Ok((None, providers, bytes))
+}
+
+fn compatible_transport(expected: &VerifiedManifest, candidate: &VerifiedManifest) -> bool {
+    expected.object_sha256() == candidate.object_sha256()
+        && expected.length() == candidate.length()
+        && expected.metadata().content_type == "application/octet-stream"
+        && candidate.metadata().content_type == expected.metadata().content_type
+        && candidate.chunks() == expected.chunks()
 }
 
 async fn lookup(
@@ -271,7 +403,7 @@ async fn lookup(
     authority: &OriginAuthorizedDigest,
     policy: &VerifiedPolicy,
     provider: &DiscoveredContentProvider,
-) -> Result<Option<SignedManifest>, ContentError> {
+) -> Result<Option<(SignedManifest, VerifiedManifest)>, ContentError> {
     if !context
         .routes
         .content_provider_is_distinct(&provider.peer_id)
@@ -302,8 +434,73 @@ async fn lookup(
     let Some(candidate) = response.map_err(|_| ContentError::Unavailable)? else {
         return Ok(None);
     };
-    authority
+    let manifest = authority
         .verify_candidate(candidate.signed(), now())
         .map_err(|_| ContentError::Invalid)?;
-    Ok(Some(candidate.signed().clone()))
+    Ok(Some((candidate.signed().clone(), manifest)))
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+    use volparossa_content::{
+        CHUNK_BYTES, CacheLimits, Metadata, Publication, Validity,
+        private_message::PRIVATE_MESSAGE_CONTENT_TYPE, publish,
+    };
+
+    use super::*;
+
+    fn transport(mut bytes: &[u8], content_type: &str, seed: u8) -> VerifiedManifest {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ChunkStore::create(
+            &directory.path().join("source"),
+            CacheLimits {
+                max_bytes: 2 * CHUNK_BYTES as u64,
+                max_entries: 2,
+                min_free_bytes: 0,
+            },
+        )
+        .unwrap();
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        let created = now();
+        let length = bytes.len() as u64;
+        publish(
+            &mut bytes,
+            Publication {
+                metadata: Metadata {
+                    name: format!("transport-{seed}"),
+                    revision: 1,
+                    content_type: content_type.into(),
+                },
+                length,
+                validity: Validity {
+                    created,
+                    expires: created + 60,
+                },
+            },
+            &key,
+            &mut store,
+        )
+        .unwrap()
+        .verify(&key.verifying_key(), created)
+        .unwrap()
+    }
+
+    #[test]
+    fn digest_pair_accepts_independent_indexes_not_other_objects_or_private_types() {
+        let bytes = vec![71; CHUNK_BYTES + 17];
+        let expected = transport(&bytes, "application/octet-stream", 31);
+        let other = transport(&bytes, "application/octet-stream", 32);
+        assert_ne!(expected.manifest_id(), other.manifest_id());
+        assert_ne!(expected.publisher(), other.publisher());
+        assert_ne!(expected.metadata().name, other.metadata().name);
+        assert_eq!(expected.chunks(), other.chunks());
+        assert!(compatible_transport(&expected, &other));
+
+        let wrong = transport(&vec![72; bytes.len()], "application/octet-stream", 32);
+        assert!(!compatible_transport(&expected, &wrong));
+        let private = transport(&bytes, PRIVATE_MESSAGE_CONTENT_TYPE, 32);
+        assert!(!compatible_transport(&expected, &private));
+        assert!(!compatible_transport(&private, &private));
+    }
 }

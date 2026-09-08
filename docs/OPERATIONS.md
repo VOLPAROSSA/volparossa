@@ -743,6 +743,15 @@ also passes: fresh HEAD and two providers supply 2,097,275 bytes with zero origi
 It takes 9.23 seconds versus 2.58 seconds origin-only in this fixture; no general website support
 or speed gain is claimed. This does not verify the later cache-only native-site extension.
 
+The newer digest consumer can use each provider's own original transport index when the
+whole hash, length, public media type and complete ordered chunk layout agree. It does not
+re-sign either index or change the final origin-authority check. Explicit `peers-first` refreshes
+recent route/policy-bound offers first, then falls back to bounded discovery if needed; up to
+two workers run at once within the same original thirty-second peer budget. Already verified
+progress is retained across attempts. This new path has targeted local checks, not a new
+network speed claim yet. Automatic mode keeps its measured budget and does not gain an
+unbounded discovery fallback.
+
 ### Automatic public-content contribution
 
 This integration removes the manual initial `content serve --manifest` step for received
@@ -864,7 +873,10 @@ volparossa content site open --publisher-key "$PUBLISHER_KEY" --name my-site \
 The original signed bundle must remain valid and complete in that cache. This mode keeps the
 same temporary localhost viewer, HTTP/range behavior and browser isolation; it does not extend
 expiry or claim that the cached version is globally newest. Missing/expired content fails
-without trying the network. The new integrated no-route reopen proof is pending.
+without trying the network. The
+[integrated no-route reopen run on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
+passes, including same-cache identity, all assets, HEAD/range behavior and cleanup. The VM
+uses actual HTTP requests rather than a browser engine.
 
 The local viewer expires at the earlier of the original signed expiry or its own
 `--lifetime-seconds` (default one hour, maximum one day). SIGINT/TERM closes the listener and

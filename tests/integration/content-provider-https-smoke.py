@@ -539,8 +539,62 @@ def validate_strategies(evidence, records, control_node):
             "product comparison is not actual single-sample time and source accounting")
 
 
+def validate_digest_indexes(evidence):
+    """Bind independent signed indexes to a real registry reset and the unchanged partial cache."""
+    indexes = evidence["digest_provider_indexes"]
+    publication, binding = indexes["publication"], indexes["binding"]
+    original, independent = publication["original"], publication["independent"]
+    native = evidence["native_publication"]
+    node = evidence["layout"]["provider_nodes"][1]
+    layout = [dict(sha256=hashlib.sha256(bytes([65 + index]) * RANGE_BYTES).hexdigest(), bytes=RANGE_BYTES)
+              for index in range(8)] + [dict(sha256=hashlib.sha256(b"Z" * 123).hexdigest(), bytes=123)]
+    require(publication["report_kind"] == "volparossa-https-independent-index"
+            and original["manifest_id"] == native["manifest_id"]
+            and original["publisher_hex"] == native["publisher_hex"]
+            and re.fullmatch(r"[0-9a-f]{64}", independent["manifest_id"])
+            and re.fullmatch(r"[0-9a-f]{64}", independent["publisher_hex"])
+            and independent["manifest_id"] != original["manifest_id"]
+            and independent["publisher_hex"] != original["publisher_hex"]
+            and original["chunks"] == independent["chunks"] == layout
+            and original["object_sha256"] == independent["object_sha256"] == SHA
+            and original["bytes"] == independent["bytes"] == BYTES
+            and original["content_type"] == independent["content_type"] == "application/octet-stream"
+            and original["name"] == independent["name"] == "disposable-native-network-publication"
+            and original["revision"] == independent["revision"] == 1
+            and 0 < original["created_unix_seconds"] == independent["created_unix_seconds"]
+                <= publication["checked_unix_seconds"] <= binding["registered_unix_seconds"]
+                < original["expires_unix_seconds"] == independent["expires_unix_seconds"]
+            and publication["publisher_private_key_persisted"] is False
+            and publication["temporary_full_copy_removed"] is True,
+            "different original indexes, identical public layout or unchanged live expiry not proven")
+    cache = publication["cache_before"]
+    require(cache == publication["cache_after"] and cache["path"] == binding["cache"]
+            and cache["device"] > 0 and cache["inode"] > 0
+            and cache["entries"] == 4 and cache["bytes"] == 4 * RANGE_BYTES
+            and cache["chunk_ids"] == [chunk["sha256"] for chunk in layout[1::2]]
+            and Path(cache["path"]).parts[-3:] == (f"state-{node}", "content", "cache")
+            and Path(binding["manifest_path"]) == Path(cache["path"]).parent / "digest-index" / "manifest.bin"
+            and binding["provider_node"] == node
+            and binding["provider_peer_id"] == evidence["expected_peers"][node]
+            and binding["publisher_hex"] == independent["publisher_hex"]
+            and binding["manifest_file_sha256"] == independent["manifest_id"]
+            and binding["original_manifest_file_sha256"] == original["manifest_id"]
+            and binding["bind_address"] == f"{PUBLIC_IPS[node]}:18080"
+            and binding["advertised_hostname"] == {
+                "relay4":"provider-a.volparossa.test", "relay5":"provider-b.volparossa.test",
+                "relay3":"provider-c.volparossa.test"}[node]
+            and binding["replacement_phase"] == "after-digest-origin-only"
+            and indexes["a_status"]["serving"] is True and indexes["a_status"]["publications"] == 1
+            and indexes["a_status"]["replication_enabled"] is False
+            and indexes["b_stop"]["serving"] is False and indexes["b_stop"]["publications"] == 0
+            and indexes["b_serve"]["serving"] is True and indexes["b_serve"]["publications"] == 1,
+            "independent B index was not exclusively registered over its unchanged four-chunk cache")
+    return {original["manifest_id"], independent["manifest_id"]}
+
+
 def validate_digest_cases(evidence, records, control_node):
-    """Fresh origin HEAD, no descriptor, then either one full GET or the original peer index."""
+    """Fresh origin HEAD, no descriptor, then either one full GET or two independent indexes."""
+    original_ids = validate_digest_indexes(evidence)
     cases = evidence["origin_digest_cases"]
     require(set(cases) == set(DIGEST_CASES), "both cold origin-digest cases required")
     require(len(records) == 3 and [record["kind"] for record in records]
@@ -579,8 +633,8 @@ def validate_digest_cases(evidence, records, control_node):
                     == evidence["cases"]["complete"]["selected_route"]["route_context_id"],
                 "digest CLI authority, exact body accounting or cold protected route not proven")
         if not from_origin:
-            require(fetch["transport_manifest_id"] == evidence["publication"]["manifest_id"],
-                    "digest peer lookup substituted the original provider envelope")
+            require(fetch["transport_manifest_id"] in original_ids,
+                    "digest peer lookup did not retain either provider's original envelope")
         validate_local_output(phase)
         validate_application(phase, browser=False, source_strategy=name.removeprefix("digest-"))
         validate_path(phase, peers, nodes, missing=False, origin_only=from_origin)
@@ -622,7 +676,7 @@ def validate_evidence(evidence):
             and stop["serving"] is False and stop["publications"] == 0,
             "the second actual provider was not explicitly withdrawn before missing retrieval")
     origin, raw_records = evidence["origin"], evidence["origin"]["connections"]
-    # Digest phases run immediately after complete, while both original providers are live.
+    # Digest phases run after complete; B's independent index replaces only its registration.
     # Keep every raw record; validate their exact slice independently, never ignore extras.
     digest_records = raw_records[1:4]
     records = raw_records[:1] + raw_records[4:]
@@ -694,6 +748,9 @@ def build_evidence(work):
     digests = {mode: cases.pop(mode) for mode in DIGEST_CASES}
     evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
         origin_digest_cases=digests,
+        digest_provider_indexes={key: read(work / f"content-provider-https-index-{suffix}.json")
+            for key, suffix in (("publication", "publication"), ("binding", "binding"),
+                                ("a_status", "a-status"), ("b_stop", "b-stop"), ("b_serve", "b-serve"))},
         source_strategy_comparison=strategy_comparison(strategies),
         publication=read(work / "content-provider-https-publication.json"),
         native_publication=read(work / "content-provider-publication.json"),

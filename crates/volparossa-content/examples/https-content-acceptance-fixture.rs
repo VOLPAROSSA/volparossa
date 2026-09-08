@@ -49,6 +49,9 @@ async fn main() -> Result<()> {
         [mode, root, manifest, publisher] if mode == "seed-from-publication" => {
             seed_from_publication(Path::new(root), Path::new(manifest), publisher)
         }
+        [mode, root, manifest, publisher, cache] if mode == "independent-index" => {
+            independent_index(Path::new(root), Path::new(manifest), publisher, Path::new(cache))
+        }
         [mode, root, listen, cert, report, connections] if matches!(mode.as_str(), "origin" | "origin-pem" | "origin-pem-bounded") => {
             let count = connections.parse()?;
             let graceful = mode == "origin-pem-bounded";
@@ -72,7 +75,7 @@ async fn main() -> Result<()> {
                 _ = interrupt.recv() => Err("origin baseline interrupted; private spool discarded".into()),
             }
         }
-        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem|origin-pem-bounded ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | independent-index ROOT MANIFEST PUBLISHER_HEX EXISTING_B_CACHE | origin|origin-pem|origin-pem-bounded ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
     }
 }
 
@@ -197,6 +200,115 @@ fn seed_from_publication(root: &Path, manifest_path: &Path, publisher: &str) -> 
             "manifest_id":hex::encode(manifest.manifest_id()), "metadata_bytes":descriptor.len(),
             "existing_publication_reused":true,
         }),
+    )
+}
+
+/// Independently publish the fixture bytes without adding payload to B's existing partial cache.
+/// This changes the test registration only, never an HTTPS authority or production envelope.
+fn independent_index(
+    root: &Path,
+    manifest_path: &Path,
+    publisher: &str,
+    cache: &Path,
+) -> Result<()> {
+    let public: [u8; 32] = hex::decode(publisher)?
+        .try_into()
+        .map_err(|_| "publisher key length")?;
+    let original = SignedManifest::decode(&read_bounded(manifest_path, MAX_MANIFEST_BYTES)?)?
+        .verify(&VerifyingKey::from_bytes(&public)?, now()?)?;
+    let bytes = fixture_bytes();
+    if original.length() != OBJECT_BYTES as u64
+        || hex::encode(original.object_sha256()) != OBJECT_SHA256
+        || original.metadata().content_type != "application/octet-stream"
+        || original.chunks().len() != 9
+        || original
+            .chunks()
+            .iter()
+            .zip(bytes.chunks(CHUNK_BYTES))
+            .any(|(chunk, part)| {
+                chunk.id() != &ChunkId::digest(part) || chunk.length() as usize != part.len()
+            })
+    {
+        return Err("independent index requires the exact public fixture representation".into());
+    }
+    let before = partial_cache_snapshot(cache, &original)?;
+    fs::DirBuilder::new().mode(0o700).create(root)?;
+    let temporary = tempfile::tempdir_in(root)?;
+    let mut store = ChunkStore::create(&temporary.path().join("publisher-cache"), limits())?;
+    let signer = SigningKey::generate(&mut rand_core::OsRng);
+    let envelope = publish(
+        &mut bytes.as_slice(),
+        Publication {
+            metadata: original.metadata().clone(),
+            length: original.length(),
+            validity: original.validity(),
+        },
+        &signer,
+        &mut store,
+    )?;
+    let alternate = envelope.verify(&signer.verifying_key(), now()?)?;
+    if alternate.manifest_id() == original.manifest_id()
+        || alternate.publisher() == original.publisher()
+        || alternate.chunks() != original.chunks()
+        || alternate.object_sha256() != original.object_sha256()
+    {
+        return Err("independent public index did not preserve exact layout and digest".into());
+    }
+    drop(store);
+    drop(signer);
+    temporary.close()?;
+    let after = partial_cache_snapshot(cache, &original)?;
+    if before != after {
+        return Err("independent publication changed provider B's original cache".into());
+    }
+    write_new(&root.join("manifest.bin"), &envelope.encode())?;
+    write_report(
+        &root.join("publication.json"),
+        &json!({"report_kind":"volparossa-https-independent-index",
+            "original":index_summary(&original), "independent":index_summary(&alternate),
+            "checked_unix_seconds":now()?, "cache_before":before, "cache_after":after,
+            "publisher_private_key_persisted":false, "temporary_full_copy_removed":true}),
+    )
+}
+
+fn index_summary(manifest: &VerifiedManifest) -> Value {
+    json!({"manifest_id":hex::encode(manifest.manifest_id()),
+        "publisher_hex":hex::encode(manifest.publisher()),
+        "object_sha256":hex::encode(manifest.object_sha256()), "bytes":manifest.length(),
+        "name":manifest.metadata().name, "revision":manifest.metadata().revision,
+        "content_type":manifest.metadata().content_type,
+        "created_unix_seconds":manifest.validity().created,
+        "expires_unix_seconds":manifest.validity().expires,
+        "chunks":manifest.chunks().iter().map(|chunk| json!({
+            "sha256":chunk.id().to_string(),"bytes":chunk.length()})).collect::<Vec<_>>()})
+}
+
+fn partial_cache_snapshot(cache: &Path, manifest: &VerifiedManifest) -> Result<Value> {
+    let metadata = fs::symlink_metadata(cache)?;
+    let mut store = ChunkStore::open(cache, limits())?;
+    if !metadata.is_dir()
+        || store.usage().entries != 4
+        || store.usage().bytes != 4 * CHUNK_BYTES as u64
+    {
+        return Err("provider B must retain exactly its four original odd chunks".into());
+    }
+    let mut present = Vec::new();
+    for (index, chunk) in manifest.chunks().iter().enumerate() {
+        let payload = store.get(chunk.id())?;
+        if payload.is_some() != (index % 2 == 1)
+            || payload
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() != chunk.length() as usize)
+        {
+            return Err("provider B's partial cache contains a wrong or additional chunk".into());
+        }
+        if payload.is_some() {
+            present.push(chunk.id().to_string());
+        }
+    }
+    Ok(
+        json!({"path":cache, "device":metadata.dev(), "inode":metadata.ino(),
+        "entries":store.usage().entries, "bytes":store.usage().bytes, "chunk_ids":present}),
     )
 }
 
@@ -633,6 +745,57 @@ fn write_report(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_fixture_independent_index_keeps_expiry_and_only_original_partial_cache() -> Result<()>
+    {
+        let temporary = tempfile::tempdir()?;
+        let publisher = temporary.path().join("publisher");
+        seed(&publisher)?;
+        let original = provider_manifest(&publisher)?;
+        let root = temporary.path().join("independent-index");
+        let cache = publisher.join("replica-b");
+        independent_index(
+            &root,
+            &publisher.join("manifest.bin"),
+            &hex::encode(original.publisher()),
+            &cache,
+        )?;
+        let report: Value =
+            serde_json::from_slice(&read_bounded(&root.join("publication.json"), 8192)?)?;
+        let envelope = SignedManifest::decode(&fs::read(root.join("manifest.bin"))?)?;
+        let alternate = envelope.verify(
+            &VerifyingKey::from_bytes(&envelope.publisher_key_hint())?,
+            now()?,
+        )?;
+        assert_ne!(original.publisher(), alternate.publisher());
+        assert_ne!(original.manifest_id(), alternate.manifest_id());
+        assert_eq!(original.metadata(), alternate.metadata());
+        assert_eq!(original.validity(), alternate.validity());
+        assert_eq!(original.chunks(), alternate.chunks());
+        assert_eq!(original.object_sha256(), alternate.object_sha256());
+        assert_eq!(report["cache_before"], report["cache_after"]);
+        assert_eq!(report["cache_after"]["entries"], 4);
+        assert_eq!(report["temporary_full_copy_removed"], true);
+        assert_eq!(
+            fs::read_dir(&root)?.count(),
+            2,
+            "no private key or full-copy cache survives"
+        );
+        // A full/incorrect provider cache must never masquerade as a complementary source.
+        let rejected = temporary.path().join("full-cache-rejected");
+        assert!(
+            independent_index(
+                &rejected,
+                &publisher.join("manifest.bin"),
+                &hex::encode(original.publisher()),
+                &publisher.join("origin-cache")
+            )
+            .is_err()
+        );
+        assert!(!rejected.exists());
+        Ok(())
+    }
 
     #[test]
     fn origin_fixture_head_is_bodyless_and_get_preserves_the_whole_representation() -> Result<()> {

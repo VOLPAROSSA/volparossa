@@ -271,6 +271,11 @@ The existing correlated final receipt and original HTTP/monotonic expiry remain 
 neither the index signature nor persisted bytes become reusable HTTPS authority. Local/browser
 JSON identifies `authentication_scope` as `origin-repr-digest` or legacy `cooperative-origin`;
 `transport_manifest_id` names the original transport envelope, not an origin trust anchor.
+Digest-mode workers may select different original provider indexes on the unchanged v1
+transfer wire, only when their whole hash, length, public media type and complete ordered
+chunk layout agree. Each worker retains its provider's original index and expiry; one writer
+assembles the object and the consumer still verifies the complete origin-authorized digest.
+This does not relax native/named transfers' exact-manifest selection or admit private messages.
 
 ## Signed control envelope
 

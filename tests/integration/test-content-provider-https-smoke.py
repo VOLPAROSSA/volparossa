@@ -3,6 +3,7 @@
 """Synthetic HTTPS-provider gate tests; not evidence of an actual network transfer."""
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -183,9 +184,36 @@ def fixture(control_node="relay2", native_publication=None):
         origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
         source_strategy_cases=strategies, source_strategy_comparison=CHECK["strategy_comparison"](strategies),
         origin_digest_cases=digests,
+        digest_provider_indexes=independent_indexes(original, provider_nodes[1], peers),
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
+
+
+def independent_indexes(original, node, peers):
+    chunks = [dict(sha256=hashlib.sha256(bytes([65 + i]) * CHECK["RANGE_BYTES"]).hexdigest(),
+                   bytes=CHECK["RANGE_BYTES"]) for i in range(8)]
+    chunks.append(dict(sha256=hashlib.sha256(b"Z" * 123).hexdigest(), bytes=123))
+    first = dict(manifest_id=original["manifest_id"], publisher_hex=original["publisher_hex"],
+        object_sha256=CHECK["SHA"], bytes=CHECK["BYTES"], chunks=chunks,
+        name="disposable-native-network-publication", revision=1, content_type="application/octet-stream",
+        created_unix_seconds=1000, expires_unix_seconds=4600)
+    second = dict(first, manifest_id="f" * 64, publisher_hex="9" * 64)
+    cache = dict(path=f"/work/state-{node}/content/cache", device=1, inode=2,
+                 entries=4, bytes=4 * CHECK["RANGE_BYTES"], chunk_ids=[c["sha256"] for c in chunks[1::2]])
+    publication = dict(report_kind="volparossa-https-independent-index", original=first, independent=second,
+        checked_unix_seconds=1020, cache_before=cache, cache_after=copy.deepcopy(cache),
+        publisher_private_key_persisted=False, temporary_full_copy_removed=True)
+    binding = dict(provider_node=node, provider_peer_id=peers[node], publisher_hex=second["publisher_hex"],
+        cache=cache["path"], manifest_path=f"/work/state-{node}/content/digest-index/manifest.bin",
+        manifest_file_sha256=second["manifest_id"], original_manifest_file_sha256=first["manifest_id"],
+        bind_address=f'{CHECK["PUBLIC_IPS"][node]}:18080', advertised_hostname={
+            "relay3":"provider-c.volparossa.test", "relay4":"provider-a.volparossa.test",
+            "relay5":"provider-b.volparossa.test"}[node],
+        registered_unix_seconds=1021, replacement_phase="after-digest-origin-only")
+    return dict(publication=publication, binding=binding,
+        a_status=dict(serving=True, publications=1, replication_enabled=False),
+        b_stop=dict(serving=False, publications=0), b_serve=dict(serving=True, publications=1))
 
 
 def changed(evidence, path, value):
@@ -198,6 +226,44 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_digest_combines_only_original_independent_indexes_over_unchanged_partial_cache(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        # Discovery order may select either provider's original envelope for final output.
+        second = copy.deepcopy(value)
+        for receipt in (second["origin_digest_cases"]["digest-peers-first"]["fetch"],
+                        second["origin_digest_cases"]["digest-peers-first"]["application"]["final"]):
+            receipt["transport_manifest_id"] = "f" * 64
+        CHECK["validate_evidence"](second)
+        indexes = value["digest_provider_indexes"]
+        for path, wrong in (
+            (("publication", "independent", "manifest_id"), indexes["publication"]["original"]["manifest_id"]),
+            (("publication", "independent", "publisher_hex"), indexes["publication"]["original"]["publisher_hex"]),
+            (("publication", "independent", "expires_unix_seconds"), 4601),
+            (("publication", "independent", "chunks", 0, "sha256"), "0" * 64),
+            (("publication", "independent", "name"), "another-name"),
+            (("publication", "independent", "content_type"), "private-message"),
+            (("publication", "cache_after", "entries"), 9),
+            (("publication", "cache_before", "chunk_ids", 0), "0" * 64),
+            (("publication", "temporary_full_copy_removed"), False),
+            (("publication", "publisher_private_key_persisted"), True),
+            (("binding", "manifest_file_sha256"), "0" * 64),
+            (("binding", "provider_peer_id"), "peer-client"),
+            (("binding", "registered_unix_seconds"), 4600),
+            (("a_status", "publications"), 2),
+            (("b_stop", "publications"), 1),
+            (("b_serve", "publications"), 2),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, ("digest_provider_indexes", *path), wrong))
+        script = (HERE / "content-provider-https-smoke.sh").read_text()
+        self.assertLess(script.index("    content_provider_https_phase complete\n"),
+                        script.index("    content_provider_https_independent_index\n"))
+        self.assertLess(script.index("    content_provider_https_independent_index\n"),
+                        script.index("    content_provider_https_phase digest-peers-first\n"))
+        self.assertLess(script.index("    content_provider_https_phase digest-peers-first\n"),
+                        script.index("    PHASE=content-provider-https-withdraw-one\n"))
+
     def test_digest_mode_requires_bodyless_heads_original_peer_index_and_distinct_cold_storage(self):
         value = fixture()
         CHECK["validate_evidence"](value)

@@ -73,7 +73,8 @@ envelope after a completed named download. An existing owned cache can then reop
 publication/site without route setup or peer discovery, while retaining its original expiry
 and durable revision/conflict floor. Missing newer content cannot silently revive an older
 version. This is local availability, separate from external replica retention or global
-latest-version claims; its no-route integrated proof is pending.
+latest-version claims. Its [no-route integrated proof on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
+passes with identical cached bytes, no peer/origin delivery and full cleanup.
 
 Best-effort cache eviction alone cannot provide durable publishing. Retention commitments,
 replica receipts, repair and an honest availability status are needed. No permanent-availability
@@ -376,6 +377,15 @@ the exact original transport index, same output hash, physical captures and clea
 peer-assisted operation takes 9.230 seconds versus 2.577 seconds for origin-only: all 2,097,275
 origin payload bytes are avoided on the peer hit, but there is no latency benefit. C08 remains
 open; explicit peers-first is not evidence of successful measured automatic peer selection.
+
+The next implementation removes two concrete limitations without changing the provider wire:
+known peers are refreshed before waiting for a new full DHT round, and independently signed
+compatible transport indexes stay paired with their actual providers. Their complete ordered
+chunk lists, whole digest, length and public type must agree; the final own-origin hash check
+still authorizes output. One writer distributes missing chunks across at most two workers at
+a time, each selecting its provider's original index. Native/named exact-index behavior and
+private-content exclusion remain unchanged. Real local complementary-provider tests and
+targeted agent checks pass; a new network proof and speed comparison remain pending.
 
 ### Bounded post-download redistribution
 

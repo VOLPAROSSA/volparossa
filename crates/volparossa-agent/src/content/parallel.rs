@@ -20,6 +20,23 @@ use super::recent::{RecentProviderHint, RecentProviderScope};
 use super::{ContentError, complete, content_event, now, tls};
 use crate::{control::ControlContext, discovery::DiscoveredContentProvider, unix_millis};
 
+struct ProviderSource {
+    provider: DiscoveredContentProvider,
+    // Only digest-authorized callers select a provider's alternative original transport index.
+    // The library compares the whole identity and exact chunk layout before workers can start.
+    transport: Option<VerifiedManifest>,
+}
+
+fn exact_sources(providers: Vec<DiscoveredContentProvider>) -> Vec<ProviderSource> {
+    providers
+        .into_iter()
+        .map(|provider| ProviderSource {
+            provider,
+            transport: None,
+        })
+        .collect()
+}
+
 pub(super) async fn pull(
     context: &ControlContext,
     manifest: &VerifiedManifest,
@@ -27,7 +44,15 @@ pub(super) async fn pull(
     policy: &volparossa_policy::VerifiedManifest,
     providers: Vec<DiscoveredContentProvider>,
 ) -> Result<(Vec<String>, u64), ContentError> {
-    pull_inner(context, manifest, store, policy, providers, None).await
+    pull_inner(
+        context,
+        manifest,
+        store,
+        policy,
+        exact_sources(providers),
+        None,
+    )
+    .await
 }
 
 /// A source-selection budget, not a new transfer protocol or a renewed operation deadline.
@@ -49,7 +74,44 @@ pub(super) async fn pull_with_budget(
     let deadline = Instant::now()
         .checked_add(budget)
         .ok_or(ContentError::Invalid)?;
-    pull_inner(context, manifest, store, policy, providers, Some(deadline)).await
+    pull_inner(
+        context,
+        manifest,
+        store,
+        policy,
+        exact_sources(providers),
+        Some(deadline),
+    )
+    .await
+}
+
+/// Whole-object HTTPS authority remains with the caller. Each provider keeps its own original
+/// index on the existing v1 wire, while the single writer accepts only the exact shared layout.
+pub(super) async fn pull_indexed_with_budget(
+    context: &ControlContext,
+    manifest: &VerifiedManifest,
+    store: &mut ChunkStore,
+    policy: &volparossa_policy::VerifiedManifest,
+    providers: Vec<(DiscoveredContentProvider, VerifiedManifest)>,
+    budget: Duration,
+) -> Result<(Vec<String>, u64), ContentError> {
+    if providers.len() > 2 {
+        return Err(ContentError::Invalid);
+    }
+    if budget.is_zero() {
+        return Ok((Vec::new(), 0));
+    }
+    let deadline = Instant::now()
+        .checked_add(budget)
+        .ok_or(ContentError::Invalid)?;
+    let sources = providers
+        .into_iter()
+        .map(|(provider, transport)| ProviderSource {
+            provider,
+            transport: Some(transport),
+        })
+        .collect();
+    pull_inner(context, manifest, store, policy, sources, Some(deadline)).await
 }
 
 async fn pull_inner(
@@ -57,7 +119,7 @@ async fn pull_inner(
     manifest: &VerifiedManifest,
     store: &mut ChunkStore,
     policy: &volparossa_policy::VerifiedManifest,
-    providers: Vec<DiscoveredContentProvider>,
+    providers: Vec<ProviderSource>,
     deadline: Option<Instant>,
 ) -> Result<(Vec<String>, u64), ContentError> {
     if providers.len() > 16 {
@@ -66,7 +128,7 @@ async fn pull_inner(
     let mut seen = BTreeSet::new();
     let mut providers = providers
         .into_iter()
-        .filter(|provider| seen.insert(provider.peer_id));
+        .filter(|source| seen.insert(source.provider.peer_id));
     let mut used = BTreeSet::new();
     let mut bytes = 0_u64;
     let scope = RecentProviderScope::for_route(context, policy).await;
@@ -85,7 +147,7 @@ async fn pull_inner(
         };
         let second = providers.next();
         let (download, [worker_a, worker_b]) =
-            ParallelDownload::new(manifest, store, limits).map_err(|_| ContentError::Invalid)?;
+            pair_download(manifest, store, &first, second.as_ref(), limits)?;
         let observed_at = Instant::now();
         let observed_wall = now();
         let mut first_elapsed = None;
@@ -94,12 +156,17 @@ async fn pull_inner(
             download,
             store,
             measured_peer(
-                peer(context, policy, Some(&first), worker_a),
+                peer(context, policy, Some(&first.provider), worker_a),
                 deadline,
                 &mut first_elapsed,
             ),
             measured_peer(
-                peer(context, policy, second.as_ref(), worker_b),
+                peer(
+                    context,
+                    policy,
+                    second.as_ref().map(|source| &source.provider),
+                    worker_b,
+                ),
                 deadline,
                 &mut second_elapsed,
             ),
@@ -110,46 +177,112 @@ async fn pull_inner(
             content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
         }
         let same_route = RecentProviderScope::for_route(context, policy).await == scope;
-        for ((provider, received), elapsed) in [Some(first), second]
-            .into_iter()
-            .zip(progress)
-            .zip([first_elapsed, second_elapsed])
-        {
-            let Some(provider) = provider else {
-                continue;
-            };
-            if let Some(scope) = scope {
-                let measurement = elapsed
-                    .filter(|_| received.bytes > 0 && !timed_out && same_route)
+        let (pair_used, pair_bytes) = record_pair(
+            context,
+            manifest,
+            [Some(first), second],
+            progress,
+            [first_elapsed, second_elapsed],
+            PairMeasurement {
+                scope,
+                observed_at,
+                observed_wall,
+                valid: !timed_out && same_route,
+            },
+        )
+        .await?;
+        used.extend(pair_used);
+        bytes = bytes.checked_add(pair_bytes).ok_or(ContentError::Invalid)?;
+    }
+    Ok((used.into_iter().collect(), bytes))
+}
+
+fn pair_download(
+    manifest: &VerifiedManifest,
+    store: &mut ChunkStore,
+    first: &ProviderSource,
+    second: Option<&ProviderSource>,
+    limits: TransferLimits,
+) -> Result<(ParallelDownload, [ChunkWorker; 2]), ContentError> {
+    let alternate = second.and_then(|source| source.transport.as_ref());
+    let prepared = if first.transport.is_some() || alternate.is_some() {
+        ParallelDownload::new_with_transport_manifests(
+            manifest,
+            [
+                first.transport.as_ref().unwrap_or(manifest),
+                alternate.unwrap_or(manifest),
+            ],
+            store,
+            limits,
+        )
+    } else {
+        // Ordinary native/named/private transfers retain the original exact-manifest contract.
+        ParallelDownload::new(manifest, store, limits)
+    };
+    prepared.map_err(|_| ContentError::Invalid)
+}
+
+struct PairMeasurement {
+    scope: Option<RecentProviderScope>,
+    observed_at: Instant,
+    observed_wall: u64,
+    valid: bool,
+}
+
+async fn record_pair(
+    context: &ControlContext,
+    manifest: &VerifiedManifest,
+    sources: [Option<ProviderSource>; 2],
+    progress: [TransferProgress; 2],
+    elapsed: [Option<Duration>; 2],
+    sample: PairMeasurement,
+) -> Result<(Vec<String>, u64), ContentError> {
+    let mut used = Vec::new();
+    let mut bytes = 0_u64;
+    for ((source, received), elapsed) in sources.into_iter().zip(progress).zip(elapsed) {
+        let Some(ProviderSource {
+            provider,
+            transport,
+        }) = source
+        else {
+            continue;
+        };
+        if let Some(scope) = sample.scope {
+            let measurement =
+                elapsed
+                    .filter(|_| received.bytes > 0 && sample.valid)
                     .map(|elapsed| RecentProviderHint {
                         peer_id: provider.peer_id,
                         verified_bytes: received.bytes,
                         elapsed,
                     });
-                remember_measurement(
-                    context,
-                    scope,
-                    &provider,
-                    measurement,
-                    observed_at,
-                    observed_wall,
-                )
-                .await;
-            }
-            if received.bytes == 0 {
-                continue;
-            }
-            bytes = bytes
-                .checked_add(received.bytes)
-                .ok_or(ContentError::Invalid)?;
-            used.insert(provider.peer_id.to_string());
-            context
-                .content
-                .remember_provider(provider.peer_id, provider.offer, *manifest.manifest_id())
-                .await;
+            remember_measurement(
+                context,
+                scope,
+                &provider,
+                measurement,
+                sample.observed_at,
+                sample.observed_wall,
+            )
+            .await;
         }
+        if received.bytes == 0 {
+            continue;
+        }
+        bytes = bytes
+            .checked_add(received.bytes)
+            .ok_or(ContentError::Invalid)?;
+        used.push(provider.peer_id.to_string());
+        context
+            .content
+            .remember_provider(
+                provider.peer_id,
+                provider.offer,
+                *transport.as_ref().unwrap_or(manifest).manifest_id(),
+            )
+            .await;
     }
-    Ok((used.into_iter().collect(), bytes))
+    Ok((used, bytes))
 }
 
 async fn remember_measurement(

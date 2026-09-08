@@ -19,7 +19,9 @@ use super::{
     MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Request, Response, Session, TransferError,
     TransferLimits, TransferProgress, VERSION, check_time, read_frame, write_frame,
 };
-use crate::{Chunk, ChunkId, ChunkStore, VerifiedManifest};
+use crate::{
+    Chunk, ChunkId, ChunkStore, VerifiedManifest, private_message::PRIVATE_MESSAGE_CONTENT_TYPE,
+};
 
 enum Work {
     Chunk(Chunk),
@@ -48,7 +50,7 @@ pub struct ParallelDownload {
     deadline: Instant,
 }
 
-/// One provider's exact subset of an independently authorized manifest; fields are not forgeable.
+/// One provider's original transport index for coordinator-assigned chunks; fields are sealed.
 pub struct ChunkWorker {
     manifest: VerifiedManifest,
     requests: mpsc::Receiver<Work>,
@@ -70,6 +72,50 @@ impl ParallelDownload {
     /// Refuses invalid limits, expiry, insufficient whole-object capacity or corrupt cache hits.
     pub fn new(
         manifest: &VerifiedManifest,
+        store: &mut ChunkStore,
+        limits: TransferLimits,
+    ) -> Result<(Self, [ChunkWorker; 2]), TransferError> {
+        Self::prepare(manifest, [manifest; 2], store, limits)
+    }
+
+    /// Combine identical public chunk layouts while selecting each provider's original index.
+    ///
+    /// This changes only transport selection, never publisher or HTTPS authority. Callers must
+    /// independently authorize the expected object and verify its complete hash before output.
+    /// Each worker retains its own signed manifest identity and checks its original expiry;
+    /// the coordinator retains `expected`, one writer and the ordinary no-duplicate assignments.
+    /// Names, revisions, signers and envelope nonces need not match. No envelope is rewritten.
+    /// Ordinary native/name callers keep [`Self::new`]'s exact-manifest contract.
+    ///
+    /// # Errors
+    /// Rejects private-message content, expired indexes, or differing whole hashes, lengths,
+    /// media types or ordered chunk references, plus the usual limits/cache errors from `new`.
+    pub fn new_with_transport_manifests(
+        expected: &VerifiedManifest,
+        transports: [&VerifiedManifest; 2],
+        store: &mut ChunkStore,
+        limits: TransferLimits,
+    ) -> Result<(Self, [ChunkWorker; 2]), TransferError> {
+        check_time(expected)?;
+        if expected.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE {
+            return Err(TransferError::Protocol);
+        }
+        for transport in transports {
+            check_time(transport)?;
+            if transport.object_sha256() != expected.object_sha256()
+                || transport.length() != expected.length()
+                || transport.metadata().content_type != expected.metadata().content_type
+                || transport.chunks() != expected.chunks()
+            {
+                return Err(TransferError::Protocol);
+            }
+        }
+        Self::prepare(expected, transports, store, limits)
+    }
+
+    fn prepare(
+        manifest: &VerifiedManifest,
+        transports: [&VerifiedManifest; 2],
         store: &mut ChunkStore,
         limits: TransferLimits,
     ) -> Result<(Self, [ChunkWorker; 2]), TransferError> {
@@ -96,8 +142,8 @@ impl ParallelDownload {
                 complete: false,
             });
         }
-        let (first, worker_a) = peer(manifest, limits, deadline);
-        let (second, worker_b) = peer(manifest, limits, deadline);
+        let (first, worker_a) = peer(transports[0], limits, deadline);
+        let (second, worker_b) = peer(transports[1], limits, deadline);
         Ok((
             Self {
                 manifest: manifest.clone(),
@@ -241,7 +287,8 @@ fn peer(
 }
 
 impl ChunkWorker {
-    /// The caller's independently verified exact publication, not a peer's replacement manifest.
+    /// This provider's original selected index, not newly acquired publisher or HTTPS authority.
+    /// Default `ParallelDownload::new` workers all retain the exact expected publication.
     pub fn manifest(&self) -> &VerifiedManifest {
         &self.manifest
     }

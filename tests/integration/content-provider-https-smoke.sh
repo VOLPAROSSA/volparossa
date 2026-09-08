@@ -152,6 +152,56 @@ content_provider_https_baseline() {
         >"$WORK/$ph_prefix-ingress.json"
 }
 
+content_provider_https_independent_index() {
+    PHASE=content-provider-https-independent-index
+    # Earlier native/cooperative downloads used the common index. Retire B's entire
+    # registry before registering its own independent publication, never an ID alias.
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_a/control/agent.sock" \
+        content status >"$WORK/content-provider-https-index-a-status.json" \
+        2>"$WORK/content-provider-https-index-a-status.err" || fail PROVIDER_HTTPS_INDEX_STATUS_FAILED
+    jq -e '.serving == true and .publications == 1 and .replication_enabled == false' \
+        "$WORK/content-provider-https-index-a-status.json" >/dev/null || fail PROVIDER_HTTPS_INDEX_A_CHANGED
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \
+        content stop >"$WORK/content-provider-https-index-b-stop.json" \
+        2>"$WORK/content-provider-https-index-b-stop.err" || fail PROVIDER_HTTPS_INDEX_STOP_FAILED
+    jq -e '.serving == false and .publications == 0' \
+        "$WORK/content-provider-https-index-b-stop.json" >/dev/null || fail PROVIDER_HTTPS_INDEX_NOT_RETIRED
+    ph_index_root=$provider_b/digest-index
+    setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$ph_binary" independent-index "$ph_index_root" "$provider_manifest" \
+        "$provider_publisher" "$provider_b/cache" >"$WORK/content-provider-https-index-seed.log" 2>&1 \
+        || fail PROVIDER_HTTPS_INDEX_SEED_FAILED
+    install -o root -g root -m 0600 "$ph_index_root/publication.json" \
+        "$WORK/content-provider-https-index-publication.json"
+    ph_index_key=$(jq -er '.independent.publisher_hex | select(test("^[0-9a-f]{64}$"))' \
+        "$WORK/content-provider-https-index-publication.json") || fail PROVIDER_HTTPS_INDEX_KEY_INVALID
+    case $provider_node_b in
+        relay4) ph_index_address=49.165.5.1; ph_index_hostname=provider-a.volparossa.test ;;
+        relay5) ph_index_address=50.166.6.1; ph_index_hostname=provider-b.volparossa.test ;;
+        relay3) ph_index_address=48.164.4.1; ph_index_hostname=provider-c.volparossa.test ;;
+        *) fail PROVIDER_HTTPS_INDEX_NODE_INVALID ;;
+    esac
+    "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \
+        content serve --manifest "$ph_index_root/manifest.bin" --publisher-key "$ph_index_key" \
+        --cache "$provider_b/cache" --bind "$ph_index_address:18080" \
+        --advertised-hostname "$ph_index_hostname" >"$WORK/content-provider-https-index-b-serve.json" \
+        2>"$WORK/content-provider-https-index-b-serve.err" || fail PROVIDER_HTTPS_INDEX_SERVE_FAILED
+    jq -e '.serving == true and .publications == 1' \
+        "$WORK/content-provider-https-index-b-serve.json" >/dev/null || fail PROVIDER_HTTPS_INDEX_NOT_EXCLUSIVE
+    jq -n --arg node "$provider_node_b" --arg key "$ph_index_key" \
+        --arg cache "$provider_b/cache" --arg manifest "$ph_index_root/manifest.bin" \
+        --arg sha "$(sha256sum "$ph_index_root/manifest.bin" | awk '{print $1}')" \
+        --arg original_sha "$(sha256sum "$provider_manifest" | awk '{print $1}')" \
+        --arg bind "$ph_index_address:18080" --arg hostname "$ph_index_hostname" \
+        --argjson registered "$(date +%s)" --slurpfile peers "$WORK/a01-expected-peers.json" \
+        '{provider_node:$node,provider_peer_id:$peers[0][$node],publisher_hex:$key,
+          cache:$cache,manifest_path:$manifest,manifest_file_sha256:$sha,
+          original_manifest_file_sha256:$original_sha,bind_address:$bind,advertised_hostname:$hostname,
+          registered_unix_seconds:$registered,replacement_phase:"after-digest-origin-only"}' \
+        >"$WORK/content-provider-https-index-binding.json"
+}
+
 content_provider_https_run() {
     PHASE=content-provider-https-origin-seed
     ph_binary=$binary_directory/examples/https-content-acceptance-fixture
@@ -220,9 +270,10 @@ content_provider_https_run() {
         "$WORK/destination/content-provider-https-origin.pem" "$ph_user/origin.pem"
 
     content_provider_https_phase complete
-    # No custom metadata-path request in either case: fresh origin HEAD independently
-    # authorizes the same whole digest, and the original two provider indexes remain live.
+    # No custom metadata-path request in either case. Replace only B's index between
+    # cases: fresh HEAD must authorize bytes from both independent original indexes.
     content_provider_https_phase digest-origin-only
+    content_provider_https_independent_index
     content_provider_https_phase digest-peers-first
     PHASE=content-provider-https-withdraw-one
     "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \

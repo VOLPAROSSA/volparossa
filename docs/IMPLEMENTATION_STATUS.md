@@ -224,6 +224,41 @@ zero owned objects and byte-identical guest host state, SHA-256
 Artifact ZIP SHA-256: `c4d419b330703d14a514c30138de53f7a390f79b6878f05dc75ecd82452c9ed1`;
 canonical raw rebuild SHA-256: `ea64f62341a0e0a300c625bc75fc4a8d21d6a9362e02ce2966ad35b648aea545`.
 This result does not verify the later native cache-only site extension.
+The [full Quality run on the same `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212584855)
+also passes; it does not certify subsequent worktree changes.
+
+### Independent digest copies and bounded recent-peer lookup
+
+The following implementation fixes a real interoperability gap: independent origin downloads
+sign different native transport envelopes for identical bytes, while the former consumer sent
+one chosen manifest ID to every provider. A provider holding only its own original index rightly
+answered missing. The new public-layout constructor retains each worker's own original index
+and expiry, requiring the exact same whole hash, length, media type and ordered chunk list.
+Ordinary native/named/private transfers retain their original exact-index constructor. Nothing
+is re-signed, provider keys gain no origin authority, and complete origin verification still
+precedes output or public contribution.
+
+An actual two-provider v1-stream test passes with independent signers, distinct indexes and
+complementary caches: four unique chunk requests reconstruct five ordered references with the
+correct complete hash. The original exact selector still rejects the other index. The existing
+parallel lifecycle test and all 38 targeted agent content/discovery tests also pass, along with
+strict content and agent Clippy. These are local protocol checks, not an independent-index VM pass.
+
+The integrated harness now replaces only provider B's registration after the origin-only case,
+retaining its same four-chunk cache and original publication expiry. Its next digest retrieval
+must use both independently indexed providers, reconstruct every byte and fetch no origin body.
+Three fixture tests, twelve HTTPS checker tests, fourteen parent checker tests and narrow shell
+checks pass; the actual new VM execution remains pending.
+
+The earlier `f3abee8e` logs identify **5.146 seconds** of discovery inside the 9.230-second digest
+peer operation. Both offers were already verified before another **5.034 seconds** waiting for
+DHT completion; the previous descriptor operation refreshed those same peers in 45/68 ms.
+The remaining 4.084 seconds cannot be attributed solely to payload from the available evidence.
+Explicit peers-first now tries freshly revalidated route/policy-scoped hints within one second,
+then bounded generic discovery/pairs if needed under its original thirty-second deadline.
+No full-object origin race is started; actual verified progress survives successive pairs.
+Automatic mode retains its existing measured budget without generic discovery fallback. The
+network benefit of these newer changes remains unproved; C08 is still open.
 
 ### Native publication/site cache-only reopen
 
@@ -250,8 +285,36 @@ Five isolated CLI-process tests, two wire tests and two parser tests pass; scope
 joint agent/CLI/local-control Clippy also pass. The CLI site fixture exercises HTTP retrieval,
 not a browser engine or a live production-agent topology. The additive real-agent no-route
 site-reopen network proof is ready; three site and fourteen parent checker tests pass with
-narrow shell checks. Its actual VM result is pending. This is local native availability, not completed
+narrow shell checks. This is local native availability, not completed
 external retention repair, reusable HTTPS authority or globally latest-version assurance.
+
+The [exact-source cache-only run on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
+now **passes**, including report equality with a full independent raw rebuild using that commit's
+archived checkers. After real route disconnect, the same agent cache (`65025:27641`) supplies
+2,097,628 bytes / nine chunks, SHA-256
+`5e3012170ca5335e4f8b7e419fda3ae4ddf59e7603eeabb6a9c2544ea6088a04`.
+Before and after the operation, connected is false, contexts/MPTCP subflows/MPQUIC paths are
+zero and paths are empty, with no new content-discovery/provider events. The receipt reports
+zero peer/origin bytes, zero providers and an empty control ID. All four assets, HEAD, the
+4096-byte Range, denials, listener shutdown and private-spool cleanup pass; no browser engine
+was executed. All seventy captures / 332 interface rows are complete and zero-drop; the six
+cache-only captures contain no WireGuard data or provider-application bytes. Cleanup leaves zero
+owned objects and unchanged guest state, SHA-256
+`91d43353558052eb03c33a713f03e6dffa8d4c49e9ff7482b2a8570ea9daefc3`.
+Artifact ZIP SHA-256: `64acd2860ee4c22ec568d72b178956e80d345e61fa73d0a2ce4d7ef56d40fbb9`;
+canonical raw rebuild SHA-256: `eaf112701f4dbee3ec362e91752111857ac7a97e5dc12daef246ca7df2a4e9c4`.
+
+The [separate `4e6cc308` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214662839)
+**fails** in `route_snapshot_alternative_controls_keep_one_exact_signed_exit_and_affine_subjects`
+with `InsufficientDiverseRelays` (497 agent tests pass, one fails). This does not invalidate the
+independent site proof or turn the broad run green. The unchanged route fixture lets an Exit's
+random nonce discriminator collide with one of three fixed relay network discriminators
+(3/256 possible first bytes); that provides a reproducible explanation, not knowledge of the
+unlogged original CI nonce. Forcing the collision reproduces the exact same error in 0.23 seconds;
+the same pinpoint test passes in 0.23 seconds with the fixture Exit discriminator fixed to 43,
+outside relay discriminators 40–42, while retaining its other 31 random nonce bytes. Formatter
+and diff checks pass. Product selection/diversity code and all existing test assertions are
+unchanged. The original failed run remains failed; the new commit still needs its own full CI.
 
 ### Automatic contribution startup/restart checkpoint
 

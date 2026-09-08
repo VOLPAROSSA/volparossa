@@ -171,7 +171,10 @@ and `content site open`: reopen a previously completed native download using the
 trusted publisher key, original signed manifest, retained revision floor and complete local
 chunks, without opening a route or looking for peers. The original expiry still applies;
 this is neither a globally latest-version check nor offline HTTPS-origin authentication.
-Targeted storage, agent and CLI checks pass; the no-route integrated reopen proof is pending.
+The [no-route reopen proof on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
+passes: the same cached site serves all assets after route disconnect, with zero peer/origin
+bytes, no new route/discovery, and complete cleanup. That commit's broad Quality run failed
+in a separate route-selection test; the passing site proof is not an all-checks-green claim.
 The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
 also passes: publish, import, serve, protected retrieval, export and recipient opening after
 the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
@@ -296,6 +299,9 @@ The [protected-network proof on `f3abee8e`](https://github.com/VOLPAROSSA/volpar
 passes: two providers deliver every payload byte with zero origin body transfer after a fresh
 origin HEAD. In this fixture peers-first takes 9.23 seconds versus 2.58 seconds origin-only;
 server payload is saved, but latency does not improve. This is not arbitrary-site compatibility.
+The next retrieval implementation first refreshes recent authenticated peers and can combine
+compatible copies with different original transport-manifest IDs. Its targeted local checks
+pass; network performance and independent-index integration still need their own new run.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

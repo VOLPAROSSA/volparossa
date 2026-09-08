@@ -1,5 +1,7 @@
 //! Real production selector/chunk handlers over backpressured streams, not host networking.
 
+mod transports;
+
 use std::{
     io,
     pin::Pin,
