@@ -84,8 +84,11 @@ def receipts(values, keys, operation, message_id=None, ciphertext_bytes=0):
                 and 0 < body[4] - body[3] <= 120
                 and hashlib.sha256(body[8]).digest() == body[7], "receipt envelope binding invalid")
         payload = fields(body[8])
+        # prost::Enumeration defaults to the FIRST variant, Register=1 here, not
+        # integer zero. Canonical encoding omits that default; explicit 1 is noncanonical.
         require(set(payload).issubset({1, 2, 3, 5, 6, 7, 8})
-                and len(payload[1]) == len(payload[2]) == 32 and payload[3] == operation
+                and len(payload[1]) == len(payload[2]) == 32
+                and payload.get(3, 1) == operation and payload.get(3) != 1
                 and payload.get(5, b"") == (bytes.fromhex(message_id) if message_id else b"")
                 and payload.get(8, 0) == ciphertext_bytes and payload[6] > body[3]
                 and bool(payload.get(7, 0)) is (operation == 5), "wrong mailbox receipt operation/result")

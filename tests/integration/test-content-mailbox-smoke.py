@@ -28,8 +28,10 @@ def wire(fields):
                     for key, value in sorted(fields.items()))
 
 
-def receipt(key, op, message=None, length=0):
-    fields = {1: bytes([op]) * 31 + bytes.fromhex(key)[:1], 2: b"g" * 32, 3: op, 6: 2000}
+def receipt(key, op, message=None, length=0, explicit_default=False):
+    fields = {1: bytes([op]) * 31 + bytes.fromhex(key)[:1], 2: b"g" * 32, 6: 2000}
+    if op != 1 or explicit_default:
+        fields[3] = op
     if message:
         fields[5] = bytes.fromhex(message)
     if length:
@@ -107,6 +109,7 @@ class MailboxEvidence(unittest.TestCase):
         valid = fixture()
         CHECK["validate_evidence"](valid)
         mutations = (
+            lambda v: v["enroll"]["storage_receipts"].__setitem__(0, receipt("22" * 32, 1, explicit_default=True)),
             lambda v: v["send"].update(retained_providers=1),
             lambda v: v["send"].update(already_acknowledged_providers=1),
             lambda v: v["receive"].update(sender_manifest_supplied=True),
