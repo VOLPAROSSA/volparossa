@@ -3,9 +3,12 @@
 """Small adversarial checks of the C03 evidence contract, not a network substitute."""
 
 import copy
+import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -80,6 +83,53 @@ def fixture(control_node="relay1"):
 
 
 class ReplicationEvidence(unittest.TestCase):
+    def test_finalizers_stream_large_evidence_and_preserve_failed_raw_inputs(self):
+        # Exercise the real shell finalizers and their real validators with synthetic data.
+        # This is an argv/copy regression only, never evidence of an actual network transfer.
+        parent = (HERE / "kvm-alpha-topology.sh").read_text()
+        helper = parent[parent.index("optional_json_evidence() {"):]
+        helper = helper[:helper.index("\n}\n") + 3]
+        script = helper + '\n. "$1"\n"$2" 0\n'
+        providers = runpy.run_path(str(HERE / "test-content-provider-smoke.py"))
+        for scenario, factory in (("replication", fixture), ("provider", providers["fixture"])):
+            for mode in ("large", "missing", "serialization-error"):
+                with self.subTest(scenario=scenario, mode=mode), tempfile.TemporaryDirectory(
+                        prefix="volparossa-report-argv-") as directory:
+                    work = Path(directory) / "work"
+                    output = Path(directory) / "output"
+                    work.mkdir()
+                    output.mkdir()
+                    evidence = factory()
+                    evidence["synthetic_report_padding"] = "x" * (160 * 1024)
+                    encoded = json.dumps(evidence)
+                    self.assertGreater(len(encoded), 131072)
+                    prefix = "content-" + scenario
+                    if mode != "missing":
+                        (work / f"{prefix}-evidence.json").write_text(encoded)
+                    (work / "a15-evidence.json").write_text(json.dumps(dict(
+                        unchanged=True, before_sha256="b" * 64, after_sha256="b" * 64)))
+                    (work / f"{prefix}-raw.err").write_text("synthetic raw observation\n")
+                    env = dict(os.environ, WORK=str(work), output_directory=str(output),
+                               source_directory=str(HERE.parent.parent), expected_commit="a" * 40,
+                               OUTPUT_UID=str(os.getuid()), OUTPUT_GID=str(os.getgid()),
+                               PHASE="synthetic-complete", OBSERVED_BLOCKER="NONE", RUN_ID="synthetic",
+                               CLEANUP_COMPLETE=("invalid-json" if mode == "serialization-error" else "true"),
+                               REMAINING_OWNED_OBJECTS="0", PYTHONDONTWRITEBYTECODE="1")
+                    result = subprocess.run(["sh", "-c", script, "report-test",
+                                             str(HERE / f"{prefix}-smoke.sh"),
+                                             f"content_{scenario}_finalize_report"],
+                                            env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode == 0, mode == "large", result.stderr)
+                    self.assertEqual((output / f"{prefix}-raw.err").read_text(),
+                                     "synthetic raw observation\n")
+                    if mode == "serialization-error":
+                        self.assertEqual(json.loads((output / f"{prefix}-evidence.json").read_text()),
+                                         evidence)
+                    else:
+                        report = json.loads((output / f"{prefix}-smoke.json").read_text())
+                        self.assertEqual(report["success"], mode == "large")
+                        self.assertEqual(report["transfer"], evidence if mode == "large" else None)
+
     def test_fixture_keeps_control_candidate_separate_from_two_data_relays(self):
         script = '''set -eu
             . "$1"

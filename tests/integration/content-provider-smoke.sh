@@ -250,13 +250,25 @@ content_provider_run() {
 
 content_provider_finalize_report() {
     provider_status=$1
-    provider_evidence=$(optional_json_evidence "$WORK/content-provider-evidence.json")
-    provider_host=$(optional_json_evidence "$WORK/a15-evidence.json")
+    # Keep complete raw evidence even when the report fails, and never place the potentially
+    # large native plus HTTPS capture bundle in a single operating-system argument.
+    for provider_artifact in "$WORK"/content-provider-*.json "$WORK"/content-provider-*.txt \
+        "$WORK"/content-provider-*.log "$WORK"/content-provider-*.out "$WORK"/content-provider-*.err; do
+        [ ! -f "$provider_artifact" ] || [ -L "$provider_artifact" ] || \
+            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$provider_artifact" \
+                "$output_directory/$(basename -- "$provider_artifact")"
+    done
+    optional_json_evidence "$WORK/content-provider-evidence.json" \
+        >"$WORK/content-provider-report-evidence.part"
+    optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/content-provider-report-host.part"
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
         --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
-        --argjson status "$provider_status" --argjson evidence "$provider_evidence" \
-        --argjson host "$provider_host" --argjson complete "$CLEANUP_COMPLETE" \
+        --argjson status "$provider_status" \
+        --slurpfile evidence_input "$WORK/content-provider-report-evidence.part" \
+        --slurpfile host_input "$WORK/content-provider-report-host.part" \
+        --argjson complete "$CLEANUP_COMPLETE" \
         --argjson remaining "$REMAINING_OWNED_OBJECTS" '
+      $evidence_input[0] as $evidence | $host_input[0] as $host |
       {schema_version:1,report_kind:"volparossa-native-content-providers",
        source_revision:$revision,run_id:$run_id,phase:$phase,
        success:($status == 0 and $evidence.success == true and $complete and
@@ -269,12 +281,8 @@ content_provider_finalize_report() {
        browser_integration_claimed:false,arbitrary_https_integration_claimed:false,
        speed_improvement_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-provider-smoke.json" || return 1
-    for provider_artifact in "$WORK"/content-provider-*.json "$WORK"/content-provider-*.txt \
-        "$WORK"/content-provider-*.log "$WORK"/content-provider-*.out "$WORK"/content-provider-*.err; do
-        [ ! -f "$provider_artifact" ] || [ -L "$provider_artifact" ] || \
-            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$provider_artifact" \
-                "$output_directory/$(basename -- "$provider_artifact")"
-    done
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/content-provider-smoke.json" \
+        "$output_directory/content-provider-smoke.json"
     python3 -B "$source_directory/tests/integration/content-provider-smoke.py" \
         report "$WORK/content-provider-smoke.json" "$expected_commit"
 }

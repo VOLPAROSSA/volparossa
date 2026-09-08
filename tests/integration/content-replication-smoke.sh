@@ -410,11 +410,24 @@ content_replication_run() {
 
 content_replication_finalize_report() {
     cr_status=$1
-    cr_evidence=$(optional_json_evidence "$WORK/content-replication-evidence.json")
-    cr_host=$(optional_json_evidence "$WORK/a15-evidence.json")
+    # Preserve raw inputs even if report serialization or validation fails. The ten physical
+    # captures can exceed Linux's per-argument limit; JSON belongs in files, not argv.
+    for cr_artifact in "$WORK"/content-replication-*.json "$WORK"/content-replication-*.txt \
+        "$WORK"/content-replication-*.log "$WORK"/content-replication-*.err \
+        "$WORK"/content-replication-*.out; do
+        [ ! -f "$cr_artifact" ] || [ -L "$cr_artifact" ] || \
+            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$cr_artifact" \
+                "$output_directory/$(basename -- "$cr_artifact")"
+    done
+    optional_json_evidence "$WORK/content-replication-evidence.json" \
+        >"$WORK/content-replication-report-evidence.part"
+    optional_json_evidence "$WORK/a15-evidence.json" >"$WORK/content-replication-report-host.part"
     jq -cn --arg revision "$expected_commit" --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
-        --argjson status "$cr_status" --argjson evidence "$cr_evidence" --argjson host "$cr_host" \
+        --argjson status "$cr_status" \
+        --slurpfile evidence_input "$WORK/content-replication-report-evidence.part" \
+        --slurpfile host_input "$WORK/content-replication-report-host.part" \
         --argjson complete "$CLEANUP_COMPLETE" --argjson remaining "$REMAINING_OWNED_OBJECTS" '
+      $evidence_input[0] as $evidence | $host_input[0] as $host |
       {schema_version:1,report_kind:"volparossa-content-replication",source_revision:$revision,
        phase:$phase,runner_exit_status:$status,observed_blocker:(if $blocker == "NONE" then null else $blocker end),
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host.unchanged),
@@ -424,13 +437,8 @@ content_replication_finalize_report() {
        full_c03_claimed:false,full_c04_claimed:false,speed_improvement_claimed:false,
        browser_integration_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-replication-smoke.json" || return 1
-    for cr_artifact in "$WORK"/content-replication-*.json "$WORK"/content-replication-*.txt \
-        "$WORK"/content-replication-*.log "$WORK"/content-replication-*.err \
-        "$WORK"/content-replication-*.out; do
-        [ ! -f "$cr_artifact" ] || [ -L "$cr_artifact" ] || \
-            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$cr_artifact" \
-                "$output_directory/$(basename -- "$cr_artifact")"
-    done
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/content-replication-smoke.json" \
+        "$output_directory/content-replication-smoke.json"
     python3 -B "$source_directory/tests/integration/content-replication-smoke.py" report \
         "$WORK/content-replication-smoke.json" "$expected_commit"
 }

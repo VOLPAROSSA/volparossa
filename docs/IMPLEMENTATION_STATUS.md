@@ -58,8 +58,21 @@ guest root state is unchanged, SHA-256
 Artifact SHA-256: `9e4363bd657127ce7438eb47a852f72385ce6b7970357a862d0b43325d0ffb40`.
 The kernel evidence receives a SYN-ACK but not acknowledgements for the subsequent 261-byte
 TLS payload. Source review does not justify changing TLS or widening ingress/firewall rules.
-The next runner retains bounded R4 TCP/routing/nft snapshots before disconnect, after reopen
-and on final-fetch failure; no traffic rule or packet gate is relaxed for that diagnostic.
+The [diagnostic run on `90c88a4b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34177039158)
+gets beyond that failed final fetch: four Exit flows complete and the final-fetch failure hook
+is not entered. R4 has a newly reopened listener, while its agent UID, reply route, RPF state
+and firewall semantics stay unchanged. Relevant product code is unchanged from `97e478a2`, so
+this is not an identified TLS fix; an intermittent cause remains unresolved. The run still fails:
+the final report passed a large evidence object as one `jq --argjson` argument and hit Linux's
+argument-size limit before copying the final receipts/hash/captures. Consequently those missing
+proofs cannot support a C03 pass. Both diagnostic snapshots are complete; raw guest state is
+unchanged, SHA-256 `9e7e8e95af3cd9a608b943c27757c32b8cab4a33efe36829aceffc374c879160`.
+Retained artifact SHA-256: `63e8f36710f422fc7ec8c1050b19529cbcfbfdeb880b1225fa7b47b5cf75cdc8`.
+Both replica and provider report writers now use file-backed JSON input and copy raw evidence
+before serializing the report. One targeted regression exercises both real finalizers with
+>160-KiB evidence, missing evidence and forced serialization failure (six cases, all pass).
+Missing evidence still fails; a failed report no longer hides its raw observations. Shell checks
+pass. The corrected source still needs its VM result; no traffic rule, timeout or packet gate is relaxed.
 
 Exact `97e478a2` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175365465)
 and [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175362088) pass.
