@@ -1,6 +1,9 @@
 //! Up to two protected provider streams, with one bounded independently verified cache writer.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, future::Future};
+
+#[cfg(test)]
+mod tests;
 
 use volparossa_content::{
     ChunkStore, VerifiedManifest,
@@ -38,22 +41,17 @@ pub(super) async fn pull(
         let (download, [worker_a, worker_b]) =
             ParallelDownload::new(manifest, store, TransferLimits::default())
                 .map_err(|_| ContentError::Invalid)?;
-        let mut progress = [TransferProgress::default(); 2];
-        let (written, peers) = tokio::join!(download.run(store, &mut progress), async {
-            tokio::try_join!(
-                peer(context, policy, Some(first), worker_a),
-                peer(context, policy, second, worker_b),
-            )
-        },);
-        match written {
-            Ok(()) => {}
-            Err(TransferError::Timeout) => {
-                content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
-            }
-            Err(_) => return Err(ContentError::Invalid),
+        let (progress, timed_out) = Box::pin(receive_pair(
+            download,
+            store,
+            peer(context, policy, Some(&first), worker_a),
+            peer(context, policy, second.as_ref(), worker_b),
+        ))
+        .await?;
+        if timed_out {
+            content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
         }
-        let (first, second) = peers?;
-        for (provider, received) in [first, second].into_iter().zip(progress) {
+        for (provider, received) in [Some(first), second].into_iter().zip(progress) {
             let Some(provider) = provider else {
                 continue;
             };
@@ -73,23 +71,48 @@ pub(super) async fn pull(
     Ok((used.into_iter().collect(), bytes))
 }
 
+/// A transport/close failure cannot cancel a useful sibling or erase bytes the single
+/// writer has already authenticated. Both sessions still end before a fallback begins.
+/// Policy and local integrity/storage failures remain fatal; these are not clean-TLS receipts.
+async fn receive_pair(
+    download: ParallelDownload,
+    store: &mut ChunkStore,
+    first: impl Future<Output = Result<(), ContentError>>,
+    second: impl Future<Output = Result<(), ContentError>>,
+) -> Result<([TransferProgress; 2], bool), ContentError> {
+    let mut progress = [TransferProgress::default(); 2];
+    let (written, first, second) = tokio::join!(download.run(store, &mut progress), first, second);
+    let timed_out = match written {
+        Ok(()) => false,
+        Err(TransferError::Timeout) => true,
+        Err(_) => return Err(ContentError::Invalid),
+    };
+    for outcome in [first, second] {
+        match outcome {
+            Ok(()) | Err(ContentError::Unavailable) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((progress, timed_out))
+}
+
 async fn peer(
     context: &ControlContext,
     policy: &volparossa_policy::VerifiedManifest,
-    provider: Option<DiscoveredContentProvider>,
+    provider: Option<&DiscoveredContentProvider>,
     mut worker: ChunkWorker,
-) -> Result<Option<DiscoveredContentProvider>, ContentError> {
+) -> Result<(), ContentError> {
     let Some(provider) = provider else {
-        return Ok(None);
+        return Ok(());
     };
     // An earlier useful provider may have closed its idle v1 read while its sibling stalled.
     // Reopen at most once, keeping the same assignment, original deadline and byte/request limits.
     for _ in 0..2 {
-        if !attempt(context, policy, &provider, &mut worker).await? {
+        if !attempt(context, policy, provider, &mut worker).await? {
             break;
         }
     }
-    Ok(Some(provider))
+    Ok(())
 }
 
 async fn attempt(
