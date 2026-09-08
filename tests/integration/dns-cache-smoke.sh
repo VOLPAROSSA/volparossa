@@ -59,7 +59,9 @@ dns_cache_select() {
     while [ "$dc_draw" -lt 32 ] && [ "$dc_attempt" -lt 120 ] && [ "$(date +%s)" -lt "$dc_deadline" ]; do
         dc_attempt=$((dc_attempt + 1))
         dc_attempt_prefix=$WORK/$dc_label-draw-$dc_attempt
-        if dns_cache_cli connect --transport single-path-udp \
+        # Prepare the association DNS actually consumes, not the independently owned
+        # native general-UDP session. Readiness alone is not application delivery.
+        if dns_cache_cli connect --transport protected-dns \
             >"$dc_attempt_prefix.out" 2>"$dc_attempt_prefix.err"; then
             dc_poll=0; dc_status=1
             while [ "$dc_poll" -lt 50 ]; do

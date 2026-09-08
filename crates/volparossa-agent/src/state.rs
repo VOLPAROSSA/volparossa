@@ -28,6 +28,7 @@ pub struct AgentState {
     mptcp_context_id: Option<Vec<u8>>,
     mpquic_context_id: Option<Vec<u8>>,
     single_udp_context_id: Option<Vec<u8>>,
+    dns_context_id: Option<Vec<u8>>,
     sessions: Vec<SessionSummary>,
     logs: VecDeque<LogRecord>,
     candidate_pool: usize,
@@ -59,6 +60,7 @@ impl AgentState {
             mptcp_context_id: None,
             mpquic_context_id: None,
             single_udp_context_id: None,
+            dns_context_id: None,
             sessions: Vec::new(),
             logs: VecDeque::with_capacity(MAX_LOG_RECORDS),
             candidate_pool: 0,
@@ -79,7 +81,8 @@ impl AgentState {
             .context_count()
             .saturating_add(usize::from(self.mptcp_context_id.is_some()))
             .saturating_add(usize::from(self.mpquic_context_id.is_some()))
-            .saturating_add(usize::from(self.single_udp_context_id.is_some()));
+            .saturating_add(usize::from(self.single_udp_context_id.is_some()))
+            .saturating_add(usize::from(self.dns_context_id.is_some()));
         StatusSnapshot {
             connected: active_contexts > 0 && (!self.paths.is_empty() || !self.sessions.is_empty()),
             active_peers: bounded_u32(self.connected_peers.len()),
@@ -208,6 +211,7 @@ impl AgentState {
             .to_vec();
         if self.mpquic_context_id.as_ref() == Some(&context_id)
             || self.single_udp_context_id.as_ref() == Some(&context_id)
+            || self.dns_context_id.as_ref() == Some(&context_id)
             || paths.iter().any(|path| {
                 path.state != PathState::Reachable as i32
                     || path.user_bytes != 0
@@ -246,6 +250,7 @@ impl AgentState {
         if self.single_udp_context_id.as_deref() == Some(context_id) {
             self.clear_single_udp_path();
         }
+        self.clear_dns_path(context_id);
     }
 
     /// Replaces only the currently owned MPQUIC route projection.
@@ -257,6 +262,7 @@ impl AgentState {
         let context_id = validate_mpquic_paths(&paths)?.to_vec();
         if self.single_udp_context_id.as_ref() == Some(&context_id)
             || self.mptcp_context_id.as_ref() == Some(&context_id)
+            || self.dns_context_id.as_ref() == Some(&context_id)
         {
             return Err(StateError::InvalidMpquicPaths);
         }
@@ -304,6 +310,7 @@ impl AgentState {
             )
             || self.mpquic_context_id.as_ref() == Some(&path.route_context_id)
             || self.mptcp_context_id.as_ref() == Some(&path.route_context_id)
+            || self.dns_context_id.as_ref() == Some(&path.route_context_id)
         {
             return Err(StateError::InvalidSingleUdpPath);
         }
@@ -325,6 +332,48 @@ impl AgentState {
                 .retain(|path| path.route_context_id != context_id);
         }
         self.sync_metrics();
+    }
+
+    /// Publishes only the dedicated protected-DNS route. Received DNS payload bytes are not
+    /// native transport counters, and neither readiness nor a request queued locally proves
+    /// delivered application bytes. No query name or resolver address is retained here.
+    pub fn replace_dns_path(&mut self, path: PathSummary) -> Result<(), StateError> {
+        if path.route_context_id.len() != ROUTE_CONTEXT_ID_BYTES
+            || path.route_context_id.iter().all(|byte| *byte == 0)
+            || path.path_id == 0
+            || usize::try_from(path.path_id).map_or(true, |id| id > MAX_MPQUIC_PATHS)
+            || path.relay_peer_id.is_empty()
+            || path.exit_peer_id.is_empty()
+            || path.relay_peer_id == path.exit_peer_id
+            || path.smoothed_rtt_micros != 0
+            || !matches!(
+                (PathState::try_from(path.state).ok(), path.user_bytes),
+                (Some(PathState::Reachable), 0) | (Some(PathState::Active), 1..)
+            )
+            || self.mpquic_context_id.as_ref() == Some(&path.route_context_id)
+            || self.mptcp_context_id.as_ref() == Some(&path.route_context_id)
+            || self.single_udp_context_id.as_ref() == Some(&path.route_context_id)
+        {
+            return Err(StateError::InvalidDnsPath);
+        }
+        if let Some(previous) = self.dns_context_id.take() {
+            self.paths
+                .retain(|existing| existing.route_context_id != previous);
+        }
+        self.dns_context_id = Some(path.route_context_id.clone());
+        self.paths.push(path);
+        self.sync_metrics();
+        Ok(())
+    }
+
+    /// Removes only the DNS context whose retained owner has finished teardown.
+    pub fn clear_dns_path(&mut self, context_id: &[u8]) {
+        if self.dns_context_id.as_deref() == Some(context_id) {
+            self.paths
+                .retain(|path| path.route_context_id != context_id);
+            self.dns_context_id = None;
+            self.sync_metrics();
+        }
     }
 
     /// Returns only actually established sessions.
@@ -369,6 +418,7 @@ impl AgentState {
         self.mptcp_context_id = None;
         self.mpquic_context_id = None;
         self.single_udp_context_id = None;
+        self.dns_context_id = None;
         self.sessions.clear();
         self.mptcp_subflows = 0;
         self.mpquic_paths = 0;
@@ -383,6 +433,7 @@ impl AgentState {
             || self.mptcp_context_id.is_some()
             || self.mpquic_context_id.is_some()
             || self.single_udp_context_id.is_some()
+            || self.dns_context_id.is_some()
             || !self.paths.is_empty()
             || !self.sessions.is_empty()
     }
@@ -464,6 +515,9 @@ pub enum StateError {
     /// Native single-path UDP status did not describe one exact bounded route.
     #[error("native single-path UDP path state is invalid")]
     InvalidSingleUdpPath,
+    /// Protected-DNS projection was ambiguous or claimed unobserved activity.
+    #[error("protected DNS path state is invalid")]
+    InvalidDnsPath,
 }
 
 #[cfg(test)]
@@ -617,6 +671,61 @@ mod tests {
         state.clear_after_helper_cleanup(&config).expect("cleanup");
         assert!(!state.has_network_state());
         assert!(!state.status().connected);
+    }
+
+    #[test]
+    fn protected_dns_projection_coexists_and_retires_only_its_exact_context() {
+        let config = Config::default();
+        let metrics = MetricsRegistry::new();
+        let mut state = AgentState::new(&config, config.roles, None, metrics.clone()).unwrap();
+        let native = path(3, 1, "native-relay", PathState::Active);
+        state.replace_single_udp_path(native.clone()).unwrap();
+        let mut dns = path(4, 1, "dns-relay", PathState::Reachable);
+        dns.smoothed_rtt_micros = 0;
+        state.replace_dns_path(dns.clone()).unwrap();
+        assert_eq!(state.status().active_contexts, 2);
+        assert_eq!(metrics.snapshot().active_route_contexts, 2);
+        assert_eq!(state.status().mpquic_paths, 0);
+        assert_eq!(state.status().mptcp_subflows, 0);
+        assert_eq!(state.path_list().paths, [native.clone(), dns.clone()]);
+
+        let mut collision = dns.clone();
+        collision.route_context_id = native.route_context_id.clone();
+        assert!(state.replace_dns_path(collision).is_err());
+        assert!(state.replace_single_udp_path(dns.clone()).is_err());
+        assert!(state.replace_mptcp_paths(selected_mptcp_paths(4)).is_err());
+        assert!(
+            state
+                .replace_mpquic_paths(vec![
+                    path(4, 1, "a", PathState::Active),
+                    path(4, 2, "b", PathState::Active)
+                ])
+                .is_err()
+        );
+
+        let mut unobserved = dns.clone();
+        unobserved.state = PathState::Active as i32;
+        assert!(state.replace_dns_path(unobserved.clone()).is_err());
+        unobserved.user_bytes = 72;
+        unobserved.smoothed_rtt_micros = 100;
+        assert!(state.replace_dns_path(unobserved).is_err());
+        dns.state = PathState::Active as i32;
+        dns.user_bytes = 72;
+        state.replace_dns_path(dns.clone()).unwrap();
+        assert_eq!(state.path_list().paths, [native.clone(), dns]);
+
+        let mut next = path(5, 1, "new-dns-relay", PathState::Reachable);
+        next.smoothed_rtt_micros = 0;
+        state.replace_dns_path(next.clone()).unwrap();
+        state.clear_committed_path_context(&[4; ROUTE_CONTEXT_ID_BYTES]);
+        assert_eq!(state.path_list().paths, [native.clone(), next]);
+        state.clear_committed_path_context(&[5; ROUTE_CONTEXT_ID_BYTES]);
+        assert_eq!(state.path_list().paths, [native]);
+        assert!(state.status().connected);
+        assert_eq!(metrics.snapshot().active_route_contexts, 1);
+        state.clear_committed_path_context(&[3; ROUTE_CONTEXT_ID_BYTES]);
+        assert!(!state.has_network_state());
+        assert_eq!(metrics.snapshot().active_route_contexts, 0);
     }
 
     fn selected_mptcp_paths(context: u8) -> Vec<PathSummary> {

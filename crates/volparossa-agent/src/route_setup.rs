@@ -154,6 +154,7 @@ pub(crate) struct ClientRouteControl {
     state: Arc<Mutex<ClientRouteControlState>>,
     tcp_connect: Arc<Mutex<()>>,
     single_udp_connect: Arc<Mutex<()>>,
+    dns_transaction: Arc<Mutex<()>>,
     mpquic_socket: Arc<PathBuf>,
     agent_state: Option<Arc<tokio::sync::RwLock<AgentState>>>,
 }
@@ -236,7 +237,7 @@ enum ClientTransportState {
 }
 
 enum ClientPathProjection {
-    None,
+    Dns(PathSummary),
     Mptcp(Vec<PathSummary>),
     Mpquic(Vec<PathSummary>),
     SingleUdp(PathSummary),
@@ -360,10 +361,27 @@ impl EstablishedClientRoute {
                 .path_summary()
                 .await
                 .map(ClientPathProjection::SingleUdp),
-            ClientTransportState::UdpReady(_) | ClientTransportState::UdpActive(_) => {
-                Ok(ClientPathProjection::None)
+            ClientTransportState::UdpReady(ready) => ready
+                .prepared
+                .route
+                .committed_single_udp_identity(&ready.prepared.path)
+                .map(|identity| ClientPathProjection::Dns(identity.dns_projection(0))),
+            ClientTransportState::UdpActive(active) => {
+                Ok(ClientPathProjection::Dns(active.observation.project()))
             }
         }
+    }
+
+    fn owned_context_id(&self) -> Option<[u8; ID_BYTES]> {
+        let embedded_route = match &self.transport {
+            ClientTransportState::UdpReady(ready) => Some(&ready.prepared.route),
+            ClientTransportState::UdpActive(active) => Some(&active.route),
+            _ => None,
+        };
+        self.route
+            .as_ref()
+            .or(embedded_route)
+            .map(|route| route.established.request.parameters.route_context_id)
     }
 
     async fn shutdown(self, agent_state: Option<&Arc<tokio::sync::RwLock<AgentState>>>) {
@@ -384,10 +402,7 @@ impl EstablishedClientRoute {
     ) -> Result<(), ClientRouteDisconnectError> {
         // Capture the retired context before consuming its affine owner. A newer context's
         // display must survive any delayed completion of this teardown.
-        let retired_context_id = self
-            .route
-            .as_ref()
-            .map(|route| route.established.request.parameters.route_context_id);
+        let retired_context_id = self.owned_context_id();
         if let Some(flow) = self.tcp_flow {
             flow.shutdown();
         }
@@ -467,6 +482,24 @@ impl ActiveProductionNativeUdpRoute {
 }
 
 impl CommittedSingleUdpRouteIdentity {
+    fn dns_projection(&self, received_bytes: u64) -> PathSummary {
+        PathSummary {
+            route_context_id: self.route_context_id.to_vec(),
+            path_id: self.native_path,
+            relay_peer_id: self.relay_peer_id.clone(),
+            exit_peer_id: self.exit_peer_id.clone(),
+            state: if received_bytes == 0 {
+                PathState::Reachable
+            } else {
+                PathState::Active
+            } as i32,
+            // No RTT sample is exposed by this protected DNS association. Only authenticated
+            // payload actually received is counted; send-queue acceptance is not delivery.
+            smoothed_rtt_micros: 0,
+            user_bytes: received_bytes,
+        }
+    }
+
     fn project(
         &self,
         statuses: &[NativePathStatus],
@@ -1030,6 +1063,7 @@ impl ClientRouteControl {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
             tcp_connect: Arc::new(Mutex::new(())),
             single_udp_connect: Arc::new(Mutex::new(())),
+            dns_transaction: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: None,
         }
@@ -1043,9 +1077,16 @@ impl ClientRouteControl {
             state: Arc::new(Mutex::new(ClientRouteControlState::Idle)),
             tcp_connect: Arc::new(Mutex::new(())),
             single_udp_connect: Arc::new(Mutex::new(())),
+            dns_transaction: Arc::new(Mutex::new(())),
             mpquic_socket: Arc::new(mpquic_socket),
             agent_state: Some(agent_state),
         }
+    }
+
+    /// Serialize a complete DNS operation across UDP/TCP ingress and explicit preparation.
+    /// The separate main controller and the inner connection-attempt mutex remain independent.
+    pub(crate) async fn lock_dns_transaction(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.dns_transaction).lock_owned().await
     }
 
     /// Retire an established route as soon as either projection of its signed hard deadline has
@@ -1391,7 +1432,7 @@ impl ClientRouteControl {
         };
         let mut state = state.write().await;
         match projection {
-            ClientPathProjection::None => Ok(()),
+            ClientPathProjection::Dns(path) => state.replace_dns_path(path),
             ClientPathProjection::Mptcp(paths) => state.replace_mptcp_paths(paths),
             ClientPathProjection::Mpquic(paths) => state.replace_mpquic_paths(paths),
             ClientPathProjection::SingleUdp(path) => state.replace_single_udp_path(path),
@@ -1951,14 +1992,15 @@ impl ClientRouteControl {
             }));
             return Err(ClientRouteConnectError::Busy);
         };
+        let context_id = *ready.prepared.path.route_context_id();
         if route.is_some() {
-            let _ = Box::pin(ready.disconnect()).await;
-            if let Some(route) = route {
-                let _ = route.disconnect().await;
-            }
-            orchestrator.shutdown_detached();
-            let mut state = self.state.lock().await;
-            *state = ClientRouteControlState::Idle;
+            self.retire_failed_dns(context_id, orchestrator, async move {
+                let _ = Box::pin(ready.disconnect()).await;
+                if let Some(route) = route {
+                    let _ = route.disconnect().await;
+                }
+            })
+            .await;
             return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
         }
         let Ok(authorized) = ready.bind_dns_ingress(ingress, policy, now_ms) else {
@@ -1984,31 +2026,60 @@ impl ClientRouteControl {
                     remote: authorized.destination(),
                 });
                 if active.client.send_payload(authorized.payload()).is_err() {
-                    let _ = active.shutdown().await;
-                    orchestrator.shutdown_detached();
-                    let mut state = self.state.lock().await;
-                    *state = ClientRouteControlState::Idle;
+                    Box::pin(
+                        self.retire_failed_dns(context_id, orchestrator, async move {
+                            let _ = active.shutdown().await;
+                        }),
+                    )
+                    .await;
                     return Err(ClientRouteConnectError::TransportRuntimeUnavailable);
                 }
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Established(Box::new(EstablishedClientRoute {
+                self.publish_established_route(EstablishedClientRoute {
                     expiry,
                     transport: ClientTransportState::UdpActive(active),
                     tcp_flow,
                     route: None,
                     orchestrator,
                     helper,
-                }));
-                Ok(ClientRouteProgress::TransportActive)
+                })
+                .await
             }
             Err(failure) => {
-                let _ = failure.route.disconnect().await;
-                orchestrator.shutdown_detached();
-                let mut state = self.state.lock().await;
-                *state = ClientRouteControlState::Idle;
+                self.retire_failed_dns(context_id, orchestrator, async move {
+                    let _ = failure.route.disconnect().await;
+                })
+                .await;
                 Err(ClientRouteConnectError::TransportRuntimeUnavailable)
             }
         }
+    }
+
+    /// Keep the exact failure owner until Destroy finishes, including failures after the
+    /// prepared DNS route has consumed its socket. A failed or still-pending teardown cannot
+    /// clear the displayed context or turn into an apparently reusable Idle controller.
+    async fn retire_failed_dns<F>(
+        &self,
+        context_id: [u8; ID_BYTES],
+        orchestrator: ProductionRouteOrchestrator,
+        stop: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let agent_state = self.agent_state.clone();
+        let task = tokio::spawn(async move {
+            stop.await;
+            orchestrator
+                .shutdown()
+                .await
+                .map_err(|_| ClientRouteDisconnectError::CleanupPending)?;
+            if let Some(state) = agent_state {
+                state.write().await.clear_dns_path(&context_id);
+            }
+            Ok(())
+        });
+        *self.state.lock().await =
+            ClientRouteControlState::CleanupPending(ClientRouteRetirement::new(task));
+        let _ = self.disconnect_confirmed().await;
     }
 
     /// Poll one native general-UDP response without waiting for a remote datagram to arrive.
@@ -2126,7 +2197,7 @@ impl ClientRouteControl {
                 .await?;
             return Ok(response);
         }
-        let ClientTransportState::UdpActive(active) = &established.transport else {
+        let ClientTransportState::UdpActive(active) = &mut established.transport else {
             return Err(ClientRouteConnectError::Busy);
         };
         let binding = active
@@ -2136,6 +2207,9 @@ impl ClientRouteControl {
             .await
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?
             .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        active.observation.record_received(payload.len())?;
+        self.replace_agent_path_projection(ClientPathProjection::Dns(active.observation.project()))
+            .await?;
         Ok(ClientUdpResponse {
             application: binding.application,
             remote: binding.remote,
@@ -5336,7 +5410,30 @@ pub(crate) struct ActiveProductionUdpRoute {
     // Field order is intentional for the same socket-before-namespace Drop barrier.
     client: SingleRelayUdpClient,
     route: ProductionRoute,
+    observation: DnsPathObservation,
     return_path: Option<ClientUdpReturnPath>,
+}
+
+struct DnsPathObservation {
+    identity: CommittedSingleUdpRouteIdentity,
+    received_bytes: u64,
+}
+
+impl DnsPathObservation {
+    fn record_received(&mut self, bytes: usize) -> Result<(), ClientRouteConnectError> {
+        self.received_bytes = self
+            .received_bytes
+            .checked_add(
+                u64::try_from(bytes)
+                    .map_err(|_| ClientRouteConnectError::TransportRuntimeUnavailable)?,
+            )
+            .ok_or(ClientRouteConnectError::TransportRuntimeUnavailable)?;
+        Ok(())
+    }
+
+    fn project(&self) -> PathSummary {
+        self.identity.dns_projection(self.received_bytes)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5871,6 +5968,12 @@ impl CertificateBoundProductionUdpRoute {
             path,
             transport,
         } = prepared;
+        let Ok(identity) = route.committed_single_udp_identity(&path) else {
+            return Err(ProductionUdpActivationFailure {
+                route,
+                cause: ProductionUdpRouteError::InvalidRoute,
+            });
+        };
         match SingleRelayUdpClient::connect(
             transport,
             target,
@@ -5887,6 +5990,10 @@ impl CertificateBoundProductionUdpRoute {
             Ok(client) => Ok(ActiveProductionUdpRoute {
                 client,
                 route,
+                observation: DnsPathObservation {
+                    identity,
+                    received_bytes: 0,
+                },
                 return_path: None,
             }),
             Err(_error) => Err(ProductionUdpActivationFailure {
@@ -5906,6 +6013,7 @@ impl ActiveProductionUdpRoute {
         let Self {
             route,
             client,
+            observation: _,
             return_path: _,
         } = self;
         client.shutdown().await;
@@ -8098,6 +8206,30 @@ mod tests {
     const TEST_EXIT_NATIVE_INSTANCE_ID: [u8; 32] = [43; 32];
 
     #[tokio::test]
+    async fn protected_dns_transaction_serializes_only_its_own_controller() {
+        let main = ClientRouteControl::new(PathBuf::from("/unused-main-control.sock"));
+        let dns = ClientRouteControl::new(PathBuf::from("/unused-dns-control.sock"));
+        let tcp_dns = dns.clone();
+        let transaction = dns.lock_dns_transaction().await;
+        assert!(
+            timeout(Duration::from_millis(10), tcp_dns.lock_dns_transaction())
+                .await
+                .is_err()
+        );
+        let main_transaction = timeout(TEST_TIMEOUT, main.lock_dns_transaction())
+            .await
+            .unwrap();
+        drop(main_transaction);
+        drop(transaction);
+        let next = timeout(TEST_TIMEOUT, tcp_dns.lock_dns_transaction())
+            .await
+            .unwrap();
+        drop(next);
+        assert!(!Arc::ptr_eq(&main.state, &dns.state));
+        assert!(Arc::ptr_eq(&dns.state, &tcp_dns.state));
+    }
+
+    #[tokio::test]
     async fn general_udp_pipeline_empty_route_drain_does_not_wait_or_retain_lock() {
         let routes = ClientRouteControl::new(PathBuf::from("/unused-native-udp-test.sock"));
         let response = timeout(
@@ -8336,6 +8468,40 @@ mod tests {
         for invalid in [&[1][..], &[1, 1], &[1, 4], &[0, 1]] {
             assert!(identity.selected_mptcp_paths(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn protected_dns_projection_keeps_exact_identity_and_only_received_payload_bytes() {
+        let identity = CommittedSingleUdpRouteIdentity {
+            route_context_id: [7; ID_BYTES],
+            native_path: 3,
+            relay_peer_id: "actual-selected-relay".into(),
+            exit_peer_id: "actual-selected-exit".into(),
+        };
+        let ready = identity.dns_projection(0);
+        assert_eq!(ready.route_context_id, [7; ID_BYTES]);
+        assert_eq!(ready.path_id, 3);
+        assert_eq!(ready.relay_peer_id, "actual-selected-relay");
+        assert_eq!(ready.exit_peer_id, "actual-selected-exit");
+        assert_eq!(ready.state, PathState::Reachable as i32);
+        assert_eq!((ready.smoothed_rtt_micros, ready.user_bytes), (0, 0));
+
+        let mut observation = DnsPathObservation {
+            identity,
+            received_bytes: 0,
+        };
+        assert_eq!(observation.project(), ready);
+        observation.record_received(72).unwrap();
+        observation.record_received(60).unwrap();
+        let active = observation.project();
+        assert_eq!(active.user_bytes, 132);
+        assert_eq!(active.smoothed_rtt_micros, 0);
+        assert_eq!(active.state, PathState::Active as i32);
+        assert_eq!(active.route_context_id, ready.route_context_id);
+        assert_eq!(active.path_id, ready.path_id);
+        observation.received_bytes = u64::MAX;
+        assert!(observation.record_received(1).is_err());
+        assert_eq!(observation.received_bytes, u64::MAX);
     }
 
     #[test]

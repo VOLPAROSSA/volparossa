@@ -261,6 +261,19 @@ a Permit, valid configuration, signed advertisement or role state alone as a usa
 
 ## Shared positive DNS cache
 
+UDP and TCP DNS ingress share a dedicated, bounded protected association, separate from the
+main data/content route. Normal DNS ingress prepares it on demand. To inspect readiness explicitly:
+
+```sh
+volparossa connect --transport protected-dns
+volparossa paths
+```
+
+This selects a real Client--Relay--Exit route; `Reachable` with zero bytes/RTT is readiness,
+not a successful DNS response. Each DNS association is retired after its response. A subsequent
+query may select a new route. `disconnect`, shutdown and policy/client disablement retire both
+client-route owners; retiring one DNS context does not remove the main route's path projection.
+
 The agent can reuse independently validated positive DNSSEC A/AAAA answers at the Exit. It keeps
 proofs only in bounded RAM; disabling/restarting it does not leave a DNS-history database. Existing
 destination policy, protected DNS ingress and exact destination pinning still apply.

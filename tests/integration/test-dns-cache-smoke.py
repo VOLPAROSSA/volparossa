@@ -34,7 +34,8 @@ def fixture():
         mode = "upstream_validated" if phase.startswith("warm-") else "peer_validated" if phase.startswith("peer-") \
             else "trusted_fallback" if phase == "unsigned-b" else "local_validated"
         route = dict(exit_node=node, exit_peer_id=peers[node], relay_node=relay, relay_peer_id=peers[relay],
-                     route_context_id=f"{index:032x}", path_id=1, state=2, transport="single-path-udp")
+                     route_context_id=f"{index:032x}", path_id=1, state=1, transport="protected-dns",
+                     rtt_us=0, reported_bytes=0)
         layout = dict(phase=phase, exit_node=node, relays={relay: CHECK.PUBLIC[relay]})
         before = {name: dict.fromkeys(CHECK.METRICS, 0) for name in ("exit", "exit2")}
         after = copy.deepcopy(before)
@@ -75,18 +76,24 @@ class DnsNetworkEvidenceTests(unittest.TestCase):
     def test_seven_phase_contract_and_exact_exit_selection(self):
         CHECK.validate_evidence(fixture())
         peers = fixture()["expected_peers"]
-        row = f"context={'a' * 32} path=1 relay=peer-relay0 exit=peer-exit2 state=2 rtt_us=42 bytes=0\n"
+        row = f"context={'a' * 32} path=1 relay=peer-relay0 exit=peer-exit2 state=1 rtt_us=0 bytes=0\n"
         self.assertEqual(CHECK.selection(row, peers, "exit2")[0], 0)
         self.assertEqual(CHECK.selection(row, peers, "exit")[0], 2)
         self.assertEqual(CHECK.selection("", peers, "exit")[0], 1)
         with self.assertRaises(ValueError):
             CHECK.selection(row.replace("peer-relay0", "peer-relay1"), peers, "exit2")
+        for invented in (row.replace("state=1", "state=3"), row.replace("rtt_us=0", "rtt_us=42"),
+                         row.replace("bytes=0", "bytes=1")):
+            with self.assertRaises(ValueError):
+                CHECK.selection(invented, peers, "exit2")
 
     def test_rejects_fake_trust_wrong_source_expired_recording_and_peer_recursion(self):
         def upstream_on_peer(value):
             value["phases"]["peer-b-a"]["metrics_after"]["exit2"]["volparossa_dns_peer_validated_total"] = 0
             value["phases"]["peer-b-a"]["metrics_after"]["exit2"]["volparossa_dns_upstream_validated_total"] = 1
         mutations = (
+            lambda v: v["phases"]["warm-a-a"]["selection"].update(transport="single-path-udp"),
+            lambda v: v["phases"]["warm-a-a"]["selection"].update(reported_bytes=42),
             lambda v: v["preflight"]["core"][0].update(builtin_anchors=False),
             lambda v: v["preflight"]["core"][0].update(source="TrustedFallback"),
             lambda v: v["preflight"]["core"][0].update(expires_at_ms=1),

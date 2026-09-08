@@ -281,6 +281,7 @@ impl Agent {
             shutdown_rx.clone(),
         ));
         let routes = production_client_routes(&self.paths, &self.state);
+        let dns_routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
             content: self.content.clone(),
             state: Arc::clone(&self.state),
@@ -288,6 +289,7 @@ impl Agent {
             discovery: self.discovery_control.clone(),
             helper: self.helper.clone(),
             routes: routes.clone(),
+            dns_routes: dns_routes.clone(),
         };
         let mut control_task = tokio::spawn(serve_control(
             listener,
@@ -308,6 +310,7 @@ impl Agent {
             maintenance_trust,
             maintenance_discovery,
             maintenance_routes,
+            dns_routes.clone(),
             shutdown_rx,
         ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
@@ -329,7 +332,7 @@ impl Agent {
             self.helper.clone(),
             routes.clone(),
             routes.clone(),
-            routes.clone(),
+            dns_routes.clone(),
             &shutdown_tx,
         );
         tokio::pin!(shutdown);
@@ -367,7 +370,7 @@ impl Agent {
         stop_task(&mut mesh_task).await;
         let _ = self.content.stop(&self.discovery_control).await;
         let route_cleanup = stop_discovery_after_retirement(
-            routes.disconnect_confirmed(),
+            control::disconnect_client_routes(&routes, &dns_routes),
             &discovery_shutdown_tx,
             &mut discovery_task,
         )
@@ -1094,6 +1097,19 @@ async fn run_client_dns_ingress(
                 continue;
             }
         };
+        // UDP and TCP DNS use the same dedicated owner. Serialize the whole query, not only
+        // route preparation, so a losing activation cannot destroy another actor's association.
+        let _transaction = tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            acquired = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, routes.lock_dns_transaction()) => {
+                let Ok(transaction) = acquired else {
+                    state.write().await.log(LogLevel::Warn, "INGRESS_DNS_BUSY", unix_millis());
+                    continue;
+                };
+                transaction
+            },
+        };
         if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
             .await
             .is_err()
@@ -1105,7 +1121,7 @@ async fn run_client_dns_ingress(
             );
             continue;
         }
-        if Box::pin(routes.activate_dns_ingress(ingress, &policy, now_ms))
+        if Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
             .await
             .is_err()
         {
@@ -1284,10 +1300,21 @@ async fn run_client_dns_tcp_ingress(
                     break;
                 }
             };
+            let _transaction = tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => return,
+                acquired = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, routes.lock_dns_transaction()) => {
+                    let Ok(transaction) = acquired else {
+                        state.write().await.log(LogLevel::Warn, "INGRESS_DNS_TCP_BUSY", unix_millis());
+                        break;
+                    };
+                    transaction
+                },
+            };
             if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
                 .await
                 .is_err()
-                || Box::pin(routes.activate_dns_ingress(ingress, &policy, now_ms))
+                || Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
                     .await
                     .is_err()
             {
@@ -1421,6 +1448,7 @@ async fn run_maintenance(
     trust_path: std::path::PathBuf,
     discovery: DiscoveryControlHandle,
     routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
@@ -1434,7 +1462,8 @@ async fn run_maintenance(
             }
             _ = interval.tick() => {
                 let now_ms = unix_millis();
-                let was_active = state.read().await.policy_active(now_ms);
+                let previous_policy = state.read().await.policy_snapshot(now_ms);
+                let was_active = previous_policy.active;
                 let (policy, policy_load_failed) = match load_active_policy(
                     &config,
                     &trust_path,
@@ -1470,6 +1499,20 @@ async fn run_maintenance(
                     );
                 }
                 drop(locked);
+                let (current_policy, client_enabled) = {
+                    let state = state.read().await;
+                    (state.policy_snapshot(now_ms), state.roles().client)
+                };
+                if client_policy_revoked(&previous_policy, &current_policy, client_enabled) {
+                    if control::disconnect_client_routes(&routes, &dns_routes).await.is_err() {
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "CLIENT_CLEANUP_PENDING",
+                            now_ms,
+                        );
+                    }
+                    continue;
+                }
                 match routes.maintain_path_health(now_ms).await {
                     Ok(ClientPathMaintenance::Unchanged) => {}
                     Ok(ClientPathMaintenance::Reconfigured) => {
@@ -1488,9 +1531,29 @@ async fn run_maintenance(
                         );
                     }
                 }
+                if dns_routes.maintain_path_health(now_ms).await.is_err() {
+                    dns_routes.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "DNS_PATH_FAIL_CLOSED",
+                        now_ms,
+                    );
+                }
             }
         }
     }
+}
+
+fn client_policy_revoked(
+    previous: &volparossa_local_control::PolicySnapshot,
+    current: &volparossa_local_control::PolicySnapshot,
+    client_enabled: bool,
+) -> bool {
+    !client_enabled
+        || !current.active
+        || previous.policy_hash != current.policy_hash
+        || previous.manifest_version != current.manifest_version
+        || previous.expires_at_ms != current.expires_at_ms
 }
 
 fn validate_integrity_file(path: &Path, maximum: u64) -> Result<(), AgentError> {
@@ -1694,6 +1757,80 @@ mod tests {
             assert_eq!(result.is_ok(), confirmed);
             assert!(*shutdown.borrow());
             assert!(discovery.is_finished());
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_dns_shutdown_waits_for_both_client_retirements() {
+        let (shutdown, mut stopped) = watch::channel(false);
+        let (request, mut requests) = tokio::sync::mpsc::channel(2);
+        let mut discovery = tokio::spawn(async move {
+            for _ in 0..2 {
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => panic!("discovery stopped before both owners retired"),
+                    Some(reply) = requests.recv() => {
+                        let reply: tokio::sync::oneshot::Sender<()> = reply;
+                        let _ = reply.send(());
+                    }
+                }
+            }
+            wait_for_shutdown(&mut stopped).await;
+        });
+        let retire = |sender: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>| async move {
+            let (reply, acknowledged) = tokio::sync::oneshot::channel();
+            sender
+                .send(reply)
+                .await
+                .expect("discovery remains available");
+            acknowledged
+                .await
+                .expect("exact owner retirement acknowledged");
+            Ok::<(), ()>(())
+        };
+        let both = async move {
+            let (main, dns) = tokio::join!(retire(request.clone()), retire(request));
+            main.and(dns)
+        };
+        assert!(
+            stop_discovery_after_retirement(both, &shutdown, &mut discovery)
+                .await
+                .is_ok()
+        );
+        assert!(*shutdown.borrow());
+        assert!(discovery.is_finished());
+    }
+
+    #[test]
+    fn protected_dns_and_main_retire_only_for_real_policy_or_role_revocation() {
+        let original = volparossa_local_control::PolicySnapshot {
+            manifest_version: 9,
+            policy_hash: vec![1; 32],
+            expires_at_ms: 9000,
+            verified_signatures: 2,
+            active: true,
+        };
+        assert!(!client_policy_revoked(&original, &original, true));
+        assert!(client_policy_revoked(&original, &original, false));
+        for changed in [
+            volparossa_local_control::PolicySnapshot {
+                active: false,
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                policy_hash: vec![2; 32],
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                manifest_version: 10,
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                expires_at_ms: 9001,
+                ..original.clone()
+            },
+        ] {
+            assert!(client_policy_revoked(&original, &changed, true));
         }
     }
 

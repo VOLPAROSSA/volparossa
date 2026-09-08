@@ -87,9 +87,9 @@ enum CliCommand {
     Stop,
     /// Show agent status.
     Status,
-    /// Establish a policy-approved route context for one explicit transport.
+    /// Establish a policy-approved transport route or prepare the separate protected DNS route.
     Connect {
-        /// Product transport to establish.
+        /// Product transport or protected DNS purpose; DNS preserves the active main route.
         #[arg(long, value_enum, default_value = "single-path-udp")]
         transport: ConnectTransport,
     },
@@ -183,6 +183,8 @@ enum ConnectTransport {
     Mptcp,
     SinglePathUdp,
     MultipathQuic,
+    /// Prepare the existing one-relay protected DNS association independently of the main route.
+    ProtectedDns,
 }
 
 impl ConnectTransport {
@@ -191,6 +193,7 @@ impl ConnectTransport {
             Self::Mptcp => SessionTransport::Mptcp,
             Self::SinglePathUdp => SessionTransport::SinglePathUdp,
             Self::MultipathQuic => SessionTransport::MultipathQuic,
+            Self::ProtectedDns => SessionTransport::ProtectedDns,
         };
         ConnectRequest {
             transport: Some(transport as i32),
@@ -745,6 +748,43 @@ mod tests {
         // The pure fallback is stable; environment mutation is intentionally avoided in tests.
         assert!(default_identity_path().ends_with("identity.key"));
     }
+
+    #[test]
+    fn protected_dns_connect_preserves_the_normal_typed_control_request() {
+        use rand_core::RngCore as _;
+        use volparossa_local_control::{
+            CONTROL_PROTOCOL_VERSION, ControlRequest, decode_request, encode_request,
+        };
+
+        let cli = Cli::try_parse_from(["volparossa", "connect", "--transport", "protected-dns"])
+            .expect("explicit protected DNS purpose");
+        let CliCommand::Connect { transport } = cli.command else {
+            panic!("normal connect command expected");
+        };
+        assert_eq!(transport.request().transport, Some(4));
+        let mut request_id = vec![0; 16];
+        rand_core::OsRng.fill_bytes(&mut request_id);
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id,
+            operation: Some(Operation::Connect(transport.request())),
+        };
+        let bytes = encode_request(&request).expect("bounded normal Connect framing");
+        assert_eq!(decode_request(&bytes).unwrap(), request);
+
+        let default = Cli::try_parse_from(["volparossa", "connect"]).unwrap();
+        let CliCommand::Connect { transport } = default.command else {
+            panic!("normal connect command expected");
+        };
+        assert_eq!(
+            transport.request().transport,
+            Some(SessionTransport::SinglePathUdp as i32)
+        );
+        assert!(
+            Cli::try_parse_from(["volparossa", "connect", "--transport", "direct-dns"]).is_err()
+        );
+    }
+
     #[test]
     fn every_cli_command_form_parses() {
         let commands: &[&[&str]] = &[
@@ -757,6 +797,7 @@ mod tests {
             &["volparossa", "status"],
             &["volparossa", "connect"],
             &["volparossa", "connect", "--transport", "multipath-quic"],
+            &["volparossa", "connect", "--transport", "protected-dns"],
             &["volparossa", "disconnect"],
             &["volparossa", "peers"],
             &["volparossa", "paths"],

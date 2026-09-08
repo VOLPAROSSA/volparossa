@@ -82,6 +82,21 @@ protected A request (`DNS_CACHE_PROTECTED_APPLICATION_FAILED`); no positive peer
 claimed. Cleanup is complete with zero owned objects and unchanged raw guest state, SHA-256
 `2b6f3c3bc3611255cfa16bfcb1d792b1a8c039e72f1a788fbf0515f7c92909fe`.
 Artifact SHA-256: `2e568572744980b81a006bd54bbd3a942dd9c5ed6c9c6ccf8c9c0af0d35643f9`.
+Source tracing identifies the first-request failure: ordinary UDP and protected DNS shared one
+route controller. The fixture's native `single-path-udp` prewarm occupied it with `NativeUdp`,
+while DNS requires `UdpReady` and waited until its request timed out. The agent now gives UDP/TCP
+DNS their own bounded controller; main data/content ownership stays separate. The normal typed
+`connect --transport protected-dns` prepares the actual DNS association, with an exact context/
+Relay/Exit projection and honest zero-byte `Reachable` state. Retirement clears that exact context,
+including its embedded owner; maintenance, policy/client disablement, Disconnect and shutdown
+include both controllers. UDP/TCP DNS and explicit DNS preparation share a bounded transaction
+gate, preventing a competing query from retiring another query's active association while leaving
+the main route independent. Seven focused DNS/controller/wire/CLI tests, six control tests and
+the CLI command-form test pass, along with strict all-target/all-feature agent/local-control/CLI
+Clippy. Four DNS network-checker tests, five original-wire fixture tests and shell checks also pass.
+The C05 harness selects this actual DNS route separately for every
+request and keeps all answer, source, original-root/TTL, capture and cleanup gates. Its new live
+result is pending, and simultaneous main-data/DNS packet delivery is not claimed from unit tests.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -110,11 +125,21 @@ tests pass, together with strict content Clippy. Two agent observation/reopen te
 typed-wire test also pass, as does strict agent/local-control/CLI Clippy. Two real CLI-process/
 Unixstream tests in capability-dropped namespaces and two parser checks pass: independent
 key/name/minimum-revision/expiry, exact streaming, correlated completion and private no-clobber
-output. Ten network-checker tests and targeted shell checks pass; they are not a live name-fetch pass.
+output. Ten network-checker tests and targeted shell checks pass.
 The additive network phase reopens both original 5+4 providers with name lookup, removes the
 Client's old manifest copy, and requires fresh-cache retrieval into a separate user's `0600`
-output plus the same full boundary captures and cleanup. Its live result is pending; this is
-not yet complete C06, generic website hosting, a mailbox or guaranteed offline availability.
+output plus the same full boundary captures and cleanup. The
+[exact `d2f886c8` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414) now passes:
+two independent providers supply all 2,097,275 bytes / nine chunks without a Client-side manifest,
+reconstructing SHA-256 `add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+The separate user owns the `0600` output; the agent retains its `0700` cache and cannot read that
+output. Exact no-clobber, both selected real WireGuard relay paths, provider/control captures and
+the original native/HTTPS/ordinary-publication phases all pass. Cleanup leaves zero owned objects;
+raw guest state is unchanged, SHA-256
+`b6e480267d396e25110cd1609729a5312c1bf9371b7f5e57445e340cd3fb92ce`.
+Artifact SHA-256: `44488197a0f8e5fe8c6f754f0a97182503f02e4713d4c67bf2316831ee97cac2`.
+The exact-source checker and reconstruction from raw records pass locally. This is not yet
+complete C06, generic website hosting, a mailbox or guaranteed offline availability.
 
 The normal HTTPS command now also supports `--local-output`: the agent keeps its fresh origin
 authorization alive while streaming verified chunks over the same authorized Unix connection,
@@ -262,6 +287,16 @@ the user mapping, the fixed trampoline creates only disposable network/PID names
 real collector runs as the original UID/GID 1001 with all capabilities cleared. This does not
 retroactively pass the old handoff failures or a complete Quality run; `0fa80d65` Quality was
 cancelled after the newer private-message harness was pushed.
+
+The newer [exact `d2f886c8` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186330314)
+fails in `ownership_journal::actor::tests::queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission`:
+initial `register_intent` returns `Ambiguous`, before the queue/gate assertions. The helper result
+is 831 passed, one failed, two ignored; the short fixture setup deadline is under investigation,
+not a proven cause. The DNS actor actually runs and passes through the explicitly opted-in
+disposable-namespace fallback, so this is not the old UID-mapping blocker. All three
+[CodeQL analysis jobs](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186328279) pass,
+but the [separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101935381514) still
+fails with 126 critical results. No alert is dismissed and no passing full-Quality claim is made.
 
 ### Preceding replica diagnostics and retirement integration
 

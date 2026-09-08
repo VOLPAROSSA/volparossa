@@ -52,6 +52,8 @@ pub struct ControlContext {
     pub helper: HelperClient,
     /// Affine owner of the current client route bootstrap, if any.
     pub routes: ClientRouteControl,
+    /// Separate affine owner shared by protected UDP and TCP DNS ingress.
+    pub dns_routes: ClientRouteControl,
     /// Explicit unprivileged content publication/retrieval lifecycle.
     pub(crate) content: crate::content::ContentRuntime,
 }
@@ -288,6 +290,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             Box::pin(disconnect_response(
                 request_id,
                 &context.routes,
+                &context.dns_routes,
                 &context.state,
             ))
             .await
@@ -428,17 +431,38 @@ async fn connect_response(
             control_response::Payload::Ack(Empty {}),
         );
     };
-    let (result, diagnostic, log_code, log_level) = match Box::pin(context.routes.connect(
-        &profile,
-        &context.discovery,
-        &context.helper,
-    ))
-    .await
-    {
+    let protected_dns = request.transport == Some(SessionTransport::ProtectedDns as i32);
+    let progress = if protected_dns {
+        match timeout(CONTROL_TIMEOUT, context.dns_routes.lock_dns_transaction()).await {
+            Ok(_transaction) => {
+                Box::pin(context.dns_routes.ensure_single_udp(
+                    &profile,
+                    &context.discovery,
+                    &context.helper,
+                ))
+                .await
+            }
+            Err(_) => Err(ClientRouteConnectError::Busy),
+        }
+    } else {
+        Box::pin(
+            context
+                .routes
+                .connect(&profile, &context.discovery, &context.helper),
+        )
+        .await
+    };
+    let (result, diagnostic, log_code, log_level) = match progress {
         Ok(ClientRouteProgress::TransportActive) => (
             ControlResult::Ok,
             "OK",
             "CONNECT_ROUTE_ESTABLISHED",
+            LogLevel::Info,
+        ),
+        Ok(ClientRouteProgress::UdpRouteReady) if protected_dns => (
+            ControlResult::Ok,
+            "DNS_ROUTE_READY",
+            "CONNECT_DNS_ROUTE_READY",
             LogLevel::Info,
         ),
         Ok(ClientRouteProgress::UdpRouteReady) => (
@@ -585,7 +609,7 @@ fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<
     let transport = SessionTransport::try_from(transport).ok()?;
     let enabled = match transport {
         SessionTransport::Mptcp => config.tcp.enabled,
-        SessionTransport::SinglePathUdp => config.udp.enabled,
+        SessionTransport::SinglePathUdp | SessionTransport::ProtectedDns => config.udp.enabled,
         SessionTransport::MultipathQuic => config.quic.enabled,
     };
     if !enabled {
@@ -593,7 +617,10 @@ fn requested_connect_profile(config: &Config, transport: Option<i32>) -> Option<
     }
     let mut profile = config.clone();
     profile.tcp.enabled = transport == SessionTransport::Mptcp;
-    profile.udp.enabled = transport == SessionTransport::SinglePathUdp;
+    profile.udp.enabled = matches!(
+        transport,
+        SessionTransport::SinglePathUdp | SessionTransport::ProtectedDns
+    );
     profile.quic.enabled = transport == SessionTransport::MultipathQuic;
     Some(profile)
 }
@@ -625,9 +652,10 @@ async fn paths_response(
 async fn disconnect_response(
     request_id: Vec<u8>,
     routes: &ClientRouteControl,
+    dns_routes: &ClientRouteControl,
     state: &Arc<RwLock<AgentState>>,
 ) -> ControlResponse {
-    if let Err(error) = Box::pin(routes.disconnect_confirmed()).await {
+    if let Err(error) = disconnect_client_routes(routes, dns_routes).await {
         let (result, diagnostic) = match error {
             ClientRouteDisconnectError::Busy => (ControlResult::Unavailable, "CLIENT_ROUTE_BUSY"),
             ClientRouteDisconnectError::CleanupPending => {
@@ -657,6 +685,25 @@ async fn disconnect_response(
         "OK",
         control_response::Payload::Ack(Empty {}),
     )
+}
+
+/// Attempt both exact client owners concurrently; one failure must not leave the other untouched.
+pub(crate) async fn disconnect_client_routes(
+    routes: &ClientRouteControl,
+    dns_routes: &ClientRouteControl,
+) -> Result<(), ClientRouteDisconnectError> {
+    let (main, dns) = tokio::join!(
+        routes.disconnect_confirmed(),
+        dns_routes.disconnect_confirmed()
+    );
+    match (main, dns) {
+        (Err(ClientRouteDisconnectError::CleanupPending), _)
+        | (_, Err(ClientRouteDisconnectError::CleanupPending)) => {
+            Err(ClientRouteDisconnectError::CleanupPending)
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 async fn set_role_response(
@@ -696,15 +743,7 @@ async fn set_role_response(
         );
     }
     match context.discovery.set_roles(current, candidate).await {
-        Ok(_) => {
-            let roles = context.state.read().await.role_snapshot();
-            response(
-                request_id,
-                ControlResult::Ok,
-                "OK",
-                control_response::Payload::Roles(roles),
-            )
-        }
+        Ok(_) => role_snapshot_after_cleanup(request_id, candidate.client, context).await,
         Err(DiscoveryControlError::Actor(RoleApplyError::Prerequisites)) => response(
             request_id,
             ControlResult::InvalidState,
@@ -763,6 +802,32 @@ async fn set_role_response(
             control_response::Payload::Ack(Empty {}),
         ),
     }
+}
+
+async fn role_snapshot_after_cleanup(
+    request_id: Vec<u8>,
+    client_enabled: bool,
+    context: &ControlContext,
+) -> ControlResponse {
+    if !client_enabled {
+        let cleanup = disconnect_response(
+            request_id.clone(),
+            &context.routes,
+            &context.dns_routes,
+            &context.state,
+        )
+        .await;
+        if cleanup.result != ControlResult::Ok as i32 {
+            return cleanup;
+        }
+    }
+    let roles = context.state.read().await.role_snapshot();
+    response(
+        request_id,
+        ControlResult::Ok,
+        "OK",
+        control_response::Payload::Roles(roles),
+    )
 }
 
 const fn changed_roles(current: RolesConfig, role: NodeRole, enabled: bool) -> RolesConfig {
@@ -900,10 +965,11 @@ mod tests {
             .expect("bounded state"),
         ));
         let routes = ClientRouteControl::default();
+        let dns_routes = ClientRouteControl::default();
         // No helper, discovery actor or native runtime is started or supplied to this operation.
         // Repeated idle Disconnect must not issue an all-role Cleanup on somebody else's behalf.
         for _ in 0..2 {
-            let result = disconnect_response(vec![1; 16], &routes, &state).await;
+            let result = disconnect_response(vec![1; 16], &routes, &dns_routes, &state).await;
             assert_eq!(result.result, ControlResult::Ok as i32);
             let state = state.read().await;
             assert_eq!(state.roles(), config.roles);
@@ -922,7 +988,7 @@ mod tests {
             .await
             .replace_single_udp_path(newer_path.clone())
             .expect("newer context projection");
-        let result = disconnect_response(vec![3; 16], &routes, &state).await;
+        let result = disconnect_response(vec![3; 16], &routes, &dns_routes, &state).await;
         assert_eq!(result.result, ControlResult::Ok as i32);
         assert_eq!(state.read().await.path_list().paths, vec![newer_path]);
     }
@@ -983,6 +1049,7 @@ mod tests {
             Some(SessionTransport::Mptcp as i32),
             Some(SessionTransport::SinglePathUdp as i32),
             Some(SessionTransport::MultipathQuic as i32),
+            Some(SessionTransport::ProtectedDns as i32),
         ] {
             assert!(requested_connect_profile(&config, transport).is_none());
         }
@@ -1003,6 +1070,7 @@ mod tests {
             (SessionTransport::Mptcp, (true, false, false)),
             (SessionTransport::SinglePathUdp, (false, true, false)),
             (SessionTransport::MultipathQuic, (false, false, true)),
+            (SessionTransport::ProtectedDns, (false, true, false)),
         ] {
             let profile = requested_connect_profile(&config, Some(transport as i32))
                 .expect("enabled transport profile");
@@ -1020,6 +1088,11 @@ mod tests {
         disabled.quic.enabled = false;
         assert!(
             requested_connect_profile(&disabled, Some(SessionTransport::MultipathQuic as i32))
+                .is_none()
+        );
+        disabled.udp.enabled = false;
+        assert!(
+            requested_connect_profile(&disabled, Some(SessionTransport::ProtectedDns as i32))
                 .is_none()
         );
     }

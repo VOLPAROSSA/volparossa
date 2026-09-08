@@ -162,8 +162,11 @@ stable-name discovery, retention repair or general website hosting. The new expl
 `fetch-name` slice adds publisher-local name retrieval over those same protected provider
 streams: original signed envelopes, highest observed revision, durable cache-bound conflict/
 rollback floors, and caller-owned output without a prior manifest file. Public serving must
-opt in; names stay out of DHT records and private-message metadata stays excluded. Focused
-source-specific evidence and the pending separate live name phase are recorded in
+opt in; names stay out of DHT records and private-message metadata stays excluded. The
+[separate live name phase on `d2f886c8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)
+passes retrieval of nine chunks / 2,097,275 bytes from two providers without the Client's
+manifest copy, into a separate user's private file. Both actual relay paths, account isolation
+and cleanup pass. Source-specific evidence is recorded in
 [implementation status](IMPLEMENTATION_STATUS.md); no globally newest-version, retention or
 general website-hosting claim is implied.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)

@@ -385,6 +385,8 @@ pub enum SessionTransport {
     SinglePathUdp = 1,
     /// MASQUE over genuine Multipath QUIC.
     MultipathQuic = 2,
+    /// Dedicated protected DNS association through one relay, separate from general UDP.
+    ProtectedDns = 4,
 }
 
 /// One ephemeral local session without destination metadata.
@@ -865,6 +867,24 @@ mod tests {
         };
         let encoded = encode_request(&connect).expect("typed connect request");
         assert_eq!(decode_request(&encoded).expect("decode connect"), connect);
+    }
+
+    #[test]
+    fn protected_dns_connect_is_additive_and_typed() {
+        assert_eq!(SessionTransport::ProtectedDns as i32, 4);
+        for transport in [None, Some(0), Some(1), Some(2), Some(4)] {
+            let mut request = status_request();
+            request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+                transport,
+            }));
+            let wire = encode_request(&request).expect("supported connect purpose");
+            assert_eq!(decode_request(&wire).expect("bounded request"), request);
+        }
+        let mut request = status_request();
+        request.operation = Some(control_request::Operation::Connect(ConnectRequest {
+            transport: Some(3),
+        }));
+        assert!(encode_request(&request).is_err());
     }
 
     #[test]

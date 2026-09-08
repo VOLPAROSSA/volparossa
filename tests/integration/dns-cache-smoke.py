@@ -122,7 +122,9 @@ def selection(text, peers, wanted):
     require(context != "0" * 32 and exit_peer in exits and relay in relays, "unknown selected endpoint")
     result = {"route_context_id": context, "path_id": int(path), "relay_peer_id": relay,
               "relay_node": relays[relay], "exit_peer_id": exit_peer, "exit_node": exits[exit_peer],
-              "transport": "single-path-udp", "state": int(state), "rtt_us": int(rtt), "reported_bytes": int(count)}
+              "transport": "protected-dns", "state": int(state), "rtt_us": int(rtt), "reported_bytes": int(count)}
+    require(result["state"] == 1 and result["rtt_us"] == result["reported_bytes"] == 0,
+            "DNS prewarm must report reachability without invented traffic or RTT")
     require(result["exit_node"] != "exit2" or result["relay_node"] == "relay0", "Exit2 has only its actual R0 link")
     return (0 if result["exit_node"] == wanted else 2), result
 
@@ -151,10 +153,11 @@ def validate_phase(phase, evidence, expected, peers):
     wanted = "exit" if phase.startswith("warm-") else "exit2"
     route, app, layout, captures = (evidence[key] for key in ("selection", "application", "layout", "captures"))
     require(route["exit_node"] == wanted and route["exit_peer_id"] == peers[wanted]
-            and route["relay_peer_id"] == peers[route["relay_node"]] and route["transport"] == "single-path-udp",
+            and route["relay_peer_id"] == peers[route["relay_node"]] and route["transport"] == "protected-dns",
             "ordinary DNS route changed endpoint")
     require(re.fullmatch(r"[0-9a-f]{32}", route["route_context_id"]) and route["route_context_id"] != "0" * 32
-            and 1 <= route["path_id"] <= 8 and 1 <= route["state"] <= 4, "DNS route identity/state")
+            and 1 <= route["path_id"] <= 8 and route["state"] == 1
+            and route["rtt_us"] == route["reported_bytes"] == 0, "DNS route identity/readiness")
     CAPTURE.validate_layout(layout)
     require(layout == {"phase": phase, "exit_node": wanted, "relays": {route["relay_node"]: PUBLIC[route["relay_node"]]}},
             "capture route correlation")
