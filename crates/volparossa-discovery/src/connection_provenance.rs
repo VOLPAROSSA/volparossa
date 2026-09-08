@@ -278,7 +278,7 @@ struct ConnectionRegistry {
 impl ConnectionRegistry {
     fn with_limits(max_total: usize, max_per_peer: usize) -> Self {
         Self {
-            records: HashMap::with_capacity(max_total),
+            records: HashMap::new(),
             max_total,
             max_per_peer,
             poisoned: false,
@@ -630,6 +630,16 @@ impl ConnectionProvenanceBehaviour {
             instance: Arc::new(ConnectionProvenanceInstance),
             registry: ConnectionRegistry::default(),
         }
+    }
+
+    /// Retention is a numeric high-water mark, not a reservation or admission limit.
+    /// A connection admitted before a resource reduction can still have its established event
+    /// queued. Keep that original lineage capacity; only actual close events remove records.
+    pub(super) fn retain_connection_capacity(&mut self, capacity: u32) {
+        self.registry.max_total = self
+            .registry
+            .max_total
+            .max(usize::try_from(capacity).unwrap_or(usize::MAX));
     }
 
     pub(super) fn content_control_state(&self, peer_id: PeerId) -> ContentControlConnectionState {
@@ -1736,6 +1746,46 @@ mod tests {
         established(&mut global, PeerId::random(), 385, &endpoint, 0);
         assert!(global.registry.poisoned);
         assert!(global.registry.records.is_empty());
+    }
+
+    #[test]
+    fn connection_capacity_shrink_preserves_queued_lineage_without_preallocation() {
+        let endpoint = dialer("/ip4/1.1.1.8/tcp/443");
+        let peer = PeerId::random();
+        let mut behaviour = ConnectionProvenanceBehaviour::new();
+        let allocated = behaviour.registry.records.capacity();
+        behaviour.retain_connection_capacity(u32::MAX);
+        assert_eq!(behaviour.registry.records.capacity(), allocated);
+        behaviour.retain_connection_capacity(512);
+        established(&mut behaviour, peer, 1, &endpoint, 0);
+        let witness = behaviour
+            .unique_witness(peer, IpFamily::Ipv4)
+            .expect("original exact public-IP witness");
+        let bound = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("original service-local binding");
+
+        // These events represent connections already admitted under the old budget. Lowering
+        // admission cannot make their later notification poison an unrelated live witness.
+        behaviour.retain_connection_capacity(0);
+        for index in 2..=385 {
+            established(&mut behaviour, PeerId::random(), index, &endpoint, 0);
+        }
+        assert!(!behaviour.registry.poisoned);
+        assert_eq!(behaviour.registry.records.len(), 385);
+        assert!(
+            behaviour
+                .bind(witness, peer, ConnectionId::new_unchecked(1))
+                .is_some()
+        );
+        assert!(behaviour.consume_bound_native_probe_control(bound, peer));
+        let closed_binding = behaviour
+            .bind_native_probe_control(peer, ConnectionId::new_unchecked(1))
+            .expect("binding still current after shrink");
+        closed(&mut behaviour, peer, 1, &endpoint, 0);
+        assert!(!behaviour.consume_bound_native_probe_control(closed_binding, peer));
+        assert_eq!(behaviour.registry.records.len(), 384);
+        assert!(!behaviour.registry.poisoned);
     }
 
     #[test]

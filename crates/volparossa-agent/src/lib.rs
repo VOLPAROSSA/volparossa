@@ -21,6 +21,7 @@ mod mptcp_flow_runtime;
 pub mod mptcp_transport;
 mod paths;
 mod policy;
+mod resource_headroom;
 mod roles;
 mod route_setup;
 mod secret;

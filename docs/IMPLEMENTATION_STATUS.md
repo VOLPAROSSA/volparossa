@@ -451,8 +451,9 @@ and deterministic resource samples, not physical network or operating-system pre
 
 The actual three-provider protected-network proof remains pending. Existing HTTPS source plans
 still select pairs; sixteen is still the bounded discovery-message input, not an adaptive active
-target. Control peers, local/Wi-Fi neighbors and native MPTCP/MPQUIC backend ceilings have not
-been generalized. This is the first connection-management slice, not the entire user requirement.
+target. The subsequent control-admission slice is described below; local/Wi-Fi neighbors and
+native MPTCP/MPQUIC backend ceilings have not been generalized. These are bounded integrations,
+not the entire user requirement.
 
 The additive protected-network scenario is now executable in the existing disposable provider
 topology. After the unchanged earlier phases and route retirement, a fresh route retrieves
@@ -473,6 +474,35 @@ tests, ten observer tests and targeted shell checks. A disposable user/network n
 and removes the exact nft filter, ending with an empty ruleset; this carries no payload.
 The actual three-provider VM result remains pending; earlier source-scoped reports do not gain
 this new required proof retroactively.
+
+### Adaptive control-connection admission
+
+The production discovery actor now replaces its bootstrap established-connection ceilings
+before normal/mesh initial dialing and on the existing one-second maintenance tick. Either
+direction may consume the resource-derived total rather than stopping permanently at 384 total
+or 256 inbound/outbound. Existing protocol demand initiates real connections; this change does
+not speculatively dial to fill the allowance or count control contacts as additional payload paths.
+
+The shared, read-only RAM/cgroup/descriptor/PSI sampler preserves the previous content-worker
+policy. Control admission independently budgets additional one-MiB/four-descriptor units from
+1/32 of free RAM and one quarter of free descriptors, less pending handshake units. Pressure
+reduces only additional room sixteen-fold; unknown RAM/FD headroom permits no new established
+connections. Neither resource loss nor a lower ceiling closes an existing connection. The
+provenance registry retains every previously admissible live/queued lineage without bulk
+preallocation or changing its generation. Pending/per-peer/address-cache input guards remain.
+This is advisory admission, not immediate eviction, bandwidth benefit, a kernel reservation,
+physical Wi-Fi proof or a replacement for native transport path ceilings.
+
+Eight targeted checks pass: three control-budget cases, the shared kernel-parser case, two
+unchanged content-lease cases, and two discovery capacity/provenance cases. The real isolated
+MemoryTransport test establishes 385 incoming Noise/Yamux control connections after a live
+budget update, exceeding both old ceilings; setting admission to zero rejects a new connection
+without closing those 385 or invalidating the original binding. An exact subsequent close
+retires only its own lineage. A separate queued-event test preserves the original public-prefix
+witness across lowering and verifies no allocation proportional to the ceiling. Strict discovery
+and agent all-target/all-feature Clippy and formatting pass. This is authenticated local control
+transport evidence, not WAN throughput or 385 payload routes. The earlier VM proofs do not
+establish the newly integrated actor's runtime behavior.
 
 ### Native publication/site cache-only reopen
 
@@ -2260,8 +2290,8 @@ connections when measured throughput, capacity, stability or useful cache reach 
 retire unhelpful connections and scale back under owner demand or resource pressure. This
 applies to connection policy, not unbounded allocation or permission to exceed a transport's
 actual protocol/backend capacity. Control peers, local neighbors, active route paths and cache
-workers need separate accounting. The first adaptive cache-worker implementation is described
-above; control, local-neighbor and transport limits have **not** yet been generalized.
+workers need separate accounting. Adaptive cache workers and resource-derived control admission
+are described above; local-neighbor and transport limits have **not** yet been generalized.
 
 The functional-development target now includes direct Ethernet and Wi-Fi peer links alongside
 Internet underlays, Internet access for a node without its own uplink through reachable
@@ -3910,8 +3940,9 @@ proof; the newly required reciprocal datapath must also be demonstrated.
   egress-quality values, a configured non-authoritative preselection ceiling, and
   `network_address_usable = false`. Its false local-block flag means only that no blocklist hit was
   supplied, not that policy was proved. A private A1c precursor passively tracks
-  authenticated libp2p establish/address-change/close lineage under the existing
-  384-global/four-per-peer ceilings.
+  authenticated libp2p establish/address-change/close lineage under the original
+  384-global/four-per-peer ceilings (subsequently extended by resource-derived control admission
+  as described above).
   It counts unusable siblings for uniqueness, accepts prefixes only from exact direct public-IP
   TCP or QUIC-v1 remote shapes, retains only the opaque normalized token plus the same native three
   or six prefix bytes (no full IP/multiaddress), generation-invalidates every address change, and

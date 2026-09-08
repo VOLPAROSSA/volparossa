@@ -328,10 +328,13 @@ all existing websites can be transparently cached. The proposal is the design re
 Native and named cache downloads now use adaptive worker counts instead of a fixed pair. They
 start with at most two useful candidates and may add providers for missing content or measured
 aggregate benefit, within current memory/descriptor headroom. Resource pressure stops expansion
-and drains surplus streams at chunk boundaries. This first connection-management integration
-does not remove the separate control-peer, Wi-Fi-neighbor or native transport limits. HTTPS
-automatic source plans still select at most two providers; real three-provider protected-network
-verification and broader adaptive connection management remain in progress.
+and drains surplus streams at chunk boundaries. Discovery/control admission now also follows
+current resources instead of a permanent 384-total/256-per-direction connection ceiling, without
+filling that allowance speculatively or breaking existing routes when it shrinks. See
+[adaptive control connections](docs/OPERATIONS.md#adaptive-control-connections). Wi-Fi-neighbor
+and native transport path limits remain separate unfinished work. HTTPS automatic source plans
+still select at most two providers; real three-provider protected-network verification and
+broader adaptive connection management remain in progress.
 
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the

@@ -788,8 +788,33 @@ policy. The actual RAM/descriptor limit remains global. Missing pressure telemet
 expansion; unknown RAM/descriptor capacity refuses new workers. No host settings are changed.
 This is not a kernel memory reservation, measured radio fairness or an owner-goodput guarantee.
 HTTPS source-selection plans still use pairs, and the current signed discovery input is bounded
-to sixteen candidates. Control peers, local neighbors and native transport path limits are
-separate unfinished adaptive integrations, not silently unlimited connections.
+to sixteen candidates. Control-connection admission is described below; local neighbors and
+native transport path limits remain separate unfinished adaptive integrations.
+
+### Adaptive control connections
+
+The agent samples resource headroom before initial normal/mesh dialing and on its existing
+one-second maintenance tick. Established libp2p control connections may exceed the old 384-total
+and 256-per-direction ceilings when resources permit; either direction can use the whole current
+allowance. This applies equally to direct-LAN and Internet underlays. It creates no new dialer:
+existing discovery, route, contribution, content and DNS protocols still initiate actual work.
+An allowance is not a target number of peers, payload capacity or evidence of additional throughput.
+
+New connection room uses conservative one-MiB/four-descriptor advisory units within 1/32 of
+available RAM (including cgroup limits) and one quarter of free process descriptors. Pending
+handshakes are accounted for rather than offering their unit twice. CPU/memory/I/O pressure,
+including unavailable pressure telemetry, divides this additional room by sixteen; unavailable
+RAM/descriptor data closes new established admission. Existing connections are preserved, not
+forcibly closed or stripped of route/provenance authority when capacity falls. Ordinary libp2p
+idle handling and actual connection closure continue to retire unused connections. Pressure
+therefore slows new admission, not guarantees immediate resource reclamation or owner speed.
+
+The passive provenance registry scales its numeric retention bound together with admission,
+without preallocating the allowed number of records. Capacity reduction preserves queued,
+already-admitted events and live witness generations. The separate 64-pending-per-direction,
+four-connections-per-peer and 1,024-peer address-cache guards remain; this does not claim an
+unbounded DHT catalogue, adaptive radio neighbors or more WireGuard/MPTCP/MPQUIC route paths.
+No configuration or host network changes are needed.
 
 ### Automatic public-content contribution
 

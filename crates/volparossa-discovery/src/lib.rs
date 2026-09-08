@@ -5,6 +5,7 @@ mod advertisement_budget;
 #[cfg(test)]
 mod advertisement_tests;
 mod advertisements;
+mod connection_capacity;
 mod connection_provenance;
 mod content_connection;
 mod content_provider;
@@ -148,11 +149,11 @@ pub const MAX_KADEMLIA_PACKET_BYTES: usize = 16 * 1_024;
 pub const MAX_PENDING_INBOUND_CONNECTIONS: u32 = 64;
 /// Maximum concurrent outbound connection attempts.
 pub const MAX_PENDING_OUTBOUND_CONNECTIONS: u32 = 64;
-/// Maximum established inbound connections.
+/// Initial established inbound ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_INBOUND_CONNECTIONS: u32 = 256;
-/// Maximum established outbound connections.
+/// Initial established outbound ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_OUTBOUND_CONNECTIONS: u32 = 256;
-/// Maximum established connections in both directions.
+/// Initial established total ceiling before an explicit resource-budget update.
 pub const MAX_ESTABLISHED_CONNECTIONS: u32 = 384;
 /// Maximum established connections to one authenticated peer.
 pub const MAX_ESTABLISHED_CONNECTIONS_PER_PEER: u32 = 4;

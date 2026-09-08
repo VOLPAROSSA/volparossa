@@ -290,8 +290,15 @@ policy expiry before minting a verified observation.
 
 The first A1c provenance component is composed as a private passive libp2p behaviour. It observes
 the authenticated `ConnectionEstablished`, `AddressChange` and `ConnectionClosed` event lineage,
-bounds the registry by the existing 384-global/four-per-peer connection ceilings, and permanently
-poisons and clears the registry on overflow or inconsistent event lineage. Every connection,
+bounds the registry together with connection admission, and permanently poisons and clears it
+on inconsistent event lineage or an event exceeding every previously admitted ceiling. The
+original constructor defaults remain 384 total/256 per direction/four per peer, but the production
+actor replaces the total and directional ceilings before initial dialing and on its one-second
+tick using current RAM/descriptor/pressure headroom. Capacity reduction never revokes live
+records or queued, already-admitted events; retention keeps a numeric high-water bound without
+preallocating that many entries. Pending and per-peer guards remain separate. See
+[adaptive control admission](OPERATIONS.md#adaptive-control-connections) for policy and limits.
+Every connection,
 including one whose remote address is unusable, counts toward per-peer uniqueness. A usable native
 prefix is accepted only from an exact direct public-IP TCP or QUIC-v1 remote multiaddress, with an
 optional terminal `/p2p` component matching the authenticated peer; DNS, memory, circuit-relayed,

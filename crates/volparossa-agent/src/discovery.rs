@@ -1,5 +1,6 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
+mod connection_budget;
 mod content;
 pub(crate) use content::DiscoveredContentProvider;
 mod dns_cache;
@@ -1792,6 +1793,7 @@ impl DiscoveryRuntime {
         &mut self,
         mesh_installed: bool,
     ) -> Result<(), DiscoveryRuntimeError> {
+        connection_budget::refresh(&mut self.service);
         configure_network(&mut self.service, &self.config)?;
         if mesh_installed {
             if let Some(address) = mesh_listener_address(&self.config)? {
@@ -1828,6 +1830,7 @@ impl DiscoveryRuntime {
         let mut service =
             DiscoveryService::new_with_protocol_roles(identity.keypair().clone(), protocol_roles)
                 .map_err(|_| DiscoveryRuntimeError::Build)?;
+        connection_budget::refresh(&mut service);
         let local_public_key = identity
             .ed25519_public_key_bytes()
             .map_err(|_| DiscoveryRuntimeError::Build)?;
@@ -2058,6 +2061,7 @@ impl DiscoveryRuntime {
                     self.refresh_candidates(&state).await;
                 }
                 _ = reservation_maintenance.tick() => {
+                    connection_budget::refresh(&mut self.service);
                     self.synchronize_exit_policy(&state).await;
                     let now_ms = unix_millis();
                     self.destroy_expired_exit_native_attempts(now_ms).await;
