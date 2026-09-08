@@ -78,7 +78,8 @@ content_network_private_cleanup() {
         [ "$(stat -Lc '%a:%u:%g' "$content_private")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
         for content_secret in "$content_private/identity.key" "$content_private/wrong-identity.key" \
-            "$content_private/passphrase" "$content_private/message.bin" "$content_private/wrong-message.bin"; do
+            "$content_private/passphrase" "$content_private/message.bin" "$content_private/wrong-message.bin" \
+            "$content_private/handoff-message.bin"; do
             [ ! -L "$content_secret" ] || return 1
             if [ -e "$content_secret" ]; then
                 [ -f "$content_secret" ] || return 1
@@ -146,6 +147,7 @@ content_network_open_message() {
         --argjson bytes "$(stat -Lc '%s' "$content_plaintext")" \
         '{plaintext_sha256:$sha256,plaintext_bytes:$bytes,private_output_mode:"0600",
           private_output_owned_by_recipient:true}' >"$WORK/content-message-object.json"
+    content_network_handoff
     content_network_private_cleanup || fail CONTENT_PRIVATE_FIXTURE_CLEANUP_FAILED
 }
 
@@ -314,7 +316,7 @@ content_network_finalize_report() {
         content_report_name=content-message-smoke.json
         content_report_kind=volparossa-native-private-content-network
         content_report_mode=message-report
-        content_scope='ciphertext-only native replicas over protected MPTCP; normal CLI recipient-key and open-message with encrypted IdentityStore, fixture-only publisher, no mailbox runtime'
+        content_scope='ciphertext-only replicas over protected MPTCP with fixture network publisher; normal recipient CLI and separate normal local publish/import/export/open across operator/service UIDs; no mailbox runtime'
     fi
     jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
         --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
@@ -335,7 +337,9 @@ content_network_finalize_report() {
        full_alpha_acceptance_claimed:false,https_authentication_claimed:false}
       + (if $scenario == "content-message" then
           {normal_recipient_cli_claimed:true,encrypted_identity_store_claimed:true,
-           normal_publisher_cli_claimed:false,mailbox_runtime_claimed:false,full_c07_claimed:false}
+           normal_publisher_cli_claimed:true,local_private_cache_handoff_claimed:true,
+           network_publisher_runtime_claimed:false,
+           mailbox_runtime_claimed:false,full_c07_claimed:false}
          else {} end)
     ' >"$WORK/$content_report_name" || return 1
     for content_artifact in "$WORK"/content-*.json "$WORK"/content-*.txt \

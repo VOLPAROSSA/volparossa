@@ -197,6 +197,53 @@ pub fn open_private_message(
     now_unix_seconds: u64,
     recipient: &RecipientKeyPair,
 ) -> Result<Zeroizing<Vec<u8>>, PrivateMessageError> {
+    let envelope = verified_envelope(manifest, stores, now_unix_seconds)?;
+    let secret = <MessageKem as KemTrait>::PrivateKey::from_bytes(&*recipient.private_key)
+        .map_err(|_| PrivateMessageError::InvalidKey)?;
+    let encapsulated_key =
+        <MessageKem as KemTrait>::EncappedKey::from_bytes(&envelope.encapsulated_key)
+            .map_err(|_| PrivateMessageError::InvalidKey)?;
+    let aad = associated_data(
+        manifest.publisher(),
+        &Publication {
+            metadata: manifest.metadata().clone(),
+            length: manifest.length(),
+            validity: manifest.validity(),
+        },
+    );
+    let plaintext = single_shot_open::<MessageAead, MessageKdf, MessageKem>(
+        &OpModeR::Base,
+        &secret,
+        &encapsulated_key,
+        INFO,
+        &envelope.ciphertext,
+        &aad,
+    )
+    .map_err(|_| PrivateMessageError::Open)?;
+    Ok(Zeroizing::new(plaintext))
+}
+
+/// Verify the full signed object's hashes and bounded canonical private-message envelope.
+///
+/// No recipient key is read and no bytes are decrypted. This checks the supported ciphertext
+/// format, not that a malicious publisher truly encrypted its input or which recipient it chose.
+/// The caller must independently authenticate the manifest's sender before calling this method.
+///
+/// # Errors
+/// Rejects expired manifests, unsupported metadata, missing/corrupt chunks, or malformed envelopes.
+pub fn validate_private_message_envelope(
+    manifest: &VerifiedManifest,
+    stores: &mut [&mut ChunkStore],
+    now_unix_seconds: u64,
+) -> Result<(), PrivateMessageError> {
+    verified_envelope(manifest, stores, now_unix_seconds).map(|_| ())
+}
+
+fn verified_envelope(
+    manifest: &VerifiedManifest,
+    stores: &mut [&mut ChunkStore],
+    now_unix_seconds: u64,
+) -> Result<Envelope, PrivateMessageError> {
     manifest.check_time(now_unix_seconds)?;
     let metadata = manifest.metadata();
     if metadata.content_type != PRIVATE_MESSAGE_CONTENT_TYPE
@@ -226,29 +273,7 @@ pub fn open_private_message(
     {
         return Err(PrivateMessageError::InvalidEnvelope);
     }
-    let secret = <MessageKem as KemTrait>::PrivateKey::from_bytes(&*recipient.private_key)
-        .map_err(|_| PrivateMessageError::InvalidKey)?;
-    let encapsulated_key =
-        <MessageKem as KemTrait>::EncappedKey::from_bytes(&envelope.encapsulated_key)
-            .map_err(|_| PrivateMessageError::InvalidKey)?;
-    let aad = associated_data(
-        manifest.publisher(),
-        &Publication {
-            metadata: metadata.clone(),
-            length: manifest.length(),
-            validity: manifest.validity(),
-        },
-    );
-    let plaintext = single_shot_open::<MessageAead, MessageKdf, MessageKem>(
-        &OpModeR::Base,
-        &secret,
-        &encapsulated_key,
-        INFO,
-        &envelope.ciphertext,
-        &aad,
-    )
-    .map_err(|_| PrivateMessageError::Open)?;
-    Ok(Zeroizing::new(plaintext))
+    Ok(envelope)
 }
 
 // For version 1: version tag/value (2), encapsulated-key tag/length/key (34),

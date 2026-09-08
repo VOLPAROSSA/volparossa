@@ -129,6 +129,17 @@ manifests, publisher hints, original creation times, local hop counts and retain
 bounded to 64 records / 8 MiB. Restoration verifies signatures and live chunks before listener
 start; it never reissues manifests, refreshes expiry or adopts foreign directories.
 
+Local control adds explicit private-message `ContentImport` (25) and `ContentExport` (26).
+After the validated request, `ContentTransferReady` (response tag 19) binds exact manifest ID,
+object length and chunk count. Existing chunk-transfer frames then run on that same authorized
+Unix connection, followed by a correlated final `ContentReceipt`. Ready is not completion.
+The control frame stays at 256 KiB; chunk payloads use their separate existing bound. Whole
+handoff lifetime is 30 seconds, each exchange at most five seconds, and only complete private
+message objects up to 4 MiB plus the bounded envelope are accepted. The destination is newly
+created under its receiving account. No ownership change, permission grant, network listener,
+private key transfer or decryption is part of either operation. Syntactic envelope validation
+does not prove that a malicious local publisher actually encrypted the bytes it supplied.
+
 ### Recipient-encrypted native message object (development v1)
 
 The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,

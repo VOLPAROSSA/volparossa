@@ -192,6 +192,7 @@ done
 test "$(stat -Lc '%U:%G:%a' /var/lib/volparossa)" = volparossa:volparossa:700
 test "$(stat -Lc '%U:%G:%a' /etc/volparossa)" = root:volparossa:750
 test "$(stat -Lc '%U:%G:%a' /etc/volparossa/config.yaml)" = root:volparossa:640
+test "$(stat -Lc '%U:%G:%a' /run/volparossa)" = root:volparossa:750
 test "$(stat -Lc '%U:%G:%a' /run/volparossa/control)" = volparossa:volparossa-users:750
 test "$(getent passwd volparossa | awk -F: '{ print $6 ":" $7 }')" \
     = /var/lib/volparossa:/usr/sbin/nologin
@@ -199,6 +200,16 @@ test "$(getent passwd volparossa-worker | awk -F: '{ print $6 ":" $7 }')" \
     = /nonexistent:/usr/sbin/nologin
 test "$(id -Gn volparossa)" = 'volparossa volparossa-users'
 test "$(id -Gn volparossa-worker)" = volparossa-worker
+# Model an operator using only the control group, never the service's private group.
+operator_uid=$(id -u volparossa-worker)
+operator_gid=$(id -g volparossa-worker)
+control_gid=$(getent group volparossa-users | cut -d: -f3)
+setpriv --reuid="$operator_uid" --regid="$operator_gid" --groups="$control_gid" \
+    --no-new-privs -- test -x /run/volparossa/control
+if setpriv --reuid="$operator_uid" --regid="$operator_gid" --groups="$control_gid" \
+    --no-new-privs -- test -r /run/volparossa; then exit 1; fi
+if setpriv --reuid="$operator_uid" --regid="$operator_gid" --groups="$control_gid" \
+    --no-new-privs -- test -x /run/volparossa/native; then exit 1; fi
 
 passphrase_file=/var/lib/volparossa/.lifecycle-identity-passphrase
 install -o volparossa -g volparossa -m 0600 /dev/null "$passphrase_file"

@@ -9,8 +9,9 @@
 
 mod content;
 pub use content::{
-    ContentCacheLimits, ContentFetchRequest, ContentReceipt, ContentReplicationConfig,
-    ContentServeRequest, HttpsContentFetchRequest,
+    ContentCacheLimits, ContentExportRequest, ContentFetchRequest, ContentImportRequest,
+    ContentReceipt, ContentReplicationConfig, ContentServeRequest, ContentTransferReady,
+    HttpsContentFetchRequest,
 };
 
 use prost::Message;
@@ -40,7 +41,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -50,8 +51,8 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ConnectRequest, ContentFetchRequest, ContentServeRequest, Empty, HttpsContentFetchRequest,
-        LogQuery, RoleChange,
+        ConnectRequest, ContentExportRequest, ContentFetchRequest, ContentImportRequest,
+        ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -102,6 +103,12 @@ pub mod control_request {
         /// Authenticate origin metadata and retrieve peer chunks with protected origin fallback.
         #[prost(message, tag = "24")]
         ContentFetchHttps(HttpsContentFetchRequest),
+        /// Upgrade this same protected local socket for explicit ciphertext import.
+        #[prost(message, tag = "25")]
+        ContentImport(ContentImportRequest),
+        /// Upgrade this same protected local socket for explicit ciphertext export.
+        #[prost(message, tag = "26")]
+        ContentExport(ContentExportRequest),
     }
 }
 
@@ -187,7 +194,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -197,8 +204,8 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ContentReceipt, Empty, LogList, PathList, PeerList, PolicySnapshot, RoleSnapshot,
-        SessionList, StatusSnapshot,
+        ContentReceipt, ContentTransferReady, Empty, LogList, PathList, PeerList, PolicySnapshot,
+        RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -231,6 +238,9 @@ pub mod control_response {
         /// Successful explicit native-content work.
         #[prost(message, tag = "18")]
         Content(ContentReceipt),
+        /// Validated scope for a following bounded same-socket chunk exchange; not success.
+        #[prost(message, tag = "19")]
+        ContentTransferReady(ContentTransferReady),
     }
 }
 
@@ -628,6 +638,8 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentServe(request) => request.validate()?,
         control_request::Operation::ContentFetch(request) => request.validate()?,
         control_request::Operation::ContentFetchHttps(request) => request.validate()?,
+        control_request::Operation::ContentImport(request) => request.validate()?,
+        control_request::Operation::ContentExport(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
             NodeRole::try_from(change.role).map_err(|_| ControlProtocolError::Invalid("role"))?;
         }
@@ -719,6 +731,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
             }
         }
         control_response::Payload::Content(receipt) => validate_content_receipt(receipt)?,
+        control_response::Payload::ContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

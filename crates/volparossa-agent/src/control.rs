@@ -1,5 +1,7 @@
 //! Protected local CLI socket and typed operation dispatch.
 
+mod content_transfer;
+
 use std::{
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
@@ -164,6 +166,15 @@ async fn process_connection(
         .await
         .map_err(|_| ControlServerError::Timeout)?
         .map_err(|_| ControlServerError::InvalidFrame)?;
+    if matches!(
+        request.operation.as_ref(),
+        Some(
+            control_request::Operation::ContentImport(_)
+                | control_request::Operation::ContentExport(_)
+        )
+    ) {
+        return content_transfer::process(stream, request).await;
+    }
     let response = Box::pin(handle_request(request, &context)).await;
     timeout(CONTROL_TIMEOUT, write_response(&mut stream, &response))
         .await
@@ -186,6 +197,16 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         );
     };
     match operation {
+        control_request::Operation::ContentImport(_)
+        | control_request::Operation::ContentExport(_) => {
+            // These require the same authorized stream, never a second socket or generic dispatch.
+            response(
+                request_id,
+                ControlResult::InvalidRequest,
+                "CONTENT_STREAM_REQUIRED",
+                control_response::Payload::Ack(Empty {}),
+            )
+        }
         control_request::Operation::ContentServe(request) => {
             content_response(request_id, context.content.serve(request, context).await)
         }

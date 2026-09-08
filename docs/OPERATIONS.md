@@ -69,12 +69,14 @@ sudo apt install ./dist/volparossa_0.1.0_amd64.deb
 ```
 
 Package installation creates the locked `volparossa` system account, `/var/lib/volparossa` mode
-0700, `/etc/volparossa` mode 0750, a root/service-only `/run/volparossa`, a separate
+0700, `/etc/volparossa` mode 0750, `/run/volparossa` root/service mode 0750, a separate
 agent-owned `/run/volparossa/control` mode 0750 that members of `volparossa-users` may traverse,
 and a service-only native socket directory. Human control users can connect to the group-writable
 agent socket but cannot replace it or access/unlink the helper socket. Installation does not
 enable agent/helper services. journald is the default; no file log or logrotate configuration is
-enabled.
+enabled. A search-only access ACL on `/run/volparossa` lets `volparossa-users` reach the
+control subdirectory without listing the parent or inheriting access to helper/native files.
+This uses Debian 13's [tmpfiles access-ACL support](https://manpages.debian.org/trixie/systemd/tmpfiles.d.5.en.html).
 
 ## First initialization
 
@@ -331,12 +333,34 @@ volparossa content publish-message \
 
 The signed manifest uses a random opaque name and contains no subject or recipient identifier.
 Sender identity, ciphertext length and expiry remain public. The existing lifetime/cache limits
-and explicit `--reuse-cache` option apply. Publishing is local: use the existing `content serve`
-command with this manifest/cache and the sender's signing key to make ciphertext available.
+and explicit `--reuse-cache` option apply. Publishing is local. The packaged service runs as
+`volparossa`, not your user account, so first copy ciphertext through its protected local socket:
+
+```sh
+volparossa content import --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --cache ./encrypted-message-cache --agent-cache /var/lib/volparossa/new-message-cache
+```
+
+The agent cache must be a new path with an existing agent-writable parent. Use `content serve`
+with that agent-owned cache, the same manifest and sender key, and a policy-authorized endpoint
+to make ciphertext available. Import itself starts no network service and transfers no keys.
 Recipients must receive the exact manifest and authenticate the sender key independently; there
 is no mailbox or automatic name/key lookup. `content fetch` can retrieve the ciphertext through
-the existing protected route into a new owned cache/output. That fetched output is still encrypted.
-Once the needed chunks are present in owned caches, the recipient opens the message:
+the existing protected route into a new agent-owned cache/output. That fetched output is still
+encrypted. Export its ciphertext to a new cache owned by the receiving user:
+
+```sh
+volparossa content export --manifest ./message.pb --publisher-key TRUSTED_SENDER_PUBLIC_KEY_HEX \
+  --agent-cache /var/lib/volparossa/fetched-message-cache --cache ./retrieved-ciphertext-cache
+```
+
+Import/export currently accept complete recipient-encrypted messages only (at most 4 MiB of
+plaintext plus the bounded encrypted envelope), not arbitrary public content or partial caches.
+They preserve each account's `0700` cache ownership and do not change permissions. No destination
+cache is reused or overwritten. A failed transfer may leave verified encrypted chunks in its
+new destination; it never reports them as a complete message. This is local ciphertext copying,
+not recipient authentication, decryption, a network transfer or a delivery acknowledgement.
+Once the needed chunks are present in user-owned caches, the recipient opens the message:
 
 ```sh
 volparossa content open-message \

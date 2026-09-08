@@ -13,7 +13,30 @@ Scoped downlink and mixed-link runs now pass; content/application integration co
 
 ## Latest content integration checkpoint
 
-The next local integration adds actual signed remote route retirement, rather than relaxing the
+Explicit local `content import`/`content export` now bridge user-owned and service-owned private
+message caches through the same authorized Unix control connection. Typed Ready/final receipts
+surround the existing bounded chunk frames; the 256 KiB control-frame bound is unchanged.
+Only original signed private-message manifests and ciphertext cross that boundary. Full-object
+hash/envelope validation is shared with normal opening; no recipient key/decryption is involved.
+Import creates a new agent-owned cache, export a new user-owned cache, both `0700`; existing
+destinations are refused and incomplete transfers are not success. Two agent stream tests,
+one wire test, five existing message tests and strict agent/content/control Clippy pass. A real
+CLI-process transfer in a disposable netns also passes; the different-UID VM extension is pending.
+The installed runtime ancestor now gives only search permission to the control group through a
+non-inherited ACL, retaining the helper's required `0750` mode and private socket permissions.
+
+The [source-bound C03 run on `97e478a2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175385789)
+remains **failed**, but at a new boundary: final Client retrieval reaches provider discovery,
+then reports `CONTENT_PROVIDER_TLS_FAILED` / `CONTENT_UNAVAILABLE` and Exit flow failure.
+The old remote-WireGuard leak is absent: all ten physical captures are complete, drained,
+zero-drop and contain no forbidden packets. Original R5 stops; R4's service stops/reopens and
+restores Q's two chunks / 262,267 bytes / one replica publication (two total publications).
+No successful post-reopen network retrieval is claimed. Global cleanup removes all owned objects;
+guest root state is unchanged, SHA-256
+`a6e726a2792fcdb336fac86949dbcc669a87b51dbd849262950c88f8d0075d18`.
+Artifact SHA-256: `9e4363bd657127ce7438eb47a852f72385ce6b7970357a862d0b43325d0ffb40`.
+
+That integration adds actual signed remote route retirement, rather than relaxing the
 C03 packet boundary. An affine Client job retains its original session signer and exact selected
 control/data relays before Finalize/ReservePath dispatch, including ambiguous rollback. Local
 Destroy happens once; at most nine remote requests run in parallel with fresh per-target nonces.
@@ -32,8 +55,8 @@ failure-retention and another context left untouched. Disabled runtime roles and
 grants do not block exact cleanup; wrong policy/session does. Strict agent Clippy also passes.
 Normal daemon shutdown now keeps discovery alive until the bounded route-retirement attempt
 finishes; a focused ordering test covers both confirmed and failed cleanup, with failure preserved
-as `ShutdownCleanup`. These are local functional proofs, not a new KVM pass. The source-bound C03
-run including replica stop/reopen is still pending.
+as `ShutdownCleanup`. The network run above now observes the cleaned packet boundary, but it
+is not a complete C03 pass because the post-reopen TLS connection fails.
 
 Temporary functional limitation: each remote role retains at most 1,024 retirement scopes,
 including completed ones; full maps reject new admission. Premature expiry-based deletion would
@@ -85,7 +108,8 @@ served, but their bytes are not automatically deleted. Three real library persis
 two agent tests, one CLI test, one typed wire test and combined strict content/agent/CLI/control
 Clippy pass. The next C03 fixture explicitly stops/reopens R4's service after R5 is offline, without
 supplying Q's manifest to R4, then requires Q to be retrieved from that restored registration.
-Three evidence-checker tests and shell syntax pass; that new network proof is pending. Automatic
+Three evidence-checker tests and shell syntax pass; the new network run confirms restored
+registration but still fails the subsequent retrieval as recorded above. Automatic
 boot service, retention repair, expiry reclamation, full C03 and full C04 remain incomplete.
 
 Exact `e592b610` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171679274) and

@@ -641,6 +641,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("agent returned no typed payload"))?
     {
         Payload::Ack(_) => println!("ok"),
+        Payload::ContentTransferReady(_) => {
+            anyhow::bail!("unexpected content stream handoff outside import/export")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({

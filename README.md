@@ -118,6 +118,10 @@ encrypted identity if old messages must remain readable. See the
 [message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands). The updated network
 run on `4c4c8954` also passes with these normal recipient commands and encrypted identities,
 including ciphertext retrieval after publisher removal, private output and complete cleanup.
+Explicit `content import` and `content export` now bridge the user's private ciphertext cache
+and the separately owned service cache over the local control socket. They neither transfer
+recipient keys nor start a listener. Local CLI/agent transfer tests pass; the different-UID VM
+probe is pending. See the message instructions for the required handoff before serving or opening.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
@@ -125,13 +129,15 @@ tests pass. Optional uptake now requests one chunk at a time, checking the confi
 before granting the next chunk; a busy sample ends the exchange with verified partial data.
 The new one-chunk-credit exchange also completes multi-node uptake and re-serving on `e592b610`,
 after the original provider shuts down. Its final capture check still fails: the replicator's
-local disconnect leaves remote WireGuard route owners alive until expiry. Explicit session-signed
-remote retirement now has local Client/Relay/Exit and helper-RPC tests, but still needs the live
-rerun. Its bounded scope-capacity reclamation remains unfinished; see implementation status.
-The earlier failed scenario is not a privacy pass.
+local disconnect leaves remote WireGuard route owners alive until expiry. The new session-signed
+retirement run on `97e478a2` removes those stray WireGuard packets: all ten boundary captures are
+complete with no forbidden traffic. It also restores the replica registration after service
+stop/reopen, but the final download now fails at provider TLS. The scenario remains failed;
+scope-capacity reclamation and the new connection failure remain unfinished.
 `content serve --reuse-replica-cache` now explicitly restores unexpired registrations from an
 owned replica cache; local transfer/reopen/re-serving tests pass. This starts no service on boot
-and does not supply automatic repair or retention guarantees; its network probe is pending.
+and does not supply automatic repair or retention guarantees; post-reopen network retrieval
+has not yet passed.
 A complete mailbox, retention repair, shared DNS, full owner-priority behavior and browser integration remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
 
@@ -161,8 +167,8 @@ volparossa content fetch-https \
 Debian system trust is the default. Optional `--ca-file public-roots.pem` selects bounded public
 PEM roots for this request only; it installs nothing and does not disable certificate or hostname
 verification. No separately supplied publisher key can replace origin authentication. Focused
-CLI/agent/control checks pass; the exact normal-CLI KVM proof is still pending, and C02/C08 remain
-incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
+CLI/agent/control checks and the source-scoped normal-CLI KVM provider proof on `e592b610` pass;
+C02/C08 remain incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
 distinguish this command from the earlier executable-fixture passes.
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

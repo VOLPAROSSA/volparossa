@@ -18,6 +18,7 @@ use volparossa_content::{
 use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
+mod handoff;
 mod private_message;
 
 #[derive(Debug, Subcommand)]
@@ -30,6 +31,10 @@ pub(crate) enum Command {
     PublishMessage(private_message::PublishMessage),
     /// Verify and decrypt cached message chunks to a new private output file.
     OpenMessage(private_message::OpenMessage),
+    /// Copy verified private-message ciphertext from your cache into a new agent-owned cache.
+    Import(handoff::Handoff),
+    /// Copy verified private-message ciphertext from an agent cache into your new local cache.
+    Export(handoff::Handoff),
     /// Verify and reconstruct from explicitly supplied local caches; no network retrieval.
     Assemble(Assemble),
     /// Register a publication with the agent and explicitly start its public content service.
@@ -257,6 +262,8 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,
         Command::PublishMessage(args) => private_message::publish_message(&args)?,
         Command::OpenMessage(args) => private_message::open_message(&args)?,
+        Command::Import(args) => handoff::run(&args, socket, handoff::Direction::Import).await?,
+        Command::Export(args) => handoff::run(&args, socket, handoff::Direction::Export).await?,
         Command::Assemble(args) => assemble(&args)?,
         Command::Serve(args) => {
             let replication = args

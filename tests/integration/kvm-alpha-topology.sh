@@ -70,8 +70,9 @@ print_plan() {
             '  give the publisher only the public recipient key and encrypt before chunking;' \
             '  remove the publisher, fetch ciphertext from two separate replica processes via protected MPTCP;' \
             '  require recipient-only decryption, wrong-key rejection, exact bytes and complete privacy captures;' \
+            '  separately publish/import/export/open a message with distinct operator/service UIDs via the protected local control socket;' \
             '  remove encrypted identities, passphrase and plaintext, clean owned networking and compare guest-root host state;' \
-            '  emit content-message-smoke.json proving normal recipient CLI opening; no normal publisher CLI, mailbox, full C07 or A01-A15 claim.'
+            '  emit content-message-smoke.json; local publisher/handoff proof does not claim a normal network publisher, mailbox, full C07 or A01-A15.'
         return
     fi
     if [ "$scenario" = content ]; then
@@ -396,6 +397,9 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     fi
 fi
 if [ "$scenario" = content-message ]; then
+    [ -f "$source_directory/tests/integration/content-handoff-smoke.sh" ] \
+        && [ ! -L "$source_directory/tests/integration/content-handoff-smoke.sh" ] \
+        || { printf '%s\n' 'private content handoff fixture unavailable' >&2; exit 69; }
     for content_secret_tool in head base64; do
         command -v "$content_secret_tool" >/dev/null 2>&1 \
             || { printf 'required recipient fixture tool unavailable: %s\n' "$content_secret_tool" >&2; exit 69; }
@@ -1428,6 +1432,10 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     # shellcheck source=tests/integration/content-network-smoke.sh
     . "$source_directory/tests/integration/content-network-smoke.sh"
 fi
+if [ "$scenario" = content-message ]; then
+    # shellcheck source=tests/integration/content-handoff-smoke.sh
+    . "$source_directory/tests/integration/content-handoff-smoke.sh"
+fi
 if [ "$scenario" = content-https ]; then
     # shellcheck source=tests/integration/content-https-smoke.sh
     . "$source_directory/tests/integration/content-https-smoke.sh"
@@ -1680,6 +1688,14 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
+    if [ "$scenario" = content-message ] && [ "$node" = relay4 ]; then
+        # Match package access without adding the operator to the private service group.
+        chgrp volparossa-users "$WORK/runtime-$node/control"
+        printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
+            | systemd-tmpfiles --create - || fail CONTENT_CONTROL_TRAVERSAL_FAILED
+        [ "$(stat -Lc '%a' "$WORK/runtime-$node")" = 750 ] \
+            || fail CONTENT_CONTROL_PARENT_MODE_CHANGED
+    fi
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 \
         "$WORK/runtime-$node/native" "$WORK/state-$node" "$WORK/credential-$node"
     printf '%s\n' 'disposable alpha topology identity passphrase' \

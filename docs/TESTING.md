@@ -169,6 +169,14 @@ but fails the final capture gate because retired remote route owners survive loc
 the explicit reopen extension still needs its live run after that teardown fix. This one chain
 does not establish full C03/C04, durable retention, generic browser support or a speed gain.
 
+The next `content-message` scenario also runs normal `publish-message`, `import`, `export` and
+`open-message` across the disposable operator/service UID boundary. The operator has only the
+control group; private stores and keys remain unreadable to the other account. This separate
+local handoff uses the existing protected Unix socket and must leave the provider service off.
+It does not turn that scenario's fixture network publisher into a normal publisher or prove a
+mailbox. Focused CLI-process, agent-stream and evidence-checker tests pass; the new different-UID
+VM proof is pending.
+
 ## Helper-boundary evidence
 
 The helper identity and production IPC boundary has a separate, narrower live gate:

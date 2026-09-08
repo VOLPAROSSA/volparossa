@@ -92,6 +92,22 @@ def private_fixture():
                               private_output_mode="0600", private_output_owned_by_recipient=True),
         temporary_cleanup=dict(encrypted_identities_removed=True, passphrase_removed=True,
                                plaintext_removed=True, private_directory_removed=True))
+    imported = dict(operation="content_import", manifest_id="a" * 64, ciphertext_bytes=2097332,
+                    chunks=9, cache="/user/source", agent_cache="/agent/cache", complete=True,
+                    network_transfer=False, ownership_changed=False,
+                    recipient_decryption_performed=False, private_keys_transferred=False,
+                    ciphertext_format_verified=True)
+    exported = {**imported, "operation": "content_export", "cache": "/user/new-cache"}
+    value["private_message"]["local_handoff"] = dict(
+        isolation=dict(user_uid=1001, agent_uid=1002, control_gid=1003, agent_gid=1002,
+                       agent_cannot_read_user_cache_or_secrets=True, user_cannot_read_agent_cache=True,
+                       all_cache_modes="0700", private_output_mode="0600", identities_unchanged=True,
+                       plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"], local_only=True),
+        publication=dict(operation="offline_private_message_publish", network_publication=False,
+                         ciphertext_bytes=2097332, chunks=9, publisher_key_hex="b" * 64),
+        **{"import": imported, "export": exported,
+           "open": dict(operation="offline_private_message_open", bytes=2097275, network_retrieval=False)},
+        status_before=dict(serving=False, publications=0), status_after=dict(serving=False, publications=0))
     return value
 
 
@@ -162,15 +178,31 @@ class EvidenceContract(unittest.TestCase):
                       full_alpha_acceptance_claimed=False, distinct_provider_nodes_claimed=False,
                       provider_discovery_claimed=False, https_authentication_claimed=False,
                       normal_recipient_cli_claimed=True, encrypted_identity_store_claimed=True,
-                      normal_publisher_cli_claimed=False, mailbox_runtime_claimed=False,
+                      normal_publisher_cli_claimed=True, local_private_cache_handoff_claimed=True,
+                      network_publisher_runtime_claimed=False, mailbox_runtime_claimed=False,
                       full_c07_claimed=False)
         CHECK["validate_report"](report, "a" * 40, True)
         for claim in ("normal_recipient_cli_claimed", "encrypted_identity_store_claimed",
-                      "normal_publisher_cli_claimed", "mailbox_runtime_claimed", "full_c07_claimed"):
+                      "normal_publisher_cli_claimed", "local_private_cache_handoff_claimed",
+                      "network_publisher_runtime_claimed", "mailbox_runtime_claimed", "full_c07_claimed"):
             wrong = copy.deepcopy(report)
             wrong[claim] = not wrong[claim]
             with self.assertRaises(ValueError):
                 CHECK["validate_report"](wrong, "a" * 40, True)
+
+    def test_private_handoff_requires_real_account_boundary_and_complete_transfer(self):
+        for key, field, value in (
+            ("isolation", "agent_uid", 1001), ("isolation", "control_gid", 1002),
+            ("isolation", "agent_cannot_read_user_cache_or_secrets", False),
+            ("import", "complete", False), ("export", "private_keys_transferred", True),
+            ("export", "manifest_id", "c" * 64), ("export", "ciphertext_bytes", 1),
+            ("open", "bytes", 1), ("status_after", "serving", True),
+        ):
+            with self.subTest(key=key, field=field):
+                handoff = private_fixture()["private_message"]["local_handoff"]
+                handoff[key][field] = value
+                with self.assertRaises(ValueError):
+                    CHECK["validate_private_handoff"](handoff)
 
     def test_private_isolation_decryption_and_cleanup_are_required(self):
         for label, mutation in (

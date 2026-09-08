@@ -4,6 +4,84 @@ use prost::Message;
 
 use crate::ControlProtocolError;
 
+/// Explicit transfer of one recipient-encrypted native object from a user cache to the agent.
+#[derive(Clone, PartialEq, Message)]
+pub struct ContentImportRequest {
+    /// Exact canonical manifest signed by the independently trusted sender.
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest: Vec<u8>,
+    /// Independently trusted sender's Ed25519 public key.
+    #[prost(bytes = "vec", tag = "2")]
+    pub publisher_key: Vec<u8>,
+    /// New absolute agent-owned cache path; existing directories are never adopted.
+    #[prost(string, tag = "3")]
+    pub cache: String,
+    /// Explicit agent cache budget.
+    #[prost(message, optional, tag = "4")]
+    pub limits: Option<ContentCacheLimits>,
+}
+
+/// Explicit transfer of one encrypted object from an existing agent-owned cache to the user.
+#[derive(Clone, PartialEq, Message)]
+pub struct ContentExportRequest {
+    /// Exact canonical manifest signed by the independently trusted sender.
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest: Vec<u8>,
+    /// Independently trusted sender's Ed25519 public key.
+    #[prost(bytes = "vec", tag = "2")]
+    pub publisher_key: Vec<u8>,
+    /// Existing absolute agent-owned cache path; no ownership changes are made.
+    #[prost(string, tag = "3")]
+    pub cache: String,
+    /// Explicit agent cache budget.
+    #[prost(message, optional, tag = "4")]
+    pub limits: Option<ContentCacheLimits>,
+}
+
+/// Permission to begin a bounded chunk exchange on this same local socket, not completion.
+#[derive(Clone, PartialEq, Eq, Message)]
+pub struct ContentTransferReady {
+    /// SHA-256 of the exact independently verified canonical signed manifest.
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest_id: Vec<u8>,
+    /// Expected complete encrypted object bytes, not bytes already transferred.
+    #[prost(uint64, tag = "2")]
+    pub bytes: u64,
+    /// Expected complete ordered chunk count, not chunks already transferred.
+    #[prost(uint32, tag = "3")]
+    pub chunks: u32,
+}
+
+impl ContentImportRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        validate_publication(&self.manifest, &self.publisher_key)?;
+        validate_path(&self.cache)?;
+        validate_limits(self.limits)
+    }
+}
+
+impl ContentExportRequest {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        validate_publication(&self.manifest, &self.publisher_key)?;
+        validate_path(&self.cache)?;
+        validate_limits(self.limits)
+    }
+}
+
+impl ContentTransferReady {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.manifest_id.len() != 32
+            || !(54..=4 * 1024 * 1024 + 64).contains(&self.bytes)
+            || !(1..=17).contains(&self.chunks)
+        {
+            return Err(ControlProtocolError::Invalid(
+                "invalid content transfer readiness",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Resource limits for explicitly selected owned caches; never a privileged operation.
 #[derive(Clone, Copy, PartialEq, Eq, Message)]
 pub struct ContentCacheLimits {
@@ -286,6 +364,62 @@ mod tests {
         control_request::Operation, control_response::Payload, decode_request, decode_response,
         encode_request, encode_response,
     };
+
+    #[test]
+    fn content_ciphertext_handoff_has_distinct_ready_and_unchanged_frame_limit() {
+        let import = ContentImportRequest {
+            manifest: vec![1; 256],
+            publisher_key: vec![2; 32],
+            cache: "/owned/new-cache".into(),
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 8 * 1024 * 1024,
+                max_entries: 32,
+                min_free_bytes: 0,
+            }),
+        };
+        let export = ContentExportRequest {
+            manifest: import.manifest.clone(),
+            publisher_key: import.publisher_key.clone(),
+            cache: import.cache.clone(),
+            limits: import.limits,
+        };
+        for operation in [
+            Operation::ContentImport(import.clone()),
+            Operation::ContentExport(export),
+        ] {
+            let request = ControlRequest {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: vec![3; 16],
+                operation: Some(operation),
+            };
+            assert_eq!(
+                decode_request(&encode_request(&request).expect("encode")).expect("decode"),
+                request
+            );
+        }
+        let mut ready = ContentTransferReady {
+            manifest_id: vec![4; 32],
+            bytes: 4 * 1024 * 1024 + 64,
+            chunks: 17,
+        };
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![3; 16],
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "CONTENT_TRANSFER_READY".into(),
+            payload: Some(Payload::ContentTransferReady(ready.clone())),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).expect("encode")).expect("decode"),
+            response
+        );
+        ready.bytes += 1;
+        assert!(ready.validate().is_err());
+        let mut invalid = import;
+        invalid.cache = "relative".into();
+        assert!(invalid.validate().is_err());
+        assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
+    }
 
     #[test]
     fn content_requests_are_typed_bounded_and_require_explicit_trust_and_paths() {

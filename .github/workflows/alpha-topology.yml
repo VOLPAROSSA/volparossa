@@ -75,6 +75,7 @@ jobs:
           python3 -B tests/integration/test-uplink-link-smoke.py
           python3 -B tests/integration/test-download-sharing-snapshot.py
           sh -n tests/integration/content-network-smoke.sh
+          sh -n tests/integration/content-handoff-smoke.sh
           python3 -B tests/integration/test-content-network-smoke.py
           sh -n tests/integration/content-https-smoke.sh
           python3 -B tests/integration/test-content-https-smoke.py
