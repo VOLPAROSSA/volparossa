@@ -292,7 +292,12 @@ The newer [exact `d2f886c8` Quality run](https://github.com/VOLPAROSSA/volpaross
 fails in `ownership_journal::actor::tests::queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission`:
 initial `register_intent` returns `Ambiguous`, before the queue/gate assertions. The helper result
 is 831 passed, one failed, two ignored; the short fixture setup deadline is under investigation,
-not a proven cause. The DNS actor actually runs and passes through the explicitly opted-in
+not a proven cause. Three isolated local repeats pass, so the CI failure is not reproduced.
+The fixture's two pre-gate durable setup operations now use its already established 2.5-second
+I/O deadline, like the adjacent tests, instead of the 500-ms default intended for timeout tests.
+The queue operations, reserved shutdown slot, fencing assertions and production deadlines are
+unchanged. The changed queue test and adjacent timeout/fencing test pass; a new complete CI pass
+is still required. The DNS actor actually runs and passes through the explicitly opted-in
 disposable-namespace fallback, so this is not the old UID-mapping blocker. All three
 [CodeQL analysis jobs](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186328279) pass,
 but the [separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101935381514) still

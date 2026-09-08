@@ -3080,11 +3080,12 @@ fn queue_capacity_reserves_shutdown_and_the_fence_linearizes_admission() {
         Some(Arc::clone(&gate)),
     )
     .expect("start actor");
+    // Durable setup is not the queue/fence deadline under test; use the existing I/O budget.
     let key = actor
-        .register_intent(durable_intent(10))
+        .register_intent_until(durable_intent(10), io_deadline())
         .expect("register intent");
     actor
-        .arm_prepare(&key, durable_anchor(10))
+        .arm_prepare_until(&key, durable_anchor(10), io_deadline())
         .expect("arm intent");
     let client = actor.client.as_ref().expect("actor client").clone();
     let active = client
