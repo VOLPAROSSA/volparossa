@@ -29,9 +29,9 @@ def layout(phase="uptake"):
 
 
 def classify(current, role, source, destination, protocol=socket.IPPROTO_UDP,
-             sport=22000, dport=23000, payload=struct.pack("<I", 4) + bytes(44)):
+             sport=22000, dport=23000, payload=struct.pack("<I", 4) + bytes(44), iface="physical0"):
     return CAPTURE.classify(current, role, protocol, source, sport, destination,
-                            dport, payload, "physical0")
+                            dport, payload, iface)
 
 
 def udp_frame(source, destination, payload):
@@ -100,9 +100,9 @@ class ReplicationCaptureTests(unittest.TestCase):
                          {"forbidden_packets": 1})
         self.assertEqual(classify(current, "relay4", "49.165.5.1", "203.0.113.1", sport=5353, dport=5353),
                          {"forbidden_packets": 1})
-        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=5353, dport=5353),
+        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=5353, dport=5353, iface="ar0"),
                          {"mdns_packets": 1, "control_packets": 1})
-        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=45678, dport=5353),
+        self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=45678, dport=5353, iface="ar0"),
                          {"mdns_packets": 1, "control_packets": 1})
         self.assertEqual(classify(current, "relay4", "10.241.90.1", "224.0.0.251", sport=0, dport=5353),
                          {"forbidden_packets": 1})
@@ -138,6 +138,47 @@ class ReplicationCaptureTests(unittest.TestCase):
                          {"forbidden_packets": 1})
         self.assertEqual(classify(current, "exit", "49.165.5.1", "46.162.3.1", payload=payload)[
             "direct_client_exit_packets"], 1)
+
+    def test_exact_fixture_control_errors_bind_reverse_quote_ports_and_physical_link(self):
+        current = layout()
+        for iface, segment in (("xr3", 23), ("xr5", 25)):
+            src, dst = f"10.241.{segment}.1", f"10.241.{segment}.2"
+            udp = struct.pack("!HHHH", 45678, 41000, 8, 0)
+            quoted = ipv4_frame(dst, src, socket.IPPROTO_UDP, udp)[14:]
+            error = b"\x03\x03" + bytes(6) + quoted
+            self.assertEqual(classify(current, "exit", dst, src, dport=41000, iface=iface),
+                             {"control_packets": 1})
+            self.assertEqual(classify(current, "exit", src, dst, socket.IPPROTO_ICMP,
+                                      payload=error, iface=iface),
+                             {"control_packets": 1, "control_port_unreachable_packets": 1})
+            wrong_port = bytearray(error)
+            wrong_port[-6:-4] = struct.pack("!H", 443)
+            fragmented = bytearray(error)
+            fragmented[14:16] = b"\x20\x00"
+            for bad in (b"\x03\x04" + error[2:], b"\x0b\x00" + error[2:], error[:-1],
+                        bytes(wrong_port), bytes(fragmented)):
+                self.assertEqual(classify(current, "exit", src, dst, socket.IPPROTO_ICMP,
+                                          payload=bad, iface=iface), {"forbidden_packets": 1})
+            for bad_src, bad_dst, bad_iface in ((dst, src, iface), (src, "10.241.99.2", iface),
+                                                (src, dst, "xr2"), ("203.0.113.1", dst, iface)):
+                self.assertEqual(classify(current, "exit", bad_src, bad_dst, socket.IPPROTO_ICMP,
+                                          payload=error, iface=bad_iface), {"forbidden_packets": 1})
+            self.assertEqual(classify(current, "exit", dst, src, dport=443, iface=iface),
+                             {"forbidden_packets": 1})
+            self.assertEqual(classify(current, "exit", "10.241.99.2", src, dport=41000, iface=iface),
+                             {"forbidden_packets": 1})
+
+    def test_mdns_source_must_belong_to_the_actual_captured_fixture_link(self):
+        current = layout()
+        for source in ("47.163.4.1", "47.163.4.2", "10.241.31.1", "10.241.31.2"):
+            self.assertEqual(classify(current, "exit", source, "224.0.0.251", sport=45678,
+                                      dport=5353, iface="xd"), {"mdns_packets": 1, "control_packets": 1})
+            self.assertEqual(classify(current, "exit", source, "224.0.0.251", sport=45678,
+                                      dport=5353, iface="xr3"), {"forbidden_packets": 1})
+        self.assertEqual(classify(current, "relay4", "10.241.99.1", "224.0.0.251", sport=45678,
+                                  dport=5353, iface="ar0"), {"forbidden_packets": 1})
+        self.assertEqual(CAPTURE.MDNS_INTERFACE_ADDRESSES["relay4", "ar1"],
+                         {"10.241.94.1", "10.241.94.2"})
 
     def test_layout_and_frame_bounds_reject_substitution_fragments_and_truncation(self):
         current = layout()

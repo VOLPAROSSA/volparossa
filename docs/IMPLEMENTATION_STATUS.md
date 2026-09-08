@@ -11,6 +11,55 @@ experiment, through an application/browser boundary. C01 now passes; C02--C08 re
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Scoped downlink and mixed-link runs now pass; content/application integration continues.
 
+## Latest content integration checkpoint
+
+The [provider run on `e592b610`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171708813)
+is **successful**, including final evidence assembly. Normal native and complete-cache HTTPS
+commands reconstruct 2,097,275 bytes from two independent authenticated provider nodes. A separate
+missing-cache request combines 1,048,699 peer bytes with four exact 206 ranges totaling 1,048,576
+origin bytes; every output has SHA-256
+`add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+Eleven Exit MPTCP flows and six origin TLS 1.3 sessions complete. Provider withdrawal, physical
+boundary/control captures and zero-owned-object cleanup pass; raw guest state is identical before
+and after. Artifact SHA-256: `f645104c36fd58add5f146c63c20556e417c1752f07319902a314e0b22f74371`.
+This is the explicit native/cooperative-origin retrieval proof; its report does not claim general
+NAT reachability, arbitrary browser integration, speedup or full C02. Earlier failed runs below
+remain historical failures, not current download blockers or retroactively changed reports.
+
+The [same-source C03 run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171709574)
+completes v3 receiver-credit uptake: foreground P is 524,609 bytes; previously absent Q contributes
+262,267 bytes / two chunks / one publication. With original R5 inactive, PID zero and listener
+absent, a fresh independent Client fetches Q from R4 with the exact expected hash. All four Exit
+MPTCP flows complete. The final privacy gate remains **failed**: exact fixture-private control
+UDP/quoted port-unreachable packets need bounded classification, and R4's retired Client route
+still receives WireGuard retries from its former remote relays. Local Destroy does not yet retire
+their remote owners; they survive until expiry or global cleanup. This is an actual remote-route
+lifecycle gap, not permission to allow those packets. All captures drain with zero drops and final
+global cleanup leaves unchanged guest state. Artifact SHA-256:
+`80b0f3f132cc02bda5f4abd751d1568392a106c3de92394e9db51906b0c7fee3`.
+The next classifier only admits control UDP/ICMP on the exact configured xr3/xr5 address pairs,
+requiring the outer ICMP tuple to reverse its valid, unfragmented UDP41000 quote. mDNS source
+addresses are narrowed to the actual physical pair. Eleven capture tests pass; unexpected
+WireGuard traffic remains forbidden while real remote retirement is implemented.
+
+Explicit replica persistence is integrated locally. `content serve --reuse-replica-cache`
+reopens the owned store, verifies a bounded cache-ID-bound journal and original signed manifests,
+and registers live chunks before starting a listener. Successive uptake merges old chunk sets
+without renewing expiry or turning a storage peer into a publisher. Missing journals restore no
+registrations; corrupt/foreign/busy stores or missing live chunks fail. Expired entries are not
+served, but their bytes are not automatically deleted. Three real library persistence tests,
+two agent tests, one CLI test, one typed wire test and combined strict content/agent/CLI/control
+Clippy pass. The next C03 fixture explicitly stops/reopens R4's service after R5 is offline, without
+supplying Q's manifest to R4, then requires Q to be retrieved from that restored registration.
+Three evidence-checker tests and shell syntax pass; that new network proof is pending. Automatic
+boot service, retention repair, expiry reclamation, full C03 and full C04 remain incomplete.
+
+Exact `e592b610` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171679274) and
+[CodeQL analysis](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171677187) pass. The separate
+PR CodeQL alert gate remains failed with 117 base-relative alerts; it is not a green security claim.
+
+## Earlier source-scoped content checkpoints
+
 The [content KVM run on `f0a906ca`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34146922945)
 passes through existing genuine MPTCP/TLS and both WireGuard legs. Bounded owned caches rebuild
 2,097,275 bytes / nine signed chunks after removing the publisher directory/key. The first

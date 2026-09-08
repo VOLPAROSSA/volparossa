@@ -138,11 +138,7 @@ impl ContentRuntime {
             }
             let mut registry = active.registry.try_lock().map_err(|_| ContentError::Busy)?;
             register(&mut registry, &request, manifest, cache_limits)?;
-            let mut receipt = ContentReceipt {
-                serving: true,
-                publications: u32::try_from(registry.len()).map_err(|_| ContentError::Invalid)?,
-                ..ContentReceipt::default()
-            };
+            let mut receipt = serving_receipt(&registry)?;
             drop(registry);
             if let Some(replication) = &active.replication {
                 replication.receipt(&mut receipt).await?;
@@ -153,8 +149,12 @@ impl ContentRuntime {
         register(&mut registry, &request, manifest, cache_limits)?;
         let replication = request
             .replication
-            .map(ReplicationRuntime::create)
+            .map(|config| ReplicationRuntime::create(config, &mut registry))
             .transpose()?;
+        let mut receipt = serving_receipt(&registry)?;
+        if let Some(runtime) = &replication {
+            runtime.receipt(&mut receipt).await?;
+        }
         let tls = tls::ContentTlsServer::new(&self.tls_identity, endpoint.hostname())
             .map_err(|_| ContentError::Unavailable)?;
         let listener = TcpListener::bind(bind)
@@ -189,12 +189,7 @@ impl ContentRuntime {
             task,
             replication,
         });
-        Ok(ContentReceipt {
-            serving: true,
-            publications: 1,
-            replication_enabled: service.as_ref().is_some_and(|s| s.replication.is_some()),
-            ..ContentReceipt::default()
-        })
+        Ok(receipt)
     }
 
     fn offer(&self, endpoint: ProviderEndpoint) -> Result<SignedProviderOffer, ContentError> {
@@ -585,6 +580,14 @@ async fn content_event(context: &ControlContext, code: &'static str) {
         code,
         unix_millis(),
     );
+}
+
+fn serving_receipt(registry: &PublicationRegistry) -> Result<ContentReceipt, ContentError> {
+    Ok(ContentReceipt {
+        serving: true,
+        publications: u32::try_from(registry.len()).map_err(|_| ContentError::Invalid)?,
+        ..ContentReceipt::default()
+    })
 }
 
 fn verified(bytes: &[u8], key: &[u8]) -> Result<VerifiedManifest, ContentError> {

@@ -4,6 +4,9 @@
 //! publisher or HTTPS authority. Foreground consumers still authorize their own manifests.
 //! Hop counts are bounded locally, not protected against a malicious peer resetting its claim.
 
+mod persistence;
+pub use persistence::{persist_replicas, restore_replicas};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -143,6 +146,12 @@ pub(super) struct SharedPublication {
 }
 
 impl PublicationRegistry {
+    /// Whether this exact manifest already has an explicit local registration.
+    /// This is not publisher/origin authority and never exposes the registered cache path.
+    pub fn contains(&self, manifest_id: &[u8; 32]) -> bool {
+        self.entries.contains_key(manifest_id)
+    }
+
     /// Explicitly opt a caller-authenticated publication into scarce extra-chunk export.
     ///
     /// Ordinary [`Self::register`] entries are not exported by this protocol. The caller must

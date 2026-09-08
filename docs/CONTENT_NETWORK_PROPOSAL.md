@@ -119,9 +119,12 @@ original scenario still failed before its final explicit service-stop steps. Cle
 with unchanged host state. The `472b6e7a` rerun again completes both two-provider downloads,
 but a subsequent lookup yields no usable peer offer and HTTPS falls back to the complete origin
 body. The same repeated-lookup defect blocks the new C03 sequence after its first real download.
-Its cause is still under investigation, not attributed to expired route or offer authority.
-The full C02 scenario remains pending; automatic placement,
-retention and name lookup are not supplied by this retrieval proof, and C06 remains open.
+The subsequent native-role/content-offer ownership and unchanged-policy refresh fixes preserve
+valid provider offers without renewing their deadlines. The fresh `e592b610` provider scenario
+now passes native and both HTTPS cases, including exact partial ranges, physical captures and
+cleanup. That scoped explicit-object proof does not establish general NAT reachability or a
+complete C02 claim. Automatic placement, retention and name lookup are not supplied by it,
+and C06 remains open.
 The newer normal HTTPS command is described below; [implementation status](IMPLEMENTATION_STATUS.md)
 retains the source-specific network and Quality results.
 
@@ -246,8 +249,8 @@ and eviction, so old cache hits are not reported as new network delivery.
 Default trust comes from Debian's system certificate bundle. Optional `--ca-file` is a bounded
 explicit public PEM input used only for this operation, not an installed interception CA or a
 certificate/hostname-verification bypass. CLI/agent/control tests and strict Clippy pass locally;
-the normal command's exact protected-route KVM proof remains pending. Prior fixture passes do
-not establish this newer integration or complete C02/C08. There is still no automatic capture
+the normal command's exact protected-route KVM proof now passes on `e592b610`, with two
+independent providers and four exact fallback ranges. This is not complete C02/C08 or automatic capture
 of arbitrary browser HTTPS, personalized response sharing, or generic unsupported-site adapter.
 
 ### Bounded post-download redistribution
@@ -281,14 +284,25 @@ One already credited chunk may overlap new owner demand. These configured-interf
 are not all-link/per-flow accounting, radio fairness or a no-slowdown/speedup guarantee. The job
 does not subtract its own estimated bytes from counters; samples run at quiet credit boundaries,
 where residual packets may conservatively reject the next credit rather than renew any budget.
-Registry metadata remains in memory, and quota exhaustion pauses uptake rather than providing
-retention repair or expiry reclamation. Those parts of C03/C04 remain open.
+Original replica manifests, hop counts and retained chunk IDs now persist in a private,
+cache-ID-bound, atomically replaced journal (at most 64 records / 8 MiB). Subsequent uptake merges
+with previous valid records; partial replicas retain their original expiry. Explicit
+`content serve --reuse-replica-cache` validates the original signature, cache ownership and live
+chunks before registering them. Missing metadata grants no authority; foreign/corrupt records
+are refused. Expired records are skipped without deleting chunks. No boot service, retention
+repair, expiry reclamation or storage-peer publisher authority is introduced.
+Quota exhaustion still pauses uptake; those remaining C03/C04 mechanisms stay open.
 
 Five focused duplex tests pass, including actual uptake followed by re-serving, quota without
 eviction, exclusions/duplicates, original expiry/hops, malformed data and a hard deadline.
-Existing v1 provider tests still pass. Agent/CLI integration compiles; a new fixture prepares
-distinct foreground and reserve objects only at the original provider. It is not evidence that
-the new multi-node agent sequence has passed. C03 and C04 therefore remain unchecked.
+Existing v1 provider tests still pass. Three new persistence probes cover actual credit-uptake,
+merge, original expiry and re-serving after publisher removal and store reopen; two agent
+tests cover explicit restoration, missing journals and full/duplicate registration handling.
+Strict content/agent/CLI/local-control Clippy passes. The `e592b610` network run completes v3 Q
+uptake and an independent Client's Q retrieval after the original provider stops, but its final
+capture gate remains failed because remote route owners survive the replicator's disconnect.
+The next fixture also stops and explicitly reopens the replica service from its journal before
+that final retrieval. Its live result is pending; C03 and C04 therefore remain unchecked.
 
 ## Integrated functional checkpoints
 

@@ -30,7 +30,7 @@ COUNTERS = (
     "client_leg_wireguard_data_bytes", "exit_leg_wireguard_data_bytes",
     "wireguard_handshake_packets", "wireguard_keepalive_packets",
     "provider_request_packets", "provider_response_packets", "provider_response_payload_bytes",
-    "control_packets", "mdns_packets", "neighbor_packets", "ipv4_frames", "ipv6_frames",
+    "control_packets", "control_port_unreachable_packets", "mdns_packets", "neighbor_packets", "ipv4_frames", "ipv6_frames",
     "forbidden_packets", "direct_client_exit_packets", "direct_provider_packets",
     "malformed_packets",
 )
@@ -58,6 +58,76 @@ MAX_FRAMES = 1_048_576
 MAX_FRAME_BYTES = 65_589  # Ethernet + IPv6 header + maximum non-jumbo IPv6 payload.
 MAX_SECONDS = 1800
 DRAIN_SECONDS = 3
+
+
+def fixture_mdns_addresses():
+    """Exact assigned addresses from kvm-alpha-topology + replication link_nodes calls."""
+    addresses = {(node, "underlay"): {ip} for node, ip in PUBLIC.items()}
+
+    def link(left, lif, right, rif, segment):
+        pair = {f"10.241.{segment}.1", f"10.241.{segment}.2"}
+        addresses[left, lif] = pair
+        addresses[right, rif] = pair
+
+    for index in range(6):
+        relay = f"relay{index}"
+        link("client", f"cr{index}", relay, f"r{index}c", 10 + index)
+        link(relay, f"r{index}x", "exit", f"xr{index}", 20 + index)
+        for bootstrap in (1, 2):
+            link(relay, f"r{index}b{bootstrap}", f"bootstrap{bootstrap}",
+                 f"b{bootstrap}r{index}", 41 + 2 * index + bootstrap)
+    for bootstrap in (1, 2):
+        link("client", f"cb{bootstrap}", f"bootstrap{bootstrap}", f"b{bootstrap}c", 39 + bootstrap)
+    link("relay0", "r0x2", "exit2", "x2r0", 26)
+    link("exit", "xd", "destination", "dx", 31)
+    addresses["exit", "xd"].update(("47.163.4.1", "47.163.4.2"))
+    for index, segment in enumerate((90, 94, 92)):
+        link("relay4", f"ar{index}", f"relay{index}", f"r{index}a", segment)
+        link(f"relay{index}", f"rp{index}", "relay5", f"pr{index}", segment + 1)
+    return addresses
+
+
+MDNS_INTERFACE_ADDRESSES = fixture_mdns_addresses()
+# Only the observed unused-Relay3 and stopped-provider5 control links. Each side
+# lists its actual private interface address and its assigned public source alias.
+# These addresses do not authorize an application or a WireGuard dataplane pair.
+EXACT_CONTROL_LINKS = {
+    ("exit", "xr3"): ({"10.241.23.2", "46.162.3.1"}, {"10.241.23.1", "48.164.4.1"}),
+    ("exit", "xr5"): ({"10.241.25.2", "46.162.3.1"}, {"10.241.25.1", "50.166.6.1"}),
+}
+
+
+def exact_control_pair(node, iface, source, destination):
+    local, remote = EXACT_CONTROL_LINKS.get((node, iface), ((), ()))
+    return ((source in local and destination in remote)
+            or (source in remote and destination in local))
+
+
+def quoted_udp(payload):
+    """Read only the bounded quoted IPv4/UDP headers; malformed quotations stay invalid."""
+    quote = payload[8:]
+    offset = (quote[0] & 15) * 4 if quote else 0
+    if len(quote) < 20 or quote[0] >> 4 != 4 or not 20 <= offset <= 60 \
+            or len(quote) < offset + 8 or quote[9] != socket.IPPROTO_UDP \
+            or struct.unpack("!H", quote[6:8])[0] & 0x3fff \
+            or struct.unpack("!H", quote[2:4])[0] < offset + 8:
+        return None
+    sport, dport, length = struct.unpack("!HHH", quote[offset:offset + 6])
+    if length < 8 or offset + length > struct.unpack("!H", quote[2:4])[0]:
+        return None
+    return (socket.inet_ntoa(quote[12:16]), sport, socket.inet_ntoa(quote[16:20]), dport)
+
+
+def exact_control_port_unreachable(node, iface, source, destination, payload):
+    if len(payload) < 8 or payload[:2] != b"\x03\x03" \
+            or not exact_control_pair(node, iface, source, destination):
+        return False
+    quoted = quoted_udp(payload)
+    if quoted is None:
+        return False
+    qsource, sport, qdestination, dport = quoted
+    return (qsource == destination and qdestination == source and sport != 0 and dport != 0
+            and 41000 in (sport, dport))
 
 
 def validate_layout(layout):
@@ -110,12 +180,17 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
     if protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
             and src in CONTROL_PEERS and dst in CONTROL_PEERS and src != dst:
         return {"control_packets": 1}
+    if protocol == socket.IPPROTO_UDP and sport != 0 and dport != 0 \
+            and 41000 in (sport, dport) and exact_control_pair(node, iface, src, dst):
+        return {"control_packets": 1}
+    if protocol == socket.IPPROTO_ICMP and exact_control_port_unreachable(node, iface, src, dst, payload):
+        return {"control_packets": 1, "control_port_unreachable_packets": 1}
     # Control connectivity is distinct from directly reaching an Exit dataplane.
     if pair == {client, exit_ip}:
         return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
     # Pinned libp2p-mdns uses a separate ephemeral-port send socket, not source5353.
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport == 5353 \
-            and dst == "224.0.0.251" and (src in CONTROL_PEERS or source in FIXTURE_LINKS):
+            and dst == "224.0.0.251" and src in MDNS_INTERFACE_ADDRESSES.get((node, iface), ()):
         return {"mdns_packets": 1, "control_packets": 1}
     if protocol == socket.IPPROTO_TCP and pair == {exit_ip, provider} and node in (
             layout["exit"]["node"], layout["provider"]["node"]):

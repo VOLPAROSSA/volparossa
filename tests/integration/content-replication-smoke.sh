@@ -288,6 +288,27 @@ content_replication_run() {
         --argjson pid "$cr_origin_pid" '{unit:$unit,active_state:$state,main_pid:$pid,listener_absent:true}' \
         >"$WORK/content-replication-origin-offline.json"
 
+    PHASE=content-replication-reopen
+    # Stop drops the service registry and replication runtime. Recreate them explicitly from
+    # the owned cache after R5 is offline; Q's manifest is still never supplied to R4.
+    content_replication_cli relay4 content stop >"$WORK/content-replication-replica-pause.json" \
+        2>"$WORK/content-replication-replica-pause.err" || fail CONTENT_REPLICATION_PAUSE_FAILED
+    jq -e '.serving == false and .publications == 0 and .replication_enabled == false' \
+        "$WORK/content-replication-replica-pause.json" >/dev/null || fail CONTENT_REPLICATION_PAUSE_INCOMPLETE
+    ip netns exec "$R4" ss -H -ltn 'sport = :18080' >"$WORK/content-replication-paused-listeners.txt"
+    [ ! -s "$WORK/content-replication-paused-listeners.txt" ] || fail CONTENT_REPLICATION_PAUSED_LISTENER_SURVIVED
+    [ ! -e "$cr_replica/q.bin" ] || fail CONTENT_REPLICATION_MANIFEST_SHORTCUT
+    content_replication_isolation relay4 "$cr_replica/p.bin" || fail CONTENT_REPLICATION_ORIGIN_SHORTCUT
+    content_replication_cli relay4 content serve --manifest "$cr_replica/p.bin" --publisher-key "$cr_key" \
+        --cache "$cr_replica/primary-p" --bind 49.165.5.1:18080 \
+        --advertised-hostname provider-a.volparossa.test \
+        --replica-cache "$cr_replica/replicas" --reuse-replica-cache \
+        >"$WORK/content-replication-replica-resume.json" \
+        2>"$WORK/content-replication-replica-resume.err" || fail CONTENT_REPLICATION_REOPEN_FAILED
+    jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 1
+        and .replica_chunks == 2 and .replica_bytes == 262267' \
+        "$WORK/content-replication-replica-resume.json" >/dev/null || fail CONTENT_REPLICATION_RESTORE_INCOMPLETE
+
     PHASE=content-replication-reserve-fetch
     content_replication_select client content-replication-final || fail CONTENT_REPLICATION_FINAL_ROUTE_UNAVAILABLE
     content_replication_capture reserve-fetch || fail CONTENT_REPLICATION_FINAL_CAPTURE_UNAVAILABLE
@@ -308,7 +329,8 @@ content_replication_run() {
       {foreground:{sha256:$psha,bytes:$pbytes},reserve:{sha256:$qsha,bytes:$qbytes},
        replicator_cannot_read_original_cache:true,consumer_cannot_read_either_cache:true,
        reserve_manifest_not_supplied_to_replicator:true,replica_cache_initially_absent:true,
-       final_cache_initially_absent:true,original_listener_absent_before_final_fetch:true}' \
+       final_cache_initially_absent:true,original_listener_absent_before_final_fetch:true,
+       replica_listener_absent_before_reopen:true,replica_reopened_after_original_shutdown:true}' \
         >"$WORK/content-replication-output.json"
     python3 -B "$source_directory/tests/integration/content-replication-smoke.py" evidence \
         "$WORK" "$WORK/content-replication-evidence.json" || fail CONTENT_REPLICATION_EVIDENCE_INVALID
@@ -328,7 +350,7 @@ content_replication_finalize_report() {
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host.unchanged),
        transfer:$evidence,cleanup:{complete:$complete,remaining_owned_objects:$remaining},
        host_state:($host | del(.acceptance_id)),
-       scope:"explicit public P/Q objects, one opportunistic replica then protected re-serving after original agent shutdown",
+       scope:"explicit public P/Q objects, one opportunistic replica, explicit service stop/reopen after original agent shutdown, then protected re-serving",
        full_c03_claimed:false,full_c04_claimed:false,speed_improvement_claimed:false,
        browser_integration_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-replication-smoke.json" || return 1

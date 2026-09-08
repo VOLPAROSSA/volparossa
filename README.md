@@ -98,20 +98,16 @@ from explicitly selected owned caches. Those two commands remain offline. New `c
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
 reconstruct the same object from two independent providers; missing HTTPS chunks use exact
-origin ranges. Lookup reliability remains under integration: the latest live failure reaches
-a provider whose offer was withdrawn although its cache listener had been registered. A native
-Relay/Exit advertisement withdrawal incorrectly also withdrew that independent content offer.
-The ownership correction passes a real actor regression. The next multi-node run exposed a
-second cause: reloading an unchanged policy every 30 seconds also withdrew content. That reload
-now preserves active registrations, in-flight offers and original deadlines; a new real actor
-regression passes. The next multi-node run (`4c4c8954`) completes native and both HTTPS downloads,
-then fails in the final checker because it reads kernel route arrays as objects. That checker
-is corrected and accepts the original records; the historical CI run remains failed.
+origin ranges. The [fresh provider run on `e592b610`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171708813)
+passes all three downloads, physical-boundary checks and cleanup with unchanged guest state.
+This proves the explicit native/cooperative-origin command path, not arbitrary browser HTTPS,
+general NAT reachability or a speed improvement. Independent content offers now survive native
+role-advertisement withdrawal and unchanged policy refresh without extending their deadlines.
 Both `content fetch` and `content fetch-https` support explicit `--reuse-cache` to resume from
 an existing owned cache, retrieving only missing chunks. HTTPS still obtains fresh origin
 authorization; cached bytes do not renew expiry or count as newly received peer traffic.
 See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
-[exact failed checkpoint](docs/IMPLEMENTATION_STATUS.md).
+[source-scoped results](docs/IMPLEMENTATION_STATUS.md).
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 Normal `content recipient-key`, `content publish-message` and `content open-message` commands
@@ -127,10 +123,14 @@ replica cache can pick up other signed chunks from a provider used by a complete
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
 tests pass. Optional uptake now requests one chunk at a time, checking the configured links
 before granting the next chunk; a busy sample ends the exchange with verified partial data.
-Actual multi-node uptake and re-serving after original-provider shutdown now work on `4c4c8954`;
-its final capture report is still rejected and being corrected. Full owner-priority behavior
-remains unfinished, and that run predates the new one-chunk-credit mechanism.
-A complete mailbox, durable redistribution, shared DNS and browser integration also remain
+The new one-chunk-credit exchange also completes multi-node uptake and re-serving on `e592b610`,
+after the original provider shuts down. Its final capture check still fails: the replicator's
+local disconnect leaves remote WireGuard route owners alive until expiry. Explicit remote
+retirement is being added; that failed scenario is not a privacy pass.
+`content serve --reuse-replica-cache` now explicitly restores unexpired registrations from an
+owned replica cache; local transfer/reopen/re-serving tests pass. This starts no service on boot
+and does not supply automatic repair or retention guarantees; its network probe is pending.
+A complete mailbox, retention repair, shared DNS, full owner-priority behavior and browser integration remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:

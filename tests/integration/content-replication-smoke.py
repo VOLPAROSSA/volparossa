@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Exact-source P/Q uptake and protected re-serving; not general spare-capacity proof."""
+"""Exact-source P/Q uptake, explicit reopen and re-serving; not general spare-capacity proof."""
 
 import json
 from pathlib import Path
@@ -27,7 +27,8 @@ SCOPE = ("full_c03_claimed", "full_c04_claimed", "speed_improvement_claimed",
          "browser_integration_claimed", "full_alpha_acceptance_claimed")
 ISOLATION = ("replicator_cannot_read_original_cache", "consumer_cannot_read_either_cache",
              "reserve_manifest_not_supplied_to_replicator", "replica_cache_initially_absent",
-             "final_cache_initially_absent", "original_listener_absent_before_final_fetch")
+             "final_cache_initially_absent", "original_listener_absent_before_final_fetch",
+             "replica_listener_absent_before_reopen", "replica_reopened_after_original_shutdown")
 
 
 def require(condition, message):
@@ -153,9 +154,15 @@ def validate_evidence(evidence):
             and before["control_relay_peer_id"] == after["control_relay_peer_id"]
             == evidence["foreground_fetch"]["control_relay_peer_id"],
             "actual bounded new Q storage/registration after foreground P not proven")
-    for record in (evidence["origin_stop"], evidence["replica_stop"]):
+    for record in (evidence["origin_stop"], evidence["replica_pause"], evidence["replica_stop"]):
         require(record["serving"] is False and record["publications"] == 0,
                 "service withdrawal incomplete")
+    resumed = evidence["replica_resume"]
+    require(evidence["replica_pause"]["replication_enabled"] is False
+            and resumed["serving"] is True and resumed["replication_enabled"] is True
+            and resumed["publications"] == 2 and resumed["replica_publications"] == 1
+            and resumed["replica_chunks"] == 2 and resumed["replica_bytes"] == Q_BYTES,
+            "explicitly recreated service did not restore original Q registration and chunks")
     require(evidence["origin_offline"] == dict(unit="volparossa-alpha-agent@relay5.service",
             active_state="inactive", main_pid=0, listener_absent=True),
             "original provider agent was not stopped before final retrieval")
@@ -179,7 +186,8 @@ def build_evidence(work):
     mapping = {"publication": "publication", "output": "output", "warm_fetch": "warm-fetch",
                "foreground_fetch": "foreground-fetch", "final_fetch": "final-fetch",
                "before": "before", "after": "after", "origin_stop": "origin-stop",
-               "origin_offline": "origin-offline", "replica_stop": "replica-stop"}
+               "origin_offline": "origin-offline", "replica_stop": "replica-stop",
+               "replica_pause": "replica-pause", "replica_resume": "replica-resume"}
     evidence = {key: read(work / f"content-replication-{suffix}.json") for key, suffix in mapping.items()}
     evidence.update(success=True, expected_peers=read(work / "a01-expected-peers.json"), phases={})
     for phase, route in (("uptake", "uptake"), ("reserve-fetch", "final")):
@@ -197,6 +205,8 @@ def build_evidence(work):
         consumer_forwarded_discovery=event_count("client", "CONTENT_DISCOVERY_COMPLETED"))
     require((work / "content-replication-origin-listeners.txt").stat().st_size == 0,
             "original provider listener remains")
+    require((work / "content-replication-paused-listeners.txt").stat().st_size == 0,
+            "replica listener survived explicit service stop")
     validate_evidence(evidence)
     return evidence
 

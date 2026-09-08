@@ -408,14 +408,21 @@ JSON receipt includes reconstructed bytes/chunks and the unique supplying `provi
 those identifiers are not written to a background browsing log.
 Status inspects only retained local state, including `control_relay_peer_id`; it opens no
 network connection or route. Fetch's receipt binds that same control identity. Stop withdraws the offer and
-closes the listener but retains the owned cache files. Registration is in memory, not durable
-publication retention. Without the explicit replica configuration below, these commands start
+closes the listener but retains the owned cache files. Primary publications must be explicitly
+registered again; this is not automatic publication retention. Without the replica configuration below, these commands start
 no background copying. They never capture browsing, resolve latest publication names or promise
 faster retrieval.
 
 For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
-to `content serve`. The directory must be new, private to the agent and different from the
-existing publication cache. Optional limits are `--replica-quota-bytes` (default 64 MiB, at most
+to `content serve`. By default the directory must be new, private to the agent and different from
+the existing publication cache. To restart this service with an existing owned replica store,
+repeat the primary publication's Serve command with the same `--replica-cache` and limits, adding
+`--reuse-replica-cache`. This restores unexpired original replica manifests and verified chunks
+before opening the listener; it does not infer registrations from loose files, extend expiry or
+activate anything on boot. Missing metadata means zero restored publications; foreign, corrupt,
+busy or incomplete stores fail without adoption or automatic deletion. Primary registrations
+take precedence, and excess valid metadata remains stored when the 64-publication registry is full.
+Optional limits are `--replica-quota-bytes` (default 64 MiB, at most
 256 MiB), `--replica-max-entries` (default 256), `--replica-max-bytes` (64 bytes through 1 MiB,
 default 1 MiB of protocol traffic) and `--replica-max-chunks` (1--4, default 4). Repeated Serve
 registrations use the same replica configuration; changing it requires stopping the service.
@@ -435,9 +442,10 @@ owner accounting and radio contention are not covered. This is not the full C04 
 `content status` reports `replication_enabled` separately from actual retained `replica_chunks`,
 `replica_bytes` and registered `replica_publications`; an enabled job is not evidence of useful
 replication. Busy cache access returns Busy rather than a fabricated count. Stop cancels the job
-and withdraws the service, retaining owned cache files. Replica registration is not yet durable
-across restart; this is not a reliable offline hosting/retention service. Use disposable topology
-probes while the independent-node C02/C03 proofs remain incomplete.
+and withdraws the service, retaining owned cache files and the cache-bound registration journal.
+Explicit reuse restores the journal, not the old service, contacts or route authority. Expired
+records are not offered again, but this does not yet reclaim their chunks or repair lost replicas.
+It remains a development service, not reliable offline hosting or guaranteed owner-priority sharing.
 
 ## Crash and cleanup
 

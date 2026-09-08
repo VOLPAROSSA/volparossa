@@ -14,6 +14,11 @@ const OWNER_FILE: &str = ".volparossa-owner-v1";
 const INDEX_FILE: &str = ".volparossa-index-v1";
 const INDEX_STAGE: &str = ".volparossa-index-next-v1";
 const CHUNK_STAGE: &str = ".volparossa-chunk-next-v1";
+const REPLICA_FILE: &str = ".volparossa-replicas-v1";
+const REPLICA_STAGE: &str = ".volparossa-replicas-next-v1";
+const REPLICA_MAGIC: &[u8; 8] = b"VPCR0001";
+pub(crate) const MAX_REPLICA_METADATA_BYTES: usize = 8 * 1024 * 1024;
+const REPLICA_OVERHEAD: usize = 8 + 32 + CHECKSUM_BYTES;
 const OWNER_MAGIC: &[u8; 8] = b"VPCC0001";
 const INDEX_MAGIC: &[u8; 8] = b"VPCI0001";
 const OWNER_BYTES: usize = 60;
@@ -126,6 +131,7 @@ impl ChunkStore {
         }
         ensure_absent(&directory, INDEX_STAGE)?;
         ensure_absent(&directory, CHUNK_STAGE)?;
+        ensure_absent(&directory, REPLICA_STAGE)?;
         let mut index = Vec::new();
         open_private_file(&directory, INDEX_FILE, MAX_INDEX_BYTES as u64)?
             .take(MAX_INDEX_BYTES as u64 + 1)
@@ -157,6 +163,63 @@ impl ChunkStore {
             bytes: self.bytes,
             entries: self.entries.len(),
         }
+    }
+
+    // Only this fixed metadata name is available: callers cannot use the owned directory
+    // handle to read/write arbitrary paths. The envelope binds it to this exact cache ID.
+    pub(crate) fn read_replica_metadata(&self) -> Result<Option<Vec<u8>>, Error> {
+        self.ensure_healthy()?;
+        ensure_absent(&self.directory, REPLICA_STAGE)?;
+        let maximum = MAX_REPLICA_METADATA_BYTES + REPLICA_OVERHEAD;
+        let file = match open_private_file(&self.directory, REPLICA_FILE, maximum as u64) {
+            Ok(file) => file,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() < REPLICA_OVERHEAD
+            || bytes.len() > maximum
+            || &bytes[..8] != REPLICA_MAGIC
+            || bytes[8..40] != self.cache_id
+        {
+            return Err(Error::InvalidStore);
+        }
+        let end = bytes.len() - CHECKSUM_BYTES;
+        if Sha256::digest(&bytes[..end]).as_slice() != &bytes[end..] {
+            return Err(Error::InvalidStore);
+        }
+        Ok(Some(bytes[40..end].to_vec()))
+    }
+
+    pub(crate) fn replace_replica_metadata(&mut self, payload: &[u8]) -> Result<(), Error> {
+        if payload.len() > MAX_REPLICA_METADATA_BYTES {
+            return Err(Error::Limit("replica metadata"));
+        }
+        // Never overwrite an unsafe, foreign or corrupt existing journal.
+        self.read_replica_metadata()?;
+        let mut bytes = Vec::with_capacity(payload.len() + REPLICA_OVERHEAD);
+        bytes.extend_from_slice(REPLICA_MAGIC);
+        bytes.extend_from_slice(&self.cache_id);
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&Sha256::digest(&bytes));
+        self.check_free_space(bytes.len() as u64)?;
+        self.healthy = false;
+        let mut output = create_file(&self.directory, REPLICA_STAGE)?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+        rustix::fs::renameat(
+            &self.directory,
+            REPLICA_STAGE,
+            &self.directory,
+            REPLICA_FILE,
+        )
+        .map_err(io_error)?;
+        self.directory.sync_all()?;
+        self.healthy = true;
+        Ok(())
     }
 
     /// Insert a nonempty chunk under its SHA-256 name, atomically and without overwriting.

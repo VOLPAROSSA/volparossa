@@ -13,7 +13,8 @@ use tokio::{
     task::JoinHandle,
 };
 use volparossa_content::provider::replication::{
-    ReplicationExclusions, ReplicationLimits, pull_replicas_with_admission,
+    ReplicationExclusions, ReplicationLimits, persist_replicas, pull_replicas_with_admission,
+    restore_replicas,
 };
 use volparossa_content::provider::{PublicationRegistry, VerifiedProviderOffer};
 use volparossa_content::{CacheLimits, CacheUsage, ChunkId, ChunkStore};
@@ -49,7 +50,10 @@ pub(super) struct ReplicationRuntime {
 }
 
 impl ReplicationRuntime {
-    pub(super) fn create(config: ContentReplicationConfig) -> Result<Arc<Self>, ContentError> {
+    pub(super) fn create(
+        config: ContentReplicationConfig,
+        registry: &mut PublicationRegistry,
+    ) -> Result<Arc<Self>, ContentError> {
         let cache_limits = limits(config.limits)?;
         if !(64..=1024 * 1024).contains(&config.max_bytes)
             || !(1..=4).contains(&config.max_chunks)
@@ -58,18 +62,40 @@ impl ReplicationRuntime {
             return Err(ContentError::Invalid);
         }
         let root = PathBuf::from(&config.replica_cache);
-        // Exclusive new private root: never adopt the foreground cache or another directory.
-        let store = ChunkStore::create(&root, cache_limits).map_err(|_| ContentError::Invalid)?;
+        // Reopen only on explicit request; the store checks UID/inode, exclusive ownership,
+        // limits and fixed-name metadata. Nothing is inferred from arbitrary directory files.
+        let mut store = if config.reuse_replica_cache {
+            ChunkStore::open(&root, cache_limits)
+        } else {
+            ChunkStore::create(&root, cache_limits)
+        }
+        .map_err(|_| ContentError::Invalid)?;
+        let restored = restore_replicas(&mut store, now()).map_err(|_| ContentError::Invalid)?;
         let usage = store.usage();
         drop(store);
+        let mut chunks = VecDeque::new();
+        let mut publications = BTreeSet::new();
+        for replica in restored {
+            let id = *replica.manifest_id();
+            remember_chunks(&mut chunks, replica.chunk_ids());
+            // Explicit foreground registrations take precedence. A full registry is not
+            // corrupt storage: retain excess metadata for a later explicitly started service.
+            if registry.contains(&id) || registry.len() >= 64 {
+                continue;
+            }
+            registry
+                .register_replica(replica, root.clone(), cache_limits, now())
+                .map_err(|_| ContentError::Invalid)?;
+            publications.insert(id);
+        }
         Ok(Arc::new(Self {
             config,
             root,
             limits: cache_limits,
             state: Mutex::new(State {
                 contacts: VecDeque::new(),
-                chunks: VecDeque::new(),
-                publications: BTreeSet::new(),
+                chunks,
+                publications,
                 usage,
                 next: Instant::now(),
             }),
@@ -78,7 +104,9 @@ impl ReplicationRuntime {
     }
 
     pub(super) fn matches(&self, config: &ContentReplicationConfig) -> bool {
-        self.config == *config
+        let mut requested = config.clone();
+        requested.reuse_replica_cache = self.config.reuse_replica_cache;
+        self.config == requested
     }
 
     pub(super) async fn receipt(&self, receipt: &mut ContentReceipt) -> Result<(), ContentError> {
@@ -267,6 +295,13 @@ impl ReplicationRuntime {
             if progress.is_some() && super::tls::finish(flow.stream_mut()).await.is_err() {
                 return;
             }
+            if let Some(progress) = &progress {
+                // Persist before exposing any new registration. Failure retains only owned
+                // chunks, never an unjournaled re-serving claim or a renewed expiry.
+                if persist_replicas(&mut store, &progress.replicas, now()).is_err() {
+                    return;
+                }
+            }
             let usage = store.usage();
             drop(store); // Registration must independently reopen and verify the owned cache.
             self.state.lock().await.usage = usage;
@@ -288,13 +323,7 @@ impl ReplicationRuntime {
                 {
                     state.publications.insert(id);
                     registered = true;
-                    for chunk in chunks {
-                        state.chunks.retain(|known| *known != chunk);
-                        if state.chunks.len() >= MAX_REMEMBERED_CHUNKS {
-                            state.chunks.pop_front();
-                        }
-                        state.chunks.push_back(chunk);
-                    }
+                    remember_chunks(&mut state.chunks, &chunks);
                 }
             }
             drop(state);
@@ -308,10 +337,125 @@ impl ReplicationRuntime {
     }
 }
 
+fn remember_chunks(remembered: &mut VecDeque<ChunkId>, chunks: &[ChunkId]) {
+    for chunk in chunks {
+        remembered.retain(|known| known != chunk);
+        if remembered.len() >= MAX_REMEMBERED_CHUNKS {
+            remembered.pop_front();
+        }
+        remembered.push_back(*chunk);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use volparossa_content::provider::serve_publication;
+    use volparossa_content::transfer::TransferLimits;
+    use volparossa_content::{Metadata, Publication, SignedManifest, Validity, publish};
     use volparossa_local_control::ContentCacheLimits;
+
+    fn test_publication(store: &mut ChunkStore, key: &SigningKey) -> SignedManifest {
+        publish(
+            &mut &b"owned replica"[..],
+            Publication {
+                metadata: Metadata {
+                    name: "explicit restart fixture".into(),
+                    revision: 1,
+                    content_type: "application/octet-stream".into(),
+                },
+                length: 13,
+                validity: Validity {
+                    created: now(),
+                    expires: now() + 600,
+                },
+            },
+            key,
+            store,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn restored_metadata_does_not_replace_primary_or_fail_a_full_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_root = directory.path().join("source");
+        let replica_root = directory.path().join("replicas");
+        let cache_limits = CacheLimits {
+            max_bytes: 1024,
+            max_entries: 4,
+            min_free_bytes: 0,
+        };
+        let mut source = ChunkStore::create(&source_root, cache_limits).unwrap();
+        let key = SigningKey::generate(&mut rand_core::OsRng);
+        let manifest = test_publication(&mut source, &key);
+        let id = *manifest
+            .verify(&key.verifying_key(), now())
+            .unwrap()
+            .manifest_id();
+        drop(source);
+        let mut registry = PublicationRegistry::new();
+        registry
+            .register_shareable(
+                manifest,
+                &key.verifying_key(),
+                source_root.clone(),
+                cache_limits,
+                now(),
+            )
+            .unwrap();
+        let mut replica_store = ChunkStore::create(&replica_root, cache_limits).unwrap();
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let exclusions = ReplicationExclusions::default();
+        let (received, sent) = tokio::join!(
+            pull_replicas_with_admission(
+                &mut client,
+                &mut replica_store,
+                ReplicationLimits::default(),
+                &exclusions,
+                || async { true }
+            ),
+            serve_publication(&mut server, &registry, TransferLimits::default()),
+        );
+        sent.unwrap();
+        persist_replicas(&mut replica_store, &received.unwrap().replicas, now()).unwrap();
+        drop(replica_store);
+        let config = ContentReplicationConfig {
+            replica_cache: replica_root.to_str().unwrap().to_owned(),
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            }),
+            max_bytes: 1024,
+            max_chunks: 1,
+            reuse_replica_cache: true,
+        };
+        let runtime = ReplicationRuntime::create(config.clone(), &mut registry).unwrap();
+        let mut receipt = ContentReceipt::default();
+        runtime.receipt(&mut receipt).await.unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(receipt.replica_publications, 0); // Existing primary is not silently replaced.
+        drop(runtime);
+        assert!(registry.remove(&id));
+        for _ in 0..64 {
+            let mut source = ChunkStore::open(&source_root, cache_limits).unwrap();
+            let manifest = test_publication(&mut source, &key);
+            let checked = manifest.verify(&key.verifying_key(), now()).unwrap();
+            drop(source);
+            registry
+                .register(checked, source_root.clone(), cache_limits, now())
+                .unwrap();
+        }
+        let runtime = ReplicationRuntime::create(config, &mut registry).unwrap();
+        runtime.receipt(&mut receipt).await.unwrap();
+        assert_eq!(registry.len(), 64);
+        assert_eq!(receipt.replica_publications, 0);
+        assert_eq!(receipt.replica_chunks, 1);
+        let mut store = ChunkStore::open(&replica_root, cache_limits).unwrap();
+        assert_eq!(restore_replicas(&mut store, now()).unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn replica_cache_is_exclusive_and_counts_retained_chunks_without_inventing_publications()
@@ -331,10 +475,12 @@ mod tests {
             }),
             max_bytes: 1024,
             max_chunks: 2,
+            reuse_replica_cache: false,
         };
-        let runtime = ReplicationRuntime::create(config.clone()).unwrap();
+        let mut registry = PublicationRegistry::new();
+        let runtime = ReplicationRuntime::create(config.clone(), &mut registry).unwrap();
         assert!(runtime.matches(&config));
-        assert!(ReplicationRuntime::create(config).is_err());
+        assert!(ReplicationRuntime::create(config.clone(), &mut registry).is_err());
         let mut receipt = ContentReceipt::default();
         runtime.receipt(&mut receipt).await.unwrap();
         assert!(receipt.replication_enabled);
@@ -360,5 +506,14 @@ mod tests {
         );
         assert_eq!(receipt.replica_publications, 0); // Cancelled/partial metadata is not registered.
         runtime.stop().await;
+        let mut reopen = config;
+        reopen.reuse_replica_cache = true;
+        assert!(runtime.matches(&reopen)); // Creation intent is not an active-service setting.
+        drop(runtime);
+        let restarted = ReplicationRuntime::create(reopen, &mut registry).unwrap();
+        restarted.receipt(&mut receipt).await.unwrap();
+        assert_eq!(receipt.replica_chunks, 1);
+        assert_eq!(receipt.replica_publications, 0); // Missing journal does not invent a manifest.
+        assert!(registry.is_empty());
     }
 }

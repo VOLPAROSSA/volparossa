@@ -88,7 +88,8 @@ browser, witness or automatic-discovery implementation in this slice.
 over supplied streams. A bounded local registry serves up to 64 explicitly verified publications
 from existing owned caches; requests never name filesystem paths. Four focused tests pass.
 The agent/CLI now integrate explicit provider registration, generic discovery through a control
-Relay and protected retrieval; their independent-node network proof remains pending. This crate
+Relay and protected retrieval; the scoped `e592b610` independent-node network proof now passes,
+including native and cooperative-origin HTTPS partial fallback. This crate
 still neither dials sockets nor grants route/egress or publisher authority.
 
 `provider::replication` adds a distinct v2 selector for small extra-chunk exchanges. Only explicitly
@@ -99,7 +100,17 @@ remain compatible and are not silently exported. `pull_replicas` admits at most 
 signed expiry is retained, and bounded hop counts are local claims rather than Sybil resistance.
 Five duplex tests prove uptake and re-serving plus quota, validation and deadline behavior.
 
-The agent now wires this into an explicitly configured post-download job; the crate itself
-still schedules nothing and creates no listener. Full owner-priority I/O scheduling, durable
-retention, web policy and DNS remain unfinished. Publisher input and output-path selection remain
+The agent uses `pull_replicas_with_admission`, a separate v3 exchange where each next chunk needs
+one receiver credit. Async admission may stop after a verified partial result; credit/framing
+bytes share the original limit and deadline. Waiting retains neither a provider registry lock
+nor an open provider store. Four focused duplex probes cover actual pacing and re-serving.
+`persist_replicas` merges original manifests and chunk IDs into a bounded private cache-bound
+journal; `restore_replicas` rechecks original signatures, expiry and live chunks under the owned
+store lock. Missing metadata restores nothing; stale authority is never inferred from loose
+chunks. Three real persistence probes include publisher removal, reopen and re-serving.
+
+The agent wires this into an explicitly configured post-download job, with explicit
+`--reuse-replica-cache` on service restart; the crate itself schedules nothing and creates no
+listener. Full owner-priority I/O scheduling, retention repair, web policy and DNS remain
+unfinished. Publisher input and output-path selection remain
 caller-authorized; this crate does not authorize sharing captured/private/no-store traffic.

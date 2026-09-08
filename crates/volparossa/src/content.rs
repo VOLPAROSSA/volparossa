@@ -69,10 +69,15 @@ pub(crate) struct Serve {
 
 #[derive(Debug, Args)]
 struct Replication {
-    /// Explicitly enable opportunistic uptake/re-serving in a NEW private agent-owned cache.
+    /// Explicitly enable opportunistic uptake/re-serving in a private agent-owned cache.
+    /// Creates a new cache unless --reuse-replica-cache explicitly requests reopening.
     /// Omit this option to start no background replication job.
     #[arg(long = "replica-cache", id = "replica_cache")]
     cache: Option<PathBuf>,
+    /// Reopen the owned replica cache and restore unexpired storage-only registrations.
+    /// Does not extend expiry, adopt other directories or automatically start a service on boot.
+    #[arg(long = "reuse-replica-cache", requires = "replica_cache")]
+    reuse_replica_cache: bool,
     /// Shared replica-store payload quota, at most 256 MiB (not a quota per publication).
     #[arg(long = "replica-quota-bytes", id = "replica_quota_bytes", default_value_t = 64 * 1024 * 1024, requires = "replica_cache",
           value_parser = clap::value_parser!(u64).range(1..=MAX_OBJECT_BYTES))]
@@ -113,6 +118,7 @@ impl Replication {
             }),
             max_bytes: self.max_bytes,
             max_chunks: self.max_chunks,
+            reuse_replica_cache: self.reuse_replica_cache,
         }))
     }
 }
@@ -612,6 +618,22 @@ mod tests {
         assert_eq!(
             (configuration.max_bytes, configuration.max_chunks),
             (1024 * 1024, 4)
+        );
+        assert!(!configuration.reuse_replica_cache);
+        assert!(parse(&["--reuse-replica-cache"]).is_err());
+        let resumed = parse(&[
+            "--replica-cache",
+            "existing-replicas",
+            "--reuse-replica-cache",
+        ])
+        .expect("explicit owned replica cache reopen");
+        assert!(
+            resumed
+                .replication
+                .wire_config(&resumed.cache, 0)
+                .unwrap()
+                .unwrap()
+                .reuse_replica_cache
         );
         assert_eq!(
             configuration.limits.unwrap(),

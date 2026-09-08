@@ -21,7 +21,7 @@ pub struct ContentCacheLimits {
 /// Explicit bounded background uptake and re-serving; absent configuration starts no cache job.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct ContentReplicationConfig {
-    /// New private agent-owned replica store, distinct from the primary publication cache.
+    /// Private agent-owned replica store, distinct from the primary publication cache.
     #[prost(string, tag = "1")]
     pub replica_cache: String,
     /// One shared byte/entry/free-space budget for the entire replica store.
@@ -33,6 +33,10 @@ pub struct ContentReplicationConfig {
     /// Maximum accepted chunks per exchange, at most four.
     #[prost(uint32, tag = "4")]
     pub max_chunks: u32,
+    /// Explicitly reopen an owned replica store and restore its original storage-only records.
+    /// False preserves exclusive creation; neither setting activates a listener on its own.
+    #[prost(bool, tag = "5")]
+    pub reuse_replica_cache: bool,
 }
 
 /// Register one explicit publication and start/reuse the agent's bounded public content service.
@@ -523,6 +527,7 @@ mod tests {
             limits: Some(limits),
             max_bytes: 1024 * 1024,
             max_chunks: 4,
+            reuse_replica_cache: false,
         };
         let mut serve = ContentServeRequest {
             manifest: vec![1; 256],
@@ -533,7 +538,17 @@ mod tests {
             limits: Some(limits),
             replication: None,
         };
-        for option in [None, Some(replication.clone())] {
+        let mut resumed = replication.clone();
+        resumed.reuse_replica_cache = true;
+        let mut expected_reuse_wire = replication.encode_to_vec();
+        expected_reuse_wire.extend_from_slice(&[0x28, 0x01]); // New bool tag5, absent when false.
+        assert_eq!(resumed.encode_to_vec(), expected_reuse_wire);
+        assert!(
+            !ContentReplicationConfig::decode(replication.encode_to_vec().as_slice())
+                .unwrap()
+                .reuse_replica_cache
+        );
+        for option in [None, Some(replication.clone()), Some(resumed)] {
             serve.replication = option;
             let request = ControlRequest {
                 protocol_version: CONTROL_PROTOCOL_VERSION,
