@@ -73,8 +73,10 @@ print_plan() {
             '  remove the publisher, fetch ciphertext from two separate replica processes via protected MPTCP;' \
             '  require recipient-only decryption, wrong-key rejection, exact bytes and complete privacy captures;' \
             '  separately publish/import/export/open a message with distinct operator/service UIDs via the protected local control socket;' \
+            '  additionally publish/import/serve a new private message using normal commands; remove sender keys/input before remote fetch/export/open;' \
+            '  capture the actual independent provider and both protected relay paths; retain the existing 5+4 proof unchanged;' \
             '  remove encrypted identities, passphrase and plaintext, clean owned networking and compare guest-root host state;' \
-            '  emit content-message-smoke.json; local publisher/handoff proof does not claim a normal network publisher, mailbox, full C07 or A01-A15.'
+            '  emit content-message-smoke.json; normal private network publication does not claim a mailbox, full C07 or A01-A15.'
         return
     fi
     if [ "$scenario" = content ]; then
@@ -399,9 +401,12 @@ if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then
     fi
 fi
 if [ "$scenario" = content-message ]; then
-    [ -f "$source_directory/tests/integration/content-handoff-smoke.sh" ] \
-        && [ ! -L "$source_directory/tests/integration/content-handoff-smoke.sh" ] \
-        || { printf '%s\n' 'private content handoff fixture unavailable' >&2; exit 69; }
+    for message_fixture in content-handoff-smoke.sh content-message-publication-smoke.sh \
+        content-provider-smoke.sh content-provider-https-smoke.py; do
+        [ -f "$source_directory/tests/integration/$message_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$message_fixture" ] \
+            || { printf '%s\n' 'private content publication fixture unavailable' >&2; exit 69; }
+    done
     for content_secret_tool in head base64; do
         command -v "$content_secret_tool" >/dev/null 2>&1 \
             || { printf 'required recipient fixture tool unavailable: %s\n' "$content_secret_tool" >&2; exit 69; }
@@ -1440,6 +1445,11 @@ fi
 if [ "$scenario" = content-message ]; then
     # shellcheck source=tests/integration/content-handoff-smoke.sh
     . "$source_directory/tests/integration/content-handoff-smoke.sh"
+    # Only utility functions are used; this does not run the public provider scenario.
+    # shellcheck source=tests/integration/content-provider-smoke.sh
+    . "$source_directory/tests/integration/content-provider-smoke.sh"
+    # shellcheck source=tests/integration/content-message-publication-smoke.sh
+    . "$source_directory/tests/integration/content-message-publication-smoke.sh"
 fi
 if [ "$scenario" = content-https ]; then
     # shellcheck source=tests/integration/content-https-smoke.sh
@@ -1465,7 +1475,7 @@ capture_host_state "$WORK/host-state-before.json" \
 # policy hostname to the one destination address, while cleanup restores the exact guest file.
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ]; then
     printf '%s\n' \
         '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
         '50.166.6.1 provider-b.volparossa.test provider-b.volparossa.test.' \
@@ -1695,9 +1705,9 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
-    if { [ "$scenario" = content-message ] && [ "$node" = relay4 ]; } \
-        || { [ "$scenario" = content-provider ] && { [ "$node" = client ] \
-            || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; }; then
+    if { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ]; } \
+        && { [ "$node" = client ] \
+            || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; then
         # Match package access without adding the operator to the private service group.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
@@ -1748,7 +1758,7 @@ jq -S -c -n \
     >"$WORK/a01-expected-peers.json"
 
 set --
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ]; then
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ]; then
     set -- --content-providers
 fi
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
@@ -2252,7 +2262,7 @@ launch_agent() {
         esac
     fi
     set --
-    if [ "$scenario" = content-provider ] && [ "$node" = client ]; then
+    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-message ]; } && [ "$node" = client ]; then
         # The identical agent UID must not permit a fixture-local replica file shortcut.
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-provider-seed"
         set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed"
@@ -4336,12 +4346,16 @@ start_privacy_observers() {
             [ "$scenario" = content-https ] || return 1 ;;
         content-provider-privacy|content-provider-https-complete-privacy|content-provider-https-missing-privacy|content-provider-user-privacy)
             [ "$scenario" = content-provider ] || return 1 ;;
+        content-message-publication-privacy)
+            [ "$scenario" = content-message ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
-    [ "$scenario" != content-provider ] || set -- --content-providers
     privacy_content_flag=
-    [ "$scenario" != content-provider ] || privacy_content_flag=--content-providers
+    if [ "$scenario" = content-provider ] || [ "$privacy_prefix" = content-message-publication-privacy ]; then
+        set -- --content-providers
+        privacy_content_flag=--content-providers
+    fi
     privacy_relay1_underlay=underlay
     if [ "$scenario" = mixed-link ]; then
         set -- --direct-lan-relay1

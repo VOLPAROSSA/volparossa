@@ -5,6 +5,7 @@
 import json
 from pathlib import Path
 import re
+import runpy
 import sys
 
 ROLES = ("client", "relay0", "relay1", "relay2", "exit")
@@ -174,6 +175,85 @@ def validate_private_message(evidence):
         "temporary encrypted identities, passphrase or plaintext were not removed")
     validate_private_handoff(message["local_handoff"])
     validate_public_handoff(message["local_public_handoff"])
+    validate_message_publication(message["network_publication"])
+
+
+def validate_message_publication(evidence):
+    publish, output = evidence["publish"], evidence["output"]
+    imported, exported, fetch = evidence["import"], evidence["export"], evidence["fetch"]
+    peers, layout = evidence["expected_peers"], evidence["layout"]
+    node, control = output["provider_node"], layout["control_relay_peer_id"]
+    candidates = ("relay4", "relay5", "relay3")
+    require(layout["provider_nodes"] == [item for item in candidates if peers[item] != control][:2]
+            and node == layout["provider_nodes"][0] and peers[node] != control
+            and publish["operation"] == "offline_private_message_publish"
+            and publish["network_publication"] is False and publish["chunks"] == 9
+            and re.fullmatch(r"[0-9a-f]{64}", publish["publisher_key_hex"])
+            and OBJECT_BYTES + 16 <= publish["ciphertext_bytes"] <= OBJECT_BYTES + 64
+            and output["ciphertext_bytes"] == publish["ciphertext_bytes"]
+            and output["plaintext_bytes"] == OBJECT_BYTES
+            and output["plaintext_sha256"] == FIXTURE_PLAINTEXT_SHA256
+            and re.fullmatch(r"[0-9a-f]{64}", output["ciphertext_sha256"])
+            and output["ciphertext_sha256"] != FIXTURE_PLAINTEXT_SHA256,
+            "normal independently signed private network publication not proven")
+    require(imported["cache"] == publish["cache"]
+            and imported["cache"] != exported["cache"]
+            and imported["agent_cache"] != exported["agent_cache"]
+            and imported["manifest_id"] == exported["manifest_id"]
+            and re.fullmatch(r"[0-9a-f]{64}", imported["manifest_id"]),
+            "private network handoff reused sender/service cache or changed the exact manifest")
+    for receipt, operation in ((imported, "content_import"), (exported, "content_export")):
+        require(receipt["operation"] == operation and receipt["complete"] is True
+                and receipt["ciphertext_bytes"] == publish["ciphertext_bytes"]
+                and receipt["chunks"] == 9 and receipt["ciphertext_format_verified"] is True
+                and all(receipt[key] is False for key in (
+                    "ownership_changed", "network_transfer", "recipient_decryption_performed",
+                    "private_keys_transferred")), "private ciphertext handoff incomplete or plaintext/key transfer claimed")
+    require(evidence["serve"]["serving"] is True and evidence["serve"]["publications"] == 1
+            and evidence["stop"]["serving"] is False and evidence["stop"]["publications"] == 0
+            and fetch["bytes"] == fetch["peer_bytes"] == publish["ciphertext_bytes"]
+            and fetch["chunks"] == 9 and fetch["providers_used"] == 1
+            and fetch["provider_peer_ids"] == [peers[node]]
+            and fetch["control_relay_peer_id"] == control
+            and fetch["origin_authenticated"] is False and fetch["origin_body_bytes"] == 0
+            and evidence["selected_route"]["route_context_id"] == output["route_context_id"]
+            and evidence["open"]["operation"] == "offline_private_message_open"
+            and evidence["open"]["bytes"] == OBJECT_BYTES
+            and evidence["open"]["network_retrieval"] is False,
+            "normal service, exact protected ciphertext fetch or recipient opening not proven")
+    require(output["user_uid"] > 0 and output["agent_uid"] > 0
+            and output["user_uid"] != output["agent_uid"]
+            and output["control_gid"] > 0 and output["control_gid"] != output["agent_gid"]
+            and output["cache_modes"] == "0700" and output["output_mode"] == "0600"
+            and all(output[key] is True for key in (
+                "sender_identity_unchanged_before_removal", "sender_removed_before_fetch",
+                "agent_cannot_read_sender_state", "client_mount_positive_control",
+                "client_mount_cannot_read_provider_cache",
+                "user_cannot_read_agent_caches", "fresh_destination_cache", "wrong_recipient_rejected",
+                "wrong_recipient_output_absent", "no_clobber_verified", "recipient_identities_unchanged",
+                "recipient_key_independently_supplied")) and output["mailbox_claimed"] is False
+            and evidence["sender_cleanup"] == dict(encrypted_sender_identity_removed=True,
+                sender_passphrase_removed=True, sender_input_removed=True,
+                sender_private_directory_removed=True),
+            "sender-offline, recipient authority, separate accounts or exact secret cleanup missing")
+    path_check = runpy.run_path(str(Path(__file__).with_name("content-provider-https-smoke.py")))
+    path_check["validate_path"](evidence, peers, layout["provider_nodes"], True)
+    control_node = next(item for item in path_check["PUBLIC_IPS"] if peers[item] == control)
+    path_check["validate_control"](evidence["control_privacy"], control_node, layout["provider_nodes"], True)
+    require(evidence["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"]
+            >= publish["ciphertext_bytes"], "ciphertext object was not observed on the provider's real application path")
+
+
+def build_message_publication(work):
+    evidence = {name: read(work / f"content-message-publication-{suffix}.json") for name, suffix in (
+        ("publish", "publish"), ("import", "import"), ("serve", "serve"), ("fetch", "fetch"),
+        ("export", "export"), ("open", "open"), ("stop", "stop"), ("output", "object"),
+        ("sender_cleanup", "sender-cleanup"), ("layout", "layout"),
+        ("selected_route", "live-selection"))}
+    evidence.update(expected_peers=read(work / "a01-expected-peers.json"),
+                    privacy={role: read(work / f"content-message-publication-privacy-{role}.json") for role in ROLES},
+                    control_privacy=read(work / "content-provider-message-control-privacy.json"))
+    return evidence
 
 
 def validate_private_handoff(handoff):
@@ -287,6 +367,7 @@ def build_evidence(work, private=False):
             "local_public_handoff": {key: read(work / f"content-handoff-public-{name}.json") for key, name in (
                 ("isolation", "isolation"), ("publication", "publish"), ("import", "import"),
                 ("export", "export"), ("assemble", "assemble"), ("status_after", "status-after"))},
+            "network_publication": build_message_publication(work),
         }
     validate_transfer(evidence, private)
     return {"success": True, **evidence}
@@ -313,9 +394,9 @@ def validate_report(report, revision, private=False):
                 and report["normal_publisher_cli_claimed"] is True
                 and report["local_private_cache_handoff_claimed"] is True
                 and report["local_public_cache_handoff_claimed"] is True
-                and report["network_publisher_runtime_claimed"] is False
+                and report["network_publisher_runtime_claimed"] is True
                 and report["mailbox_runtime_claimed"] is False and report["full_c07_claimed"] is False,
-                "normal local publisher/handoff/recipient CLI required, not a network publisher/mailbox claim")
+                "normal private network publication and recipient CLI required, without a mailbox/full C07 claim")
     validate_transfer(report["transfer"], private)
 
 

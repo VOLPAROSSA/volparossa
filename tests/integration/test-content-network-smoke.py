@@ -124,7 +124,42 @@ def private_fixture():
            "assemble": dict(operation="offline_content_assemble", bytes=2097275,
                             publisher_key_hex="b" * 64, network_retrieval=False)},
         status_after=dict(serving=False, publications=0))
+    value["private_message"]["network_publication"] = network_publication_fixture()
     return value
+
+
+def network_publication_fixture():
+    # Reuse synthetic path facts only; this is not a live network acceptance result.
+    base = runpy.run_path(str(Path(__file__).with_name("test-content-provider-smoke.py")))["fixture"]()
+    ordinary = base["ordinary_publication"]
+    size = CHECK["OBJECT_BYTES"] + 57
+    imported = dict(operation="content_import", manifest_id="e" * 64, complete=True,
+                    ciphertext_bytes=size, chunks=9, cache="/user/source", agent_cache="/agent/relay4/cache",
+                    ciphertext_format_verified=True, ownership_changed=False, network_transfer=False,
+                    recipient_decryption_performed=False, private_keys_transferred=False)
+    output = dict(provider_node="relay4", ciphertext_bytes=size, ciphertext_sha256="f" * 64,
+                  plaintext_bytes=CHECK["OBJECT_BYTES"], plaintext_sha256=CHECK["FIXTURE_PLAINTEXT_SHA256"],
+                  route_context_id="a" * 32, user_uid=1001, agent_uid=1002, control_gid=1003, agent_gid=1002,
+                  cache_modes="0700", output_mode="0600", sender_identity_unchanged_before_removal=True,
+                  sender_removed_before_fetch=True, agent_cannot_read_sender_state=True,
+                  client_mount_positive_control=True, client_mount_cannot_read_provider_cache=True,
+                  user_cannot_read_agent_caches=True,
+                  fresh_destination_cache=True, wrong_recipient_rejected=True, wrong_recipient_output_absent=True,
+                  no_clobber_verified=True, recipient_identities_unchanged=True,
+                  recipient_key_independently_supplied=True, mailbox_claimed=False)
+    return dict(
+        publish=dict(operation="offline_private_message_publish", publisher_key_hex="2" * 64,
+                     network_publication=False, ciphertext_bytes=size, chunks=9, cache="/user/source"),
+        **{"import": imported, "export": dict(imported, operation="content_export",
+                                               cache="/user/received", agent_cache="/agent/client/cache")},
+        fetch=dict(ordinary["fetch"], bytes=size, peer_bytes=size),
+        serve=dict(serving=True, publications=1), stop=dict(serving=False, publications=0),
+        open=dict(operation="offline_private_message_open", network_retrieval=False, bytes=CHECK["OBJECT_BYTES"]),
+        output=output, sender_cleanup=dict(encrypted_sender_identity_removed=True, sender_passphrase_removed=True,
+            sender_input_removed=True, sender_private_directory_removed=True),
+        expected_peers=ordinary["expected_peers"], layout=ordinary["layout"],
+        selected_route=ordinary["selected_route"], privacy=ordinary["privacy"],
+        control_privacy=base["control_underlay"]["capture"])
 
 
 class EvidenceContract(unittest.TestCase):
@@ -196,7 +231,7 @@ class EvidenceContract(unittest.TestCase):
                       normal_recipient_cli_claimed=True, encrypted_identity_store_claimed=True,
                       normal_publisher_cli_claimed=True, local_private_cache_handoff_claimed=True,
                       local_public_cache_handoff_claimed=True,
-                      network_publisher_runtime_claimed=False, mailbox_runtime_claimed=False,
+                      network_publisher_runtime_claimed=True, mailbox_runtime_claimed=False,
                       full_c07_claimed=False)
         CHECK["validate_report"](report, "a" * 40, True)
         for claim in ("normal_recipient_cli_claimed", "encrypted_identity_store_claimed",
@@ -236,6 +271,47 @@ class EvidenceContract(unittest.TestCase):
                 handoff[key][field] = value
                 with self.assertRaises(ValueError):
                     CHECK["validate_public_handoff"](handoff)
+
+    def test_normal_private_network_publication_requires_real_paths_sender_removal_and_exact_ciphertext(self):
+        CHECK["validate_message_publication"](network_publication_fixture())
+        for key, field, value in (
+            ("output", "sender_removed_before_fetch", False),
+            ("output", "recipient_key_independently_supplied", False),
+            ("output", "wrong_recipient_rejected", False),
+            ("output", "client_mount_positive_control", False),
+            ("output", "client_mount_cannot_read_provider_cache", False),
+            ("output", "user_uid", 1002), ("output", "no_clobber_verified", False),
+            ("sender_cleanup", "encrypted_sender_identity_removed", False),
+            ("fetch", "peer_bytes", 0), ("fetch", "provider_peer_ids", ["peer-client"]),
+            ("export", "ciphertext_format_verified", False), ("export", "manifest_id", "c" * 64),
+            ("export", "agent_cache", "/agent/relay4/cache"), ("stop", "serving", True),
+        ):
+            with self.subTest(key=key, field=field):
+                value_under_test = network_publication_fixture()
+                value_under_test[key][field] = value
+                with self.assertRaises(ValueError):
+                    CHECK["validate_message_publication"](value_under_test)
+        for role, counter in (("relay0", "exit_leg_wireguard_data_datagrams"),
+                              ("client", "direct_client_exit_packets")):
+            value_under_test = network_publication_fixture()
+            value_under_test["privacy"][role][counter] = 0 if role == "relay0" else 1
+            with self.assertRaises(ValueError):
+                CHECK["validate_message_publication"](value_under_test)
+
+    def test_message_publication_builder_reads_actual_named_cli_and_capture_artifacts(self):
+        value = network_publication_fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name, suffix in (("publish", "publish"), ("import", "import"), ("serve", "serve"),
+                    ("fetch", "fetch"), ("export", "export"), ("open", "open"), ("stop", "stop"),
+                    ("output", "object"), ("sender_cleanup", "sender-cleanup"),
+                    ("layout", "layout"), ("selected_route", "live-selection")):
+                (work / f"content-message-publication-{suffix}.json").write_text(json.dumps(value[name]))
+            for role, capture in value["privacy"].items():
+                (work / f"content-message-publication-privacy-{role}.json").write_text(json.dumps(capture))
+            (work / "content-provider-message-control-privacy.json").write_text(json.dumps(value["control_privacy"]))
+            (work / "a01-expected-peers.json").write_text(json.dumps(value["expected_peers"]))
+            self.assertEqual(CHECK["build_message_publication"](work), value)
 
     def test_private_isolation_decryption_and_cleanup_are_required(self):
         for label, mutation in (
@@ -314,22 +390,32 @@ class EvidenceContract(unittest.TestCase):
 
     def test_private_cleanup_is_exact_and_idempotent(self):
         script = str(Path(__file__).with_name("content-network-smoke.sh").resolve())
+        sender_script = str(Path(__file__).with_name("content-message-publication-smoke.sh").resolve())
         with tempfile.TemporaryDirectory(prefix="volparossa-content-private-cleanup-") as temporary:
             work = Path(temporary)
             private = work / "client-fixtures/content/private"
             private.mkdir(parents=True, mode=0o700)
-            for name in ("identity.key", "wrong-identity.key", "passphrase", "message.bin", "wrong-message.bin"):
+            for name in ("identity.key", "wrong-identity.key", "passphrase", "message.bin", "wrong-message.bin",
+                         "network-message.bin", "network-wrong-message.bin"):
                 path = private / name
                 path.write_bytes(b"public non-secret cleanup fixture")
+                path.chmod(0o600)
+            sender = work / "client-fixtures/message-publication/private"
+            sender.mkdir(parents=True, mode=0o700)
+            for name in ("identity.key", "passphrase", "input.bin"):
+                path = sender / name
+                path.write_bytes(b"public non-secret sender cleanup fixture")
                 path.chmod(0o600)
             unrelated = work / "unrelated.txt"
             unrelated.write_text("preserve", encoding="ascii")
             environment = dict(os.environ, WORK=str(work), WORKER_UID=str(os.getuid()),
                                WORKER_GID=str(os.getgid()))
             for _ in range(2):
-                subprocess.run(["sh", "-eu", "-c", '. "$1"; content_network_private_cleanup', "sh", script],
+                subprocess.run(["sh", "-eu", "-c", '. "$1"; . "$2"; content_network_private_cleanup',
+                                "sh", script, sender_script],
                                env=environment, check=True, timeout=5, capture_output=True)
             self.assertFalse(private.exists())
+            self.assertFalse(sender.exists())
             self.assertEqual(unrelated.read_text(encoding="ascii"), "preserve")
             self.assertEqual(json.loads((work / "content-private-cleanup.json").read_text()),
                              dict(encrypted_identities_removed=True, passphrase_removed=True,
