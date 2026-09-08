@@ -344,7 +344,10 @@ Strict content/agent/CLI/local-control Clippy passes. The `e592b610` network run
 uptake and an independent Client's Q retrieval after the original provider stops, but its final
 capture gate remains failed because remote route owners survive the replicator's disconnect.
 The next fixture also stops and explicitly reopens the replica service from its journal before
-that final retrieval. Its live result is pending; C03 and C04 therefore remain unchecked.
+that final retrieval. Its [live run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
+passes uptake, provider removal, journal reopen and independent Q retrieval with complete
+physical captures and unchanged-host cleanup. Retention repair and global contribution/fairness
+remain absent; C03 and C04 therefore remain unchecked.
 
 ## Integrated functional checkpoints
 

@@ -111,8 +111,9 @@ See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and 
 For cooperative HTTPS downloads, new `content fetch-https --local-output ./asset.bin` delivers
 directly to a new `0600` file owned by the calling user, while the cache remains agent-owned.
 Fresh origin authority and the final transfer receipt are checked before publication; no
-ownership change or reusable HTTPS proof is introduced. Local process checks pass; the updated
-cross-account network proof is still pending. Existing agent-side `--output` remains available.
+ownership change or reusable HTTPS proof is introduced. The
+[cross-account network proof on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184629816)
+now passes both complete-cache and partial-origin cases. Existing agent-side `--output` remains available.
 Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
 VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
 Normal `content recipient-key`, `content publish-message` and `content open-message` commands
@@ -133,6 +134,10 @@ The [extended public-file VM on `49b6a7d1`](https://github.com/VOLPAROSSA/volpar
 also passes, including default refusal, exact reconstruction and cleanup. This does not authenticate arbitrary HTTPS content.
 See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
 before serving or assembling a publication held by another account.
+The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
+also passes: publish, import, serve, protected retrieval, export and recipient opening after
+the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
+an automatically discoverable mailbox or guaranteed offline retention.
 That `10f63244` run also joins the normal commands end to end: user publication/import,
 agent serving, independent protected retrieval, then user export/assembly. The complete
 2,097,275-byte file retains its exact hash across accounts and the network; all twenty physical

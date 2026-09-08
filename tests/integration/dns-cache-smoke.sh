@@ -85,7 +85,10 @@ dns_cache_select() {
         else
             a01_transient_connect_unavailable "$dc_attempt_prefix.err" || return 1
         fi
-        sleep 0.25
+        # A cold discovery round and its bounded owner/cooldown can outlive 30 seconds.
+        # Quarter-second polling spent all 120 admission attempts before it could finish.
+        # Match the existing topology admission cadence; never retry a DNS query itself.
+        sleep 1
     done
     return 1
 }

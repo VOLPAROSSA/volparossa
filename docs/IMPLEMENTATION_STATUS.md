@@ -42,7 +42,12 @@ validity during this run. Original public wire records, source/binary hashes and
 are retained in artifact SHA-256
 `4efa632e5ea53462b7c16cfda30ddc9eca935a183a8d2aeea1a077aa586ff857`.
 The replay listener closes cleanly. This is a real public-root collector/local-cache pass,
-not a normal Client route or positive peer-cache pass.
+not a normal Client route or positive peer-cache pass. A fresh
+[repeat on `73c0c4be`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34185235916)
+also passes both families and local reuse with unchanged roots. The preceding `1024e6d2`
+standalone run failed while collecting public data, before validation; its generic `ValueError`
+did not retain the cause. The recorder now preserves fixed local rejection reasons (five focused
+checks pass), without changing acceptance, trust or TTL rules. No cause is inferred from the repeat.
 The normal resolver now exports only aggregate local/peer/upstream/fallback counters through the
 existing loopback-only metrics endpoint, plus signed cache-miss replies queued by the actor.
 No names, addresses or peer labels are added. Targeted cache/source-accounting, actor, metrics
@@ -63,6 +68,13 @@ retains bounded nested diagnostics. No DNSSEC root, signed record or TTL rule is
 the correction still needs a new live run. Cleanup leaves zero owned objects and raw guest state
 unchanged, SHA-256 `dc55803ed7a7fb55413bf488dbb6b3fa7a98e4179b34f8007bea64e72e459cec`.
 Artifact SHA-256: `9e0e9d67392ea71ab159a637503d63e4f2c63fe963b5a1d6bdb764ec56a39ba0`.
+The [next `1024e6d2` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184628720)
+stops earlier, before collection: cold discovery consumes 120 quarter-second admission attempts,
+ending with `PRESELECTION_OWNER_BUSY`, no selected route and no DNS request. The fixture now uses
+the existing topology's one-second admission cadence within its original 180-second deadline;
+this does not retry failed DNS queries or prove that route setup succeeds. This run also cleans
+up completely with unchanged raw guest state; artifact SHA-256
+`334fdf8d1680297d4e2803db0fc422982e84357e0bb2f76f249981278215c693`.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -87,7 +99,15 @@ Existing `--output` and its wire operation remain unchanged. Two isolated real C
 three CLI argument tests, twelve origin-TLS/Range library tests, the new wire test and strict
 four-crate Clippy pass. The existing complete/missing HTTPS topology cases now use separate
 operator/service accounts, with exact output ownership, no-clobber and cleanup requirements;
-their new network result remains pending, not inferred from the local control fixture.
+their [exact `1024e6d2` network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184629816)
+now passes. Both reconstruct 2,097,275 bytes / nine chunks into user 985's `0600` file while
+agent 987 retains its `0700` cache. The complete case receives all bytes from two independent
+providers and no origin body; the missing case receives 1,048,699 peer bytes plus 1,048,576
+origin bytes in four exact ranges. The ordinary public publication sequence also passes.
+All physical capture gates and cleanup pass; raw guest state is unchanged, SHA-256
+`722dcae6ec43f24af7d3430cef084d89e455e4bdb5a8b822e029323c8ffb8320`.
+Artifact SHA-256: `63f112d83b14cac188b07526146062eb9b5090eba74798bb062194cf7470a8e0`.
+This is cooperative-origin CLI integration, not arbitrary browser HTTPS or a speed claim.
 
 Explicit local `content import`/`content export` now bridge user-owned and service-owned private
 message caches through the same authorized Unix control connection. Typed Ready/final receipts
@@ -124,6 +144,16 @@ above; the boundary check is not weakened and this run remains failed. Cleanup l
 guest state unchanged, SHA-256 `c2864ace57362c8967429aa614de19b6c1660eeeae853ed12ce1ecc3c21e5a73`.
 Artifact SHA-256: `fa73a1b1d77be63e177466e8b8ec03fad1dee96d30f4b4045a8aaad2196d83f6`.
 A mailbox/full C07 or general combined-role unlinkability is not claimed.
+The [corrected `1024e6d2` private-network run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
+now passes the complete normal sender publish/import/serve/protected fetch/export/open sequence
+with sender secrets removed before retrieval. The exact 2,097,275-byte plaintext is recovered
+from nine ciphertext chunks; account isolation, wrong-recipient/no-clobber checks and the
+unchanged physical privacy gate pass, including zero Exit-to-Client discovery attempts.
+Cleanup leaves zero owned objects and unchanged raw guest state, SHA-256
+`caff570494b73a7d81ee4283d89c49782c6c1abdaa12118ff1c065b523839950`.
+Artifact SHA-256: `3334c3d32813b41f7f4eb1475f674e10f6b5f67c781ee36c75f6b18d804b146d`.
+The earlier failure remains a failure; this proves the corrected scoped path, not a mailbox,
+automatic recipient discovery, durable offline availability or full C07.
 
 The installed runtime ancestor now gives only search permission to the control group through a
 non-inherited ACL, retaining the helper's required `0750` mode and private socket permissions.
