@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use volparossa_content::{
     CacheLimits, ChunkStore, MAX_MANIFEST_BYTES, MAX_OBJECT_BYTES, MAX_SOURCES,
@@ -191,6 +191,24 @@ pub(crate) struct FetchName {
     limits: Limits,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum HttpsSourceChoice {
+    Auto,
+    PeersFirst,
+    OriginOnly,
+}
+
+impl HttpsSourceChoice {
+    const fn wire(self) -> volparossa_local_control::HttpsSourceStrategy {
+        use volparossa_local_control::HttpsSourceStrategy;
+        match self {
+            Self::Auto => HttpsSourceStrategy::Auto,
+            Self::PeersFirst => HttpsSourceStrategy::PeersFirst,
+            Self::OriginOnly => HttpsSourceStrategy::OriginOnly,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct FetchHttps {
     /// Exact canonical HTTPS resource URL; credentials and fragments are rejected.
@@ -205,6 +223,9 @@ pub(crate) struct FetchHttps {
     /// Resume owned chunks after fresh HTTPS origin authorization; never extend cached validity.
     #[arg(long)]
     reuse_cache: bool,
+    /// Source preference after fresh origin authentication; no speed or policy-bypass guarantee.
+    #[arg(long, value_enum, default_value = "auto")]
+    source_strategy: HttpsSourceChoice,
     /// New output path writable by the agent account; no existing entry is overwritten.
     #[arg(
         long,
@@ -416,6 +437,7 @@ fn https_fetch_request(
         limits: Some(args.limits.wire_limits()),
         ca_certificates_pem,
         reuse_cache: args.reuse_cache,
+        source_strategy: args.source_strategy.wire() as i32,
     })
 }
 
@@ -918,11 +940,59 @@ mod tests {
     }
 
     #[test]
+    fn https_source_strategy_cli_maps_explicit_choices_and_defaults_to_auto() {
+        use volparossa_local_control::HttpsSourceStrategy;
+        let base = [
+            "volparossa",
+            "content",
+            "fetch-https",
+            "--url",
+            "https://origin.example/object.bin",
+            "--metadata-path",
+            "/metadata",
+            "--cache",
+            "/agent/cache",
+            "--local-output",
+            "/user/output",
+        ];
+        for (choice, expected) in [
+            (None, HttpsSourceStrategy::Auto),
+            (Some("auto"), HttpsSourceStrategy::Auto),
+            (Some("peers-first"), HttpsSourceStrategy::PeersFirst),
+            (Some("origin-only"), HttpsSourceStrategy::OriginOnly),
+        ] {
+            let mut arguments = base.to_vec();
+            if let Some(value) = choice {
+                arguments.extend(["--source-strategy", value]);
+            }
+            let crate::CliCommand::Content { command } =
+                crate::Cli::try_parse_from(arguments).unwrap().command
+            else {
+                panic!("content command");
+            };
+            let Command::FetchHttps(args) = *command else {
+                panic!("HTTPS command");
+            };
+            let request = https_fetch_request(&args).unwrap();
+            assert_eq!(request.source_strategy, expected as i32);
+            assert!(request.output.is_empty());
+            assert!(request.ca_certificates_pem.is_empty());
+        }
+        for unknown in ["fastest", "peer-only", "3"] {
+            assert!(
+                crate::Cli::try_parse_from(base.into_iter().chain(["--source-strategy", unknown]))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn https_fetch_request_uses_explicit_bounded_regular_ca_file_without_creating_outputs() {
         let directory = tempfile::tempdir().expect("private fixture directory");
         let root = directory.path();
         let mut args = FetchHttps {
             reuse_cache: false,
+            source_strategy: HttpsSourceChoice::Auto,
             url: "https://origin.example/object.bin".into(),
             metadata_path: "/metadata".into(),
             cache: root.join("new-cache"),

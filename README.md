@@ -8,12 +8,14 @@
 > See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
 > installing, or enabling a role.
 
-Peer downloads retain already verified chunks if another provider fails. The protected native,
-browser-download and partial-origin sequence now passes on `5f648434`, including its origin-only
-reference. In that one comparison the complete peer-assisted download took 4.40 seconds versus
-1.62 seconds from the origin: origin-body traffic was avoided, but latency did not improve.
-Replica pause/resume is observed; its final re-fetch fix still needs a new integrated result.
-C04/C08 therefore remain open.
+Peer downloads retain already verified chunks if another provider fails. On `fed8ab33`, the
+protected native/browser/partial-origin sequence and native static-site publication pass, as
+does owner-priority replica pause/resume followed by retrieval after the original provider stops.
+These source-bound results cover the bounded C01–C07 checkpoints. C08 remains open: the latest
+complete peer-assisted download took 7.57 seconds versus 1.85 seconds from the origin in that
+one comparison. Origin-body traffic was avoided, but latency did not improve. New automatic
+source selection uses recent measured costs and prefers the origin when evidence is absent;
+that implementation still needs its own integrated measurement, not an assumed speedup.
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
@@ -156,7 +158,10 @@ The new `content site pack` and `content site open` commands add native static w
 publish an explicit HTML/CSS/JavaScript/media directory through the same signed-content service,
 then retrieve it by publisher/name and open its verified assets on a temporary local browser URL.
 Local packing, HTTP/range handling, actual CLI-transfer/cleanup and isolated Firefox rendering
-with working CSS/JavaScript pass; complete protected-network site integration is still pending.
+with working CSS/JavaScript pass. The [protected-network site run on `fed8ab33`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203091361)
+also passes: the publishing application and its source files are gone before a fresh Client
+retrieves the signed site from two independent providers and reads its HTML/CSS/JavaScript and
+byte ranges. The VM checks HTTP behavior; actual Firefox rendering is a separate local proof.
 This does not give cached pages another
 website's HTTPS origin or a dynamic backend. See the [site commands](docs/OPERATIONS.md#native-static-websites).
 The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)

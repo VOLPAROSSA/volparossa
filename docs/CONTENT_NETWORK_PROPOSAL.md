@@ -2,8 +2,10 @@
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
 storage, protected-route public/encrypted transfer and a cooperative-origin HTTPS consumer.
-**Multi-peer retrieval has source-bound passing checkpoints; owner-contention integration,
-browser benefit and generic existing-site reuse remain incomplete.**
+**Multi-peer retrieval, bounded owner-contention integration and native static-site publishing
+have source-bound passing checkpoints; browser benefit and generic existing-site reuse remain
+incomplete.** Global replica repair/fairness and unsupported-site HTTPS integration are still
+requested work; the bounded checkpoints do not remove them from the functional scope.
 This is additional functional scope, not evidence that the VPN/local-link alpha is finished.
 Continue from the scoped downlink/mixed-link passes into the application/content runtime.
 
@@ -322,8 +324,14 @@ The explicit one-shot `content browser-download` adapter now has local process t
 executable protected-network harness (`d82a64f`), whose checker passes locally. A same-overlay
 origin-only reference fixture (`49a0253`) uses the existing origin verifier and an ordinary Client
 socket; the integrated comparison harness records actual monotone durations and reports the
-result even when the origin is faster. Neither preparation is a browser-network pass or measured
-benefit. The reference is fixture-only, not a new CLI benchmark mode; C08 stays open.
+result even when the origin is faster. The complete sequence now passes on `fed8ab33`, including
+native static-site publication/retrieval after publisher-application exit. Its peer-assisted
+HTTPS download is slower than the origin reference, so C08 stays open. The ordinary HTTPS CLI
+now has `--source-strategy auto|peers-first|origin-only`: auto prefers origin in the absence of
+recent comparable costs, otherwise bounds fresh known-peer lookup and transfer together. Local
+verified chunks remain reusable under fresh origin authority. Explicit peers-first exploration
+is not a latency guarantee; source selection does not make unsupported HTTPS sites shareable.
+The new strategy requires its own integrated measurement.
 
 ### Bounded post-download redistribution
 
@@ -398,7 +406,8 @@ The next fixture also stops and explicitly reopens the replica service from its 
 that final retrieval. Its [live run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
 passes uptake, provider removal, journal reopen and independent Q retrieval with complete
 physical captures and unchanged-host cleanup. Retention repair and global contribution/fairness
-remain absent; C03's bounded-diversity criterion is covered by that run, while C04 remains unchecked.
+remain absent; that older run covers C03's bounded-diversity criterion. The newer owner-contention
+run below covers C04's local bounded-contribution criterion, not those wider missing functions.
 
 ## Integrated functional checkpoints
 
@@ -406,7 +415,10 @@ remain absent; C03's bounded-diversity criterion is covered by that run, while C
   protected-route transfer verified on `f0a906ca` (source-scoped evidence above).
 - [x] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback ([`d2f886c8` network proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)).
 - [x] C03: bounded opportunistic redistribution improving reachable chunk diversity ([`603cec9d` extra-Q uptake and subsequent replica retrieval](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)).
-- [ ] C04: owner-priority network/storage behavior and fair bounded contribution under contention.
+- [x] C04: local owner-priority network/storage behavior and bounded contribution under contention
+  ([`fed8ab33` real owner-load pause/resume, replica reopen and Q retrieval](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203089267),
+  together with bounded quotas/min-free-space and foreground cancellation). This does not claim
+  global fairness, general disk-I/O QoS or an unconditional no-slowdown guarantee.
 - [x] C05: independent DNS validation, correct expiry and no peer-induced policy bypass ([`b172d11f` protected upstream/peer/local/fallback proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)).
 - [x] C06: signed public publication remains retrievable after its publisher goes offline ([`603cec9d` original-node-stop/replica-reopen proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)).
 - [x] C07: an intended recipient retrieves and decrypts a replicated message after sender exit ([`b172d11f` sender-app-exit/route-disconnect/inbox proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)).

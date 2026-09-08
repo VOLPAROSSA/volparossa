@@ -3,12 +3,17 @@
 //! Origin trust is authenticated before any provider lookup, and remains in memory until
 //! atomic output reconstruction. Cached native signatures never substitute for HTTPS authority.
 
+pub(super) mod sources;
+
 use std::{path::PathBuf, time::Duration};
 
 use rustls::RootCertStore;
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use tokio::io::AsyncReadExt;
-use tokio::{net::UnixStream, time::timeout};
+use tokio::{
+    net::UnixStream,
+    time::{Instant, timeout},
+};
 use volparossa_content::ChunkStore;
 use volparossa_content::origin_https::{
     OriginAuthorizedManifest, OriginClient, OriginLimits, OriginRequest,
@@ -16,10 +21,12 @@ use volparossa_content::origin_https::{
 use volparossa_content::transfer::{TransferLimits, serve_peer};
 use volparossa_local_control::{
     CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
-    HttpsContentFetchRequest, HttpsContentTransferReady, control_response::Payload, write_response,
+    HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
+    control_response::Payload, write_response,
 };
 use volparossa_policy::{TransportProtocol, VerifiedManifest as VerifiedPolicy};
 
+use super::recent::RecentProviderScope;
 use super::{ContentError, ContentRuntime, download_cache, limits, now};
 use crate::{
     control::ControlContext, mptcp_flow_runtime::ActiveProductionMptcpClientFlow, unix_millis,
@@ -58,6 +65,8 @@ async fn retrieve(
     request: HttpsContentFetchRequest,
     context: &ControlContext,
 ) -> Result<PreparedDownload, ContentError> {
+    let strategy = HttpsSourceStrategy::try_from(request.source_strategy)
+        .map_err(|_| ContentError::Invalid)?;
     let origin = OriginRequest::new(&request.resource_url, &request.metadata_path)
         .map_err(|_| ContentError::Invalid)?;
     let client = OriginClient::new(
@@ -83,11 +92,12 @@ async fn retrieve(
     )
     .await
     .map_err(|_| ContentError::Unavailable)?;
-    let control_peer = context
+    let (control_peer, route_context) = context
         .routes
-        .content_discovery_control()
+        .content_discovery_scope()
         .await
         .ok_or(ContentError::Unavailable)?;
+    let scope = RecentProviderScope::new(control_peer, *policy.policy_hash(), route_context);
     let mut flow = open_origin_stream(context, &origin, &policy).await?;
     let authenticated = client
         .authenticate_manifest(flow.stream_mut(), &origin, now())
@@ -99,16 +109,14 @@ async fn retrieve(
     flow.shutdown();
     let authorized = authenticated.map_err(|_| ContentError::Unavailable)?;
     let mut store = download_cache(&request.cache, cache_limits, request.reuse_cache)?;
-    // Check full-object cache capacity and HTTPS freshness before contacting any peers.
-    authorized
-        .next_missing_range(&mut store, now())
-        .map_err(|_| ContentError::Invalid)?;
-    let (providers, peer_bytes) = match ContentRuntime::pull_registered_providers(
+    let (providers, peer_bytes) = match pull_selected(
         context,
-        authorized.manifest(),
+        &origin,
+        &authorized,
         &mut store,
         &policy,
-        control_peer,
+        scope,
+        strategy,
     )
     .await
     {
@@ -116,9 +124,18 @@ async fn retrieve(
         Err(ContentError::Unavailable) => (Vec::new(), 0),
         Err(error) => return Err(error),
     };
+    let origin_started = Instant::now();
     let (origin_body_bytes, origin_range_requests) =
         fill_missing(context, &client, &origin, &authorized, &policy, &mut store).await?;
     checked_policy(context, &origin, &policy).await?;
+    context.content.source_costs.lock().await.observe_origin(
+        scope,
+        &origin,
+        origin_body_bytes,
+        origin_range_requests,
+        origin_started.elapsed(),
+        Instant::now(),
+    );
     let receipt = ContentReceipt {
         bytes: authorized.manifest().length(),
         chunks: u32::try_from(authorized.manifest().chunks().len())
@@ -139,6 +156,110 @@ async fn retrieve(
         store,
         receipt,
     })
+}
+
+async fn pull_selected(
+    context: &ControlContext,
+    origin: &OriginRequest,
+    authorized: &OriginAuthorizedManifest,
+    store: &mut ChunkStore,
+    policy: &VerifiedPolicy,
+    scope: RecentProviderScope,
+    strategy: HttpsSourceStrategy,
+) -> Result<(Vec<String>, u64), ContentError> {
+    // Quota/freshness/corrupt cache errors are fatal even when the origin is preferred.
+    let Some(missing) = authorized
+        .next_missing_range(store, now())
+        .map_err(|_| ContentError::Invalid)?
+    else {
+        return Ok((Vec::new(), 0));
+    };
+    match strategy {
+        HttpsSourceStrategy::OriginOnly => {
+            super::content_event(context, "CONTENT_HTTPS_SOURCE_EXPLICIT_ORIGIN").await;
+            return Ok((Vec::new(), 0));
+        }
+        HttpsSourceStrategy::PeersFirst => {
+            super::content_event(context, "CONTENT_HTTPS_SOURCE_EXPLICIT_PEERS").await;
+            return ContentRuntime::pull_registered_providers(
+                context,
+                authorized.manifest(),
+                store,
+                policy,
+                scope.control_peer,
+            )
+            .await;
+        }
+        HttpsSourceStrategy::Auto => {}
+    }
+    let started = Instant::now();
+    let estimate = context.content.source_costs.lock().await.estimate_origin(
+        scope,
+        origin,
+        missing.length(),
+        started,
+    );
+    let Some(origin_cost) = estimate else {
+        super::content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_UNMEASURED").await;
+        return Ok((Vec::new(), 0));
+    };
+    let hints = context.content.recent_provider_hints(scope).await;
+    let Some(plan) = sources::PeerPlan::new(origin_cost, authorized.manifest().length(), &hints)
+    else {
+        super::content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_PREFERRED").await;
+        return Ok((Vec::new(), 0));
+    };
+    let providers = context
+        .content
+        .refresh_recent_provider_hints(scope, &context.discovery, plan.lookup_budget)
+        .await;
+    let refreshed = hints
+        .into_iter()
+        .filter(|hint| {
+            providers
+                .iter()
+                .any(|provider| provider.peer_id == hint.peer_id)
+        })
+        .collect::<Vec<_>>();
+    if !plan.admits_refreshed(
+        authorized.manifest().length(),
+        &refreshed,
+        started.elapsed(),
+    ) {
+        super::content_event(context, "CONTENT_HTTPS_SOURCE_ORIGIN_AFTER_LOOKUP").await;
+        return Ok((Vec::new(), 0));
+    }
+    authorized
+        .check_validity(now())
+        .map_err(|_| ContentError::Unavailable)?;
+    checked_policy(context, origin, policy).await?;
+    super::content_event(context, "CONTENT_HTTPS_SOURCE_MEASURED_PEERS").await;
+    // The writer retains verified byte counts on timeout and joins/drops both owned
+    // protected streams before returning. Only then may fill_missing contact origin.
+    let remaining = plan.total_budget.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok((Vec::new(), 0));
+    }
+    let attempted = providers
+        .iter()
+        .map(|provider| provider.peer_id)
+        .collect::<Vec<_>>();
+    let outcome = super::parallel::pull_with_budget(
+        context,
+        authorized.manifest(),
+        store,
+        policy,
+        providers,
+        remaining,
+    )
+    .await;
+    if started.elapsed() >= plan.total_budget {
+        for peer in attempted {
+            context.content.forget_recent_provider(scope, peer).await;
+        }
+        super::content_event(context, "CONTENT_HTTPS_SOURCE_PEER_BUDGET_EXHAUSTED").await;
+    }
+    outcome
 }
 
 /// Complete fresh origin authorization and deliver directly from the owned cache.

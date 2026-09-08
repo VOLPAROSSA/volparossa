@@ -7,8 +7,8 @@ Last updated: 2026-09-08
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 The proposal records the full idea and a researched HTTPS integration design: authenticated
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
-experiment, through an application/browser boundary. C01/C02/C03/C05/C06/C07 now have source-bound
-passing checkpoints; C04/C08 remain incomplete;
+experiment, through an application/browser boundary. C01–C07 now have source-bound
+passing checkpoints within their stated bounded scope; C08 remains incomplete;
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Scoped downlink and mixed-link runs now pass; content/application integration continues.
 Current criterion evidence: [C02 on `d2f886c8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)
@@ -59,8 +59,19 @@ established-flow bypass, TLS relaxation or new agent/helper RPC. The actual Rust
 batch passes the disposable reproduction: misdirected replies fall from five to zero, the
 full TCP request/response completes, wrong UID and original-direction attempts remain blocked,
 and two injected stale SYN markers are cleared. Three existing parent tests and strict helper
-Clippy also pass. The privileged regression is explicit opt-in; a new integrated C04 result
-is still required.
+Clippy also pass. The privileged regression is explicit opt-in. The
+[integrated C04 run on `fed8ab33`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203089267)
+now **passes** its exact-source report and raw rebuild. During 3.001237 seconds of owner load,
+2,088 UDP packets carry 2,505,600 bytes. The same provider TCP flow has 263,912 payload bytes
+before, zero during and 263,679 after that load, observed independently at Provider and Exit.
+The replica reopens and delivers all 524,411 Q bytes / three chunks while the original provider
+is offline, with SHA-256 `22da54d461a4bfef4e32682d16db4771dd1a810e032aebbc669618259601326a`.
+Both selected WireGuard paths carry data; all ten physical captures are complete and zero-drop
+with no forbidden traffic. Cleanup leaves zero owned objects and byte-identical guest state.
+Artifact ZIP SHA-256: `c386851aa45c9de794b3dc1d3fe0c5d01c18e40e8beb1cd75b00bf295ed28d7d`.
+Together with existing bounded quotas/min-free-space/non-eviction and foreground cancellation,
+this satisfies C04's local bounded-contribution criterion. It does not establish global fairness,
+general disk-I/O QoS, retention repair or a universal no-slowdown guarantee.
 
 The [browser/provider VM on `b9404908`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34197445147)
 passes its native two-provider download but **fails before the browser consumer starts**: the
@@ -89,7 +100,7 @@ The origin is about **2.71 times faster in this one sample**. Browser delivery a
 body bytes; its final localhost HTTP GET takes only 10.9 ms, which must not be substituted for
 the complete command time. This VM executes an HTTP consumer, not a browser engine. Useful
 cache/origin latency selection is still unfinished; neither general speedup nor owner-goodput
-is guaranteed. C04/C08 remain unchecked.
+is guaranteed. C08 remains unchecked; the newer C04 result above supersedes its earlier failure.
 
 Quality on `1283` failed
 `refreshed_control_lineage_keeps_forwarded_exit_selectable`; its random fixture nonce can collide
@@ -101,6 +112,9 @@ now passes formatting, locked dependencies/licenses, strict Clippy, workspace te
 namespace-backed proof reporting and the non-mutating integration harness. This does not turn
 the separate failed network runs into passes. The earlier `b22a9153` provider and `b172d11f` DNS/mailbox
 network evidence above retains its exact source scope and is not extended to these candidates.
+The newer [full Quality run on `fed8ab33`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203066709)
+also **passes**, alongside the exact-source C04 and site/provider VMs above/below. The later
+source-strategy changes have their own verification and do not inherit that result.
 
 ### Native static-site application
 
@@ -119,11 +133,45 @@ the host filesystem is read-only, network/PID/user namespaces are disposable, th
 browser have no capabilities, and only the owned fixture/evidence storage is writable. The
 rendered screenshot visibly contains the expected JavaScript-replaced text in CSS green, SHA-256
 `01c64a9fb42b7b40d902020a9c3f7a0aa349012dc017c42aa219ba1de1c66c28`.
-This is actual browser execution behind the real local named-transfer protocol, not yet a
-protected-network/offline-publisher site proof. The additive two-provider site topology remains
-pending. Run the opt-in browser proof with `sh tests/integration/site-browser-smoke.sh`, supplying
+This is actual browser execution behind the real local named-transfer protocol. Separately, the
+[site/provider VM on `fed8ab33`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203091361)
+now **passes** ordinary `init`/`site pack`/`publish`, provider imports and protected `site open`
+after the publisher application exits and its identity, assets, bundle, manifest and source cache
+are removed. The independent Client supplies only its trusted publisher key and name; two
+providers deliver nine chunks / 2,097,628 bytes with exact bundle SHA-256
+`5e3012170ca5335e4f8b7e419fda3ae4ddf59e7603eeabb6a9c2544ea6088a04`.
+Four real HTTP assets, HEAD and a 4,096-byte range return the exact bytes/MIME; wrong Host and
+traversal are refused. SIGTERM removes the private spool and listener. All forty captures /
+192 interface rows pass the unchanged boundary predicates, with zero drops or forbidden packets;
+cleanup leaves zero owned objects and byte-identical guest state. Artifact ZIP SHA-256:
+`3d7a0bd4605cdcbec76d65134a36888a9d6d042ee59a815ff8557198f2df0181`;
+exact-source raw rebuild SHA-256:
+`2c414bc7d5e738ea23bd97e5f750b6965c69508c6d6ff248063a23592e1bb86c`.
+This VM executes HTTP requests, not Firefox, and proves publisher-application exit rather than
+power-off of a whole provider machine. Its HTTPS reference again shows no latency benefit:
+7.567 seconds peer-assisted versus 1.848 seconds origin-only (descriptive ratio 0.244212).
+Run the opt-in browser proof with `sh tests/integration/site-browser-smoke.sh`, supplying
 the built named-download test executable and a new empty `0700` evidence directory; it installs
 nothing and does not disable Firefox's sandbox. See [site commands](OPERATIONS.md#native-static-websites).
+
+### Measured source selection under development
+
+HTTPS now exposes `--source-strategy auto|peers-first|origin-only`, defaulting to `auto`.
+Automatic selection retains verified local chunks, requires fresh origin authorization and
+prefers the origin when there is no recent comparable origin/peer cost. Two RAM-only useful-peer
+hints are scoped to the carrying route context, control Relay and policy; they retain no object
+catalogue and never replace newly authenticated provider offers. Cost hints expire after at
+most sixty seconds and cannot extend signed-offer validity. An admitted peer attempt includes
+fresh exact lookup and protected transfer in one bounded budget, retaining verified progress
+and ending both workers before origin fallback. No full-object origin race is introduced.
+The explicit `peers-first` mode supports deliberate peer-path exploration/tests, not a speed
+claim. Seven targeted agent tests pass, including actual chunk transfer followed by a source
+deadline, retained verified counts and both worker owners dropped before fallback. Three
+CLI/local-control strategy tests, strict agent/CLI/local-control/example Clippy, ten HTTPS and
+fourteen parent checker tests also pass. The additive harness compares two cold product
+`origin-only`/`auto` downloads, binds their exact origin/peer byte accounting and reports actual
+monotone durations without forcing a winner. The new network measurement is pending; the older
+`fed8ab33` evidence above does not verify these later source changes or complete C08.
 
 ## Latest known-contact mailbox integration checkpoint
 

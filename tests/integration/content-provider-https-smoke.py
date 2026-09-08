@@ -3,8 +3,8 @@
 """Normal CLI/browser-HTTP provider evidence, not a GUI, speed or full C02/C08 acceptance.
 
 The enclosing native-provider report owns exact-source and final host/guest cleanup checks.
-This checker requires both peer-assisted phases and the origin-only reference, each with
-independently drained physical captures.
+This checker requires both peer-assisted phases, the ordinary origin reference and two
+cold product source-strategy phases, each with independently drained physical captures.
 """
 
 import hashlib
@@ -134,10 +134,27 @@ def inspect_spool(user_directory, uid, gid):
     return spools[0]
 
 
+def consumer_command(case, binary, control, cache, user_directory, output):
+    """Pin existing peer evidence explicitly; the ordinary reference is not an auto request."""
+    require(case in ("complete", "missing", "baseline", "origin-only", "auto"), "unknown HTTPS consumer phase")
+    if case == "baseline":
+        return [binary, "origin-baseline", str(user_directory), "47.163.4.2:18443",
+                str(user_directory / "origin.pem"), str(output)]
+    command = [binary, "--control-socket", control, "content",
+               "browser-download" if case == "complete" else "fetch-https",
+               "--url", "https://destination.volparossa.test:18443/asset.bin",
+               "--metadata-path", "/.well-known/volparossa/content/asset",
+               "--ca-file", str(user_directory / "origin.pem"), "--cache", cache,
+               "--source-strategy", case if case in ("origin-only", "auto") else "peers-first"]
+    if case != "complete":
+        command.extend(["--local-output", str(output)])
+    return command
+
+
 def consume(arguments):
     """Called only after the enclosing disposable harness enters CLIENT and drops privileges."""
     case, binary, control, cache, user_path, parent_ns, client_ns, uid, gid, control_gid = arguments
-    require(case in ("complete", "missing", "baseline"), "unknown HTTPS consumer phase")
+    require(case in ("complete", "missing", "baseline", "origin-only", "auto"), "unknown HTTPS consumer phase")
     uid, gid, control_gid = int(uid), int(gid), int(control_gid)
     boundary = process_boundary("self", parent_ns, client_ns, uid, gid, control_gid)
     user_directory = Path(user_path)
@@ -145,16 +162,7 @@ def consume(arguments):
     require(not output.exists() and not output.is_symlink()
             and not list(user_directory.glob("volparossa-browser-*"))
             and not list(user_directory.glob("volparossa-origin-baseline-*")), "consumer storage is not fresh")
-    command = [binary, "--control-socket", control, "content",
-               "browser-download" if case == "complete" else "fetch-https",
-               "--url", "https://destination.volparossa.test:18443/asset.bin",
-               "--metadata-path", "/.well-known/volparossa/content/asset",
-               "--ca-file", str(user_directory / "origin.pem"), "--cache", cache]
-    if case == "missing":
-        command.extend(["--local-output", str(output)])
-    elif case == "baseline":
-        command = [binary, "origin-baseline", str(user_directory), "47.163.4.2:18443",
-                   str(user_directory / "origin.pem"), str(output)]
+    command = consumer_command(case, binary, control, cache, user_directory, output)
     started, deadline = time.monotonic_ns(), time.monotonic() + 110
     process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
                                env=dict(os.environ, TMPDIR=str(user_directory)))
@@ -167,6 +175,8 @@ def consume(arguments):
         cli_boundary = process_boundary(process.pid, parent_ns, client_ns, uid, gid, control_gid)
         first = bounded_json_line(process.stdout, deadline)
         report = dict(final=first, consumer=boundary, cli=cli_boundary)
+        if case != "baseline":
+            report["requested_source_strategy"] = command[command.index("--source-strategy") + 1]
         if case == "baseline":
             require(first["network_namespace"] == client_ns and first["effective_uid"] == uid
                     and read(output) == first, "baseline report differs from actual isolated fixture process")
@@ -213,9 +223,9 @@ def origin_exit_source(source):
         and 0 < int(source.rsplit(":", 1)[1]) <= 65535
 
 
-def validate_drained(capture):
+def validate_drained(capture, allow_empty=False):
     statistics = capture["interface_statistics"]
-    require(capture["truncated"] is False and capture["observed_frames"] > 0
+    require(capture["truncated"] is False and capture["observed_frames"] >= (0 if allow_empty else 1)
             and capture["packet_socket_drops"] == 0 and len(capture["interfaces"]) > 0
             and len(set(capture["interfaces"])) == len(capture["interfaces"])
             and set(statistics) == set(capture["interfaces"])
@@ -226,7 +236,7 @@ def validate_drained(capture):
             "capture truncated, dropped, still accepting intake or not completely drained")
 
 
-def validate_control(capture, control_node, provider_nodes, missing):
+def validate_control(capture, control_node, provider_nodes, missing, require_contacts=True):
     pairs = {f"cp{i}": [PUBLIC_IPS[control_node], PUBLIC_IPS[node]]
              for i, node in enumerate(provider_nodes)}
     require(capture["capture_role"] == "content-control"
@@ -240,15 +250,15 @@ def validate_control(capture, control_node, provider_nodes, missing):
             and all(value == 0 for counters in capture["provider_application"].values()
                     for value in counters.values()),
             "exact generic-control links carried unexpected control or application traffic")
-    validate_drained(capture)
+    validate_drained(capture, allow_empty=not require_contacts)
     # The withdrawn provider may legitimately receive no second-phase service query.
-    for interface in ("cp0",) if missing else ("cp0", "cp1"):
+    for interface in (("cp0",) if missing else ("cp0", "cp1")) if require_contacts else ():
         counters = capture["content_control_packets"][interface]
         require(counters["inbound"] > 0 and counters["outbound"] > 0,
                 "active provider lacks bidirectional authenticated-control traffic")
 
 
-def validate_path(phase, peers, provider_nodes, missing, origin_only=False):
+def validate_path(phase, peers, provider_nodes, missing, origin_only=False, useful_peer_bytes=None):
     selected = phase["selected_route"]
     paths, slots = selected["paths"], selected["benchmark_slots"]
     provider_peers = {peers[node] for node in provider_nodes}
@@ -290,7 +300,19 @@ def validate_path(phase, peers, provider_nodes, missing, origin_only=False):
     active = [] if origin_only else provider_nodes[:1] if missing else provider_nodes
     for node in CANDIDATES:
         application = privacy["exit"]["provider_application"][node]
-        if origin_only:
+        if useful_peer_bytes is not None:
+            useful = useful_peer_bytes if node == provider_nodes[0] else 0
+            require(application["response_payload_bytes"] >= useful
+                    and application["response_payload_bytes"] <= useful + 65536,
+                    "strategy provider traffic exceeds useful bytes plus bounded protocol overhead")
+            if useful:
+                require(application["request_packets"] > 0 and application["response_packets"] > 0,
+                        "strategy provider useful bytes lack a real protected exchange")
+            elif origin_only or node != provider_nodes[0]:
+                require(application["response_payload_bytes"] == 0
+                        and application.get("request_payload_bytes", 0) == 0,
+                        "explicit origin-only used provider payload")
+        elif origin_only:
             # Prior completed provider sockets may still exchange ACK/FIN; those are not
             # downloaded object bytes. This observer currently has no request-payload field.
             require(application["response_payload_bytes"] == 0
@@ -326,9 +348,10 @@ def validate_local_output(phase):
             "same-operation HTTPS result was not delivered privately to the actual user account")
 
 
-def validate_application(phase, browser):
+def validate_application(phase, browser, source_strategy="peers-first"):
     application, fetch, output = phase["application"], phase["fetch"], phase["output"]
-    require(application["final"] == fetch and 0 < application["elapsed_ns"] <= 120_000_000_000,
+    require(application["final"] == fetch and 0 < application["elapsed_ns"] <= 120_000_000_000
+            and application["requested_source_strategy"] == source_strategy,
             "application receipt differs from real CLI result or lacks bounded monotone timing")
     for key in ("consumer", "cli"):
         boundary = application[key]
@@ -385,6 +408,7 @@ def validate_baseline(baseline, cases, peers, provider_nodes):
             and reference["pid"] > 0,
             "origin-only reference did not run in the same capless Client operator namespace")
     require(reference["report_kind"] == "volparossa-https-origin-baseline"
+            and "requested_source_strategy" not in application
             and reference["bytes"] == reference["origin_body_bytes"] == BYTES
             and reference["object_sha256"] == SHA and reference["chunks"] == 9
             and reference["peer_bytes"] == 0
@@ -411,6 +435,9 @@ def measured_comparison(cases, baseline):
     browser, missing = (cases[key]["application"] for key in ("complete", "missing"))
     reference = baseline["application"]
     return dict(reference="same-overlay-origin-only", samples_per_case=1, speedup_required=False,
+        reference_kind="ordinary-application-not-product-source-selector",
+        browser_source_strategy=browser["requested_source_strategy"],
+        missing_source_strategy=missing["requested_source_strategy"],
         browser_ready_elapsed_ns=browser["ready_elapsed_ns"],
         browser_http_elapsed_ns=browser["http"]["elapsed_ns"],
         browser_command_elapsed_ns=browser["elapsed_ns"],
@@ -419,6 +446,91 @@ def measured_comparison(cases, baseline):
         origin_to_browser_ready_ratio=reference["elapsed_ns"] / browser["ready_elapsed_ns"],
         origin_to_browser_command_ratio=reference["elapsed_ns"] / browser["elapsed_ns"],
         origin_to_missing_command_ratio=reference["elapsed_ns"] / missing["elapsed_ns"])
+
+
+def strategy_comparison(cases):
+    return dict(reference="product-origin-only", samples_per_case=1, speedup_required=False,
+        origin_to_auto_command_ratio=cases["origin-only"]["application"]["elapsed_ns"]
+            / cases["auto"]["application"]["elapsed_ns"],
+        measurements={name: dict(requested_source_strategy=name,
+            command_elapsed_ns=phase["application"]["elapsed_ns"],
+            peer_bytes=phase["fetch"]["peer_bytes"],
+            origin_body_bytes=phase["fetch"]["origin_body_bytes"],
+            origin_range_requests=phase["fetch"]["origin_range_requests"],
+            providers_used=phase["fetch"]["providers_used"])
+            for name, phase in cases.items()})
+
+
+def validate_strategy_origin(records, phase, metadata_bytes, available_peer):
+    """Exact per-command origin ranges, with no overlap or unaccounted body race."""
+    fetch = phase["fetch"]
+    require(len(records) == 1 + fetch["origin_range_requests"] and 1 <= len(records) <= 10,
+            "strategy origin request count differs from actual receipt")
+    metadata = records[0]
+    require(metadata["kind"] == "metadata" and metadata["payload_bytes"] == metadata_bytes
+            and metadata["status"] == 200 and all(metadata[key] is None for key in
+                ("range_start", "range_end", "range_total")), "strategy origin authority missing")
+    covered = set()
+    for record in records[1:]:
+        if record["kind"] == "body":
+            require(record["status"] == 200 and len(records) == 2
+                    and all(record[key] is None for key in ("range_start", "range_end", "range_total")),
+                    "full origin response was raced with ranges")
+            start, end = 0, BYTES - 1
+        else:
+            require(record["kind"] == "body_range" and record["status"] == 206
+                    and record["range_total"] == BYTES, "invalid strategy range response")
+            start, end = record["range_start"], record["range_end"]
+        require(0 <= start <= end < BYTES and start % RANGE_BYTES == 0
+                and (end == BYTES - 1 or (end + 1) % RANGE_BYTES == 0)
+                and record["payload_bytes"] == end - start + 1, "strategy body is not exact verified chunks")
+        chunks = set(range(start // RANGE_BYTES, end // RANGE_BYTES + 1))
+        require(not covered.intersection(chunks), "duplicate origin body bytes")
+        covered.update(chunks)
+    peer_chunks = set(range(9)) - covered
+    require(peer_chunks <= {0, 2, 4, 6, 8}
+            and fetch["peer_bytes"] == sum(min(RANGE_BYTES, BYTES - chunk * RANGE_BYTES) for chunk in peer_chunks)
+            and fetch["origin_body_bytes"] == sum(record["payload_bytes"] for record in records[1:])
+            and fetch["peer_bytes"] + fetch["origin_body_bytes"] == BYTES
+            and fetch["provider_peer_ids"] == ([available_peer] if peer_chunks else [])
+            and fetch["providers_used"] == bool(peer_chunks),
+            "strategy source accounting duplicates data or invents unavailable peer chunks")
+
+
+def validate_strategies(evidence, records, control_node):
+    cases, old = evidence["source_strategy_cases"], evidence["cases"]
+    require(set(cases) == {"origin-only", "auto"}, "both cold product source strategies required")
+    peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
+    offset = 8
+    for mode in ("origin-only", "auto"):
+        phase = cases[mode]
+        fetch, output = phase["fetch"], phase["output"]
+        require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
+                and fetch["origin_authenticated"] is True
+                and fetch["control_relay_peer_id"] == evidence["layout"]["control_relay_peer_id"]
+                and output["client_cache_initially_absent"] is True
+                and output["client_mount_cannot_read_origin"] is True
+                and phase["selected_route"]["route_context_id"] == old["complete"]["selected_route"]["route_context_id"],
+                "strategy did not authenticate the exact cold object over the retained route")
+        if mode == "origin-only":
+            require(fetch["peer_bytes"] == 0 and fetch["origin_body_bytes"] == BYTES,
+                    "explicit origin-only selected peers")
+        count = 1 + fetch["origin_range_requests"]
+        validate_strategy_origin(records[offset:offset + count], phase,
+            evidence["publication"]["metadata_bytes"], peers[nodes[0]])
+        offset += count
+        validate_local_output(phase)
+        validate_application(phase, browser=False, source_strategy=mode)
+        validate_path(phase, peers, nodes, missing=True, origin_only=mode == "origin-only",
+                      useful_peer_bytes=fetch["peer_bytes"])
+        validate_control(phase["control"], control_node, nodes, missing=True, require_contacts=False)
+    require(offset == len(records), "unaccounted origin requests outside product phases")
+    all_outputs = [phase["output"] for phase in (*old.values(), *cases.values())]
+    require(len({out["path"] for out in all_outputs}) == len(all_outputs)
+            and len({out["agent_cache"] for out in all_outputs}) == len(all_outputs),
+            "source comparison reused another phase's output or cache")
+    require(evidence["source_strategy_comparison"] == strategy_comparison(cases),
+            "product comparison is not actual single-sample time and source accounting")
 
 
 def validate_evidence(evidence):
@@ -451,9 +563,11 @@ def validate_evidence(evidence):
             and stop["serving"] is False and stop["publications"] == 0,
             "the second actual provider was not explicitly withdrawn before missing retrieval")
     origin, records = evidence["origin"], evidence["origin"]["connections"]
-    require(origin["pid"] > 0 and len(records) == 8
-            and [r["kind"] for r in records] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
-            and [r["payload_bytes"] for r in records]
+    require(origin["pid"] > 0 and 12 <= len(records) <= 28
+            and origin["request_limit"] == 28 and origin["stop_requested"] is True
+            and origin["listener_closed"] is True and origin["inflight_drained"] is True
+            and [r["kind"] for r in records[:8]] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
+            and [r["payload_bytes"] for r in records[:8]]
                 == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4 + [publication["metadata_bytes"], BYTES]
             and all(r["tls13"] is True and r["alpn_http11"] is True
                     and origin_exit_source(r["source"]) for r in records),
@@ -464,7 +578,7 @@ def validate_evidence(evidence):
                     and r["range_total"] == BYTES
                     for r, (start, end) in zip(records[2:6], RANGES, strict=True))
             and all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
-                    and r["range_total"] is None for r in records[6:]),
+                    and r["range_total"] is None for r in records[6:8]),
             "origin returned wrong missing-chunk ranges or a forbidden full-body substitute")
     cases = evidence["cases"]
     require(set(cases) == {"complete", "missing"}, "both fresh-cache HTTPS retrieval cases required")
@@ -494,6 +608,7 @@ def validate_evidence(evidence):
     validate_baseline(evidence["origin_baseline"], cases, peers, provider_nodes)
     require(evidence["comparison"] == measured_comparison(cases, evidence["origin_baseline"]),
             "reported comparison is not the actual single-sample monotone timing ratio")
+    validate_strategies(evidence, records, control_node)
     require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
             explicit_fixture_ca_removed=True, user_directory_removed=True),
             "temporary user outputs and explicit public CA were not cleaned up")
@@ -501,7 +616,7 @@ def validate_evidence(evidence):
 
 def build_evidence(work):
     cases = {}
-    for name in ("complete", "missing"):
+    for name in ("complete", "missing", "origin-only", "auto"):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
             fetch=read(work / f"{prefix}-fetch.json"),
@@ -511,7 +626,9 @@ def build_evidence(work):
             selected_route=read(work / f"{prefix}-live-selection.json"),
             privacy={role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES},
             control=read(work / f"{prefix}-control.json"))
-    evidence = dict(success=True, cases=cases,
+    strategies = {mode: cases.pop(mode) for mode in ("origin-only", "auto")}
+    evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
+        source_strategy_comparison=strategy_comparison(strategies),
         publication=read(work / "content-provider-https-publication.json"),
         native_publication=read(work / "content-provider-publication.json"),
         layout=read(work / "content-provider-layout.json"),

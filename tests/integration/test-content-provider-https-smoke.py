@@ -85,7 +85,7 @@ def fixture(control_node="relay2", native_publication=None):
                         client_namespace=True, outside_parent_namespace=True,
                         all_capabilities_dropped=True, no_new_privileges=True)
         application = dict(consumer=copy.deepcopy(boundary), cli=copy.deepcopy(boundary),
-                           elapsed_ns=3_000_000_000)
+                           elapsed_ns=3_000_000_000, requested_source_strategy="peers-first")
         if not index:
             for key in ("local_delivery", "output_mode", "ownership_changed", "local_output", "cache"):
                 del fetch[key]
@@ -102,7 +102,8 @@ def fixture(control_node="relay2", native_publication=None):
                     single_use_listener_closed=True, completed_before_expiry=True, elapsed_ns=100_000_000))
         application["final"] = copy.deepcopy(fetch)
         cases[name]["application"] = application
-    origin = dict(pid=300, connections=[
+    origin = dict(pid=300, request_limit=28, stop_requested=True,
+        listener_closed=True, inflight_drained=True, connections=[
         dict(kind="metadata", payload_bytes=1024, tls13=True, alpn_http11=True,
              source="47.163.4.1:32100", status=200, range_start=None, range_end=None, range_total=None)
         for _ in range(2)] + [dict(kind="body_range", payload_bytes=CHECK["RANGE_BYTES"],
@@ -130,10 +131,34 @@ def fixture(control_node="relay2", native_publication=None):
                 origin_authenticated=True, origin_authority_persisted=False,
                 reference_cache_initially_empty=True, private_spool_removed=True, output_mode="0600",
                 application_socket="ordinary_tcp_transparent_ingress")))
+    strategies = {}
+    for mode, elapsed in (("origin-only", 2_000_000_000), ("auto", 3_000_000_000)):
+        phase = copy.deepcopy(cases["missing"])
+        phase["privacy"] = copy.deepcopy(baseline_privacy)
+        phase["fetch"].update(peer_bytes=0, origin_body_bytes=CHECK["BYTES"],
+            origin_range_requests=1, providers_used=0, provider_peer_ids=[],
+            local_output=f"/user/{mode}.bin", cache=f"/agent/{mode}-cache")
+        phase["output"].update(path=f"/user/{mode}.bin", agent_cache=f"/agent/{mode}-cache")
+        phase["application"].update(final=copy.deepcopy(phase["fetch"]),
+            requested_source_strategy=mode, elapsed_ns=elapsed)
+        # Origin-only need not contact a cache peer; an empty fully drained control
+        # socket is still coverage, never invented useful traffic.
+        phase["control"]["observed_frames"] = 0
+        for counters in phase["control"]["content_control_packets"].values():
+            counters.update(inbound=0, outbound=0)
+        for statistics in phase["control"]["interface_statistics"].values():
+            statistics.update(observed_frames=0, packet_socket_packets=0)
+        strategies[mode] = phase
+        origin["connections"].extend([
+            copy.deepcopy(origin["connections"][0]),
+            dict(kind="body_range", payload_bytes=CHECK["BYTES"], tls13=True,
+                alpn_http11=True, source="47.163.4.1:32100", status=206,
+                range_start=0, range_end=CHECK["BYTES"] - 1, range_total=CHECK["BYTES"])])
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
         origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
+        source_strategy_cases=strategies, source_strategy_comparison=CHECK["strategy_comparison"](strategies),
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
@@ -149,6 +174,69 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_peer_phases_pin_source_strategy_and_do_not_relabel_origin_reference(self):
+        value = fixture()
+        for name in ("complete", "missing", "baseline", "origin-only", "auto"):
+            with self.subTest(case=name):
+                command = CHECK["consumer_command"](name, "/fixture/binary", "/agent/socket",
+                    "/agent/cache", Path("/user"), Path("/user/output"))
+                if name == "baseline":
+                    self.assertEqual(command[1], "origin-baseline")
+                    self.assertNotIn("--source-strategy", command)
+                else:
+                    self.assertEqual(command.count("--source-strategy"), 1)
+                    self.assertEqual(command[command.index("--source-strategy") + 1],
+                                     name if name in ("origin-only", "auto") else "peers-first")
+                if name in ("complete", "missing"):
+                    for mode in ("auto", "origin-only", "unverified"):
+                        with self.assertRaises(ValueError):
+                            CHECK["validate_evidence"](changed(value,
+                                ("cases", name, "application", "requested_source_strategy"), mode))
+        relabelled = copy.deepcopy(value)
+        relabelled["origin_baseline"]["application"]["requested_source_strategy"] = "origin-only"
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](relabelled)
+
+    def test_cold_product_comparison_accepts_either_auto_source_without_forcing_gain(self):
+        value = fixture()
+        self.assertLess(value["source_strategy_comparison"]["origin_to_auto_command_ratio"], 1)
+        CHECK["validate_evidence"](value)
+        for path, wrong in (
+            (("origin", "stop_requested"), False), (("origin", "inflight_drained"), False),
+            (("origin", "listener_closed"), False), (("origin", "request_limit"), 100),
+            (("source_strategy_cases", "auto", "application", "requested_source_strategy"), "peers-first"),
+            (("source_strategy_cases", "auto", "fetch", "peer_bytes"), 262144),
+            (("source_strategy_cases", "auto", "output", "client_cache_initially_absent"), False),
+            (("source_strategy_cases", "auto", "output", "path"), "/user/origin-only.bin"),
+            (("source_strategy_cases", "origin-only", "privacy", "exit", "provider_application",
+              "relay4", "response_payload_bytes"), 1),
+            (("source_strategy_comparison", "origin_to_auto_command_ratio"), 2),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, path, wrong))
+        extra = copy.deepcopy(value)
+        extra["origin"]["connections"].append(copy.deepcopy(extra["origin"]["connections"][-1]))
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](extra)
+        # Auto may instead use the remaining real 5-chunk provider and exact four
+        # missing origin ranges. Preserve its own cold destination and requested mode.
+        alternate = copy.deepcopy(value)
+        phase = alternate["source_strategy_cases"]["auto"]
+        missing = alternate["cases"]["missing"]
+        for key in ("peer_bytes", "origin_body_bytes", "origin_range_requests",
+                    "providers_used", "provider_peer_ids"):
+            phase["fetch"][key] = copy.deepcopy(missing["fetch"][key])
+        phase["application"]["final"] = copy.deepcopy(phase["fetch"])
+        phase["privacy"] = copy.deepcopy(missing["privacy"])
+        phase["privacy"]["exit"]["provider_application"]["relay4"]["response_payload_bytes"] = 1050000
+        alternate["origin"]["connections"][11:] = copy.deepcopy(alternate["origin"]["connections"][2:6])
+        alternate["source_strategy_comparison"] = CHECK["strategy_comparison"](alternate["source_strategy_cases"])
+        CHECK["validate_evidence"](alternate)
+        duplicate = copy.deepcopy(alternate)
+        duplicate["origin"]["connections"][12] = copy.deepcopy(duplicate["origin"]["connections"][11])
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](duplicate)
+
     def test_origin_reference_requires_fresh_protected_flow_full_body_and_honest_timing(self):
         value = fixture()
         # A slower end-to-end browser result must still pass: no fabricated benefit gate.
@@ -226,7 +314,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
         registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
         script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
         for scenario in ("content-provider", "content-https", "content-message", "dns-cache"):
-            for suffix in ("complete", "missing", "baseline", "unregistered"):
+            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", "unregistered"):
                 with self.subTest(scenario=scenario, suffix=suffix):
                     prefix = f"content-provider-https-{suffix}-privacy"
                     result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
@@ -259,7 +347,8 @@ class ProviderHttpsEvidence(unittest.TestCase):
             root = Path(directory)
             output = root / "client-fixtures/https-output"
             output.mkdir(parents=True, mode=0o700)
-            for name in ("origin.pem", "complete-object.bin", "missing-object.bin", "origin-baseline.json"):
+            for name in ("origin.pem", "complete-object.bin", "missing-object.bin", "origin-baseline.json",
+                         "origin-only-object.bin", "auto-object.bin"):
                 path = output / name
                 path.write_bytes(b"known public cleanup fixture")
                 path.chmod(0o400 if name == "origin.pem" else 0o600)

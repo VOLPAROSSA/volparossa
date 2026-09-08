@@ -48,12 +48,13 @@ async fn main() -> Result<()> {
         [mode, root, manifest, publisher] if mode == "seed-from-publication" => {
             seed_from_publication(Path::new(root), Path::new(manifest), publisher)
         }
-        [mode, root, listen, cert, report, connections] if mode == "origin" || mode == "origin-pem" => {
+        [mode, root, listen, cert, report, connections] if matches!(mode.as_str(), "origin" | "origin-pem" | "origin-pem-bounded") => {
             let count = connections.parse()?;
-            if !(1..=8).contains(&count) {
-                return Err("origin connection count must be 1..8".into());
+            let graceful = mode == "origin-pem-bounded";
+            if !(1..=if graceful { 28 } else { 8 }).contains(&count) {
+                return Err("origin connection count outside explicit fixture bound".into());
             }
-            origin(Path::new(root), listen.parse()?, Path::new(cert), Path::new(report), count, mode == "origin-pem").await
+            origin(Path::new(root), listen.parse()?, Path::new(cert), Path::new(report), count, mode != "origin", graceful).await
         }
         [mode, root, listen, variant, report] if mode == "peers" => {
             peers(Path::new(root), listen.parse()?, variant, Path::new(report)).await
@@ -70,7 +71,7 @@ async fn main() -> Result<()> {
                 _ = interrupt.recv() => Err("origin baseline interrupted; private spool discarded".into()),
             }
         }
-        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
+        _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem|origin-pem-bounded ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
     }
 }
 
@@ -205,6 +206,7 @@ async fn origin(
     report: &Path,
     connections: usize,
     certificate_pem: bool,
+    graceful: bool,
 ) -> Result<()> {
     let generated = generate_simple_self_signed(vec![HOST.to_owned()])?;
     let certificate = generated.cert.der().clone();
@@ -224,10 +226,34 @@ async fn origin(
     } else {
         write_new(cert_path, certificate.as_ref())?;
     }
+    let mut terminate = if graceful {
+        Some(tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )?)
+    } else {
+        None
+    };
     ready(report)?;
     let mut records = Vec::new();
-    for _ in 0..connections {
-        let (socket, source) = timeout(DEADLINE, listener.accept()).await??;
+    let stopped = loop {
+        if !graceful && records.len() == connections {
+            break false;
+        }
+        // Finish an already accepted bounded TLS request before observing stop. No
+        // per-request cancellation may masquerade as a complete origin response.
+        let accepted = tokio::select! {
+            accepted = timeout(DEADLINE, listener.accept()) => Some(accepted??),
+            () = async {
+                if let Some(signal) = &mut terminate { signal.recv().await; }
+                else { std::future::pending::<()>().await; }
+            } => None,
+        };
+        let Some((socket, source)) = accepted else {
+            break true;
+        };
+        if records.len() >= connections {
+            return Err("origin fixture request limit exceeded".into());
+        }
         let record = timeout(DEADLINE, async {
             let mut stream = acceptor.accept(socket).await?;
             if stream.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
@@ -265,10 +291,12 @@ async fn origin(
             }))
         }).await??;
         records.push(record);
-    }
+    };
+    drop(listener);
     write_report(
         report,
-        &json!({"report_kind":"volparossa-https-content-origin", "pid":std::process::id(), "connections":records}),
+        &json!({"report_kind":"volparossa-https-content-origin", "pid":std::process::id(), "connections":records,
+            "request_limit":connections, "stop_requested":stopped, "listener_closed":true, "inflight_drained":true}),
     )
 }
 

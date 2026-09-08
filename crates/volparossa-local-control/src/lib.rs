@@ -12,7 +12,7 @@ mod mailbox;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
     ContentImportRequest, ContentReceipt, ContentReplicationConfig, ContentServeRequest,
-    ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady,
+    ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
     NamedContentTransferReady,
 };
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};

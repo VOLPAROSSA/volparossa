@@ -1563,6 +1563,12 @@ impl ClientRouteControl {
     /// Retain the carrying route's control identity for generic service lookup.
     /// The discovery actor must still revalidate its current authenticated connection/authority.
     pub(crate) async fn content_discovery_control(&self) -> Option<Libp2pPeerId> {
+        self.content_discovery_scope().await.map(|(peer, _)| peer)
+    }
+
+    /// Cache-cost hints are bound to this actual carrying route, never a projected path list.
+    /// This is observation only; each discovery RPC still authenticates its current connection.
+    pub(crate) async fn content_discovery_scope(&self) -> Option<(Libp2pPeerId, [u8; 16])> {
         let state = self.state.lock().await;
         let ClientRouteControlState::Established(established) = &*state else {
             return None;
@@ -1570,16 +1576,11 @@ impl ClientRouteControl {
         if established.is_expired(crate::unix_millis(), Instant::now()) {
             return None;
         }
-        Some(
-            established
-                .route
-                .as_ref()?
-                .established
-                .request
-                .control
-                .identity
-                .peer_id,
-        )
+        let request = &established.route.as_ref()?.established.request;
+        Some((
+            request.control.identity.peer_id,
+            request.parameters.route_context_id,
+        ))
     }
 
     /// This first native-content destination must not be any actor on its carrying route.

@@ -234,6 +234,18 @@ pub struct ContentFetchRequest {
     pub reuse_cache: bool,
 }
 
+/// Bounded source selection after fresh HTTPS authorization; never a policy or trust bypass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum HttpsSourceStrategy {
+    /// Select available sources without requiring provider-first discovery.
+    Auto = 0,
+    /// Explicitly prefer peers; this choice does not promise a speed improvement.
+    PeersFirst = 1,
+    /// Use the authenticated origin and already verified local chunks, without peer retrieval.
+    OriginOnly = 2,
+}
+
 /// Fetch public chunks authorized by the requested resource's own authenticated HTTPS origin.
 #[derive(Clone, PartialEq, Message)]
 pub struct HttpsContentFetchRequest {
@@ -259,6 +271,9 @@ pub struct HttpsContentFetchRequest {
     /// Reopen only an owned cache; cached chunks never replace fresh HTTPS origin authorization.
     #[prost(bool, tag = "7")]
     pub reuse_cache: bool,
+    /// Source preference; omitted legacy fields select Auto, with unchanged origin authorization.
+    #[prost(enumeration = "HttpsSourceStrategy", tag = "8")]
+    pub source_strategy: i32,
 }
 
 /// Same-operation local handoff after the agent's own fresh HTTPS authorization.
@@ -421,7 +436,8 @@ impl HttpsContentFetchRequest {
     }
 
     fn validate_common(&self) -> Result<(), ControlProtocolError> {
-        if self.resource_url.len() > 4096
+        if HttpsSourceStrategy::try_from(self.source_strategy).is_err()
+            || self.resource_url.len() > 4096
             || !self.resource_url.starts_with("https://")
             || self.resource_url.bytes().any(|b| b.is_ascii_control())
             || self.metadata_path.len() > 4096
@@ -721,6 +737,7 @@ mod tests {
     fn https_request() -> HttpsContentFetchRequest {
         HttpsContentFetchRequest {
             reuse_cache: false,
+            source_strategy: HttpsSourceStrategy::Auto as i32,
             resource_url: "https://origin.example/object.bin".into(),
             metadata_path: "/.well-known/volparossa/object".into(),
             cache: "/private/new-cache".into(),
@@ -803,6 +820,47 @@ mod tests {
                     request
                 );
             }
+        }
+    }
+
+    #[test]
+    fn https_source_strategy_roundtrips_and_rejects_unknown_values() {
+        let original = https_request();
+        let legacy = original.encode_to_vec();
+        let decoded = HttpsContentFetchRequest::decode(legacy.as_slice()).unwrap();
+        assert_eq!(decoded.source_strategy(), HttpsSourceStrategy::Auto);
+        assert_eq!(decoded.encode_to_vec(), legacy);
+        for strategy in [
+            HttpsSourceStrategy::Auto,
+            HttpsSourceStrategy::PeersFirst,
+            HttpsSourceStrategy::OriginOnly,
+        ] {
+            let mut fetch = original.clone();
+            fetch.source_strategy = strategy as i32;
+            if strategy != HttpsSourceStrategy::Auto {
+                let mut expected = legacy.clone();
+                expected.extend([0x40, u8::try_from(strategy as i32).unwrap()]);
+                assert_eq!(fetch.encode_to_vec(), expected, "field eight");
+            }
+            assert!(fetch.validate().is_ok());
+            fetch.output.clear();
+            assert!(fetch.validate_download().is_ok());
+            let request = ControlRequest {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: vec![5; 16],
+                operation: Some(Operation::ContentDownloadHttps(fetch)),
+            };
+            assert_eq!(
+                decode_request(&encode_request(&request).unwrap()).unwrap(),
+                request
+            );
+        }
+        for unknown in [-1, 3, i32::MAX] {
+            let mut fetch = original.clone();
+            fetch.source_strategy = unknown;
+            assert!(fetch.validate().is_err());
+            fetch.output.clear();
+            assert!(fetch.validate_download().is_err());
         }
     }
 

@@ -7,6 +7,7 @@ mod https;
 mod mailbox;
 mod named;
 mod parallel;
+mod recent;
 mod replication;
 mod replication_budget;
 #[cfg(test)]
@@ -41,7 +42,11 @@ use volparossa_local_control::{
 };
 use zeroize::Zeroizing;
 
-use crate::{control::ControlContext, discovery::DiscoveryControlHandle, unix_millis};
+use crate::{
+    control::ControlContext,
+    discovery::{ContentDiscoveryError as DiscoveryError, DiscoveryControlHandle},
+    unix_millis,
+};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const OFFER_LIFETIME: u64 = 300;
@@ -70,6 +75,8 @@ pub(crate) struct ContentRuntime {
     service: Arc<Mutex<Option<Service>>>,
     retrieval: Arc<Mutex<()>>,
     foreground: Arc<Foreground>,
+    recent: Arc<Mutex<recent::RecentProviders>>,
+    source_costs: Arc<Mutex<https::sources::SourceCosts>>,
 }
 
 struct Service {
@@ -98,6 +105,8 @@ impl ContentRuntime {
             service: Arc::new(Mutex::new(None)),
             retrieval: Arc::new(Mutex::new(())),
             foreground: Arc::new(Foreground::default()),
+            recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
+            source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
         })
     }
 
@@ -493,12 +502,65 @@ impl ContentRuntime {
         if complete(manifest, store)? {
             return Ok((Vec::new(), 0));
         }
-        let providers = context
+        let mut used = std::collections::BTreeSet::new();
+        let mut attempted = std::collections::BTreeSet::new();
+        let mut bytes = 0_u64;
+        if let Some(scope) = recent::RecentProviderScope::for_route(context, policy).await {
+            let recent = context
+                .content
+                .refresh_recent_provider_hints(scope, &context.discovery, Duration::from_secs(1))
+                .await;
+            attempted.extend(recent.iter().map(|provider| provider.peer_id));
+            let (providers, received) =
+                Self::pull_providers(context, manifest, store, policy, recent).await?;
+            used.extend(providers);
+            bytes = received;
+            if complete(manifest, store)? {
+                return Ok((used.into_iter().collect(), bytes));
+            }
+        }
+        let discovered = context
             .discovery
             .discover_content_providers(control_peer, 16)
-            .await
-            .map_err(|_| ContentError::Unavailable)?;
-        Self::pull_providers(context, manifest, store, policy, providers).await
+            .await;
+        let state = context.state.read().await;
+        if !state.roles().client
+            || state
+                .active_policy(unix_millis())
+                .as_ref()
+                .map(volparossa_policy::VerifiedManifest::policy_hash)
+                != Some(policy.policy_hash())
+        {
+            return Err(ContentError::Policy);
+        }
+        drop(state);
+        let providers = match discovered {
+            Ok(providers) => providers,
+            Err(DiscoveryError::Invalid) => return Err(ContentError::Invalid),
+            Err(DiscoveryError::Invalidated) => return Err(ContentError::Policy),
+            Err(
+                DiscoveryError::Busy
+                | DiscoveryError::Closed
+                | DiscoveryError::Timeout
+                | DiscoveryError::Unavailable,
+            ) => {
+                // A later unavailable capability search cannot erase verified earlier bytes.
+                // Native callers still require complete reconstruction; HTTPS fills only gaps.
+                if bytes > 0 {
+                    return Ok((used.into_iter().collect(), bytes));
+                }
+                return Err(ContentError::Unavailable);
+            }
+        };
+        let providers = providers
+            .into_iter()
+            .filter(|provider| !attempted.contains(&provider.peer_id))
+            .collect();
+        let (providers, received) =
+            Self::pull_providers(context, manifest, store, policy, providers).await?;
+        used.extend(providers);
+        bytes = bytes.checked_add(received).ok_or(ContentError::Invalid)?;
+        Ok((used.into_iter().collect(), bytes))
     }
 
     /// Reuse the same bounded provider set after a name-metadata round; no second discovery.

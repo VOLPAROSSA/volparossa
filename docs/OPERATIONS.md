@@ -667,6 +667,23 @@ normal signed Exit policy. Debian's normal public CA bundle is used unless an ex
 The CLI/process, origin-library and different-UID network checks pass, as recorded in
 [implementation status](IMPLEMENTATION_STATUS.md).
 
+Both HTTPS download commands accept `--source-strategy auto|peers-first|origin-only`:
+
+- `auto` (default) prefers the origin when recent comparable completion-cost measurements are
+  absent. Otherwise it refreshes at most two recently useful peers and attempts them only within
+  a lookup-plus-transfer budget projected to beat the origin. Network changes can still make a
+  prediction wrong; this is not a guarantee of higher speed.
+- `peers-first` explicitly explores/preferentially uses peers, then obtains missing ranges from
+  the origin. It is useful for provider tests but may be slower than origin retrieval.
+- `origin-only` skips provider lookup/body retrieval and gets missing bytes from the origin.
+  Verified local chunks are still reused with `--reuse-cache`.
+
+All modes retain fresh same-origin authorization, the normal protected route and signed Exit
+policy. No mode publishes private HTTPS content, accepts a peer as an origin authority or races
+duplicate full-object downloads. Recent cost hints are RAM-only and short-lived, with no URL or
+object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
+such observations conservatively uses the origin, rather than inventing a speed estimate.
+
 ### One-shot browser download
 
 For the same supported cooperative HTTPS origin, let the browser choose where to save the

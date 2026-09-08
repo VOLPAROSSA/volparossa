@@ -18,7 +18,7 @@ content_provider_https_cleanup() {
         [ -d "$ph_cleanup_root" ] \
             && [ "$(stat -Lc '%a:%u:%g' "$ph_cleanup_root")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json; do
+        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin; do
             ph_cleanup_mode=600
             [ "$ph_cleanup_name" != origin.pem ] || ph_cleanup_mode=400
             ph_cleanup_file=$ph_cleanup_root/$ph_cleanup_name
@@ -38,6 +38,11 @@ content_provider_https_cleanup() {
 
 content_provider_https_phase() {
     ph_case=$1
+    case $ph_case in
+        complete|missing) ph_strategy=peers-first ;;
+        origin-only|auto) ph_strategy=$ph_case ;;
+        *) fail PROVIDER_HTTPS_SOURCE_STRATEGY_INVALID ;;
+    esac
     ph_prefix=content-provider-https-$ph_case
     ph_cache=$provider_client/https-$ph_case-cache
     ph_output=$ph_user/$ph_case-object.bin
@@ -76,7 +81,7 @@ content_provider_https_phase() {
     # obtained via HTTP. It is not an invented browser-download output-path option.
     if content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
         --metadata-path /.well-known/volparossa/content/asset --ca-file "$ph_user/origin.pem" \
-        --cache "$ph_cache" --local-output "$ph_output" \
+        --source-strategy "$ph_strategy" --cache "$ph_cache" --local-output "$ph_output" \
         >"$WORK/$ph_prefix-no-clobber.out" 2>"$WORK/$ph_prefix-no-clobber.err"; then
         fail PROVIDER_HTTPS_USER_OUTPUT_OVERWRITTEN
     fi
@@ -197,8 +202,8 @@ content_provider_https_run() {
     ph_origin_report=$WORK/destination/content-provider-https-origin.json
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
-        --no-new-privs -- "$ph_binary" origin-pem "$ph_origin_root" 47.163.4.2:18443 \
-        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 8 \
+        --no-new-privs -- "$ph_binary" origin-pem-bounded "$ph_origin_root" 47.163.4.2:18443 \
+        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 28 \
         >"$WORK/content-provider-https-origin.log" 2>&1 &
     TLS_POLICY_SERVER_PID=$!
     wait_observer "$TLS_POLICY_SERVER_PID" "$ph_origin_report.ready" \
@@ -222,8 +227,13 @@ content_provider_https_run() {
         >"$WORK/content-provider-https-withdrawal.json"
     content_provider_https_phase missing
     content_provider_https_baseline
+    # Same product command, user, object and carrying route; each owns a distinct cold
+    # agent cache. Choice remains free in auto, and measured timing never forces a winner.
+    content_provider_https_phase origin-only
+    content_provider_https_phase auto
 
     ph_origin_status=0
+    kill -TERM "$TLS_POLICY_SERVER_PID" || fail PROVIDER_HTTPS_ORIGIN_STOP_FAILED
     wait "$TLS_POLICY_SERVER_PID" || ph_origin_status=$?
     TLS_POLICY_SERVER_PID=
     [ "$ph_origin_status" -eq 0 ] || fail PROVIDER_HTTPS_ORIGIN_FAILED

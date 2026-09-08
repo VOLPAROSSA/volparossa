@@ -19,7 +19,7 @@ use tokio::{
 };
 
 use super::{
-    FetchHttps, Limits,
+    FetchHttps, HttpsSourceChoice, Limits,
     https_download::{self, VerifiedDownload},
     now_seconds,
 };
@@ -42,6 +42,9 @@ pub(crate) struct Arguments {
     /// Explicitly reopen verified owned chunks after fresh origin authentication.
     #[arg(long)]
     reuse_cache: bool,
+    /// Source preference after fresh origin authentication; never grants external origin rights.
+    #[arg(long, value_enum, default_value = "auto")]
+    source_strategy: HttpsSourceChoice,
     /// Explicit public PEM roots for this operation only; otherwise Debian system roots.
     #[arg(long)]
     ca_file: Option<PathBuf>,
@@ -56,6 +59,7 @@ impl Arguments {
             metadata_path: self.metadata_path,
             cache: self.cache,
             reuse_cache: self.reuse_cache,
+            source_strategy: self.source_strategy,
             ca_file: self.ca_file,
             limits: self.limits,
             output: None,
@@ -288,6 +292,48 @@ mod tests {
     use clap::Parser as _;
 
     const RESOURCE: &str = "https://origin.example/object.bin";
+
+    #[test]
+    fn browser_https_source_strategy_reaches_the_same_typed_download_request() {
+        use volparossa_local_control::HttpsSourceStrategy;
+        let base = [
+            "volparossa",
+            "content",
+            "browser-download",
+            "--url",
+            RESOURCE,
+            "--metadata-path",
+            "/metadata",
+            "--cache",
+            "/agent/cache",
+        ];
+        for (choice, expected) in [
+            (None, HttpsSourceStrategy::Auto),
+            (Some("auto"), HttpsSourceStrategy::Auto),
+            (Some("peers-first"), HttpsSourceStrategy::PeersFirst),
+            (Some("origin-only"), HttpsSourceStrategy::OriginOnly),
+        ] {
+            let mut arguments = base.to_vec();
+            if let Some(value) = choice {
+                arguments.extend(["--source-strategy", value]);
+            }
+            let crate::CliCommand::Content { command } =
+                crate::Cli::try_parse_from(arguments).unwrap().command
+            else {
+                panic!("content command");
+            };
+            let super::super::Command::BrowserDownload(args) = *command else {
+                panic!("browser download");
+            };
+            let request = super::super::https_fetch_request(&args.into_fetch()).unwrap();
+            assert_eq!(request.source_strategy, expected as i32);
+            assert!(request.output.is_empty());
+        }
+        assert!(
+            crate::Cli::try_parse_from(base.into_iter().chain(["--source-strategy", "unverified"]))
+                .is_err()
+        );
+    }
 
     #[test]
     fn browser_download_parser_and_http_request_are_explicit_and_bounded() {
