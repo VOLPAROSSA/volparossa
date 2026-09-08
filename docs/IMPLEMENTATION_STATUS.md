@@ -246,6 +246,15 @@ and cause a dial; no complete recall or general combined-role unlinkability is c
 
 ## Latest content integration checkpoint
 
+The explicit `content browser-download` bridge (`91608a97`) is integrated locally: one parser
+test, three real CLI-process tests and strict CLI Clippy pass. It exposes only one temporary
+localhost attachment after complete cooperative-origin verification, bounded by original authority
+and five minutes; no real-browser/VM result, measured benefit or completed C08 is claimed.
+
+Replica admission (`ba48fce5`) now waits for owner traffic to settle before the next chunk credit,
+then resumes the same bounded exchange. Five credit tests, two budget tests and strict agent/content
+Clippy pass; this is not yet an integrated network-contention or completed C04 proof.
+
 Foreground native, named and cooperative-HTTPS downloads now use at most two concurrent provider
 streams (`b172d11f`). The backpressured production-protocol test proves actual overlap: the fast
 peer delivers three unique chunks while the other remains partway through its first response;
@@ -488,10 +497,15 @@ its maximum-size response fixture clones one provider identity sixteen times, vi
 response's required uniqueness (160 other discovery tests pass). The test-only correction uses
 sixteen distinct identities and explicitly retains duplicate rejection; its targeted test and
 strict content/agent/discovery Clippy pass, with production validation unchanged.
-This is not the older formatting, namespace or DNS timestamp failure. New-head Quality
-is pending. All [d1 CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191404475)
+This is not the older formatting, namespace or DNS timestamp failure. The subsequent
+[exact `b22a9153` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193378918)
+now passes formatting, strict Clippy, workspace tests, namespace proofs and the final integration
+harness. All [d1 CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191404475)
 complete, but the [separate PR alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101950158074)
 fails with 126 critical results. An equal count is not a fresh alert-identity audit or a clean gate.
+All three `b22a9153` CodeQL analyses also pass, while its
+[separate alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101955945979) still fails with
+126 critical results. The earlier failed workflows are not relabelled or bypassed.
 
 ### Preceding replica diagnostics and retirement integration
 

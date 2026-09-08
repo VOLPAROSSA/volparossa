@@ -173,7 +173,8 @@ A first bounded redistribution path is now wired into the agent: an explicitly c
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
 tests pass. Optional uptake now requests one chunk at a time, checking the configured links
-before granting the next chunk; a busy sample ends the exchange with verified partial data.
+before granting the next chunk; a busy sample pauses credit and resumes only within the original
+deadline, without renewing the exchange budget.
 The [replication run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
 now passes the complete bounded sequence: retrieve foreground P, opportunistically acquire
 262,267 bytes of Q, stop the original node, explicitly reopen the replica service with
@@ -216,13 +217,11 @@ no upstream query. Original roots/expiries, all 35 physical captures and cleanup
 Protected DNS now owns a separate bounded client route instead of contending with the general
 datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
 See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
-The [latest completed Quality run on `d1fd6d1f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191408128)
-passes formatting and strict Clippy but fails a codec test whose maximum-size fixture repeats
-one provider identity sixteen times. The uniqueness check correctly rejects that fixture;
-the test-only correction and targeted strict Clippy pass while preserving duplicate rejection.
-New-head Quality is pending.
-The `d1fd6d1f` CodeQL analysis completes, but its separate PR alert gate remains red with 126 results.
-These failures are separate from the passing VM scenarios; see the exact
+The [exact `b22a9153` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193378918)
+passes formatting, strict Clippy, workspace tests, namespace proofs and the integration-harness
+checks. Earlier failures remain recorded. All three CodeQL analyses also pass, but the
+[separate PR alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101955945979)
+remains red with 126 critical results; this is not a clean security-gate claim. See the exact
 [CI checkpoint](docs/IMPLEMENTATION_STATUS.md).
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:
@@ -257,6 +256,14 @@ distinguish this command from the earlier executable-fixture passes.
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
 [implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
+
+`content browser-download` uses the same cooperative-origin authentication and protected retrieval,
+then prints a short-lived, single-use localhost download URL. Open that URL directly in the
+browser while the command runs; the response is an attachment, not a page with the HTTPS origin's
+permissions. It takes `--url`, `--metadata-path` and `--cache`, with no output or bind option.
+The link lasts at most five minutes and never outlives the original authenticated authority.
+See the [browser-download usage](docs/OPERATIONS.md#one-shot-browser-download); no CA is installed.
+Arbitrary-site compatibility and measured benefit are not claimed, and C08 remains open.
 
 ## Safe development setup
 

@@ -667,6 +667,37 @@ normal signed Exit policy. Debian's normal public CA bundle is used unless an ex
 The CLI/process, origin-library and different-UID network checks pass, as recorded in
 [implementation status](IMPLEMENTATION_STATUS.md).
 
+### One-shot browser download
+
+For the same supported cooperative HTTPS origin, let the browser choose where to save the
+already verified result:
+
+```sh
+volparossa content browser-download \
+  --url https://downloads.example/asset.bin \
+  --metadata-path /.well-known/volparossa/content/asset \
+  --cache /agent-owned/new-browser-cache
+```
+
+Keep the command running. After protected retrieval and verification, its first JSON line contains
+`download_url`; paste that temporary URL directly into the browser's address bar. It binds only
+`127.0.0.1` on an automatically chosen port, accepts one authorized GET and sends a binary attachment.
+There is no `--output`, `--local-output` or `--bind` option, proxy endpoint or resumable browser Range
+request. The unguessable URL is a temporary access secret: do not publish or share it.
+The link and transfer deadline are the earlier of five minutes or the original authenticated
+authority's expiry. The CLI removes its private temporary spool on completion or interruption;
+the browser's saved download remains under the user's control. A final JSON receipt reports
+delivery and spool cleanup.
+
+The normal agent-owned cache, optional `--reuse-cache`, limits and explicit public `--ca-file`
+retain the same meaning as `fetch-https`. Fresh origin authentication still precedes peer reuse;
+no certificate is installed, verification bypassed or origin authority persisted. The localhost
+attachment gains none of the source website's browser permissions, cookies or login state.
+This is an explicit download integration, not general website rendering or transparent HTTPS
+caching. Measured benefit and the complete C08 checkpoint remain unproved.
+
+### Opportunistic replica cache
+
 For the first development-only redistribution integration, add `--replica-cache /agent-owned/new-extras`
 to `content serve`. By default the directory must be new, private to the agent and different from
 the existing publication cache. To restart this service with an existing owned replica store,
@@ -687,7 +718,9 @@ enabled, with meaningful link capacities and the real carrying interfaces. Unkno
 interfaces or a busy preflight sample cause uptake to pause; no host configuration is changed by
 the sampling itself. The receiver uses protocol v3: after each received chunk the provider must
 wait for a new one-chunk credit. A fresh sample of the configured links precedes that credit;
-a busy or unavailable sample sends stop and retains verified partial chunks for re-serving.
+a busy sample withholds credit and waits for quiet within the same original deadline, then
+resumes that exchange without renewing its budget. Unavailable accounting never authorizes
+credit; cancellation or deadline expiry ends the job without extending authority.
 Credit, stop and finish framing share the original protocol budget/deadline. There is no silent
 fallback to the unsolicited v2 exchange. New foreground content operations cancel background
 uptake. One already credited chunk can still overlap new demand; unmeasured links, per-flow
@@ -698,7 +731,9 @@ owner accounting and radio contention are not covered. This is not the full C04 
 replication. Busy cache access returns Busy rather than a fabricated count. Stop cancels the job
 and withdraws the service, retaining owned cache files and the cache-bound registration journal.
 Explicit reuse restores the journal, not the old service, contacts or route authority. Expired
-records are not offered again, but this does not yet reclaim their chunks or repair lost replicas.
+records are not offered again; maintenance before new uptake reclaims only expired, unshared
+journaled chunks, preserving live/foreground references and refusing mailbox stores. It does not
+repair lost replicas.
 It remains a development service, not reliable offline hosting or guaranteed owner-priority sharing.
 
 ## Crash and cleanup

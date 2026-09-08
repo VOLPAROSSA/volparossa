@@ -346,7 +346,9 @@ malicious hop rewriting. Exact interests remain inside the protected stream, not
 Admission requires fresh read-only traffic samples on the explicitly configured sharing links.
 The agent now uses a distinct v3 exchange with one receiver credit per chunk, never a silent
 v2 fallback. While the provider waits for its next credit, the receiver takes another fresh
-sample; a busy sample stops the exchange and preserves verified partial uptake. Credits, stop
+sample; a busy sample withholds credit until quiet, resuming the same exchange only within its
+original deadline and reserved budget. Unavailable accounting fails closed; cancellation or
+deadline expiry ends the session without renewing authority. Credits, stop
 and finish remain inside the original protocol-byte limit and deadline. Waiting holds neither
 the provider's registry mutex nor an open provider cache. The older v1/v2 protocols remain
 available to existing explicit callers, without inheriting this new pacing claim.
@@ -355,7 +357,8 @@ cooldown bounds its configured average rate; the 30-second overall limit also cl
 One already credited chunk may overlap new owner demand. These configured-interface samples
 are not all-link/per-flow accounting, radio fairness or a no-slowdown/speedup guarantee. The job
 does not subtract its own estimated bytes from counters; samples run at quiet credit boundaries,
-where residual packets may conservatively reject the next credit rather than renew any budget.
+where residual packets may conservatively postpone the next credit rather than renew any budget.
+This bounded pause/resume is not an integrated contention or completed C04 proof.
 Original replica manifests, hop counts and retained chunk IDs now persist in a private,
 cache-ID-bound, atomically replaced journal (at most 64 records / 8 MiB). Subsequent uptake merges
 with previous valid records; partial replicas retain their original expiry. Explicit
