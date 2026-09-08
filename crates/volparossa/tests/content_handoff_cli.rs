@@ -13,8 +13,10 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::OsRng;
 use tokio::{io::AsyncReadExt as _, net::UnixListener};
 use volparossa_content::{
-    CHUNK_BYTES, CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest,
+    CHUNK_BYTES, CacheLimits, ChunkStore, Metadata, Publication, SignedManifest, Validity,
+    VerifiedManifest,
     private_message::{RecipientKeyPair, open_private_message, publish_private_message},
+    publish,
     transfer::{TransferLimits, pull_from_peer, serve_peer},
 };
 use volparossa_local_control::{
@@ -23,10 +25,23 @@ use volparossa_local_control::{
 };
 
 const INNER: &str = "VOLPAROSSA_HANDOFF_TEST_PARENT_NETNS";
-const TEST_NAME: &str = "ciphertext_handoff_cli_round_trip_and_correlation_are_real";
-
 #[test]
 fn ciphertext_handoff_cli_round_trip_and_correlation_are_real() {
+    isolated(
+        "ciphertext_handoff_cli_round_trip_and_correlation_are_real",
+        scenario(),
+    );
+}
+
+#[test]
+fn public_content_handoff_cli_is_explicit_streamed_and_empty_safe() {
+    isolated(
+        "public_content_handoff_cli_is_explicit_streamed_and_empty_safe",
+        public_scenario(),
+    );
+}
+
+fn isolated(test_name: &str, scenario: impl Future<Output = ()>) {
     let current = fs::read_link("/proc/self/ns/net").expect("current namespace");
     if let Some(parent) = std::env::var_os(INNER) {
         assert_ne!(
@@ -38,13 +53,13 @@ fn ciphertext_handoff_cli_round_trip_and_correlation_are_real() {
             .enable_all()
             .build()
             .expect("isolated runtime")
-            .block_on(scenario());
+            .block_on(scenario);
         return;
     }
     let output = Command::new("/usr/bin/unshare")
         .args(["--user", "--map-root-user", "--net"])
         .arg(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", TEST_NAME, "--nocapture"])
+        .args(["--exact", test_name, "--nocapture"])
         .env(INNER, current)
         .output()
         .expect("execute proof in a disposable user/network namespace");
@@ -132,15 +147,24 @@ async fn exchange(
         let request = read_request(&mut stream)
             .await
             .expect("bounded control request");
-        let (encoded, key, cache, importing) = match request.operation.expect("operation") {
-            Operation::ContentImport(value) => {
-                (value.manifest, value.publisher_key, value.cache, true)
-            }
-            Operation::ContentExport(value) => {
-                (value.manifest, value.publisher_key, value.cache, false)
-            }
-            _ => panic!("expected only explicit ciphertext handoff"),
-        };
+        let (encoded, key, cache, importing, allow_public_content) =
+            match request.operation.expect("operation") {
+                Operation::ContentImport(value) => (
+                    value.manifest,
+                    value.publisher_key,
+                    value.cache,
+                    true,
+                    value.allow_public_content,
+                ),
+                Operation::ContentExport(value) => (
+                    value.manifest,
+                    value.publisher_key,
+                    value.cache,
+                    false,
+                    value.allow_public_content,
+                ),
+                _ => panic!("expected only explicit ciphertext handoff"),
+            };
         let key =
             VerifyingKey::from_bytes(&key.try_into().expect("public key bytes")).expect("key");
         let verified = SignedManifest::decode(&encoded)
@@ -148,6 +172,10 @@ async fn exchange(
             .verify(&key, now())
             .expect("trusted sender");
         assert_eq!(verified.manifest_id(), manifest.manifest_id());
+        assert_eq!(
+            allow_public_content,
+            manifest.metadata().content_type == "application/octet-stream"
+        );
         assert!(
             Path::new(&cache).starts_with(root),
             "only fixture-owned paths"
@@ -181,8 +209,8 @@ async fn exchange(
         let limits = TransferLimits {
             exchange_timeout: Duration::from_secs(5),
             session_timeout: Duration::from_secs(30),
-            max_requests: manifest.chunks().len(),
-            max_bytes: manifest.length(),
+            max_requests: manifest.chunks().len().max(1),
+            max_bytes: manifest.length().max(1),
         };
         let mut store = if importing {
             ChunkStore::create(Path::new(&cache), cache_limits())
@@ -356,5 +384,89 @@ async fn scenario() {
             .expect("retained bytes remain authentic")
             .as_slice(),
         plaintext
+    );
+}
+
+async fn public_scenario() {
+    for length in [4 * 1024 * 1024 + 127, 0] {
+        public_roundtrip(length).await;
+    }
+}
+
+async fn public_roundtrip(length: usize) {
+    let directory = tempfile::tempdir().expect("explicit public fixture root");
+    let root = directory.path();
+    let sender = SigningKey::generate(&mut OsRng);
+    let key = sender.verifying_key();
+    let mut bytes = vec![0; length];
+    for (index, chunk) in bytes.chunks_mut(CHUNK_BYTES).enumerate() {
+        chunk.fill(u8::try_from(index).expect("bounded distinct chunks"));
+    }
+    let mut source = ChunkStore::create(&root.join("user-source"), cache_limits()).expect("source");
+    let signed = publish(
+        &mut bytes.as_slice(),
+        Publication {
+            metadata: Metadata {
+                name: "explicit-file.bin".into(),
+                revision: 1,
+                content_type: "application/octet-stream".into(),
+            },
+            length: u64::try_from(length).expect("bounded object length"),
+            validity: Validity {
+                created: now(),
+                expires: now() + 300,
+            },
+        },
+        &sender,
+        &mut source,
+    )
+    .expect("signed ordinary native publication");
+    let manifest = signed.verify(&key, now()).expect("trusted public manifest");
+    fs::write(root.join("manifest.pb"), signed.encode()).expect("public descriptor");
+    drop(source);
+    let import = arguments(root, "import", "user-source", "agent-cache", &key);
+    let rejected = invoke(root, import.clone()).await;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--public-content"));
+    assert!(!root.join("agent-cache").exists());
+    let mut import = import;
+    import.push("--public-content".into());
+    let imported = successful(&exchange(root, import, &manifest, Fault::None).await);
+    assert_eq!(imported["public_content"], true);
+    assert_eq!(imported["content_bytes"], length);
+    assert_eq!(imported["ciphertext_format_verified"], false);
+    assert!(imported.get("ciphertext_bytes").is_none());
+    let mut export = arguments(root, "export", "user-copy", "agent-cache", &key);
+    assert!(!invoke(root, export.clone()).await.status.success());
+    assert!(!root.join("user-copy").exists());
+    export.push("--public-content".into());
+    let exported = successful(&exchange(root, export, &manifest, Fault::None).await);
+    assert_eq!(exported["content_bytes"], length);
+    assert_eq!(exported["public_content"], true);
+    assert_eq!(exported["origin_authenticated"], false);
+    assert_eq!(exported["network_transfer"], false);
+    successful(
+        &invoke(
+            root,
+            [
+                "assemble".into(),
+                "--manifest".into(),
+                "manifest.pb".into(),
+                "--publisher-key".into(),
+                hex::encode(key.as_bytes()),
+                "--cache".into(),
+                "user-copy".into(),
+                "--output".into(),
+                "assembled.bin".into(),
+                "--min-free-bytes".into(),
+                "0".into(),
+            ]
+            .into(),
+        )
+        .await,
+    );
+    assert_eq!(
+        fs::read(root.join("assembled.bin")).expect("actual CLI reconstruction"),
+        bytes
     );
 }

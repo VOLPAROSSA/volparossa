@@ -31,9 +31,9 @@ pub(crate) enum Command {
     PublishMessage(private_message::PublishMessage),
     /// Verify and decrypt cached message chunks to a new private output file.
     OpenMessage(private_message::OpenMessage),
-    /// Copy verified private-message ciphertext from your cache into a new agent-owned cache.
+    /// Copy private-message ciphertext (or explicit --public-content) into a new agent cache.
     Import(handoff::Handoff),
-    /// Copy verified private-message ciphertext from an agent cache into your new local cache.
+    /// Copy private-message ciphertext (or explicit --public-content) into your new local cache.
     Export(handoff::Handoff),
     /// Verify and reconstruct from explicitly supplied local caches; no network retrieval.
     Assemble(Assemble),

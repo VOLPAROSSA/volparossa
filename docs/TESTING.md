@@ -169,13 +169,17 @@ but fails the final capture gate because retired remote route owners survive loc
 the explicit reopen extension still needs its live run after that teardown fix. This one chain
 does not establish full C03/C04, durable retention, generic browser support or a speed gain.
 
-The next `content-message` scenario also runs normal `publish-message`, `import`, `export` and
+The `content-message` scenario also runs normal `publish-message`, `import`, `export` and
 `open-message` across the disposable operator/service UID boundary. The operator has only the
 control group; private stores and keys remain unreadable to the other account. This separate
 local handoff uses the existing protected Unix socket and must leave the provider service off.
 It does not turn that scenario's fixture network publisher into a normal publisher or prove a
-mailbox. Focused CLI-process, agent-stream and evidence-checker tests pass; the new different-UID
-VM proof is pending.
+mailbox. That different-UID VM proof passes on `ec091bdd`, with private caches/output, unchanged
+identity files and complete cleanup. The next source additionally publishes an explicitly public
+fixture file, rejects default import before creating a destination, then uses `--public-content`
+for import/export and normal `assemble`. Its checker requires exact hashes, distinct account
+ownership and no false ciphertext, HTTPS-origin or network-service claim. Local >4-MiB/empty-object
+CLI/agent probes and seven checker tests pass; the new public-file VM proof is pending.
 
 ## Helper-boundary evidence
 

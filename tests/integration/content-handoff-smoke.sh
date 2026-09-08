@@ -78,4 +78,70 @@ content_network_handoff() {
           all_cache_modes:"0700",private_output_mode:"0600",identities_unchanged:true,
           plaintext_sha256:$plaintext_sha256,local_only:true}' \
         >"$WORK/content-handoff-isolation.json"
+    content_network_public_handoff
+}
+
+content_network_public_handoff() {
+    PHASE=content-public-cache-handoff
+    # Explicitly publish the known disposable test bytes, never captured browsing or user data.
+    content_public_source=$content_client_root/handoff-public-source
+    content_public_return=$content_client_root/handoff-public-return
+    content_public_agent=$WORK/state-relay4/public-handoff
+    content_public_manifest=$content_client_root/handoff-public-manifest.bin
+    content_network_recipient_cli content publish --input "$content_plaintext" \
+        --name disposable-public-file --revision 1 --content-type application/octet-stream \
+        --identity "$content_private/wrong-identity.key" --passphrase-file "$content_private/passphrase" \
+        --cache "$content_public_source" --manifest "$content_public_manifest" \
+        >"$WORK/content-handoff-public-publish.json" 2>"$WORK/content-handoff-public-publish.err" \
+        || fail CONTENT_PUBLIC_HANDOFF_PUBLISH_FAILED
+    if content_handoff_cli content import --manifest "$content_public_manifest" \
+        --publisher-key "$content_sender" --cache "$content_public_source" \
+        --agent-cache "$content_public_agent" \
+        >"$WORK/content-handoff-public-default.out" 2>"$WORK/content-handoff-public-default.err"; then
+        fail CONTENT_PUBLIC_HANDOFF_DEFAULT_ACCEPTED
+    fi
+    [ ! -e "$content_public_agent" ] && [ ! -L "$content_public_agent" ] \
+        || fail CONTENT_PUBLIC_HANDOFF_DEFAULT_CREATED_CACHE
+    content_handoff_cli content import --public-content --manifest "$content_public_manifest" \
+        --publisher-key "$content_sender" --cache "$content_public_source" \
+        --agent-cache "$content_public_agent" \
+        >"$WORK/content-handoff-public-import.json" 2>"$WORK/content-handoff-public-import.err" \
+        || fail CONTENT_PUBLIC_HANDOFF_IMPORT_FAILED
+    content_handoff_cli content export --public-content --manifest "$content_public_manifest" \
+        --publisher-key "$content_sender" --agent-cache "$content_public_agent" \
+        --cache "$content_public_return" \
+        >"$WORK/content-handoff-public-export.json" 2>"$WORK/content-handoff-public-export.err" \
+        || fail CONTENT_PUBLIC_HANDOFF_EXPORT_FAILED
+    content_network_recipient_cli content assemble --manifest "$content_public_manifest" \
+        --publisher-key "$content_sender" --cache "$content_public_return" \
+        --output "$content_private/handoff-public.bin" \
+        >"$WORK/content-handoff-public-assemble.json" 2>"$WORK/content-handoff-public-assemble.err" \
+        || fail CONTENT_PUBLIC_HANDOFF_ASSEMBLE_FAILED
+    content_public_sha=$(sha256sum "$content_private/handoff-public.bin" | awk '{print $1}')
+    [ "$content_public_sha" = "$content_plaintext_digest" ] || fail CONTENT_PUBLIC_HANDOFF_BYTES_CHANGED
+    if [ "$(stat -Lc '%a:%u:%g' "$content_public_source")" != "700:$WORKER_UID:$WORKER_GID" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_public_return")" != "700:$WORKER_UID:$WORKER_GID" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_public_agent")" != "700:$AGENT_UID:$AGENT_GID" ] \
+        || [ "$(stat -Lc '%a:%u:%g' "$content_private/handoff-public.bin")" != "600:$WORKER_UID:$WORKER_GID" ]; then
+        fail CONTENT_PUBLIC_HANDOFF_OWNERSHIP_CHANGED
+    fi
+    if setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$content_public_source"; then fail CONTENT_PUBLIC_HANDOFF_USER_STATE_EXPOSED; fi
+    if setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$content_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- test -r "$content_public_agent"; then fail CONTENT_PUBLIC_HANDOFF_SERVICE_STATE_EXPOSED; fi
+    [ "$(sha256sum "$content_private/wrong-identity.key" | awk '{print $1}')" = "$content_wrong_identity_digest" ] \
+        || fail CONTENT_PUBLIC_HANDOFF_IDENTITY_CHANGED
+    content_handoff_cli content status >"$WORK/content-handoff-public-status-after.json" \
+        2>"$WORK/content-handoff-public-status-after.err" || fail CONTENT_PUBLIC_HANDOFF_CONTROL_UNAVAILABLE
+    jq -n --argjson user_uid "$WORKER_UID" --argjson agent_uid "$AGENT_UID" \
+        --argjson control_gid "$content_control_gid" --argjson agent_gid "$AGENT_GID" \
+        --arg sha256 "$content_public_sha" \
+        '{user_uid:$user_uid,agent_uid:$agent_uid,control_gid:$control_gid,agent_gid:$agent_gid,
+          agent_cannot_read_user_cache:true,user_cannot_read_agent_cache:true,
+          all_cache_modes:"0700",output_mode:"0600",identity_unchanged:true,
+          default_public_import_rejected:true,default_destination_absent:true,
+          sha256:$sha256,local_only:true,explicit_public_fixture:true}' \
+        >"$WORK/content-handoff-public-isolation.json"
 }

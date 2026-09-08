@@ -16,14 +16,35 @@ Scoped downlink and mixed-link runs now pass; content/application integration co
 Explicit local `content import`/`content export` now bridge user-owned and service-owned private
 message caches through the same authorized Unix control connection. Typed Ready/final receipts
 surround the existing bounded chunk frames; the 256 KiB control-frame bound is unchanged.
-Only original signed private-message manifests and ciphertext cross that boundary. Full-object
-hash/envelope validation is shared with normal opening; no recipient key/decryption is involved.
+By default only original signed private-message manifests and ciphertext cross that boundary.
+Full-object hash/envelope validation is shared with normal opening; no recipient key/decryption is involved.
 Import creates a new agent-owned cache, export a new user-owned cache, both `0700`; existing
 destinations are refused and incomplete transfers are not success. Two agent stream tests,
 one wire test, five existing message tests and strict agent/content/control Clippy pass. A real
-CLI-process transfer in a disposable netns also passes; the different-UID VM extension is pending.
+CLI-process transfer in a disposable netns also passes. The
+[exact `ec091bdd` VM run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34176555568)
+now passes the different-UID extension: user 985, service 987, separate control group 986;
+nine ciphertext chunks / 2,097,332 bytes reconstruct the expected 2,097,275-byte plaintext after
+normal publish/import/export/open. Cache modes remain `0700`, plaintext `0600`, identities
+unchanged and secrets unreadable to the other account. No service is implicitly activated.
+Cleanup removes secrets/plaintext and all owned network objects; raw guest state before/after
+is identical, SHA-256 `3f70c790a278cd5a80e4f6d2a0b04f1496e914c3d10d6851f71e006fc2e9bc41`.
+Artifact SHA-256: `0f352df1445d02e3c8f9f4f176a08aeded77709ac81dd68c80470b1118537279`.
+This is normal local sender/account integration plus the existing fixture-publisher network path,
+not a complete normal sender network runtime, mailbox or C07. Exact CodeQL analysis passes;
+Quality was cancelled by a newer head, not reported as passed.
 The installed runtime ancestor now gives only search permission to the control group through a
 non-inherited ACL, retaining the helper's required `0750` mode and private socket permissions.
+
+The same account bridge now accepts an ordinary native publication only with explicit
+`--public-content` (wire bool tag 5, false by default). It supports the existing 0--256 MiB bound,
+with streamed full-object verification and finish-only empty transfers. Exact private-message
+types retain their envelope/4-MiB check even with that flag. Public receipts cannot claim verified
+ciphertext or HTTPS origin authentication. Two actual CLI-process tests, three agent stream tests,
+one wire test and combined strict CLI/agent/control Clippy pass; they cover >4-MiB public files,
+empty objects, default refusal and unchanged private behavior. The next different-UID fixture
+adds normal public publish/import/export/assemble; seven checker tests and shell checks pass,
+but its new VM proof remains pending. No automatic serving, browser capture or HTTPS export.
 
 The [source-bound C03 run on `97e478a2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175385789)
 remains **failed**, but at a new boundary: final Client retrieval reaches provider discovery,

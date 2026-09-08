@@ -120,8 +120,13 @@ run on `4c4c8954` also passes with these normal recipient commands and encrypted
 including ciphertext retrieval after publisher removal, private output and complete cleanup.
 Explicit `content import` and `content export` now bridge the user's private ciphertext cache
 and the separately owned service cache over the local control socket. They neither transfer
-recipient keys nor start a listener. Local CLI/agent transfer tests pass; the different-UID VM
-probe is pending. See the message instructions for the required handoff before serving or opening.
+recipient keys nor start a listener. The [different-UID VM run on `ec091bdd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34176555568)
+passes normal local publication, import/export and opening with unchanged private permissions
+and complete cleanup. Ordinary native files now use the same bridge with explicit
+`--public-content`; local CLI/agent tests pass, including files above 4 MiB and empty objects.
+The extended public-file VM proof is pending. This does not authenticate arbitrary HTTPS content.
+See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
+before serving or assembling a publication held by another account.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving

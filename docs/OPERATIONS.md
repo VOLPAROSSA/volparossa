@@ -310,6 +310,40 @@ hashes, and exposes a new `0600` output atomically only after complete reconstru
 expired manifests, absent/corrupt chunks and an existing output are errors. No peer discovery or
 network retrieval occurs; successful output explicitly reports `network_retrieval: false`.
 
+### Moving an explicit public publication to or from the service
+
+The agent runs as a different account and must not open your private cache directory directly.
+Use its protected local control socket to copy one complete, explicitly selected native object:
+
+```sh
+volparossa content import --public-content \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache ./content-cache --agent-cache /var/lib/volparossa/new-notes-cache
+```
+
+The agent-owned destination must be new and its parent already agent-writable. You can then
+explicitly `content serve` that cache with the same manifest/key and an authorized endpoint.
+Import itself does not start serving. Conversely, after `content fetch` has completed into an
+agent-owned native cache, copy it to your account and use normal offline reconstruction:
+
+```sh
+volparossa content export --public-content \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --agent-cache /var/lib/volparossa/fetched-notes-cache --cache ./received-notes-cache
+volparossa content assemble \
+  --manifest ./notes.v1.pb --publisher-key TRUSTED_PUBLISHER_PUBLIC_KEY_HEX \
+  --cache ./received-notes-cache --output ./received-notes.pdf
+```
+
+Both directions require `--public-content` for ordinary native content; the default only accepts
+recipient-encrypted messages. All chunks and the whole object hash are verified, including empty
+objects, within the existing 256-MiB object bound. New destination caches remain `0700` and are
+never adopted or overwritten. Failed transfers may retain verified partial chunks, not a success
+receipt. No key, ownership or permission change occurs. `public_content: true` means you explicitly
+selected an ordinary native object; it does not mean a peer may automatically publish browsing data.
+Native signatures are not HTTPS origin authentication. This command does not export an authenticated
+HTTPS descriptor or make arbitrary cached HTTPS responses shareable.
+
 ### Recipient-encrypted message commands
 
 These commands use the existing encrypted node identity; they do not create a separate plaintext
@@ -354,8 +388,10 @@ volparossa content export --manifest ./message.pb --publisher-key TRUSTED_SENDER
   --agent-cache /var/lib/volparossa/fetched-message-cache --cache ./retrieved-ciphertext-cache
 ```
 
-Import/export currently accept complete recipient-encrypted messages only (at most 4 MiB of
-plaintext plus the bounded encrypted envelope), not arbitrary public content or partial caches.
+Import/export accept complete recipient-encrypted messages by default (at most 4 MiB of
+plaintext plus the bounded encrypted envelope), not partial caches. Ordinary native public
+objects require the separate explicit `--public-content` flag described above; that flag never
+bypasses envelope validation for the exact private-message content type.
 They preserve each account's `0700` cache ownership and do not change permissions. No destination
 cache is reused or overwritten. A failed transfer may leave verified encrypted chunks in its
 new destination; it never reports them as a complete message. This is local ciphertext copying,

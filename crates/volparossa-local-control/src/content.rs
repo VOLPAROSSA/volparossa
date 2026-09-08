@@ -4,7 +4,7 @@ use prost::Message;
 
 use crate::ControlProtocolError;
 
-/// Explicit transfer of one recipient-encrypted native object from a user cache to the agent.
+/// Explicit transfer of one native object from a user cache to the agent; private by default.
 #[derive(Clone, PartialEq, Message)]
 pub struct ContentImportRequest {
     /// Exact canonical manifest signed by the independently trusted sender.
@@ -19,9 +19,12 @@ pub struct ContentImportRequest {
     /// Explicit agent cache budget.
     #[prost(message, optional, tag = "4")]
     pub limits: Option<ContentCacheLimits>,
+    /// Explicitly allow ordinary native publications; never confers HTTPS-origin authority.
+    #[prost(bool, tag = "5")]
+    pub allow_public_content: bool,
 }
 
-/// Explicit transfer of one encrypted object from an existing agent-owned cache to the user.
+/// Explicit transfer from an existing agent-owned cache to the user; private by default.
 #[derive(Clone, PartialEq, Message)]
 pub struct ContentExportRequest {
     /// Exact canonical manifest signed by the independently trusted sender.
@@ -36,6 +39,9 @@ pub struct ContentExportRequest {
     /// Explicit agent cache budget.
     #[prost(message, optional, tag = "4")]
     pub limits: Option<ContentCacheLimits>,
+    /// Explicitly allow ordinary native publications; private-message validation is unchanged.
+    #[prost(bool, tag = "5")]
+    pub allow_public_content: bool,
 }
 
 /// Permission to begin a bounded chunk exchange on this same local socket, not completion.
@@ -44,7 +50,7 @@ pub struct ContentTransferReady {
     /// SHA-256 of the exact independently verified canonical signed manifest.
     #[prost(bytes = "vec", tag = "1")]
     pub manifest_id: Vec<u8>,
-    /// Expected complete encrypted object bytes, not bytes already transferred.
+    /// Expected complete object bytes, not bytes already transferred.
     #[prost(uint64, tag = "2")]
     pub bytes: u64,
     /// Expected complete ordered chunk count, not chunks already transferred.
@@ -71,8 +77,9 @@ impl ContentExportRequest {
 impl ContentTransferReady {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
         if self.manifest_id.len() != 32
-            || !(54..=4 * 1024 * 1024 + 64).contains(&self.bytes)
-            || !(1..=17).contains(&self.chunks)
+            || self.bytes > 256 * 1024 * 1024
+            || self.chunks > 1024
+            || u64::from(self.chunks) != self.bytes.div_ceil(256 * 1024)
         {
             return Err(ControlProtocolError::Invalid(
                 "invalid content transfer readiness",
@@ -376,12 +383,14 @@ mod tests {
                 max_entries: 32,
                 min_free_bytes: 0,
             }),
+            allow_public_content: false,
         };
         let export = ContentExportRequest {
             manifest: import.manifest.clone(),
             publisher_key: import.publisher_key.clone(),
             cache: import.cache.clone(),
             limits: import.limits,
+            allow_public_content: false,
         };
         for operation in [
             Operation::ContentImport(import.clone()),
@@ -397,6 +406,23 @@ mod tests {
                 request
             );
         }
+        // The absent tag remains false for old callers; public transfer is an explicit opt-in.
+        let encoded_private = import.encode_to_vec();
+        assert!(
+            !ContentImportRequest::decode(encoded_private.as_slice())
+                .unwrap()
+                .allow_public_content
+        );
+        let mut public = import.clone();
+        public.allow_public_content = true;
+        let mut expected_public = encoded_private;
+        expected_public.extend([0x28, 0x01]); // bool field 5, true; no new frame or protocol version.
+        assert_eq!(public.encode_to_vec(), expected_public);
+        assert!(
+            ContentImportRequest::decode(expected_public.as_slice())
+                .unwrap()
+                .allow_public_content
+        );
         let mut ready = ContentTransferReady {
             manifest_id: vec![4; 32],
             bytes: 4 * 1024 * 1024 + 64,
@@ -413,7 +439,15 @@ mod tests {
             decode_response(&encode_response(&response).expect("encode")).expect("decode"),
             response
         );
-        ready.bytes += 1;
+        ready.bytes = 0;
+        ready.chunks = 0;
+        assert!(ready.validate().is_ok());
+        ready.bytes = 1;
+        assert!(ready.validate().is_err());
+        ready.bytes = 256 * 1024 * 1024;
+        ready.chunks = 1024;
+        assert!(ready.validate().is_ok());
+        ready.bytes = 256 * 1024 * 1024 + 1;
         assert!(ready.validate().is_err());
         let mut invalid = import;
         invalid.cache = "relative".into();

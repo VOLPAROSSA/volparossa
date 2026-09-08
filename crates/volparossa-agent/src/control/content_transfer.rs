@@ -1,4 +1,4 @@
-//! Explicit local ciphertext handoff; no ownership relaxation, plaintext, or recipient keys.
+//! Explicit local native-content handoff; private-message ciphertext remains the default.
 
 #[cfg(test)]
 mod tests;
@@ -12,6 +12,7 @@ use volparossa_content::{
     private_message::{
         MAX_PRIVATE_MESSAGE_BYTES, PRIVATE_MESSAGE_CONTENT_TYPE, validate_private_message_envelope,
     },
+    reassemble,
     transfer::{TransferLimits, pull_from_peer, serve_peer},
 };
 use volparossa_local_control::{
@@ -60,7 +61,7 @@ pub(super) async fn process(
             .await
             .map_err(|_| ControlServerError::InvalidFrame)?;
         // A framing/timeout error closes this connection. No control frame is injected into a
-        // half-finished chunk exchange, and already verified ciphertext remains in the cache.
+        // half-finished chunk exchange, and already verified content remains in the cache.
         let limits = transfer_limits(&scope.manifest);
         let progress = if scope.importing {
             pull_from_peer(&mut stream, &scope.manifest, &mut scope.store, limits).await
@@ -77,8 +78,7 @@ pub(super) async fn process(
         let complete = progress.missing == 0
             && progress.bytes == unique.values().sum::<u64>()
             && progress.chunks == unique.len()
-            && validate_private_message_envelope(&scope.manifest, &mut [&mut scope.store], now())
-                .is_ok();
+            && verify_complete(&scope.manifest, &mut scope.store).is_ok();
         let result = if complete {
             Ok(ContentReceipt {
                 bytes: scope.manifest.length(),
@@ -98,13 +98,14 @@ pub(super) async fn process(
 }
 
 fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
-    let (encoded, key, cache, limits, importing) = match operation {
+    let (encoded, key, cache, limits, importing, allow_public_content) = match operation {
         Some(Operation::ContentImport(request)) => (
             request.manifest,
             request.publisher_key,
             request.cache,
             request.limits,
             true,
+            request.allow_public_content,
         ),
         Some(Operation::ContentExport(request)) => (
             request.manifest,
@@ -112,10 +113,11 @@ fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
             request.cache,
             request.limits,
             false,
+            request.allow_public_content,
         ),
         _ => return Err(ContentError::Invalid),
     };
-    let manifest = private_manifest(&encoded, &key)?;
+    let manifest = handoff_manifest(&encoded, &key, allow_public_content)?;
     let cache_limits = cache_limits(limits, &manifest)?;
     let mut store = if importing {
         ChunkStore::create(Path::new(&cache), cache_limits)
@@ -124,8 +126,7 @@ fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
     }
     .map_err(|_| ContentError::Invalid)?;
     if !importing {
-        validate_private_message_envelope(&manifest, &mut [&mut store], now())
-            .map_err(|_| ContentError::Invalid)?;
+        verify_complete(&manifest, &mut store)?;
     }
     Ok(Scope {
         manifest,
@@ -134,15 +135,26 @@ fn prepare(operation: Option<Operation>) -> Result<Scope, ContentError> {
     })
 }
 
-fn private_manifest(encoded: &[u8], key: &[u8]) -> Result<VerifiedManifest, ContentError> {
+fn handoff_manifest(
+    encoded: &[u8],
+    key: &[u8],
+    allow_public_content: bool,
+) -> Result<VerifiedManifest, ContentError> {
     let key = VerifyingKey::from_bytes(&key.try_into().map_err(|_| ContentError::Invalid)?)
         .map_err(|_| ContentError::Invalid)?;
     let manifest = SignedManifest::decode(encoded)
         .and_then(|signed| signed.verify(&key, now()))
         .map_err(|_| ContentError::Invalid)?;
     let metadata = manifest.metadata();
-    if metadata.content_type != PRIVATE_MESSAGE_CONTENT_TYPE
-        || metadata.revision != 1
+    if metadata.content_type != PRIVATE_MESSAGE_CONTENT_TYPE {
+        return if allow_public_content {
+            Ok(manifest)
+        } else {
+            Err(ContentError::Invalid)
+        };
+    }
+    // Public opt-in never downgrades the exact private-message profile or envelope checks.
+    if metadata.revision != 1
         || metadata.name.len() != 64
         || !metadata
             .name
@@ -154,6 +166,22 @@ fn private_manifest(encoded: &[u8], key: &[u8]) -> Result<VerifiedManifest, Cont
         return Err(ContentError::Invalid);
     }
     Ok(manifest)
+}
+
+fn verify_complete(
+    manifest: &VerifiedManifest,
+    store: &mut ChunkStore,
+) -> Result<(), ContentError> {
+    if manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE {
+        validate_private_message_envelope(manifest, &mut [store], now())
+            .map_err(|_| ContentError::Invalid)?;
+    } else {
+        // Bounded chunk-at-a-time reassembly checks the signed whole hash without buffering
+        // the complete (at most 256 MiB) publication or persisting another object copy.
+        reassemble(manifest, &mut [store], now(), &mut std::io::sink())
+            .map_err(|_| ContentError::Invalid)?;
+    }
+    Ok(())
 }
 
 fn cache_limits(
@@ -176,8 +204,10 @@ fn transfer_limits(manifest: &VerifiedManifest) -> TransferLimits {
     TransferLimits {
         exchange_timeout: Duration::from_secs(5),
         session_timeout: TRANSFER_TIMEOUT,
-        max_requests: 17,
-        max_bytes: manifest.length(),
+        // An empty native object still sends the normal finish frame; its allowed chunk
+        // map is empty, so these nonzero protocol configuration bounds permit no body.
+        max_requests: manifest.chunks().len().max(1),
+        max_bytes: manifest.length().max(1),
     }
 }
 

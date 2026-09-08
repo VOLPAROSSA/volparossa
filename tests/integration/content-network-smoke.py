@@ -173,6 +173,7 @@ def validate_private_message(evidence):
         "plaintext_removed": True, "private_directory_removed": True},
         "temporary encrypted identities, passphrase or plaintext were not removed")
     validate_private_handoff(message["local_handoff"])
+    validate_public_handoff(message["local_public_handoff"])
 
 
 def validate_private_handoff(handoff):
@@ -216,6 +217,46 @@ def validate_private_handoff(handoff):
             "exact message, fresh user output or no implicit service activation not proven")
 
 
+def validate_public_handoff(handoff):
+    isolation, publication = handoff["isolation"], handoff["publication"]
+    require(isolation["user_uid"] > 0 and isolation["agent_uid"] > 0
+            and isolation["user_uid"] != isolation["agent_uid"]
+            and isolation["control_gid"] > 0 and isolation["agent_gid"] > 0
+            and isolation["control_gid"] != isolation["agent_gid"]
+            and all(isolation[flag] is True for flag in (
+                "agent_cannot_read_user_cache", "user_cannot_read_agent_cache",
+                "identity_unchanged", "default_public_import_rejected", "default_destination_absent",
+                "local_only", "explicit_public_fixture"))
+            and isolation["all_cache_modes"] == "0700" and isolation["output_mode"] == "0600"
+            and isolation["sha256"] == FIXTURE_PLAINTEXT_SHA256,
+            "explicit separate-account public cache handoff not proven")
+    require(publication["operation"] == "offline_content_publish"
+            and publication["network_publication"] is False
+            and publication["bytes"] == OBJECT_BYTES and publication["chunks"] == 9
+            and re.fullmatch(r"[0-9a-f]{64}", publication["publisher_key_hex"]),
+            "normal explicit public file publication not proven")
+    imported, exported = handoff["import"], handoff["export"]
+    for operation, receipt in (("content_import", imported), ("content_export", exported)):
+        require(receipt["operation"] == operation and receipt["complete"] is True
+                and receipt["content_bytes"] == OBJECT_BYTES and receipt["chunks"] == 9
+                and re.fullmatch(r"[0-9a-f]{64}", receipt["manifest_id"])
+                and receipt["public_content"] is True and "ciphertext_bytes" not in receipt
+                and all(receipt[flag] is False for flag in (
+                    "ciphertext_format_verified", "origin_authenticated", "network_transfer",
+                    "ownership_changed", "recipient_decryption_performed", "private_keys_transferred")),
+                "incomplete public transfer or false encryption/origin claim")
+    require(imported["manifest_id"] == exported["manifest_id"]
+            and imported["agent_cache"] == exported["agent_cache"]
+            and imported["cache"] != exported["cache"]
+            and handoff["assemble"]["operation"] == "offline_content_assemble"
+            and handoff["assemble"]["publisher_key_hex"] == publication["publisher_key_hex"]
+            and handoff["assemble"]["bytes"] == OBJECT_BYTES
+            and handoff["assemble"]["network_retrieval"] is False
+            and handoff["status_after"]["serving"] is False
+            and handoff["status_after"]["publications"] == 0,
+            "exact public reconstruction or no implicit service activation not proven")
+
+
 def build_evidence(work, private=False):
     phases = []
     for replica in "ab":
@@ -243,6 +284,9 @@ def build_evidence(work, private=False):
                 ("isolation", "isolation"), ("publication", "publish"), ("import", "import"),
                 ("export", "export"), ("open", "open"), ("status_before", "status-before"),
                 ("status_after", "status-after"))},
+            "local_public_handoff": {key: read(work / f"content-handoff-public-{name}.json") for key, name in (
+                ("isolation", "isolation"), ("publication", "publish"), ("import", "import"),
+                ("export", "export"), ("assemble", "assemble"), ("status_after", "status-after"))},
         }
     validate_transfer(evidence, private)
     return {"success": True, **evidence}
@@ -268,6 +312,7 @@ def validate_report(report, revision, private=False):
                 and report["encrypted_identity_store_claimed"] is True
                 and report["normal_publisher_cli_claimed"] is True
                 and report["local_private_cache_handoff_claimed"] is True
+                and report["local_public_cache_handoff_claimed"] is True
                 and report["network_publisher_runtime_claimed"] is False
                 and report["mailbox_runtime_claimed"] is False and report["full_c07_claimed"] is False,
                 "normal local publisher/handoff/recipient CLI required, not a network publisher/mailbox claim")

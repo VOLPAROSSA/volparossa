@@ -129,13 +129,19 @@ manifests, publisher hints, original creation times, local hop counts and retain
 bounded to 64 records / 8 MiB. Restoration verifies signatures and live chunks before listener
 start; it never reissues manifests, refreshes expiry or adopts foreign directories.
 
-Local control adds explicit private-message `ContentImport` (25) and `ContentExport` (26).
+Local control adds explicit `ContentImport` (25) and `ContentExport` (26). Both default to
+private-message objects; optional bool tag 5 `allow_public_content` defaults false and explicitly
+allows an ordinary native publication. An older agent cannot silently enable this new opt-in.
 After the validated request, `ContentTransferReady` (response tag 19) binds exact manifest ID,
 object length and chunk count. Existing chunk-transfer frames then run on that same authorized
 Unix connection, followed by a correlated final `ContentReceipt`. Ready is not completion.
 The control frame stays at 256 KiB; chunk payloads use their separate existing bound. Whole
-handoff lifetime is 30 seconds, each exchange at most five seconds, and only complete private
-message objects up to 4 MiB plus the bounded envelope are accepted. The destination is newly
+handoff lifetime is 30 seconds, each exchange at most five seconds. Complete private-message
+objects remain bounded to 4 MiB plus their envelope, even when the opt-in flag is set. Public
+native objects use the existing 0--256 MiB / 0--1024 chunk bounds; empty objects exchange only
+the existing finish frame. Full native hash verification streams chunks without buffering an
+entire object. Neither a public opt-in nor native publisher trust authenticates an HTTPS origin.
+The destination is newly
 created under its receiving account. No ownership change, permission grant, network listener,
 private key transfer or decryption is part of either operation. Syntactic envelope validation
 does not prove that a malicious local publisher actually encrypted the bytes it supplied.

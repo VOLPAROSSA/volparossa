@@ -74,6 +74,7 @@ impl Fixture {
                 publisher_key,
                 cache,
                 limits: Some(wire_limits()),
+                allow_public_content: false,
             })
         } else {
             Operation::ContentExport(ContentExportRequest {
@@ -81,6 +82,7 @@ impl Fixture {
                 publisher_key,
                 cache,
                 limits: Some(wire_limits()),
+                allow_public_content: false,
             })
         };
         ControlRequest {
@@ -112,6 +114,15 @@ async fn begin(
     });
     write_request(&mut client, request).await.expect("request");
     (client, task)
+}
+
+fn allow_public(mut request: ControlRequest) -> ControlRequest {
+    match request.operation.as_mut() {
+        Some(Operation::ContentImport(value)) => value.allow_public_content = true,
+        Some(Operation::ContentExport(value)) => value.allow_public_content = true,
+        _ => panic!("handoff operation"),
+    }
+    request
 }
 
 async fn ready(stream: &mut UnixStream, manifest: &VerifiedManifest) {
@@ -243,7 +254,8 @@ async fn handoff_rejects_invalid_sender_before_ready_and_malformed_ciphertext_be
     )
     .expect("self-consistent signature does not prove HPKE envelope");
     let manifest = fixture.verified();
-    let (mut socket, server) = begin(&fixture.request(true, &agent_cache)).await;
+    // Opting into public content must not bypass the exact private-message envelope checks.
+    let (mut socket, server) = begin(&allow_public(fixture.request(true, &agent_cache))).await;
     ready(&mut socket, &manifest).await;
     serve_peer(
         &mut socket,
@@ -269,7 +281,7 @@ async fn handoff_rejects_invalid_sender_before_ready_and_malformed_ciphertext_be
             .bytes,
         80
     );
-    let (mut socket, server) = begin(&fixture.request(false, &agent_cache)).await;
+    let (mut socket, server) = begin(&allow_public(fixture.request(false, &agent_cache))).await;
     assert_ne!(
         read_response(&mut socket)
             .await
@@ -278,4 +290,111 @@ async fn handoff_rejects_invalid_sender_before_ready_and_malformed_ciphertext_be
         ControlResult::Ok as i32
     );
     server.await.expect("server").expect("export rejection");
+}
+
+#[tokio::test]
+async fn public_handoff_requires_explicit_opt_in_and_transfers_large_and_empty_objects() {
+    for length in [MAX_PRIVATE_MESSAGE_BYTES + 123, 0] {
+        public_roundtrip(length).await;
+    }
+}
+
+async fn public_roundtrip(length: usize) {
+    let mut fixture = Fixture::new();
+    let mut bytes = vec![0_u8; length];
+    for (index, chunk) in bytes.chunks_mut(CHUNK_BYTES).enumerate() {
+        chunk.fill(u8::try_from(index).expect("bounded distinct fixture chunk"));
+    }
+    let public_source = fixture.root.path().join("public-source");
+    let mut source = ChunkStore::create(&public_source, limits()).expect("source");
+    fixture.signed = publish(
+        &mut bytes.as_slice(),
+        Publication {
+            metadata: Metadata {
+                name: "explicit-native-object".into(),
+                revision: 1,
+                content_type: "application/octet-stream".into(),
+            },
+            length: u64::try_from(bytes.len()).expect("length"),
+            validity: Validity {
+                created: now(),
+                expires: now() + 300,
+            },
+        },
+        &fixture.sender,
+        &mut source,
+    )
+    .expect("explicit public publication");
+    let manifest = fixture.verified();
+    let agent_cache = fixture.root.path().join("agent-public");
+    let (mut socket, server) = begin(&fixture.request(true, &agent_cache)).await;
+    assert_ne!(
+        read_response(&mut socket)
+            .await
+            .expect("public disabled")
+            .result,
+        ControlResult::Ok as i32
+    );
+    server.await.expect("server").expect("default rejection");
+    assert!(
+        !agent_cache.exists(),
+        "default rejection does not create agent state"
+    );
+
+    let (mut socket, server) = begin(&allow_public(fixture.request(true, &agent_cache))).await;
+    ready(&mut socket, &manifest).await;
+    let progress = serve_peer(
+        &mut socket,
+        &manifest,
+        &mut source,
+        transfer_limits(&manifest),
+    )
+    .await
+    .expect("complete public import");
+    assert_eq!(
+        progress.bytes,
+        manifest.length(),
+        "distinct chunks carry the full object"
+    );
+    final_receipt(&mut socket, &manifest).await;
+    server.await.expect("server").expect("import success");
+    drop(source);
+    let (mut socket, server) = begin(&fixture.request(false, &agent_cache)).await;
+    assert_ne!(
+        read_response(&mut socket)
+            .await
+            .expect("public export disabled")
+            .result,
+        ControlResult::Ok as i32
+    );
+    server
+        .await
+        .expect("server")
+        .expect("export default rejection");
+
+    let (mut socket, server) = begin(&allow_public(fixture.request(false, &agent_cache))).await;
+    ready(&mut socket, &manifest).await;
+    let mut destination = ChunkStore::create(&fixture.root.path().join("public-return"), limits())
+        .expect("new user cache");
+    let progress = pull_from_peer(
+        &mut socket,
+        &manifest,
+        &mut destination,
+        transfer_limits(&manifest),
+    )
+    .await
+    .expect("complete public export");
+    assert_eq!(progress.bytes, manifest.length());
+    assert_eq!(progress.chunks, manifest.chunks().len());
+    final_receipt(&mut socket, &manifest).await;
+    server.await.expect("server").expect("export success");
+    let mut reconstructed = Vec::new();
+    reassemble(
+        &manifest,
+        &mut [&mut destination],
+        now(),
+        &mut reconstructed,
+    )
+    .expect("complete signed object hash");
+    assert_eq!(reconstructed, bytes);
 }
