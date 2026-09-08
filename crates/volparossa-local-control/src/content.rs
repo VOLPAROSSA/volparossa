@@ -274,16 +274,20 @@ pub struct HttpsContentFetchRequest {
     /// Source preference; omitted legacy fields select Auto, with unchanged origin authorization.
     #[prost(enumeration = "HttpsSourceStrategy", tag = "8")]
     pub source_strategy: i32,
+    /// Explicit whole-representation digest mode; no cooperative metadata path is supplied.
+    /// The agent must authenticate Repr-Digest itself and verify the whole object before Ready.
+    #[prost(bool, tag = "9")]
+    pub origin_digest: bool,
 }
 
 /// Same-operation local handoff after the agent's own fresh HTTPS authorization.
 /// Never a transferable origin proof or authority accepted from storage peers/disk.
 #[derive(Clone, PartialEq, Eq, Message)]
 pub struct HttpsContentTransferReady {
-    /// Original canonical native manifest authenticated by the requested HTTPS origin.
+    /// Canonical native transport manifest for the origin-authenticated complete object.
     #[prost(bytes = "vec", tag = "1")]
     pub manifest: Vec<u8>,
-    /// Publisher key from that origin authorization, not a separate peer trust anchor.
+    /// Transport signing key; digest mode does not authorize this key as an origin/publisher.
     #[prost(bytes = "vec", tag = "2")]
     pub publisher_key: Vec<u8>,
     /// Exact resource from the correlated local request.
@@ -292,6 +296,9 @@ pub struct HttpsContentTransferReady {
     /// Original HTTP/manifest expiry, never renewed by this local transfer.
     #[prost(uint64, tag = "4")]
     pub expires_unix_seconds: u64,
+    /// Correlated explicit request mode. False is the legacy cooperative-origin descriptor.
+    #[prost(bool, tag = "5")]
+    pub origin_digest: bool,
 }
 
 impl HttpsContentTransferReady {
@@ -334,7 +341,7 @@ pub struct ContentReceipt {
     /// Carrying route's control Relay, or empty when no route is retained.
     #[prost(string, tag = "7")]
     pub control_relay_peer_id: String,
-    /// Whether this operation authenticated its descriptor through genuine origin HTTPS.
+    /// Whether this operation authenticated its descriptor or full representation digest through origin HTTPS.
     #[prost(bool, tag = "8")]
     pub origin_authenticated: bool,
     /// Body bytes received from the authenticated origin, excluding metadata/TLS overhead.
@@ -440,11 +447,15 @@ impl HttpsContentFetchRequest {
             || self.resource_url.len() > 4096
             || !self.resource_url.starts_with("https://")
             || self.resource_url.bytes().any(|b| b.is_ascii_control())
-            || self.metadata_path.len() > 4096
-            || !self.metadata_path.starts_with('/')
-            || self.metadata_path.starts_with("//")
-            || !self.metadata_path.bytes().all(|b| b.is_ascii_graphic())
-            || self.metadata_path.contains(['#', '\\'])
+            || if self.origin_digest {
+                !self.metadata_path.is_empty()
+            } else {
+                self.metadata_path.len() > 4096
+                    || !self.metadata_path.starts_with('/')
+                    || self.metadata_path.starts_with("//")
+                    || !self.metadata_path.bytes().all(|b| b.is_ascii_graphic())
+                    || self.metadata_path.contains(['#', '\\'])
+            }
             || self.ca_certificates_pem.len() > 128 * 1024
         {
             return Err(ControlProtocolError::Invalid(
@@ -737,6 +748,7 @@ mod tests {
     fn https_request() -> HttpsContentFetchRequest {
         HttpsContentFetchRequest {
             reuse_cache: false,
+            origin_digest: false,
             source_strategy: HttpsSourceStrategy::Auto as i32,
             resource_url: "https://origin.example/object.bin".into(),
             metadata_path: "/.well-known/volparossa/object".into(),
@@ -768,6 +780,7 @@ mod tests {
             request
         );
         let mut ready = HttpsContentTransferReady {
+            origin_digest: false,
             manifest: vec![1; 256],
             publisher_key: vec![2; 32],
             resource_url: fetch.resource_url,
@@ -788,6 +801,69 @@ mod tests {
         assert!(ready.validate().is_err());
         assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
         assert_eq!(CONTROL_PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn https_origin_digest_mode_roundtrips_without_metadata_and_preserves_legacy_default() {
+        assert!(!HttpsContentFetchRequest::default().origin_digest);
+        assert!(!HttpsContentTransferReady::default().origin_digest);
+        let legacy = https_request();
+        let bytes = legacy.encode_to_vec();
+        let decoded = HttpsContentFetchRequest::decode(bytes.as_slice()).unwrap();
+        assert!(!decoded.origin_digest);
+        assert_eq!(decoded.encode_to_vec(), bytes);
+        let mut digest = legacy;
+        digest.origin_digest = true;
+        assert!(
+            digest.validate().is_err(),
+            "digest with descriptor path is ambiguous"
+        );
+        digest.metadata_path.clear();
+        assert!(digest.validate().is_ok());
+        for local in [false, true] {
+            let mut fetch = digest.clone();
+            let operation = if local {
+                fetch.output.clear();
+                Operation::ContentDownloadHttps(fetch)
+            } else {
+                Operation::ContentFetchHttps(fetch)
+            };
+            let request = ControlRequest {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: vec![1; 16],
+                operation: Some(operation),
+            };
+            assert_eq!(
+                decode_request(&encode_request(&request).unwrap()).unwrap(),
+                request
+            );
+        }
+        digest.origin_digest = false;
+        assert!(
+            digest.validate().is_err(),
+            "legacy mode still requires metadata"
+        );
+        for origin_digest in [false, true] {
+            let ready = HttpsContentTransferReady {
+                manifest: vec![1; 256],
+                publisher_key: vec![2; 32],
+                resource_url: "https://origin.example/object.bin".into(),
+                expires_unix_seconds: 1,
+                origin_digest,
+            };
+            let response = ControlResponse {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                request_id: vec![1; 16],
+                result: ControlResult::Ok as i32,
+                diagnostic_code: "HTTPS_CONTENT_TRANSFER_READY".into(),
+                payload: Some(Payload::HttpsContentTransferReady(ready)),
+            };
+            assert_eq!(
+                decode_response(&encode_response(&response).unwrap()).unwrap(),
+                response
+            );
+        }
+        assert_eq!(crate::MAX_CONTROL_FRAME, 256 * 1024);
     }
 
     #[test]

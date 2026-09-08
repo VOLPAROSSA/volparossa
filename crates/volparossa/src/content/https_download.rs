@@ -20,7 +20,7 @@ use super::{FetchHttps, ensure_new_output, https_fetch_request, now_seconds, out
 pub(super) async fn run(args: &FetchHttps, socket: &Path, output: &Path) -> Result<()> {
     ensure_new_output(output)?;
     let download = prepare(args, socket, output_parent(output)).await?;
-    let receipt = report(download.receipt(), output, &args.cache, download.manifest());
+    let receipt = report(&download, output, &args.cache);
     download.check_live()?;
     download
         .temporary
@@ -38,9 +38,17 @@ pub(super) struct VerifiedDownload {
     receipt: ContentReceipt,
     expires: u64,
     authority_deadline: Instant,
+    origin_digest: bool,
 }
 
 impl VerifiedDownload {
+    pub(super) const fn authentication_scope(&self) -> &'static str {
+        if self.origin_digest {
+            "origin-repr-digest"
+        } else {
+            "cooperative-origin"
+        }
+    }
     pub(super) fn file(&self) -> &std::fs::File {
         self.temporary.as_file()
     }
@@ -87,7 +95,7 @@ async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<
     let Some(Payload::HttpsContentTransferReady(ready)) = response.payload else {
         bail!("expected same-operation HTTPS readiness, not a native export");
     };
-    let manifest = verified_ready(&ready, &args.url)?;
+    let manifest = verified_ready(&ready, &args.url, args.origin_digest)?;
     let remaining = ready
         .expires_unix_seconds
         .checked_sub(now_seconds()?)
@@ -141,20 +149,28 @@ async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<
         receipt,
         expires: ready.expires_unix_seconds,
         authority_deadline,
+        origin_digest: ready.origin_digest,
     })
 }
 
-fn verified_ready(ready: &HttpsContentTransferReady, resource: &str) -> Result<VerifiedManifest> {
+fn verified_ready(
+    ready: &HttpsContentTransferReady,
+    resource: &str,
+    origin_digest: bool,
+) -> Result<VerifiedManifest> {
     let now = now_seconds()?;
-    if ready.resource_url != resource || ready.expires_unix_seconds <= now {
-        bail!("local HTTPS readiness names a different or expired resource");
+    if ready.resource_url != resource
+        || ready.expires_unix_seconds <= now
+        || ready.origin_digest != origin_digest
+    {
+        bail!("local HTTPS readiness names a different resource, mode or expired authority");
     }
     let publisher = VerifyingKey::from_bytes(
         &ready
             .publisher_key
             .as_slice()
             .try_into()
-            .context("invalid origin-authorized publisher key length")?,
+            .context("invalid local transport signing key length")?,
     )?;
     let manifest = SignedManifest::decode(&ready.manifest)?.verify(&publisher, now)?;
     if manifest.metadata().content_type != "application/octet-stream"
@@ -165,17 +181,16 @@ fn verified_ready(ready: &HttpsContentTransferReady, resource: &str) -> Result<V
     Ok(manifest)
 }
 
-fn report(
-    receipt: &ContentReceipt,
-    output: &Path,
-    cache: &Path,
-    manifest: &VerifiedManifest,
-) -> serde_json::Value {
+fn report(download: &VerifiedDownload, output: &Path, cache: &Path) -> serde_json::Value {
+    let receipt = download.receipt();
+    let manifest = download.manifest();
     serde_json::json!({
         "operation":"https_content_download", "bytes":receipt.bytes, "chunks":receipt.chunks,
         "sha256":hex::encode(manifest.object_sha256()), "local_output":output, "cache":cache,
+        "transport_manifest_id":hex::encode(manifest.manifest_id()),
         "local_delivery":true, "output_mode":"0600", "ownership_changed":false,
         "origin_authenticated":true, "origin_authority_persisted":false,
+        "authentication_scope":download.authentication_scope(), "origin_digest":download.origin_digest,
         "peer_bytes":receipt.peer_bytes, "origin_body_bytes":receipt.origin_body_bytes,
         "origin_range_requests":receipt.origin_range_requests, "providers_used":receipt.providers_used,
         "provider_peer_ids":receipt.provider_peer_ids, "control_relay_peer_id":receipt.control_relay_peer_id,

@@ -5,6 +5,7 @@
 //! provider key and supplies a policy-authorized protected stream. This module never dials,
 //! listens, discovers peers, or adopts a directory named by a network request.
 
+pub mod digest;
 pub mod named;
 pub mod replication;
 
@@ -547,6 +548,12 @@ where
             && selector.manifest_id.is_empty()
         {
             return named::serve(stream, registry, &session).await;
+        }
+        if selector.version == digest::VERSION
+            && selector.operation == digest::OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            return digest::serve(stream, registry, &session).await;
         }
         if selector.version == replication::VERSION
             && selector.operation == replication::OPERATION

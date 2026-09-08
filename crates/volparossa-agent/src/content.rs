@@ -137,7 +137,7 @@ impl ContentRuntime {
     ) -> Result<ContentReceipt, ContentError> {
         let mut service = self.service.try_lock().map_err(|_| ContentError::Busy)?;
         let policy = serving_policy(context).await?;
-        let manifest = verified(&request.manifest, &request.publisher_key)?;
+        verified(&request.manifest, &request.publisher_key)?;
         let bind: SocketAddr = request
             .bind_address
             .parse()
@@ -171,7 +171,7 @@ impl ContentRuntime {
                 return Err(ContentError::Busy);
             }
             let mut registry = active.registry.try_lock().map_err(|_| ContentError::Busy)?;
-            register(&mut registry, &request, manifest, cache_limits)?;
+            register(&mut registry, &request, cache_limits)?;
             let mut receipt = serving_receipt(&registry)?;
             drop(registry);
             if let Some(replication) = &active.replication {
@@ -180,7 +180,7 @@ impl ContentRuntime {
             return Ok(receipt);
         }
         let mut registry = PublicationRegistry::new();
-        register(&mut registry, &request, manifest, cache_limits)?;
+        register(&mut registry, &request, cache_limits)?;
         let replication = request
             .replication
             .map(|config| ReplicationRuntime::create(config, &mut registry))
@@ -677,32 +677,22 @@ impl ContentRuntime {
 fn register(
     registry: &mut PublicationRegistry,
     request: &ContentServeRequest,
-    manifest: VerifiedManifest,
     cache_limits: CacheLimits,
 ) -> Result<(), ContentError> {
     let root = PathBuf::from(&request.cache);
+    let key: [u8; 32] = request
+        .publisher_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| ContentError::Invalid)?;
+    let key = VerifyingKey::from_bytes(&key).map_err(|_| ContentError::Invalid)?;
+    let signed = SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
     let result = if request.replication.is_some() {
-        let key: [u8; 32] = request
-            .publisher_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| ContentError::Invalid)?;
-        let key = VerifyingKey::from_bytes(&key).map_err(|_| ContentError::Invalid)?;
-        let signed =
-            SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
         registry.register_shareable(signed, &key, root, cache_limits, now())
-    } else if request.name_lookup {
-        let key: [u8; 32] = request
-            .publisher_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| ContentError::Invalid)?;
-        let key = VerifyingKey::from_bytes(&key).map_err(|_| ContentError::Invalid)?;
-        let signed =
-            SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?;
-        registry.register_signed(signed, &key, root, cache_limits, now())
     } else {
-        registry.register(manifest, root, cache_limits, now())
+        // Preserve the original transport envelope for exact digest queries. Retaining it
+        // does not enable name lookup, incidental replication or any new consumer trust.
+        registry.register_signed(signed, &key, root, cache_limits, now())
     };
     result.map_err(|_| ContentError::Invalid)?;
     registry.set_name_lookup(request.name_lookup);

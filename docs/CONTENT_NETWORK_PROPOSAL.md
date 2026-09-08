@@ -1,7 +1,8 @@
 # Distributed content, publishing and offline delivery
 
 Status: user idea received 2026-09-07; architecture proposal with working persistent native
-storage, protected-route public/encrypted transfer and a cooperative-origin HTTPS consumer.
+storage, protected-route public/encrypted transfer and cooperative-origin/representation-digest
+HTTPS consumers.
 **Multi-peer retrieval, bounded owner-contention integration and native static-site publishing
 have source-bound passing checkpoints; browser benefit and generic existing-site reuse remain
 incomplete.** Global replica repair/fairness and unsupported-site HTTPS integration are still
@@ -333,6 +334,39 @@ verified chunks remain reusable under fresh origin authority. Explicit peers-fir
 is not a latency guarantee; source selection does not make unsupported HTTPS sites shareable.
 The new strategy requires its own integrated measurement.
 
+### Own-origin representation digests without a custom descriptor
+
+The additional explicit `--origin-digest` application mode implements the origin-metadata option
+without a VOLPAROSSA-specific descriptor endpoint. Every consumer obtains a SHA-256
+`Repr-Digest` and exact representation length from its own hostname/CA-verified TLS 1.3 HEAD
+exchange. This follows the representation/content distinction in
+[RFC 9530, Appendix B.2](https://www.rfc-editor.org/rfc/rfc9530.html#appendix-B.2): HEAD
+`Content-Digest` is not substituted for the resource's representation digest.
+The first profile deliberately supports anonymous public identity-encoded binary objects and
+one canonical SHA-256 entry, not arbitrary responses or every valid digest-field combination.
+
+A bounded protected-provider query returns an original signed chunk index matching the whole
+hash and length. The signature establishes only index consistency, not origin provenance.
+All ordered bytes must pass whole-object verification before Ready, atomic output or automatic
+public contribution. The live HTTP/monotonic deadline remains separate from the native index;
+neither a replica journal nor a peer key becomes reusable HTTPS authority. Normal publication
+retains the original signed index without enabling name lookup or extra replication implicitly.
+The provider lookup publishes no per-object catalogue in the DHT.
+
+The normal agent, local-control, fetch CLI and browser-download adapter compose this mode with
+the existing measured source choice and two-provider transfer. If peers cannot provide the
+whole verified representation, their workers end before one full protected origin GET. Unlike
+the cooperative descriptor, a whole digest cannot authorize individual guessed ranges; this
+first mode therefore does not combine partial origin ranges. An absent/unsupported digest
+currently returns unavailable, not arbitrary peer trust. Unsupported-site/witness integration
+remains separate work, with any extra trust requiring the user's explicit choice.
+
+Real local origin-TLS and provider-stream tests, CLI-process checks, strict scoped Clippy and
+the additive harness checks pass. The new protected-network sequence is ready but not yet
+verified: cold HEAD+origin GET, then cold HEAD+two-provider delivery with zero origin body,
+exact original transport index, same output hash, physical captures and cleanup. C08 and
+measured benefit remain open; the older descriptor proofs do not certify this new mode.
+
 ### Bounded post-download redistribution
 
 The first C03 implementation adds a separate versioned exchange over the existing protected
@@ -414,7 +448,7 @@ run below covers C04's local bounded-contribution criterion, not those wider mis
 The explicit `content_contribution` integration now joins verified foreground reception to the
 same bounded cache/provider/journal rather than requiring a seed manifest and manual initial
 Serve. It starts an empty or restored service after Discovery starts, queues successful public
-native/named and freshly origin-authorized cooperative HTTPS objects, and copies small batches
+native/named and freshly origin-authorized cooperative/digest HTTPS objects, and copies small batches
 without live-content eviction. The existing extra-chunk exchange and local copy share a single
 background owner. Name lookup retains the original independently trusted publisher authority;
 no URL, private-message payload or reusable HTTPS authority enters this automatic public queue.

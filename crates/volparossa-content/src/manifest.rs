@@ -178,6 +178,19 @@ pub struct SignedManifest {
 }
 
 impl SignedManifest {
+    /// Self-declared key for transport-index signature consistency, never publisher/origin trust.
+    ///
+    /// # Panics
+    /// Only if the private fixed-width invariant is broken; all public constructors validate it.
+    pub fn publisher_key_hint(&self) -> [u8; 32] {
+        // Construction and canonical decoding both validate this fixed-width field.
+        self.body
+            .publisher
+            .as_slice()
+            .try_into()
+            .expect("validated publisher key length")
+    }
+
     pub(crate) fn sign(
         publication: Publication,
         chunks: Vec<Chunk>,

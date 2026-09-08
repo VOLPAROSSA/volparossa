@@ -56,7 +56,7 @@ pub(crate) enum Command {
     FetchName(FetchName),
     /// Authenticate HTTPS origin metadata, fetch peer chunks and fill missing ranges via origin.
     FetchHttps(FetchHttps),
-    /// Offer one verified cooperative-HTTPS object as a short-lived localhost browser download.
+    /// Offer one verified HTTPS object as a short-lived localhost browser download.
     BrowserDownload(browser_download::Arguments),
     /// Withdraw and stop the agent's content service, retaining owned cache files.
     Stop,
@@ -215,8 +215,12 @@ pub(crate) struct FetchHttps {
     #[arg(long, value_parser = parse_origin_url)]
     url: String,
     /// Explicit canonical metadata path on the same HTTPS origin.
-    #[arg(long, value_parser = parse_metadata_path)]
-    metadata_path: String,
+    #[arg(long, value_parser = parse_metadata_path, required_unless_present = "origin_digest", conflicts_with = "origin_digest")]
+    metadata_path: Option<String>,
+    /// Use the website's authenticated Repr-Digest instead of a VOLPAROSSA descriptor.
+    /// Requires a supported public binary representation; never adopts peer-origin trust.
+    #[arg(long)]
+    origin_digest: bool,
     /// New agent-owned cache directory, or an existing owned cache with --reuse-cache.
     #[arg(long)]
     cache: PathBuf,
@@ -412,8 +416,14 @@ fn https_fetch_request(
     args: &FetchHttps,
 ) -> Result<volparossa_local_control::HttpsContentFetchRequest> {
     const MAX_CA_BYTES: u64 = 128 * 1024;
-    volparossa_content::origin_https::OriginRequest::new(&args.url, &args.metadata_path)
-        .context("invalid canonical HTTPS resource or same-origin metadata path")?;
+    match (args.origin_digest, args.metadata_path.as_deref()) {
+        (true, None) => volparossa_content::origin_https::OriginRequest::resource(&args.url),
+        (false, Some(path)) => {
+            volparossa_content::origin_https::OriginRequest::new(&args.url, path)
+        }
+        _ => bail!("select exactly one of --metadata-path and --origin-digest"),
+    }
+    .context("invalid canonical HTTPS resource or same-origin metadata path")?;
     let mut ca_certificates_pem = Vec::new();
     if let Some(path) = args.ca_file.as_deref() {
         open_regular(path, MAX_CA_BYTES)?
@@ -426,7 +436,7 @@ fn https_fetch_request(
     }
     Ok(volparossa_local_control::HttpsContentFetchRequest {
         resource_url: args.url.clone(),
-        metadata_path: args.metadata_path.clone(),
+        metadata_path: args.metadata_path.clone().unwrap_or_default(),
         cache: absolute_path(&args.cache)?,
         output: args
             .output
@@ -438,6 +448,7 @@ fn https_fetch_request(
         ca_certificates_pem,
         reuse_cache: args.reuse_cache,
         source_strategy: args.source_strategy.wire() as i32,
+        origin_digest: args.origin_digest,
     })
 }
 
@@ -940,6 +951,59 @@ mod tests {
     }
 
     #[test]
+    fn origin_digest_cli_requires_one_authority_mode_for_fetch_and_browser() {
+        for command in ["fetch-https", "browser-download"] {
+            let mut base = vec![
+                "volparossa",
+                "content",
+                command,
+                "--url",
+                "https://origin.example/object.bin",
+                "--cache",
+                "/agent/cache",
+            ];
+            if command == "fetch-https" {
+                base.extend(["--local-output", "/user/output"]);
+            }
+            assert!(crate::Cli::try_parse_from(base.clone()).is_err());
+            assert!(
+                crate::Cli::try_parse_from(base.iter().copied().chain([
+                    "--origin-digest",
+                    "--metadata-path",
+                    "/metadata"
+                ]))
+                .is_err()
+            );
+            for origin_digest in [false, true] {
+                let mut arguments = base.clone();
+                if origin_digest {
+                    arguments.push("--origin-digest");
+                } else {
+                    arguments.extend(["--metadata-path", "/metadata"]);
+                }
+                let crate::CliCommand::Content { command } =
+                    crate::Cli::try_parse_from(arguments).unwrap().command
+                else {
+                    panic!("content");
+                };
+                let args = match *command {
+                    Command::FetchHttps(args) => args,
+                    Command::BrowserDownload(args) => args.into_fetch(),
+                    _ => panic!("HTTPS command"),
+                };
+                let request = https_fetch_request(&args).unwrap();
+                assert_eq!(request.origin_digest, origin_digest);
+                assert_eq!(
+                    request.metadata_path,
+                    if origin_digest { "" } else { "/metadata" }
+                );
+                assert!(request.output.is_empty());
+                assert!(request.ca_certificates_pem.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn https_source_strategy_cli_maps_explicit_choices_and_defaults_to_auto() {
         use volparossa_local_control::HttpsSourceStrategy;
         let base = [
@@ -992,9 +1056,10 @@ mod tests {
         let root = directory.path();
         let mut args = FetchHttps {
             reuse_cache: false,
+            origin_digest: false,
             source_strategy: HttpsSourceChoice::Auto,
             url: "https://origin.example/object.bin".into(),
-            metadata_path: "/metadata".into(),
+            metadata_path: Some("/metadata".into()),
             cache: root.join("new-cache"),
             output: Some(root.join("new.bin")),
             local_output: None,
@@ -1004,7 +1069,7 @@ mod tests {
         let default = https_fetch_request(&args).expect("Debian system roots selection");
         assert!(default.ca_certificates_pem.is_empty());
         assert_eq!(default.resource_url, args.url);
-        assert_eq!(default.metadata_path, args.metadata_path);
+        assert_eq!(Some(default.metadata_path), args.metadata_path);
         assert!(!args.cache.exists() && !args.output.as_ref().unwrap().exists());
         let pem = b"-----BEGIN CERTIFICATE-----\nZmFrZSBwdWJsaWMgdGVzdCBjZXJ0\n-----END CERTIFICATE-----\n";
         let path = root.join("roots.pem");

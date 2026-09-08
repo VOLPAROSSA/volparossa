@@ -256,8 +256,8 @@ small metadata through actual hostname/CA-verified TLS, retrieve authenticated p
 use same-version origin fallback when chunks are missing. Its full-body-fallback protected-route
 test passes on `2de8209f`. Partial HTTPS fallback also passes the protected-route test on
 `6cf2394b`: fetch only missing chunk ranges and verify them against the same origin manifest.
-This currently needs publisher cooperation and supports anonymous static binary resources,
-not arbitrary websites or a browser adapter. Arbitrary peers are not trust anchors, and no
+The descriptor mode needs publisher cooperation and supports anonymous static binary resources,
+not arbitrary websites. Arbitrary peers are not trust anchors, and no
 compulsory central witness is proposed.
 
 The normal CLI now exposes `content fetch-https`: authenticate the cooperative origin's canonical
@@ -278,6 +278,15 @@ verification. No separately supplied publisher key can replace origin authentica
 CLI/agent/control checks and the source-scoped normal-CLI KVM provider proof on `e592b610` pass;
 C08 remains incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
 distinguish this command from the earlier executable-fixture passes.
+An additional explicit `--origin-digest` mode replaces `--metadata-path` when the origin supplies
+a supported SHA-256 `Repr-Digest` on the resource's own authenticated HEAD response. This needs
+no VOLPAROSSA-specific origin descriptor: providers supply an untrusted chunk index, and the
+agent checks the complete object against the origin digest before delivery or contribution.
+It currently supports the same anonymous public binary profile, with complete peer retrieval or
+one full origin GET. Missing/unsupported digest metadata is rejected, not replaced by peer trust.
+The library, normal CLI and provider harness pass their targeted local checks; its protected
+network proof is pending. This is not arbitrary-site compatibility or a demonstrated speedup.
+See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
 [implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
@@ -285,7 +294,8 @@ all existing websites can be transparently cached. The proposal is the design re
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the
 browser while the command runs; the response is an attachment, not a page with the HTTPS origin's
-permissions. It takes `--url`, `--metadata-path` and `--cache`, with no output or bind option.
+permissions. It takes `--url`, either `--metadata-path` or `--origin-digest`, and `--cache`,
+with no output or bind option.
 The link lasts at most five minutes and never outlives the original authenticated authority.
 See the [browser-download usage](docs/OPERATIONS.md#one-shot-browser-download); no CA is installed.
 Arbitrary-site compatibility and measured benefit are not claimed, and C08 remains open.

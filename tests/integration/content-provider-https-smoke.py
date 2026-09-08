@@ -32,6 +32,9 @@ PUBLIC_IPS = dict(relay0="42.158.0.1", relay1="44.160.1.1", relay2="45.161.2.1",
 RANGES = ((262144, 524287), (786432, 1048575),
           (1310720, 1572863), (1835008, 2097151))
 RANGE_BYTES = 262144
+DIGEST_CASES = ("digest-origin-only", "digest-peers-first")
+CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIGEST_CASES)
+REPR_DIGEST = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:"
 
 
 def process_boundary(pid, parent_namespace, client_namespace, uid, gid, control_gid):
@@ -136,16 +139,18 @@ def inspect_spool(user_directory, uid, gid):
 
 def consumer_command(case, binary, control, cache, user_directory, output):
     """Pin existing peer evidence explicitly; the ordinary reference is not an auto request."""
-    require(case in ("complete", "missing", "baseline", "origin-only", "auto"), "unknown HTTPS consumer phase")
+    require(case in CONSUMER_CASES, "unknown HTTPS consumer phase")
     if case == "baseline":
         return [binary, "origin-baseline", str(user_directory), "47.163.4.2:18443",
                 str(user_directory / "origin.pem"), str(output)]
     command = [binary, "--control-socket", control, "content",
                "browser-download" if case == "complete" else "fetch-https",
                "--url", "https://destination.volparossa.test:18443/asset.bin",
-               "--metadata-path", "/.well-known/volparossa/content/asset",
                "--ca-file", str(user_directory / "origin.pem"), "--cache", cache,
-               "--source-strategy", case if case in ("origin-only", "auto") else "peers-first"]
+               "--source-strategy", case.removeprefix("digest-") if case in DIGEST_CASES
+                   else case if case in ("origin-only", "auto") else "peers-first"]
+    command.extend(["--origin-digest"] if case in DIGEST_CASES
+                   else ["--metadata-path", "/.well-known/volparossa/content/asset"])
     if case != "complete":
         command.extend(["--local-output", str(output)])
     return command
@@ -154,7 +159,7 @@ def consumer_command(case, binary, control, cache, user_directory, output):
 def consume(arguments):
     """Called only after the enclosing disposable harness enters CLIENT and drops privileges."""
     case, binary, control, cache, user_path, parent_ns, client_ns, uid, gid, control_gid = arguments
-    require(case in ("complete", "missing", "baseline", "origin-only", "auto"), "unknown HTTPS consumer phase")
+    require(case in CONSUMER_CASES, "unknown HTTPS consumer phase")
     uid, gid, control_gid = int(uid), int(gid), int(control_gid)
     boundary = process_boundary("self", parent_ns, client_ns, uid, gid, control_gid)
     user_directory = Path(user_path)
@@ -177,6 +182,7 @@ def consume(arguments):
         report = dict(final=first, consumer=boundary, cli=cli_boundary)
         if case != "baseline":
             report["requested_source_strategy"] = command[command.index("--source-strategy") + 1]
+            report["requested_origin_digest"] = "--origin-digest" in command
         if case == "baseline":
             require(first["network_namespace"] == client_ns and first["effective_uid"] == uid
                     and read(output) == first, "baseline report differs from actual isolated fixture process")
@@ -533,6 +539,59 @@ def validate_strategies(evidence, records, control_node):
             "product comparison is not actual single-sample time and source accounting")
 
 
+def validate_digest_cases(evidence, records, control_node):
+    """Fresh origin HEAD, no descriptor, then either one full GET or the original peer index."""
+    cases = evidence["origin_digest_cases"]
+    require(set(cases) == set(DIGEST_CASES), "both cold origin-digest cases required")
+    require(len(records) == 3 and [record["kind"] for record in records]
+            == ["digest_head", "body", "digest_head"],
+            "digest cases did not issue exactly HEAD+GET then HEAD without origin body")
+    for index, record in enumerate(records):
+        head = index != 1
+        require(record["method"] == ("HEAD" if head else "GET")
+                and record["payload_bytes"] == (0 if head else BYTES)
+                and record["content_length"] == BYTES and record["status"] == 200
+                and record["representation_digest"] == REPR_DIGEST
+                and record["object_sha256"] == SHA
+                and all(record[key] is None for key in ("range_start", "range_end", "range_total")),
+                "digest HEAD or ordinary GET represented another body, range or digest")
+    peers, nodes = evidence["expected_peers"], evidence["layout"]["provider_nodes"]
+    for name in DIGEST_CASES:
+        phase = cases[name]
+        fetch, output, application = phase["fetch"], phase["output"], phase["application"]
+        from_origin = name == "digest-origin-only"
+        require(fetch["bytes"] == output["bytes"] == BYTES and fetch["chunks"] == 9
+                and fetch["origin_authenticated"] is True
+                and fetch["authentication_scope"] == "origin-repr-digest"
+                and fetch["origin_digest"] is True
+                and application["requested_origin_digest"] is True
+                and re.fullmatch(r"[0-9a-f]{64}", fetch["transport_manifest_id"])
+                and fetch["peer_bytes"] == (0 if from_origin else BYTES)
+                and fetch["origin_body_bytes"] == (BYTES if from_origin else 0)
+                and fetch["origin_range_requests"] == 0
+                and fetch["providers_used"] == (0 if from_origin else 2)
+                and len(fetch["provider_peer_ids"]) == (0 if from_origin else 2)
+                and set(fetch["provider_peer_ids"]) == (set() if from_origin else {peers[node] for node in nodes})
+                and fetch["control_relay_peer_id"] == evidence["layout"]["control_relay_peer_id"]
+                and output["client_cache_initially_absent"] is True
+                and output["client_mount_cannot_read_origin"] is True
+                and phase["selected_route"]["route_context_id"]
+                    == evidence["cases"]["complete"]["selected_route"]["route_context_id"],
+                "digest CLI authority, exact body accounting or cold protected route not proven")
+        if not from_origin:
+            require(fetch["transport_manifest_id"] == evidence["publication"]["manifest_id"],
+                    "digest peer lookup substituted the original provider envelope")
+        validate_local_output(phase)
+        validate_application(phase, browser=False, source_strategy=name.removeprefix("digest-"))
+        validate_path(phase, peers, nodes, missing=False, origin_only=from_origin)
+        validate_control(phase["control"], control_node, nodes, missing=False,
+                         require_contacts=not from_origin)
+    all_phases = (*evidence["cases"].values(), *evidence["source_strategy_cases"].values(), *cases.values())
+    require(len({phase["output"]["path"] for phase in all_phases}) == len(all_phases)
+            and len({phase["output"]["agent_cache"] for phase in all_phases}) == len(all_phases),
+            "digest phases reused an earlier output or agent cache")
+
+
 def validate_evidence(evidence):
     publication, original = evidence["publication"], evidence["native_publication"]
     require(evidence["success"] is True
@@ -562,15 +621,19 @@ def validate_evidence(evidence):
             and withdrawal["provider_peer_id"] == peers[provider_nodes[1]]
             and stop["serving"] is False and stop["publications"] == 0,
             "the second actual provider was not explicitly withdrawn before missing retrieval")
-    origin, records = evidence["origin"], evidence["origin"]["connections"]
-    require(origin["pid"] > 0 and 12 <= len(records) <= 28
-            and origin["request_limit"] == 28 and origin["stop_requested"] is True
+    origin, raw_records = evidence["origin"], evidence["origin"]["connections"]
+    # Digest phases run immediately after complete, while both original providers are live.
+    # Keep every raw record; validate their exact slice independently, never ignore extras.
+    digest_records = raw_records[1:4]
+    records = raw_records[:1] + raw_records[4:]
+    require(origin["pid"] > 0 and 15 <= len(raw_records) <= 31
+            and origin["request_limit"] == 31 and origin["stop_requested"] is True
             and origin["listener_closed"] is True and origin["inflight_drained"] is True
             and [r["kind"] for r in records[:8]] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
             and [r["payload_bytes"] for r in records[:8]]
                 == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4 + [publication["metadata_bytes"], BYTES]
             and all(r["tls13"] is True and r["alpn_http11"] is True
-                    and origin_exit_source(r["source"]) for r in records),
+                    and origin_exit_source(r["source"]) for r in raw_records),
             "three actual origin HTTPS metadata sessions, four ranges and one full reference body not proven")
     require(all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
                 and r["range_total"] is None for r in records[:2])
@@ -609,6 +672,7 @@ def validate_evidence(evidence):
     require(evidence["comparison"] == measured_comparison(cases, evidence["origin_baseline"]),
             "reported comparison is not the actual single-sample monotone timing ratio")
     validate_strategies(evidence, records, control_node)
+    validate_digest_cases(evidence, digest_records, control_node)
     require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
             explicit_fixture_ca_removed=True, user_directory_removed=True),
             "temporary user outputs and explicit public CA were not cleaned up")
@@ -616,7 +680,7 @@ def validate_evidence(evidence):
 
 def build_evidence(work):
     cases = {}
-    for name in ("complete", "missing", "origin-only", "auto"):
+    for name in ("complete", "missing", "origin-only", "auto", *DIGEST_CASES):
         prefix = f"content-provider-https-{name}"
         cases[name] = dict(
             fetch=read(work / f"{prefix}-fetch.json"),
@@ -627,7 +691,9 @@ def build_evidence(work):
             privacy={role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES},
             control=read(work / f"{prefix}-control.json"))
     strategies = {mode: cases.pop(mode) for mode in ("origin-only", "auto")}
+    digests = {mode: cases.pop(mode) for mode in DIGEST_CASES}
     evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
+        origin_digest_cases=digests,
         source_strategy_comparison=strategy_comparison(strategies),
         publication=read(work / "content-provider-https-publication.json"),
         native_publication=read(work / "content-provider-publication.json"),

@@ -184,6 +184,35 @@ Artifact ZIP SHA-256: `950f8f341772884e1814d6af29ef536d2e7e8d68edd89118d58fb4b7b
 The [Quality run on the same commit](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205947343)
 also passes. Neither result completes C08 or verifies later changes.
 
+### Origin-authenticated representation-digest integration
+
+The new explicit `--origin-digest` mode is connected end to end through origin TLS, protected
+provider lookup, normal agent retrieval, local control, `fetch-https`, `browser-download` and
+automatic public contribution. It replaces the custom metadata-path requirement only when the
+origin itself supplies supported SHA-256 `Repr-Digest` metadata on a fresh authenticated HEAD.
+The anonymous public binary profile remains bounded; missing/unsupported digest metadata
+returns unavailable. It does not make ordinary unsupported HTTPS sites shareable.
+
+An original provider-signed manifest is an untrusted transport index. The complete ordered
+object must match the live origin digest before Ready, output or contribution. Original HTTP
+and native expiry are both retained. Incomplete peer delivery stops before one full origin GET;
+this new mode does not claim partial origin ranges. Native registration retains original signed
+indexes without implicitly enabling name lookup or incidental replication. Local/browser JSON
+distinguishes `origin-repr-digest` from `cooperative-origin` and exposes `transport_manifest_id`.
+
+Four digest library tests pass, including real origin TLS/HEAD/full GET, rejection of a false
+chunk index and actual provider query/transfer. The existing cooperative TLS regression also
+passes. Agent check and strict content/agent/CLI/local-control Clippy pass, as do the wire-mode
+and parser-mode tests, four isolated CLI-process tests, the legacy parser test and two origin
+fixture tests. Eleven HTTPS and fourteen parent-provider checker tests and narrow shell checks
+pass. These local results do not establish network delivery or browser-engine behavior.
+
+The additive provider topology now requires fresh HEAD+origin GET and then fresh
+HEAD+two-provider retrieval using different cold caches. It checks all 2,097,275 bytes, the
+original transport manifest, zero origin body on the peer hit, bounded physical captures and
+cleanup. That network run is pending. C08, arbitrary-site compatibility and speedup remain
+unproved; previous descriptor-mode passes do not certify this implementation.
+
 ### Automatic contribution integration in progress
 
 The new explicit `content_contribution` configuration binds one cache, endpoint and quota to
@@ -213,7 +242,10 @@ Cleanup leaves zero owned objects and unchanged guest state. Artifact ZIP SHA-25
 The replication script now performs its own bounded restart of the already owned R4 unit,
 retaining PID/namespace/executable and journal checks. Eight narrow checker tests and strict
 shell checks pass; the standalone dependency regression performs no host service operation.
-The corrected network run is pending; the failed run is not relabelled as a pass.
+The [corrected network run on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709)
+is pending; the failed run is not relabelled as a pass. The
+[Quality run on the original `24e9a4b9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34209675968)
+passes independently of that scenario failure.
 
 ## Latest known-contact mailbox integration checkpoint
 

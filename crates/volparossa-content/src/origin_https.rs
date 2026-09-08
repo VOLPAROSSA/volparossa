@@ -7,6 +7,9 @@
 //! to shared storage. This is not a browser adapter, generic web proof or offline origin trust.
 //! URLs and HTTP metadata remain in the caller's in-memory authorization, not the chunk store.
 
+mod digest;
+pub use digest::OriginAuthorizedDigest;
+
 use std::{path::Path, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
@@ -44,7 +47,7 @@ pub const ORIGIN_DESCRIPTOR_CONTENT_TYPE: &str = "application/vnd.volparossa.ori
 #[derive(Clone)]
 pub struct OriginRequest {
     resource: Url,
-    metadata_path: String,
+    metadata_path: Option<String>,
 }
 
 impl OriginRequest {
@@ -54,7 +57,34 @@ impl OriginRequest {
     /// Rejects non-HTTPS, credentials/fragments, non-domain hosts, excessive lengths and
     /// noncanonical/ambiguous metadata paths. The supplied stream is still caller-authorized.
     pub fn new(resource_https_url: &str, metadata_path: &str) -> Result<Self, OriginError> {
-        if resource_https_url.len() > MAX_TARGET_BYTES || metadata_path.len() > MAX_TARGET_BYTES {
+        let mut request = Self::resource(resource_https_url)?;
+        if metadata_path.len() > MAX_TARGET_BYTES {
+            return Err(OriginError::Limit);
+        }
+        if !metadata_path.starts_with('/')
+            || metadata_path.starts_with("//")
+            || !metadata_path.bytes().all(|byte| byte.is_ascii_graphic())
+            || metadata_path.contains(['#', '\\'])
+        {
+            return Err(OriginError::Request);
+        }
+        let metadata = request
+            .resource
+            .join(metadata_path)
+            .map_err(|_| OriginError::Request)?;
+        if metadata.origin() != request.resource.origin() || target(&metadata) != metadata_path {
+            return Err(OriginError::Request);
+        }
+        request.metadata_path = Some(metadata_path.into());
+        Ok(request)
+    }
+
+    /// Select only the exact HTTPS resource, without inventing an origin metadata endpoint.
+    ///
+    /// # Errors
+    /// Rejects noncanonical/non-HTTPS URLs, credentials, fragments, raw IPs and excessive length.
+    pub fn resource(resource_https_url: &str) -> Result<Self, OriginError> {
+        if resource_https_url.len() > MAX_TARGET_BYTES {
             return Err(OriginError::Limit);
         }
         let resource = Url::parse(resource_https_url).map_err(|_| OriginError::Request)?;
@@ -64,22 +94,12 @@ impl OriginRequest {
             || resource.password().is_some()
             || resource.fragment().is_some()
             || resource.as_str() != resource_https_url
-            || !metadata_path.starts_with('/')
-            || metadata_path.starts_with("//")
-            || !metadata_path.bytes().all(|byte| byte.is_ascii_graphic())
-            || metadata_path.contains(['#', '\\'])
         {
-            return Err(OriginError::Request);
-        }
-        let metadata = resource
-            .join(metadata_path)
-            .map_err(|_| OriginError::Request)?;
-        if metadata.origin() != resource.origin() || target(&metadata) != metadata_path {
             return Err(OriginError::Request);
         }
         Ok(Self {
             resource,
-            metadata_path: metadata_path.into(),
+            metadata_path: None,
         })
     }
 
@@ -171,13 +191,17 @@ impl OriginClient {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        let metadata_path = request
+            .metadata_path
+            .as_deref()
+            .ok_or(OriginError::Request)?;
         let clock = Clock::new(now_unix)?;
         timeout(self.limits.session_timeout, async {
             let mut tls = self.connect(stream, request).await?;
             send_request(
                 &mut tls,
                 request,
-                &request.metadata_path,
+                metadata_path,
                 ORIGIN_DESCRIPTOR_CONTENT_TYPE,
                 None,
             )
@@ -786,6 +810,8 @@ struct Response {
     content_type: String,
     max_age: u64,
     date_unix: u64,
+    representation_digest: Option<String>,
+    has_content_location: bool,
 }
 
 impl Response {
@@ -889,6 +915,8 @@ async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Response,
         content_type,
         max_age,
         date_unix,
+        representation_digest: optional_header(&headers, "repr-digest")?.map(str::to_owned),
+        has_content_location: headers.contains_key("content-location"),
     })
 }
 
@@ -936,6 +964,12 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, OriginError
         .to_str()
         .map_err(|_| OriginError::Response)
 }
+fn optional_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, OriginError> {
+    headers
+        .get(name)
+        .map(|value| value.to_str().map_err(|_| OriginError::Response))
+        .transpose()
+}
 fn decimal(value: &str) -> Result<u64, OriginError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(OriginError::Response);
@@ -970,6 +1004,12 @@ struct Descriptor {
 /// Bounded HTTPS-origin authorization and retrieval failure, without URL logging.
 #[derive(Debug, thiserror::Error)]
 pub enum OriginError {
+    /// No supported whole-representation digest was supplied; no peer authority exists.
+    #[error("origin representation digest unavailable")]
+    DigestUnavailable,
+    /// The candidate or complete bytes do not match this live origin representation digest.
+    #[error("origin representation digest mismatch")]
+    DigestMismatch,
     /// Existing chunk/manifest verification or storage failed.
     #[error(transparent)]
     Content(#[from] crate::Error),

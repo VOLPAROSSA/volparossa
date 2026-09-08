@@ -3,7 +3,10 @@
 //! Origin trust is authenticated before any provider lookup, and remains in memory until
 //! atomic output reconstruction. Cached native signatures never substitute for HTTPS authority.
 
+mod authority;
+mod digest;
 pub(super) mod sources;
+use authority::Authorization;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -51,10 +54,10 @@ pub(super) async fn fetch(
         .reassemble_to_file(&mut [&mut download.store], now(), &output)
         .map_err(|_| ContentError::Unavailable)?;
     checked_policy(context, &download.origin, &download.policy).await?;
-    context
-        .content
-        .contribute_https(
-            &download.authorized,
+    download
+        .authorized
+        .contribute(
+            &context.content,
             download.source_root,
             download.source_limits,
         )
@@ -65,7 +68,7 @@ pub(super) async fn fetch(
 struct PreparedDownload {
     origin: OriginRequest,
     policy: VerifiedPolicy,
-    authorized: OriginAuthorizedManifest,
+    authorized: Authorization,
     store: ChunkStore,
     source_root: PathBuf,
     source_limits: CacheLimits,
@@ -76,6 +79,9 @@ async fn retrieve(
     request: HttpsContentFetchRequest,
     context: &ControlContext,
 ) -> Result<PreparedDownload, ContentError> {
+    if request.origin_digest {
+        return Box::pin(digest::retrieve(request, context)).await;
+    }
     let strategy = HttpsSourceStrategy::try_from(request.source_strategy)
         .map_err(|_| ContentError::Invalid)?;
     let origin = OriginRequest::new(&request.resource_url, &request.metadata_path)
@@ -163,7 +169,7 @@ async fn retrieve(
     Ok(PreparedDownload {
         origin,
         policy,
-        authorized,
+        authorized: Authorization::Cooperative(authorized),
         store,
         source_root: PathBuf::from(request.cache),
         source_limits: cache_limits,
@@ -303,10 +309,11 @@ pub(super) async fn download(
         .ok_or(ContentError::Unavailable)?;
     timeout(Duration::from_secs(remaining.min(30)), async {
         let ready = HttpsContentTransferReady {
-            manifest: download.authorized.native_manifest_bytes().to_vec(),
+            manifest: download.authorized.native_manifest_bytes(),
             publisher_key: download.authorized.manifest().publisher().to_vec(),
             resource_url,
             expires_unix_seconds: expires,
+            origin_digest: download.authorized.origin_digest(),
         };
         checked_policy(context, &download.origin, &download.policy).await?;
         *ready_sent = true;
@@ -342,10 +349,10 @@ pub(super) async fn download(
             .check_validity(now())
             .map_err(|_| ContentError::Unavailable)?;
         checked_policy(context, &download.origin, &download.policy).await?;
-        context
-            .content
-            .contribute_https(
-                &download.authorized,
+        download
+            .authorized
+            .contribute(
+                &context.content,
                 download.source_root,
                 download.source_limits,
             )

@@ -39,6 +39,60 @@ fn https_local_output_streams_exact_bytes_and_preserves_origin_accounting() {
 }
 
 #[test]
+fn https_origin_digest_mode_is_correlated_before_local_transfer() {
+    isolated(
+        "https_origin_digest_mode_is_correlated_before_local_transfer",
+        digest_mode_downloads(),
+    );
+}
+
+async fn digest_mode_downloads() {
+    // This is a trusted local-control fixture, not an origin TLS/digest authentication proof.
+    for (origin_digest, fault) in [
+        (true, Fault::None),
+        (true, Fault::WrongMode),
+        (false, Fault::WrongMode),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.origin_digest = origin_digest;
+        let output = exchange(&mut fixture, "correlated.bin", fault, 0).await;
+        if matches!(fault, Fault::None) {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["authentication_scope"], "origin-repr-digest");
+            assert_eq!(report["origin_digest"], true);
+            assert_eq!(report["origin_authenticated"], true);
+            assert_eq!(
+                report["transport_manifest_id"],
+                hex::encode(fixture.manifest.manifest_id())
+            );
+            assert_eq!(
+                report["sha256"],
+                hex::encode(fixture.manifest.object_sha256())
+            );
+            assert_eq!(report["peer_bytes"], fixture.manifest.length());
+            assert_eq!(report["origin_body_bytes"], 0);
+            assert_eq!(
+                fs::read(fixture.directory.path().join("correlated.bin")).unwrap(),
+                fixture.bytes
+            );
+            assert_eq!(
+                directory_names(fixture.directory.path()),
+                ["correlated.bin", "served-store"]
+            );
+        } else {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("mode"));
+            assert_eq!(directory_names(fixture.directory.path()), ["served-store"]);
+        }
+    }
+}
+
+#[test]
 fn https_local_output_is_not_published_before_valid_ready_and_final() {
     isolated(
         "https_local_output_is_not_published_before_valid_ready_and_final",
@@ -92,6 +146,7 @@ struct Fixture {
     signed: SignedManifest,
     manifest: VerifiedManifest,
     bytes: Vec<u8>,
+    origin_digest: bool,
 }
 
 impl Fixture {
@@ -134,6 +189,7 @@ impl Fixture {
             signed,
             manifest,
             bytes,
+            origin_digest: false,
         }
     }
 
@@ -144,7 +200,11 @@ impl Fixture {
             panic!("the local-output command requires the typed stream upgrade");
         };
         assert_eq!(parameters.resource_url, RESOURCE);
-        assert_eq!(parameters.metadata_path, "/metadata");
+        assert_eq!(parameters.origin_digest, self.origin_digest);
+        assert_eq!(
+            parameters.metadata_path,
+            if self.origin_digest { "" } else { "/metadata" }
+        );
         assert_eq!(
             Path::new(&parameters.cache),
             self.directory.path().join("agent-cache")
@@ -153,7 +213,35 @@ impl Fixture {
             parameters.output.is_empty(),
             "user output path must never reach the agent"
         );
-        let ready = HttpsContentTransferReady {
+        let ready = self.readiness(fault);
+        write_response(
+            &mut stream,
+            &response(
+                request.request_id.clone(),
+                "HTTPS_CONTENT_TRANSFER_READY",
+                Payload::HttpsContentTransferReady(ready),
+            ),
+        )
+        .await
+        .unwrap();
+        if matches!(
+            fault,
+            Fault::WrongResource | Fault::ExpiredReady | Fault::WrongMode
+        ) {
+            assert_eq!(
+                stream.read(&mut [0; 1]).await.unwrap(),
+                0,
+                "no chunk request after invalid Ready"
+            );
+            return;
+        }
+        self.serve_payload(&mut stream, request.request_id, fault, origin_bytes)
+            .await;
+    }
+
+    fn readiness(&self, fault: Fault) -> HttpsContentTransferReady {
+        HttpsContentTransferReady {
+            origin_digest: self.origin_digest ^ matches!(fault, Fault::WrongMode),
             manifest: self.signed.encode(),
             publisher_key: self.manifest.publisher().to_vec(),
             resource_url: if matches!(fault, Fault::WrongResource) {
@@ -166,27 +254,18 @@ impl Fixture {
             } else {
                 self.manifest.validity().expires
             },
-        };
-        write_response(
-            &mut stream,
-            &response(
-                request.request_id.clone(),
-                "HTTPS_CONTENT_TRANSFER_READY",
-                Payload::HttpsContentTransferReady(ready),
-            ),
-        )
-        .await
-        .unwrap();
-        if matches!(fault, Fault::WrongResource | Fault::ExpiredReady) {
-            assert_eq!(
-                stream.read(&mut [0; 1]).await.unwrap(),
-                0,
-                "no chunk request after invalid Ready"
-            );
-            return;
         }
+    }
+
+    async fn serve_payload(
+        &mut self,
+        stream: &mut tokio::net::UnixStream,
+        mut request_id: Vec<u8>,
+        fault: Fault,
+        origin_bytes: u64,
+    ) {
         let progress = serve_peer(
-            &mut stream,
+            stream,
             &self.manifest,
             &mut self.store,
             TransferLimits {
@@ -204,12 +283,11 @@ impl Fixture {
         if matches!(fault, Fault::Disconnect) {
             return;
         }
-        let mut request_id = request.request_id;
         if matches!(fault, Fault::WrongFinal) {
             request_id[0] ^= 1;
         }
         write_response(
-            &mut stream,
+            stream,
             &response(
                 request_id,
                 "CONTENT_OK",
@@ -239,6 +317,7 @@ enum Fault {
     ExpiredReady,
     Disconnect,
     WrongFinal,
+    WrongMode,
 }
 
 fn response(request_id: Vec<u8>, code: &str, payload: Payload) -> ControlResponse {
@@ -252,24 +331,27 @@ fn response(request_id: Vec<u8>, code: &str, payload: Payload) -> ControlRespons
 }
 
 async fn invoke(root: &Path, name: &str) -> Output {
+    invoke_mode(root, name, false).await
+}
+
+async fn invoke_mode(root: &Path, name: &str, origin_digest: bool) -> Output {
     let root = root.to_owned();
     let name = name.to_owned();
     tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_volparossa"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_volparossa"));
+        command
             .current_dir(&root)
             .arg("--control-socket")
             .arg(root.join("control.sock"))
-            .args([
-                "content",
-                "fetch-https",
-                "--url",
-                RESOURCE,
-                "--metadata-path",
-                "/metadata",
-                "--cache",
-            ])
+            .args(["content", "fetch-https", "--url", RESOURCE, "--cache"])
             .arg(root.join("agent-cache"))
-            .args(["--local-output", &name, "--min-free-bytes", "0"])
+            .args(["--local-output", &name, "--min-free-bytes", "0"]);
+        if origin_digest {
+            command.arg("--origin-digest");
+        } else {
+            command.args(["--metadata-path", "/metadata"]);
+        }
+        command
             .stdin(Stdio::null())
             .output()
             .expect("real CLI process")
@@ -280,11 +362,12 @@ async fn invoke(root: &Path, name: &str) -> Output {
 
 async fn exchange(fixture: &mut Fixture, name: &str, fault: Fault, origin_bytes: u64) -> Output {
     let root = fixture.directory.path().to_owned();
+    let origin_digest = fixture.origin_digest;
     let listener = UnixListener::bind(root.join("control.sock")).unwrap();
     let ((), output) = tokio::time::timeout(Duration::from_secs(30), async {
         tokio::join!(
             fixture.serve(&listener, fault, origin_bytes),
-            invoke(&root, name)
+            invoke_mode(&root, name, origin_digest)
         )
     })
     .await
@@ -305,6 +388,12 @@ async fn successful_downloads() {
         );
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["operation"], "https_content_download");
+        assert_eq!(result["authentication_scope"], "cooperative-origin");
+        assert_eq!(result["origin_digest"], false);
+        assert_eq!(
+            result["transport_manifest_id"],
+            hex::encode(fixture.manifest.manifest_id())
+        );
         assert_eq!(result["bytes"], fixture.manifest.length());
         assert_eq!(result["chunks"], 2);
         assert_eq!(

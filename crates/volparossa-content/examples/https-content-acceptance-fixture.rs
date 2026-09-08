@@ -38,6 +38,7 @@ const RESOURCE: &str = "https://destination.volparossa.test:18443/asset.bin";
 const METADATA: &str = "/.well-known/volparossa/content/asset";
 const OBJECT_BYTES: usize = 2 * 1024 * 1024 + 123;
 const OBJECT_SHA256: &str = "add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767";
+const OBJECT_REPR_DIGEST: &str = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:";
 const DEADLINE: Duration = Duration::from_secs(90);
 
 #[tokio::main]
@@ -51,7 +52,7 @@ async fn main() -> Result<()> {
         [mode, root, listen, cert, report, connections] if matches!(mode.as_str(), "origin" | "origin-pem" | "origin-pem-bounded") => {
             let count = connections.parse()?;
             let graceful = mode == "origin-pem-bounded";
-            if !(1..=if graceful { 28 } else { 8 }).contains(&count) {
+            if !(1..=if graceful { 31 } else { 8 }).contains(&count) {
                 return Err("origin connection count outside explicit fixture bound".into());
             }
             origin(Path::new(root), listen.parse()?, Path::new(cert), Path::new(report), count, mode != "origin", graceful).await
@@ -221,6 +222,9 @@ async fn origin(
     let listener = TcpListener::bind(listen).await?;
     let descriptor = read_bounded(&root.join("descriptor.bin"), MAX_MANIFEST_BYTES + 8192)?;
     let object = read_bounded(&root.join("object.bin"), OBJECT_BYTES)?;
+    if object.len() != OBJECT_BYTES || ChunkId::digest(&object).to_string() != OBJECT_SHA256 {
+        return Err("origin representation does not match its fixed digest".into());
+    }
     if certificate_pem {
         write_new(cert_path, generated.cert.pem().as_bytes())?;
     } else {
@@ -277,7 +281,10 @@ async fn origin(
                 format!("Content-Range: bytes {start}-{end}/{}\r\n", object.len())
             });
             let date = format_http_date(now()?)?;
-            let response = format!("HTTP/1.1 {status_line}\r\nDate: {date}\r\nContent-Length: {}\r\nContent-Type: {}\r\n{range_header}Cache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.bytes.len(), payload.content_type);
+            let length = if payload.head { object.len() } else { payload.bytes.len() };
+            let digest_header = if payload.kind == "metadata" { String::new() }
+                else { format!("Repr-Digest: {OBJECT_REPR_DIGEST}\r\n") };
+            let response = format!("HTTP/1.1 {status_line}\r\nDate: {date}\r\nContent-Length: {length}\r\nContent-Type: {}\r\n{range_header}{digest_header}Cache-Control: public, max-age=300\r\nAge: 0\r\nConnection: close\r\n\r\n", payload.content_type);
             stream.write_all(response.as_bytes()).await?;
             stream.write_all(payload.bytes).await?;
             stream.flush().await?;
@@ -288,6 +295,9 @@ async fn origin(
                 "range_start":payload.range.map(|range| range.0),
                 "range_end":payload.range.map(|range| range.1),
                 "range_total":payload.range.map(|_| object.len()),
+                "content_length":length, "method":if payload.head { "HEAD" } else { "GET" },
+                "representation_digest":if payload.kind == "metadata" { None } else { Some(OBJECT_REPR_DIGEST) },
+                "object_sha256":if payload.kind == "metadata" { None } else { Some(OBJECT_SHA256) },
             }))
         }).await??;
         records.push(record);
@@ -305,6 +315,7 @@ struct OriginPayload<'a> {
     content_type: &'static str,
     bytes: &'a [u8],
     range: Option<(usize, usize)>,
+    head: bool,
 }
 
 fn origin_payload<'a>(
@@ -324,6 +335,16 @@ fn origin_payload<'a>(
             content_type: "application/vnd.volparossa.origin-manifest.v1",
             bytes: descriptor,
             range: None,
+            head: false,
+        });
+    }
+    if request.starts_with("HEAD /asset.bin HTTP/1.1\r\n") && ranges.is_empty() {
+        return Ok(OriginPayload {
+            kind: "digest_head",
+            content_type: "application/octet-stream",
+            bytes: &[],
+            range: None,
+            head: true,
         });
     }
     if !request.starts_with("GET /asset.bin HTTP/1.1\r\n") || ranges.len() > 1 {
@@ -353,6 +374,7 @@ fn origin_payload<'a>(
         content_type: "application/octet-stream",
         bytes: range.map_or(object, |(start, end)| &object[start..=end]),
         range,
+        head: false,
     })
 }
 
@@ -611,6 +633,37 @@ fn write_report(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_fixture_head_is_bodyless_and_get_preserves_the_whole_representation() -> Result<()> {
+        let object = fixture_bytes();
+        let head = origin_payload(
+            "HEAD /asset.bin HTTP/1.1\r\n\r\n",
+            b"unused descriptor",
+            &object,
+        )?;
+        assert!(head.head && head.bytes.is_empty());
+        assert_eq!(head.kind, "digest_head");
+        assert_eq!(head.content_type, "application/octet-stream");
+        let get = origin_payload(
+            "GET /asset.bin HTTP/1.1\r\n\r\n",
+            b"unused descriptor",
+            &object,
+        )?;
+        assert!(!get.head && get.range.is_none());
+        assert_eq!(get.kind, "body");
+        assert_eq!(get.bytes.len(), OBJECT_BYTES);
+        assert_eq!(ChunkId::digest(get.bytes).to_string(), OBJECT_SHA256);
+        assert!(
+            origin_payload(
+                "HEAD /asset.bin HTTP/1.1\r\nRange: bytes=0-9\r\n\r\n",
+                &[],
+                &object
+            )
+            .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn origin_fixture_preserves_the_independently_existing_native_manifest() -> Result<()> {

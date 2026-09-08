@@ -18,7 +18,7 @@ content_provider_https_cleanup() {
         [ -d "$ph_cleanup_root" ] \
             && [ "$(stat -Lc '%a:%u:%g' "$ph_cleanup_root")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin; do
+        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json origin-only-object.bin auto-object.bin digest-origin-only-object.bin digest-peers-first-object.bin; do
             ph_cleanup_mode=600
             [ "$ph_cleanup_name" != origin.pem ] || ph_cleanup_mode=400
             ph_cleanup_file=$ph_cleanup_root/$ph_cleanup_name
@@ -41,6 +41,8 @@ content_provider_https_phase() {
     case $ph_case in
         complete|missing) ph_strategy=peers-first ;;
         origin-only|auto) ph_strategy=$ph_case ;;
+        digest-origin-only) ph_strategy=origin-only ;;
+        digest-peers-first) ph_strategy=peers-first ;;
         *) fail PROVIDER_HTTPS_SOURCE_STRATEGY_INVALID ;;
     esac
     ph_prefix=content-provider-https-$ph_case
@@ -79,8 +81,12 @@ content_provider_https_phase() {
     ph_output_digest=$(sha256sum "$ph_output" | awk '{print $1}')
     # This is the existing local-output command's no-clobber guard, also for the file
     # obtained via HTTP. It is not an invented browser-download output-path option.
+    case $ph_case in
+        digest-*) set -- --origin-digest ;;
+        *) set -- --metadata-path /.well-known/volparossa/content/asset ;;
+    esac
     if content_provider_https_cli content fetch-https --url https://destination.volparossa.test:18443/asset.bin \
-        --metadata-path /.well-known/volparossa/content/asset --ca-file "$ph_user/origin.pem" \
+        "$@" --ca-file "$ph_user/origin.pem" \
         --source-strategy "$ph_strategy" --cache "$ph_cache" --local-output "$ph_output" \
         >"$WORK/$ph_prefix-no-clobber.out" 2>"$WORK/$ph_prefix-no-clobber.err"; then
         fail PROVIDER_HTTPS_USER_OUTPUT_OVERWRITTEN
@@ -203,7 +209,7 @@ content_provider_https_run() {
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
         --no-new-privs -- "$ph_binary" origin-pem-bounded "$ph_origin_root" 47.163.4.2:18443 \
-        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 28 \
+        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 31 \
         >"$WORK/content-provider-https-origin.log" 2>&1 &
     TLS_POLICY_SERVER_PID=$!
     wait_observer "$TLS_POLICY_SERVER_PID" "$ph_origin_report.ready" \
@@ -214,6 +220,10 @@ content_provider_https_run() {
         "$WORK/destination/content-provider-https-origin.pem" "$ph_user/origin.pem"
 
     content_provider_https_phase complete
+    # No custom metadata-path request in either case: fresh origin HEAD independently
+    # authorizes the same whole digest, and the original two provider indexes remain live.
+    content_provider_https_phase digest-origin-only
+    content_provider_https_phase digest-peers-first
     PHASE=content-provider-https-withdraw-one
     "$binary_directory/volparossa" --control-socket "$WORK/runtime-$provider_node_b/control/agent.sock" \
         content stop >"$WORK/content-provider-https-provider-stop.json" \

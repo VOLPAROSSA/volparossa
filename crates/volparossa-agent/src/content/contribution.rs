@@ -162,6 +162,25 @@ impl ContentRuntime {
         .await;
     }
 
+    /// Only the HTTPS caller's whole-object-verified digest result reaches this admission seam.
+    pub(crate) async fn contribute_https_digest(
+        &self,
+        authority: &volparossa_content::origin_https::OriginAuthorizedDigest,
+        signed: SignedManifest,
+        manifest: VerifiedManifest,
+        root: PathBuf,
+        limits: CacheLimits,
+    ) {
+        let Ok(expires) = authority.check_validity(now()) else {
+            return;
+        };
+        if authority.verify_candidate(&signed, now()).is_err() {
+            return;
+        }
+        self.queue_contribution(signed, manifest, root, limits, expires)
+            .await;
+    }
+
     async fn queue_contribution(
         &self,
         signed: SignedManifest,

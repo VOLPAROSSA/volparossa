@@ -674,15 +674,55 @@ Both HTTPS download commands accept `--source-strategy auto|peers-first|origin-o
   a lookup-plus-transfer budget projected to beat the origin. Network changes can still make a
   prediction wrong; this is not a guarantee of higher speed.
 - `peers-first` explicitly explores/preferentially uses peers, then obtains missing ranges from
-  the origin. It is useful for provider tests but may be slower than origin retrieval.
+  the origin in descriptor mode, or one full GET in digest mode. It is useful for provider
+  tests but may be slower than origin retrieval.
 - `origin-only` skips provider lookup/body retrieval and gets missing bytes from the origin.
-  Verified local chunks are still reused with `--reuse-cache`.
+  Descriptor mode reuses verified local chunks with `--reuse-cache`; digest mode performs a
+  full GET because the HEAD digest supplies no authenticated chunk index.
 
 All modes retain fresh same-origin authorization, the normal protected route and signed Exit
 policy. No mode publishes private HTTPS content, accepts a peer as an origin authority or races
 duplicate full-object downloads. Recent cost hints are RAM-only and short-lived, with no URL or
 object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
 such observations conservatively uses the origin, rather than inventing a speed estimate.
+
+### HTTPS origin-digest downloads
+
+For an origin that returns a supported SHA-256 `Repr-Digest` in its own resource HEAD response,
+use `--origin-digest` **instead of** `--metadata-path`:
+
+```sh
+volparossa content fetch-https \
+  --url https://downloads.example/asset.bin --origin-digest \
+  --source-strategy peers-first \
+  --cache /agent-owned/new-digest-cache --local-output ./asset.bin
+```
+
+This example explicitly explores peers; omit `--source-strategy` for measured `auto` selection,
+which prefers origin when useful comparable costs are unavailable. `browser-download` accepts
+the same mode in place of its metadata path, without either output option.
+
+The consumer authenticates the exact resource using its own TLS 1.3 HEAD exchange through the
+normal protected route. The supported profile is status 200, identity encoding,
+`application/octet-stream`, explicit public freshness and one canonical SHA-256 representation
+digest; cookies, credentials, variants, redirects and content-location indirection are rejected.
+`Content-Digest` on HEAD is not accepted as the resource digest. No custom VOLPAROSSA descriptor
+is needed, but an origin without supported `Repr-Digest` is currently unavailable in this mode;
+there is no silent trust downgrade or generic ordinary-download fallback for such origins.
+
+Protected providers are queried by whole-object hash and length, not URL. Their original signed
+manifest is only a bounded transport index, never origin authority. The agent verifies the
+complete representation before local delivery, browser readiness or automatic contribution.
+An incomplete peer attempt ends before one full origin GET; its received bytes are still
+reported. This mode does not request partial origin ranges. Existing descriptor-mode partial
+retrieval remains available. With `--reuse-cache`, matching local chunks can help after a valid
+peer index is found, but an offline origin still cannot authorize a new download.
+
+Local/browser JSON reports `authentication_scope: "origin-repr-digest"` and the original
+`transport_manifest_id`; descriptor mode reports `cooperative-origin`. These labels distinguish
+authorization from transport signatures. The original HTTP expiry is never renewed by caching.
+Targeted local origin-TLS, provider, CLI and harness checks pass; the integrated network proof
+is pending. No general website support or speed gain is claimed.
 
 ### Automatic public-content contribution
 
@@ -711,7 +751,7 @@ cache; arbitrary existing directories are not adopted. The listener starts empty
 valid retained publications are offered after startup or admission.
 
 Enabling this setting is explicit consent to retain and serve successfully verified public
-native/named objects and supported anonymous cooperative-HTTPS content. Private messages and
+native/named objects and supported anonymous cooperative-HTTPS or origin-digest content. Private messages and
 mailbox storage are excluded; ordinary encrypted browsing, cookies, login sessions and
 `private`/`no-store` responses are not opted in. Every later HTTPS consumer still obtains fresh
 origin authorization. Storage peers do not become publishers or origin authorities.
@@ -736,6 +776,9 @@ volparossa content browser-download \
   --metadata-path /.well-known/volparossa/content/asset \
   --cache /agent-owned/new-browser-cache
 ```
+
+For the supported [origin-digest profile](#https-origin-digest-downloads), replace the
+`--metadata-path` argument with `--origin-digest`; the remaining browser behavior is identical.
 
 Keep the command running. After protected retrieval and verification, its first JSON line contains
 `download_url`; paste that temporary URL directly into the browser's address bar. It binds only

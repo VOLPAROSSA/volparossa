@@ -115,6 +115,16 @@ request operation tags 20/21/22/23 for serve/fetch/stop/status and response payl
 content receipt; unknown operations remain rejected by older agents. This is not a name service,
 automatic replica placement or an HTTPS trust constructor.
 
+Exact representation-digest lookup uses an additive selector `version=6`, `operation=4` and
+an empty manifest ID. Its canonical request (at most 128 bytes) binds a fresh 32-byte nonce,
+SHA-256, complete length, creation time and at most fifteen seconds of validity. The reply
+echoes that scope and returns missing or one original signed public manifest within
+`MAX_MANIFEST_BYTES + 256`; its expiry cannot outlive either request or manifest. The bounded
+registry scan excludes private-message entries and does not query mailbox storage. This
+lookup creates no DHT object index, name authority or origin trust. A consumer must obtain
+independent whole-object authority and verify the complete ordered bytes; ordinary v1
+manifest-bound chunk transfer remains separate from this untrusted-index lookup.
+
 Optional post-download redistribution uses a separate selector version: v2 sends bounded
 extra chunks; the normal agent uses v3 with one receiver credit per chunk and a checked finish
 on receiver stop. No silent v2 fallback occurs. Request, selector, metadata, credit, chunk and
@@ -241,6 +251,18 @@ return 200 only as a complete original representation, checked against all chunk
 and counted at its full payload cost. No ETag is treated as cryptographic integrity, and neither
 partial nor full fallback renews origin authority. A complete cache needs no fallback connection.
 No general-browser semantics, reusable TLS proof or peer discovery is implied.
+
+The local-control `HttpsContentFetchRequest` adds optional bool `origin_digest` at tag 9.
+Omitted/false preserves the descriptor mode and requires its explicit metadata path; true
+requires an empty metadata path and selects the consumer's own resource HEAD/TLS `Repr-Digest`
+authorization. `HttpsContentTransferReady` echoes that bool at tag 5, and the CLI refuses a
+different mode before requesting chunks. The control-frame limit and protocol version are
+unchanged. A digest-mode native manifest is only a transport index: the agent must verify the
+entire object against the authenticated representation digest before Ready or contribution.
+The existing correlated final receipt and original HTTP/monotonic expiry remain mandatory;
+neither the index signature nor persisted bytes become reusable HTTPS authority. Local/browser
+JSON identifies `authentication_scope` as `origin-repr-digest` or legacy `cooperative-origin`;
+`transport_manifest_id` names the original transport envelope, not an origin trust anchor.
 
 ## Signed control envelope
 

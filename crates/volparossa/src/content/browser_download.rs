@@ -1,4 +1,4 @@
-//! One explicit cooperative-origin download, not a proxy or another site's browser origin.
+//! One explicit origin-authorized download, not a proxy or another site's browser origin.
 
 use std::{
     io::{Seek as _, Write as _},
@@ -30,12 +30,15 @@ const LINK_LIFETIME: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Args)]
 pub(crate) struct Arguments {
-    /// Exact cooperative HTTPS resource; never supplied by a localhost HTTP request.
+    /// Exact HTTPS resource; never supplied by a localhost HTTP request.
     #[arg(long, value_parser = super::parse_origin_url)]
     url: String,
     /// Canonical same-origin descriptor path for the supported public representation.
-    #[arg(long, value_parser = super::parse_metadata_path)]
-    metadata_path: String,
+    #[arg(long, value_parser = super::parse_metadata_path, required_unless_present = "origin_digest", conflicts_with = "origin_digest")]
+    metadata_path: Option<String>,
+    /// Authenticate the website's Repr-Digest instead of a VOLPAROSSA metadata descriptor.
+    #[arg(long)]
+    origin_digest: bool,
     /// Agent-owned cache destination; the browser's temporary spool is separate and private.
     #[arg(long)]
     cache: PathBuf,
@@ -53,10 +56,11 @@ pub(crate) struct Arguments {
 }
 
 impl Arguments {
-    fn into_fetch(self) -> FetchHttps {
+    pub(super) fn into_fetch(self) -> FetchHttps {
         FetchHttps {
             url: self.url,
             metadata_path: self.metadata_path,
+            origin_digest: self.origin_digest,
             cache: self.cache,
             reuse_cache: self.reuse_cache,
             source_strategy: self.source_strategy,
@@ -278,7 +282,8 @@ fn report(download: &VerifiedDownload) -> serde_json::Value {
     serde_json::json!({
         "bytes":receipt.bytes, "chunks":receipt.chunks,
         "sha256":hex::encode(download.manifest().object_sha256()),
-        "origin_authenticated":true, "authentication_scope":"cooperative-origin",
+        "transport_manifest_id":hex::encode(download.manifest().manifest_id()),
+        "origin_authenticated":true, "authentication_scope":download.authentication_scope(),
         "origin_authority_persisted":false, "https_origin_privileges":false, "single_use":true,
         "peer_bytes":receipt.peer_bytes, "origin_body_bytes":receipt.origin_body_bytes,
         "origin_range_requests":receipt.origin_range_requests, "providers_used":receipt.providers_used,

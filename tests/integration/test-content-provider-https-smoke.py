@@ -102,7 +102,7 @@ def fixture(control_node="relay2", native_publication=None):
                     single_use_listener_closed=True, completed_before_expiry=True, elapsed_ns=100_000_000))
         application["final"] = copy.deepcopy(fetch)
         cases[name]["application"] = application
-    origin = dict(pid=300, request_limit=28, stop_requested=True,
+    origin = dict(pid=300, request_limit=31, stop_requested=True,
         listener_closed=True, inflight_drained=True, connections=[
         dict(kind="metadata", payload_bytes=1024, tls13=True, alpn_http11=True,
              source="47.163.4.1:32100", status=200, range_start=None, range_end=None, range_total=None)
@@ -154,11 +154,35 @@ def fixture(control_node="relay2", native_publication=None):
             dict(kind="body_range", payload_bytes=CHECK["BYTES"], tls13=True,
                 alpn_http11=True, source="47.163.4.1:32100", status=206,
                 range_start=0, range_end=CHECK["BYTES"] - 1, range_total=CHECK["BYTES"])])
+    digests = {}
+    for name in CHECK["DIGEST_CASES"]:
+        from_origin = name == "digest-origin-only"
+        phase = copy.deepcopy(cases["missing"])
+        phase["privacy"] = copy.deepcopy(baseline_privacy if from_origin else cases["complete"]["privacy"])
+        phase["fetch"].update(peer_bytes=0 if from_origin else CHECK["BYTES"],
+            origin_body_bytes=CHECK["BYTES"] if from_origin else 0, origin_range_requests=0,
+            providers_used=0 if from_origin else 2,
+            provider_peer_ids=[] if from_origin else [peers[node] for node in provider_nodes],
+            local_output=f"/user/{name}.bin", cache=f"/agent/{name}-cache",
+            authentication_scope="origin-repr-digest", origin_digest=True,
+            transport_manifest_id="e" * 64 if from_origin else original["manifest_id"])
+        phase["output"].update(path=f"/user/{name}.bin", agent_cache=f"/agent/{name}-cache")
+        phase["application"].update(final=copy.deepcopy(phase["fetch"]),
+            requested_source_strategy=name.removeprefix("digest-"), requested_origin_digest=True)
+        digests[name] = phase
+    origin["connections"][1:1] = [
+        dict(kind="body" if index == 1 else "digest_head", payload_bytes=CHECK["BYTES"] if index == 1 else 0,
+            method="GET" if index == 1 else "HEAD", content_length=CHECK["BYTES"],
+            representation_digest=CHECK["REPR_DIGEST"], object_sha256=CHECK["SHA"],
+            tls13=True, alpn_http11=True, source="47.163.4.1:32100", status=200,
+            range_start=None, range_end=None, range_total=None)
+        for index in range(3)]
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
         origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
         source_strategy_cases=strategies, source_strategy_comparison=CHECK["strategy_comparison"](strategies),
+        origin_digest_cases=digests,
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
@@ -174,6 +198,33 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_digest_mode_requires_bodyless_heads_original_peer_index_and_distinct_cold_storage(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        for case in CHECK["DIGEST_CASES"]:
+            command = CHECK["consumer_command"](case, "/fixture/binary", "/agent/socket",
+                "/agent/cache", Path("/user"), Path("/user/output"))
+            self.assertEqual(command.count("--origin-digest"), 1)
+            self.assertNotIn("--metadata-path", command)
+            self.assertEqual(command[command.index("--source-strategy") + 1], case.removeprefix("digest-"))
+        for path, wrong in (
+            (("origin", "connections", 1, "payload_bytes"), 1),
+            (("origin", "connections", 1, "representation_digest"), "sha-256=:wrong:"),
+            (("origin", "connections", 2, "method"), "HEAD"),
+            (("origin", "connections", 2, "payload_bytes"), 0),
+            (("origin", "connections", 3, "kind"), "metadata"),
+            (("origin", "connections", 3, "content_length"), 0),
+            (("origin_digest_cases", "digest-peers-first", "fetch", "transport_manifest_id"), "e" * 64),
+            (("origin_digest_cases", "digest-peers-first", "fetch", "origin_body_bytes"), 1),
+            (("origin_digest_cases", "digest-peers-first", "application", "requested_origin_digest"), False),
+            (("origin_digest_cases", "digest-peers-first", "fetch", "origin_digest"), False),
+            (("origin_digest_cases", "digest-origin-only", "fetch", "origin_range_requests"), 1),
+            (("origin_digest_cases", "digest-origin-only", "fetch", "authentication_scope"), "cooperative-origin"),
+            (("origin_digest_cases", "digest-origin-only", "output", "agent_cache"), "/agent/missing-cache"),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, path, wrong))
+
     def test_peer_phases_pin_source_strategy_and_do_not_relabel_origin_reference(self):
         value = fixture()
         for name in ("complete", "missing", "baseline", "origin-only", "auto"):
@@ -229,11 +280,11 @@ class ProviderHttpsEvidence(unittest.TestCase):
         phase["application"]["final"] = copy.deepcopy(phase["fetch"])
         phase["privacy"] = copy.deepcopy(missing["privacy"])
         phase["privacy"]["exit"]["provider_application"]["relay4"]["response_payload_bytes"] = 1050000
-        alternate["origin"]["connections"][11:] = copy.deepcopy(alternate["origin"]["connections"][2:6])
+        alternate["origin"]["connections"][14:] = copy.deepcopy(alternate["origin"]["connections"][5:9])
         alternate["source_strategy_comparison"] = CHECK["strategy_comparison"](alternate["source_strategy_cases"])
         CHECK["validate_evidence"](alternate)
         duplicate = copy.deepcopy(alternate)
-        duplicate["origin"]["connections"][12] = copy.deepcopy(duplicate["origin"]["connections"][11])
+        duplicate["origin"]["connections"][15] = copy.deepcopy(duplicate["origin"]["connections"][14])
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](duplicate)
 
@@ -266,9 +317,9 @@ class ProviderHttpsEvidence(unittest.TestCase):
                 CHECK["validate_evidence"](changed(value, ("origin_baseline", *path), wrong))
         for path, wrong in (
             (("comparison", "origin_to_browser_command_ratio"), 9),
-            (("origin", "connections", 6, "kind"), "body_range"),
-            (("origin", "connections", 7, "payload_bytes"), 0),
-            (("origin", "connections", 7, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 9, "kind"), "body_range"),
+            (("origin", "connections", 10, "payload_bytes"), 0),
+            (("origin", "connections", 10, "source"), "43.159.1.1:32100"),
         ):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 CHECK["validate_evidence"](changed(value, path, wrong))
@@ -314,7 +365,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
         registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
         script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
         for scenario in ("content-provider", "content-https", "content-message", "dns-cache"):
-            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", "unregistered"):
+            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", *CHECK["DIGEST_CASES"], "unregistered"):
                 with self.subTest(scenario=scenario, suffix=suffix):
                     prefix = f"content-provider-https-{suffix}-privacy"
                     result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
@@ -348,7 +399,8 @@ class ProviderHttpsEvidence(unittest.TestCase):
             output = root / "client-fixtures/https-output"
             output.mkdir(parents=True, mode=0o700)
             for name in ("origin.pem", "complete-object.bin", "missing-object.bin", "origin-baseline.json",
-                         "origin-only-object.bin", "auto-object.bin"):
+                         "origin-only-object.bin", "auto-object.bin", "digest-origin-only-object.bin",
+                         "digest-peers-first-object.bin"):
                 path = output / name
                 path.write_bytes(b"known public cleanup fixture")
                 path.chmod(0o400 if name == "origin.pem" else 0o600)
@@ -375,12 +427,12 @@ class ProviderHttpsEvidence(unittest.TestCase):
             (("withdrawal", "provider_node"), "relay4"),
             (("missing_provider_stop", "serving"), True),
             (("origin", "connections", 0, "tls13"), False),
-            (("origin", "connections", 1, "source"), "43.159.1.1:32100"),
-            (("origin", "connections", 1, "source"), "46.162.3.1:32100"),
-            (("origin", "connections", 2, "status"), 200),
-            (("origin", "connections", 3, "range_start"), 0),
-            (("origin", "connections", 4, "range_end"), 1572864),
-            (("origin", "connections", 5, "range_total"), CHECK["BYTES"] - 1),
+            (("origin", "connections", 4, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 4, "source"), "46.162.3.1:32100"),
+            (("origin", "connections", 5, "status"), 200),
+            (("origin", "connections", 6, "range_start"), 0),
+            (("origin", "connections", 7, "range_end"), 1572864),
+            (("origin", "connections", 8, "range_total"), CHECK["BYTES"] - 1),
             (("cases", "complete", "fetch", "origin_authenticated"), False),
             (("cases", "complete", "fetch", "origin_body_bytes"), CHECK["BYTES"]),
             (("cases", "complete", "fetch", "provider_peer_ids"), ["peer-relay4", "peer-relay4"]),
