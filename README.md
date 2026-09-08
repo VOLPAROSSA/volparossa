@@ -159,8 +159,11 @@ completes two-provider deposit, store reopen and private receive/acknowledgement
 checker rejects a valid omitted protobuf enum default. The corrected checker passes the original
 raw receipts, captures and cleanup; the historical workflow remains failed. A
 [fresh run on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
-is pending. Sender and recipient are separate application identities behind one Client, not
-independent network nodes. This is not automatic contact discovery, SMTP, retention repair or a
+now passes the complete sequence and original-source raw checker: sender application exit and
+route disconnect, two deposits, provider reopen, intended-recipient decryption, both ACKs and
+empty repeat, with exact hash and clean captures/cleanup. This satisfies C07's sender-exit delivery
+checkpoint. Sender and recipient are separate application identities behind one Client.
+This is not automatic contact discovery, SMTP, retention repair or a
 guarantee that a provider stays online. See the [mailbox commands](docs/OPERATIONS.md#known-contact-mailboxes).
 That `10f63244` run also joins the normal commands end to end: user publication/import,
 agent serving, independent protected retrieval, then user export/assembly. The complete
@@ -178,14 +181,18 @@ now passes the complete bounded sequence: retrieve foreground P, opportunistical
 Real remote route retirement completes before the replicator's disconnect returns. All ten
 boundary captures are complete with zero drops or forbidden packets, and cleanup leaves guest
 state unchanged. Earlier TLS/report failures remain recorded, not retrospectively passed.
-This proves one uptake/offline-provider/reopen/re-serving sequence, not full C03/C04, automatic
+This proves C03's bounded uptake/offline-provider/reopen/re-serving sequence, not full C04, automatic
 boot service, retention repair, retirement-scope reclamation or general owner-priority sharing.
-A complete mailbox, retention repair, shared DNS, full owner-priority behavior and browser integration remain
-unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
+C01/C02/C03/C05/C06/C07 now have source-bound passing checkpoints. Full owner-priority behavior
+and existing-web integration/benefit remain open under C04/C08; retention repair and permanent
+availability are not claimed. More replicas alone do not establish a speedup.
 Native, named and cooperative-HTTPS chunk downloads now use up to two concurrent providers.
 A real backpressured-stream test proves overlapping progress without duplicate chunk requests,
-including bounded reassignment after missing or failed chunks. This is local functional evidence,
-not a measured network speedup or a new parallel-download VM pass.
+including bounded reassignment after missing or failed chunks. The
+[parallel-provider VM on `b22a9153`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
+also passes: kernel packet-arrival timestamps show 0.933 seconds of overlapping bulk delivery
+from the two providers, with exact reconstruction and complete capture/cleanup checks.
+This is actual overlap, not a measured speedup or unique TCP goodput.
 Replica maintenance can now reclaim expired, unshared journaled chunks before another uptake
 attempt. Live references, explicit foreground publications and mailbox stores remain protected;
 local expiry/reuse tests pass, not a new expiry-maintenance VM sequence.
@@ -194,16 +201,18 @@ DNS resolution. It independently validates peer evidence, excludes involved rout
 retains the existing resolver when evidence is missing or unsupported. Combined compilation and
 strict Clippy pass. The [public DNSSEC-chain run on `0fa80d65`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684)
 now passes real IPv4/IPv6 validation with unchanged built-in roots and local cache reuse.
-Ordinary two-Exit peer sharing is still awaiting its network proof, so C05 is not complete.
+The ordinary two-Exit sharing sequence now passes on `b172d11f`, satisfying the C05 checkpoint.
 The [partial `4f90e370` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187656229)
 proves ordinary A/AAAA requests through the protected route. The
 [subsequent `5ac9bb0e` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34189965926)
 also reaches the second Exit and returns a correct answer, but from the trusted fallback rather
-than the peer cache. That source requirement remains unmet.
+than the peer cache. That older run remains failed.
 The signed DNS RPC now pins its actual authenticated connection when two direct connections to
-the same peer exist; a real two-connection actor test passes. This is not yet a positive peer-DNSSEC
-network result: the [new `b172d11f` DNS run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
-is pending.
+the same peer exist; a real two-connection actor test passes. The
+[`b172d11f` DNS run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
+proves A/AAAA upstream validation, actual peer-cache hits without upstream/fallback, and local
+hits after the cachepeer stops. Unsigned data remains an explicit fallback; peer misses trigger
+no upstream query. Original roots/expiries, all 35 physical captures and cleanup pass.
 Protected DNS now owns a separate bounded client route instead of contending with the general
 datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
 See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
@@ -243,7 +252,7 @@ Debian system trust is the default. Optional `--ca-file public-roots.pem` select
 PEM roots for this request only; it installs nothing and does not disable certificate or hostname
 verification. No separately supplied publisher key can replace origin authentication. Focused
 CLI/agent/control checks and the source-scoped normal-CLI KVM provider proof on `e592b610` pass;
-C02/C08 remain incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
+C08 remains incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
 distinguish this command from the earlier executable-fixture passes.
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;

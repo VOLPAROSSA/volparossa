@@ -7,9 +7,23 @@ Last updated: 2026-09-08
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 The proposal records the full idea and a researched HTTPS integration design: authenticated
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
-experiment, through an application/browser boundary. C01 now passes; C02--C08 remain incomplete;
+experiment, through an application/browser boundary. C01/C02/C03/C05/C06/C07 now have source-bound
+passing checkpoints; C04/C08 remain incomplete;
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Scoped downlink and mixed-link runs now pass; content/application integration continues.
+Current criterion evidence: [C02 on `d2f886c8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)
+proves two-provider reconstruction and four missing-origin ranges;
+[C03/C06 on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
+proves zero initial replicas, foreground P retrieval, extra Q uptake without Q's manifest supplied,
+then Q retrieval from a reopened replica after the original provider node stops;
+[C05 on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
+proves actual A/AAAA peer-cache hits, local reuse after peer shutdown and cache-only miss/fallback;
+[C07 on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
+proves intended-recipient inbox retrieval/decryption after sender application exit and route
+disconnect. Older narrower checkpoint labels below retain their historical scope. The
+[`b22a9153` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
+also proves actual overlapping provider bulk traffic; a full expanded-alpha verification on one
+build and measured speedup remain unproved.
 
 ## Latest known-contact mailbox integration checkpoint
 
@@ -39,8 +53,8 @@ reopen both providers, discover/Get/decrypt/acknowledge the inbox, check private
 no-clobber, reject wrong identities and mismatched final responses, and exercise one-provider
 List failure with explicit degraded readout. Those providers use the real store/protocol behind
 Unix/duplex streams, not the production network. The CLI parser test passes. The first protected
-network result and its distinct checker failure are recorded below; no complete mailbox/C07, automatic contact discovery,
-retention repair, speedup or global offline-availability claim is made.
+network result and its distinct checker failure are recorded below. Those local tests alone do not
+prove network C07, automatic contact discovery, retention repair, speedup or global offline availability.
 
 The additive `content-mailbox` KVM scenario is now executable: two independent provider agents,
 normal invite/enroll/deposit, sender application keys/input/manifest removed, normal Disconnect,
@@ -70,8 +84,17 @@ corrected raw-evidence rebuild SHA-256:
 `a8aa78f7271ad1f5d9849c043ef1f3757726f793da8a988ec10dc5147b4faaf7`.
 The historical workflow stays failed; the
 [fresh mailbox run on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
-is pending. This is two application identities behind one Client, not an independently offline
-sender node or full C07.
+now **passes**, including an independent exact-source checker/raw rebuild equal to the original
+report. The sender application exits, its secrets/input/manifest are gone and its route is
+disconnected; the intended owner receives on a fresh route from the reopened provider, verifies
+the same plaintext hash, acknowledges both copies and sees an empty repeat. Eleven MPTCP flows,
+all twelve complete zero-drop/forbidden-packet-free captures and zero remaining owned objects pass.
+This satisfies C07's stated sender-exit criterion using two application identities behind one
+Client, without claiming an independently offline sender machine or permanent availability.
+Original artifact ZIP SHA-256:
+`ec7765e1fb4a1278a81ea4a0e1edcc9aa2b36fe798a421f1a437c8e16e814eef`;
+byte-identical raw guest-state SHA-256:
+`1ae5faca21180235c4ff1dbfa5c35eae8a913582646748329aae9e65dfe8c99b`.
 
 The [initial `891f86f5` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34190575234)
 stopped at formatting because the new mailbox/manifest module declarations were out of order;
@@ -120,8 +143,8 @@ No names, addresses or peer labels are added. Targeted cache/source-accounting, 
 and exact development-policy flag tests pass. The GitHub preflight builds before collecting the
 expiring public records and uses the same capability-dropped namespace runner.
 
-**C05 remains incomplete.** The ordinary two-Exit upstream/peer/local-hit/fallback network sequence
-has not passed yet. Its disposable `dns-cache` scenario is now executable: fresh original public
+Before the `b172d11f` pass below, the ordinary two-Exit upstream/peer/local-hit/fallback sequence
+remained unproved. Its disposable `dns-cache` scenario uses fresh original public
 wire records, normal protected requests to each selected Exit, seven source-accounted phases,
 peer shutdown and 35 physical capture windows. Four checker/classifier tests, four existing
 public-fixture tests and shell/topology-contract checks pass; these are not a live peer-cache pass.
@@ -196,7 +219,18 @@ hash remain bound. Three actor checks, four adapter checks, the codec test and s
 Clippy pass. This reproduces and fixes the two-connection boundary, not an exclusive explanation
 of the older VM or a positive peer-DNSSEC proof. The
 [new exact `b172d11f` DNS VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
-is pending; original roots, TTLs, relay exclusions and source-accounting requirements are unchanged.
+now **passes** all seven normal protected-query phases. Warm A/AAAA each increment only
+`UpstreamValidated` and perform six original-chain TCP queries; ExitB's A/AAAA each increment only
+`PeerValidated`, with no upstream or fallback. Unsigned B increments only fallback while the peer
+serves a cache-only miss without upstream traffic. After ExitA is inactive/PID 0, both B requests
+increment only `LocalValidated`. Every positive answer precedes the original proof expiry.
+All 35 captures / 224 interface rows reconcile intake, drain and kernel packet counts with zero
+drops, forbidden traffic or direct Client--Exit packets; cleanup leaves zero owned objects.
+Original ZIP SHA-256: `0659758928c34a335f4fb04f61de87ed436b76a58750d9a657a7d47f01d9a042`.
+Raw guest state is byte-identical, SHA-256
+`b6af943e78788602c5909b595ea1906a9c7da494ef9138e96b19db8252e0f2c3`.
+The exact-source report and full raw rebuild pass independently. This satisfies C05 with unchanged
+roots, TTLs, relay exclusions and source accounting, not arbitrary-answer sharing or speedup.
 CNAME/negative-answer
 sharing is not implemented; unsupported proofs use the existing resolver without sharing that
 result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
@@ -220,9 +254,22 @@ failed chunks are reassigned only after their in-flight ownership is released. T
 case permits one reconnect without resetting the original deadline or request budget. That test's
 four variants, four existing provider tests, four stream-transfer tests and strict content/agent
 Clippy pass. This is local stream evidence, not network timing, speedup, full C02 or a new VM pass.
-The forthcoming provider VM also has a bounded physical-packet overlap requirement. Twelve checker
+The provider VM also has a bounded physical-packet overlap requirement. Twelve checker
 and ten observer tests, plus a real disposable-veth timestamp test, pass locally; no live overlap
-or throughput result is inferred from that observer preparation.
+or throughput result is inferred from that observer preparation. The
+[exact `b22a9153` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
+now passes that requirement: independent kernel-arrival timestamps for each provider's 64--960 KiB
+bulk window overlap by 933,365,936 ns with zero timing errors. Native and named retrieval reconstruct
+all 2,097,275 bytes / nine chunks from two providers; cooperative HTTPS completes from peers alone,
+then from 1,048,699 peer bytes plus four exact 206 ranges / 1,048,576 origin bytes after withdrawal.
+The ordinary cross-account publication chain also passes. All output hashes match, all 25 physical
+and four control capture windows are complete/zero-drop, both providers stop and cleanup leaves
+zero objects. Original ZIP SHA-256:
+`6640485f36ec2c46cb19487b6dfda6f250467e2d2c492b8ffa753ff174580a60`;
+byte-identical raw guest-state SHA-256:
+`5b657d2aac41573b82609760e78f600d55d49d313eeb8552d4114789ea02a5da`.
+Exact-source report and raw rebuild agree. This proves real overlap, not comparative speedup or
+unique TCP goodput.
 
 Replica capacity reclamation (`665fbfb4`) now runs before a new optional uptake attempt. It removes
 only expired journaled chunks without live journal or explicit foreground references, preserves
@@ -231,7 +278,7 @@ usage replaces guessed quota credit. Two core tests and one runtime filter pass,
 cache that rejects uptake, releases only the expired unshared chunk, then accepts real v3 uptake.
 They advance an explicit library clock, not wall-clock or VM time. Strict content/agent/discovery
 Clippy passes. This adds bounded local expiry reclamation, not retention repair, eviction of live
-data, automatic boot service or full C03/C04.
+data, automatic boot service or full C04.
 
 The new native `content fetch-name` command resolves an independently trusted publisher key
 and exact name without a prior manifest file at the consumer. Providers explicitly enable

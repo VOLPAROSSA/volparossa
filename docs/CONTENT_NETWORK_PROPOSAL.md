@@ -329,7 +329,9 @@ Foreground native, named and cooperative-HTTPS downloads now use at most two con
 streams. A production-protocol test over backpressured streams proves overlapping progress,
 exclusive in-flight chunk ownership and bounded reassignment after missing/failed chunks;
 reconnection does not reset the original deadline or request budget. Focused tests and strict
-Clippy pass. This is local functionality, not measured speedup or a parallel-download VM pass.
+Clippy pass. The [exact `b22a9153` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
+also proves 933,365,936 ns of overlapping provider bulk-payload windows using kernel arrival
+timestamps, with exact reconstruction and complete captures/cleanup. This is not measured speedup.
 
 An explicitly configured agent replica cache can pick up other chunks from a recently used
 provider after a successful foreground download. No new provider discovery or route is created
@@ -365,7 +367,7 @@ files, refuses mailbox-owned stores and uses measured remaining capacity; it nei
 expiry nor evicts live content. Two core tests and one runtime filter pass, including real uptake
 after a full cache releases an expired unshared chunk. These advance an explicit library clock,
 not wall-clock or VM time. Quota still pauses uptake when no eligible capacity can be reclaimed.
-No boot service, retention repair or storage-peer publisher authority is introduced; full C03/C04
+No boot service, retention repair or storage-peer publisher authority is introduced; full C04
 and an expiry-maintenance network sequence remain unproved.
 
 Five focused duplex tests pass, including actual uptake followed by re-serving, quota without
@@ -380,18 +382,18 @@ The next fixture also stops and explicitly reopens the replica service from its 
 that final retrieval. Its [live run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
 passes uptake, provider removal, journal reopen and independent Q retrieval with complete
 physical captures and unchanged-host cleanup. Retention repair and global contribution/fairness
-remain absent; C03 and C04 therefore remain unchecked.
+remain absent; C03's bounded-diversity criterion is covered by that run, while C04 remains unchecked.
 
 ## Integrated functional checkpoints
 
 - [x] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection;
   protected-route transfer verified on `f0a906ca` (source-scoped evidence above).
-- [ ] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback.
-- [ ] C03: bounded opportunistic redistribution improving reachable chunk diversity.
+- [x] C02: real multi-peer discovery/fetch/reassembly and appropriate partial origin fallback ([`d2f886c8` network proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)).
+- [x] C03: bounded opportunistic redistribution improving reachable chunk diversity ([`603cec9d` extra-Q uptake and subsequent replica retrieval](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)).
 - [ ] C04: owner-priority network/storage behavior and fair bounded contribution under contention.
-- [ ] C05: independent DNS validation, correct expiry and no peer-induced policy bypass.
-- [ ] C06: signed public publication remains retrievable after its publisher goes offline.
-- [ ] C07: an intended recipient retrieves and decrypts a replicated message after sender exit.
+- [x] C05: independent DNS validation, correct expiry and no peer-induced policy bypass ([`b172d11f` protected upstream/peer/local/fallback proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)).
+- [x] C06: signed public publication remains retrievable after its publisher goes offline ([`603cec9d` original-node-stop/replica-reopen proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)).
+- [x] C07: an intended recipient retrieves and decrypts a replicated message after sender exit ([`b172d11f` sender-app-exit/route-disconnect/inbox proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)).
 - [ ] C08: agreed existing-web application integration and measured benefit over origin retrieval.
 
 Start with the common chunk/manifest/provider substrate and a real publish/retrieve/offline
