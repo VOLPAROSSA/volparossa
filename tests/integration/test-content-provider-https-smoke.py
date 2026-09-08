@@ -109,9 +109,31 @@ def fixture(control_node="relay2", native_publication=None):
              tls13=True, alpn_http11=True, source="47.163.4.1:32100", status=206,
              range_start=start, range_end=end, range_total=CHECK["BYTES"])
         for start, end in CHECK["RANGES"]])
+    origin["connections"].extend([
+        dict(kind=kind, payload_bytes=length, tls13=True, alpn_http11=True,
+             source="47.163.4.1:32100", status=200, range_start=None, range_end=None, range_total=None)
+        for kind, length in (("metadata", 1024), ("body", CHECK["BYTES"]))])
+    baseline_privacy = copy.deepcopy(cases["complete"]["privacy"])
+    for capture in baseline_privacy.values():
+        for counters in capture["provider_application"].values():
+            counters.update(request_packets=0, response_packets=0, response_payload_bytes=0)
+    baseline = dict(privacy=baseline_privacy, selected_route=copy.deepcopy(route),
+        ingress=dict(client_before=2, client_after=4, exit_before=10, exit_after=12),
+        application=dict(consumer=copy.deepcopy(boundary), cli=copy.deepcopy(boundary),
+            elapsed_ns=2_600_000_000, reported_client_namespace=True,
+            final=dict(report_kind="volparossa-https-origin-baseline", pid=400,
+                effective_uid=985, network_namespace="net:[12345]", bytes=CHECK["BYTES"],
+                chunks=9, object_sha256=CHECK["SHA"], origin_body_bytes=CHECK["BYTES"],
+                peer_bytes=0, metadata_requests=1, body_requests=1,
+                metadata_elapsed_ns=400_000_000, body_elapsed_ns=2_000_000_000,
+                reconstruct_elapsed_ns=20_000_000, total_elapsed_ns=2_420_000_000,
+                origin_authenticated=True, origin_authority_persisted=False,
+                reference_cache_initially_empty=True, private_spool_removed=True, output_mode="0600",
+                application_socket="ordinary_tcp_transparent_ingress")))
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
+        origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
@@ -127,6 +149,42 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_origin_reference_requires_fresh_protected_flow_full_body_and_honest_timing(self):
+        value = fixture()
+        # A slower end-to-end browser result must still pass: no fabricated benefit gate.
+        self.assertLess(value["comparison"]["origin_to_browser_command_ratio"], 1)
+        # Late ACK/FIN on an old provider socket is not reference-body traffic.
+        value["origin_baseline"]["privacy"]["exit"]["provider_application"]["relay4"].update(
+            request_packets=1, response_packets=1)
+        CHECK["validate_evidence"](value)
+        for path, wrong in (
+            (("application", "consumer", "client_namespace"), False),
+            (("application", "reported_client_namespace"), False),
+            (("application", "final", "effective_uid"), 0),
+            (("application", "final", "origin_authenticated"), False),
+            (("application", "final", "origin_body_bytes"), 0),
+            (("application", "final", "peer_bytes"), CHECK["BYTES"]),
+            (("application", "final", "reference_cache_initially_empty"), False),
+            (("application", "final", "private_spool_removed"), False),
+            (("application", "final", "metadata_elapsed_ns"), 0),
+            (("application", "final", "total_elapsed_ns"), 1),
+            (("application", "final", "application_socket"), "direct_exit"),
+            (("ingress", "client_after"), 3), (("ingress", "exit_after"), 11),
+            (("selected_route", "route_context_id"), "b" * 32),
+            (("privacy", "exit", "provider_application", "relay4", "response_payload_bytes"), 1),
+            (("privacy", "exit", "provider_application", "relay4", "request_payload_bytes"), 1),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, ("origin_baseline", *path), wrong))
+        for path, wrong in (
+            (("comparison", "origin_to_browser_command_ratio"), 9),
+            (("origin", "connections", 6, "kind"), "body_range"),
+            (("origin", "connections", 7, "payload_bytes"), 0),
+            (("origin", "connections", 7, "source"), "43.159.1.1:32100"),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, path, wrong))
+
     def test_browser_delivery_requires_actual_client_get_receipt_deadline_and_private_spool(self):
         value = fixture()
         CHECK["validate_evidence"](value)
@@ -187,7 +245,7 @@ class ProviderHttpsEvidence(unittest.TestCase):
             root = Path(directory)
             output = root / "client-fixtures/https-output"
             output.mkdir(parents=True, mode=0o700)
-            for name in ("origin.pem", "complete-object.bin", "missing-object.bin"):
+            for name in ("origin.pem", "complete-object.bin", "missing-object.bin", "origin-baseline.json"):
                 path = output / name
                 path.write_bytes(b"known public cleanup fixture")
                 path.chmod(0o400 if name == "origin.pem" else 0o600)

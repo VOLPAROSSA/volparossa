@@ -18,7 +18,7 @@ content_provider_https_cleanup() {
         [ -d "$ph_cleanup_root" ] \
             && [ "$(stat -Lc '%a:%u:%g' "$ph_cleanup_root")" = "700:$WORKER_UID:$WORKER_GID" ] \
             || return 1
-        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin; do
+        for ph_cleanup_name in origin.pem complete-object.bin missing-object.bin origin-baseline.json; do
             ph_cleanup_mode=600
             [ "$ph_cleanup_name" != origin.pem ] || ph_cleanup_mode=400
             ph_cleanup_file=$ph_cleanup_root/$ph_cleanup_name
@@ -103,6 +103,44 @@ content_provider_https_phase() {
         >"$WORK/$ph_prefix-output.json"
 }
 
+content_provider_https_baseline() {
+    ph_prefix=content-provider-https-baseline
+    PHASE=$ph_prefix-capture
+    capture_product_logs
+    ph_client_before=$(grep -cF 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" || true)
+    ph_exit_before=$(grep -cF 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" || true)
+    start_privacy_observers "$ph_prefix-privacy" || fail PROVIDER_HTTPS_PRIVACY_UNAVAILABLE
+    PHASE=$ph_prefix-fetch
+    timeout --signal=TERM --kill-after=10s 120s ip netns exec "$CLIENT" setpriv \
+        --reuid="$WORKER_UID" --regid="$WORKER_GID" --groups="$ph_control_gid" \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$source_directory/tests/integration/content-provider-https-smoke.py" \
+        consume baseline "$ph_binary" "$WORK/runtime-client/control/agent.sock" unused \
+        "$ph_user" "$ph_parent_netns" "$ph_client_netns" "$WORKER_UID" "$WORKER_GID" "$ph_control_gid" \
+        >"$WORK/$ph_prefix-consumer.json" 2>"$WORK/$ph_prefix-fetch.err" \
+        || fail PROVIDER_HTTPS_ORIGIN_BASELINE_FAILED
+    benchmark_capture_paths "$ph_prefix-live" mptcp || fail PROVIDER_HTTPS_PATHS_UNAVAILABLE
+    jq -e --arg context "$provider_context" '.route_context_id == $context' \
+        "$WORK/$ph_prefix-live-selection.json" >/dev/null || fail PROVIDER_HTTPS_ROUTE_CHANGED
+    # New completion events, not historical A08 successes, prove ordinary TPROXY ingress.
+    ph_log_attempt=0
+    while [ "$ph_log_attempt" -lt 50 ]; do
+        capture_product_logs
+        ph_client_after=$(grep -cF 'event=INGRESS_TCP_STREAM_COMPLETED' "$WORK/logs-client.txt" || true)
+        ph_exit_after=$(grep -cF 'event=MPTCP_EXIT_FLOW_COMPLETED' "$WORK/logs-exit.txt" || true)
+        if [ "$ph_client_after" -ge "$((ph_client_before + 2))" ] \
+            && [ "$ph_exit_after" -ge "$((ph_exit_before + 2))" ]; then break; fi
+        sleep 0.1
+        ph_log_attempt=$((ph_log_attempt + 1))
+    done
+    [ "$ph_log_attempt" -lt 50 ] || fail PROVIDER_HTTPS_BASELINE_INGRESS_NOT_PROVEN
+    stop_privacy_observers || fail PROVIDER_HTTPS_PRIVACY_INCOMPLETE
+    jq -n --argjson client_before "$ph_client_before" --argjson client_after "$ph_client_after" \
+        --argjson exit_before "$ph_exit_before" --argjson exit_after "$ph_exit_after" \
+        '{client_before:$client_before,client_after:$client_after,exit_before:$exit_before,exit_after:$exit_after}' \
+        >"$WORK/$ph_prefix-ingress.json"
+}
+
 content_provider_https_run() {
     PHASE=content-provider-https-origin-seed
     ph_binary=$binary_directory/examples/https-content-acceptance-fixture
@@ -153,7 +191,7 @@ content_provider_https_run() {
     ip netns exec "$DEST" setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
         --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
         --no-new-privs -- "$ph_binary" origin-pem "$ph_origin_root" 47.163.4.2:18443 \
-        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 6 \
+        "$WORK/destination/content-provider-https-origin.pem" "$ph_origin_report" 8 \
         >"$WORK/content-provider-https-origin.log" 2>&1 &
     TLS_POLICY_SERVER_PID=$!
     wait_observer "$TLS_POLICY_SERVER_PID" "$ph_origin_report.ready" \
@@ -176,6 +214,7 @@ content_provider_https_run() {
         '{provider_node:$node,provider_peer_id:$peers[0][$node]}' \
         >"$WORK/content-provider-https-withdrawal.json"
     content_provider_https_phase missing
+    content_provider_https_baseline
 
     ph_origin_status=0
     wait "$TLS_POLICY_SERVER_PID" || ph_origin_status=$?

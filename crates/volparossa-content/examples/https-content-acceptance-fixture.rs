@@ -62,7 +62,13 @@ async fn main() -> Result<()> {
             consume(Path::new(root), origin.parse()?, Path::new(cert), peer.parse()?, variant, Path::new(report)).await
         }
         [mode, parent, origin, cert, report] if mode == "origin-baseline" => {
-            timeout(DEADLINE, origin_baseline(Path::new(parent), origin.parse()?, Path::new(cert), Path::new(report))).await?
+            let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            tokio::select! {
+                result = timeout(DEADLINE, origin_baseline(Path::new(parent), origin.parse()?, Path::new(cert), Path::new(report))) => result?,
+                _ = terminate.recv() => Err("origin baseline stopped; private spool discarded".into()),
+                _ = interrupt.recv() => Err("origin baseline interrupted; private spool discarded".into()),
+            }
         }
         _ => Err("usage: seed ROOT | seed-from-publication ROOT MANIFEST PUBLISHER_HEX | origin|origin-pem ROOT LISTEN CERT REPORT CONNECTIONS | peers ROOT LISTEN complete|missing REPORT | consume CLIENT_ROOT ORIGIN CERT PEER complete|missing REPORT | origin-baseline PRIVATE_PARENT ORIGIN_ADDR CERT_PEM REPORT".into()),
     }

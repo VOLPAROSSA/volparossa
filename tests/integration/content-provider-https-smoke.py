@@ -3,7 +3,8 @@
 """Normal CLI/browser-HTTP provider evidence, not a GUI, speed or full C02/C08 acceptance.
 
 The enclosing native-provider report owns exact-source and final host/guest cleanup checks.
-This checker requires both HTTPS phases and their independently drained physical captures.
+This checker requires both peer-assisted phases and the origin-only reference, each with
+independently drained physical captures.
 """
 
 import hashlib
@@ -136,13 +137,14 @@ def inspect_spool(user_directory, uid, gid):
 def consume(arguments):
     """Called only after the enclosing disposable harness enters CLIENT and drops privileges."""
     case, binary, control, cache, user_path, parent_ns, client_ns, uid, gid, control_gid = arguments
-    require(case in ("complete", "missing"), "unknown HTTPS consumer phase")
+    require(case in ("complete", "missing", "baseline"), "unknown HTTPS consumer phase")
     uid, gid, control_gid = int(uid), int(gid), int(control_gid)
     boundary = process_boundary("self", parent_ns, client_ns, uid, gid, control_gid)
     user_directory = Path(user_path)
-    output = user_directory / f"{case}-object.bin"
+    output = user_directory / ("origin-baseline.json" if case == "baseline" else f"{case}-object.bin")
     require(not output.exists() and not output.is_symlink()
-            and not list(user_directory.glob("volparossa-browser-*")), "consumer storage is not fresh")
+            and not list(user_directory.glob("volparossa-browser-*"))
+            and not list(user_directory.glob("volparossa-origin-baseline-*")), "consumer storage is not fresh")
     command = [binary, "--control-socket", control, "content",
                "browser-download" if case == "complete" else "fetch-https",
                "--url", "https://destination.volparossa.test:18443/asset.bin",
@@ -150,6 +152,9 @@ def consume(arguments):
                "--ca-file", str(user_directory / "origin.pem"), "--cache", cache]
     if case == "missing":
         command.extend(["--local-output", str(output)])
+    elif case == "baseline":
+        command = [binary, "origin-baseline", str(user_directory), "47.163.4.2:18443",
+                   str(user_directory / "origin.pem"), str(output)]
     started, deadline = time.monotonic_ns(), time.monotonic() + 110
     process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0,
                                env=dict(os.environ, TMPDIR=str(user_directory)))
@@ -162,6 +167,10 @@ def consume(arguments):
         cli_boundary = process_boundary(process.pid, parent_ns, client_ns, uid, gid, control_gid)
         first = bounded_json_line(process.stdout, deadline)
         report = dict(final=first, consumer=boundary, cli=cli_boundary)
+        if case == "baseline":
+            require(first["network_namespace"] == client_ns and first["effective_uid"] == uid
+                    and read(output) == first, "baseline report differs from actual isolated fixture process")
+            report["reported_client_namespace"] = True
         if case == "complete":
             require(first["operation"] == "browser_download_ready" and first["bytes"] == BYTES
                     and first["sha256"] == SHA and first["origin_authenticated"] is True,
@@ -181,7 +190,9 @@ def consume(arguments):
         require(process.wait(timeout=max(0.1, deadline - time.monotonic())) == 0
                 and process.stdout.read(1) == b"", "CLI failed or emitted unexpected trailing data")
         report["elapsed_ns"] = time.monotonic_ns() - started
-        require(not list(user_directory.glob("volparossa-browser-*")), "private browser spool remained")
+        require(not list(user_directory.glob("volparossa-browser-*"))
+                and not list(user_directory.glob("volparossa-origin-baseline-*")),
+                "private application spool remained")
         return report
     finally:
         if process.poll() is None:
@@ -237,7 +248,7 @@ def validate_control(capture, control_node, provider_nodes, missing):
                 "active provider lacks bidirectional authenticated-control traffic")
 
 
-def validate_path(phase, peers, provider_nodes, missing):
+def validate_path(phase, peers, provider_nodes, missing, origin_only=False):
     selected = phase["selected_route"]
     paths, slots = selected["paths"], selected["benchmark_slots"]
     provider_peers = {peers[node] for node in provider_nodes}
@@ -276,10 +287,16 @@ def validate_path(phase, peers, provider_nodes, missing):
         require(privacy[node]["client_leg_wireguard_data_datagrams"] > 16
                 and privacy[node]["exit_leg_wireguard_data_datagrams"] > 16,
                 "selected physical WireGuard legs did not both carry genuine data")
-    active = provider_nodes[:1] if missing else provider_nodes
+    active = [] if origin_only else provider_nodes[:1] if missing else provider_nodes
     for node in CANDIDATES:
         application = privacy["exit"]["provider_application"][node]
-        if node in active:
+        if origin_only:
+            # Prior completed provider sockets may still exchange ACK/FIN; those are not
+            # downloaded object bytes. This observer currently has no request-payload field.
+            require(application["response_payload_bytes"] == 0
+                    and application.get("request_payload_bytes", 0) == 0,
+                    "origin-only reference received or requested provider payload")
+        elif node in active:
             require(application["request_packets"] > 0 and application["response_packets"] > 0
                     and application["response_payload_bytes"] >= (1048699 if missing else 1048576),
                     "active independent provider did not return its useful payload to the Exit")
@@ -355,6 +372,55 @@ def validate_application(phase, browser):
             "actual single-use HTTP delivery, elapsed timing or private spool cleanup not proven")
 
 
+def validate_baseline(baseline, cases, peers, provider_nodes):
+    application = baseline["application"]
+    reference, ingress = application["final"], baseline["ingress"]
+    boundary = application["consumer"]
+    require(boundary == application["cli"] and boundary["user_uid"] == reference["effective_uid"] == 985
+            and boundary["control_gid"] == cases["complete"]["output"]["control_gid"]
+            and all(boundary[flag] is True for flag in ("client_namespace", "outside_parent_namespace",
+                "all_capabilities_dropped", "no_new_privileges"))
+            and application["reported_client_namespace"] is True
+            and re.fullmatch(r"net:\[[0-9]+\]", reference["network_namespace"])
+            and reference["pid"] > 0,
+            "origin-only reference did not run in the same capless Client operator namespace")
+    require(reference["report_kind"] == "volparossa-https-origin-baseline"
+            and reference["bytes"] == reference["origin_body_bytes"] == BYTES
+            and reference["object_sha256"] == SHA and reference["chunks"] == 9
+            and reference["peer_bytes"] == 0
+            and reference["metadata_requests"] == reference["body_requests"] == 1
+            and reference["origin_authenticated"] is True and reference["origin_authority_persisted"] is False
+            and reference["reference_cache_initially_empty"] is True
+            and reference["private_spool_removed"] is True and reference["output_mode"] == "0600"
+            and reference["application_socket"] == "ordinary_tcp_transparent_ingress",
+            "reference skipped origin authority, used cache/peers or retained a private spool")
+    stages = [reference[key] for key in ("metadata_elapsed_ns", "body_elapsed_ns", "reconstruct_elapsed_ns")]
+    require(all(value > 0 for value in stages)
+            and sum(stages) <= reference["total_elapsed_ns"] <= application["elapsed_ns"] <= 120_000_000_000
+            and ingress["client_before"] >= 0 and ingress["exit_before"] >= 0
+            and ingress["client_after"] - ingress["client_before"] >= 2
+            and ingress["exit_after"] - ingress["exit_before"] >= 2
+            and baseline["selected_route"]["route_context_id"]
+                == cases["complete"]["selected_route"]["route_context_id"],
+            "reference timing, fresh ingress/Exit completions or unchanged route not proven")
+    validate_path(baseline, peers, provider_nodes, missing=False, origin_only=True)
+
+
+def measured_comparison(cases, baseline):
+    """Descriptive single sequential sample; neither ordering nor a speedup is a pass condition."""
+    browser, missing = (cases[key]["application"] for key in ("complete", "missing"))
+    reference = baseline["application"]
+    return dict(reference="same-overlay-origin-only", samples_per_case=1, speedup_required=False,
+        browser_ready_elapsed_ns=browser["ready_elapsed_ns"],
+        browser_http_elapsed_ns=browser["http"]["elapsed_ns"],
+        browser_command_elapsed_ns=browser["elapsed_ns"],
+        missing_command_elapsed_ns=missing["elapsed_ns"],
+        origin_command_elapsed_ns=reference["elapsed_ns"],
+        origin_to_browser_ready_ratio=reference["elapsed_ns"] / browser["ready_elapsed_ns"],
+        origin_to_browser_command_ratio=reference["elapsed_ns"] / browser["elapsed_ns"],
+        origin_to_missing_command_ratio=reference["elapsed_ns"] / missing["elapsed_ns"])
+
+
 def validate_evidence(evidence):
     publication, original = evidence["publication"], evidence["native_publication"]
     require(evidence["success"] is True
@@ -385,18 +451,20 @@ def validate_evidence(evidence):
             and stop["serving"] is False and stop["publications"] == 0,
             "the second actual provider was not explicitly withdrawn before missing retrieval")
     origin, records = evidence["origin"], evidence["origin"]["connections"]
-    require(origin["pid"] > 0 and len(records) == 6
-            and [r["kind"] for r in records] == ["metadata"] * 2 + ["body_range"] * 4
+    require(origin["pid"] > 0 and len(records) == 8
+            and [r["kind"] for r in records] == ["metadata"] * 2 + ["body_range"] * 4 + ["metadata", "body"]
             and [r["payload_bytes"] for r in records]
-                == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4
+                == [publication["metadata_bytes"]] * 2 + [RANGE_BYTES] * 4 + [publication["metadata_bytes"], BYTES]
             and all(r["tls13"] is True and r["alpn_http11"] is True
                     and origin_exit_source(r["source"]) for r in records),
-            "two genuine origin HTTPS metadata sessions and four body ranges not proven")
+            "three actual origin HTTPS metadata sessions, four ranges and one full reference body not proven")
     require(all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
                 and r["range_total"] is None for r in records[:2])
             and all(r["status"] == 206 and r["range_start"] == start and r["range_end"] == end
                     and r["range_total"] == BYTES
-                    for r, (start, end) in zip(records[2:], RANGES, strict=True)),
+                    for r, (start, end) in zip(records[2:6], RANGES, strict=True))
+            and all(r["status"] == 200 and r["range_start"] is None and r["range_end"] is None
+                    and r["range_total"] is None for r in records[6:]),
             "origin returned wrong missing-chunk ranges or a forbidden full-body substitute")
     cases = evidence["cases"]
     require(set(cases) == {"complete", "missing"}, "both fresh-cache HTTPS retrieval cases required")
@@ -423,6 +491,9 @@ def validate_evidence(evidence):
     require(cases["complete"]["selected_route"]["route_context_id"]
                 == cases["missing"]["selected_route"]["route_context_id"],
             "HTTPS cases changed the carrying route context")
+    validate_baseline(evidence["origin_baseline"], cases, peers, provider_nodes)
+    require(evidence["comparison"] == measured_comparison(cases, evidence["origin_baseline"]),
+            "reported comparison is not the actual single-sample monotone timing ratio")
     require(evidence["user_cleanup"] == dict(user_outputs_removed=True,
             explicit_fixture_ca_removed=True, user_directory_removed=True),
             "temporary user outputs and explicit public CA were not cleaned up")
@@ -449,6 +520,12 @@ def build_evidence(work):
         user_cleanup=read(work / "content-provider-https-user-cleanup.json"),
         missing_provider_stop=read(work / "content-provider-https-provider-stop.json"),
         withdrawal=read(work / "content-provider-https-withdrawal.json"))
+    prefix = "content-provider-https-baseline"
+    baseline = dict(application=read(work / f"{prefix}-consumer.json"),
+        ingress=read(work / f"{prefix}-ingress.json"),
+        selected_route=read(work / f"{prefix}-live-selection.json"),
+        privacy={role: read(work / f"{prefix}-privacy-{role}.json") for role in ROLES})
+    evidence.update(origin_baseline=baseline, comparison=measured_comparison(cases, baseline))
     validate_evidence(evidence)
     return evidence
 
