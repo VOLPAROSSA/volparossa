@@ -121,6 +121,72 @@ content_replication_disconnect() (
     benchmark_disconnect_route "$2"
 )
 
+# Observe only the already-owned R4 parent namespace. Unlike the generic worker diagnostic,
+# this includes ordinary provider TCP sockets and compares them across route/service teardown.
+# No payload, key, configuration file, packet trace, or namespace mutation is collected.
+content_replication_provider_network() (
+    cr_network_stage=$1
+    case $cr_network_stage in before-disconnect|after-reopen|final-fetch-failed) ;; *) return 1 ;; esac
+    cr_network_output=$WORK/content-replication-provider-network.txt
+    cr_network_part=$WORK/content-replication-provider-network-$cr_network_stage.part
+    cr_network_status=0
+    {
+        printf 'snapshot=%s node=relay4 timestamp=%s\n' "$cr_network_stage" "$(date -u +%FT%T.%NZ)"
+        timeout --signal=TERM --kill-after=1s 2s systemctl show \
+            volparossa-alpha-agent@relay4.service \
+            --property=MainPID --property=ActiveState --property=SubState \
+            || printf 'agent_unit_observation_failed=true\n'
+    } >>"$cr_network_output"
+    # Limit each of the three observations independently; failure/truncation is recorded,
+    # never treated as proof of an empty ruleset or absent listener. Child limits affect only
+    # this diagnostic, and its timeout cannot terminate a product service or existing capture.
+    (
+        ulimit -f 256
+        timeout --signal=TERM --kill-after=1s 5s ip netns exec "$R4" sh -c '
+            observe() {
+                "$@"
+                printf "observation_command_status=%s\n" "$?"
+            }
+            printf "section=namespace\n"
+            observe stat -Lc "netns=%d:%i" /proc/self/ns/net
+            printf "section=tcp-listeners\n"
+            observe ss -H -n -l -t -e -p "sport = :18080"
+            printf "section=tcp-connections\n"
+            observe ss -H -n -t -a -i -e -m -p "( sport = :18080 or dport = :18080 )"
+            printf "section=links\n"
+            observe ip -details -statistics link show
+            printf "section=addresses\n"
+            observe ip -4 address show
+            observe ip -6 address show
+            printf "section=rules-and-routes\n"
+            observe ip -4 rule show
+            observe ip -6 rule show
+            observe ip -4 route show table all
+            observe ip -6 route show table all
+            printf "section=provider-reply-route\n"
+            observe ip -4 route get 46.162.3.1 from 49.165.5.1 uid "$1"
+            printf "section=nftables\n"
+            observe nft list ruleset
+            printf "section=reverse-path-settings\n"
+            for setting in /proc/sys/net/ipv4/conf/*/rp_filter \
+                /proc/sys/net/ipv4/conf/*/src_valid_mark; do
+                printf "%s=" "$setting"
+                observe cat "$setting"
+            done
+            printf "section=kernel-counters\n"
+            observe cat /proc/net/netstat /proc/net/snmp
+            printf "snapshot_body_complete=true\n"
+        ' sh "$AGENT_UID"
+    ) >"$cr_network_part" 2>&1 || cr_network_status=$?
+    head -c 131072 "$cr_network_part" >>"$cr_network_output"
+    cr_network_bytes=$(wc -c <"$cr_network_part")
+    cr_network_truncated=false
+    [ "$cr_network_bytes" -lt 131072 ] || cr_network_truncated=true
+    printf '\nsnapshot_end=%s command_status=%s observed_bytes=%s byte_limit=131072 truncated=%s\n' \
+        "$cr_network_stage" "$cr_network_status" "$cr_network_bytes" "$cr_network_truncated" \
+        >>"$cr_network_output"
+)
+
 content_replication_isolation() {
     cr_iso_node=$1; cr_iso_manifest=$2
     cr_iso_pid=$(systemctl show --property=MainPID --value "volparossa-alpha-agent@$cr_iso_node.service")
@@ -268,6 +334,7 @@ content_replication_run() {
     [ "$cr_complete" = yes ] || fail CONTENT_REPLICATION_UPTAKE_NOT_OBSERVED
     content_replication_snapshot relay4 content-replication-uptake-live || fail CONTENT_REPLICATION_PATH_PROOF_UNAVAILABLE
     stop_privacy_observers || fail CONTENT_REPLICATION_CAPTURE_INCOMPLETE
+    content_replication_provider_network before-disconnect
     content_replication_disconnect relay4 content-replication-replicator || fail CONTENT_REPLICATION_ROUTE_CLEANUP_FAILED
     PHASE=content-replication-origin-offline
     content_replication_cli relay5 content stop >"$WORK/content-replication-origin-stop.json" \
@@ -308,14 +375,17 @@ content_replication_run() {
     jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 1
         and .replica_chunks == 2 and .replica_bytes == 262267' \
         "$WORK/content-replication-replica-resume.json" >/dev/null || fail CONTENT_REPLICATION_RESTORE_INCOMPLETE
+    content_replication_provider_network after-reopen
 
     PHASE=content-replication-reserve-fetch
     content_replication_select client content-replication-final || fail CONTENT_REPLICATION_FINAL_ROUTE_UNAVAILABLE
     content_replication_capture reserve-fetch || fail CONTENT_REPLICATION_FINAL_CAPTURE_UNAVAILABLE
-    content_replication_cli client content fetch --manifest "$cr_final/q.bin" --publisher-key "$cr_key" \
+    if ! content_replication_cli client content fetch --manifest "$cr_final/q.bin" --publisher-key "$cr_key" \
         --cache "$cr_final/cache" --output "$cr_final/q.bin.verified" \
-        >"$WORK/content-replication-final-fetch.json" 2>"$WORK/content-replication-final-fetch.err" \
-        || fail CONTENT_REPLICATION_FINAL_FETCH_FAILED
+        >"$WORK/content-replication-final-fetch.json" 2>"$WORK/content-replication-final-fetch.err"; then
+        content_replication_provider_network final-fetch-failed
+        fail CONTENT_REPLICATION_FINAL_FETCH_FAILED
+    fi
     content_replication_snapshot client content-replication-final-live || fail CONTENT_REPLICATION_FINAL_PATHS_UNAVAILABLE
     stop_privacy_observers || fail CONTENT_REPLICATION_FINAL_CAPTURE_INCOMPLETE
     content_replication_cli relay4 content stop >"$WORK/content-replication-replica-stop.json" \

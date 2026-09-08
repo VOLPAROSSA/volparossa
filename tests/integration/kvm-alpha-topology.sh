@@ -639,7 +639,7 @@ copy_artifacts() {
         agent-relay0.log agent-relay1.log agent-relay2.log agent-relay3.log \
         agent-relay4.log agent-relay5.log agent-exit.log agent-exit2.log \
         helper-bootstrap1.log helper-bootstrap2.log \
-        worker-network-diagnostics.txt \
+        worker-network-diagnostics.txt content-replication-provider-network.txt \
         status-bootstrap1.txt status-bootstrap2.txt \
         roles-bootstrap1.txt roles-bootstrap2.txt \
         a01-bootstrap1-blocked.json a01-bootstrap2-blocked.json \

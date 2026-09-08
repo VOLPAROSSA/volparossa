@@ -35,6 +35,19 @@ No successful post-reopen network retrieval is claimed. Global cleanup removes a
 guest root state is unchanged, SHA-256
 `a6e726a2792fcdb336fac86949dbcc669a87b51dbd849262950c88f8d0075d18`.
 Artifact SHA-256: `9e4363bd657127ce7438eb47a852f72385ce6b7970357a862d0b43325d0ffb40`.
+The kernel evidence receives a SYN-ACK but not acknowledgements for the subsequent 261-byte
+TLS payload. Source review does not justify changing TLS or widening ingress/firewall rules.
+The next runner retains bounded R4 TCP/routing/nft snapshots before disconnect, after reopen
+and on final-fetch failure; no traffic rule or packet gate is relaxed for that diagnostic.
+
+Exact `97e478a2` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175365465)
+and [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175362088) pass.
+The separate PR alert gate reports 126 critical results. A bounded SARIF comparison against
+`413cddca` (Rust analyses 1738252998 / 1738337615, same CodeQL 2.26.4 and category) finds exactly
+nine added rule/fingerprint pairs and none removed: all nine are fixed test nonces reported by
+`rust/hard-coded-cryptographic-value`, eight in `protocol/tests/route_retire.rs` and one under
+`cfg(test)` in `discovery/src/route_retire.rs`. There is no added production location in that
+delta; the pre-existing findings have not thereby been audited and the alert gate remains red.
 
 That integration adds actual signed remote route retirement, rather than relaxing the
 C03 packet boundary. An affine Client job retains its original session signer and exact selected
