@@ -121,6 +121,65 @@ content_replication_disconnect() (
     benchmark_disconnect_route "$2"
 )
 
+content_replication_cleanup() {
+    cr_owner_remaining=0
+    for cr_owner_pid in "${CONTENT_OWNER_SOURCE_PID:-}" "${CONTENT_OWNER_SINK_PID:-}"; do
+        [ -n "$cr_owner_pid" ] || continue
+        kill -TERM "$cr_owner_pid" 2>/dev/null || true
+    done
+    for cr_owner_pid in "${CONTENT_OWNER_SOURCE_PID:-}" "${CONTENT_OWNER_SINK_PID:-}"; do
+        [ -n "$cr_owner_pid" ] || continue
+        wait "$cr_owner_pid" 2>/dev/null || true
+        if kill -0 "$cr_owner_pid" 2>/dev/null; then cr_owner_remaining=$((cr_owner_remaining + 1)); fi
+    done
+    CONTENT_OWNER_SOURCE_PID=
+    CONTENT_OWNER_SINK_PID=
+    jq -cn --argjson remaining "$cr_owner_remaining" \
+        '{complete:($remaining == 0),remaining_processes:$remaining}' \
+        >"$WORK/content-replication-owner-cleanup.json"
+    [ "$cr_owner_remaining" -eq 0 ]
+}
+
+content_replication_start_owner_probe() {
+    # Independent capless traffic uses an existing disposable local link, never Exit/provider
+    # access. AGENT_UID is the fixture's trusted local owner class, not a new product bypass.
+    printf '%s\n' 'C04 fixture: R4 ar0 10.241.90.1:19004 -> R0 r0a 10.241.90.2:19004 UDP, 3s bounded owner load; no host changes.'
+    install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-replication-owner"
+    for cr_owner_script in content-replication-smoke.py content-replication-capture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$cr_owner_script" \
+            "$WORK/bin/$cr_owner_script"
+    done
+    jq -cn --argjson uid "$AGENT_UID" --argjson gid "$AGENT_GID" \
+        --argjson receiver "$(stat -Lc '%i' "/run/netns/$R4")" \
+        --argjson sink "$(stat -Lc '%i' "/run/netns/$R0")" \
+        --argjson parent "$(stat -Lc '%i' /proc/self/ns/net)" \
+        '{uid:$uid,gid:$gid,relay4:$receiver,relay0:$sink,parent:$parent}' \
+        >"$WORK/content-replication-owner-isolation.json" || return 1
+    for cr_owner_mode in owner-sink owner-source; do
+        if [ "$cr_owner_mode" = owner-sink ]; then cr_owner_ns=$R0; else cr_owner_ns=$R4; fi
+        timeout --signal=TERM --kill-after=1s 50s ip netns exec "$cr_owner_ns" \
+            setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- python3 -B "$WORK/bin/content-replication-smoke.py" "$cr_owner_mode" \
+            "$WORK" "$cr_replica/replicas" "$RUN_ID" \
+            >"$WORK/content-replication-$cr_owner_mode.json" \
+            2>"$WORK/content-replication-$cr_owner_mode.err" &
+        cr_owner_pid=$!
+        if [ "$cr_owner_mode" = owner-sink ]; then CONTENT_OWNER_SINK_PID=$cr_owner_pid
+        else CONTENT_OWNER_SOURCE_PID=$cr_owner_pid; fi
+        wait_observer "$cr_owner_pid" "$WORK/content-replication-owner/$cr_owner_mode.ready" || return 1
+    done
+}
+
+content_replication_finish_owner_probe() {
+    wait "$CONTENT_OWNER_SOURCE_PID" || return 1
+    CONTENT_OWNER_SOURCE_PID=
+    kill -TERM "$CONTENT_OWNER_SINK_PID" || return 1
+    wait "$CONTENT_OWNER_SINK_PID" || return 1
+    CONTENT_OWNER_SINK_PID=
+    content_replication_cleanup
+}
+
 # Observe only the already-owned R4 parent namespace. Unlike the generic worker diagnostic,
 # this includes ordinary provider TCP sockets and compares them across route/service teardown.
 # No payload, key, configuration file, packet trace, or namespace mutation is collected.
@@ -317,17 +376,19 @@ content_replication_run() {
 
     PHASE=content-replication-uptake
     content_replication_capture uptake || fail CONTENT_REPLICATION_CAPTURE_UNAVAILABLE
+    content_replication_start_owner_probe || fail CONTENT_REPLICATION_OWNER_PROBE_UNAVAILABLE
     content_replication_cli relay4 content fetch --manifest "$cr_replica/p.bin" --publisher-key "$cr_key" \
         --cache "$cr_replica/foreground-p" --output "$cr_replica/foreground-p.bin" \
         >"$WORK/content-replication-foreground-fetch.json" 2>"$WORK/content-replication-foreground-fetch.err" \
         || fail CONTENT_REPLICATION_FOREGROUND_FAILED
+    content_replication_finish_owner_probe || fail CONTENT_REPLICATION_OWNER_PAUSE_RESUME_FAILED
     cr_deadline=$(($(date +%s) + 45))
     cr_complete=no
     while [ "$(date +%s)" -lt "$cr_deadline" ]; do
         if CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli relay4 content status \
             >"$WORK/content-replication-after.json" \
             2>"$WORK/content-replication-after.err" \
-            && jq -e '.replica_chunks == 2 and .replica_bytes == 262267 and .replica_publications == 1' \
+            && jq -e '.replica_chunks == 3 and .replica_bytes == 524411 and .replica_publications == 1' \
                 "$WORK/content-replication-after.json" >/dev/null; then cr_complete=yes; break; fi
         sleep 0.25
     done
@@ -373,7 +434,7 @@ content_replication_run() {
         >"$WORK/content-replication-replica-resume.json" \
         2>"$WORK/content-replication-replica-resume.err" || fail CONTENT_REPLICATION_REOPEN_FAILED
     jq -e '.serving and .replication_enabled and .publications == 2 and .replica_publications == 1
-        and .replica_chunks == 2 and .replica_bytes == 262267' \
+        and .replica_chunks == 3 and .replica_bytes == 524411' \
         "$WORK/content-replication-replica-resume.json" >/dev/null || fail CONTENT_REPLICATION_RESTORE_INCOMPLETE
     content_replication_provider_network after-reopen
 
@@ -433,7 +494,7 @@ content_replication_finalize_report() {
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host.unchanged),
        transfer:$evidence,cleanup:{complete:$complete,remaining_owned_objects:$remaining},
        host_state:($host | del(.acceptance_id)),
-       scope:"explicit public P/Q objects, one opportunistic replica, explicit service stop/reopen after original agent shutdown, then protected re-serving",
+       scope:"explicit P/Q objects; bounded real owner traffic, one in-flight chunk allowance and same-flow replica resume; explicit service reopen and protected re-serving",
        full_c03_claimed:false,full_c04_claimed:false,speed_improvement_claimed:false,
        browser_integration_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-replication-smoke.json" || return 1

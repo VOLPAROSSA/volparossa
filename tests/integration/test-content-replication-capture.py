@@ -123,6 +123,23 @@ class ReplicationCaptureTests(unittest.TestCase):
             self.assertEqual(classify(current, "relay4", "49.165.5.1", "42.158.0.1", payload=payload),
                              {counter: 1})
 
+    def test_owner_fixture_allows_only_exact_local_tuple_phase_interface_and_shape(self):
+        expected = dict(owner_fixture_packets=1, owner_fixture_payload_bytes=1200)
+        payload = b"VPC04OWN" + bytes(1192)
+        for node, iface in (("relay4", "ar0"), ("relay0", "r0a")):
+            self.assertEqual(classify(layout(), node, "10.241.90.1", "10.241.90.2",
+                                     sport=19004, dport=19004, payload=payload, iface=iface), expected)
+        for current, node, source, destination, sport, dport, body, iface in (
+            (layout("reserve-fetch"), "relay4", "10.241.90.1", "10.241.90.2", 19004, 19004, payload, "ar0"),
+            (layout(), "relay4", "10.241.90.3", "10.241.90.2", 19004, 19004, payload, "ar0"),
+            (layout(), "relay4", "10.241.90.1", "46.162.3.1", 19004, 19004, payload, "ar0"),
+            (layout(), "relay4", "10.241.90.1", "10.241.90.2", 19005, 19004, payload, "ar0"),
+            (layout(), "relay4", "10.241.90.1", "10.241.90.2", 19004, 19004, bytes(1200), "ar0"),
+            (layout(), "relay4", "10.241.90.1", "10.241.90.2", 19004, 19004, payload, "ar2"),
+        ):
+            self.assertEqual(classify(current, node, source, destination, sport=sport, dport=dport,
+                                     payload=body, iface=iface).get("forbidden_packets"), 1)
+
     def test_wireguard_mtu_clamped_data_is_legal_but_not_arbitrary_or_oversized_udp(self):
         current = layout()
         # Linux pads only up to MTU1420: 1420 plaintext +32 authenticated overhead =1452.

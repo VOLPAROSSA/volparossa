@@ -25,7 +25,7 @@ def fixture(control_node="relay1"):
                     origin_authenticated=False, origin_body_bytes=0, origin_range_requests=0)
     publication, output = {}, {name: True for name in CHECK["ISOLATION"]}
     for label, field, size, chunks, digest in (("p", "foreground", CHECK["P_BYTES"], 3, CHECK["P_SHA"]),
-                                              ("q", "reserve", CHECK["Q_BYTES"], 2, CHECK["Q_SHA"])):
+                                              ("q", "reserve", CHECK["Q_BYTES"], 3, CHECK["Q_SHA"])):
         publication[field] = dict(label=label, bytes=size, chunks=chunks, seeded_cache_bytes=size,
             seeded_cache_entries=chunks, object_sha256=digest, publisher_hex="b" * 64,
             manifest_id=("d" if label == "p" else "e") * 64,
@@ -34,11 +34,11 @@ def fixture(control_node="relay1"):
     publication.update(publisher_removed=True, publisher_private_key_persisted=False, replicator_seeded=False)
     before = dict(serving=True, replication_enabled=True, replica_chunks=0, replica_bytes=0,
                   replica_publications=0, publications=1, control_relay_peer_id=peers[control_node])
-    after = dict(before, replica_chunks=2, replica_bytes=CHECK["Q_BYTES"], replica_publications=1, publications=2)
+    after = dict(before, replica_chunks=3, replica_bytes=CHECK["Q_BYTES"], replica_publications=1, publications=2)
     evidence = dict(success=True, publication=publication, output=output, expected_peers=peers,
         warm_fetch=fetch(CHECK["P_BYTES"], 3, "relay5"),
         foreground_fetch=fetch(CHECK["P_BYTES"], 3, "relay5"),
-        final_fetch=fetch(CHECK["Q_BYTES"], 2, "relay4"), before=before, after=after,
+        final_fetch=fetch(CHECK["Q_BYTES"], 3, "relay4"), before=before, after=after,
         origin_stop=dict(serving=False, publications=0), replica_stop=dict(serving=False, publications=0),
         replica_pause=dict(serving=False, publications=0, replication_enabled=False),
         replica_resume=dict(after),
@@ -46,6 +46,18 @@ def fixture(control_node="relay1"):
                             main_pid=0, listener_absent=True),
         events=dict(replica_chunks_available=1, exit_mptcp_flows_completed=4,
                     replicator_forwarded_discovery=2, consumer_forwarded_discovery=1), phases={})
+    evidence["owner_isolation"] = dict(uid=1000, gid=1000, relay4=41, relay0=42, parent=40)
+    evidence["owner_cleanup"] = dict(complete=True, remaining_processes=0)
+    for label, namespace, process in (("source", 41, 101), ("sink", 42, 102)):
+        evidence["owner_" + label] = dict(mode="owner-" + label, complete=True, socket_closed=True,
+            socket_priority=0, packets=2000, bytes=2400000,
+            identity=dict(uid=1000, gid=1000, pid=process, netns=namespace,
+                          cap_eff=0, cap_bnd=0, no_new_privs=True))
+    evidence["owner_source"].update(owner_start_ns=1_000_000_000, owner_end_ns=4_000_000_000,
+        chunks={"0": dict(at_ns=900_000_000, bytes=262144),
+                "1": dict(at_ns=1_300_000_000, bytes=262144),
+                "2": dict(at_ns=4_800_000_000, bytes=123)})
+    evidence["owner_sink"].update(drained=True, first_packet_ns=1_001_000_000, last_packet_ns=3_990_000_000)
     for phase, client, provider, context in (("uptake", "relay4", "relay5", "a" * 32),
                                             ("reserve-fetch", "client", "relay4", "b" * 32)):
         layout = dict(phase=phase, client=dict(node=client, ip=CAPTURE["PUBLIC"][client]),
@@ -77,12 +89,37 @@ def fixture(control_node="relay1"):
             if role in ("exit", "provider"):
                 capture.update(provider_request_packets=50, provider_response_packets=500,
                                provider_response_payload_bytes=CHECK["P_BYTES"] + CHECK["Q_BYTES"])
+                capture["provider_payload_timeline"] = [dict(at_ns=800_000_000, flow=0, bytes=262900),
+                    dict(at_ns=1_250_000_000, flow=0, bytes=262900),
+                    dict(at_ns=4_500_000_000, flow=0, bytes=700)] if phase == "uptake" else []
+            if phase == "uptake" and role == "receiver":
+                capture.update(owner_fixture_packets=2000, owner_fixture_payload_bytes=2400000)
             captures[role] = capture
         evidence["phases"][phase] = dict(layout=layout, route=route, captures=captures)
     return evidence
 
 
 class ReplicationEvidence(unittest.TestCase):
+    def test_real_owner_evidence_requires_same_flow_pause_resume_not_a_new_job_or_no_load(self):
+        CHECK["validate_contention"](fixture())
+        for mutate in (
+            lambda value: value["owner_sink"].update(bytes=0),
+            lambda value: value["owner_source"].update(owner_end_ns=2_000_000_000),
+            lambda value: value["owner_source"]["chunks"]["2"].update(at_ns=2_000_000_000),
+            lambda value: value["owner_source"]["chunks"]["2"].update(at_ns=20_000_000_000),
+            lambda value: value["owner_source"]["identity"].update(cap_eff=1),
+            lambda value: value["owner_source"]["identity"].update(netns=40),
+            lambda value: value["owner_cleanup"].update(remaining_processes=1),
+            lambda value: value["phases"]["uptake"]["captures"]["receiver"].update(owner_fixture_payload_bytes=0),
+            lambda value: value["phases"]["uptake"]["captures"]["provider"]["provider_payload_timeline"][2].update(flow=1),
+            lambda value: value["phases"]["uptake"]["captures"]["exit"]["provider_payload_timeline"][1].update(bytes=524288),
+            lambda value: value["phases"]["uptake"]["captures"]["provider"]["provider_payload_timeline"][1].update(at_ns=3_500_000_000),
+        ):
+            evidence = fixture()
+            mutate(evidence)
+            with self.assertRaises(ValueError):
+                CHECK["validate_contention"](evidence)
+
     def test_finalizers_stream_large_evidence_and_preserve_failed_raw_inputs(self):
         # Exercise the real shell finalizers and their real validators with synthetic data.
         # This is an argv/copy regression only, never evidence of an actual network transfer.

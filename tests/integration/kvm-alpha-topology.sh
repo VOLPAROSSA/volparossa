@@ -1190,6 +1190,9 @@ cleanup() {
     if [ "$scenario" = content-message ]; then
         content_network_private_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-replication ] && command -v content_replication_cleanup >/dev/null 2>&1; then
+        content_replication_cleanup || original_status=1
+    fi
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi

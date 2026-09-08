@@ -2,16 +2,24 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Exact-source P/Q uptake, explicit reopen and re-serving; not general spare-capacity proof."""
 
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import runpy
+import select
+import signal
+import socket
+import stat
+import struct
 import sys
+import time
 
 CAPTURE = runpy.run_path(str(Path(__file__).with_name("content-replication-capture.py")))
-P_BYTES, Q_BYTES = 524609, 262267
+P_BYTES, Q_BYTES = 524609, 524411
 P_SHA = "507a1f72e20863b91dbd92265ad6d58499cc16fab5a9d753676c56bbe87cb836"
-Q_SHA = "b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d"
+Q_SHA = "22da54d461a4bfef4e32682d16db4771dd1a810e032aebbc669618259601326a"
 ROLES = ("receiver", "relay-a", "relay-b", "exit", "provider")
 RELAY_NODES = {"relay0", "relay1", "relay2"}
 PHYSICAL_INTERFACES = {
@@ -41,6 +49,152 @@ def read(path):
         data = source.read(2 * 1024 * 1024 + 1)
     require(len(data) <= 2 * 1024 * 1024, "oversized evidence")
     return json.loads(data)
+
+
+def owner_process(mode, work, cache, run_id):
+    """Disposable capless owner traffic and metadata-only observation, not a product API."""
+    status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines()
+                  if ":" in line)
+    require(os.getuid() != 0 and int(status["CapEff"].strip(), 16) == 0
+            and int(status["CapBnd"].strip(), 16) == 0 and status["NoNewPrivs"].strip() == "1",
+            "owner process must run unprivileged and capless")
+    identity = dict(uid=os.getuid(), gid=os.getgid(), pid=os.getpid(),
+                    netns=os.stat("/proc/self/ns/net").st_ino, cap_eff=0, cap_bnd=0, no_new_privs=True)
+    packet_prefix = b"VPC04OWN" + hashlib.sha256(run_id.encode("ascii")).digest()[:16]
+    record = dict(mode=mode, complete=False, identity=identity, packets=0, bytes=0)
+    running = True
+
+    def stop(*_args):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    deadline = time.monotonic() + 45
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as transport:
+        source = mode == "owner-source"
+        transport.bind(("10.241.90.1" if source else "10.241.90.2", 19004))
+        transport.setblocking(False)
+        record["socket_priority"] = transport.getsockopt(socket.SOL_SOCKET, socket.SO_PRIORITY)
+        require(record["socket_priority"] == 0, "owner socket must not use contribution priority")
+        (work / "content-replication-owner" / f"{mode}.ready").write_text("ready\n")
+        try:
+            if source:
+                # Only fixture-known names and sizes are observed, never cache payload/key reads.
+                expected = [(hashlib.sha256(bytes([value]) * length).hexdigest(), length)
+                            for value, length in ((ord("q"), 262144), (ord("r"), 262144), (ord("s"), 123))]
+                observed = {}
+
+                def observe():
+                    for index, (name, length) in enumerate(expected):
+                        if str(index) in observed:
+                            continue
+                        try:
+                            metadata = (cache / name).lstat()
+                        except FileNotFoundError:
+                            continue
+                        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()
+                                and metadata.st_nlink == 1 and metadata.st_size == length,
+                                "unexpected fixture cache entry")
+                        observed[str(index)] = dict(at_ns=time.monotonic_ns(), bytes=length)
+
+                while running and not observed and time.monotonic() < deadline:
+                    observe()
+                    time.sleep(0.002)
+                require(running and "0" in observed and "2" not in observed,
+                        "remaining replica credit opportunity not observed")
+                record["chunks"] = observed
+                record["owner_start_ns"] = time.monotonic_ns()
+                until = time.monotonic() + 3
+                while running and time.monotonic() < until:
+                    packet = packet_prefix + struct.pack("!Q", record["packets"]) + bytes(1168)
+                    require(transport.sendto(packet, ("10.241.90.2", 19004)) == 1200, "owner send truncated")
+                    record["packets"] += 1
+                    record["bytes"] += len(packet)
+                    observe()
+                    # Fixture offered load only: never delay or alter the product stream.
+                    time.sleep(0.00125)
+                record["owner_end_ns"] = time.monotonic_ns()
+                while running and len(observed) != 3 and time.monotonic() < deadline:
+                    observe()
+                    time.sleep(0.002)
+                require(running and len(observed) == 3, "same-session replica resume missing")
+                record["complete"] = True
+            else:
+                transport.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+                while time.monotonic() < deadline:
+                    readable, _, _ = select.select([transport], [], [], 0.05 if running else 0)
+                    if not readable:
+                        if not running:
+                            record.update(complete=True, drained=True)
+                            break
+                        continue
+                    packet, peer = transport.recvfrom(1201)
+                    require(peer == ("10.241.90.1", 19004) and len(packet) == 1200
+                            and packet[:24] == packet_prefix and packet[32:] == bytes(1168)
+                            and struct.unpack("!Q", packet[24:32])[0] == record["packets"],
+                            "owner payload/source/order mismatch")
+                    at = time.monotonic_ns()
+                    record.setdefault("first_packet_ns", at)
+                    record["last_packet_ns"] = at
+                    record["packets"] += 1
+                    record["bytes"] += len(packet)
+                require(record["complete"], "owner receiver was not stopped and drained")
+        finally:
+            transport.close()
+            record["socket_closed"] = True
+            # stdout is an already-open root-owned report file; no writable agent state is shared.
+            print(json.dumps(record, sort_keys=True), flush=True)
+
+
+def validate_contention(evidence):
+    source, sink = evidence["owner_source"], evidence["owner_sink"]
+    isolation = evidence["owner_isolation"]
+    for item, node in ((source, "relay4"), (sink, "relay0")):
+        require(item["complete"] is True and item["socket_closed"] is True
+                and item["socket_priority"] == 0 and item["identity"]["cap_eff"] == item["identity"]["cap_bnd"] == 0
+                and item["identity"]["no_new_privs"] is True
+                and item["identity"]["uid"] == isolation["uid"] != 0
+                and item["identity"]["gid"] == isolation["gid"]
+                and item["identity"]["netns"] == isolation[node] != isolation["parent"],
+                "owner traffic was not capless in the exact disposable namespace")
+    require(source["identity"]["netns"] != sink["identity"]["netns"]
+            and source["identity"]["pid"] != sink["identity"]["pid"] and sink["drained"] is True
+            and source["packets"] == sink["packets"] >= 1000
+            and source["bytes"] == sink["bytes"] == source["packets"] * 1200,
+            "independent owner payload or full drain missing")
+    start, end, chunks = source["owner_start_ns"], source["owner_end_ns"], source["chunks"]
+    require(3_000_000_000 <= end - start < 4_000_000_000
+            and sink["last_packet_ns"] - sink["first_packet_ns"] >= 2_500_000_000
+            and set(chunks) == {"0", "1", "2"}
+            and [chunks[str(index)]["bytes"] for index in range(3)] == [262144, 262144, 123]
+            and chunks["0"]["at_ns"] <= start < chunks["2"]["at_ns"]
+            and end < chunks["2"]["at_ns"] < chunks["0"]["at_ns"] + 15_000_000_000
+            and source["bytes"] * 8 * 1_000_000_000 / (end - start) > 2_000_000,
+            "owner load, withheld remaining chunk or bounded actual resume missing")
+    require(evidence["owner_cleanup"] == {"complete": True, "remaining_processes": 0},
+            "owner fixture processes survived cleanup")
+    captures = evidence["phases"]["uptake"]["captures"]
+    require(captures["receiver"]["owner_fixture_payload_bytes"] == source["bytes"],
+            "actual configured ar0 owner traffic not physically observed")
+    for role in ("provider", "exit"):
+        timeline = captures[role]["provider_payload_timeline"]
+        require(0 < len(timeline) <= 4096 and all(set(row) == {"at_ns", "flow", "bytes"}
+                and 0 <= row["flow"] < 16 and row["bytes"] > 0 for row in timeline),
+                "bounded actual provider flow observations missing")
+        # Identify the flow carrying the post-owner Q tail. No new connection may impersonate resume.
+        flows = {row["flow"] for row in timeline}
+        matches = []
+        for flow in flows:
+            rows = [row for row in timeline if row["flow"] == flow]
+            before = sum(row["bytes"] for row in rows if row["at_ns"] <= start)
+            during = [row for row in rows if start < row["at_ns"] < end]
+            after = sum(row["bytes"] for row in rows if end <= row["at_ns"])
+            last_active = max([start, *(row["at_ns"] for row in during)])
+            if before >= 262144 and after >= 123 and end - last_active >= 1_000_000_000 \
+                    and sum(row["bytes"] for row in during) <= 262144 + 16384:
+                matches.append(flow)
+        require(len(matches) == 1, "same provider flow did not yield (one in-flight chunk allowed) and resume")
 
 
 def validate_route(route, peers):
@@ -127,7 +281,7 @@ def validate_evidence(evidence):
     require(seed["publisher_removed"] is True and seed["publisher_private_key_persisted"] is False
             and seed["replicator_seeded"] is False, "initial publisher/replicator isolation missing")
     for label, field, size, chunks, digest in (("p", "foreground", P_BYTES, 3, P_SHA),
-                                              ("q", "reserve", Q_BYTES, 2, Q_SHA)):
+                                              ("q", "reserve", Q_BYTES, 3, Q_SHA)):
         item = seed[field]
         require(item["label"] == label and item["bytes"] == item["seeded_cache_bytes"] == size
                 and item["chunks"] == item["seeded_cache_entries"] == chunks
@@ -144,12 +298,12 @@ def validate_evidence(evidence):
             "fixture identities are not independent")
     validate_fetch(evidence["warm_fetch"], P_BYTES, 3, peers["relay5"], control)
     validate_fetch(evidence["foreground_fetch"], P_BYTES, 3, peers["relay5"], control)
-    validate_fetch(evidence["final_fetch"], Q_BYTES, 2, peers["relay4"], control)
+    validate_fetch(evidence["final_fetch"], Q_BYTES, 3, peers["relay4"], control)
     before, after = evidence["before"], evidence["after"]
     require(before["serving"] is True and before["replication_enabled"] is True
             and before["replica_chunks"] == before["replica_bytes"] == before["replica_publications"] == 0
             and after["serving"] is True and after["replication_enabled"] is True
-            and after["replica_chunks"] == 2 and after["replica_bytes"] == Q_BYTES
+            and after["replica_chunks"] == 3 and after["replica_bytes"] == Q_BYTES
             and after["replica_publications"] == 1 and after["publications"] == 2
             and before["control_relay_peer_id"] == after["control_relay_peer_id"]
             == evidence["foreground_fetch"]["control_relay_peer_id"],
@@ -161,7 +315,7 @@ def validate_evidence(evidence):
     require(evidence["replica_pause"]["replication_enabled"] is False
             and resumed["serving"] is True and resumed["replication_enabled"] is True
             and resumed["publications"] == 2 and resumed["replica_publications"] == 1
-            and resumed["replica_chunks"] == 2 and resumed["replica_bytes"] == Q_BYTES,
+            and resumed["replica_chunks"] == 3 and resumed["replica_bytes"] == Q_BYTES,
             "explicitly recreated service did not restore original Q registration and chunks")
     require(evidence["origin_offline"] == dict(unit="volparossa-alpha-agent@relay5.service",
             active_state="inactive", main_pid=0, listener_absent=True),
@@ -180,6 +334,7 @@ def validate_evidence(evidence):
     require(events["replica_chunks_available"] >= 1 and events["exit_mptcp_flows_completed"] >= 4
             and events["replicator_forwarded_discovery"] >= 2 and events["consumer_forwarded_discovery"] >= 1,
             "native replica registration, genuine MPTCP completion or forwarded discovery missing")
+    validate_contention(evidence)
 
 
 def build_evidence(work):
@@ -187,7 +342,9 @@ def build_evidence(work):
                "foreground_fetch": "foreground-fetch", "final_fetch": "final-fetch",
                "before": "before", "after": "after", "origin_stop": "origin-stop",
                "origin_offline": "origin-offline", "replica_stop": "replica-stop",
-               "replica_pause": "replica-pause", "replica_resume": "replica-resume"}
+               "replica_pause": "replica-pause", "replica_resume": "replica-resume",
+               "owner_source": "owner-source", "owner_sink": "owner-sink",
+               "owner_isolation": "owner-isolation", "owner_cleanup": "owner-cleanup"}
     evidence = {key: read(work / f"content-replication-{suffix}.json") for key, suffix in mapping.items()}
     evidence.update(success=True, expected_peers=read(work / "a01-expected-peers.json"), phases={})
     for phase, route in (("uptake", "uptake"), ("reserve-fetch", "final")):
@@ -225,6 +382,9 @@ def validate_report(report, revision):
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 5 and sys.argv[1] in ("owner-source", "owner-sink"):
+            owner_process(sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+            raise SystemExit(0)
         if len(sys.argv) != 4:
             raise ValueError("usage: evidence WORK OUTPUT | report REPORT REVISION")
         if sys.argv[1] == "evidence":

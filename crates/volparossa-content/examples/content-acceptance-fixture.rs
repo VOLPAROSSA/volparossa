@@ -187,7 +187,8 @@ fn seed_replication(root: &Path, foreground: &Path, reserve: &Path) -> Result<()
     let mut publications = Vec::new();
     for (label, path, full_chunks, first_byte, tail) in [
         ("p", foreground, 2, b'1', 321),
-        ("q", reserve, 1, b'q', 123),
+        // Three chunks leave a resume opportunity after one already-issued credit.
+        ("q", reserve, 2, b'q', 123),
     ] {
         let mut bytes = Vec::with_capacity(full_chunks * CHUNK_BYTES + tail);
         for offset in 0..full_chunks {
@@ -491,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             q["object_sha256"],
-            "b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d"
+            "22da54d461a4bfef4e32682d16db4771dd1a810e032aebbc669618259601326a"
         );
         assert_eq!(p["publisher_hex"], q["publisher_hex"]);
         assert_ne!(p["manifest_id"], q["manifest_id"]);
@@ -500,7 +501,7 @@ mod tests {
             ChunkStore::open(&reserve, limits())?,
         ];
         for (index, label, report, length, chunks) in
-            [(0, "p", &p, 524_609, 3), (1, "q", &q, 262_267, 2)]
+            [(0, "p", &p, 524_609, 3), (1, "q", &q, 524_411, 3)]
         {
             assert_eq!(report["publisher_removed"], true);
             assert_eq!(report["publisher_private_key_persisted"], false);

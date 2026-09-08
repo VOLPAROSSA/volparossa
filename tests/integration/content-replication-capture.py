@@ -33,6 +33,7 @@ COUNTERS = (
     "control_packets", "control_port_unreachable_packets", "mdns_packets", "neighbor_packets", "ipv4_frames", "ipv6_frames",
     "forbidden_packets", "direct_client_exit_packets", "direct_provider_packets",
     "malformed_packets",
+    "owner_fixture_packets", "owner_fixture_payload_bytes",
 )
 # Fixed labels only: no packet-derived address, port, type number or payload is persisted.
 PROTOCOL_LABELS = {socket.IPPROTO_TCP: "tcp", socket.IPPROTO_UDP: "udp",
@@ -177,6 +178,13 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
                 and sport != 0 and dport == 5353:
             return {"mdns_packets": 1, "control_packets": 1}
         return {"forbidden_packets": 1}
+    # Only this uptake fixture's independent local owner socket; never an Exit/provider
+    # bypass. The exact bound tuple, interface, payload shape and phase are mandatory.
+    if layout["phase"] == "uptake" and protocol == socket.IPPROTO_UDP \
+            and (node, iface) in (("relay4", "ar0"), ("relay0", "r0a")) \
+            and (src, sport, dst, dport) == ("10.241.90.1", 19004, "10.241.90.2", 19004) \
+            and len(payload) == 1200 and payload[:8] == b"VPC04OWN":
+        return {"owner_fixture_packets": 1, "owner_fixture_payload_bytes": len(payload)}
     if protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
             and src in CONTROL_PEERS and dst in CONTROL_PEERS and src != dst:
         return {"control_packets": 1}
@@ -380,6 +388,8 @@ def capture(layout, output, ready, role, interfaces):
         for leg in ("client_leg", "exit_leg"):
             record[f"{relay}_{leg}_wireguard_data_datagrams"] = 0
     sockets = {}
+    provider_flows = {}
+    record["provider_payload_timeline"] = []
     running = True
 
     def stop(*_args):
@@ -404,6 +414,16 @@ def capture(layout, output, ready, role, interfaces):
             else:
                 record[f"ipv{packet[0]}_frames"] += 1
                 updates = classify(layout, role, *packet[1:], sockets[observer])
+                if layout["phase"] == "uptake" and updates.get("provider_response_payload_bytes", 0):
+                    flow = packet[2:6]
+                    provider_flows.setdefault(flow, len(provider_flows))
+                    timeline = record["provider_payload_timeline"]
+                    if len(provider_flows) > 16 or len(timeline) >= 4096:
+                        record["truncated"] = True
+                    else:
+                        # No addresses, TCP sequence numbers, or body bytes are retained.
+                        timeline.append(dict(at_ns=time.monotonic_ns(), flow=provider_flows[flow],
+                                             bytes=updates["provider_response_payload_bytes"]))
         except ValueError:
             updates = {"malformed_packets": 1, "forbidden_packets": 1}
         record["interface_statistics"][sockets[observer]]["forbidden_packets"] += updates.get(
