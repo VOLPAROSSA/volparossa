@@ -311,13 +311,25 @@ The [independent-index follow-up on `3357169e`](https://github.com/VOLPAROSSA/vo
 also passes: freshly revalidated recent peers deliver the complete object using their different
 original indexes, with no origin body. Lookup replies arrive in 42/64 ms; the complete peer
 operation takes 4.91 seconds versus 2.54 seconds origin-only, so no latency win is claimed.
-The next source-selection integration overlaps both index requests and includes their measured
-cost in automatic admission. A separate fixed-bandwidth comparison remains pending; it does
-not replace the earlier fast-origin results.
+Source selection now overlaps both index requests and includes their measured cost in automatic
+admission. The [fixed 4-Mbps-origin run on `2769761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34223916952)
+completed an actual automatic peer hit: 4.09 seconds for the full command versus 6.31 seconds
+origin-only, with zero origin body. The workflow **failed in its evidence checker**, not during
+those downloads; rechecking the retained HTTPS evidence with two narrow checker corrections
+passes. A complete corrected workflow remains pending. This one constrained-uplink sample does
+not replace the earlier faster-origin results or promise a general speedup.
 See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
 There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
 all existing websites can be transparently cached. The proposal is the design reference;
 [implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
+
+Native and named cache downloads now use adaptive worker counts instead of a fixed pair. They
+start with at most two useful candidates and may add providers for missing content or measured
+aggregate benefit, within current memory/descriptor headroom. Resource pressure stops expansion
+and drains surplus streams at chunk boundaries. This first connection-management integration
+does not remove the separate control-peer, Wi-Fi-neighbor or native transport limits. HTTPS
+automatic source plans still select at most two providers; real three-provider protected-network
+verification and broader adaptive connection management remain in progress.
 
 `content browser-download` uses the same cooperative-origin authentication and protected retrieval,
 then prints a short-lived, single-use localhost download URL. Open that URL directly in the

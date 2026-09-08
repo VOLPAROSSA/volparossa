@@ -1,9 +1,17 @@
-//! Up to two protected provider streams, with one bounded independently verified cache writer.
+//! Resource-leased protected provider streams and one independently verified cache writer.
 
-use std::{collections::BTreeSet, future::Future, time::Duration};
+use std::{
+    collections::BTreeSet,
+    future::Future,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use tokio::time::{Instant, timeout_at};
 
+#[cfg(test)]
+mod adaptive_tests;
+mod drivers;
 #[cfg(test)]
 mod tests;
 
@@ -56,7 +64,7 @@ pub(super) async fn pull(
 }
 
 /// A source-selection budget, not a new transfer protocol or a renewed operation deadline.
-/// Verified writer progress survives the deadline; both workers end before origin can start.
+/// Verified writer progress survives the deadline; all workers end before origin can start.
 pub(super) async fn pull_with_budget(
     context: &ControlContext,
     manifest: &VerifiedManifest,
@@ -126,137 +134,130 @@ async fn pull_inner(
         return Err(ContentError::Invalid);
     }
     let mut seen = BTreeSet::new();
-    let mut providers = providers
+    let providers = providers
         .into_iter()
-        .filter(|source| seen.insert(source.provider.peer_id));
-    let mut used = BTreeSet::new();
-    let mut bytes = 0_u64;
-    let scope = RecentProviderScope::for_route(context, policy).await;
-    while !complete(manifest, store)? {
-        let mut limits = TransferLimits::default();
-        if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            limits.session_timeout = limits.session_timeout.min(remaining);
-            limits.exchange_timeout = limits.exchange_timeout.min(remaining);
-        }
-        let Some(first) = providers.next() else {
-            break;
-        };
-        let second = providers.next();
-        let (download, [worker_a, worker_b]) =
-            pair_download(manifest, store, &first, second.as_ref(), limits)?;
-        let observed_at = Instant::now();
-        let observed_wall = now();
-        let mut first_elapsed = None;
-        let mut second_elapsed = None;
-        let (progress, timed_out) = Box::pin(receive_pair_until(
-            download,
-            store,
-            measured_peer(
-                peer(context, policy, Some(&first.provider), worker_a),
-                deadline,
-                &mut first_elapsed,
-            ),
-            measured_peer(
-                peer(
-                    context,
-                    policy,
-                    second.as_ref().map(|source| &source.provider),
-                    worker_b,
-                ),
-                deadline,
-                &mut second_elapsed,
-            ),
-            deadline,
-        ))
-        .await?;
-        if timed_out {
-            content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
-        }
-        let same_route = RecentProviderScope::for_route(context, policy).await == scope;
-        let (pair_used, pair_bytes) = record_pair(
-            context,
-            manifest,
-            [Some(first), second],
-            progress,
-            [first_elapsed, second_elapsed],
-            PairMeasurement {
-                scope,
-                observed_at,
-                observed_wall,
-                valid: !timed_out && same_route,
-            },
-        )
-        .await?;
-        used.extend(pair_used);
-        bytes = bytes.checked_add(pair_bytes).ok_or(ContentError::Invalid)?;
+        .filter(|source| seen.insert(source.provider.peer_id))
+        .collect::<Vec<_>>();
+    if providers.is_empty() || complete(manifest, store)? {
+        return Ok((Vec::new(), 0));
     }
-    Ok((used.into_iter().collect(), bytes))
+    let mut limits = TransferLimits::default();
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + limits.session_timeout);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Ok((Vec::new(), 0));
+    }
+    limits.session_timeout = limits.session_timeout.min(remaining);
+    limits.exchange_timeout = limits.exchange_timeout.min(remaining);
+    let budget = &context.content.worker_budget;
+    let allowance = budget.available_workers();
+    if allowance == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let (download, workers) = prepare_download(manifest, store, &providers, limits, allowance)?;
+    let scope = RecentProviderScope::for_route(context, policy).await;
+    let observed_at = Instant::now();
+    let observed_wall = now();
+    let active = AtomicUsize::new(0);
+    let drivers = workers
+        .into_iter()
+        .zip(&providers)
+        .map(|(worker, source)| {
+            drivers::assigned(
+                worker,
+                deadline,
+                &active,
+                || budget.try_acquire(),
+                move |worker| peer(context, policy, &source.provider, worker),
+            )
+        })
+        .collect();
+    let (progress, measurements, timed_out) = Box::pin(receive_workers(
+        download,
+        store,
+        drivers,
+        || budget.allowance(active.load(Ordering::Acquire)),
+        deadline,
+    ))
+    .await?;
+    if timed_out {
+        content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
+    }
+    let same_route = RecentProviderScope::for_route(context, policy).await == scope;
+    record_batch(
+        context,
+        manifest,
+        providers,
+        progress,
+        measurements,
+        BatchMeasurement {
+            scope,
+            observed_at,
+            observed_wall,
+            valid: !timed_out && same_route,
+        },
+    )
+    .await
 }
 
-fn pair_download(
+fn prepare_download(
     manifest: &VerifiedManifest,
     store: &mut ChunkStore,
-    first: &ProviderSource,
-    second: Option<&ProviderSource>,
+    sources: &[ProviderSource],
     limits: TransferLimits,
-) -> Result<(ParallelDownload, [ChunkWorker; 2]), ContentError> {
-    let alternate = second.and_then(|source| source.transport.as_ref());
-    let prepared = if first.transport.is_some() || alternate.is_some() {
-        ParallelDownload::new_with_transport_manifests(
+    allowance: usize,
+) -> Result<(ParallelDownload, Vec<ChunkWorker>), ContentError> {
+    let prepared = if sources.iter().any(|source| source.transport.is_some()) {
+        let transports = sources
+            .iter()
+            .map(|source| source.transport.as_ref().unwrap_or(manifest))
+            .collect::<Vec<_>>();
+        ParallelDownload::new_adaptive_with_transport_manifests(
             manifest,
-            [
-                first.transport.as_ref().unwrap_or(manifest),
-                alternate.unwrap_or(manifest),
-            ],
+            &transports,
             store,
             limits,
+            allowance,
         )
     } else {
         // Ordinary native/named/private transfers retain the original exact-manifest contract.
-        ParallelDownload::new(manifest, store, limits)
+        ParallelDownload::new_adaptive(manifest, sources.len(), store, limits, allowance)
     };
     prepared.map_err(|_| ContentError::Invalid)
 }
 
-struct PairMeasurement {
+struct BatchMeasurement {
     scope: Option<RecentProviderScope>,
     observed_at: Instant,
     observed_wall: u64,
     valid: bool,
 }
 
-async fn record_pair(
+async fn record_batch(
     context: &ControlContext,
     manifest: &VerifiedManifest,
-    sources: [Option<ProviderSource>; 2],
-    progress: [TransferProgress; 2],
-    elapsed: [Option<Duration>; 2],
-    sample: PairMeasurement,
+    sources: Vec<ProviderSource>,
+    progress: Vec<TransferProgress>,
+    measurements: Vec<drivers::Measurement>,
+    sample: BatchMeasurement,
 ) -> Result<(Vec<String>, u64), ContentError> {
     let mut used = Vec::new();
     let mut bytes = 0_u64;
-    for ((source, received), elapsed) in sources.into_iter().zip(progress).zip(elapsed) {
-        let Some(ProviderSource {
+    for ((source, received), measurement) in sources.into_iter().zip(progress).zip(measurements) {
+        let ProviderSource {
             provider,
             transport,
-        }) = source
-        else {
-            continue;
-        };
-        if let Some(scope) = sample.scope {
-            let measurement =
-                elapsed
-                    .filter(|_| received.bytes > 0 && sample.valid)
-                    .map(|elapsed| RecentProviderHint {
-                        peer_id: provider.peer_id,
-                        verified_bytes: received.bytes,
-                        elapsed,
-                        digest_index: None,
-                    });
+        } = source;
+        if let Some(scope) = sample.scope.filter(|_| measurement.attempted) {
+            let measurement = measurement
+                .elapsed
+                .filter(|_| received.bytes > 0 && sample.valid)
+                .map(|elapsed| RecentProviderHint {
+                    peer_id: provider.peer_id,
+                    verified_bytes: received.bytes,
+                    elapsed,
+                    digest_index: None,
+                });
             remember_measurement(
                 context,
                 scope,
@@ -312,6 +313,30 @@ async fn remember_measurement(
     }
 }
 
+async fn receive_workers<F: Future<Output = Result<drivers::Measurement, ContentError>>>(
+    download: ParallelDownload,
+    store: &mut ChunkStore,
+    drivers: Vec<F>,
+    allowance: impl Fn() -> usize,
+    deadline: Instant,
+) -> Result<(Vec<TransferProgress>, Vec<drivers::Measurement>, bool), ContentError> {
+    let mut progress = vec![TransferProgress::default(); drivers.len()];
+    let write = timeout_at(
+        deadline,
+        download.run_with_allowance(store, &mut progress, allowance),
+    );
+    // Every future remains owned here: cancellation drops both writer and stream owners.
+    // A failed peer is collected independently, so verified siblings can still finish.
+    let (written, outcomes) = tokio::join!(write, drivers::collect(drivers));
+    let timed_out = match written {
+        Ok(Ok(())) => false,
+        Ok(Err(TransferError::Timeout)) | Err(_) => true,
+        Ok(Err(_)) => return Err(ContentError::Invalid),
+    } || Instant::now() >= deadline;
+    let measurements = outcomes.into_iter().collect::<Result<Vec<_>, _>>()?;
+    Ok((progress, measurements, timed_out))
+}
+
 /// A transport/close failure cannot cancel a useful sibling or erase bytes the single
 /// writer has already authenticated. Both sessions still end before a fallback begins.
 /// Policy and local integrity/storage failures remain fatal; these are not clean-TLS receipts.
@@ -325,6 +350,7 @@ async fn receive_pair(
     receive_pair_until(download, store, first, second, None).await
 }
 
+#[cfg(test)]
 async fn receive_pair_until(
     download: ParallelDownload,
     store: &mut ChunkStore,
@@ -360,6 +386,7 @@ async fn receive_pair_until(
     Ok((progress, timed_out))
 }
 
+#[cfg(test)]
 async fn measured_peer(
     work: impl Future<Output = Result<bool, ContentError>>,
     deadline: Option<Instant>,
@@ -382,12 +409,9 @@ async fn measured_peer(
 async fn peer(
     context: &ControlContext,
     policy: &volparossa_policy::VerifiedManifest,
-    provider: Option<&DiscoveredContentProvider>,
+    provider: &DiscoveredContentProvider,
     mut worker: ChunkWorker,
 ) -> Result<bool, ContentError> {
-    let Some(provider) = provider else {
-        return Ok(false);
-    };
     // An earlier useful provider may have closed its idle v1 read while its sibling stalled.
     // Reopen at most once, keeping the same assignment, original deadline and byte/request limits.
     for _ in 0..2 {

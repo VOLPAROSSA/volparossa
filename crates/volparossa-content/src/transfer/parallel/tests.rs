@@ -1,5 +1,6 @@
 //! Real production selector/chunk handlers over backpressured streams, not host networking.
 
+mod adaptive;
 mod transports;
 
 use std::{

@@ -38,6 +38,19 @@ CONSUMER_CASES = ("complete", "missing", "baseline", "origin-only", "auto", *DIG
 REPR_DIGEST = "sha-256=:rdByTY2+aEB9VEwkcUEocyopxIgM/zDSg7GtqTYuN2c=:"
 
 
+def read_qdiscs(path):
+    """tc -j emits an array, unlike the surrounding object-shaped evidence."""
+    require(not path.is_symlink(), "symlink qdisc evidence is not accepted")
+    with path.open(encoding="ascii") as source:
+        text = source.read(16385)
+    require(len(text) <= 16384, "qdisc evidence exceeds its bound")
+    value = json.loads(text)
+    require(isinstance(value, list) and 1 <= len(value) <= 16
+            and all(isinstance(row, dict) for row in value),
+            "qdisc evidence must be a bounded array of objects")
+    return value
+
+
 def process_boundary(pid, parent_namespace, client_namespace, uid, gid, control_gid):
     """Inspect real inherited credentials, not successful setpriv exit status alone."""
     status = dict(line.split(":", 1) for line in Path(f"/proc/{pid}/status").read_text().splitlines())
@@ -294,7 +307,9 @@ def validate_path(phase, peers, provider_nodes, missing, origin_only=False, usef
                 and capture["expected_link_down_notifications"] == 0
                 and capture["unexpected_provider_application_packets"] == 0,
                 "physical capture observed unexpected outer or provider traffic")
-        validate_drained(capture)
+        # An unselected relay need not generate background noise. Its sockets must
+        # still cover every expected interface and finish with exact intake counts.
+        validate_drained(capture, allow_empty=role in ROLES[1:4] and role not in nodes)
         require(set(capture["provider_application"]) == set(CANDIDATES),
                 "provider application capture coverage incomplete")
     require(privacy["client"]["direct_client_exit_packets"] == 0
@@ -852,13 +867,13 @@ def build_evidence(work):
     for mode, phase in limited.items():
         prefix = f"content-provider-https-{mode}"
         phase.update(source_events=source_events(work, prefix),
-            qdisc_before=read(work / f"{prefix}-qdisc-before.json"),
-            qdisc_after=read(work / f"{prefix}-qdisc-after.json"))
+            qdisc_before=read_qdiscs(work / f"{prefix}-qdisc-before.json"),
+            qdisc_after=read_qdiscs(work / f"{prefix}-qdisc-after.json"))
     evidence = dict(success=True, cases=cases, source_strategy_cases=strategies,
         origin_digest_cases=digests,
         limited_uplink=dict(cases=limited, comparison=limited_comparison(limited),
             profile=read(work / "content-provider-https-limited-profile.json"),
-            **{"qdisc_" + position: read(work / f"content-provider-https-limited-qdisc-{position}.json")
+            **{"qdisc_" + position: read_qdiscs(work / f"content-provider-https-limited-qdisc-{position}.json")
                for position in ("before", "after", "final")}),
         digest_provider_indexes={key: read(work / f"content-provider-https-index-{suffix}.json")
             for key, suffix in (("publication", "publication"), ("binding", "binding"),

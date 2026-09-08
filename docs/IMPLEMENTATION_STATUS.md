@@ -363,9 +363,8 @@ event follows that check; ordinary native/cooperative prediction remains unchang
 Three final targeted tests and strict agent all-targets/all-features Clippy pass, alongside
 formatting. The additive comparison uses one predefined 4-Mbps disposable origin uplink for
 origin-only calibration/reference, peers-first calibration and a cold automatic download,
-without replacing earlier fast-origin or missing-chunk tests. Actual automatic peer delivery
-and any whole-command latency benefit remain unproved until the next network execution;
-C08 stays open.
+without replacing earlier fast-origin or missing-chunk tests. The first network execution and
+its checker failure are recorded below; C08 stays open.
 
 Thirteen HTTPS and fourteen parent checker tests pass. Shell syntax and targeted ShellCheck
 also pass. One local disposable user/network namespace checks the actual iproute2 schema and
@@ -376,6 +375,66 @@ Its separate `benefit_passed` field is calculated only from the complete command
 a slower automatic sample remains false. The limiter is removed before the earlier fast-origin
 tests and through the existing failure cleanup. The origin's original 31-connection cap stays
 unchanged; four additional raw records are explicitly accounted.
+
+The [exact `2769761c` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34223916952)
+**fails** in HTTPS evidence finalization: the object-only JSON reader receives the actual
+`tc -j` qdisc array. A subsequent in-memory diagnosis also finds an empty, unselected R0 capture
+being required to contain traffic. Both issues are checker-only: the correction accepts bounded
+qdisc arrays only at that seam and allows silence only for the independently verified unselected
+relay. Selected relays, Client/Exit, complete capture intake/accounting and every privacy
+predicate remain mandatory. Fifteen HTTPS checker tests and fourteen parent tests pass.
+
+The original workflow/report remain failed; ordinary publication, named and site phases after
+the finalizer did not run. Its [full Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34223896953)
+passes. Re-evaluating the retained HTTPS raw evidence with these two corrections and exact
+unchanged checker dependencies passes, with SHA-256
+`183ab4f5ebebc35bdfa85f4a5a707236d8690a8bcc504802cbe8de40c2570044`.
+The actual automatic source event and receipt show both independent providers, all 2,097,275
+peer bytes and zero origin body after fresh HEAD authorization. Complete command durations are
+**6.307903196 seconds** origin-only, **4.164107493 seconds** peers-first and **4.092074725 seconds**
+automatic, within one 17.223931781-second window. Thus this single constrained-uplink sample is
+about 1.54 times faster via automatic peers; it is not a general speed or owner-fairness claim.
+
+The fixed qdisc options remain unchanged throughout and cleanup restores `noqueue`. All 65
+captures / 306 interface rows are complete with exact socket accounting and zero drops or
+forbidden/direct traffic; 119,564 summed boundary frames are not unique packets. Cleanup leaves
+zero owned objects and equal guest-state SHA-256
+`eb70cea1c179e32b54fa29d85c9fd0366a3f25377573255fdb30d50af0847b3d`.
+Artifact ZIP SHA-256: `9328af15ced2ea4a84f82d5232cb6a4b162229cd1407ceb68b977d178701d2bc`.
+No full corrected-source VM pass or expanded-alpha completion is claimed.
+
+### Adaptive cache-worker integration
+
+Native/named downloads now pass their bounded candidate batch to a dynamically sized coordinator,
+with one writer and per-provider attempt sets rather than a two-element array/eight-bit mask.
+At most two start; dormant candidates own no stream. Every later assignment first acquires a
+shared RAM/descriptor resource lease, then opens the unchanged protected route/TLS/provider
+protocol. All futures stay joined under the original deadline, with no detached tasks or duplicate
+in-flight chunk requests. Each provider retains its exact original transport index and authority.
+
+The controller can add a probe for useful missing content or observed aggregate throughput.
+Further rate-based growth requires at least ten percent gain in verified bytes per monotone
+wall time across a complete contributing batch, not a sum of overlapping per-peer rates.
+Unhelpful probes finish and stop further throughput growth. Pressure drains surplus streams
+after current responses, preserving at most one per existing download and blocking new shared
+admission while any worker remains. It does not promise globally evicting every stream but one.
+RAM/descriptor resource leases are global to the content runtime, derived
+from read-only RAM/cgroup/descriptor headroom; unavailable pressure data does not imply idle
+capacity. This is advisory accounting, not a kernel reservation or universal owner-speed promise.
+
+The final targeted core filter passes three tests, including six actual v1-stream adaptive
+variants: complementary three-provider delivery, failed stream, one/zero resource slots, a
+tenth provider, and active three-to-one pressure draining with continued bytes/full reconstruction.
+Strict content Clippy passes. Four targeted agent tests pass, including the actual assignment/
+lease driver opening three of four candidates, twelve verified chunks/full hash, all leases
+released, and a last-moment resource refusal opening no stream. Three resource-accounting tests
+and strict agent all-targets/all-features Clippy pass. These use backpressured duplex streams
+and deterministic resource samples, not physical network or operating-system pressure measurements.
+
+The actual three-provider protected-network proof remains pending. Existing HTTPS source plans
+still select pairs; sixteen is still the bounded discovery-message input, not an adaptive active
+target. Control peers, local/Wi-Fi neighbors and native MPTCP/MPQUIC backend ceilings have not
+been generalized. This is the first connection-management slice, not the entire user requirement.
 
 ### Native publication/site cache-only reopen
 
@@ -2156,6 +2215,15 @@ route-specific privacy/policy enforcement and disposable-network cleanup remain 
 requirements, never labels that can be satisfied by mocks or configuration alone.
 
 ## Direct-link network extension (agreed 2026-09-05)
+
+Additional user requirement (2026-09-08): replace arbitrary fixed product limits on the number
+of direct/Internet peer connections with adaptive connection management. Retain additional
+connections when measured throughput, capacity, stability or useful cache reach improves;
+retire unhelpful connections and scale back under owner demand or resource pressure. This
+applies to connection policy, not unbounded allocation or permission to exceed a transport's
+actual protocol/backend capacity. Control peers, local neighbors, active route paths and cache
+workers need separate accounting. The first adaptive cache-worker implementation is described
+above; control, local-neighbor and transport limits have **not** yet been generalized.
 
 The functional-development target now includes direct Ethernet and Wi-Fi peer links alongside
 Internet underlays, Internet access for a node without its own uplink through reachable

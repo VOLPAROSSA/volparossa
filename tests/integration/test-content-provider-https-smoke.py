@@ -261,6 +261,58 @@ def changed(evidence, path, value):
 
 
 class ProviderHttpsEvidence(unittest.TestCase):
+    def test_qdisc_file_reader_preserves_real_tc_array_and_rejects_unbounded_or_wrong_types(self):
+        qdiscs = fixture()["limited_uplink"]["cases"]["limited-origin-only"]["qdisc_before"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "qdisc.json"
+            path.write_text(json.dumps(qdiscs), encoding="ascii")
+            self.assertEqual(CHECK["read_qdiscs"](path), qdiscs)
+            # Ordinary evidence remains object-only; only the qdisc seam differs.
+            with self.assertRaises(ValueError):
+                CHECK["read"](path)
+            for value in ({"qdiscs": qdiscs}, None, [], [1], [{}] * 17):
+                path.write_text(json.dumps(value), encoding="ascii")
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    CHECK["read_qdiscs"](path)
+            path.write_text("[{}]" + " " * 16384, encoding="ascii")
+            with self.assertRaises(ValueError):
+                CHECK["read_qdiscs"](path)
+            path.write_text(json.dumps(qdiscs), encoding="ascii")
+            link = Path(directory) / "linked.json"
+            link.symlink_to(path)
+            with self.assertRaises(ValueError):
+                CHECK["read_qdiscs"](link)
+
+    def test_only_exact_unselected_relay_may_be_silent_with_complete_capture_accounting(self):
+        def silence(capture):
+            capture.update(observed_frames=0, client_leg_wireguard_data_datagrams=0,
+                           exit_leg_wireguard_data_datagrams=0)
+            for statistics in capture["interface_statistics"].values():
+                statistics.update(observed_frames=0, packet_socket_packets=0)
+
+        value = fixture()
+        quiet = value["origin_baseline"]["privacy"]["relay2"]
+        silence(quiet)
+        CHECK["validate_evidence"](value)
+        for role in ("client", "exit", "relay0", "relay1"):
+            invalid = copy.deepcopy(value)
+            silence(invalid["origin_baseline"]["privacy"][role])
+            with self.subTest(role=role), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](invalid)
+        for path, wrong in (
+            (("truncated",), True), (("packet_socket_drops",), 1),
+            (("unexpected_outer_packets",), 1), (("internet_destination_outer_packets",), 1),
+            (("interface_statistics", "physical", "intake_stopped"), False),
+            (("interface_statistics", "physical", "packet_socket_packets"), 1),
+            (("interface_statistics", "physical", "packet_socket_drops"), 1),
+            (("interfaces",), []),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, ("origin_baseline", "privacy", "relay2", *path), wrong))
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](changed(value,
+                ("origin_baseline", "selected_route", "benchmark_slots", 1, "relay_node"), "relay2"))
+
     def test_fixed_origin_uplink_requires_actual_auto_hit_and_does_not_invent_latency_benefit(self):
         value = fixture()
         CHECK["validate_evidence"](value)

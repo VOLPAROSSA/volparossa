@@ -759,7 +759,34 @@ measurements must also have a fresh successful digest-index measurement; missing
 prefer the origin. Admission includes that fixed setup cost and is checked again after the
 actual index round, using only the selected peers and the original remaining deadline. These
 RAM-only costs expire within sixty seconds and do not renew offers or establish content trust.
-The new cost-aware automatic-hit/bandwidth comparison is pending, not a speed guarantee.
+The fixed 4-Mbps-origin comparison on `2769761c` completed a genuine automatic hit with two
+providers and zero origin body: 4.092074725 seconds for the full command versus 6.307903196
+seconds origin-only. That workflow failed in the checker; retained HTTPS raw evidence passes
+with the subsequent qdisc-array and silent-unselected-relay corrections. A new complete workflow
+remains pending. This is one bounded comparison, not a general speed guarantee.
+
+### Adaptive foreground cache workers
+
+Native and named retrieval now pass their bounded signed-provider batch to one adaptive writer,
+instead of opening a fixed pair. Dormant candidates open no sockets. A real missing-chunk
+assignment and a shared resource lease must precede protected route/TLS setup. Initially at most
+two workers run; further workers need unfilled chunks plus useful missing coverage or a measured
+aggregate-throughput probe. An unhelpful probe is closed and further throughput growth stops.
+An in-flight chunk is never duplicated. Original provider identity, manifest, expiry and operation
+deadline remain unchanged, and all worker futures/flows finish or drop before origin fallback.
+
+The advisory shared allowance derives from read-only available RAM (including cgroup limits)
+and process file-descriptor headroom, reserving conservative 8-MiB/eight-descriptor worker units
+within 1/32 of available RAM and one quarter of free descriptors. These are resource
+budgets, not a new maximum peer count. CPU, memory or I/O pressure drains each existing download
+to at most one stream at chunk boundaries and blocks extra shared admission while any worker
+remains. This preserves existing foreground progress; it is not a one-stream global eviction
+policy. The actual RAM/descriptor limit remains global. Missing pressure telemetry prevents
+expansion; unknown RAM/descriptor capacity refuses new workers. No host settings are changed.
+This is not a kernel memory reservation, measured radio fairness or an owner-goodput guarantee.
+HTTPS source-selection plans still use pairs, and the current signed discovery input is bounded
+to sixteen candidates. Control peers, local neighbors and native transport path limits are
+separate unfinished adaptive integrations, not silently unlimited connections.
 
 ### Automatic public-content contribution
 

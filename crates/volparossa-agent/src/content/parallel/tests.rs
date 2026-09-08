@@ -144,7 +144,7 @@ async fn transfer(missing_last: bool, policy_failure: bool) {
     });
     let mut first_elapsed = None;
     let mut second_elapsed = None;
-    let result = receive_pair(
+    let result = Box::pin(receive_pair(
         download,
         &mut cache,
         measured_peer(
@@ -175,7 +175,7 @@ async fn transfer(missing_last: bool, policy_failure: bool) {
             None,
             &mut second_elapsed,
         ),
-    )
+    ))
     .await;
     assert!(server_a.await.unwrap().is_err());
     let sent_b = server_b

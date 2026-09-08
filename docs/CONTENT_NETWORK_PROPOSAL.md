@@ -404,8 +404,12 @@ The next automatic-selection implementation also accounts for the separately mea
 index flows. Two lookups overlap under the original deadline; successful complete delivery may
 attach their short-lived cost to the exact useful provider hints without creating new hints or
 renewing validity. Automatic admission requires this measurement and rechecks remaining payload
-cost after the actual index round. A new fixed 4-Mbps origin-uplink comparison is separate from
-the existing fast-origin trials; its network outcome and any measured benefit remain pending.
+cost after the actual index round. The fixed 4-Mbps origin-uplink comparison on `2769761c`
+completes a genuine automatic two-provider hit: 4.092 seconds versus 6.308 seconds origin-only
+for complete commands, with zero origin body. Its workflow fails at two checker-shape/accounting
+errors; the retained HTTPS raw evidence passes after those narrow corrections. Later phases
+were not reached, so this is not a full workflow pass. The single bounded benefit does not
+replace the earlier fast-origin trials or complete C08.
 
 ### Bounded post-download redistribution
 
@@ -415,8 +419,8 @@ expiry and chunk hashes. A storage-only replica checks signature self-consistenc
 it does **not** establish a trusted publisher, web origin or recipient. A later consumer still
 supplies independent native authority or obtains its own origin-authenticated HTTPS descriptor.
 
-Foreground native, named and cooperative-HTTPS downloads now use at most two concurrent provider
-streams. A production-protocol test over backpressured streams proves overlapping progress,
+The earlier foreground implementation used at most two concurrent provider streams.
+A production-protocol test over backpressured streams proves overlapping progress,
 exclusive in-flight chunk ownership and bounded reassignment after missing/failed chunks;
 reconnection does not reset the original deadline or request budget. Focused tests and strict
 Clippy pass. The [exact `b22a9153` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
@@ -424,6 +428,18 @@ also proves 933,365,936 ns of overlapping provider bulk-payload windows using ke
 timestamps, with exact reconstruction and complete captures/cleanup. This is not measured speedup.
 The later `b0e7c36` correction retains verified partial progress after a failed parallel stream;
 three duplex variants and strict agent Clippy pass locally, without extending that older VM result.
+
+The user's 2026-09-08 adaptive-connection revision is now being applied first to cache workers.
+Native/named retrieval has a dynamically sized coordinator and starts only assigned candidates,
+with one shared resource lease per actual protected stream. Beyond its initial pair, extra
+missing-content coverage or a measured aggregate-throughput probe can justify another worker;
+redistributing a fixed bottleneck among peers is not itself a throughput gain. Unhelpful probes
+stop further growth; memory/descriptor scarcity and system pressure drain surplus streams after
+their current chunk. Original authority, exclusive chunk ownership and the deadline stay intact.
+The core has no replacement two/eight-worker ceiling, but the current discovery message remains
+bounded to sixteen candidates and the HTTPS source planner still selects pairs. This does not
+yet generalize control peers, Wi-Fi neighbors or backend path capacity, nor prove owner fairness
+or three-provider protected-network operation. Those scopes remain separate work.
 
 An explicitly configured agent replica cache can pick up other chunks from a recently used
 provider after a successful foreground download. No new provider discovery or route is created

@@ -14,6 +14,7 @@ mod replication_budget;
 #[cfg(test)]
 mod resume_tests;
 mod tls;
+mod worker_budget;
 
 use replication::ReplicationRuntime;
 use replication_budget::Foreground;
@@ -78,6 +79,7 @@ pub(crate) struct ContentRuntime {
     foreground: Arc<Foreground>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
+    worker_budget: worker_budget::WorkerBudget,
     contribution: Arc<Mutex<Option<Arc<contribution::ContributionRuntime>>>>,
 }
 
@@ -126,6 +128,7 @@ impl ContentRuntime {
             foreground: Arc::new(Foreground::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
+            worker_budget: worker_budget::WorkerBudget::default(),
             contribution: Arc::new(Mutex::new(None)),
         })
     }
