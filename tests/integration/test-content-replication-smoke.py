@@ -96,10 +96,84 @@ def fixture(control_node="relay1"):
                 capture.update(owner_fixture_packets=2000, owner_fixture_payload_bytes=2400000)
             captures[role] = capture
         evidence["phases"][phase] = dict(layout=layout, route=route, captures=captures)
+    cache = dict(device=1, inode=42, uid=987, gid=987, mode=0o700,
+                 journal_sha256="f" * 64, journal_bytes=1024)
+    automatic = dict(config=dict(content_contribution=dict(enabled=True,
+        bind_address="49.165.5.1:18080", advertised_hostname="provider-a.volparossa.test",
+        cache="/fixture/state-relay4/content/automatic-replicas", quota_bytes=67108864,
+        max_entries=256, min_free_bytes=268435456, max_bytes=1048576, max_chunks=4),
+        relay_enabled=True, sharing_enabled=True, download_sharing_enabled=True, cache_initially_absent=True),
+        before=dict(before, publications=0), after=dict(after, publications=1, replica_bytes=CHECK["P_BYTES"]),
+        restored=dict(after, publications=1, replica_bytes=CHECK["P_BYTES"]),
+        foreground_fetch=fetch(CHECK["P_BYTES"], 3, "relay5"),
+        final_fetch=fetch(CHECK["P_BYTES"], 3, "relay4"),
+        origin_stop=dict(serving=False, publications=0), stop=dict(serving=False, publications=0),
+        origin_offline=dict(evidence["origin_offline"]), contribution_events=1,
+        cache_empty=dict(cache, journal_sha256=None, journal_bytes=0),
+        cache_before=dict(cache), cache_after=dict(cache), phases=copy.deepcopy(evidence["phases"]),
+        output=dict(foreground=dict(bytes=CHECK["P_BYTES"], sha256=CHECK["P_SHA"]),
+                    final=dict(bytes=CHECK["P_BYTES"], sha256=CHECK["P_SHA"]),
+                    download_cache_initially_absent=True, consumer_cache_initially_absent=True,
+                    replicator_cannot_read_original_cache=True, consumer_cannot_read_either_cache=True,
+                    manual_serve_used_on_replicator=False, replicator_restarted_after_original_shutdown=True))
+    for name, old, new in (("startup", 100, 101), ("restart", 101, 102)):
+        automatic[name] = dict(unit="volparossa-alpha-agent@relay4.service", active_state="active",
+                               pid_before=old, pid_after=new, network_namespace_identity="4:500",
+                               executable_verified=True)
+    for name, context in (("uptake", "c" * 32), ("reserve-fetch", "d" * 32)):
+        automatic["phases"][name]["route"]["route_context_id"] = context
+        for path in automatic["phases"][name]["route"]["paths"]:
+            path["route_context_id"] = context
+    evidence["automatic_contribution"] = automatic
     return evidence
 
 
 class ReplicationEvidence(unittest.TestCase):
+    def test_automatic_contribution_requires_empty_start_real_restart_journal_and_independent_p(self):
+        CHECK["validate_evidence"](fixture())
+        for mutate in (
+            lambda value: value["config"].update(download_sharing_enabled=False),
+            lambda value: value["config"]["content_contribution"].update(max_chunks=5),
+            lambda value: value["before"].update(publications=1),
+            lambda value: value["after"].update(replica_bytes=0),
+            lambda value: value["restored"].update(replica_publications=0),
+            lambda value: value["restart"].update(pid_after=101),
+            lambda value: value["cache_after"].update(inode=43),
+            lambda value: value["cache_after"].update(journal_sha256="0" * 64),
+            lambda value: value["origin_offline"].update(main_pid=500),
+            lambda value: value["output"].update(manual_serve_used_on_replicator=True),
+            lambda value: value["output"]["final"].update(sha256=CHECK["Q_SHA"]),
+            lambda value: value["final_fetch"].update(provider_peer_ids=["peer-relay5"]),
+            lambda value: value.update(contribution_events=0),
+            lambda value: value["phases"]["reserve-fetch"]["captures"]["provider"].update(forbidden_packets=1),
+        ):
+            evidence = fixture()
+            mutate(evidence["automatic_contribution"])
+            with self.assertRaises(ValueError):
+                CHECK["validate_evidence"](evidence)
+
+    def test_automatic_config_preserves_explicit_roles_and_both_real_sharing_budgets(self):
+        original = ("roles:\n  client: true\n  relay: true\n  exit: false\n"
+                    "sharing:\n  enabled: true\n  interface: ar0\n"
+                    "download_sharing:\n  enabled: true\n  interface: ar2\n")
+        with tempfile.TemporaryDirectory(prefix="volparossa-automatic-config-") as directory:
+            path = Path(directory) / "config-relay4.yaml"
+            path.write_text(original)
+            path.chmod(0o600)
+            result = CHECK["configure_automatic"](path)
+            self.assertTrue(path.read_text().startswith(original))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(result["content_contribution"]["max_chunks"], 4)
+            with self.assertRaises(ValueError):
+                CHECK["configure_automatic"](path)
+            for absent in ("client", "relay", "download_sharing"):
+                text = original.replace(f"  {absent}: true", f"  {absent}: false") if absent != "download_sharing" else \
+                    original.replace("download_sharing:\n  enabled: true", "download_sharing:\n  enabled: false")
+                path.write_text(text)
+                with self.assertRaises(ValueError):
+                    CHECK["configure_automatic"](path)
+                self.assertEqual(path.read_text(), text)
+
     def test_real_owner_evidence_requires_same_flow_pause_resume_not_a_new_job_or_no_load(self):
         CHECK["validate_contention"](fixture())
         for mutate in (

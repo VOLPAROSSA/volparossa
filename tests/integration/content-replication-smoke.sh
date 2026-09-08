@@ -270,6 +270,7 @@ content_replication_isolation() {
 
 content_replication_capture() {
     cr_phase=$1
+    cr_capture_prefix=${2:-content-replication-$cr_phase}
     if [ "$cr_phase" = uptake ]; then
         cr_client=relay4; cr_client_ip=49.165.5.1; cr_client_ns=$R4
         cr_provider=relay5; cr_provider_ip=50.166.6.1; cr_provider_ns=$R5
@@ -280,6 +281,7 @@ content_replication_capture() {
         cr_provider=relay4; cr_provider_ip=49.165.5.1; cr_provider_ns=$R4
         cr_selection=$WORK/content-replication-final-selection.json
     fi
+    cr_selection=${3:-$cr_selection}
     cr_selected_relays=$(jq -ce '[.benchmark_slots[].relay_node] | sort as $selected |
       {relay0:"42.158.0.1",relay1:"44.160.1.1",relay2:"45.161.2.1"} |
       with_entries(select(.key as $node | $selected | index($node)))' "$cr_selection") || return 1
@@ -290,7 +292,7 @@ content_replication_capture() {
       {phase:$phase,client:{node:$client,ip:$cip},
        relays:$relays,
        exit:{node:"exit",ip:"46.162.3.1"},provider:{node:$provider,ip:$pip}}' \
-        >"$WORK/content-replication-$cr_phase-layout.json"
+        >"$WORK/$cr_capture_prefix-layout.json"
     for cr_role in receiver relay-a relay-b exit provider; do
         case $cr_role in
             receiver) cr_capture_node=$cr_client; cr_capture_ns=$cr_client_ns ;;
@@ -312,10 +314,10 @@ content_replication_capture() {
         # shellcheck disable=SC2086 # Deliberately split strictly filtered interface names.
         ip netns exec "$cr_capture_ns" python3 -B \
             "$source_directory/tests/integration/content-replication-capture.py" capture \
-            "$WORK/content-replication-$cr_phase-layout.json" \
-            "$WORK/content-replication-$cr_phase-$cr_role.json" \
-            "$WORK/content-replication-$cr_phase-$cr_role.ready" "$cr_capture_node" \
-            $cr_interfaces >"$WORK/content-replication-$cr_phase-$cr_role.log" 2>&1 &
+            "$WORK/$cr_capture_prefix-layout.json" \
+            "$WORK/$cr_capture_prefix-$cr_role.json" \
+            "$WORK/$cr_capture_prefix-$cr_role.ready" "$cr_capture_node" \
+            $cr_interfaces >"$WORK/$cr_capture_prefix-$cr_role.log" 2>&1 &
         cr_capture_pid=$!
         case $cr_role in
             receiver) PRIVACY_CLIENT_PID=$cr_capture_pid ;;
@@ -324,8 +326,152 @@ content_replication_capture() {
             exit) PRIVACY_EXIT_PID=$cr_capture_pid ;;
             provider) PRIVACY_RELAY1_PID=$cr_capture_pid ;;
         esac
-        wait_observer "$cr_capture_pid" "$WORK/content-replication-$cr_phase-$cr_role.ready" || return 1
+        wait_observer "$cr_capture_pid" "$WORK/$cr_capture_prefix-$cr_role.ready" || return 1
     done
+}
+
+content_replication_automatic_status() {
+    cra_status_label=$1; cra_expected=$2
+    cra_status_deadline=$(($(date +%s) + 120))
+    while [ "$(date +%s)" -lt "$cra_status_deadline" ]; do
+        if CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli relay4 content status \
+            >"$WORK/content-replication-automatic-$cra_status_label.json" \
+            2>"$WORK/content-replication-automatic-$cra_status_label.err" \
+            && jq -e --argjson expected "$cra_expected" '
+                .serving and .replication_enabled and .publications == $expected
+                and .replica_publications == $expected and .replica_chunks == (3 * $expected)
+                and .replica_bytes == (524609 * $expected)' \
+                "$WORK/content-replication-automatic-$cra_status_label.json" >/dev/null; then
+            if [ "$cra_status_label" != after ]; then return 0; fi
+            # Storage precedes registration. Await its actual fixed event, not an arbitrary
+            # sleep or a manufactured advertisement/TTL refresh from the fixture.
+            if CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli relay4 logs --limit 400 \
+                >"$WORK/content-replication-automatic-uptake-events.txt" \
+                && grep -Eq '^[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+event=CONTENT_CONTRIBUTION_CHUNKS_AVAILABLE([[:space:]]|$)' \
+                    "$WORK/content-replication-automatic-uptake-events.txt"; then return 0; fi
+        fi
+        sleep 0.25
+    done
+    return 1
+}
+
+content_replication_automatic_restart() {
+    cra_restart_label=$1
+    restart_advertiser relay4 || return 1
+    cra_net=$(stat -Lc '%d:%i' "/proc/$restart_new_pid/ns/net") || return 1
+    [ "$cra_net" = "$(stat -Lc '%d:%i' "/run/netns/$R4")" ] || return 1
+    [ "$(readlink -f -- "/proc/$restart_new_pid/exe")" = "$binary_directory/volparossa-agent" ] || return 1
+    jq -cn --argjson before "$restart_old_pid" --argjson after "$restart_new_pid" \
+        --arg net "$cra_net" '{unit:"volparossa-alpha-agent@relay4.service",active_state:"active",
+          pid_before:$before,pid_after:$after,network_namespace_identity:$net,executable_verified:true}' \
+        >"$WORK/content-replication-automatic-$cra_restart_label.json"
+}
+
+content_replication_automatic_run() {
+    # Additive proof: the earlier P/Q outputs, captures and pre-restart event ring stay intact.
+    # No Serve/import/copy of chunks is issued to R4 in this phase. Its explicit startup
+    # configuration owns the empty listener and the automatic verified-download contribution.
+    PHASE=content-replication-automatic-startup
+    cra_cache=$WORK/state-relay4/content/automatic-replicas
+    cra_download=$WORK/state-relay4/content/automatic-download
+    cra_output=$WORK/state-relay4/content/automatic-p.verified
+    cra_final=$WORK/state-client/content/automatic-cache
+    cra_final_output=$WORK/state-client/content/automatic-p.verified
+    for cra_new in "$cra_cache" "$cra_download" "$cra_output" "$cra_final" "$cra_final_output"; do
+        [ ! -e "$cra_new" ] && [ ! -L "$cra_new" ] || fail CONTENT_AUTOMATIC_CACHE_NOT_FRESH
+    done
+    python3 -B "$source_directory/tests/integration/content-replication-smoke.py" configure-automatic \
+        "$WORK/config-relay4.yaml" "$WORK/content-replication-automatic-config.json" \
+        || fail CONTENT_AUTOMATIC_CONFIG_INVALID
+    content_replication_automatic_restart startup || fail CONTENT_AUTOMATIC_STARTUP_FAILED
+    content_replication_automatic_status before 0 || fail CONTENT_AUTOMATIC_NOT_EMPTY
+    content_replication_isolation relay4 "$cr_replica/p.bin" || fail CONTENT_AUTOMATIC_ORIGIN_SHORTCUT
+    # Metadata only: the independent consumer never receives cache chunks from the fixture.
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0400 "$cr_seed/manifest-p.bin" "$cr_final/p.bin"
+    content_replication_isolation client "$cr_final/p.bin" || fail CONTENT_AUTOMATIC_CONSUMER_SHORTCUT
+    python3 -B "$source_directory/tests/integration/content-replication-smoke.py" automatic-cache \
+        "$cra_cache" "$WORK/content-replication-automatic-cache-empty.json" \
+        || fail CONTENT_AUTOMATIC_CACHE_INVALID
+
+    # The old, explicitly owned transient R5 unit was collected after its previous stop.
+    # Relaunch through the identical sandbox/namespace launcher; retain one cleanup owner.
+    case " $AGENT_UNITS " in *' volparossa-alpha-agent@relay5.service '*) ;; *) fail CONTENT_AUTOMATIC_UNIT_NOT_OWNED ;; esac
+    cra_collect_deadline=$(($(date +%s) + 30))
+    while [ "$(unit_load_state volparossa-alpha-agent@relay5.service)" != not-found ]; do
+        [ "$(date +%s)" -lt "$cra_collect_deadline" ] || fail CONTENT_AUTOMATIC_ORIGIN_UNIT_RETAINED
+        sleep 0.1
+    done
+    cra_owned_units=$AGENT_UNITS
+    launch_agent relay5 "$R5"
+    AGENT_UNITS=$cra_owned_units
+    cra_origin_deadline=$(($(date +%s) + 30))
+    while ! CONTENT_REPLICATION_COMMAND_TIMEOUT=2s content_replication_cli relay5 content status \
+        >"$WORK/content-replication-automatic-origin-initial.json" \
+        2>"$WORK/content-replication-automatic-origin-initial.err"; do
+        [ "$(date +%s)" -lt "$cra_origin_deadline" ] || fail CONTENT_AUTOMATIC_ORIGIN_START_FAILED
+        sleep 0.1
+    done
+    content_replication_cli relay5 content serve --manifest "$cr_seed/manifest-p.bin" \
+        --publisher-key "$cr_key" --cache "$cr_origin/p" --bind 50.166.6.1:18080 \
+        --advertised-hostname provider-b.volparossa.test \
+        >"$WORK/content-replication-automatic-origin-serve.json" \
+        2>"$WORK/content-replication-automatic-origin-serve.err" || fail CONTENT_AUTOMATIC_ORIGIN_SERVE_FAILED
+
+    PHASE=content-replication-automatic-uptake
+    content_replication_select relay4 content-replication-automatic-warm || fail CONTENT_AUTOMATIC_ROUTE_UNAVAILABLE
+    content_replication_capture uptake content-replication-automatic-uptake \
+        "$WORK/content-replication-automatic-warm-selection.json" || fail CONTENT_AUTOMATIC_CAPTURE_UNAVAILABLE
+    content_replication_cli relay4 content fetch --manifest "$cr_replica/p.bin" --publisher-key "$cr_key" \
+        --cache "$cra_download" --output "$cra_output" \
+        >"$WORK/content-replication-automatic-foreground-fetch.json" \
+        2>"$WORK/content-replication-automatic-foreground-fetch.err" || fail CONTENT_AUTOMATIC_FOREGROUND_FAILED
+    content_replication_automatic_status after 1 || fail CONTENT_AUTOMATIC_UPTAKE_NOT_OBSERVED
+    content_replication_snapshot relay4 content-replication-automatic-uptake-live || fail CONTENT_AUTOMATIC_PATHS_MISSING
+    stop_privacy_observers || fail CONTENT_AUTOMATIC_CAPTURE_INCOMPLETE
+    content_replication_disconnect relay4 content-replication-automatic-replicator || fail CONTENT_AUTOMATIC_ROUTE_CLEANUP_FAILED
+    content_replication_cli relay5 content stop >"$WORK/content-replication-automatic-origin-stop.json" \
+        2>"$WORK/content-replication-automatic-origin-stop.err" || fail CONTENT_AUTOMATIC_ORIGIN_STOP_FAILED
+    systemctl stop volparossa-alpha-agent@relay5.service || fail CONTENT_AUTOMATIC_ORIGIN_SHUTDOWN_FAILED
+    cra_origin_state=$(systemctl show --property=ActiveState --value volparossa-alpha-agent@relay5.service)
+    cra_origin_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay5.service)
+    [ "$cra_origin_state" = inactive ] && [ "$cra_origin_pid" = 0 ] || fail CONTENT_AUTOMATIC_ORIGIN_SURVIVED
+    ip netns exec "$R5" ss -H -ltn 'sport = :18080' >"$WORK/content-replication-automatic-origin-listeners.txt"
+    [ ! -s "$WORK/content-replication-automatic-origin-listeners.txt" ] || fail CONTENT_AUTOMATIC_ORIGIN_LISTENER_SURVIVED
+    jq -cn --arg state "$cra_origin_state" --argjson pid "$cra_origin_pid" '
+        {unit:"volparossa-alpha-agent@relay5.service",active_state:$state,main_pid:$pid,listener_absent:true}' \
+        >"$WORK/content-replication-automatic-origin-offline.json"
+
+    PHASE=content-replication-automatic-restart
+    python3 -B "$source_directory/tests/integration/content-replication-smoke.py" automatic-cache \
+        "$cra_cache" "$WORK/content-replication-automatic-cache-before.json" || fail CONTENT_AUTOMATIC_JOURNAL_MISSING
+    content_replication_automatic_restart restart || fail CONTENT_AUTOMATIC_RESTART_FAILED
+    content_replication_automatic_status restored 1 || fail CONTENT_AUTOMATIC_RESTORE_FAILED
+    python3 -B "$source_directory/tests/integration/content-replication-smoke.py" automatic-cache \
+        "$cra_cache" "$WORK/content-replication-automatic-cache-after.json" || fail CONTENT_AUTOMATIC_JOURNAL_MISSING
+    content_replication_isolation relay4 "$cr_replica/p.bin" || fail CONTENT_AUTOMATIC_ORIGIN_SHORTCUT
+
+    PHASE=content-replication-automatic-reserve-fetch
+    content_replication_select client content-replication-automatic-final || fail CONTENT_AUTOMATIC_FINAL_ROUTE_UNAVAILABLE
+    content_replication_capture reserve-fetch content-replication-automatic-reserve-fetch \
+        "$WORK/content-replication-automatic-final-selection.json" || fail CONTENT_AUTOMATIC_FINAL_CAPTURE_UNAVAILABLE
+    content_replication_cli client content fetch --manifest "$cr_final/p.bin" --publisher-key "$cr_key" \
+        --cache "$cra_final" --output "$cra_final_output" \
+        >"$WORK/content-replication-automatic-final-fetch.json" \
+        2>"$WORK/content-replication-automatic-final-fetch.err" || fail CONTENT_AUTOMATIC_FINAL_FETCH_FAILED
+    content_replication_snapshot client content-replication-automatic-final-live || fail CONTENT_AUTOMATIC_FINAL_PATHS_MISSING
+    stop_privacy_observers || fail CONTENT_AUTOMATIC_FINAL_CAPTURE_INCOMPLETE
+    content_replication_disconnect client content-replication-automatic-final || fail CONTENT_AUTOMATIC_FINAL_CLEANUP_FAILED
+    content_replication_cli relay4 content stop >"$WORK/content-replication-automatic-stop.json" \
+        2>"$WORK/content-replication-automatic-stop.err" || fail CONTENT_AUTOMATIC_STOP_FAILED
+    jq -cn --arg psha "$(sha256sum "$cra_output" | awk '{print $1}')" \
+        --arg csha "$(sha256sum "$cra_final_output" | awk '{print $1}')" \
+        --argjson pbytes "$(stat -Lc '%s' "$cra_output")" \
+        --argjson cbytes "$(stat -Lc '%s' "$cra_final_output")" '
+        {foreground:{sha256:$psha,bytes:$pbytes},final:{sha256:$csha,bytes:$cbytes},
+         download_cache_initially_absent:true,consumer_cache_initially_absent:true,
+         replicator_cannot_read_original_cache:true,consumer_cannot_read_either_cache:true,
+         manual_serve_used_on_replicator:false,replicator_restarted_after_original_shutdown:true}' \
+        >"$WORK/content-replication-automatic-output.json"
 }
 
 content_replication_run() {
@@ -463,6 +609,12 @@ content_replication_run() {
        final_cache_initially_absent:true,original_listener_absent_before_final_fetch:true,
        replica_listener_absent_before_reopen:true,replica_reopened_after_original_shutdown:true}' \
         >"$WORK/content-replication-output.json"
+    for cr_legacy_node in relay4 client exit; do
+        install -o root -g root -m 0600 "$WORK/logs-$cr_legacy_node.txt" \
+            "$WORK/content-replication-legacy-logs-$cr_legacy_node.txt"
+    done
+    install -o root -g root -m 0600 "$WORK/agent-relay5.log" "$WORK/content-replication-legacy-agent-relay5.log"
+    content_replication_automatic_run
     python3 -B "$source_directory/tests/integration/content-replication-smoke.py" evidence \
         "$WORK" "$WORK/content-replication-evidence.json" || fail CONTENT_REPLICATION_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
@@ -494,7 +646,7 @@ content_replication_finalize_report() {
        success:($status == 0 and $evidence.success == true and $complete and $remaining == 0 and $host.unchanged),
        transfer:$evidence,cleanup:{complete:$complete,remaining_owned_objects:$remaining},
        host_state:($host | del(.acceptance_id)),
-       scope:"explicit P/Q objects; bounded real owner traffic, one in-flight chunk allowance and same-flow replica resume; explicit service reopen and protected re-serving",
+       scope:"explicit P/Q objects; bounded owner contention and replica resume; explicit reopen; automatic public-download contribution, agent restart and protected independent re-serving",
        full_c03_claimed:false,full_c04_claimed:false,speed_improvement_claimed:false,
        browser_integration_claimed:false,full_alpha_acceptance_claimed:false}' \
         >"$WORK/content-replication-smoke.json" || return 1

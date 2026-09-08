@@ -9,14 +9,15 @@ use std::{
 
 use libp2p::PeerId;
 use tokio::{
-    sync::{Mutex, watch},
+    sync::{Mutex, OwnedMutexGuard, watch},
     task::JoinHandle,
 };
 use volparossa_content::provider::replication::{
-    ReplicationExclusions, ReplicationLimits, persist_replicas, pull_replicas_with_admission,
+    ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
+    pull_public_replicas_with_admission, pull_replicas_with_admission, restore_public_replicas,
     restore_replicas,
 };
-use volparossa_content::provider::{PublicationRegistry, VerifiedProviderOffer};
+use volparossa_content::provider::{ProviderError, PublicationRegistry, VerifiedProviderOffer};
 use volparossa_content::{CacheLimits, CacheUsage, ChunkId, ChunkStore};
 use volparossa_local_control::{ContentReceipt, ContentReplicationConfig};
 
@@ -47,12 +48,29 @@ pub(super) struct ReplicationRuntime {
     limits: CacheLimits,
     state: Mutex<State>,
     job: Mutex<Option<JoinHandle<()>>>,
+    background: Arc<Mutex<()>>,
+    public_only: bool,
 }
 
 impl ReplicationRuntime {
     pub(super) fn create(
         config: ContentReplicationConfig,
         registry: &mut PublicationRegistry,
+    ) -> Result<Arc<Self>, ContentError> {
+        Self::create_mode(config, registry, false)
+    }
+
+    pub(super) fn create_public(
+        config: ContentReplicationConfig,
+        registry: &mut PublicationRegistry,
+    ) -> Result<Arc<Self>, ContentError> {
+        Self::create_mode(config, registry, true)
+    }
+
+    fn create_mode(
+        config: ContentReplicationConfig,
+        registry: &mut PublicationRegistry,
+        public_only: bool,
     ) -> Result<Arc<Self>, ContentError> {
         let cache_limits = limits(config.limits)?;
         if !(64..=1024 * 1024).contains(&config.max_bytes)
@@ -70,12 +88,23 @@ impl ReplicationRuntime {
             ChunkStore::create(&root, cache_limits)
         }
         .map_err(|_| ContentError::Invalid)?;
-        let restored = restore_replicas(&mut store, now()).map_err(|_| ContentError::Invalid)?;
+        let restored = if public_only {
+            restore_public_replicas(&mut store, now())
+        } else {
+            restore_replicas(&mut store, now())
+        }
+        .map_err(|_| ContentError::Invalid)?;
         let usage = store.usage();
         drop(store);
         let mut chunks = VecDeque::new();
         let mut publications = BTreeSet::new();
         for replica in restored {
+            if public_only
+                && replica.content_type()
+                    == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+            {
+                continue;
+            }
             let id = *replica.manifest_id();
             remember_chunks(&mut chunks, replica.chunk_ids());
             // Explicit foreground registrations take precedence. A full registry is not
@@ -100,7 +129,14 @@ impl ReplicationRuntime {
                 next: Instant::now(),
             }),
             job: Mutex::new(None),
+            background: Arc::new(Mutex::new(())),
+            public_only,
         }))
+    }
+
+    /// One owner for local contribution copies and optional network exchanges alike.
+    pub(super) fn try_background_slot(&self) -> Option<OwnedMutexGuard<()>> {
+        Arc::clone(&self.background).try_lock_owned().ok()
     }
 
     pub(super) fn matches(&self, config: &ContentReplicationConfig) -> bool {
@@ -153,7 +189,7 @@ impl ReplicationRuntime {
         }
     }
 
-    async fn reclaim(
+    pub(super) async fn reclaim(
         &self,
         registry: &Mutex<PublicationRegistry>,
         at: u64,
@@ -173,6 +209,12 @@ impl ReplicationRuntime {
         });
         state.chunks.clear();
         for replica in result.live {
+            if self.public_only
+                && replica.content_type()
+                    == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+            {
+                continue;
+            }
             remember_chunks(&mut state.chunks, replica.chunk_ids());
             let id = *replica.manifest_id();
             if registry.contains(&id) || registry.len() >= 64 {
@@ -202,6 +244,9 @@ impl ReplicationRuntime {
         if foreground.active() {
             return;
         }
+        let Some(background) = self.try_background_slot() else {
+            return;
+        };
         match self.reclaim(&registry, now()).await {
             Ok(true) => content_event(&context, "CONTENT_REPLICATION_EXPIRED_RECLAIMED").await,
             Ok(false) => {}
@@ -236,6 +281,7 @@ impl ReplicationRuntime {
         };
         let runtime = Arc::clone(self);
         *job = Some(tokio::spawn(async move {
+            let _background = background;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             let mut owner_change = foreground.subscribe();
             if foreground.active() || *stop.borrow() {
@@ -313,25 +359,10 @@ impl ReplicationRuntime {
             let Ok(mut store) = ChunkStore::open(&self.root, self.limits) else {
                 return;
             };
-            let progress = pull_replicas_with_admission(
-                &mut stream,
-                &mut store,
-                ReplicationLimits {
-                    max_chunks: self.config.max_chunks as usize,
-                    max_wire_bytes: self.config.max_bytes,
-                    ..ReplicationLimits::default()
-                },
-                exclusions,
-                // The provider awaits our next credit while owner activity settles. Resume
-                // this same exchange within its original deadline and reserved budget;
-                // never sample our actively received payload as owner demand.
-                || async {
-                    budget.wait_until_quiet().await;
-                    true
-                },
-            )
-            .await
-            .ok();
+            let progress = self
+                .pull(&mut stream, &mut store, exclusions, budget)
+                .await
+                .ok();
             if progress.is_some() && super::tls::finish(&mut stream).await.is_err() {
                 return;
             }
@@ -378,6 +409,42 @@ impl ReplicationRuntime {
         }
         .await;
         flow.shutdown();
+    }
+
+    async fn pull<S>(
+        &self,
+        stream: &mut S,
+        store: &mut ChunkStore,
+        exclusions: &ReplicationExclusions,
+        budget: &IdleBudget,
+    ) -> Result<ReplicationProgress, ProviderError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let transfer_limits = ReplicationLimits {
+            max_chunks: self.config.max_chunks as usize,
+            max_wire_bytes: self.config.max_bytes,
+            ..ReplicationLimits::default()
+        };
+        // The provider waits for credit: sample owner demand without counting our
+        // active payload, and never renew the original deadline or reserved budget.
+        let admission = || async {
+            budget.wait_until_quiet().await;
+            true
+        };
+        if self.public_only {
+            pull_public_replicas_with_admission(
+                stream,
+                store,
+                transfer_limits,
+                exclusions,
+                admission,
+            )
+            .await
+        } else {
+            pull_replicas_with_admission(stream, store, transfer_limits, exclusions, admission)
+                .await
+        }
     }
 }
 

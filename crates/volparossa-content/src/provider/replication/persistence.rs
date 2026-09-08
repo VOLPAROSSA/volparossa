@@ -9,7 +9,7 @@ use super::{MAX_HOPS, Replica};
 use crate::store::MAX_REPLICA_METADATA_BYTES;
 use crate::{ChunkId, ChunkStore, Error, MAX_CHUNKS, MAX_MANIFEST_BYTES, SignedManifest};
 
-const MAX_RECORDS: usize = 64;
+pub(super) const MAX_RECORDS: usize = 64;
 const MAX_RECORD_BYTES: usize = MAX_MANIFEST_BYTES + MAX_CHUNKS * 32 + 128;
 
 // Count and length framing bound allocation before decoding each canonical protobuf record.

@@ -4,8 +4,10 @@
 //! publisher or HTTPS authority. Foreground consumers still authorize their own manifests.
 //! Hop counts are bounded locally, not protected against a malicious peer resetting its claim.
 
+mod admission;
 mod expiry;
 mod persistence;
+pub use admission::{LocalReplicaLimits, admit_public_replica, restore_public_replicas};
 pub use expiry::ReplicaReclamation;
 pub use persistence::{persist_replicas, restore_replicas};
 
@@ -101,6 +103,11 @@ pub struct Replica {
 }
 
 impl Replica {
+    /// Signed media type, for storage admission only; not independent content authority.
+    pub fn content_type(&self) -> &str {
+        &self.checked.metadata().content_type
+    }
+
     /// Original signed bytes, requiring independent publisher authorization for consumption.
     pub fn signed_manifest(&self) -> &SignedManifest {
         &self.signed
@@ -237,7 +244,7 @@ pub async fn pull_replicas<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pull_with_admission(stream, store, limits, exclusions, VERSION, || {
+    pull_with_admission(stream, store, limits, exclusions, VERSION, false, || {
         std::future::ready(true)
     })
     .await
@@ -266,7 +273,50 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    pull_with_admission(stream, store, limits, exclusions, CREDIT_VERSION, admission).await
+    pull_with_admission(
+        stream,
+        store,
+        limits,
+        exclusions,
+        CREDIT_VERSION,
+        false,
+        admission,
+    )
+    .await
+}
+
+/// Pull public-only optional replicas using the same v3 credit protocol.
+///
+/// Automatic public contribution must use this variant: private-message manifests are refused
+/// before cache insertion, and a mailbox destination is never adopted. This does not promote
+/// self-consistent publisher signatures to independent native or HTTPS consumer authority.
+/// Existing explicit replication APIs retain their compatibility and wire representation.
+///
+/// # Errors
+/// Same bounded transport/integrity failures as [`pull_replicas_with_admission`], plus private
+/// content or mailbox storage. No private chunk or replica metadata is inserted on rejection.
+pub async fn pull_public_replicas_with_admission<S, F, Fut>(
+    stream: &mut S,
+    store: &mut ChunkStore,
+    limits: ReplicationLimits,
+    exclusions: &ReplicationExclusions,
+    admission: F,
+) -> Result<ReplicationProgress, ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    pull_with_admission(
+        stream,
+        store,
+        limits,
+        exclusions,
+        CREDIT_VERSION,
+        true,
+        admission,
+    )
+    .await
 }
 
 async fn pull_with_admission<S, F, Fut>(
@@ -275,6 +325,7 @@ async fn pull_with_admission<S, F, Fut>(
     limits: ReplicationLimits,
     exclusions: &ReplicationExclusions,
     version: u32,
+    public_only: bool,
     mut admission: F,
 ) -> Result<ReplicationProgress, ProviderError>
 where
@@ -283,6 +334,9 @@ where
     Fut: Future<Output = bool>,
 {
     let limits = limits.validate()?;
+    if public_only && store.read_mailbox_metadata()?.is_some() {
+        return Err(ProviderError::Registry);
+    }
     let deadline = Instant::now() + limits.session_timeout;
     let request = Request::new(limits, exclusions, version)?;
     let mut budget = Budget::new(limits.max_wire_bytes);
@@ -326,7 +380,7 @@ where
             if seen.len() >= limits.max_chunks {
                 return Err(ProviderError::Limit);
             }
-            let (replica, chunk_id) = checked_frame(&frame, limits, exclusions)?;
+            let (replica, chunk_id) = checked_frame(&frame, limits, exclusions, public_only)?;
             if !seen.insert(chunk_id) {
                 return Err(ProviderError::Protocol);
             }
@@ -365,6 +419,7 @@ fn checked_frame(
     frame: &Frame,
     limits: ReplicationLimits,
     exclusions: &ReplicationExclusions,
+    public_only: bool,
 ) -> Result<(Replica, ChunkId), ProviderError> {
     if frame.data.is_empty()
         || frame.data.len() > CHUNK_BYTES
@@ -382,6 +437,11 @@ fn checked_frame(
     // Self-consistency only. This private checked value never leaves the storage-only Replica.
     // The peer-selected key is deliberately NOT returned as a consumer trust capability.
     let checked = signed.verify(&key, now()?)?;
+    if public_only
+        && checked.metadata().content_type == crate::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
+    {
+        return Err(ProviderError::Registry);
+    }
     let chunk = checked
         .chunks()
         .get(frame.chunk_index as usize)

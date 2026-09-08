@@ -11,11 +11,13 @@
 Peer downloads retain already verified chunks if another provider fails. On `fed8ab33`, the
 protected native/browser/partial-origin sequence and native static-site publication pass, as
 does owner-priority replica pause/resume followed by retrieval after the original provider stops.
-These source-bound results cover the bounded C01–C07 checkpoints. C08 remains open: the latest
-complete peer-assisted download took 7.57 seconds versus 1.85 seconds from the origin in that
-one comparison. Origin-body traffic was avoided, but latency did not improve. New automatic
-source selection uses recent measured costs and prefers the origin when evidence is absent;
-that implementation still needs its own integrated measurement, not an assumed speedup.
+These source-bound results cover the bounded C01–C07 checkpoints. C08 remains open. The
+[new source-selection run on `8830a57a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205965849)
+passes: automatic selection chose the origin before peer body transfer, taking 2.68 seconds
+versus 2.55 seconds for explicit origin-only retrieval of the same cold object. This is a useful
+source choice, not a measured speedup. Both commands preserve fresh origin authorization and
+the same protected route with two parallel relay paths. Automatic successful peer selection
+still needs live evidence.
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
@@ -201,11 +203,15 @@ now passes the complete bounded sequence: retrieve foreground P, opportunistical
 Real remote route retirement completes before the replicator's disconnect returns. All ten
 boundary captures are complete with zero drops or forbidden packets, and cleanup leaves guest
 state unchanged. Earlier TLS/report failures remain recorded, not retrospectively passed.
-This proves C03's bounded uptake/offline-provider/reopen/re-serving sequence, not full C04, automatic
-boot service, retention repair, retirement-scope reclamation or general owner-priority sharing.
-C01/C02/C03/C05/C06/C07 now have source-bound passing checkpoints. Full owner-priority behavior
-and existing-web integration/benefit remain open under C04/C08; retention repair and permanent
-availability are not claimed. More replicas alone do not establish a speedup.
+That older run proves C03's bounded uptake/offline-provider/reopen/re-serving sequence, not
+automatic boot service or retention repair. The newer `fed8ab33` run also passes C04's local
+owner-priority criterion; it does not prove global fairness or universal no-slowdown behavior.
+An explicitly configured automatic contribution service is now being integrated: start empty,
+retain verified public downloads within one quota, and restore useful replicas at agent startup.
+Its separate source-stop/restart network proof is pending. See
+[automatic contribution](docs/OPERATIONS.md#automatic-public-content-contribution).
+C08 existing-web integration/benefit, retention repair and permanent availability remain open.
+More replicas alone do not establish a speedup.
 Native, named and cooperative-HTTPS chunk downloads now use up to two concurrent providers.
 A real backpressured-stream test proves overlapping progress without duplicate chunk requests,
 including bounded reassignment after missing or failed chunks. The

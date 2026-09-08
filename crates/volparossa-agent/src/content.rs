@@ -3,6 +3,7 @@
 //! Neither browsing capture nor a default listener is enabled. Provider offers are only
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
+mod contribution;
 mod https;
 mod mailbox;
 mod named;
@@ -77,6 +78,7 @@ pub(crate) struct ContentRuntime {
     foreground: Arc<Foreground>,
     recent: Arc<Mutex<recent::RecentProviders>>,
     source_costs: Arc<Mutex<https::sources::SourceCosts>>,
+    contribution: Arc<Mutex<Option<Arc<contribution::ContributionRuntime>>>>,
 }
 
 struct Service {
@@ -88,6 +90,23 @@ struct Service {
     replication: Option<Arc<ReplicationRuntime>>,
     name_lookup: bool,
     mailbox: bool,
+}
+
+struct ServiceOptions {
+    replication: Option<Arc<ReplicationRuntime>>,
+    name_lookup: bool,
+    automatic: bool,
+}
+
+struct ServingLoop {
+    listener: TcpListener,
+    tls: tls::ContentTlsServer,
+    registry: Arc<Mutex<PublicationRegistry>>,
+    signer: Arc<SigningKey>,
+    endpoint: ProviderEndpoint,
+    discovery: DiscoveryControlHandle,
+    stop: watch::Receiver<bool>,
+    automatic: bool,
 }
 
 impl ContentRuntime {
@@ -107,6 +126,7 @@ impl ContentRuntime {
             foreground: Arc::new(Foreground::default()),
             recent: Arc::new(Mutex::new(recent::RecentProviders::default())),
             source_costs: Arc::new(Mutex::new(https::sources::SourceCosts::default())),
+            contribution: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -134,6 +154,7 @@ impl ContentRuntime {
             .map_err(|_| ContentError::Policy)?;
         let cache_limits = limits(request.limits)?;
         if let Some(active) = service.as_ref() {
+            let automatic = self.contribution.lock().await.is_some();
             if active.bind != bind
                 || active.endpoint != endpoint
                 || active.task.is_finished()
@@ -144,6 +165,7 @@ impl ContentRuntime {
             if !match (&active.replication, &request.replication) {
                 (None, None) => true,
                 (Some(runtime), Some(config)) => runtime.matches(config),
+                (Some(_), None) if automatic => true,
                 _ => false,
             } {
                 return Err(ContentError::Busy);
@@ -167,6 +189,32 @@ impl ContentRuntime {
         if let Some(runtime) = &replication {
             runtime.receipt(&mut receipt).await?;
         }
+        *service = Some(
+            self.start_service(
+                context,
+                bind,
+                endpoint,
+                registry,
+                ServiceOptions {
+                    replication,
+                    name_lookup: request.name_lookup,
+                    automatic: false,
+                },
+            )
+            .await?,
+        );
+        Ok(receipt)
+    }
+
+    /// Shared listener lifecycle. An automatic empty registry is deliberately not advertised.
+    async fn start_service(
+        &self,
+        context: &ControlContext,
+        bind: SocketAddr,
+        endpoint: ProviderEndpoint,
+        registry: PublicationRegistry,
+        options: ServiceOptions,
+    ) -> Result<Service, ContentError> {
         let tls = tls::ContentTlsServer::new(&self.tls_identity, endpoint.hostname())
             .map_err(|_| ContentError::Unavailable)?;
         let listener = TcpListener::bind(bind)
@@ -175,35 +223,42 @@ impl ContentRuntime {
         SockRef::from(&listener)
             .set_priority(CONTRIBUTION_SOCKET_PRIORITY)
             .map_err(|_| ContentError::Unavailable)?;
-        let offer = self.offer(endpoint.clone())?;
         // The listener and a verified registration exist before announcing service availability.
-        context
-            .discovery
-            .register_content_offer(offer)
-            .await
-            .map_err(|_| ContentError::Unavailable)?;
+        if !options.automatic || registry.has_live_publications(now()) {
+            context
+                .discovery
+                .register_content_offer(self.offer(endpoint.clone())?)
+                .await
+                .map_err(|_| ContentError::Unavailable)?;
+        }
         let registry = Arc::new(Mutex::new(registry));
         let (stop, receiver) = watch::channel(false);
-        let task = tokio::spawn(Self::serve_loop(
+        let serving = ServingLoop {
             listener,
             tls,
-            Arc::clone(&registry),
-            Arc::clone(&self.signer),
-            endpoint.clone(),
-            context.discovery.clone(),
-            receiver,
-        ));
-        *service = Some(Service {
+            registry: Arc::clone(&registry),
+            signer: Arc::clone(&self.signer),
+            endpoint: endpoint.clone(),
+            discovery: context.discovery.clone(),
+            stop: receiver,
+            automatic: options.automatic,
+        };
+        let listener_stopped = stop.clone();
+        let task = tokio::spawn(async move {
+            Self::serve_loop_inner(serving).await;
+            // An automatic worker cannot re-advertise after its carrying listener exits.
+            let _ = listener_stopped.send(true);
+        });
+        Ok(Service {
             registry,
             endpoint,
             bind,
             stop,
             task,
-            replication,
-            name_lookup: request.name_lookup,
+            replication: options.replication,
+            name_lookup: options.name_lookup,
             mailbox: false,
-        });
-        Ok(receipt)
+        })
     }
 
     fn offer(&self, endpoint: ProviderEndpoint) -> Result<SignedProviderOffer, ContentError> {
@@ -217,8 +272,32 @@ impl ContentRuntime {
         signer: Arc<SigningKey>,
         endpoint: ProviderEndpoint,
         discovery: DiscoveryControlHandle,
-        mut stop: watch::Receiver<bool>,
+        stop: watch::Receiver<bool>,
     ) {
+        Self::serve_loop_inner(ServingLoop {
+            listener,
+            tls,
+            registry,
+            signer,
+            endpoint,
+            discovery,
+            stop,
+            automatic: false,
+        })
+        .await;
+    }
+
+    async fn serve_loop_inner(server: ServingLoop) {
+        let ServingLoop {
+            listener,
+            tls,
+            registry,
+            signer,
+            endpoint,
+            discovery,
+            mut stop,
+            automatic,
+        } = server;
         let mut sessions = JoinSet::new();
         let mut refresh = interval(Duration::from_secs(60));
         refresh.tick().await;
@@ -228,6 +307,14 @@ impl ContentRuntime {
                     if changed.is_err() || *stop.borrow() { break; }
                 }
                 _ = refresh.tick() => {
+                    if automatic {
+                        let registry = registry.lock().await;
+                        if !registry.has_live_publications(now()) && !registry.has_mailbox() {
+                            drop(registry);
+                            let _ = discovery.withdraw_content_offer().await;
+                            continue;
+                        }
+                    }
                     let Ok(offer) = make_offer(&signer, endpoint.clone()) else { break; };
                     if discovery.register_content_offer(offer).await.is_err() { break; }
                 }
@@ -268,6 +355,9 @@ impl ContentRuntime {
         let mut current = self.service.lock().await;
         if let Some(service) = current.take() {
             let _ = service.stop.send(true);
+            if let Some(contribution) = self.contribution.lock().await.take() {
+                contribution.stop().await;
+            }
             if let Some(replication) = service.replication {
                 replication.stop().await;
             }
@@ -478,6 +568,15 @@ impl ContentRuntime {
         let bytes =
             volparossa_content::reassemble_to_file(&manifest, &mut [&mut store], now(), &output)
                 .map_err(|_| ContentError::Unavailable)?;
+        context
+            .content
+            .contribute_native(
+                SignedManifest::decode(&request.manifest).map_err(|_| ContentError::Invalid)?,
+                manifest.clone(),
+                PathBuf::from(&request.cache),
+                limits(request.limits)?,
+            )
+            .await;
         Ok(ContentReceipt {
             bytes,
             chunks: u32::try_from(manifest.chunks().len()).map_err(|_| ContentError::Invalid)?,

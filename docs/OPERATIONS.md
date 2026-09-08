@@ -684,6 +684,47 @@ duplicate full-object downloads. Recent cost hints are RAM-only and short-lived,
 object catalogue; native/explicit peer transfers supply useful-peer observations. A node with no
 such observations conservatively uses the origin, rather than inventing a speed estimate.
 
+### Automatic public-content contribution
+
+This integration removes the manual initial `content serve --manifest` step for received
+public objects. It is still awaiting its dedicated source-stop/restart network proof.
+On an explicitly participating relay, configure a policy-authorized endpoint and private cache:
+
+```yaml
+content_contribution:
+  enabled: true
+  bind_address: "0.0.0.0:18080"
+  advertised_hostname: cache.example
+  cache: /var/lib/volparossa/public-contribution
+  quota_bytes: 67108864
+  max_entries: 256
+  min_free_bytes: 268435456
+  max_bytes: 1048576
+  max_chunks: 4
+```
+
+This block requires the existing `sharing` and `download_sharing` settings, with explicit local
+interfaces and usable capacities; it does not configure those interfaces, enable roles or
+grant new Exit policy permissions. The hostname and TCP port must already be permitted by the
+active signed policy. The directory must be new or the same exclusively owned contribution
+cache; arbitrary existing directories are not adopted. The listener starts empty, and only
+valid retained publications are offered after startup or admission.
+
+Enabling this setting is explicit consent to retain and serve successfully verified public
+native/named objects and supported anonymous cooperative-HTTPS content. Private messages and
+mailbox storage are excluded; ordinary encrypted browsing, cookies, login sessions and
+`private`/`no-store` responses are not opted in. Every later HTTPS consumer still obtains fresh
+origin authorization. Storage peers do not become publishers or origin authorities.
+
+One quota covers both received content and incidental extra chunks. Admission never evicts live
+content to make room; insufficient space skips optional work. A bounded in-memory queue expires
+after at most five minutes, and each idle batch copies at most four chunks / one MiB. Foreground
+downloads and configured owner traffic take precedence. Cache persistence is not a retention
+promise, global fairness measurement or guarantee that other clients can always retrieve an
+entire object. `content status` reports the same service and replica counters as manual serving;
+`content stop` stops the current service, and the explicit configuration takes effect again at
+the next agent start.
+
 ### One-shot browser download
 
 For the same supported cooperative HTTPS origin, let the browser choose where to save the

@@ -293,12 +293,28 @@ impl Agent {
         };
         let mut control_task = tokio::spawn(serve_control(
             listener,
-            control_context,
+            control_context.clone(),
             shutdown_rx.clone(),
         ));
         let discovery_state = Arc::clone(&self.state);
         let mut discovery_task =
             tokio::spawn(self.discovery.run(discovery_state, discovery_shutdown_rx));
+        // Registration uses Discovery RPCs, so start only once its actor can receive them.
+        // The existing ContentRuntime stop path owns the listener and background worker.
+        let mut contribution_shutdown = shutdown_rx.clone();
+        let mut contribution_task = tokio::spawn(async move {
+            control_context
+                .content
+                .start_contribution(&control_context)
+                .await
+                .map_err(|_| AgentError::Content)?;
+            while !*contribution_shutdown.borrow() {
+                if contribution_shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+            Ok::<(), AgentError>(())
+        });
         let maintenance_state = Arc::clone(&self.state);
         let maintenance_config = Arc::clone(&self.config);
         let maintenance_trust = self.paths.policy_trust.clone();
@@ -345,6 +361,10 @@ impl Agent {
             },
             _ = &mut discovery_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
+            result = &mut contribution_task => match result {
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(())) | Err(_) => Err(AgentError::Task),
+            },
             result = &mut metrics_task => match result {
                 Ok(Err(error)) => Err(AgentError::Metrics(error)),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
@@ -361,6 +381,7 @@ impl Agent {
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
         stop_task(&mut maintenance_task).await;
+        stop_task(&mut contribution_task).await;
         stop_task(&mut metrics_task).await;
         stop_task(&mut ingress_task).await;
         stop_task(&mut tcp_ingress_task).await;

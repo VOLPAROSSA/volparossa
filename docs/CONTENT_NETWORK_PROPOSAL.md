@@ -409,6 +409,24 @@ physical captures and unchanged-host cleanup. Retention repair and global contri
 remain absent; that older run covers C03's bounded-diversity criterion. The newer owner-contention
 run below covers C04's local bounded-contribution criterion, not those wider missing functions.
 
+### Automatic contribution from actual downloads
+
+The explicit `content_contribution` integration now joins verified foreground reception to the
+same bounded cache/provider/journal rather than requiring a seed manifest and manual initial
+Serve. It starts an empty or restored service after Discovery starts, queues successful public
+native/named and freshly origin-authorized cooperative HTTPS objects, and copies small batches
+without live-content eviction. The existing extra-chunk exchange and local copy share a single
+background owner. Name lookup retains the original independently trusted publisher authority;
+no URL, private-message payload or reusable HTTPS authority enters this automatic public queue.
+The dedicated source-offline/agent-restart/independent-retrieval network proof is pending.
+This does not introduce global placement fairness, retention repair or generic HTTPS capture.
+
+The preceding measured-source selection now has a
+[passing exact-source run on `8830a57a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205965849):
+auto chose origin before peer payload, taking 2.684 seconds versus 2.554 seconds for explicit
+origin-only on the same cold object/protected route. This is live origin-preferred behavior,
+not a speedup or evidence for successful automatic peer selection. C08 remains open.
+
 ## Integrated functional checkpoints
 
 - [x] C01: bounded real chunk storage, authenticated manifests and corrupt/missing-part rejection;

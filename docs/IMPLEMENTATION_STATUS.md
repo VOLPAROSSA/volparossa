@@ -170,8 +170,39 @@ deadline, retained verified counts and both worker owners dropped before fallbac
 CLI/local-control strategy tests, strict agent/CLI/local-control/example Clippy, ten HTTPS and
 fourteen parent checker tests also pass. The additive harness compares two cold product
 `origin-only`/`auto` downloads, binds their exact origin/peer byte accounting and reports actual
-monotone durations without forcing a winner. The new network measurement is pending; the older
-`fed8ab33` evidence above does not verify these later source changes or complete C08.
+monotone durations without forcing a winner. The
+[network run on exact `8830a57a381cc3ce77a1b1303385216f46ac8da1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205965849)
+now **passes**, including an independent rebuild from the raw artifact. Explicit origin-only
+takes **2.553865542 seconds** and auto takes **2.684187122 seconds**, with distinct cold stores,
+the same 2,097,275-byte object/hash and unchanged protected route context. Both obtain zero peer
+body bytes and one full origin range. The actual `ORIGIN_PREFERRED` event precedes auto's body
+retrieval; no failed peer payload attempt is hidden. This proves the origin-preferred branch,
+not successful automatic peer admission, budget fallback in the VM or a latency gain.
+All 52 captures / 248 interface rows are complete and zero-drop, with no forbidden or direct
+Client–Exit packets. Cleanup leaves zero owned objects and byte-identical guest state.
+Artifact ZIP SHA-256: `950f8f341772884e1814d6af29ef536d2e7e8d68edd89118d58fb4b7bc4e20c6`.
+The [Quality run on the same commit](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205947343)
+also passes. Neither result completes C08 or verifies later changes.
+
+### Automatic contribution integration in progress
+
+The new explicit `content_contribution` configuration binds one cache, endpoint and quota to
+the agent lifecycle. It requires relay participation and configured upload/download accounting;
+installation defaults remain inert. A listener may start empty but advertises only usable
+restored/admitted content. Completed native, named and freshly authorized cooperative HTTPS
+downloads enqueue bounded storage-only copies, with no URL or reusable HTTPS authority saved.
+The background queue, existing incidental-uptake job and foreground cancellation share one
+cache owner and budget. Public replicas retain their original signatures, expiry and bounded
+journal; private-message and mailbox content must not enter automatic public redistribution.
+Two library store/duplex tests, three new runtime tests, two existing replication-runtime tests,
+all thirty configuration tests and strict content/agent/config Clippy pass. These include actual
+incremental storage and re-serving after reopen, quota without eviction, private-v3 admission
+rejection and refusal to promote a legacy private journal. Expiry tests use explicit library
+time; this is not yet a live agent-start proof. Seven additive harness/checker tests, shellsyntax
+and strict ShellCheck pass. The dedicated VM will require an initially empty automatic service,
+ordinary P download, original-node shutdown, a real agent PID change with retained journal, and
+independent protected P retrieval. That run remains pending. This is not arbitrary HTTPS
+interception, retention repair or globally fair placement.
 
 ## Latest known-contact mailbox integration checkpoint
 

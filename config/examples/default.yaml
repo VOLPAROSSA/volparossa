@@ -100,6 +100,21 @@ dns_cache:
   enabled: true
   upstream: null
 
+# Explicit public-content storage/serving consent. An enabled relay with a policy-authorized
+# hostname may start empty and automatically retain verified native/cooperative-HTTPS downloads.
+# Requires sharing and download_sharing with explicitly configured interfaces/capacities.
+# Private messages, cookies, authenticated sessions and arbitrary HTTPS are never opted in.
+content_contribution:
+  enabled: false
+  bind_address: ""
+  advertised_hostname: ""
+  cache: ""
+  quota_bytes: 67108864
+  max_entries: 256
+  min_free_bytes: 268435456
+  max_bytes: 1048576
+  max_chunks: 4
+
 quic:
   enabled: true
   transport: masque_connect_ip_mpquic

@@ -1,11 +1,11 @@
 //! Explicit native name resolution over protected provider streams, never global latestness.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tokio::{net::UnixStream, time::timeout};
 use volparossa_content::provider::named::{NameQuery, NameResolution, lookup_publication};
 use volparossa_content::transfer::{TransferLimits, serve_peer};
-use volparossa_content::{ChunkStore, SignedManifest, VerifiedManifest};
+use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, VerifiedManifest};
 use volparossa_local_control::{
     CONTROL_PROTOCOL_VERSION, ContentFetchNameRequest, ContentReceipt, ControlResponse,
     ControlResult, NamedContentTransferReady, control_response::Payload, write_response,
@@ -27,6 +27,8 @@ struct PreparedDownload {
     query: NameQuery,
     policy: VerifiedPolicy,
     store: ChunkStore,
+    source_root: PathBuf,
+    source_limits: CacheLimits,
     receipt: ContentReceipt,
 }
 
@@ -264,6 +266,8 @@ async fn retrieve(
         query,
         policy,
         store,
+        source_root: PathBuf::from(request.cache),
+        source_limits: cache_limits,
         receipt,
     })
 }
@@ -282,6 +286,8 @@ pub(super) async fn download(
         query,
         policy,
         mut store,
+        source_root,
+        source_limits,
         receipt,
     } = retrieve(request, context).await?;
     let verified = &selected.manifest;
@@ -329,6 +335,15 @@ pub(super) async fn download(
         query
             .verify_candidate(&selected.signed, now())
             .map_err(|_| ContentError::Unavailable)?;
+        context
+            .content
+            .contribute_native(
+                selected.signed.clone(),
+                verified.clone(),
+                source_root,
+                source_limits,
+            )
+            .await;
         send_response(stream, request_id, "CONTENT_OK", Payload::Content(receipt)).await
     })
     .await

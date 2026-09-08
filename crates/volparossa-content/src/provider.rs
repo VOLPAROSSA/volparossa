@@ -294,6 +294,11 @@ impl PublicationRegistry {
         self.mailbox = Some(service);
     }
 
+    /// Whether an explicitly attached mailbox still owns this service independently of public content.
+    pub fn has_mailbox(&self) -> bool {
+        self.mailbox.is_some()
+    }
+
     /// Register the original independently verified envelope without opting into replication.
     /// Retaining these bounded bytes alone does not enable name lookup.
     ///
@@ -366,6 +371,16 @@ impl PublicationRegistry {
     /// Whether no publications are registered.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Whether a nonempty, currently valid publication is explicitly registered.
+    ///
+    /// Metadata only: this never scans a directory or creates authority. Automatic services
+    /// must first restore/admit and verify actual replica chunks; a mailbox is separate.
+    pub fn has_live_publications(&self, now_unix: u64) -> bool {
+        self.entries.values().any(|entry| {
+            !entry.manifest.chunks().is_empty() && entry.manifest.check_time(now_unix).is_ok()
+        })
     }
 }
 

@@ -4,6 +4,8 @@ mod wifi_mesh;
 pub use wifi_mesh::WifiMeshConfig;
 mod dns_cache;
 pub use dns_cache::DnsCacheConfig;
+mod content_contribution;
+pub use content_contribution::ContentContributionConfig;
 
 use std::{
     collections::HashSet,
@@ -92,6 +94,8 @@ pub struct Config {
     pub wifi_mesh: WifiMeshConfig,
     /// Bounded independently validated DNSSEC cache; does not activate participation.
     pub dns_cache: DnsCacheConfig,
+    /// Explicit bounded automatic sharing of verified public downloads.
+    pub content_contribution: ContentContributionConfig,
     /// Route-context and interception safety settings.
     pub routing: RoutingConfig,
     /// TCP/MPTCP settings.
@@ -118,6 +122,7 @@ impl Default for Config {
             download_sharing: DownloadSharingConfig::default(),
             wifi_mesh: WifiMeshConfig::default(),
             dns_cache: DnsCacheConfig::default(),
+            content_contribution: ContentContributionConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
             udp: UdpConfig::default(),
@@ -205,6 +210,15 @@ impl Config {
         validate_download_sharing(&self.download_sharing)?;
         self.wifi_mesh.validate()?;
         self.dns_cache.validate()?;
+        self.content_contribution.validate(self.roles.relay)?;
+        if self.content_contribution.enabled
+            && (!self.sharing.enabled || !self.download_sharing.enabled)
+        {
+            return Err(validation(
+                "content_contribution.enabled",
+                "requires configured upload and download sharing for owner-priority admission",
+            ));
+        }
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
         validate_udp(&self.udp)?;
@@ -1199,6 +1213,47 @@ mod tests {
         let shipped = include_str!("../../../config/examples/default.yaml");
         let actual = Config::from_yaml(shipped).expect("shipped default YAML must validate");
         assert_eq!(actual, Config::default());
+    }
+
+    #[test]
+    fn content_contribution_requires_both_owner_accounting_settings() {
+        let mut config = explicit_participant_config();
+        config.content_contribution = ContentContributionConfig {
+            enabled: true,
+            bind_address: "0.0.0.0:18080".into(),
+            advertised_hostname: "cache.example".into(),
+            cache: "/var/lib/volparossa/public-contribution".into(),
+            ..ContentContributionConfig::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation {
+                field: "content_contribution.enabled",
+                ..
+            })
+        ));
+        config.sharing = SharingConfig {
+            enabled: true,
+            interface: "eth0".into(),
+            total_upload_mbps: 100,
+            contribution_upload_ceiling_mbps: 60,
+        };
+        assert!(config.validate().is_err());
+        config.download_sharing = DownloadSharingConfig {
+            enabled: true,
+            interface: "eth0".into(),
+            total_download_mbps: 100,
+            contribution_download_ceiling_mbps: 60,
+        };
+        config
+            .validate()
+            .expect("explicit storage and owner accounting");
+        assert_eq!(
+            Config::from_yaml(&config.to_yaml().unwrap()).unwrap(),
+            config
+        );
+        config.sharing.enabled = false;
+        assert!(config.validate().is_err());
     }
 
     #[test]

@@ -14,11 +14,11 @@ use tokio::{
     net::UnixStream,
     time::{Instant, timeout},
 };
-use volparossa_content::ChunkStore;
 use volparossa_content::origin_https::{
     OriginAuthorizedManifest, OriginClient, OriginLimits, OriginRequest,
 };
 use volparossa_content::transfer::{TransferLimits, serve_peer};
+use volparossa_content::{CacheLimits, ChunkStore};
 use volparossa_local_control::{
     CONTROL_PROTOCOL_VERSION, ContentReceipt, ControlResponse, ControlResult,
     HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
@@ -50,6 +50,15 @@ pub(super) async fn fetch(
         .authorized
         .reassemble_to_file(&mut [&mut download.store], now(), &output)
         .map_err(|_| ContentError::Unavailable)?;
+    checked_policy(context, &download.origin, &download.policy).await?;
+    context
+        .content
+        .contribute_https(
+            &download.authorized,
+            download.source_root,
+            download.source_limits,
+        )
+        .await;
     Ok(download.receipt)
 }
 
@@ -58,6 +67,8 @@ struct PreparedDownload {
     policy: VerifiedPolicy,
     authorized: OriginAuthorizedManifest,
     store: ChunkStore,
+    source_root: PathBuf,
+    source_limits: CacheLimits,
     receipt: ContentReceipt,
 }
 
@@ -154,6 +165,8 @@ async fn retrieve(
         policy,
         authorized,
         store,
+        source_root: PathBuf::from(request.cache),
+        source_limits: cache_limits,
         receipt,
     })
 }
@@ -329,6 +342,14 @@ pub(super) async fn download(
             .check_validity(now())
             .map_err(|_| ContentError::Unavailable)?;
         checked_policy(context, &download.origin, &download.policy).await?;
+        context
+            .content
+            .contribute_https(
+                &download.authorized,
+                download.source_root,
+                download.source_limits,
+            )
+            .await;
         send_local_response(
             stream,
             request_id,
