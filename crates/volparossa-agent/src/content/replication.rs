@@ -153,6 +153,39 @@ impl ReplicationRuntime {
         }
     }
 
+    async fn reclaim(
+        &self,
+        registry: &Mutex<PublicationRegistry>,
+        at: u64,
+    ) -> Result<bool, ContentError> {
+        let mut registry = registry.try_lock().map_err(|_| ContentError::Busy)?;
+        let result = registry
+            .reclaim_replica_cache(&self.root, self.limits, at)
+            .map_err(|_| ContentError::Busy)?;
+        let mut state = self.state.lock().await;
+        state.usage = result.usage;
+        state.publications.retain(|id| {
+            registry.contains(id)
+                && result
+                    .live
+                    .iter()
+                    .any(|replica| replica.manifest_id() == id)
+        });
+        state.chunks.clear();
+        for replica in result.live {
+            remember_chunks(&mut state.chunks, replica.chunk_ids());
+            let id = *replica.manifest_id();
+            if registry.contains(&id) || registry.len() >= 64 {
+                continue;
+            }
+            registry
+                .register_replica(replica, self.root.clone(), self.limits, at)
+                .map_err(|_| ContentError::Invalid)?;
+            state.publications.insert(id);
+        }
+        Ok(!result.expired_manifest_ids.is_empty())
+    }
+
     pub(super) async fn start(
         self: &Arc<Self>,
         context: ControlContext,
@@ -165,6 +198,14 @@ impl ReplicationRuntime {
         };
         if job.as_ref().is_some_and(|task| !task.is_finished()) || *stop.borrow() {
             return;
+        }
+        if foreground.active() {
+            return;
+        }
+        match self.reclaim(&registry, now()).await {
+            Ok(true) => content_event(&context, "CONTENT_REPLICATION_EXPIRED_RECLAIMED").await,
+            Ok(false) => {}
+            Err(_) => return, // Busy or unsafe storage never authorizes speculative quota credit.
         }
         let Some(budget) = IdleBudget::new(&context.config) else {
             content_event(&context, "CONTENT_REPLICATION_ACCOUNTING_UNAVAILABLE").await;
@@ -455,6 +496,15 @@ mod tests {
         assert_eq!(receipt.replica_chunks, 1);
         let mut store = ChunkStore::open(&replica_root, cache_limits).unwrap();
         assert_eq!(restore_replicas(&mut store, now()).unwrap().len(), 1);
+        drop(store);
+        // Explicit library clock, not an elapsed-time or networking claim. The normal
+        // runtime maintenance refreshes capacity even when unrelated primaries fill serving.
+        let registry = Mutex::new(registry);
+        assert!(runtime.reclaim(&registry, now() + 601).await.unwrap());
+        runtime.receipt(&mut receipt).await.unwrap();
+        assert_eq!(registry.lock().await.len(), 64);
+        assert_eq!(receipt.replica_publications, 0);
+        assert_eq!((receipt.replica_chunks, receipt.replica_bytes), (0, 0));
     }
 
     #[tokio::test]

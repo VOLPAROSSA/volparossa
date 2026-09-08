@@ -32,12 +32,14 @@ struct Record {
 ///
 /// Preserves earlier valid publications and unions additional chunks of the exact same
 /// signed manifest. Original signed expiry is never renewed; local hops never decrease.
+/// Old expired ownership records remain until explicit reclamation, including when their
+/// expiry passed during a transfer. Restoring/serving still exposes only live publications.
 /// Contains no provider contacts, browsing URLs, private keys or independent trust anchors.
 /// The journal is private, cache-ID-bound and atomically replaced under the cache lock.
 ///
 /// # Errors
 /// Rejects invalid/expired new replicas, absent/corrupt chunks, unsafe or corrupt old metadata,
-/// more than sixty-four live publications, metadata above eight MiB, and filesystem failures.
+/// more than sixty-four stored publications, metadata above eight MiB, and filesystem failures.
 /// No chunk is evicted or deleted to admit metadata.
 pub fn persist_replicas(
     store: &mut ChunkStore,
@@ -47,10 +49,16 @@ pub fn persist_replicas(
     if replicas.len() > MAX_RECORDS {
         return Err(Error::Limit("replica metadata count"));
     }
-    let mut combined: BTreeMap<_, _> = restore_replicas(store, now_unix)?
-        .into_iter()
-        .map(|replica| (*replica.manifest_id(), replica))
-        .collect();
+    let mut combined = BTreeMap::new();
+    for replica in read_records(store)? {
+        if now_unix < replica.validity().created {
+            return Err(Error::Expired);
+        }
+        if now_unix < replica.validity().expires {
+            check_chunks(store, &replica)?;
+        }
+        combined.insert(*replica.manifest_id(), replica);
+    }
     for replica in replicas {
         replica.checked.check_time(now_unix)?;
         check_chunks(store, replica)?;
@@ -74,9 +82,19 @@ pub fn persist_replicas(
             combined.insert(id, replica.clone());
         }
     }
-    let count = u32::try_from(combined.len()).map_err(|_| Error::InvalidStore)?;
+    replace_records(store, combined.values())
+}
+
+pub(super) fn replace_records<'a>(
+    store: &mut ChunkStore,
+    records: impl ExactSizeIterator<Item = &'a Replica>,
+) -> Result<(), Error> {
+    if records.len() > MAX_RECORDS {
+        return Err(Error::Limit("replica metadata count"));
+    }
+    let count = u32::try_from(records.len()).map_err(|_| Error::InvalidStore)?;
     let mut bytes = count.to_le_bytes().to_vec();
-    for replica in combined.values() {
+    for replica in records {
         let record = encode_record(replica);
         if record.len() > MAX_RECORD_BYTES
             || bytes.len() + 4 + record.len() > MAX_REPLICA_METADATA_BYTES
@@ -101,6 +119,20 @@ pub fn persist_replicas(
 /// Rejects foreign, corrupt or unfinished metadata, future validity, missing/corrupt live
 /// chunks, duplicate records, excessive resources, and filesystem failures.
 pub fn restore_replicas(store: &mut ChunkStore, now_unix: u64) -> Result<Vec<Replica>, Error> {
+    let mut restored = Vec::new();
+    for replica in read_records(store)? {
+        if now_unix < replica.validity().created {
+            return Err(Error::Expired);
+        }
+        if now_unix < replica.validity().expires {
+            check_chunks(store, &replica)?;
+            restored.push(replica);
+        }
+    }
+    Ok(restored)
+}
+
+pub(super) fn read_records(store: &ChunkStore) -> Result<Vec<Replica>, Error> {
     let Some(bytes) = store.read_replica_metadata()? else {
         return Ok(Vec::new());
     };
@@ -122,13 +154,7 @@ pub fn restore_replicas(store: &mut ChunkStore, now_unix: u64) -> Result<Vec<Rep
         if !ids.insert(*replica.manifest_id()) {
             return Err(Error::InvalidStore);
         }
-        if now_unix < replica.validity().created {
-            return Err(Error::Expired);
-        }
-        if now_unix < replica.validity().expires {
-            check_chunks(store, &replica)?;
-            restored.push(replica);
-        }
+        restored.push(replica);
     }
     if !remaining.is_empty() {
         return Err(Error::InvalidStore);
@@ -208,7 +234,7 @@ fn check_shape(replica: &Replica) -> Result<(), Error> {
     Ok(())
 }
 
-fn check_chunks(store: &mut ChunkStore, replica: &Replica) -> Result<(), Error> {
+pub(super) fn check_chunks(store: &mut ChunkStore, replica: &Replica) -> Result<(), Error> {
     check_shape(replica)?;
     for id in &replica.chunk_ids {
         store.get(id)?.ok_or(Error::MissingChunk(*id))?;

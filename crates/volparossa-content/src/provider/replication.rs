@@ -4,7 +4,9 @@
 //! publisher or HTTPS authority. Foreground consumers still authorize their own manifests.
 //! Hop counts are bounded locally, not protected against a malicious peer resetting its claim.
 
+mod expiry;
 mod persistence;
+pub use expiry::ReplicaReclamation;
 pub use persistence::{persist_replicas, restore_replicas};
 
 use std::{
