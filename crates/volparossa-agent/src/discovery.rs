@@ -1,6 +1,7 @@
 //! Real libp2p privacy-v4 discovery, forwarding, and verified peerstore ingestion.
 
 mod content;
+mod dns_cache;
 mod downlink;
 mod native_ready;
 mod preselection_observation;
@@ -520,6 +521,7 @@ impl DiscoveryControlHandle {
 #[allow(dead_code, reason = "typed route boundary")]
 enum DiscoveryCommand {
     Content(content::ContentCommand),
+    DnsCache(dns_cache::DnsCommand),
     RetireRoute(route_retire::RetireCommand),
     SetRoles {
         expected: RolesConfig,
@@ -1706,6 +1708,7 @@ pub struct DiscoveryRuntime {
     exit_runtime_retirements: HashMap<[u8; FORWARD_ID_BYTES], ExitRuntimeRetirement>,
     downlink: downlink::DownlinkBridge,
     content: content::ContentBridge,
+    dns_cache: dns_cache::DnsBridge,
     route_retire: route_retire::RouteRetireBridge,
     metrics: MetricsRegistry,
     role_commands: mpsc::Receiver<DiscoveryCommand>,
@@ -1905,6 +1908,7 @@ impl DiscoveryRuntime {
             exit_runtime_retirements: HashMap::new(),
             downlink: downlink::DownlinkBridge::default(),
             content: content::ContentBridge::default(),
+            dns_cache: dns_cache::DnsBridge::default(),
             route_retire: route_retire::RouteRetireBridge::default(),
             metrics,
             role_commands,
@@ -2002,7 +2006,8 @@ impl DiscoveryRuntime {
         loop {
             self.maintain_client_preselection();
             self.maintain_content();
-            let content_deadline = self.content_deadline();
+            self.maintain_dns_cache();
+            let content_deadline = self.content_deadline().min(self.dns_deadline());
             let responder_policy = {
                 let now_ms = unix_millis();
                 let policy = state.read().await.policy_snapshot(now_ms);
@@ -2011,6 +2016,7 @@ impl DiscoveryRuntime {
             tokio::select! {
                 () = tokio::time::sleep_until(content_deadline) => {
                     self.maintain_content();
+                    self.maintain_dns_cache();
                 }
                 _ = downlink_maintenance.tick() => {
                     if Box::pin(self.maintain_downlink(&state)).await.is_err() {
@@ -2143,6 +2149,7 @@ impl DiscoveryRuntime {
         self.shutdown_downlink(&state).await;
         self.cancel_client_preselection(ClientPreselectionError::Closed);
         self.invalidate_content();
+        self.stop_dns_cache();
         self.fail_all_outbound_reservations(OutboundReservationError::Shutdown);
         self.reject_queued_outbound_commands();
         self.withdraw_local();
@@ -2194,6 +2201,7 @@ impl DiscoveryRuntime {
         self.maintain_client_preselection();
         match command {
             DiscoveryCommand::Content(command) => self.handle_content_command(command, state).await,
+            DiscoveryCommand::DnsCache(command) => self.handle_dns_command(command),
             DiscoveryCommand::SetRoles {
                 expected,
                 candidate,
@@ -3583,6 +3591,7 @@ impl DiscoveryRuntime {
         while let Ok(command) = self.role_commands.try_recv() {
             match command {
                 DiscoveryCommand::Content(command) => command.reject(ContentDiscoveryError::Closed),
+                DiscoveryCommand::DnsCache(command) => command.reject(),
                 DiscoveryCommand::RetireRoute(command) => command.reject(),
                 DiscoveryCommand::RequestExitForward { reply, .. } => {
                     let _ = reply.send(Err(OutboundReservationError::Shutdown));
@@ -4387,9 +4396,12 @@ impl DiscoveryRuntime {
         clear_exit_metric(&self.metrics);
         match active_policy {
             Some(policy) => {
-                if let Ok(service) =
+                if let Ok(mut service) =
                     build_exit_service(self.local_node_id, &self.config, policy, &self.metrics)
                 {
+                    if let Some(resolver) = &self.dns_cache.resolver {
+                        service.set_dns_resolver(Arc::clone(resolver));
+                    }
                     self.exit_service = Some(service);
                     state.write().await.log(
                         LogLevel::Info,
@@ -4850,7 +4862,9 @@ impl DiscoveryRuntime {
         event: SwarmEvent<BehaviourEvent>,
         state: &Arc<RwLock<AgentState>>,
     ) {
-        let event = self.handle_content_swarm_event(event);
+        let event = self
+            .handle_dns_event(event)
+            .and_then(|event| self.handle_content_swarm_event(event));
         self.flush_content_events(state).await;
         let Some(event) = event else {
             return;
@@ -9982,6 +9996,11 @@ impl DiscoveryRuntime {
                     .and_then(|service| service.release(route.bundle.reservation_id()).ok());
                 return None;
             };
+            let service = self.exit_service.as_ref()?;
+            let active = active.with_dns_resolver(
+                service.dns_resolver(),
+                service.dns_resolution_scope(route.bundle.reservation_id()),
+            );
             let encoded = encode_canonical(
                 &signal,
                 usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
@@ -10035,6 +10054,11 @@ impl DiscoveryRuntime {
                     return None;
                 }
             };
+            let service = self.exit_service.as_ref()?;
+            let active = active.with_dns_resolver(
+                service.dns_resolver(),
+                service.dns_resolution_scope(route.bundle.reservation_id()),
+            );
             let encoded = encode_canonical(
                 &signal,
                 usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
@@ -10338,6 +10362,11 @@ impl DiscoveryRuntime {
             usize::try_from(MAX_FORWARDING_FRAME_BYTES).unwrap_or(usize::MAX),
         )
         .ok()?;
+        let service = self.exit_service.as_ref()?;
+        let active = active.with_dns_resolver(
+            service.dns_resolver(),
+            service.dns_resolution_scope(route.bundle.reservation_id()),
+        );
         spawn_exit_mpquic_runtime(active, shutdown, completed, now_ms);
         Some(encoded)
     }

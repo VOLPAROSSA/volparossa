@@ -10,6 +10,7 @@ mod content_connection;
 mod content_provider;
 #[cfg(test)]
 mod content_provider_address_tests;
+mod dns_cache;
 mod forwarding;
 mod listener_recovery;
 mod mpquic_session;
@@ -66,6 +67,8 @@ pub use content_provider::{
     MAX_PENDING_CONTENT_REQUESTS,
 };
 use content_provider::{ContentProviderState, ContentServiceCodec};
+pub use dns_cache::{DNS_CACHE_PROTOCOL, DNS_CACHE_RPC_TIMEOUT, DnsCacheRequest, DnsCacheResponse};
+use dns_cache::{DnsCacheCodec, DnsCacheState};
 pub use forwarding::{
     EXIT_FORWARD_PROTOCOL, EXIT_FORWARD_REQUEST_TIMEOUT, EXIT_FORWARD_UPSTREAM_PROTOCOL,
     EXIT_FORWARD_UPSTREAM_TIMEOUT, ExitForwardOperation, ExitForwardRequest, ExitForwardResponse,
@@ -232,6 +235,8 @@ pub mod capability {
     pub const MPQUIC: &str = "/volparossa/v1/provider/mpquic";
     /// Explicit public content services, without a content or browser-history index.
     pub const CONTENT: &str = "/volparossa/v1/provider/content";
+    /// Generic positive DNSSEC cache service; no DNS names or history in the index.
+    pub const DNSSEC_CACHE: &str = "/volparossa/v1/provider/dnssec-cache";
 
     /// Builds a bounded region capability key.
     pub fn region(role: &str, region: &str) -> Option<String> {
@@ -307,6 +312,8 @@ pub struct DiscoveryBehaviour {
     content_service: request_response::Behaviour<ContentServiceCodec>,
     /// Client to its already authenticated control relay for public service offers.
     content_discovery: ContentConnectionBehaviour,
+    /// Direct authenticated Exit-to-cache peer exchange; never control-relay forwarding.
+    dns_cache: request_response::Behaviour<DnsCacheCodec>,
     /// Client-to-control-relay forwarding hop.
     pub exit_forward: request_response::Behaviour<ExitForwardCodec>,
     /// Control-relay-to-exit forwarding hop.
@@ -409,6 +416,10 @@ impl DiscoveryBehaviour {
             advertisements,
             content_service,
             content_discovery,
+            dns_cache: dns_cache::behaviour(protocol_support(
+                protocol_roles.exit(),
+                protocol_roles.client() || protocol_roles.relay() || protocol_roles.exit(),
+            )),
             exit_forward,
             exit_forward_upstream,
             datapath_relay,
@@ -454,6 +465,8 @@ pub enum BehaviourEvent {
     ContentService(request_response::Event<ContentServiceRequest, ContentServiceResponse>),
     /// Inbound client query or exactly correlated forwarded content-service offers.
     ContentDiscovery(request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>),
+    /// Signed cache-only DNSSEC request or bounded correlated reply.
+    DnsCache(request_response::Event<DnsCacheRequest, DnsCacheResponse>),
     /// Client-hop A1c event; the client-side outbound attempt owner remains absent.
     PreselectionObservation(
         request_response::Event<
@@ -687,6 +700,11 @@ impl From<request_response::Event<ContentServiceRequest, ContentServiceResponse>
 {
     fn from(value: request_response::Event<ContentServiceRequest, ContentServiceResponse>) -> Self {
         Self::ContentService(value)
+    }
+}
+impl From<request_response::Event<DnsCacheRequest, DnsCacheResponse>> for BehaviourEvent {
+    fn from(value: request_response::Event<DnsCacheRequest, DnsCacheResponse>) -> Self {
+        Self::DnsCache(value)
     }
 }
 impl From<request_response::Event<ContentDiscoveryRequest, ContentDiscoveryResponse>>
@@ -952,6 +970,7 @@ pub struct DiscoveryService {
     local_advertisement: Option<Vec<u8>>,
     advertisement_budgets: AdvertisementBudgets,
     content_provider: ContentProviderState,
+    dns_cache: DnsCacheState,
     address_admissions: AddressAdmissions,
     protocol_roles: DiscoveryProtocolRoles,
     preselection_forwarder: PreselectionForwarderState,
@@ -1031,6 +1050,7 @@ impl DiscoveryService {
             local_advertisement: None,
             advertisement_budgets: AdvertisementBudgets::new(),
             content_provider: ContentProviderState::default(),
+            dns_cache: DnsCacheState::default(),
             address_admissions: AddressAdmissions::default(),
             preselection_forwarder: PreselectionForwarderState::new()
                 .map_err(|error| DiscoveryError::Build(error.to_string()))?,

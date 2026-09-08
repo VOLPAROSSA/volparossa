@@ -259,6 +259,36 @@ single-path QUIC. The original v1 checkpoint exercised the real client--relay--e
 Unavailable peers, policy, capacity or required paths still cause explicit failure. Do not interpret
 a Permit, valid configuration, signed advertisement or role state alone as a usable route.
 
+## Shared positive DNS cache
+
+The agent can reuse independently validated positive DNSSEC A/AAAA answers at the Exit. It keeps
+proofs only in bounded RAM; disabling/restarting it does not leave a DNS-history database. Existing
+destination policy, protected DNS ingress and exact destination pinning still apply.
+
+The default configuration is:
+
+```yaml
+dns_cache:
+  enabled: true
+  upstream: null
+```
+
+This enables no network role and selects no public DNS provider. To collect shareable proofs,
+set `upstream` to an existing recursive resolver that you already trust and that accepts DNS over
+TCP on port 53. For example, `127.0.0.53:53` is appropriate only if such a listener actually exists
+in the agent's network namespace; VOLPAROSSA does not install or reconfigure it. Restart the agent
+after an explicit configuration change. A null endpoint retains peer-proof reuse and the existing
+OS-resolution fallback; `enabled: false` retains the old resolver path without cache exchange.
+
+Peer signatures authenticate the transport peer, not the DNS answer. Every usable peer proof must
+validate against the built-in DNSSEC root anchors. Unsigned, missing or unsupported evidence falls
+back to existing resolution and is not shared as validated data. Cache peers never perform an
+upstream lookup on another peer's cache miss. Names are not published in the DHT or product logs;
+the authenticated cache peer serving a question necessarily sees that question. Involved route
+relays are excluded from those requests. CNAME and negative-answer sharing remain outside this
+initial positive-answer implementation. See the source-bound
+[implementation status](IMPLEMENTATION_STATUS.md); the complete two-Exit network proof is pending.
+
 ## Offline content commands
 
 `content publish` and `content assemble` work locally without starting services, opening network

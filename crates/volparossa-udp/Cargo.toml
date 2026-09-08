@@ -11,8 +11,12 @@ publish = false
 
 [dependencies]
 bytes.workspace = true
-hickory-proto.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hickory-proto = { workspace = true, features = ["dnssec-ring"] }
+prost.workspace = true
 quinn.workspace = true
+sha2.workspace = true
 socket2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true

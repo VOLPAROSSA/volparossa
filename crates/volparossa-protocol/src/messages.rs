@@ -84,6 +84,10 @@ pub enum ControlMessageType {
     RouteRetire = 29,
     /// Concrete remote owner's acknowledgement of one exact retirement request.
     RetirementReceipt = 30,
+    /// Authenticated cache-only positive DNSSEC query, never a DHT key.
+    DnsCacheQuery = 31,
+    /// Correlated opaque DNSSEC proof; peer signatures do not establish DNS authority.
+    DnsCacheReply = 32,
 }
 
 /// Data transport authorized by a reservation.
@@ -2103,7 +2107,10 @@ fn validate_canonical_hostname(hostname: &str) -> Result<(), ProtocolError> {
     validate_canonical_dns_name(hostname, "hostname")
 }
 
-fn validate_canonical_dns_name(hostname: &str, field: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_canonical_dns_name(
+    hostname: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
     if hostname.is_empty()
         || hostname.len() > 253
         || hostname.ends_with('.')

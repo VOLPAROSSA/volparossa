@@ -93,8 +93,20 @@ The Hickory diff also declares the non-default
 `volparossa-backport-regressions` feature. It exposes only a doc-hidden boolean
 adapter to the same private `verify_nsec3` call so the isolated GPL-3.0-only
 test harness can execute the cross-zone path with `dnssec-ring`. The production
-feature-graph gate rejects this feature and both DNSSEC backends; the adapter
+feature-graph gate rejects this feature and the unused aws-lc DNSSEC backend; the adapter
 does not change Hickory's default features or semantic package version.
+
+The bounded positive A/AAAA DNS-sharing resolver now explicitly enables
+`dnssec-ring` in `volparossa-udp`. The previous product guard excluded DNSSEC
+because no production caller needed it, not instead of applying the NSEC3 fix.
+The exact reviewed cross-zone fix and offline regression remain mandatory.
+The new wrapper accepts only bounded positive A/AAAA and DNSKEY/DS/RRSIG
+chains, requires `Proof::Secure`, rejects aliases/wildcards/negative proof
+shapes, and keeps the existing compiled root anchors. It preserves original
+received RR/RRSIG TTL bounds separately from Hickory's adjusted TTL. No vendor
+bytes, trust-anchor files, licenses, or cryptographic implementation change.
+The standalone fuzz graph does not depend on the UDP resolver and still
+forbids both DNSSEC backends and the regression adapter.
 
 The isolated harness has its own rustc-1.85-resolved `Cargo.lock` with SHA-256
 `08e7bcd46d2e3f7411e8f4e855c70027f627be6061f63ab459c43f41a687c5cc`.
@@ -136,9 +148,10 @@ after `scripts/check-rust-dependencies.sh`:
 4. verifies unchanged upstream license files and the complete tree hashes;
 5. verifies the exact isolated-harness files and lock, then executes the
    compression, NSEC3, RFC 2822, and Yamux regressions offline;
-6. proves both locked graphs use all three local paths, contain only fixed
-   `yamux 0.13.10`, and do not enable Hickory `dnssec-ring`,
-   `dnssec-aws-lc-rs`, or the regression-only feature;
+6. proves both locked graphs use all three local paths and contain only fixed
+   `yamux 0.13.10`; production explicitly enables only Hickory `dnssec-ring`,
+   while the standalone fuzz graph excludes DNSSEC; both reject the
+   regression-only feature and `dnssec-aws-lc-rs`;
 7. runs CVSS 4.0-capable cargo-deny advisory, license, ban, and source checks; and
 8. independently runs a CVSS 4.0-capable cargo-audit without fetching.
 

@@ -6,6 +6,7 @@
 //! over decoding the raw signed envelope directly.
 
 mod canonical;
+mod dns_cache;
 mod envelope;
 mod messages;
 mod native_preselection_probe;
@@ -21,6 +22,10 @@ pub use route_retire::{
 };
 
 pub use canonical::{decode_canonical, encode_canonical};
+pub use dns_cache::{
+    DnsCacheQuery, DnsCacheReply, MAX_DNS_CACHE_BUNDLE_BYTES, MAX_DNS_CACHE_LIFETIME_MS,
+    dns_cache_request_hash,
+};
 pub use envelope::{
     ControlPayload, ReplayCache, SignedEnvelope, TimePolicy, VerifiedControlMessage,
     generate_nonce, node_id_from_public_key, sign_control_message, sign_control_message_with,

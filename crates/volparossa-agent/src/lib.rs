@@ -51,7 +51,7 @@ use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
-use volparossa_udp::MAX_DNS_MESSAGE_BYTES;
+use volparossa_udp::{ExitResolver, MAX_DNS_MESSAGE_BYTES};
 
 use client_ingress::{
     BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
@@ -130,7 +130,7 @@ impl Agent {
         let metrics = MetricsRegistry::new();
         let mut state = AgentState::new(&config, roles, active_policy.clone(), metrics.clone())?;
         let helper = HelperClient::new(paths.helper_socket.clone(), paths.helper_token.clone());
-        let (discovery, discovery_control) = DiscoveryRuntime::new(
+        let (mut discovery, discovery_control) = DiscoveryRuntime::new(
             identity,
             &config,
             peerstore,
@@ -144,6 +144,12 @@ impl Agent {
                 mpquic_socket: paths.mpquic_exit_socket(roles),
             },
         )?;
+        if config.dns_cache.enabled {
+            discovery.configure_dns_cache(Arc::new(ExitResolver::new(
+                config.dns_cache.upstream,
+                Some(discovery_control.dns_peer_backend()),
+            )));
+        }
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
         if policy_failed {
             state.log(LogLevel::Warn, "POLICY_LOAD_FAILED", unix_millis());

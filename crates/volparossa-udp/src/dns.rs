@@ -1,5 +1,9 @@
-use std::{collections::BTreeSet, net::IpAddr, time::Duration};
+use std::{collections::BTreeSet, net::IpAddr, sync::Arc};
 
+use crate::{
+    AuthorizedUdpFlow, DatagramLimits, QuicUdpAssociation, UdpBridgeStats, UdpError,
+    authorization::is_permitted_egress,
+};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
     rr::{
@@ -7,18 +11,40 @@ use hickory_proto::{
         rdata::{A, AAAA},
     },
 };
-use tokio::{net::lookup_host, time::timeout};
 
-use crate::{
-    AuthorizedUdpFlow, DatagramLimits, QuicUdpAssociation, UdpBridgeStats, UdpError,
-    authorization::is_permitted_egress,
-};
+pub mod resolver;
+use resolver::{DnsQuestion, DnsResolutionScope, ExitResolver};
 
 /// Largest DNS request or response accepted by the protected DNS vertical.
 pub const MAX_DNS_MESSAGE_BYTES: usize = 4_096;
 const MAX_DNS_ANSWERS: usize = 16;
-const DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DNS_BINDING_TTL_SECONDS: u32 = 30;
+
+/// Resolve both address families using the same policy and complete route privacy exclusions.
+/// Each family remains bounded by the resolver's common collection/fallback deadline.
+///
+/// # Errors
+/// Rejects invalid names or a result without any permitted Internet-unicast address.
+pub async fn resolve_hostname_addresses(
+    resolver: &ExitResolver,
+    scope: &DnsResolutionScope,
+    hostname: &str,
+) -> Result<Vec<IpAddr>, UdpError> {
+    let v4 = DnsQuestion::new(hostname, DnsQueryType::A).map_err(|_| UdpError::ResolutionFailed)?;
+    let v6 =
+        DnsQuestion::new(hostname, DnsQueryType::Aaaa).map_err(|_| UdpError::ResolutionFailed)?;
+    let (v4, v6) = tokio::join!(resolver.resolve(&v4, scope), resolver.resolve(&v6, scope));
+    let addresses: BTreeSet<_> = v4
+        .into_iter()
+        .chain(v6)
+        .flat_map(|answer| answer.addresses().to_vec())
+        .filter(|address| is_permitted_egress(*address))
+        .collect();
+    if addresses.is_empty() {
+        return Err(UdpError::ResolutionFailed);
+    }
+    Ok(addresses.into_iter().take(MAX_DNS_ANSWERS).collect())
+}
 
 /// DNS address-family question accepted by the protected resolver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +120,8 @@ pub(crate) struct ExitDnsBridge {
     expected_name: String,
     expires_at_ms: u64,
     limits: DatagramLimits,
+    resolver: Arc<ExitResolver>,
+    resolution_scope: DnsResolutionScope,
 }
 
 impl ExitDnsBridge {
@@ -102,6 +130,8 @@ impl ExitDnsBridge {
         flow: &AuthorizedUdpFlow,
         now_ms: u64,
         limits: DatagramLimits,
+        resolver: Arc<ExitResolver>,
+        resolution_scope: DnsResolutionScope,
     ) -> Result<Self, UdpError> {
         flow.ensure_active_at(now_ms)?;
         let expected_name = flow
@@ -113,6 +143,8 @@ impl ExitDnsBridge {
             expected_name,
             expires_at_ms: flow.expires_at_ms(),
             limits,
+            resolver,
+            resolution_scope,
         })
     }
 
@@ -122,6 +154,8 @@ impl ExitDnsBridge {
             expected_name,
             expires_at_ms,
             limits,
+            resolver,
+            resolution_scope,
         } = self;
         let result = async {
             let request = association.receive_payload().await?;
@@ -132,7 +166,12 @@ impl ExitDnsBridge {
             if query.name() != expected_name {
                 return Err(UdpError::InvalidBinding("signed DNS name"));
             }
-            let addresses = resolve_addresses(&query).await?;
+            let question = DnsQuestion::new(query.name(), query.query_type())
+                .map_err(|_| UdpError::ResolutionFailed)?;
+            let answer = resolver
+                .resolve(&question, &resolution_scope)
+                .await
+                .map_err(|_| UdpError::ResolutionFailed)?;
             let now_ms = unix_millis()?;
             if now_ms >= expires_at_ms {
                 return Err(UdpError::Expired);
@@ -140,8 +179,13 @@ impl ExitDnsBridge {
             let remaining_seconds = expires_at_ms.saturating_sub(now_ms) / 1_000;
             let ttl = u32::try_from(remaining_seconds)
                 .unwrap_or(u32::MAX)
-                .clamp(1, MAX_DNS_BINDING_TTL_SECONDS);
-            let response = build_response(&request, &expected_name, &addresses, ttl)?;
+                .min(MAX_DNS_BINDING_TTL_SECONDS)
+                .min(answer.ttl_seconds());
+            // Never round an expired proof or sub-second route lifetime up to a fresh second.
+            if ttl == 0 {
+                return Err(UdpError::Expired);
+            }
+            let response = build_response(&request, &expected_name, answer.addresses(), ttl)?;
             if response.len() > limits.maximum_payload_bytes() {
                 return Err(UdpError::ResourceLimit);
             }
@@ -160,28 +204,6 @@ impl ExitDnsBridge {
         association.close();
         result
     }
-}
-
-async fn resolve_addresses(query: &BoundedDnsQuery) -> Result<Vec<IpAddr>, UdpError> {
-    let absolute_name = format!("{}.", query.name());
-    let resolved = timeout(
-        DNS_RESOLUTION_TIMEOUT,
-        lookup_host((absolute_name.as_str(), 0)),
-    )
-    .await
-    .map_err(|_| UdpError::ResolutionFailed)??;
-    let addresses = resolved
-        .take(MAX_DNS_ANSWERS)
-        .map(|socket| socket.ip())
-        .filter(|address| {
-            is_permitted_egress(*address)
-                && matches!(
-                    (query.query_type(), address),
-                    (DnsQueryType::A, IpAddr::V4(_)) | (DnsQueryType::Aaaa, IpAddr::V6(_))
-                )
-        })
-        .collect::<BTreeSet<_>>();
-    Ok(addresses.into_iter().collect())
 }
 
 fn build_response(

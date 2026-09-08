@@ -98,7 +98,7 @@ from explicitly selected owned caches. Those two commands remain offline. New `c
 `content fetch` and `content stop` commands connect explicit publications to the agent's signed
 provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
 reconstruct the same object from two independent providers; missing HTTPS chunks use exact
-origin ranges. The [fresh provider run on `e592b610`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171708813)
+origin ranges. The [fresh provider run on `10f63244`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
 passes all three downloads, physical-boundary checks and cleanup with unchanged guest state.
 This proves the explicit native/cooperative-origin command path, not arbitrary browser HTTPS,
 general NAT reachability or a speed improvement. Independent content offers now survive native
@@ -128,27 +128,35 @@ The [extended public-file VM on `49b6a7d1`](https://github.com/VOLPAROSSA/volpar
 also passes, including default refusal, exact reconstruction and cleanup. This does not authenticate arbitrary HTTPS content.
 See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
 before serving or assembling a publication held by another account.
-The next provider scenario joins these normal commands end to end: user publication/import,
-agent serving, independent protected retrieval, then user export/assembly. Its original
-complementary-provider and HTTPS checks remain in place; this new user-network proof is pending.
+That `10f63244` run also joins the normal commands end to end: user publication/import,
+agent serving, independent protected retrieval, then user export/assembly. The complete
+2,097,275-byte file retains its exact hash across accounts and the network; all twenty physical
+capture windows and cleanup pass. The complementary-provider and HTTPS checks remain intact.
 A first bounded redistribution path is now wired into the agent: an explicitly configured
 replica cache can pick up other signed chunks from a provider used by a completed download,
 then offer those chunks to independently authorizing consumers. Library uptake/re-serving
 tests pass. Optional uptake now requests one chunk at a time, checking the configured links
 before granting the next chunk; a busy sample ends the exchange with verified partial data.
-The new one-chunk-credit exchange also completes multi-node uptake and re-serving on `e592b610`,
-after the original provider shuts down. Its final capture check still fails: the replicator's
-local disconnect leaves remote WireGuard route owners alive until expiry. The new session-signed
-retirement run on `97e478a2` removes those stray WireGuard packets: all ten boundary captures are
-complete with no forbidden traffic. It also restores the replica registration after service
-stop/reopen, but the final download now fails at provider TLS. The scenario remains failed;
-scope-capacity reclamation and the new connection failure remain unfinished.
-`content serve --reuse-replica-cache` now explicitly restores unexpired registrations from an
-owned replica cache; local transfer/reopen/re-serving tests pass. This starts no service on boot
-and does not supply automatic repair or retention guarantees; post-reopen network retrieval
-has not yet passed.
+The [replication run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
+now passes the complete bounded sequence: retrieve foreground P, opportunistically acquire
+262,267 bytes of Q, stop the original node, explicitly reopen the replica service with
+`content serve --reuse-replica-cache`, then retrieve Q from a fresh Client with its exact hash.
+Real remote route retirement completes before the replicator's disconnect returns. All ten
+boundary captures are complete with zero drops or forbidden packets, and cleanup leaves guest
+state unchanged. Earlier TLS/report failures remain recorded, not retrospectively passed.
+This proves one uptake/offline-provider/reopen/re-serving sequence, not full C03/C04, automatic
+boot service, retention repair, retirement-scope reclamation or general owner-priority sharing.
 A complete mailbox, retention repair, shared DNS, full owner-priority behavior and browser integration remain
 unfinished; see the proposal's C02--C08 scope. More replicas alone do not establish a speedup.
+The first positive DNSSEC cache is now connected to the ordinary agent's TCP, UDP and protected
+DNS resolution. It independently validates peer evidence, excludes involved route relays and
+retains the existing resolver when evidence is missing or unsupported. Combined compilation and
+strict Clippy pass; the real public-chain/two-Exit sharing proof is still pending, so C05 is not
+complete. See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
+On `10f63244`, general Quality still fails before two local handoff tests can run because the
+CI runner refuses their user-namespace UID mapping. CodeQL analysis completes, but its separate
+PR alert gate remains red with 126 results. These failures are separate from the passing VM
+scenarios; see the exact [CI checkpoint](docs/IMPLEMENTATION_STATUS.md).
 
 Existing HTTPS reuse needs genuine origin authentication through an application boundary:
 authenticated origin metadata, publisher signatures, or an explicitly configured experimental

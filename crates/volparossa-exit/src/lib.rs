@@ -32,6 +32,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -40,7 +41,7 @@ use socket2::SockRef;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpSocket, TcpStream, lookup_host},
+    net::{TcpSocket, TcpStream},
     sync::Mutex,
     time,
 };
@@ -68,8 +69,9 @@ use volparossa_tcp_proxy::{
     TcpProxyError, VerifiedMptcpRoute, proxy_bidirectional, read_authorized_open_tcp,
 };
 use volparossa_udp::{
-    AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, QuicUdpAssociation, UdpAuthorizationScope,
-    UdpError, VerifiedSingleRelayPath,
+    AuthorizedUdpFlow, DatagramLimits, DnsResolutionScope, ExitResolver, ExitUdpBridge,
+    QuicUdpAssociation, UdpAuthorizationScope, UdpError, VerifiedSingleRelayPath,
+    resolve_hostname_addresses,
 };
 use volparossa_wireguard::{
     ExitEndpointLease, HelperContextHandle, PublicWireGuardEndpoint, WireGuardPublicKey,
@@ -609,6 +611,7 @@ pub struct ExitService {
     endpoint_states: HashMap<ReservationId, ExitReservationState>,
     native_route_identity_owners: HashMap<ReservationId, ExitNativeRouteIdentityOwner>,
     metrics: Option<MetricsRegistry>,
+    dns_resolver: Arc<ExitResolver>,
 }
 
 impl ExitService {
@@ -708,9 +711,61 @@ impl ExitService {
             endpoint_states: HashMap::new(),
             native_route_identity_owners: HashMap::new(),
             metrics,
+            dns_resolver: Arc::new(ExitResolver::default()),
         };
         service.sync_metrics();
         Ok(service)
+    }
+
+    /// Install the node's shared bounded DNS resolver for newly created egress flows.
+    pub fn set_dns_resolver(&mut self, resolver: Arc<ExitResolver>) {
+        self.dns_resolver = resolver;
+    }
+
+    /// Share the same RAM-only resolver with an authorized UDP or MPQUIC runtime.
+    #[must_use]
+    pub fn dns_resolver(&self) -> Arc<ExitResolver> {
+        self.dns_resolver.clone()
+    }
+
+    /// Derive complete DNS peer exclusions from the retained verified reservation.
+    /// Missing/unconfirmed provenance disables peer lookup rather than leaking a query.
+    #[must_use]
+    pub fn dns_resolution_scope(&self, reservation_id: &[u8; ID_BYTES]) -> DnsResolutionScope {
+        let scope = (|| {
+            let key = text_id::<ReservationId>(reservation_id).ok()?;
+            let state = self.endpoint_states.get(&key)?;
+            if state.policy_hash != *self.policy.policy_hash()
+                || state.paths.is_empty()
+                || state
+                    .paths
+                    .iter()
+                    .any(|path| path.relay_exit_endpoint.is_none())
+            {
+                return None;
+            }
+            let mut peers = vec![state.control_relay_peer_id.clone()];
+            peers.extend(state.paths.iter().map(|path| path.relay_peer_id.clone()));
+            peers.sort();
+            peers.dedup();
+            DnsResolutionScope::new(state.policy_hash, peers).ok()
+        })();
+        scope.unwrap_or_else(|| DnsResolutionScope::without_peers(*self.policy.policy_hash()))
+    }
+
+    fn dns_scope_for_context(&self, context: &[u8; ID_BYTES]) -> DnsResolutionScope {
+        self.endpoint_states
+            .iter()
+            .find(|(_, state)| state.route_context_id == *context)
+            .and_then(|(reservation, _)| {
+                let mut bytes = [0; ID_BYTES];
+                hex::decode_to_slice(reservation.as_str(), &mut bytes).ok()?;
+                Some(bytes)
+            })
+            .map_or_else(
+                || DnsResolutionScope::without_peers(*self.policy.policy_hash()),
+                |reservation| self.dns_resolution_scope(&reservation),
+            )
     }
 
     /// Bind one admitted reservation to its exact client-confirmed relay grants for TCP.
@@ -846,6 +901,7 @@ impl ExitService {
         self.ensure_active_reservation(&route.reservation_id)?;
         route.route.ensure_active_at(now_ms)?;
         self.policy.ensure_active_at(now_ms)?;
+        let dns_scope = self.dns_resolution_scope(&route.reservation_id);
         Ok(ActiveTcpEgressRoute {
             route: route.route,
             reservation_id: route.reservation_id,
@@ -853,6 +909,8 @@ impl ExitService {
             flow_replay: Mutex::new(ReplayCache::new(self.config.replay_capacity)?),
             metrics: self.metrics.clone(),
             independent_egress: self.config.independent_egress.clone(),
+            dns_resolver: self.dns_resolver.clone(),
+            dns_scope,
         })
     }
 
@@ -946,7 +1004,11 @@ impl ExitService {
     ) -> Result<ExitUdpBridge, ExitError> {
         self.policy.ensure_active_at(now_ms)?;
         prepared.path.ensure_active_at(now_ms)?;
-        let pinned = prepared.flow.resolve_and_pin(now_ms).await?;
+        let dns_scope = self.dns_resolution_scope(prepared.path.reservation_id());
+        let pinned = prepared
+            .flow
+            .resolve_and_pin_with_resolver(now_ms, &self.dns_resolver, &dns_scope)
+            .await?;
         let association =
             QuicUdpAssociation::new(connection, prepared.path, &prepared.flow, now_ms)?;
         Ok(ExitUdpBridge::connect_with_egress(
@@ -986,6 +1048,10 @@ impl ExitService {
             &self.policy,
             self.metrics.as_ref(),
             self.config.independent_egress.as_ref(),
+            (
+                &self.dns_resolver,
+                &self.dns_scope_for_context(flow.route_context_id()),
+            ),
             flow,
             protected_client,
             now_ms,
@@ -1619,6 +1685,8 @@ pub struct ActiveTcpEgressRoute {
     flow_replay: Mutex<ReplayCache>,
     metrics: Option<MetricsRegistry>,
     independent_egress: Option<IndependentEgress>,
+    dns_resolver: Arc<ExitResolver>,
+    dns_scope: DnsResolutionScope,
 }
 
 impl ActiveTcpEgressRoute {
@@ -1683,6 +1751,7 @@ impl ActiveTcpEgressRoute {
             &self.policy,
             self.metrics.as_ref(),
             self.independent_egress.as_ref(),
+            (&self.dns_resolver, &self.dns_scope),
             flow,
             protected_client,
             now_ms,
@@ -2054,13 +2123,19 @@ async fn resolve_and_connect(
     dns_timeout: Duration,
     connect_timeout: Duration,
     independent_egress: Option<&IndependentEgress>,
+    dns: (&ExitResolver, &DnsResolutionScope),
 ) -> Result<TcpStream, ExitError> {
     let addresses = if let Some(hostname) = hostname {
-        let resolved = time::timeout(dns_timeout, lookup_host((hostname, port)))
-            .await
-            .map_err(|_| ExitError::EgressTimeout("DNS"))??;
+        let resolved = time::timeout(
+            dns_timeout,
+            resolve_hostname_addresses(dns.0, dns.1, hostname),
+        )
+        .await
+        .map_err(|_| ExitError::EgressTimeout("DNS"))?
+        .map_err(|_| ExitError::ResolutionFailed)?;
         let mut addresses = Vec::new();
-        for address in resolved.take(MAX_DNS_RESULTS) {
+        for ip in resolved.into_iter().take(MAX_DNS_RESULTS) {
+            let address = SocketAddr::new(ip, port);
             if permitted_egress(address.ip())
                 && destination_ip.is_none_or(|pinned| pinned == address.ip())
                 && !addresses.contains(&address)
@@ -2115,10 +2190,12 @@ fn contribution_tcp_socket(
     Ok(socket)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tcp_egress_with_policy<C>(
     policy: &VerifiedManifest,
     metrics: Option<&MetricsRegistry>,
     independent_egress: Option<&IndependentEgress>,
+    dns: (&ExitResolver, &DnsResolutionScope),
     flow: &AuthorizedTcpFlow,
     mut protected_client: C,
     now_ms: u64,
@@ -2163,6 +2240,7 @@ where
         limits.dns_timeout,
         limits.connect_timeout,
         independent_egress,
+        dns,
     )
     .await?;
     if !initial.is_empty() {
@@ -3986,6 +4064,63 @@ mod tests {
         assert_eq!(flow.hostname(), Some("allowed.example"));
         assert_eq!(flow.port(), 80);
         service.release(&reservation_id).unwrap();
+    }
+
+    #[test]
+    fn dns_scope_retains_every_confirmed_route_peer_and_shared_resolver() {
+        use crate::{ExitResolver, ReservationId, text_id};
+
+        let (mut service, admitted) = admit_route(
+            2,
+            &[Transport::TcpMptcp],
+            Vec::new(),
+            MetricsRegistry::new(),
+        );
+        let reservation_id = admitted.accepted.reservation_id;
+        let key = text_id::<ReservationId>(&reservation_id).unwrap();
+        let confirmed = &service.endpoint_states[&key];
+        let mut expected = vec![confirmed.control_relay_peer_id.clone()];
+        expected.extend(
+            confirmed
+                .paths
+                .iter()
+                .map(|path| path.relay_peer_id.clone()),
+        );
+        expected.sort();
+        expected.dedup();
+        assert_eq!(expected.len(), 3, "control relay and both data relays");
+        let scope = service.dns_resolution_scope(&reservation_id);
+        assert!(scope.permits_peers());
+        assert_eq!(scope.excluded_peers(), expected);
+        assert_eq!(scope.policy_hash(), service.policy_hash());
+
+        let resolver = Arc::new(ExitResolver::default());
+        service.set_dns_resolver(Arc::clone(&resolver));
+        let relays = admitted
+            .signed_relays
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let active = service
+            .bind_tcp_route(&admitted.accepted, &relays, NOW_MS)
+            .unwrap();
+        let detached = service.detach_tcp_egress_route(active, NOW_MS).unwrap();
+        assert!(Arc::ptr_eq(&resolver, &detached.dns_resolver));
+        assert_eq!(detached.dns_scope.excluded_peers(), expected);
+
+        service.endpoint_states.get_mut(&key).unwrap().paths[0].relay_exit_endpoint = None;
+        assert!(
+            !service
+                .dns_resolution_scope(&reservation_id)
+                .permits_peers()
+        );
+        service.release(&reservation_id).unwrap();
+        assert!(
+            !service
+                .dns_resolution_scope(&reservation_id)
+                .permits_peers()
+        );
+        assert_eq!(detached.dns_scope.excluded_peers(), expected);
     }
 
     #[tokio::test]

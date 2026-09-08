@@ -50,6 +50,7 @@ set -- \
     tests/helper/validate-helper-restart-exact-present-evidence-v1.sh \
     tests/helper/validate-helper-restart-vm-environment-v1.sh \
     tests/integration/run.sh \
+    tests/integration/dns-cache-proof.sh \
     tests/integration/generate-alpha-acceptance-report.sh \
     tests/integration/test-alpha-acceptance-report.sh \
     tests/integration/test-harness.sh \

@@ -424,9 +424,13 @@ RustSec scanners still identify the unchanged semantic versions as affected.
 `RUSTSEC-2026-0009`, `RUSTSEC-2026-0118`, and
 `RUSTSEC-2026-0119` are narrowly exempted only after reconstruction
 establishes the local fixes. These are locally remediated advisory-version
-matches, not accepted vulnerable upstream artifacts. The production feature
-graph also keeps both Hickory DNSSEC features disabled; the NSEC3 fix is
-nevertheless present and tested.
+matches, not accepted vulnerable upstream artifacts. The bounded positive
+A/AAAA DNS-proof resolver explicitly enables the existing `dnssec-ring`
+backend; its feature guard still forbids the unused aws-lc backend and the
+regression-only adapter. The NSEC3 fix and its isolated regression remain
+mandatory, and no vendor source, root-anchor, or license bytes are changed.
+The standalone fuzz graph, which does not include this UDP resolver, still
+excludes both DNSSEC backends.
 
 The dependency gate requires CVSS 4.0-capable `cargo-deny >= 0.18.6` and
 `cargo-audit >= 0.22.1`; the former runs all four checks while the latter

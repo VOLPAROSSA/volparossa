@@ -1705,6 +1705,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "ADJACENT_RECEIVE_BUDGET_RECEIPT",
         "ROUTE_RETIRE",
         "RETIREMENT_RECEIPT",
+        "DNS_CACHE_QUERY",
+        "DNS_CACHE_REPLY",
     ];
     let rust_names = [
         "Unspecified",
@@ -1738,6 +1740,8 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         "AdjacentReceiveBudgetReceipt",
         "RouteRetire",
         "RetirementReceipt",
+        "DnsCacheQuery",
+        "DnsCacheReply",
     ];
     assert_eq!(schema_enum.matches(';').count(), names.len());
     assert_eq!(
@@ -1751,6 +1755,10 @@ fn assert_preselection_message_type_tags(schema: &str, messages: &str) {
         assert!(schema_enum.contains(&format!("CONTROL_MESSAGE_TYPE_{schema_name} = {tag};")));
         assert!(rust_enum.contains(&format!("{rust_name} = {tag},")));
     }
+    assert_preselection_observation_tags(schema);
+}
+
+fn assert_preselection_observation_tags(schema: &str) {
     let rust = include_str!("../src/preselection_observation.rs");
     assert_small_enum(
         schema,

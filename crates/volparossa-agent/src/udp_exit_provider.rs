@@ -5,7 +5,7 @@
     reason = "the discovery responder owns this affine provider and its transport-specific consumers"
 )]
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use pem::parse;
 use rcgen::generate_simple_self_signed;
@@ -24,9 +24,9 @@ use volparossa_protocol::NativeRouteIdentity;
 use volparossa_protocol::{ReplayCache, TimePolicy};
 use volparossa_routing::{CommitLeaseBatch, ContextRole, WireguardRole};
 use volparossa_udp::{
-    CommittedQuicUdpTransport, CommittedUdpRole, DatagramLimits, SINGLE_RELAY_UDP_EXIT_PORT,
-    SingleRelayUdpExitListener, UdpBridgeStats, VerifiedSingleRelayPath,
-    committed_quic_udp_socket_request,
+    CommittedQuicUdpTransport, CommittedUdpRole, DatagramLimits, DnsResolutionScope, ExitResolver,
+    SINGLE_RELAY_UDP_EXIT_PORT, SingleRelayUdpExitListener, UdpBridgeStats,
+    VerifiedSingleRelayPath, committed_quic_udp_socket_request,
 };
 
 use crate::helper::{HelperClient, RuntimeBoundPreparedLeaseBatch};
@@ -168,6 +168,15 @@ pub(crate) struct ActiveProductionUdpExitRoute {
 }
 
 impl ActiveProductionUdpExitRoute {
+    pub(crate) fn with_dns_resolver(
+        mut self,
+        resolver: Arc<ExitResolver>,
+        scope: DnsResolutionScope,
+    ) -> Self {
+        self.listener = self.listener.with_dns_resolver(resolver, scope);
+        self
+    }
+
     pub(crate) async fn run_until_shutdown(
         self,
         mut shutdown: watch::Receiver<bool>,

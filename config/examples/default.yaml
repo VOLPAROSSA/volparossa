@@ -92,6 +92,14 @@ udp:
   transport: single_path_quic
   idle_timeout_seconds: 60
 
+# Positive DNSSEC proofs may be shared from bounded RAM while participating.
+# This does not change host DNS, enable roles, or trust unsigned peer answers.
+# Set upstream to an existing trusted recursive TCP/53 endpoint to collect proofs;
+# null preserves the existing OS fallback when no independently valid peer proof exists.
+dns_cache:
+  enabled: true
+  upstream: null
+
 quic:
   enabled: true
   transport: masque_connect_ip_mpquic

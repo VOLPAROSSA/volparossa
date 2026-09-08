@@ -11,6 +11,36 @@ experiment, through an application/browser boundary. C01 now passes; C02--C08 re
 ordinary HTTPS, peer hashes or a zkTLS label alone do not establish reusable origin authority.
 Scoped downlink and mixed-link runs now pass; content/application integration continues.
 
+## Latest DNS integration checkpoint
+
+The positive DNSSEC cache is now composed into the normal agent: the same bounded RAM resolver
+serves protected DNS, TCP resolution, general UDP and browser-QUIC destination pinning. Its peer
+backend uses signed, bounded cache-only RPC and a generic provider capability, not DNS names in
+the DHT. Complete control/data-relay exclusions come from the verified reservation and survive
+detached TCP ownership; ambiguous provenance disables peer requests. No roles, root anchors or
+host resolver settings are changed automatically. The
+[configuration and fallback rules](OPERATIONS.md#shared-positive-dns-cache) are documented.
+
+The existing exact Hickory version now enables its ring DNSSEC backend, with the recorded NSEC3
+backport and unchanged vendor/license verification. A real cryptographic root/DS/child/A+AAAA
+test chain, monotone TTL/replay bounds and disposable TCP collector pass; test trust anchors are
+private `cfg(test)` seams, never product configuration. Combined all-target/all-feature compile
+and strict Clippy pass for agent, Exit, config, UDP, discovery and protocol, including the
+fixture-only `dns-cache-proof` executable. That executable accepts only an explicit loopback
+recursive fixture in a different network namespace and requires genuine built-in-anchor A/AAAA
+validation plus local cache reuse; an OS fallback can never count as its success.
+The signed protocol and codec tests, two actor/exclusion tests, verified Exit-scope test, all 28
+config tests and exact schema check pass. The actor executes inside a disposable namespace and
+proves a signed cache miss without triggering an upstream lookup, not a positive peer hit.
+The bounded public-wire recorder/replayer and preflight runner have four socket-free evidence
+tests and shell checks passing; no fresh public fixture could be obtained in this environment.
+
+**C05 remains incomplete.** Current public-chain collection/validation and the ordinary two-Exit
+upstream/peer/local-hit/fallback network sequence have not passed yet. CNAME/negative-answer
+sharing is not implemented; unsupported proofs use the existing resolver without sharing that
+result as DNSSEC evidence. No peer-speed improvement or absolute global TTL-replay prevention
+is claimed. The older content VM successes below do not verify this newer DNS-integrated build.
+
 ## Latest content integration checkpoint
 
 Explicit local `content import`/`content export` now bridge user-owned and service-owned private
@@ -52,15 +82,66 @@ guest state is unchanged, SHA-256 `2caf3e00759c843289b12e4a01b4c6a11fe1e4ca009a0
 Artifact SHA-256: `2a535c5c2d07cb0164c713c4467016a17ee69113279dcc02807414c775ded6c4`.
 No automatic serving, browser capture or HTTPS export is claimed.
 
-The next `content-provider` extension now composes those normal commands through the network:
+The `content-provider` extension now composes those normal commands through the network:
 a separate user identity signs an explicit file, imports it to one provider account and registers
 it with normal Serve; the Client agent retrieves it through existing provider discovery and
 protected MPTCP, then exports to the user for normal Assemble. The existing complementary 5+4
 provider and cooperative HTTPS cases remain intact. A dedicated capture window binds the new
 publication to its selected provider and both WireGuard relay paths; private fixture identity,
 passphrase and input/output must be removed. Nine provider-checker tests, four replication tests
-(including the large-report regression) and shell checks pass. This is an integration harness
-awaiting its source-bound VM result, not a claimed ordinary-user network pass, mailbox or complete C06/C07.
+(including the large-report regression) and shell checks pass. Its
+[exact `10f63244` VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
+now passes the ordinary-user network chain: all 2,097,275 bytes / nine chunks cross the protected
+route and reconstruct with SHA-256
+`add0724d8dbe68407d544c24714128732a29c4880cff30d283b1ada9362e3767`.
+The new user's independent identity signs the publication; import/export retain the same manifest,
+the user and service retain separate private ownership, and temporary secrets/input/output are
+removed. The earlier two-provider native case and complete/missing cooperative HTTPS cases also
+pass: the latter uses 1,048,699 peer bytes plus four exact origin ranges totaling 1,048,576 bytes.
+Twelve Exit MPTCP flows complete. All twenty physical capture windows have stopped intake,
+reconciled frame counts, zero drops and no forbidden packets. Cleanup removes all owned objects;
+raw guest state is identical, SHA-256
+`257bbc34127a6ed4d7876bdd5082343a609c5655e7a7e8644ce45b6c0a83b934`.
+Artifact SHA-256: `d19a7501935ce31a3903d5ce24f61f0c86e9de9682834acf120a0241d13dcf45`.
+The exact-source checker passes and reconstructs the report from the raw records. This proves
+explicit normal native publication/retrieval across accounts and nodes, not a mailbox, arbitrary
+browser HTTPS, general NAT reachability, speedup or complete C02/C06/C07.
+
+The [corrected C03 run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
+now passes the complete bounded uptake/offline-provider/reopen/re-serving sequence. R4 retrieves
+foreground P (524,609 bytes / three chunks), then opportunistically receives Q (262,267 bytes /
+two chunks) using the one-chunk-credit exchange. Original R5's service and agent stop, with PID
+zero and listener absent. R4 explicitly stops/reopens with only P's supplied manifest and restores
+Q's independent replica registration. A fresh Client then retrieves Q over a new protected route,
+matching SHA-256 `b5a1801633b0bb108ee611668a11f438f46f4d6d630f0bc394485a41ff2a401d`.
+The uptake uses R0/R2 and final retrieval R0/R1; both selected WireGuard legs carry data. Actual
+Exit and selected-Relay retirement completes before R4's `CLIENT_CLEANUP_COMPLETE`. Four Exit
+MPTCP flows complete; all ten physical captures reconcile intake/frame counts, drain completely,
+have zero drops and reject no packets. Final cleanup leaves zero owned objects and byte-identical
+guest state, SHA-256 `8b8d47802f1a5ac13dc8601150f7537f453e9e1c2b6100a02238533e87426255`.
+Artifact SHA-256: `4540417efb775503765c8a890af6c532e4b47a2d1dbb30651a041dbf64d16fcb`.
+The exact-source checker and independent raw-report reconstruction both pass. This is the first
+complete proof of that sequence, not full C03/C04, guaranteed retention/repair, automatic capacity
+estimation or complete retirement-scope recovery. C05 DNS sharing remains incomplete and unverified.
+
+Exact `10f63244` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178579525)
+fails in workspace tests: both `content_handoff_cli` process tests stop before execution because
+`unshare` cannot write `/proc/self/uid_map` (`Operation not permitted`) on the CI runner.
+Their passing local/VM evidence does not turn this run green; isolated CI execution still needs
+correction, without a host-socket fallback. The
+[CodeQL analysis workflow](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178576948)
+passes, but the [separate PR alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101912886127)
+fails with 126 critical results. The unchanged count is not a new SARIF identity audit or a clean
+security claim. No alert is dismissed and no failed run is relabelled.
+
+The namespace runner correction in `41690c9` keeps real execution rather than skipping these
+tests. It first tries disposable user/network/PID namespaces. Only the explicit Quality opt-in
+may use sudo for namespace creation when user mappings are denied; the exact test then runs as
+the original user with capabilities removed. It never retries a failed test on the host network.
+Both CLI tests and the new TCP collector pass locally through the corrected isolated runner;
+the sudo path still requires a fresh actual Ubuntu CI result and is not reported as passed here.
+
+### Preceding replica diagnostics and retirement integration
 
 The [source-bound C03 run on `97e478a2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175385789)
 remains **failed**, but at a new boundary: final Client retrieval reaches provider discovery,
@@ -68,7 +149,7 @@ then reports `CONTENT_PROVIDER_TLS_FAILED` / `CONTENT_UNAVAILABLE` and Exit flow
 The old remote-WireGuard leak is absent: all ten physical captures are complete, drained,
 zero-drop and contain no forbidden packets. Original R5 stops; R4's service stops/reopens and
 restores Q's two chunks / 262,267 bytes / one replica publication (two total publications).
-No successful post-reopen network retrieval is claimed. Global cleanup removes all owned objects;
+That run did not prove successful post-reopen retrieval. Global cleanup removes all owned objects;
 guest root state is unchanged, SHA-256
 `a6e726a2792fcdb336fac86949dbcc669a87b51dbd849262950c88f8d0075d18`.
 Artifact SHA-256: `9e4363bd657127ce7438eb47a852f72385ce6b7970357a862d0b43325d0ffb40`.
@@ -88,7 +169,8 @@ Both replica and provider report writers now use file-backed JSON input and copy
 before serializing the report. One targeted regression exercises both real finalizers with
 >160-KiB evidence, missing evidence and forced serialization failure (six cases, all pass).
 Missing evidence still fails; a failed report no longer hides its raw observations. Shell checks
-pass. The corrected source still needs its VM result; no traffic rule, timeout or packet gate is relaxed.
+pass. The subsequent `603cec9d` result above verifies the corrected report and complete sequence;
+neither earlier failure is relabelled. No traffic rule, timeout or packet gate is relaxed.
 
 Exact `97e478a2` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175365465)
 and [CodeQL analyses](https://github.com/VOLPAROSSA/volparossa/actions/runs/34175362088) pass.
@@ -118,8 +200,9 @@ failure-retention and another context left untouched. Disabled runtime roles and
 grants do not block exact cleanup; wrong policy/session does. Strict agent Clippy also passes.
 Normal daemon shutdown now keeps discovery alive until the bounded route-retirement attempt
 finishes; a focused ordering test covers both confirmed and failed cleanup, with failure preserved
-as `ShutdownCleanup`. The network run above now observes the cleaned packet boundary, but it
-is not a complete C03 pass because the post-reopen TLS connection fails.
+as `ShutdownCleanup`. The earlier `97e478a2` run observed the cleaned packet boundary but failed
+at post-reopen TLS; the later `603cec9d` proof also completes retrieval. That later success does
+not identify the earlier intermittent connection failure's cause.
 
 Temporary functional limitation: each remote role retains at most 1,024 retirement scopes,
 including completed ones; full maps reject new admission. Premature expiry-based deletion would
@@ -169,10 +252,10 @@ without renewing expiry or turning a storage peer into a publisher. Missing jour
 registrations; corrupt/foreign/busy stores or missing live chunks fail. Expired entries are not
 served, but their bytes are not automatically deleted. Three real library persistence tests,
 two agent tests, one CLI test, one typed wire test and combined strict content/agent/CLI/control
-Clippy pass. The next C03 fixture explicitly stops/reopens R4's service after R5 is offline, without
+Clippy pass. The C03 fixture explicitly stops/reopens R4's service after R5 is offline, without
 supplying Q's manifest to R4, then requires Q to be retrieved from that restored registration.
-Three evidence-checker tests and shell syntax pass; the new network run confirms restored
-registration but still fails the subsequent retrieval as recorded above. Automatic
+Three evidence-checker tests and shell syntax pass; `603cec9d` now confirms both restored
+registration and subsequent retrieval, following the earlier failures recorded above. Automatic
 boot service, retention repair, expiry reclamation, full C03 and full C04 remain incomplete.
 
 Exact `e592b610` [Quality](https://github.com/VOLPAROSSA/volparossa/actions/runs/34171679274) and

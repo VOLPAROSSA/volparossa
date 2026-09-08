@@ -5,13 +5,14 @@ use std::{
 };
 
 use subtle::ConstantTimeEq;
-use tokio::net::lookup_host;
 use volparossa_policy::{TransportProtocol, VerifiedManifest};
 use volparossa_protocol::{
     ReplayCache, TimePolicy, UdpFlowAuthorization, VerifiedControlMessage, verify_control_message,
 };
 
-use crate::{UdpError, VerifiedSingleRelayPath};
+use crate::{
+    DnsResolutionScope, ExitResolver, UdpError, VerifiedSingleRelayPath, resolve_hostname_addresses,
+};
 
 const ROUTE_CONTEXT_BYTES: usize = 16;
 const CLIENT_ID_BYTES: usize = 32;
@@ -286,6 +287,25 @@ impl AuthorizedUdpFlow {
     /// finding an Internet-unicast result, or yields only loopback, private,
     /// link-local, multicast, documentation, or reserved addresses.
     pub async fn resolve_and_pin(&self, now_ms: u64) -> Result<PinnedUdpFlow, UdpError> {
+        self.resolve_and_pin_with_resolver(
+            now_ms,
+            &ExitResolver::default(),
+            &DnsResolutionScope::without_peers([0; 32]),
+        )
+        .await
+    }
+
+    /// Resolve through the shared Exit DNS cache while retaining this exact authorized tuple.
+    /// The scope must contain every involved control/data relay before peers may be queried.
+    ///
+    /// # Errors
+    /// Resolution, expiry, public-address or exact pinned-address mismatch fails closed.
+    pub async fn resolve_and_pin_with_resolver(
+        &self,
+        now_ms: u64,
+        resolver: &ExitResolver,
+        scope: &DnsResolutionScope,
+    ) -> Result<PinnedUdpFlow, UdpError> {
         self.ensure_active_at(now_ms)?;
         let address = match &self.destination {
             AuthorizedDestination::Ip(address) => {
@@ -298,17 +318,17 @@ impl AuthorizedUdpFlow {
                 hostname,
                 pinned_address,
             } => {
-                let addresses = lookup_host((hostname.as_str(), self.port)).await?;
+                let addresses = resolve_hostname_addresses(resolver, scope, hostname).await?;
                 match pinned_address {
                     Some(pinned) if is_permitted_egress(*pinned) => addresses
+                        .into_iter()
                         .take(MAX_RESOLUTION_RESULTS)
-                        .map(|socket| socket.ip())
                         .find(|address| address == pinned)
                         .ok_or(UdpError::ResolutionFailed)?,
                     Some(_) => return Err(UdpError::ResolutionFailed),
                     None => addresses
+                        .into_iter()
                         .take(MAX_RESOLUTION_RESULTS)
-                        .map(|socket| socket.ip())
                         .find(|address| is_permitted_egress(*address))
                         .ok_or(UdpError::ResolutionFailed)?,
                 }

@@ -6,6 +6,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     os::fd::OwnedFd,
+    sync::Arc,
     time::Duration,
 };
 
@@ -35,7 +36,10 @@ use volparossa_routing::{
     AcquireTransportSocket, CommitLeaseBatch, ContextRole, TransportSocketAddress,
     TransportSocketKind, WireguardRole,
 };
-use volparossa_udp::{AuthorizedUdpFlow, UdpAuthorizationScope, UdpError, VerifiedSingleRelayPath};
+use volparossa_udp::{
+    AuthorizedUdpFlow, DnsResolutionScope, ExitResolver, UdpAuthorizationScope, UdpError,
+    VerifiedSingleRelayPath,
+};
 use volparossa_wireguard::{HELPER_HANDLE_BYTES, overlay_addresses};
 use zeroize::Zeroizing;
 
@@ -275,9 +279,19 @@ pub(crate) struct ActiveProductionMpquicExitRoute {
     transport_mode: TransportMode,
     single_path_udp: Option<VerifiedSingleRelayPath>,
     independent_egress: Option<IndependentEgress>,
+    dns: Option<(Arc<ExitResolver>, DnsResolutionScope)>,
 }
 
 impl ActiveProductionMpquicExitRoute {
+    pub(crate) fn with_dns_resolver(
+        mut self,
+        resolver: Arc<ExitResolver>,
+        scope: DnsResolutionScope,
+    ) -> Self {
+        self.dns = Some((resolver, scope));
+        self
+    }
+
     /// Bridge policy-authorized inner IPv4/UDP datagrams until route or policy expiry.
     ///
     /// Every destination gets one connected, route-local UDP socket. Its reverse traffic is
@@ -497,7 +511,14 @@ impl ActiveProductionMpquicExitRoute {
                         pending_browser_flows.insert(datagram.client, pending);
                         continue;
                     }
-                    let pinned = pending.authorization.resolve_and_pin(current_ms).await?;
+                    let pinned = if let Some((resolver, scope)) = &self.dns {
+                        pending
+                            .authorization
+                            .resolve_and_pin_with_resolver(current_ms, resolver, scope)
+                            .await?
+                    } else {
+                        pending.authorization.resolve_and_pin(current_ms).await?
+                    };
                     if pinned.destination() != SocketAddr::V4(datagram.destination) {
                         return Err(ProductionMpquicError::Invalid(
                             "browser QUIC DNS/original-destination pin",
@@ -1330,6 +1351,7 @@ async fn start_production_native_exit(
             transport_mode,
             single_path_udp,
             independent_egress,
+            dns: None,
         },
         ready,
     ))

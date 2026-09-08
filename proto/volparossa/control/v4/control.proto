@@ -46,6 +46,21 @@ enum ControlMessageType {
   CONTROL_MESSAGE_TYPE_ADJACENT_RECEIVE_BUDGET_RECEIPT = 28;
   CONTROL_MESSAGE_TYPE_ROUTE_RETIRE = 29;
   CONTROL_MESSAGE_TYPE_RETIREMENT_RECEIPT = 30;
+  CONTROL_MESSAGE_TYPE_DNS_CACHE_QUERY = 31;
+  CONTROL_MESSAGE_TYPE_DNS_CACHE_REPLY = 32;
+}
+
+// Cache-only IN/A or IN/AAAA; names never enter the capability DHT.
+message DnsCacheQuery {
+  string name = 1;
+  uint32 query_type = 2;
+  bytes policy_hash = 3;
+}
+
+// Empty bundle means cache miss. Peer signatures are not DNSSEC authority.
+message DnsCacheReply {
+  bytes request_hash = 1;
+  bytes bundle = 2;
 }
 
 // A fresh session-signed destruction request. Ownership is matched against retained grants.

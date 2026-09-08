@@ -3,6 +3,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::OwnedFd,
+    sync::Arc,
     time::Duration,
 };
 
@@ -19,9 +20,10 @@ use volparossa_routing::{
 use volparossa_wireguard::{HelperContextHandle, overlay_addresses};
 
 use crate::{
-    AuthorizedUdpFlow, DatagramLimits, ExitUdpBridge, ManagedQuinnEndpoint, QuicUdpAssociation,
-    UdpAuthorizationScope, UdpBridgeStats, UdpError, VerifiedSingleRelayPath, dns::ExitDnsBridge,
-    endpoint_from_bound_owned_fd, read_authorized_udp_flow, write_udp_authorization,
+    AuthorizedUdpFlow, DatagramLimits, DnsResolutionScope, ExitResolver, ExitUdpBridge,
+    ManagedQuinnEndpoint, QuicUdpAssociation, UdpAuthorizationScope, UdpBridgeStats, UdpError,
+    VerifiedSingleRelayPath, dns::ExitDnsBridge, endpoint_from_bound_owned_fd,
+    read_authorized_udp_flow, write_udp_authorization,
 };
 
 /// Endpoint role permitted for a committed single-path UDP descriptor.
@@ -365,6 +367,7 @@ enum SingleRelayExitBridge {
 pub struct SingleRelayUdpExitListener {
     endpoint: ManagedQuinnEndpoint,
     path: VerifiedSingleRelayPath,
+    dns: Option<(Arc<ExitResolver>, DnsResolutionScope)>,
 }
 
 impl SingleRelayUdpExitListener {
@@ -379,7 +382,21 @@ impl SingleRelayUdpExitListener {
         path: VerifiedSingleRelayPath,
     ) -> Result<Self, UdpError> {
         let endpoint = transport.adopt(CommittedUdpRole::Exit, &path, Some(server_config))?;
-        Ok(Self { endpoint, path })
+        Ok(Self {
+            endpoint,
+            path,
+            dns: None,
+        })
+    }
+
+    /// Attach shared DNS resolution with the retained complete control/data-relay exclusions.
+    pub fn with_dns_resolver(
+        mut self,
+        resolver: Arc<ExitResolver>,
+        scope: DnsResolutionScope,
+    ) -> Self {
+        self.dns = Some((resolver, scope));
+        self
     }
 
     /// Accept and authorize exactly one Client flow on this committed listener.
@@ -430,7 +447,17 @@ impl SingleRelayUdpExitListener {
         independent_egress: Option<&IndependentEgress>,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<SingleRelayUdpExit, UdpError> {
-        let Self { endpoint, path } = self;
+        let Self {
+            endpoint,
+            path,
+            dns,
+        } = self;
+        let (resolver, dns_scope) = dns.unwrap_or_else(|| {
+            (
+                Arc::new(ExitResolver::default()),
+                DnsResolutionScope::without_peers(*policy.policy_hash()),
+            )
+        });
         let attempt = async {
             let connection = endpoint.accept().await?;
             let path_id = u8::try_from(path.path_id())
@@ -454,10 +481,12 @@ impl SingleRelayUdpExitListener {
             .await?;
             let association = QuicUdpAssociation::new(connection, path, &flow, now_ms)?;
             if flow.dns_name().is_some() {
-                ExitDnsBridge::new(association, &flow, now_ms, limits)
+                ExitDnsBridge::new(association, &flow, now_ms, limits, resolver, dns_scope)
                     .map(SingleRelayExitBridge::Dns)
             } else {
-                let pinned = flow.resolve_and_pin(now_ms).await?;
+                let pinned = flow
+                    .resolve_and_pin_with_resolver(now_ms, &resolver, &dns_scope)
+                    .await?;
                 ExitUdpBridge::connect_with_egress(
                     association,
                     pinned,

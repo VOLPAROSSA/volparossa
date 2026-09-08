@@ -25,7 +25,14 @@ mod session;
 pub use association::{MAX_UDP_PAYLOAD_BYTES, QuicUdpAssociation, UdpAssociationState};
 pub use authorization::{AuthorizedUdpFlow, PinnedUdpFlow, UdpAuthorizationScope};
 pub use bridge::{DatagramLimits, ExitUdpBridge, UdpBridgeStats};
-pub use dns::{BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query};
+pub use dns::resolver::{
+    DnsAnswerSource, DnsPeerBackend, DnsPeerFuture, DnsProofBundle, DnsQuestion,
+    DnsResolutionScope, DnsResolverError, ExitResolver, MAX_DNS_PROOF_BYTES, ValidatedDnsAnswer,
+};
+pub use dns::{
+    BoundedDnsQuery, DnsQueryType, MAX_DNS_MESSAGE_BYTES, parse_dns_query,
+    resolve_hostname_addresses,
+};
 pub use endpoint::{ManagedQuinnEndpoint, endpoint_from_bound_owned_fd};
 pub use framing::{read_authorized_udp_flow, write_udp_authorization};
 pub use path::VerifiedSingleRelayPath;

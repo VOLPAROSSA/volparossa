@@ -2,6 +2,8 @@
 
 mod wifi_mesh;
 pub use wifi_mesh::WifiMeshConfig;
+mod dns_cache;
+pub use dns_cache::DnsCacheConfig;
 
 use std::{
     collections::HashSet,
@@ -88,6 +90,8 @@ pub struct Config {
     pub download_sharing: DownloadSharingConfig,
     /// Explicit direct Wi-Fi underlay; disabled until its open-L2 scope is acknowledged.
     pub wifi_mesh: WifiMeshConfig,
+    /// Bounded independently validated DNSSEC cache; does not activate participation.
+    pub dns_cache: DnsCacheConfig,
     /// Route-context and interception safety settings.
     pub routing: RoutingConfig,
     /// TCP/MPTCP settings.
@@ -113,6 +117,7 @@ impl Default for Config {
             sharing: SharingConfig::default(),
             download_sharing: DownloadSharingConfig::default(),
             wifi_mesh: WifiMeshConfig::default(),
+            dns_cache: DnsCacheConfig::default(),
             routing: RoutingConfig::default(),
             tcp: TcpConfig::default(),
             udp: UdpConfig::default(),
@@ -199,6 +204,7 @@ impl Config {
         validate_sharing(&self.sharing)?;
         validate_download_sharing(&self.download_sharing)?;
         self.wifi_mesh.validate()?;
+        self.dns_cache.validate()?;
         validate_routing(self.runtime_mode, &self.routing)?;
         validate_tcp(self.tcp)?;
         validate_udp(&self.udp)?;

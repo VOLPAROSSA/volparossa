@@ -310,10 +310,12 @@ grep -F "third_party/rust/vendor/hickory-proto-0.25.2" "$hickory_features" >/dev
     fail 'the locked graph does not use the reviewed hickory-proto vendor tree'
 grep -F "third_party/rust/vendor/time-0.3.41" "$time_features" >/dev/null ||
     fail 'the locked graph does not use the reviewed time vendor tree'
-if grep -Eq 'dnssec-ring|dnssec-aws-lc-rs|volparossa-backport-regressions' "$hickory_features"; then
-    fail 'the production feature graph unexpectedly enables Hickory DNSSEC'
+if grep -Eq 'dnssec-aws-lc-rs|volparossa-backport-regressions' "$hickory_features"; then
+    fail 'the production feature graph enables an unreviewed Hickory DNSSEC backend or test adapter'
 fi
-pass 'locked Cargo graph uses the reviewed Hickory and time patches and keeps Hickory DNSSEC disabled'
+grep -F 'hickory-proto feature "dnssec-ring"' "$hickory_features" >/dev/null ||
+    fail 'the production DNS proof validator lacks its reviewed Hickory ring backend'
+pass 'locked Cargo graph uses reviewed Hickory/time patches and only the production ring DNSSEC backend'
 
 check_single_path_package \
     "$fuzz_metadata" \

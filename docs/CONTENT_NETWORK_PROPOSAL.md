@@ -86,6 +86,31 @@ resolution path where independent validation is unavailable. Replication must no
 or signature lifetime, mix private/split-horizon views, override policy or redirect arbitrary
 destinations. A DNS record is a typed object with DNS-specific validation, not generic web data.
 
+The first integrated implementation now connects one RAM-only `ExitResolver` to protected DNS,
+TCP hostname resolution and UDP/browser-QUIC destination pinning. Positive A/AAAA proofs are
+checked independently with the pinned Hickory DNSSEC verifier and built-in root anchors. A
+generic provider capability locates caches; DNS names never enter provider records. Queries and
+replies use the existing signed control envelope over an exact authenticated direct connection,
+excluding the local node and every retained control/data relay for the original route. A cache
+miss never makes the serving peer perform a recursive lookup. Each receiving Exit still applies
+its own policy and independently validates the proof before using it.
+
+`dns_cache.enabled` defaults to true but activates no roles or new listener. Optional
+`dns_cache.upstream` selects an operator-specified existing recursive TCP/53 endpoint for proof
+collection; its default is null, with no built-in DNS provider or host DNS reconfiguration.
+Invalid, absent, unsigned or unsupported proofs retain the existing OS-resolution fallback,
+whose answers are not advertised as DNSSEC evidence. CNAME chains and negative-answer sharing
+are not implemented by this positive-only slice. Cache entries are policy-partitioned and
+bounded by received TTLs, signature expiry and local monotone first-seen deadlines; forwarding
+cannot extend the local expiry. DNSSEC cannot prove when an unknown peer first received a
+record, so this is not an absolute network-wide TTL-replay guarantee.
+
+The combined runtime compiles and the focused core verifies a real cryptographic test chain
+and TCP collector in a disposable namespace. That test's private anchor exists only under
+`cfg(test)`; it does not prove the current public chain or network-wide C05. A separate fixture
+probe requires genuine A and AAAA validation against the unchanged built-in production anchors.
+The ordinary two-Exit peer-hit/fallback network checkpoint remains open.
+
 ## First delivered foundation (2026-09-07)
 
 [`volparossa-content`](../crates/volparossa-content/README.md) now has real, bounded local
