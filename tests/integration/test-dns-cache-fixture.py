@@ -61,6 +61,18 @@ class FixtureTests(unittest.TestCase):
         self.assertFalse(json.loads(output.getvalue())["cryptographically_verified"])
         return root
 
+    def test_failure_keeps_fixed_shape_reason_but_not_raw_remote_text(self):
+        with mock.patch.object(FIXTURE, "fetch_wire", return_value=b"short"):
+            with self.assertRaises(FIXTURE.FixtureError) as raised:
+                FIXTURE.collect(self.parent / "failed")
+        self.assertEqual(FIXTURE.failure_summary(raised.exception),
+                         "DNS fixture failed: FixtureError: collect iana.org A: DNS wire size")
+        for error in (ValueError("remote secret text"), OSError("private path"),
+                      KeyError("remote key")):
+            self.assertEqual(FIXTURE.failure_summary(error),
+                             "DNS fixture failed: " + type(error).__name__)
+        self.assertFalse((self.parent / "failed").exists())
+
     def test_shape_ad_alone_substitution_and_real_time_are_not_proof(self):
         for question in FIXTURE.QUESTIONS:
             wire = synthetic_response(question, self.now)

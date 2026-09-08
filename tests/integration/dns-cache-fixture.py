@@ -34,9 +34,13 @@ MAX_SECONDS = 120
 TYPE_NAMES = {1: "A", 28: "AAAA", 43: "DS", 48: "DNSKEY"}
 
 
+class FixtureError(ValueError):
+    """Only locally authored fixture diagnostics, never raw remote/parser text."""
+
+
 def require(condition, reason):
     if not condition:
-        raise ValueError(reason)
+        raise FixtureError(reason)
 
 
 def name_wire(name):
@@ -71,7 +75,7 @@ def read_name(data, offset):
             require(re.fullmatch(r"[A-Za-z0-9_-]+", label) is not None, "invalid DNS label")
             labels.append(label.lower())
             offset += length + 1
-    raise ValueError("DNS name depth")
+    raise FixtureError("DNS name depth")
 
 
 def parse_question(data):
@@ -149,7 +153,7 @@ def query_wire(name, kind, query_id):
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
-        raise ValueError("fixture DoH redirect refused")
+        raise FixtureError("fixture DoH redirect refused")
 
 
 def fetch_wire(question, remaining):
@@ -191,9 +195,13 @@ def collect(root):
     for question in QUESTIONS:
         remaining = deadline - time.monotonic()
         require(remaining > 0, "fixture collection deadline")
-        data = fetch_wire(question, remaining)
-        received = int(time.time() * 1000)
-        inspected = inspect_response(data, question, received)
+        try:
+            data = fetch_wire(question, remaining)
+            received = int(time.time() * 1000)
+            inspected = inspect_response(data, question, received)
+        except FixtureError as error:
+            # These are the fixed public test questions, not browsing or remote error text.
+            raise FixtureError(f"collect {question[0]} {TYPE_NAMES[question[1]]}: {error}") from None
         records.append({"name": question[0], "type": question[1], "wire_hex": data.hex(),
                         "sha256": hashlib.sha256(data).hexdigest(), "received_at_unix_ms": received,
                         "minimum_ttl_seconds": inspected["minimum_ttl_seconds"],
@@ -360,6 +368,15 @@ def validate_core(root, output):
               "core": answers, "replay": replay})
 
 
+def failure_summary(error):
+    summary = "DNS fixture failed: " + type(error).__name__
+    if isinstance(error, FixtureError):
+        summary += ": " + str(error)
+    elif isinstance(error, urllib.error.HTTPError):
+        summary += ": status " + str(error.code)
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -387,5 +404,4 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, struct.error, urllib.error.URLError) as error:
-        # The literal public question is fixture data, but raw remote/parser text is unnecessary.
-        raise SystemExit("DNS fixture failed: " + type(error).__name__) from None
+        raise SystemExit(failure_summary(error)) from None
