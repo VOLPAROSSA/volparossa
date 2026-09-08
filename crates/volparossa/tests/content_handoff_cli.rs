@@ -56,13 +56,14 @@ fn isolated(test_name: &str, scenario: impl Future<Output = ()>) {
             .block_on(scenario);
         return;
     }
-    let output = Command::new("/usr/bin/unshare")
-        .args(["--user", "--map-root-user", "--net"])
-        .arg(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", test_name, "--nocapture"])
-        .env(INNER, current)
-        .output()
-        .expect("execute proof in a disposable user/network namespace");
+    let output = Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/run-isolated-test.sh"
+    ))
+    .arg(std::env::current_exe().expect("current test executable"))
+    .args([test_name, INNER, "none"])
+    .output()
+    .expect("execute proof in a disposable user/network namespace");
     assert!(
         output.status.success(),
         "isolated CLI proof failed (no host socket fallback): {}{}",

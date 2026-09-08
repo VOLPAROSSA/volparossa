@@ -29,6 +29,7 @@ set -- \
     scripts/check-system.sh \
     scripts/cleanup-network.sh \
     scripts/run-fuzz.sh \
+    scripts/run-isolated-test.sh \
     tests/helper/lib/live-worker-proof-capture.sh \
     tests/helper/lib/production-ipc-unit-hook.sh \
     tests/helper/lib/restart-exact-present-launcher.sh \
