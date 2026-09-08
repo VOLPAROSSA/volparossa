@@ -322,10 +322,13 @@ impl ReplicationRuntime {
                     ..ReplicationLimits::default()
                 },
                 exclusions,
-                // No next chunk is in flight while this sample runs: the provider must
-                // await our next credit. Busy ends the exchange with verified partials;
-                // it never relabels our actively received payload as owner demand.
-                || budget.quiet(),
+                // The provider awaits our next credit while owner activity settles. Resume
+                // this same exchange within its original deadline and reserved budget;
+                // never sample our actively received payload as owner demand.
+                || async {
+                    budget.wait_until_quiet().await;
+                    true
+                },
             )
             .await
             .ok();

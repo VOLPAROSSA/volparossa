@@ -113,7 +113,7 @@ impl IdleBudget {
     }
 
     /// A fresh decision on the explicitly configured interfaces, never all route interfaces.
-    /// False at a credit boundary ends this optional exchange; it does not extend its deadline.
+    /// False withholds the next credit; waiting for quiet never extends the caller's deadline.
     pub(super) async fn quiet(&self) -> bool {
         let Some(before) = self.sample().await else {
             return false;

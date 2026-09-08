@@ -160,6 +160,82 @@ async fn credit_stall_sends_nothing_and_releases_cache_for_real_foreground_pull(
 }
 
 #[tokio::test]
+async fn admission_pause_resumes_the_same_stream_with_verified_partial_and_original_bounds() {
+    let fixture = Fixture::new(2);
+    let mut target = fixture.store("target");
+    let (mut client, mut server) = duplex(4096);
+    let exclusions = ReplicationExclusions::default();
+    let (paused, observed_pause) = tokio::sync::oneshot::channel();
+    let mut paused = Some(paused);
+    let quiet = tokio::sync::Notify::new();
+    let mut checks = 0;
+    let (received, sent) = {
+        let exchange = async {
+            tokio::join!(
+                pull_replicas_with_admission(
+                    &mut client,
+                    &mut target,
+                    ReplicationLimits::default(),
+                    &exclusions,
+                    || {
+                        checks += 1;
+                        let paused = if checks == 2 { paused.take() } else { None };
+                        let quiet = &quiet;
+                        async move {
+                            if let Some(paused) = paused {
+                                // The first chunk is already verified before this callback.
+                                // Simulated owner activity blocks only the next credit.
+                                paused.send(()).unwrap();
+                                quiet.notified().await;
+                            }
+                            true
+                        }
+                    }
+                ),
+                super::super::serve_publication(
+                    &mut server,
+                    &fixture.registry,
+                    TransferLimits::default()
+                ),
+            )
+        };
+        tokio::pin!(exchange);
+        tokio::select! {
+            result = &mut exchange => panic!("exchange ended before credit pause: {result:?}"),
+            paused = tokio::time::timeout(Duration::from_secs(2), observed_pause) => {
+                paused.unwrap().unwrap();
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut exchange)
+                .await
+                .is_err()
+        );
+        // No source-cache lock is held while the optional exchange awaits credit.
+        drop(ChunkStore::open(&fixture.source_root, cache_limits()).unwrap());
+        quiet.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), exchange)
+            .await
+            .unwrap()
+    };
+    let received = received.unwrap();
+    assert_eq!(checks, 3); // Two chunks and the final credit, without a new exchange.
+    assert_eq!(
+        (received.chunks, received.bytes),
+        (2, (2 * CHUNK_BYTES) as u64)
+    );
+    assert_eq!(sent.unwrap().chunks, 2);
+    assert_eq!(received.replicas[0].validity(), fixture.verified.validity());
+    assert!(received.wire_bytes > received.bytes && received.wire_bytes <= MAX_WIRE_BYTES);
+    for (index, chunk) in fixture.verified.chunks().iter().enumerate() {
+        assert_eq!(
+            target.get(chunk.id()).unwrap().unwrap(),
+            vec![u8::try_from(index + 1).unwrap(); CHUNK_BYTES]
+        );
+    }
+}
+
+#[tokio::test]
 async fn owner_busy_stop_returns_verified_partial_with_original_expiry_and_no_eviction() {
     let fixture = Fixture::new(2);
     let mut target = fixture.store("target");
