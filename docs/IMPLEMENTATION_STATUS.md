@@ -144,8 +144,14 @@ the Client UID could not read its helper under `/home/vpci/source`, causing
 `DOCUMENT_PUBLIC_INPUT_FAILED`. Cleanup completed with zero owned objects and unchanged
 guest-state hashes. Correction `4421b1a6de2b0f69bf08873e1c5c9e7a3d419e52` installs only the
 public guest helper and an owner-readable, read-only README copy; it does not widen source-tree
-permissions. Parser, file and shell checks pass; the corrected exact-source
-[VM run 34893180542](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
+permissions. Parser, file and shell checks pass. The corrected exact-source
+[VM run 34893180542](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542)
+passes public-input preparation but fails at worker startup with `compute_result_missing`,
+before any validated worker phase. Cleanup again leaves zero owned objects and identical
+guest-state hashes. That head's workspace Quality and CodeQL checks pass, but the document
+datapath remains unproven. A separate diagnostic candidate retains only a fixed startup
+category, exit code/signal and byte count when stdout ends without a result; it does not
+log raw stderr or document text and does not claim to fix the underlying startup failure.
 This is not confidential offload, source-cache discovery, automatic network replication,
 neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
@@ -235,7 +241,30 @@ All 68 focused CLI compute tests and strict CLI Clippy pass; physical-device evi
 The new `agent-owner-cancel` disposable fixture targets actual training followed by owner-only
 pidfd/SIGINT, a five-second CLI/observed-process cleanup bound, `compute_owner_busy`, no completed
 checkpoint and unchanged on-disk base/guest state. Its local parser/file/shell checks pass;
-the actual VM proof is pending. Neither this candidate nor its tests check off B01, B03 or B05.
+The [actual owner-cancel VM on `43dee7ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893645697)
+passes its exact-source report and original raw-bundle verification: owner-only SIGINT, CLI
+reaping after 3.242 ms and all four observed processes ended after 59.420 ms, without fallback
+signals or a completed checkpoint. The runtime lock is released and the 269,060,552-byte base
+model hash remains unchanged. Cleanup leaves zero owned objects; both guest-state hashes are
+`c512a02a7bd7c80acbb93c000b9c95682247d164578afc977c271261ec8edd87`.
+Review, source hashes and the original-bundle checker are retained under
+`.git/ci-evidence/34893645697/`. Physical battery/thermal and comprehensive interactive-activity
+evidence remain open; this scoped result does not check off B01, B03 or B05.
+
+The successor-selection candidate adds a mandatory `source-heldout-loss-v1` policy to new
+training-loop enrollment and version-2 state. Technical training completion no longer promotes
+every candidate: only finite, consistent reloaded held-out loss strictly lower than its
+predecessor by more than `1e-6` replaces the warmstart or enters automatic publication.
+Immutable `evaluation.json` binds actual dataset, worker reports, base, input adapter and
+candidate files; recovery and publication recheck the decision. Rejected outputs remain
+bounded/reclaimable and cannot evict the last approved warmstart or pending approved publication.
+Old version-1 loops are not silently migrated or treated as evaluated; their output is retained.
+The current training source also supplies the held-out examples, so this is not independent
+benchmarking, cross-round contamination prevention, general intelligence or completed B05.
+All 75 focused CLI compute tests and strict CLI Clippy pass, including startup diagnostics,
+promotion/rejection, restart and reclamation. The pure proof checker accepts all four possible
+two-cycle promotion outcomes and rejects inconsistent evidence. These are control/receipt
+checks, not live model evidence; the updated VM training-loop proof is pending.
 
 The next `compute train-loop` candidate connects that real cycle executor to a persistent,
 owner-enabled coordinator: cache-independent round-robin selection from explicit public

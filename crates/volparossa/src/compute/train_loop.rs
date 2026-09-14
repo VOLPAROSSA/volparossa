@@ -1,6 +1,7 @@
 //! Owner-enabled continuous public training, independent source selection and durable sharing.
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
+mod evaluation;
 mod publication;
 mod seed;
 mod storage;
@@ -146,6 +147,7 @@ enum Phase {
     Complete,
     Failed,
     PublicationExpired,
+    Rejected,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -167,6 +169,8 @@ struct State {
     next_sequence: u64,
     cursor: usize,
     completed: u64,
+    promoted: u64,
+    rejected: u64,
     latest: Option<u64>,
     sources: Vec<SourceProgress>,
     cycles: Vec<Cycle>,
@@ -177,10 +181,12 @@ struct State {
 impl State {
     fn new(count: usize) -> Self {
         Self {
-            version: 1,
+            version: 2,
             next_sequence: 1,
             cursor: 0,
             completed: 0,
+            promoted: 0,
+            rejected: 0,
             latest: None,
             sources: (0..count).map(|_| SourceProgress::default()).collect(),
             cycles: Vec::new(),
@@ -275,6 +281,7 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         "publish_name":args.publish_name,"publication_key":args.publication_key.map(|key|hex::encode(key.as_bytes())),
         "identity":args.identity,"passphrase_file":args.passphrase_file,"publish_cache":args.publish_cache,
         "first_publication_revision":args.first_publication_revision,"seed":seed::selection(args)?,"source_choice_uses_cache_inventory":false,
+        "quality_policy":"source-heldout-loss-v1",
         "private_data_supported":false,"code_or_model_downloads":false,"automatic_model_quality_claimed":false});
     Ok((plan, selection))
 }
@@ -355,6 +362,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     println!(
         "{}",
         json!({"operation":"compute_train_loop","completed_cycles":state.completed,
+        "promoted_cycles":state.promoted,"rejected_cycles":state.rejected,"latest_approved_sequence":state.latest,
+        "quality_policy":"source-heldout-loss-v1","independent_quality_benchmark":false,
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
         "private_data_supported":false,"full_b05_claimed":false})
@@ -364,8 +373,11 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
 
 fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
     ensure!(
-        state.version == 1
+        state.version == 2
             && state.next_sequence > 0
+            && state.promoted.checked_add(state.rejected) == Some(state.completed)
+            && state.completed < state.next_sequence
+            && (state.latest.is_some() == (state.promoted > 0))
             && state.sources.len() == count
             && state.cursor < count
             && state.cycles.len() <= RETAINED_CYCLES
@@ -398,6 +410,12 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
         }
         if let Some(snapshot) = &cycle.snapshot {
             store.validate_snapshot(cycle.sequence, snapshot)?;
+            let decision = evaluation::verify(store, cycle.sequence)?;
+            ensure!(
+                decision.approved == (cycle.phase != Phase::Rejected)
+                    && (cycle.phase != Phase::Rejected || cycle.publication.is_none()),
+                "train_loop_evaluation_phase_mismatch"
+            );
         }
         ensure!(
             cycle.snapshot.is_some() != matches!(cycle.phase, Phase::Running | Phase::Failed),
@@ -406,10 +424,9 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
     }
     if let Some(latest) = state.latest {
         ensure!(
-            state
-                .cycles
-                .iter()
-                .any(|cycle| cycle.sequence == latest && cycle.snapshot.is_some()),
+            state.cycles.iter().any(|cycle| cycle.sequence == latest
+                && cycle.snapshot.is_some()
+                && cycle.phase != Phase::Rejected),
             "train_loop_latest_missing"
         );
     }
@@ -424,7 +441,7 @@ fn make_room(store: &Store, state: &mut State) -> Result<bool> {
         Some(cycle.sequence) != state.latest
             && matches!(
                 cycle.phase,
-                Phase::Complete | Phase::Failed | Phase::PublicationExpired
+                Phase::Complete | Phase::Failed | Phase::PublicationExpired | Phase::Rejected
             )
     });
     let Some(index) = obsolete else {
@@ -510,30 +527,21 @@ async fn attempt(
     store.save_state(&serde_json::to_value(&*state)?)?;
     // Do not select/drop this future on cancellation: the model supervisor must reap.
     let result = train_cycle::execute_cycle(&options, socket, activity.clone()).await;
-    let cycle = state
-        .cycles
-        .last_mut()
-        .context("train_loop_cycle_missing")?;
-    if result.is_ok() {
-        let manifest = SignedManifest::decode(&read_file(
-            &options.output.join("dataset.manifest"),
-            64 * 1024,
-        )?)?;
-        let verified = manifest.verify(&source.key()?, now()?)?;
-        state.sources[index].revision = Some(verified.metadata().revision);
-        cycle.snapshot = Some(store.snapshot_cycle(sequence)?);
-        cycle.phase = if args.publish_name.is_some() {
-            Phase::Trained
-        } else {
-            Phase::Complete
-        };
-        state.latest = Some(sequence);
-        state.completed = state
-            .completed
-            .checked_add(1)
-            .context("train_loop_completed_exhausted")?;
-    } else {
-        cycle.phase = Phase::Failed;
+    let qualified = result.and_then(|_| {
+        qualify_cycle(
+            store,
+            state,
+            sequence,
+            &options,
+            args.publish_name.is_some(),
+        )
+    });
+    if qualified.is_err() {
+        state
+            .cycles
+            .last_mut()
+            .context("train_loop_cycle_missing")?
+            .phase = Phase::Failed;
         // Model/network errors can contain source text. Record a fixed phase only.
         eprintln!("compute loop_event=cycle_failed");
     }
@@ -541,8 +549,95 @@ async fn attempt(
     println!(
         "{}",
         json!({"operation":"compute_train_loop_cycle","sequence":sequence,"source_index":index,
-        "completed":result.is_ok(),"total_completed":state.completed,"selection_used_cache_inventory":false})
+        "completed":qualified.is_ok(),"approved":qualified.as_ref().ok().map(|decision|decision.approved),
+        "latest_approved_sequence":state.latest,"quality_policy":"source-heldout-loss-v1",
+        "total_completed":state.completed,"selection_used_cache_inventory":false})
     );
+    Ok(())
+}
+
+fn qualify_cycle(
+    store: &Store,
+    state: &mut State,
+    sequence: u64,
+    options: &train_cycle::Options,
+    publish: bool,
+) -> Result<evaluation::Record> {
+    let manifest = SignedManifest::decode(&read_file(
+        &options.output.join("dataset.manifest"),
+        64 * 1024,
+    )?)?;
+    let verified = manifest.verify(&options.publisher_key, now()?)?;
+    let decision = evaluation::assess(
+        store,
+        sequence,
+        state.latest,
+        options.adapter_root.as_deref(),
+    )?;
+    store.write_cycle_json(
+        sequence,
+        "evaluation.json",
+        &serde_json::to_value(&decision)?,
+    )?;
+    select_successor(
+        state,
+        store.snapshot_cycle(sequence)?,
+        verified.metadata().revision,
+        &decision,
+        publish,
+    )?;
+    Ok(decision)
+}
+
+/// Technical completion is separate from promotion. A rejected candidate never
+/// replaces the warmstart, enters the publication queue, or retries the same
+/// completed source revision by accident; it remains bounded and reclaimable.
+fn select_successor(
+    state: &mut State,
+    snapshot: Snapshot,
+    revision: u64,
+    decision: &evaluation::Record,
+    publish: bool,
+) -> Result<()> {
+    ensure!(
+        decision.predecessor == state.latest,
+        "train_loop_evaluation_predecessor"
+    );
+    let completed = state
+        .completed
+        .checked_add(1)
+        .context("train_loop_completed_exhausted")?;
+    let promoted = state
+        .promoted
+        .checked_add(u64::from(decision.approved))
+        .context("train_loop_promoted_exhausted")?;
+    let rejected = state
+        .rejected
+        .checked_add(u64::from(!decision.approved))
+        .context("train_loop_rejected_exhausted")?;
+    let cycle = state
+        .cycles
+        .last_mut()
+        .context("train_loop_cycle_missing")?;
+    ensure!(
+        decision.sequence == cycle.sequence && cycle.phase == Phase::Running,
+        "train_loop_evaluation_cycle"
+    );
+    state.sources[cycle.source].revision = Some(revision);
+    cycle.snapshot = Some(snapshot);
+    cycle.phase = if !decision.approved {
+        Phase::Rejected
+    } else if publish {
+        Phase::Trained
+    } else {
+        Phase::Complete
+    };
+    if decision.approved {
+        state.latest = Some(cycle.sequence);
+    }
+    state.completed = completed;
+    state.promoted = promoted;
+    state.rejected = rejected;
     Ok(())
 }
 

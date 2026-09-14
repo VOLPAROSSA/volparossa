@@ -165,12 +165,14 @@ agent_train_loop_run() {
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" last-json \
         "$WORK/agent-train-loop-stdout.jsonl" compute_train_loop >"$WORK/agent-train-loop-summary.json" || fail TRAIN_LOOP_SUMMARY_INVALID
     agent_train_loop_private collect "$artifact_user" >"$WORK/agent-train-loop-loop.json" || fail TRAIN_LOOP_ACTUAL_FILES_INVALID
-    # The two exact update receipts are mandatory. Background replication may
-    # also retain the already verified original seed/dataset; account only for
-    # those known complete objects, never an arbitrary publication count.
+    # Only approved candidates may have exact update receipts. Background
+    # replication may also retain the already verified original seed/dataset;
+    # account only for that exact allowed set, including zero approved updates.
     agent_train_loop_shared loop-shared false || fail TRAIN_LOOP_UPDATES_NOT_SHARED
+    loop_latest=$(jq -r '.state.latest // "none"' "$WORK/agent-train-loop-loop.json")
+    case $loop_latest in 1|2|none) ;; *) fail TRAIN_LOOP_LATEST_INVALID ;; esac
     PHASE=agent-train-loop-explicit-original-dataset-contribution
-    # Fixture-only explicit sharing of the already fetched original dataset. The loop's two
+    # Fixture-only explicit sharing of the already fetched original dataset. Approved
     # adapter publications above are automatic; this separate handoff is not claimed automatic.
     agent_artifact_cli relay4 content export --public-content \
         --manifest "$artifact_user/loop/cycle-0000000000000002/dataset.manifest" --publisher-key "$artifact_publisher" \
@@ -182,6 +184,7 @@ agent_train_loop_run() {
     agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
 
+    if [ "$loop_latest" != none ]; then
     PHASE=agent-train-loop-independent-import
     content_replication_select client agent-train-loop-reserve-fetch || fail TRAIN_LOOP_IMPORT_ROUTE_FAILED
     content_replication_capture reserve-fetch agent-train-loop-reserve-fetch "$WORK/agent-train-loop-reserve-fetch-selection.json" \
@@ -190,7 +193,7 @@ agent_train_loop_run() {
     [ ! -e "$artifact_cache" ] && [ ! -L "$artifact_cache" ] || fail TRAIN_LOOP_IMPORT_CACHE_NOT_NEW
     agent_artifact_cli client content agent fetch --publisher-key "$loop_publisher" \
         --dataset-publisher-key "$artifact_publisher" --name disposable-loop-update \
-        --dataset-name disposable-agent-dataset --min-revision 2 --cache "$artifact_cache" --output "$artifact_user/received" \
+        --dataset-name disposable-agent-dataset --min-revision "$loop_latest" --cache "$artifact_cache" --output "$artifact_user/received" \
         >"$WORK/agent-train-loop-fetch.json" 2>"$WORK/agent-train-loop-fetch.err" || fail TRAIN_LOOP_IMPORT_FAILED
     content_replication_snapshot client agent-train-loop-reserve-fetch-live || fail TRAIN_LOOP_IMPORT_PATHS_FAILED
     stop_privacy_observers || fail TRAIN_LOOP_IMPORT_CAPTURE_INCOMPLETE
@@ -205,6 +208,13 @@ agent_train_loop_run() {
     wait "$artifact_job_pid" || fail TRAIN_LOOP_INFERENCE_FAILED
     artifact_job_pid=
     install -m 0600 "$artifact_user/inference-isolation.json" "$WORK/agent-artifact-inference-isolation.json"
+    else
+        # No candidate passed the real heldout gate. Do not run an import of the
+        # rejected checkpoint or create a synthetic inference result in its place.
+        PHASE=agent-train-loop-no-candidate-promoted
+    fi
+    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" adoption \
+        "$WORK/agent-train-loop-loop.json" >"$WORK/agent-train-loop-adoption.json" || fail TRAIN_LOOP_ADOPTION_INVALID
     agent_train_loop_cleanup || fail TRAIN_LOOP_PRIVATE_CLEANUP_FAILED
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" evidence "$WORK" "$expected_commit" || fail TRAIN_LOOP_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

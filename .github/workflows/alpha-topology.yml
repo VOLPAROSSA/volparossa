@@ -795,7 +795,7 @@ jobs:
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.after_sha256' "$report")"
 
-      - name: Require autonomous public cycles, publication and another peer import
+      - name: Require public cycles and evidence-bound successor selection before sharing
         if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-train-loop'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}

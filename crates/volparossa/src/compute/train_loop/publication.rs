@@ -100,6 +100,10 @@ async fn prepare(
         .as_ref()
         .context("train_loop_snapshot_required")?;
     store.validate_snapshot(cycle.sequence, snapshot)?;
+    ensure!(
+        super::evaluation::verify(store, cycle.sequence)?.approved,
+        "train_loop_unapproved_publication"
+    );
     let root = store.cycle_path(cycle.sequence)?;
     let result = store.read_cycle_json(cycle.sequence, "result.json")?;
     let source_expires = result["source_expires_unix_seconds"]

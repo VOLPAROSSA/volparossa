@@ -142,7 +142,7 @@ memory cap, and this foreground CLI does not detect all interactive activity or 
 physical-device safety. Actual model execution and sandbox observations now pass the source-bound
 distinct-node smoke below: eight CPU optimizer updates change 230,400 LoRA parameters,
 the original base remains unchanged, and a fresh base/adapter reload is evaluated.
-B01 still needs measured owner-triggered cancellation; real CPU-pressure pause/resume now
+B01 still needs broader interactive/physical-device evidence; real CPU-pressure pause/resume now
 passes below. Improved answer quality, distributed
 training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
@@ -187,7 +187,11 @@ The separate `agent-owner-cancel` guest fixture waits for real training, sends o
 SIGINT only to the exact CLI through its pidfd, and requires CLI reaping and all observed
 descendants ended within five seconds. It expects `compute_owner_busy`, not a completed
 checkpoint, and checks the unchanged on-disk base, released runtime lock and guest cleanup.
-Its local checker/shell tests pass; actual VM cancellation evidence is pending, so B01 stays open.
+The [actual owner-cancellation proof on `43dee7ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893645697)
+passes exact-source/raw-bundle verification. The CLI is reaped 3.242 ms after SIGINT and all
+four observed processes end within 59.420 ms, without fallback signals. The base remains
+unchanged, the runtime lock is free and cleanup leaves no owned objects. This is one measured
+disposable-guest result, not a universal latency guarantee or completed B01.
 
 ### Cache-backed adapter candidate
 
@@ -326,6 +330,31 @@ reconstruct the same report; cleanup leaves no owned objects and original guest-
 unchanged. PR #123 integrated this milestone into `main`. This is not general task planning,
 model-quality improvement, private training, defended
 gradient/model aggregation, automatic peer-job activation or completed B05.
+
+### Source-heldout successor selection
+
+New train-loop enrollment fixes `quality_policy: source-heldout-loss-v1`. A technically complete
+training cycle is now a candidate, not automatically the next warmstart. The worker already
+measures token-weighted held-out loss after applying the predecessor and before training,
+then after training and after a fresh checkpoint reload. Only a finite reloaded-candidate loss
+strictly below the predecessor loss minus `1e-6`, with matching positive target-token counts
+and reload consistency, approves promotion and optional automatic publication.
+
+Each cycle retains `evaluation.json` with exact source, report, predecessor and adapter
+bindings. Recovery and publication recheck that decision against the immutable cycle snapshot.
+Rejected candidates keep their real output, do not replace the previous warmstart and are
+eligible for bounded local cleanup. Source revision tracking still advances after a measured
+rejection, so the same revision is not silently trained forever. The loop reports technical
+completions, promotions and rejections separately.
+
+This changes coordinator state to version 2 and adds the enrolled policy. Existing version-1
+loop directories are not silently migrated or relabelled: keep their results, and start a new
+directory with an explicitly selected compatible adapter if further training is wanted.
+The current source supplies both training and held-out examples; within-source disjointness
+does not establish an independently selected benchmark or exclude cross-round contamination.
+This is a scoped measured promotion rule, not evidence of general intelligence, no forgetting,
+globally monotone improvement or robust peer evaluation. Independent evaluation/selection and
+specialist retention remain required work. The updated actual training-loop proof is pending.
 
 ## Owner-first resource allocation
 
@@ -639,7 +668,7 @@ build larger connected slices, without claiming these unchecked requirements are
   pause/resume/cancellation, not a stub model or an unconstrained background process.
   Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; real CPU-pressure
   pause/resume passes on `d12768e3`. Device-budget code and the manual-cancellation fixture
-  pass local checks; actual owner-cancellation, physical battery/thermal and broader
+  pass local checks; measured owner cancellation passes on `43dee7ed`. Physical battery/thermal and broader
   interactive-activity evidence remain incomplete.
 - [x] B02: transfer an original compatible trained artifact over the real protected content
   network, validate it on another node and execute it there; restart/custody retains validity.

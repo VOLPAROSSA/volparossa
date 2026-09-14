@@ -20,13 +20,14 @@ const JSON_LIMIT: u64 = 256 * 1024;
 const ENROLLMENT_LIMIT: u64 = 64 * 1024;
 const TREE_ENTRIES: usize = 32;
 const TREE_BYTES: u64 = 16 * 1024 * 1024;
-const CONTENT_FILES: [(&str, u64); 11] = [
+const CONTENT_FILES: [(&str, u64); 12] = [
     ("selection.json", 64 * 1024),
     ("dataset.json", 1024 * 1024),
     ("dataset.manifest", 64 * 1024),
     ("source-provenance.json", 64 * 1024),
     ("training-report.json", 32 * 1024),
     ("result.json", 64 * 1024),
+    ("evaluation.json", 64 * 1024),
     ("adapter.bundle", 4 * 1024 * 1024),
     ("training/report.json", 16 * 1024),
     ("training/adapter/README.md", 16 * 1024),
@@ -143,11 +144,14 @@ impl Store {
         Ok(serde_json::from_slice(&read_private(&file, limit)?)?)
     }
 
-    /// Publication receipts are separate from the immutable completed-content
-    /// snapshot. Persist once; retries must inspect an existing receipt explicitly.
+    /// Decisions are written once before the completed-content snapshot; later
+    /// publication receipts remain separate. Existing records are never replaced.
     pub(super) fn write_cycle_json(&self, sequence: u64, name: &str, value: &Value) -> Result<()> {
         ensure!(
-            matches!(name, "publication.json" | "contribution.json"),
+            matches!(
+                name,
+                "evaluation.json" | "publication.json" | "contribution.json"
+            ),
             "train_loop_receipt_name"
         );
         let bytes = json_bytes(value, 64 * 1024)?;

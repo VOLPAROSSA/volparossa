@@ -81,7 +81,9 @@ passes: the same worker pauses, resumes at the same step and completes eight upd
 Both new proofs pass exact-source raw verification, preserve original guest-root state and
 leave no owned objects. A new candidate adds read-only exposed battery/thermal observations
 to the ML budget; `compute capacity` explains its current decision without model or network
-execution. Physical-device behavior and the new manual owner-cancellation VM remain unproven;
+execution. The [owner-cancellation VM on `43dee7ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893645697)
+passes: all four observed processes end within 60 ms of owner SIGINT, with no completed
+checkpoint or changed base weights. Physical battery/thermal behavior remains unproven;
 interactive-activity integration, B01, autonomous B05 and the broader alpha remain open.
 [`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate)
 connects repeated public training, optional peer warmstarts and signed update sharing. It can
@@ -90,6 +92,12 @@ limits. The [live proof on `bcc1df52`](https://github.com/VOLPAROSSA/volparossa/
 passes: two genuine eight-update cycles automatically publish their signed adapters, then
 another Client retrieves the exact successor and runs inference with it. This milestone is
 merged into `main`; broader autonomous source discovery, defended aggregation and B05 remain open.
+A successor-selection candidate now separates completed training from promotion: only a
+candidate with lower measured held-out loss becomes the next warmstart or is automatically
+published. Rejected candidates leave the current version intact and remain reclaimable.
+The decision is bound to retained source/model reports, not to cache popularity. This first
+gate evaluates examples supplied with the current training source, not an independent benchmark
+or a guarantee of generally smarter agents; its new live training-loop proof is still pending.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider
