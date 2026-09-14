@@ -45,7 +45,8 @@ B03 remains unchecked.
 Explicit `compute peer resume` now reconciles retained original handles and permits one bounded
 replacement attempt per unfinished part, without silently extending an old lease. Terminal
 receipts remain observable briefly after cleanup. Broker/peer tests and narrow strict Clippy
-pass; live recovery remains unproved and the happy-path workflow still has a historical checker failure.
+pass. The historical happy-path checker failure is retained below; the subsequent live
+worker-loss/recovery checkpoint now passes on `0d756a64`.
 The first [two-executor run on `c52781f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34866691641)
 stopped during capability lookup, before model execution: an unused initial MPTCP socket
 outlived the Exit's 12-second TLS deadline while brokers were prepared. The candidate now
@@ -91,8 +92,18 @@ General task decomposition, live workflow/reassignment proof and private executi
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
-The separate `agent-jobs-loss` guest scenario now exercises actual owned-worker termination
-and explicit reassignment of only failed rows. Its fixture/checker is not a passing live proof.
+The separate [agent-jobs-loss run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+now passes, including exact-source reconstruction equal to both original component and final
+reports. The guest terminates the observed R4 Python worker via pidfd/SIGKILL while R5 stays
+alive, preserves R5's completed result and original handles, and explicitly executes only the
+failed row once on a genuinely new R5 worker. Six captures / 28 interface rows / 12,454 frames
+have zero drops or unexpected outer packets; both selected WireGuard paths carry data
+(774/616 datagrams per leg). Cleanup leaves zero owned objects; guest-state hash before/after
+is `7c7da50e0b2570c1ec2c4de8f7a37ed6c6db5a2d89158cd81596d65ba78d7962`.
+Artifact ZIP SHA-256: `73eaf3bcfe315e2fe67898076829284ea94e8b9925f78791bc452a168e7e0d73`;
+77,280-byte canonical reconstruction: `2ea8f1c769db736928bc42d267d0b765e26dcbdc9584e4a45424bc0cd8beb020`.
+This proves bounded explicit public-job recovery, not automatic task decomposition, exactly-once
+execution, private offload or the whole B03 criterion.
 The explicit `compute train-cycle` candidate now connects an independently selected signed
 public dataset, cache-preferred/protected retrieval, the actual bounded local training worker
 and a public-ready adapter bundle. The same dataset identity survives a cache miss; fixed
@@ -102,9 +113,21 @@ or autonomous unbiased source selection. The cycle supports an explicitly import
 adapter, preserves selection/source/result provenance and does not auto-publish or activate
 outputs. Source expiry bounds execution as well as final packaging. Five focused named-content
 tests, one request-codec test and strict agent Clippy pass. The separate live cache/warmstart
-cycle proof is pending; B01 and B05 remain unchecked. Three focused training-cycle tests and
+cycle proof remains pending: [the first run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873357867)
+completed producer training but stopped before the receiving-client cycle when the new route
+selected a different control relay. The fixture had bound its provider links to the earlier
+probe's relay. That failed run retains full cleanup and unchanged guest state; it proves no
+warmstart cycle. B01 and B05 remain unchecked. Three focused training-cycle tests and
 five existing adapter-CLI tests pass with strict CLI Clippy. Their synthetic saved-report/adapter
 fixture proves source binding and packaging, not real training; that requires the guest run.
+The next owner-priority candidate adds a persistent private owner-control pipe to the actual
+worker. `compute run` and `compute train-cycle` opt in with `--spare-capacity`; peer brokers
+always use it and refuse new work while sampled capacity is unavailable. CPU/I/O pressure
+pauses model work at an execution checkpoint and resumes after five seconds of observed quiet;
+insufficient effective host/cgroup memory cancels and reaps the worker. Pauses never extend
+the original deadline. Bounded control/ACK and real standard-library process tests pass, but
+measured pause/resume during actual model work still requires its separate disposable guest
+proof. Interactive-input, battery and thermal sensing are not implemented; B01 remains open.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

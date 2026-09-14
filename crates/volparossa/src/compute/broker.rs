@@ -31,6 +31,7 @@ use volparossa_local_control::compute::{
     Operation, Outcome, Request, Response, Submit,
 };
 
+use super::spare_capacity::{Budget, Decision};
 use super::{Mode, Options, execute, private_directory};
 
 const RETAINED_JOBS: usize = 8;
@@ -75,6 +76,7 @@ struct Broker {
     options: Serve,
     capabilities: Capabilities,
     jobs: VecDeque<Job>,
+    budget: Budget,
 }
 
 struct SocketGuard {
@@ -108,6 +110,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "work_root": options.work_root, "mode": "public_inference_only",
                 "runtime_slots": 1, "pending_queue": 0, "retained_jobs": RETAINED_JOBS,
                 "terminal_receipt_grace_seconds": TERMINAL_GRACE_SECONDS,
+                "spare_capacity": true, "pressure_action": "cooperative-pause-resume-memory-cancel",
+                "pause_extends_deadline": false,
                 "max_job_seconds": compute::MAX_JOB_SECONDS, "same_uid_only": true,
                 "remote_network_authentication": "required-agent-boundary",
                 "network_access": false, "remote_execution_proved": false
@@ -134,6 +138,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
         options,
         capabilities,
         jobs: VecDeque::new(),
+        budget: Budget::new(),
     };
     let mut ticks = tokio::time::interval(Duration::from_millis(100));
     let serving = async {
@@ -314,7 +319,9 @@ impl Broker {
     }
 
     fn available(&self) -> bool {
-        self.jobs.len() < RETAINED_JOBS && self.jobs.iter().all(|job| job.execution.is_none())
+        self.budget.current() == Decision::Run
+            && self.jobs.len() < RETAINED_JOBS
+            && self.jobs.iter().all(|job| job.execution.is_none())
     }
 
     fn submit(&mut self, requester: &str, submit: &Submit, time: u64) -> Outcome {
@@ -378,6 +385,7 @@ impl Broker {
             threads: 2,
             max_seconds: u16::try_from(submit.binding.expires_unix_seconds - time)?,
             execute: true,
+            spare_capacity: true,
         };
         options.validate()?;
         let (activity, receiver) = watch::channel(true);
@@ -415,6 +423,7 @@ impl Broker {
     }
 
     async fn refresh(&mut self, time: u64) {
+        self.budget.sample();
         for job in &mut self.jobs {
             if job.status.binding.expires_unix_seconds <= time && job.execution.is_some() {
                 job.status.cancellation_requested = true;

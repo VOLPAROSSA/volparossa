@@ -1,8 +1,10 @@
 //! Explicit public-data model jobs, isolated from the network agent and its identity.
 
 mod broker;
+mod owner_control;
 mod peer;
 mod sandbox;
+mod spare_capacity;
 mod supervise;
 mod train_cycle;
 
@@ -74,6 +76,9 @@ pub(crate) struct Options {
     /// Total wall-clock deadline, including loading and cancellation cleanup.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
+    /// Cooperatively pause under observed CPU/IO pressure; memory pressure still cancels.
+    #[arg(long)]
+    spare_capacity: bool,
     /// Without this flag only the exact bounded job plan is printed.
     #[arg(long)]
     execute: bool,
@@ -92,6 +97,8 @@ struct WorkerRequest {
     steps: u16,
     threads: u16,
     max_seconds: u16,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    owner_control: bool,
 }
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
@@ -112,6 +119,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
                 "adapter_root": options.adapter_root,
                 "new_output": options.output, "steps": options.steps,
                 "threads": options.threads, "max_seconds": options.max_seconds,
+                "spare_capacity": options.spare_capacity,
                 "network": "isolated-loopback-only", "device": "cpu",
                 "private_data_supported": false, "distributed_execution": false,
                 "limits": {
@@ -151,7 +159,14 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         "compute_unprivileged_user_required"
     );
     let _lease = runtime_lease(&options.runtime_root)?;
-    supervise::headroom()?;
+    if options.spare_capacity {
+        ensure!(
+            spare_capacity::Budget::new().sample() != spare_capacity::Decision::Cancel,
+            "compute_memory_pressure"
+        );
+    } else {
+        supervise::headroom()?;
+    }
     ensure!(*activity.borrow(), "compute_owner_busy");
     fs::DirBuilder::new()
         .mode(0o700)
@@ -171,6 +186,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         steps: options.steps,
         threads: options.threads,
         max_seconds: options.max_seconds,
+        owner_control: options.spare_capacity,
     };
     let child = sandbox::command(options)
         .spawn()
@@ -313,7 +329,16 @@ fn check_message(bytes: &[u8], id: &str) -> Result<Value> {
         Some("progress") => ensure!(
             matches!(
                 value.get("phase").and_then(Value::as_str),
-                Some("preparing" | "baseline" | "training" | "checkpoint" | "reload" | "complete")
+                Some(
+                    "preparing"
+                        | "baseline"
+                        | "training"
+                        | "checkpoint"
+                        | "reload"
+                        | "complete"
+                        | "paused"
+                        | "resumed"
+                )
             ),
             "compute_worker_phase"
         ),

@@ -63,6 +63,9 @@ pub(crate) struct Options {
     /// Training deadline, additionally bounded by source expiry; retrieval has its own 600s bound.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
+    /// Pause this explicitly authorized background cycle under CPU/IO pressure.
+    #[arg(long)]
+    spare_capacity: bool,
     /// Explicitly authorize this one cycle. Default preview performs no retrieval or training.
     #[arg(long)]
     execute: bool,
@@ -192,6 +195,7 @@ fn selection(args: &Options) -> Result<Value> {
         "cache_only":false,"prefer_cached":true,"cache_miss_selects_different_source":false,
         "runtime_root":args.runtime_root,"model_root":args.model_root,"adapter_root":args.adapter_root,
         "output":args.output,"steps":args.steps,"threads":args.threads,"maximum_training_seconds":args.max_seconds,
+        "spare_capacity":args.spare_capacity,
         "maximum_fetch_seconds":600,"private_data_supported":false,"automatic_source_discovery":false,
         "code_or_model_downloads":false,"automatic_publication":false,"globally_latest_version_claimed":false}),
     )
@@ -266,6 +270,7 @@ fn worker_options(args: &Options, expires: u64, time: u64) -> Result<super::Opti
         threads: args.threads,
         max_seconds: u16::try_from(remaining.min(u64::from(args.max_seconds)))?,
         execute: true,
+        spare_capacity: args.spare_capacity,
     })
 }
 

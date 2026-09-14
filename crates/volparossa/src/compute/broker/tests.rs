@@ -71,7 +71,35 @@ fn broker(root: &Path) -> Broker {
             max_rows: 4,
         },
         jobs: VecDeque::new(),
+        budget: Budget::fixed_for_test(Decision::Run),
     }
+}
+
+#[tokio::test]
+async fn pressure_admission_refuses_work_without_spawning_or_touching_job_files() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    for decision in [Decision::Pause, Decision::Cancel] {
+        broker.budget = Budget::fixed_for_test(decision);
+        let caps = broker.handle(request(Operation::Capabilities), 1000).await;
+        assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if !caps.accepting_work));
+        let result = broker
+            .handle(
+                request(Operation::Submit(Submit {
+                    binding: binding(),
+                    dataset_json: data(),
+                    publication: publication(),
+                })),
+                1000,
+            )
+            .await;
+        assert!(matches!(result.outcome, Outcome::Error(ErrorCode::Busy)));
+        assert!(broker.jobs.is_empty());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    broker.budget = Budget::fixed_for_test(Decision::Run);
+    let caps = broker.handle(request(Operation::Capabilities), 1000).await;
+    assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if caps.accepting_work));
 }
 
 #[tokio::test]

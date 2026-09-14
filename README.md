@@ -42,6 +42,9 @@ now has complete raw evidence of simultaneous isolated workers, separate model r
 protected paths and cleanup. Its CI run remains failed due to a reporting-field error;
 the corrected checker reconstructs the retained measurements successfully. This does not yet
 provide autonomous task planning, private offload or unbounded per-device execution.
+The subsequent [worker-loss recovery run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+passes: after one real worker is stopped, its peer's result is retained and only the failed
+part is explicitly rerun on a new worker through the protected network, with full cleanup.
 An explicit `compute peer workflow` candidate now sequences multiple signed public datasets,
 retains verified local results, and resumes unfinished work across separate bounded leases.
 This enlarges the overall job, not the resource allowance of any participating device;
@@ -51,6 +54,10 @@ adapter packaging in one command: use verified cache bytes when available, other
 that same publisher's dataset through the protected network. It can continue training an
 explicitly imported adapter. Execution requires `--execute`; the resulting bundle is not
 automatically published or activated. Its separate live warmstart/cache-cycle proof is pending.
+Background execution now has a cooperative CPU/I/O pause/resume candidate: explicit local
+jobs use `--spare-capacity`, and peer executors always enable it. Memory pressure still cancels;
+pauses do not extend an individual worker's deadline. Actual model-under-pressure proof and
+battery/thermal/interactive-activity integration remain unfinished.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

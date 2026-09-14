@@ -132,7 +132,8 @@ new private output. The fixed worker performs inference or rank-4 LoRA training,
 actual base/adapter tensors, saves safetensors, loads a fresh base plus saved adapter and
 evaluates again. Rust enforces the wall-clock deadline, bounded protocol, resource-pressure
 cancellation and external artifact hashes. There is no unsandboxed fallback, private-input
-training, automatic cache training, peer job execution or automatic policy activation yet.
+training, automatic cache training or automatic policy activation yet. Explicit public peer
+job execution has the separate source-bound checkpoint below.
 
 The initial resource boundary includes two CPU threads maximum, idle CPU/IO priority,
 per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
@@ -144,6 +145,18 @@ the original base remains unchanged, and a fresh base/adapter reload is evaluate
 B01 still needs measured owner-priority pause/resume/cancellation; improved answer quality, distributed
 training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
+
+The owner-priority candidate adds `--spare-capacity` to `compute run` and `compute train-cycle`;
+`compute serve` uses the same mechanism by default. Fixed, sequenced private-pipe commands
+pause and resume at model/optimizer checkpoints, with acknowledgements from the execution
+thread. CPU `some avg10 >= 20` or I/O `some avg10 >= 10` pauses; five seconds of continuously
+sampled quiet permits resumption. Unknown pressure cannot authorize work; unknown or less than
+512 MiB available memory across the host and unified-cgroup parent limits cancels and reaps it.
+Existing RSS/output limits and the original wall-clock deadline continue while paused. The
+broker advertises no free slot under observed pressure. These are coarse capacity observations,
+not universal owner-activity detection or a hard cgroup reservation. Native operations are not
+preempted mid-call; unacknowledged commands have a bounded timeout. Standard-library worker
+process/pipe and focused Rust tests pass; actual model-pressure evidence is still pending.
 
 ### Cache-backed adapter candidate
 
@@ -263,7 +276,7 @@ questions across explicitly selected compatible peers, sends the tasks concurren
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
 poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
-checkpoint. Automatic peer selection, reassignment after worker loss, general multi-step
+checkpoint. Automatic peer selection/reassignment, general multi-step
 continuation, distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
 who reported a result, not whether the result is true.
@@ -275,8 +288,8 @@ is not reassigned; an expired unreachable lease stays labelled unconfirmed, not 
 Original IDs/deadlines remain unchanged and replacement attempts get distinct saved handles.
 Results report which rows were requested, including when only part of the original dataset was
 resumed. This is bounded explicit recovery, not an automatic general workflow scheduler or an
-exactly-once execution guarantee. Its pure source/handle tests pass; live worker-loss/recovery
-proof is still pending. Terminal broker receipts receive a nonrenewable 60-second observation
+exactly-once execution guarantee. Its source/handle tests and the explicit live worker-loss/recovery
+checkpoint below pass. Terminal broker receipts receive a nonrenewable 60-second observation
 grace after observed completion, without extending any execution lease or the eight-record cap.
 
 The `agent-jobs` disposable guest runner exercises two independent CPU workers on separate nodes,
@@ -301,7 +314,13 @@ Cleanup and unchanged guest state passed even in the failed runs. The separate
 `agent-jobs-loss` scenario additionally terminates one exact guest-owned Python worker via pidfd,
 requires terminal original receipts, and resumes only its failed rows on the idle surviving
 peer. Its checker requires a genuinely new worker and preserved original successful output;
-the scenario itself is not yet a passing live checkpoint.
+[its run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+now passes with exact-source raw reconstruction equal to the original reports: R4's actual
+worker is killed, the concurrent R5 result survives unchanged, and only R4's failed row is
+executed once on a new R5 worker. Both selected two-leg WireGuard paths carry data; all six
+captures have zero drops/unexpected outer packets. Original handles/deadlines remain intact,
+cleanup leaves zero owned objects and guest-state hashes match. This proves bounded explicit
+public-job recovery, not automatic general planning or private computation; B03 remains open.
 
 ### Explicit multi-package workflows
 

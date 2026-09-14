@@ -12,6 +12,10 @@ use tokio::{
 };
 
 use super::{MAX_LINE_BYTES, MAX_STREAM_BYTES, Mode, Options, WorkerRequest, check_message};
+use super::{
+    owner_control::{Action, Controls},
+    spare_capacity::{Budget, Decision},
+};
 
 pub(super) const MAX_RSS_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -37,19 +41,31 @@ pub(super) async fn run(
     let mut peak_rss = 0;
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result = {
+    let mut budget = Budget::new();
+    let controls = options.spare_capacity.then(Controls::default);
+    let result = async {
+        if let Some(controls) = &controls {
+            let action = pressure_action(budget.sample())?;
+            input.extend(controls.issue(action, &request.id)?.context("compute_initial_control")?);
+        }
+        tokio::time::timeout(Duration::from_secs(1), stdin.write_all(&input))
+            .await.context("compute_request_write_deadline")?
+            .context("compute_request_write")?;
+        // Legacy workers receive EOF after the request. Controlled workers retain
+        // exactly this private pipe; neither peers nor model output can issue commands.
+        let mut control_stdin = if controls.is_some() { Some(stdin) } else { drop(stdin); None };
         let io = async {
-            stdin
-                .write_all(&input)
-                .await
-                .context("compute_request_write")?;
-            drop(stdin);
             let (result, (), status) = tokio::try_join!(
-                collect_stdout(stdout, &request.id),
+                collect_stdout(stdout, &request.id, controls.as_ref()),
                 drain_stderr(stderr),
                 async { child.wait().await.context("compute_wait") }
             )?;
             check_result(&result, request)?;
+            if let Some(controls) = &controls {
+                controls.check_report(&result)?;
+            } else {
+                ensure!(result.get("owner_control").is_none(), "compute_unrequested_owner_control");
+            }
             ensure!(status.success(), "compute_worker_exit");
             check_artifacts(&result, request.mode, &options.output)?;
             check_input_adapter(&result, options)?;
@@ -67,15 +83,24 @@ pub(super) async fn run(
                 },
                 result = &mut io => break result,
                 _ = ticks.tick() => {
-                    let observation = observe(pid, &options.output);
+                    let observation = observe(pid, &options.output, !options.spare_capacity);
                     match observation {
                         Ok(rss) => peak_rss = peak_rss.max(rss),
                         Err(error) => break Err(error),
                     }
+                    if let Some(controls) = &controls {
+                        let action = pressure_action(budget.sample())?;
+                        if let Some(record) = controls.issue(action, &request.id)? {
+                            tokio::time::timeout(Duration::from_secs(1),
+                                control_stdin.as_mut().context("compute_control_stdin")?.write_all(&record))
+                                .await.context("compute_control_write_deadline")?
+                                .context("compute_control_write")?;
+                        }
+                    }
                 }
             }
         }
-    };
+    }.await;
     if result.is_err() {
         // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
         // PID namespace teardown kills/reaps descendants; no host process-group scan.
@@ -93,12 +118,24 @@ pub(super) async fn run(
         "rss_limit_bytes": MAX_RSS_BYTES,
         "rss_enforcement": "250ms-observed-cancel-not-cgroup-hard-limit",
         "owner_activity_action": "cancel",
+        "spare_capacity": options.spare_capacity,
+        "pressure_action": if options.spare_capacity { "cooperative-pause-resume-memory-cancel" } else { "cancel" },
+        "last_capacity_observation": controls.as_ref().map(|_| budget.observation()),
+        "pause_extends_deadline": false,
         "deadline_seconds": options.max_seconds,
         "child_reaped": true,
         "distributed_execution_claimed": false,
         "private_training_claimed": false
     });
     Ok(result)
+}
+
+fn pressure_action(decision: Decision) -> Result<Action> {
+    match decision {
+        Decision::Run => Ok(Action::Resume),
+        Decision::Pause => Ok(Action::Pause),
+        Decision::Cancel => bail!("compute_memory_pressure"),
+    }
 }
 
 fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
@@ -218,7 +255,11 @@ fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
     Ok(())
 }
 
-async fn collect_stdout(stream: impl AsyncRead + Unpin, id: &str) -> Result<Value> {
+async fn collect_stdout(
+    stream: impl AsyncRead + Unpin,
+    id: &str,
+    controls: Option<&Controls>,
+) -> Result<Value> {
     let mut reader = BufReader::new(stream);
     let mut result = None;
     let mut bytes = 0_usize;
@@ -230,8 +271,36 @@ async fn collect_stdout(stream: impl AsyncRead + Unpin, id: &str) -> Result<Valu
         ensure!(result.is_none(), "compute_output_after_result");
         let value = check_message(&line, id)?;
         if value.get("kind").and_then(Value::as_str) == Some("result") {
+            if let Some(controls) = controls {
+                controls.terminal()?;
+            }
             result = Some(value);
         } else {
+            if matches!(value["phase"].as_str(), Some("paused" | "resumed")) {
+                controls
+                    .context("compute_unrequested_control_ack")?
+                    .acknowledge(&value)?;
+                let sequence = value["control_sequence"]
+                    .as_u64()
+                    .context("compute_control_sequence")?;
+                let step = value["step"]
+                    .as_u64()
+                    .filter(|step| *step <= 64)
+                    .context("compute_control_step")?;
+                let elapsed = value["elapsed_ms"]
+                    .as_u64()
+                    .filter(|elapsed| *elapsed < 600_000)
+                    .context("compute_control_elapsed")?;
+                eprintln!(
+                    "compute owner_ack phase={} sequence={sequence} step={step} elapsed_ms={elapsed}",
+                    value["phase"].as_str().context("compute_control_phase")?
+                );
+            } else {
+                ensure!(
+                    value.get("control_sequence").is_none(),
+                    "compute_unexpected_control_sequence"
+                );
+            }
             // Only the validated phase label is logged, never raw backend text or data.
             eprintln!(
                 "compute phase={}",
@@ -304,8 +373,10 @@ pub(super) fn headroom() -> Result<()> {
     Ok(())
 }
 
-fn observe(pid: u32, output: &Path) -> Result<u64> {
-    headroom()?;
+fn observe(pid: u32, output: &Path, legacy_headroom: bool) -> Result<u64> {
+    if legacy_headroom {
+        headroom()?;
+    }
     let mut pending = vec![pid];
     let mut visited = BTreeSet::new();
     let mut total = 0_u64;
@@ -445,11 +516,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_acks_require_owner_issuance_and_cannot_appear_on_legacy_stdout() {
+        let controls = Controls::default();
+        let ack = b"{\"version\":1,\"id\":\"abc\",\"kind\":\"progress\",\"phase\":\"paused\",\"control_sequence\":1,\"step\":0,\"elapsed_ms\":10}\n";
+        assert!(collect_stdout(&ack[..], "abc", None).await.is_err());
+        assert!(
+            collect_stdout(&ack[..], "abc", Some(&controls))
+                .await
+                .is_err()
+        );
+        controls.issue(Action::Pause, "abc").unwrap();
+        let mut stream = ack.to_vec();
+        stream.extend(b"{\"version\":1,\"id\":\"abc\",\"kind\":\"result\",\"status\":\"error\"}\n");
+        assert!(
+            collect_stdout(stream.as_slice(), "abc", Some(&controls))
+                .await
+                .is_ok()
+        );
+        assert!(controls.issue(Action::Resume, "abc").unwrap().is_none());
+        assert!(
+            collect_stdout(stream.as_slice(), "abc", Some(&controls))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_result_cannot_override_the_first() {
         let line = "{\"version\":1,\"id\":\"abc\",\"kind\":\"result\",\"status\":\"ok\"}\n";
         let doubled = line.repeat(2);
-        assert!(collect_stdout(doubled.as_bytes(), "abc").await.is_err());
-        assert!(collect_stdout(line.as_bytes(), "abc").await.is_ok());
+        assert!(
+            collect_stdout(doubled.as_bytes(), "abc", None)
+                .await
+                .is_err()
+        );
+        assert!(collect_stdout(line.as_bytes(), "abc", None).await.is_ok());
     }
 
     #[test]

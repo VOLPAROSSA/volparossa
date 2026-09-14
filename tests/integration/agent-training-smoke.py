@@ -308,7 +308,7 @@ def alive(member):
         return False
 
 
-def execute(output, revision):
+def execute(output, revision, owner_priority=False):
     guest_guard()
     provision, jobs = Path("/home/vpci/ml-provision"), Path("/home/vpci/ml-jobs")
     require(not provision.exists() and not jobs.exists(), "guest fixture root already exists")
@@ -318,7 +318,7 @@ def execute(output, revision):
     result = {"report_kind": "volparossa-isolated-agent-training", "source_revision": revision,
               "success": False, "scope": SCOPE, "full_alpha_claimed": False,
               "cleanup": {"complete": False, "remaining_owned_objects": 1}, "phase": "provision"}
-    process, observer = None, None
+    process, observer, pressure = None, None, None
     try:
         with (output / "agent-training-provision.log").open("w") as log:
             subprocess.run([sys.executable, "-B", str(ML / "provision.py"), "--execute", "--yes",
@@ -341,7 +341,8 @@ def execute(output, revision):
             process = subprocess.Popen(["/home/vpci/target/debug/volparossa", "compute", "run", "--mode", "train",
                                         "--runtime-root", str(provision / "venv"), "--model-root", str(provision / "model"),
                                         "--dataset", str(dataset), "--output", str(job), "--steps", "8", "--threads", "2",
-                                        "--max-seconds", "600", "--execute"], stdout=stdout, stderr=stderr)
+                                        "--max-seconds", "600", "--execute"]
+                                       + (["--spare-capacity"] if owner_priority else []), stdout=stdout, stderr=stderr)
             with (output / "agent-training-observer.stderr").open("w") as diagnostics:
                 observer = subprocess.Popen(["sudo", "-n", sys.executable, "-B", str(Path(__file__).resolve()), "observe",
                                              str(process.pid), str(output / "agent-training-isolation.json"),
@@ -349,6 +350,12 @@ def execute(output, revision):
                 require(observer.wait(timeout=70) == 0, "actual worker isolation observation failed")
             result["isolation"] = read(output / "agent-training-isolation.json")
             check_isolation(result["isolation"])
+            if owner_priority:
+                with (output / "agent-owner-priority-pressure.stderr").open("w") as diagnostics:
+                    pressure = subprocess.Popen(["sudo", "-n", sys.executable, "-B",
+                        str(Path(__file__).with_name("agent-owner-priority-smoke.py")), "pressure", str(output)],
+                        stderr=diagnostics)
+                    require(pressure.wait(timeout=120) == 0, "actual owner-pressure pause/resume observation failed")
             require(process.wait(timeout=610) == 0, "real training CLI failed")
         worker = read(output / "agent-training-worker.json")
         check_worker(worker, revision)
@@ -367,7 +374,7 @@ def execute(output, revision):
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         result["observed_blocker"] = str(error)[:1024]
     finally:
-        for child in (observer, process):
+        for child in (pressure, observer, process):
             if child is not None and child.poll() is None:
                 child.terminate()
                 try:
@@ -375,7 +382,10 @@ def execute(output, revision):
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=5)
-        members = result.get("isolation", {}).get("owned_processes", [])
+        members = list(result.get("isolation", {}).get("owned_processes", []))
+        pressure_path = output / "agent-owner-priority-pressure.json"
+        if owner_priority and pressure_path.is_file():
+            members += read(pressure_path).get("pressure_processes", [])
         remaining = sum(alive(member) for member in members)
         # These two exact roots were required absent and created only for this guest job.
         for owned in (provision, jobs):

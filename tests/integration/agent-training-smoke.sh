@@ -8,6 +8,7 @@ umask 077
 mode=preview
 approval=no
 revision=
+scenario=agent-training
 plan() {
     printf '%s\n' \
         'VOLPAROSSA isolated public model-training plan:' \
@@ -19,6 +20,14 @@ plan() {
         '  check held-out evaluation, unchanged base, changed adapter, reload and artifact hashes;' \
         '  reap processes, remove only the new guest model/job roots, compare routes/DNS/firewall.' \
         'No development-host install/training, native MPQUIC build, distributed-training or better-answer claim.'
+    if [ "$scenario" = agent-owner-priority ]; then
+        printf '%s\n' \
+            'Owner-priority variant: explicitly enable spare-capacity handling for this actual model job;' \
+            '  create bounded CPU contenders only inside this guest, observe validated paused/resumed ACKs;' \
+            '  measure the exact paused worker CPU ticks and unchanged model step, then real resumed work;' \
+            '  preserve the original 600s deadline and reap all exact owned contenders/model processes;' \
+            '  this does not prove all owner activity, battery/thermal policy or owner cancellation.'
+    fi
 }
 while [ "$#" -gt 0 ]; do
     case $1 in
@@ -26,6 +35,8 @@ while [ "$#" -gt 0 ]; do
         --execute) mode=execute ;;
         --yes) approval=yes ;;
         --expected-commit) [ "$#" -ge 2 ] || exit 64; revision=$2; shift ;;
+        --scenario) [ "$#" -ge 2 ] || exit 64; scenario=$2; shift
+            case $scenario in agent-training|agent-owner-priority) ;; *) exit 64 ;; esac ;;
         *) exit 64 ;;
     esac
     shift
@@ -47,13 +58,14 @@ case $revision in ''|*[!0-9a-f]*) exit 64 ;; esac
 [ ! -e /home/vpci/alpha-output ] || exit 77
 mkdir -m 0700 /home/vpci/alpha-output
 output=/home/vpci/alpha-output
+fixture=tests/integration/$scenario-smoke.py
 phase=guest-packages
 finalize() {
     result=$?
     trap - EXIT HUP INT TERM
     set +e
-    if [ ! -f "$output/agent-training-smoke.json" ]; then
-        python3 -B tests/integration/agent-training-smoke.py failure "$output" "$revision" "$phase"
+    if [ ! -f "$output/$scenario-smoke.json" ]; then
+        python3 -B "$fixture" failure "$output" "$revision" "$phase"
     fi
     printf '%s\n' "$result" >"$output/guest-exit-status"
     find "$output" -type d -exec chmod 0700 {} +
@@ -79,5 +91,5 @@ CARGO_TARGET_DIR=/home/vpci/target cargo build --locked -p volparossa --bin volp
     }
 phase=training
 printf '%s\n' "$phase" >"$output/current-phase"
-python3 -B tests/integration/agent-training-smoke.py execute "$output" "$revision" \
+python3 -B "$fixture" execute "$output" "$revision" \
     >"$output/runner.stdout" 2>"$output/runner.stderr"

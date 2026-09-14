@@ -18,6 +18,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import stat
 import struct
@@ -28,6 +29,8 @@ VERSION = 1
 MAX_REQUEST = 65536
 MAX_DATASET = 1048576
 MAX_LINE = 16384
+MAX_CONTROL_LINE = 1024
+MAX_CONTROLS = 128
 MAX_CONTEXT = 256
 MAX_NEW_TOKENS = 64
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
@@ -112,12 +115,14 @@ def bounded_integer(value, low, high):
 
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
-    optional = {"steps", "threads", "max_seconds", "adapter_root"}
+    optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
     require(value["mode"] in ("infer", "train"), "INVALID_JOB_MODE")
+    require("owner_control" not in value or type(value["owner_control"]) is bool,
+            "INVALID_OWNER_CONTROL")
     for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
         if field == "adapter_root" and field not in value:
             continue
@@ -355,19 +360,127 @@ def apply_adapter(model, prepared, peft, torch, session, trainable):
                    "base_parameters_after_apply": after, "applied": True}
 
 
+class InputFrames:
+    """One raw-fd reader preserves controls arriving in the same write as the request."""
+
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.pending = bytearray()
+
+    def take(self, maximum, code):
+        boundary = self.pending.find(b"\n")
+        if boundary >= 0:
+            require(boundary + 1 <= maximum, code)
+            frame = bytes(self.pending[:boundary + 1])
+            del self.pending[:boundary + 1]
+            return frame
+        require(len(self.pending) < maximum, code)
+        return None
+
+    def request(self):
+        while True:
+            frame = self.take(MAX_REQUEST, "INVALID_REQUEST_FRAME")
+            if frame is not None:
+                return frame
+            block = os.read(self.descriptor, min(4096, MAX_REQUEST - len(self.pending)))
+            require(block, "INVALID_REQUEST_FRAME")
+            self.pending.extend(block)
+
+    def require_eof(self):
+        require(not self.pending and os.read(self.descriptor, 1) == b"", "INVALID_REQUEST_FRAME")
+
+    def control(self, wait):
+        frame = self.take(MAX_CONTROL_LINE, "INVALID_CONTROL_FRAME")
+        if frame is not None:
+            return frame
+        if not select.select([self.descriptor], [], [], wait)[0]:
+            return None
+        try:
+            block = os.read(self.descriptor, MAX_CONTROL_LINE)
+        except BlockingIOError:
+            return None
+        require(block, "OWNER_CONTROL_CLOSED")
+        self.pending.extend(block)
+        return self.take(MAX_CONTROL_LINE, "INVALID_CONTROL_FRAME")
+
+
 class Session:
-    def __init__(self, request):
+    def __init__(self, request, frames=None):
         self.request = request
         self.started = time.monotonic()
+        self.frames = frames if request.get("owner_control", False) else None
+        require(not request.get("owner_control", False) or frames is not None, "OWNER_CONTROL_MISSING")
+        if self.frames is not None:
+            os.set_blocking(self.frames.descriptor, False)
+        self.step = 0
+        self.sequence = 0
+        self.pause_count = 0
+        self.resume_count = 0
+        self.paused_since = None
+        self.paused_seconds = 0.0
 
     def elapsed(self):
         return int((time.monotonic() - self.started) * 1000)
 
-    def check(self):
+    def budget(self):
         require(not STOP_REQUESTED, "JOB_CANCELLED")
         require(self.elapsed() < self.request["max_seconds"] * 1000, "JOB_DEADLINE_EXCEEDED")
 
+    def check(self):
+        self.budget()
+        if self.frames is None:
+            return
+        while True:
+            self.budget()
+            # Partial records also wait without starting another model operation. Neither
+            # partial input nor a pause extends the original monotonic job deadline.
+            waiting = self.sequence == 0 or self.paused_since is not None or bool(self.frames.pending)
+            frame = self.frames.control(0.05 if waiting else 0)
+            if frame is None:
+                if waiting or self.frames.pending:
+                    continue
+                return
+            self.budget()
+            self.accept_control(frame)
+
+    def accept_control(self, frame):
+        value = parse_json(frame)
+        require(type(value) is dict and value.keys() == {"version", "id", "sequence", "action"},
+                "INVALID_CONTROL_FIELDS")
+        require(type(value["version"]) is int and value["version"] == VERSION
+                and value["id"] == self.request["id"], "INVALID_CONTROL_BINDING")
+        require(bounded_integer(value["sequence"], 1, MAX_CONTROLS)
+                and value["sequence"] == self.sequence + 1, "INVALID_CONTROL_SEQUENCE")
+        action = value["action"]
+        require(type(action) is str and action in ("pause", "resume", "cancel"), "INVALID_CONTROL_ACTION")
+        self.sequence = value["sequence"]
+        require(action != "cancel", "JOB_CANCELLED")
+        if action == "pause":
+            self.pause_count += 1
+            if self.paused_since is None:
+                self.paused_since = time.monotonic()
+            phase = "paused"
+        else:
+            self.resume_count += 1
+            if self.paused_since is not None:
+                self.paused_seconds += time.monotonic() - self.paused_since
+                self.paused_since = None
+            phase = "resumed"
+        # ACK only on this execution thread at a checkpoint, never from a reader thread
+        # while the native model/optimizer operation is still running.
+        emit({"version": VERSION, "id": self.request["id"], "kind": "progress", "phase": phase,
+              "step": self.step, "elapsed_ms": self.elapsed(), "control_sequence": self.sequence})
+
+    def owner_stats(self):
+        elapsed = self.paused_seconds
+        if self.paused_since is not None:
+            elapsed += time.monotonic() - self.paused_since
+        return {"enabled": True, "records_received": self.sequence, "last_sequence": self.sequence,
+                "pause_count": self.pause_count, "resume_count": self.resume_count,
+                "paused_ms": int(elapsed * 1000)}
+
     def progress(self, phase, step=0):
+        self.step = step
         self.check()
         require(phase in PHASES, "INTERNAL_PHASE_ERROR")
         emit({"version": VERSION, "id": self.request["id"], "kind": "progress",
@@ -551,15 +664,21 @@ def save_checkpoint(model, output_root, session):
 def execute_job(request, session):
     session.progress("preparing")
     model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
+    session.check()
     prepared_adapter = (prepare_adapter(request["adapter_root"], output_root)
                         if "adapter_root" in request else None)
     configure_offline()
+    session.check()
     torch, transformers, peft, versions = load_backend(request["threads"])
+    session.check()
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
     require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
+    session.check()
     samples = encode_dataset(tokenizer, torch, dataset)
+    session.check()
     model = load_model(transformers, torch, model_root)
+    session.check()
     input_adapter = None
     if prepared_adapter is not None:
         model, input_adapter = apply_adapter(model, prepared_adapter, peft, torch, session,
@@ -592,12 +711,15 @@ def execute_job(request, session):
             session.progress("training", step)
             model.train()
             optimizer.zero_grad(set_to_none=True)
+            session.check()
             loss = model(**samples["train"][step % len(samples["train"])]).loss
             losses.append(finite_loss(loss))
+            session.check()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, 1.0, error_if_nonfinite=True)
             session.check()
             optimizer.step()
+            session.step = step + 1
         adapted = evaluate(model, samples["heldout"], torch, session)
         base_after = parameter_hash(model, False, session)
         adapter_after = parameter_hash(model, True, session)
@@ -637,8 +759,10 @@ def execute_job(request, session):
     # in-memory frozen-parameter comparison and is required for compatible adapter reuse.
     require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
             "MODEL_WEIGHTS_CHANGED_ON_DISK")
-    result["elapsed_ms"] = session.elapsed()
     session.progress("complete", result["updates_completed"])
+    result["elapsed_ms"] = session.elapsed()
+    if session.frames is not None:
+        result["owner_control"] = session.owner_stats()
     serialized = json.dumps(result, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
     require(len(serialized.encode("ascii")) + 1 <= MAX_LINE, "RESULT_TOO_LARGE")
     with (output_root / "report.json").open("x", encoding="ascii") as report:
@@ -660,14 +784,16 @@ def main():
     signal.signal(signal.SIGINT, stop_requested)
     request_id, session = "0" * 32, None
     try:
-        raw = sys.stdin.buffer.readline(MAX_REQUEST + 1)
-        require(len(raw) <= MAX_REQUEST and raw.endswith(b"\n") and sys.stdin.buffer.read(1) == b"",
-                "INVALID_REQUEST_FRAME")
+        frames = InputFrames(sys.stdin.fileno())
+        raw = frames.request()
         value = parse_json(raw)
+        controlled = type(value) is dict and value.get("owner_control") is True
+        if not controlled:
+            frames.require_eof()
         if type(value) is dict and type(value.get("id")) is str and HEX32.fullmatch(value["id"]):
             request_id = value["id"]
         request = validate_request(value)
-        session = Session(request)
+        session = Session(request, frames if controlled else None)
         # Third-party diagnostics may include local paths. Only our fixed, bounded protocol
         # uses the original stdout; no raw prompt, dataset or stack trace is logged.
         with open(os.devnull, "w", encoding="ascii") as quiet:
@@ -687,8 +813,11 @@ def main():
         code = "BACKEND_IMPORT_FAILED"
     except Exception:
         code = "BACKEND_EXECUTION_FAILED"
-    emit({"version": VERSION, "id": request_id, "kind": "result", "status": "error", "code": code,
-          "elapsed_ms": session.elapsed() if session else 0})
+    failure = {"version": VERSION, "id": request_id, "kind": "result", "status": "error", "code": code,
+               "elapsed_ms": session.elapsed() if session else 0}
+    if session is not None and session.frames is not None:
+        failure["owner_control"] = session.owner_stats()
+    emit(failure)
     return 1
 
 
