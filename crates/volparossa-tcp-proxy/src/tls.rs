@@ -4,13 +4,18 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
     time,
 };
 use tokio_rustls::{
     TlsAcceptor, TlsConnector, client::TlsStream as ClientTlsStream,
     server::TlsStream as ServerTlsStream,
 };
+
+mod transport;
+pub use transport::TlsMptcpIo;
+
+#[cfg(test)]
+mod half_close;
 
 use crate::{TcpProxyError, VerifiedMptcpRoute};
 
@@ -20,9 +25,9 @@ pub const VOLPAROSSA_TCP_ALPN: &[u8] = b"volparossa-tcp/1";
 /// TLS stream returned by either the MPTCP client or MPTCP server transport.
 pub enum Tls13MptcpStream {
     /// Client side of an authenticated TLS 1.3 session over MPTCP.
-    Client(ClientTlsStream<TcpStream>),
+    Client(ClientTlsStream<TlsMptcpIo>),
     /// Exit side of an authenticated TLS 1.3 session over MPTCP.
-    Server(ServerTlsStream<TcpStream>),
+    Server(ServerTlsStream<TlsMptcpIo>),
 }
 
 impl Tls13MptcpStream {
@@ -105,7 +110,7 @@ impl Tls13MptcpClient {
             return Err(TcpProxyError::InvalidBinding("TLS handshake timeout"));
         }
         mptcp.require_negotiated()?;
-        let stream = mptcp.into_inner();
+        let stream = TlsMptcpIo::new(mptcp.into_inner());
         let tls = time::timeout(
             handshake_timeout,
             self.connector.connect(exit_server_name, stream),
@@ -163,9 +168,12 @@ impl Tls13MptcpServer {
             return Err(TcpProxyError::InvalidBinding("TLS handshake timeout"));
         }
         stream.require_negotiated()?;
-        let tls = time::timeout(handshake_timeout, self.acceptor.accept(stream.into_inner()))
-            .await
-            .map_err(|_| TcpProxyError::IdleTimeout)??;
+        let tls = time::timeout(
+            handshake_timeout,
+            self.acceptor.accept(TlsMptcpIo::new(stream.into_inner())),
+        )
+        .await
+        .map_err(|_| TcpProxyError::IdleTimeout)??;
         if tls.get_ref().1.alpn_protocol() != Some(VOLPAROSSA_TCP_ALPN) {
             return Err(TcpProxyError::InvalidBinding("TLS ALPN"));
         }

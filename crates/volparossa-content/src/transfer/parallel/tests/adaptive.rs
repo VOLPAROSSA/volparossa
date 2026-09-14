@@ -135,6 +135,104 @@ struct Counters {
     drained_payload: Arc<AtomicUsize>,
 }
 
+#[test]
+fn admitted_probe_gets_missing_assignment_before_established_peer_refills() {
+    let Fixture {
+        _directory,
+        manifest,
+        mut output,
+        ..
+    } = fixture(Case::Complementary);
+    let (mut download, mut workers) =
+        ParallelDownload::new_adaptive(&manifest, 3, &mut output, TransferLimits::default(), 3)
+            .unwrap();
+    download.assign_ready().unwrap();
+    let initial = [
+        workers[0].requests.try_recv(),
+        workers[1].requests.try_recv(),
+    ];
+    assert!(initial.iter().all(Result::is_ok));
+    assert!(
+        workers[2].requests.try_recv().is_err(),
+        "dormant until useful work"
+    );
+    let mut progress = vec![TransferProgress::default(); 3];
+    download
+        .accept(1, Some(Ok(None)), &mut output, &mut progress)
+        .unwrap();
+    download
+        .accept(
+            0,
+            Some(Ok(Some(vec![1; CHUNK_BYTES]))),
+            &mut output,
+            &mut progress,
+        )
+        .unwrap();
+    download.adjust_width(3);
+    assert!(download.peers[2].probing);
+    download.assign_ready().unwrap();
+    assert_eq!(
+        download.peers[2].pending,
+        Some(1),
+        "probe tests observed missing coverage"
+    );
+    assert_eq!(
+        download.peers[1].pending,
+        Some(3),
+        "missing provider tries a different chunk"
+    );
+    assert_eq!(
+        download.peers[0].pending,
+        Some(2),
+        "established peer continues useful work"
+    );
+    assert_eq!(download.chunks[1].owner, Some(2));
+    assert_eq!(
+        download.chunks[1]
+            .attempted
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    download.assign_ready().unwrap();
+    assert_eq!(
+        download.peers[2].pending,
+        Some(1),
+        "never duplicate or replace in-flight work"
+    );
+}
+
+#[test]
+fn probe_prioritizes_observed_miss_over_unattempted_manifest_membership() {
+    let Fixture {
+        _directory,
+        manifest,
+        mut output,
+        ..
+    } = fixture(Case::Complementary);
+    let (mut download, _workers) =
+        ParallelDownload::new_adaptive(&manifest, 3, &mut output, TransferLimits::default(), 3)
+            .unwrap();
+    // A prior provider's completed miss is known, but a manifest reference alone says
+    // nothing about which cache owns any of the earlier, still-unattempted chunks.
+    download.chunks[4].attempted.insert(0);
+    download.explore = true;
+    download.adjust_width(3);
+    download.assign_ready().unwrap();
+    assert_eq!(download.peers[2].pending, Some(4));
+    assert_eq!(download.peers[0].pending, Some(0));
+    assert_eq!(download.peers[1].pending, Some(1));
+    assert_eq!(
+        download.chunks[4]
+            .attempted
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0, 2]
+    );
+}
+
 #[tokio::test]
 async fn adaptive_original_indexes_use_three_providers_and_preserve_progress_under_resource_limits()
 {

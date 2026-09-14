@@ -14348,8 +14348,10 @@ mod tests {
                 fake.prepared_lease_count,
             )
         };
-        assert_eq!(accepted_addrs, Some(2));
-        assert_eq!(subflows, Some(2));
+        // Kernel room includes the reserved warm path; only the two selected initial
+        // paths are activated. A later justified probe must not need a wider grant.
+        assert_eq!(accepted_addrs, Some(3));
+        assert_eq!(subflows, Some(3));
         assert_eq!(lease_count, Some(3));
         assert!(matches!(
             established.teardown().await,
@@ -14403,8 +14405,9 @@ mod tests {
         assert_eq!(fixture.shared.selected_paths().len(), 6);
         {
             let fake = fixture.shared.state.lock().expect("fake state");
-            assert_eq!(fake.prepared_mptcp_accepted_addrs, Some(4));
-            assert_eq!(fake.prepared_mptcp_subflows, Some(4));
+            // Four initial paths plus two authorized warm paths fit the same context.
+            assert_eq!(fake.prepared_mptcp_accepted_addrs, Some(6));
+            assert_eq!(fake.prepared_mptcp_subflows, Some(6));
             assert_eq!(fake.prepared_lease_count, Some(6));
         }
         assert!(matches!(

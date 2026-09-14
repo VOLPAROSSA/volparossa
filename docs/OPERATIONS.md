@@ -877,12 +877,16 @@ This does not reopen the application flow, change its Exit or remove the initial
 unhelpful extra endpoint can retire after the grace interval only when the initial set remains
 established for all observed live flows; unsupported observations leave current flows intact.
 No new user flag or host setting is required. Native path ceilings remain in force.
+TLS carries directional application EOF using authenticated `close_notify`; the underlying
+MPTCP socket remains joinable during the response and closes when the full flow ends. Abrupt
+TLS truncation remains an error, not an authenticated end of content.
 
 `mptcp-growth` is a separate disposable topology scenario, not the full alpha or a speed benchmark.
 It requires the same live download before/after expansion, actual kernel subflow ACK and receive
 deltas, data on all six WireGuard legs, the full application hash and complete cleanup. Its
-network result is still pending. The ordinary MPTCP CLI selection rows are reachability metadata,
-not these live per-socket byte counters.
+first network run ended before three-subflow growth was observed; the integration remains
+incomplete. The ordinary MPTCP CLI selection rows are reachability metadata, not these live
+per-socket byte counters.
 
 ### Warm MPQUIC path growth
 
@@ -904,10 +908,12 @@ route retirement and unchanged guest state. The first two runs found fixture sel
 native-counter integration faults; both are corrected. The API7 rerun proves initial ACK progress
 but still fails to activate the third path under loss. Its diagnostic follow-up identifies an
 incorrect retransmission-based loss counter for unreliable datagrams. The corrected native
-mapping reports actual detected losses without changing the growth conditions; the new live
-network run remains pending.
-Local state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
-ceiling and other transport limits are not removed by this bounded integration.
+mapping reports actual detected losses without changing the growth conditions. The
+[exact `5b1ba7af` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851) now passes:
+all three paths make fresh transport progress in the same live route, both complete application
+hashes match, and the owned loss rule and route are removed with unchanged guest state. Its
+report was independently rebuilt from the retained raw evidence. This is not a throughput-gain
+claim; the existing eight-path backend ceiling and other transport limits remain.
 
 ### Automatic public-content contribution
 

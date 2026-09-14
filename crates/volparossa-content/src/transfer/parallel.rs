@@ -257,9 +257,7 @@ impl ParallelDownload {
             if self.adaptive {
                 self.adjust_width(allowance());
             }
-            for index in 0..self.peers.len() {
-                self.assign(index)?;
-            }
+            self.assign_ready()?;
             if !self
                 .peers
                 .iter()
@@ -305,16 +303,43 @@ impl ParallelDownload {
         Ok(())
     }
 
+    fn assign_ready(&mut self) -> Result<(), TransferError> {
+        // Give the admitted probe actual work before established streams refill their
+        // credits. Otherwise they can take the missing chunk that justified exploration,
+        // leaving the new cold stream to spend another round trip on unrelated coverage.
+        for index in 0..self.peers.len() {
+            if self.peers[index].probing {
+                self.assign(index)?;
+            }
+        }
+        for index in 0..self.peers.len() {
+            self.assign(index)?;
+        }
+        Ok(())
+    }
+
     fn assign(&mut self, index: usize) -> Result<(), TransferError> {
         let peer = &mut self.peers[index];
         if peer.state != adaptive::PeerState::Active || peer.pending.is_some() {
             return Ok(());
         }
-        let Some((position, pending)) = self.chunks.iter_mut().enumerate().find(|(_, item)| {
+        let eligible = |item: &PendingChunk| {
             !item.complete && item.owner.is_none() && !item.attempted.contains(&index)
-        }) else {
+        };
+        // A failed/missing request is useful evidence for exploration; manifest membership
+        // alone never claims that a provider actually stores a chunk. Prefer that unresolved
+        // coverage for the probe without reassigning anybody's still-in-flight request.
+        let missing = if peer.probing {
+            self.chunks
+                .iter()
+                .position(|item| eligible(item) && !item.attempted.is_empty())
+        } else {
+            None
+        };
+        let Some(position) = missing.or_else(|| self.chunks.iter().position(eligible)) else {
             return Ok(());
         };
+        let pending = &mut self.chunks[position];
         match peer.requests.try_send(Work::Chunk(pending.chunk.clone())) {
             Ok(()) => {
                 pending.attempted.insert(index);

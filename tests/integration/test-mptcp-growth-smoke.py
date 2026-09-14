@@ -71,7 +71,7 @@ def fixture():
     return dict(success=True, run_id=other["run_id"], expected_peers=other["expected_peers"],
         selection=selection, layout=layout, owners=owners, **snapshots, injection=injection,
         privacy=other["privacy"], rate_limits=rates,
-        client=dict(common, application=dict(ip="43.159.1.1", port=40001),
+        client=dict(common, application=dict(ip="169.254.240.1", port=40001),
                     destination=dict(ip="47.163.4.2", port=18080),
                     first_byte_monotonic_ns=12, completed_monotonic_ns=50, duration_ns=38),
         server=dict(common, source=dict(ip="47.163.4.1", port=41000),

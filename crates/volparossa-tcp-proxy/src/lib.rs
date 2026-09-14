@@ -21,7 +21,9 @@ pub use authorization::{AuthorizedTcpFlow, TcpAuthorizationScope};
 pub use framing::{read_authorized_open_tcp, write_open_tcp};
 pub use route::{MINIMUM_MPTCP_PATHS, VerifiedMptcpRoute};
 pub use streaming::{StreamTransferLimits, StreamTransferStats, proxy_bidirectional};
-pub use tls::{Tls13MptcpClient, Tls13MptcpServer, Tls13MptcpStream, VOLPAROSSA_TCP_ALPN};
+pub use tls::{
+    Tls13MptcpClient, Tls13MptcpServer, Tls13MptcpStream, TlsMptcpIo, VOLPAROSSA_TCP_ALPN,
+};
 
 use thiserror::Error;
 

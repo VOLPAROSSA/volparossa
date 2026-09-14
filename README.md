@@ -344,14 +344,21 @@ filling that allowance speculatively or breaking existing routes when it shrinks
 passes: all fifteen unique chunks arrive from three overlapping provider streams through the
 protected route, with no origin body. HTTPS source plans now admit a bounded batch beyond two
 providers into that same resource-leased downloader; independent original indexes and fresh
-origin authentication remain required. The three-index local exchange passes, but a real
-three-provider HTTPS network run is still pending.
+origin authentication remain required. The first live three-provider HTTPS retrieval reconstructs
+the complete object, but its bulk transfers did not overlap; concurrent throughput remains unproved.
 
 TCP routes now retain reserved warm paths separately from their initial MPTCP subflows. The
 Exit can advertise an extra path when actual per-subflow kernel observations show sustained
 loss, without first removing an initial path or restarting the application connection.
-Targeted runtime checks and the real two-subflow kernel observer pass; the new live two-to-three
-download proof is still pending. Backend path ceilings have not yet been removed.
+Targeted runtime checks and the real two-subflow kernel observer pass; the first live download
+ended before three-subflow growth was observed, so that integration remains incomplete.
+Backend path ceilings have not yet been removed.
+
+The [MPQUIC warm-growth run on `5b1ba7af`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851)
+passes: one HTTP/3 flow expands from two to three active relay paths under measured packet loss,
+with fresh transport progress on all three, traffic on all six WireGuard legs, matching 32-MiB
+upload/download hashes and complete cleanup. This proves bounded live path growth, not additional
+throughput, unique application bytes per path or removal of the backend path ceiling.
 
 Configured Wi-Fi meshes now adjust new-neighbor admission instead of defaulting to eight and
 rejecting everything above thirty-two. `wifi_mesh.maximum_peers: 0` means no operator ceiling;

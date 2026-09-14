@@ -277,7 +277,9 @@ def validate(e):
             and e["client"]["request_sha256"] == e["server"]["request_sha256"] == hashlib.sha256(request).hexdigest()
             and e["server"]["source"]["ip"] == "47.163.4.1" and e["server"]["listen"] == dict(ip="47.163.4.2", port=18080)
             and 0 < e["server"]["source"]["port"] <= 65535
-            and e["client"]["application"]["ip"] == "43.159.1.1"
+            # The ordinary application uses the helper's exact parent ingress veth,
+            # not the Client's public underlay address (kernel.rs parent ingress tuple).
+            and e["client"]["application"]["ip"] == "169.254.240.1"
             and 0 < e["client"]["application"]["port"] <= 65535
             and e["client"]["destination"] == e["server"]["listen"], "normal request/destination/Exit source not preserved")
     require(e["client"]["completed_monotonic_ns"] - e["client"]["first_byte_monotonic_ns"]

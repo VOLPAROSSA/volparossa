@@ -580,6 +580,19 @@ The separate disjoint-chunk two/three-provider proofs retain their actual multi-
 This run's earlier automatic HTTPS comparison chooses the origin, taking 6.34 seconds versus
 5.93 seconds origin-only; the previous faster-peer sample is not a universal prediction.
 
+The [next `5b1ba7af` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838840638)
+reaches both three-provider native and HTTPS retrievals. Each reconstructs all 15 chunks /
+3,932,160 bytes from three providers with no origin body, but the bulk intervals do not overlap:
+the latest start follows the earliest finish by 437.107 ms (native) and 303.425 ms (HTTPS).
+The exact raw rebuild therefore reproduces `CONTENT_PROVIDER_ADAPTIVE_EVIDENCE_INVALID`;
+complete retrieval is not a concurrent-throughput pass. Cleanup leaves zero owned objects
+and byte-identical retained guest state. The next production correction gives an already
+admitted exploratory provider first choice of unresolved, previously missed chunks before
+established providers refill. This avoids spending a cold probe on unrelated coverage while
+its motivating chunk is assigned elsewhere. It does not infer chunk ownership from manifest
+membership, duplicate in-flight requests or change resource/benefit thresholds. Five targeted
+parallel-transfer checks pass; the unchanged live overlap gate still needs a fresh run.
+
 ### Adaptive mesh-neighbor integration
 
 Wi-Fi configuration now uses zero as the default optional operator ceiling, replacing the
@@ -661,6 +674,21 @@ tests and strict agent Clippy pass. The new `mptcp-growth` scenario must still p
 download growing from two to three simultaneous data-carrying subflows with six WireGuard legs,
 the complete payload hash, normal disconnect and unchanged guest state. No live three-subflow
 growth, arbitrary path count or throughput improvement is claimed yet.
+
+The [first `5b1ba7af` MPTCP growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838837544)
+fails at `mptcp-growth-sustained-download-loss` with
+`MPTCP_GROWTH_FLOW_ENDED_BEFORE_GROWTH`. It does not prove live three-subflow growth. The retained
+report records complete cleanup and zero owned objects. Its controller does add and retire the
+warm endpoint three times, but the actual application half-close sends MPTCP DATA_FIN before
+the response completes. A separate disposable kernel reproduction confirms that subsequent
+SIGNAL endpoints can create new subflows while ESTABLISHED, but not after that half-close.
+The corrected TLS adapter retains authenticated `close_notify` as directional application EOF
+and defers underlying transport FIN until the complete flow closes. A real isolated MPTCP/TLS
+test retains both original ESTABLISHED metasockets, transfers a full 1-MiB response after request
+EOF, closes both descriptors on drop and still rejects truncated TLS with `UnexpectedEof`.
+The evidence checker also uses the actual helper-ingress address `169.254.240.1`, not the
+Client's public underlay address. Two TLS checks and six checker tests pass. Neither these
+local results nor endpoint-add notifications replace the still-required live three-subflow proof.
 
 ### Warm MPQUIC growth integration
 
@@ -761,6 +789,20 @@ are covered. No growth threshold changes or live three-path success are claimed;
 network run is still required. The [same-source Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34245544220)
 passed. GitHub's aggregate CodeQL findings gate remains open separately; this is not a release
 security clearance.
+
+The [corrected `5b1ba7af` MPQUIC growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851)
+**passes**, including an exact-source independent report/raw-evidence rebuild. One HTTP/3
+connection grows from initial active paths 1/3 to simultaneous paths 1/2/3 without changing
+its route context or Exit. During the owned 15% loss profile, netem records 122 actual drops.
+After expansion, the three transport-ACK deltas are 97,188, 301,532 and 94,696 bytes; these are
+not reported as unique application bytes. Retained boundary captures show data on all six
+WireGuard legs without forbidden packets or capture drops. The application sends and receives
+33,554,432 bytes, with matching independent client/server hashes in each direction. Both
+applications exit successfully, the loss qdisc is removed, route/context counts return to zero,
+and retained before/after guest-state files are byte-identical. This completes the bounded live
+warm-growth proof, not a throughput comparison, arbitrary path-count support or the expanded
+alpha. Artifact ZIP SHA-256:
+`4ef47461dcde1b2007ba55244c4a9c907db0e239b7c9ca02aabd04b5eba5e833`.
 
 ### Native publication/site cache-only reopen
 
