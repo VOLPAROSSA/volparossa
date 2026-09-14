@@ -9,7 +9,11 @@ agent_public_document_cli() {
     # A document invocation includes planning and several independent worker
     # leases. This fixture has its own bounded 1320-second owner window; it does
     # not promise 32 maximally long jobs or extend any original 600-second lease.
-    timeout --signal=INT --kill-after=15s 1320s nsenter --target "$document_cli_pid" --mount --net \
+    # This trusted owner CLI must retain its own mount/resource view, like the
+    # train-loop owner: the agent's masked /proc prevents the nested unprivileged
+    # worker sandbox from mounting its private procfs. Enter only Client's netns;
+    # keep the agent service protections and the fixed worker sandbox unchanged.
+    timeout --signal=INT --kill-after=15s 1320s nsenter --target "$document_cli_pid" --net \
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" "$@"
