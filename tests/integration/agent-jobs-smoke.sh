@@ -32,6 +32,17 @@ agent_jobs_prepare() {
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"
 }
 
+agent_jobs_broker_startup() {
+    # Fixed properties only: no journal, command line, environment or private paths.
+    # Capture before stop/reset-failed can discard the original startup outcome.
+    timeout --signal=TERM --kill-after=1s 2s systemctl show \
+        --property=LoadState,ActiveState,SubState,Result,CollectMode,MainPID,ExecMainCode,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,CPUUsageNSec \
+        "$jobs_unit" 2>/dev/null \
+        | python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" broker-startup \
+            "$jobs_node" "$1" "$jobs_attempt" "$jobs_started" \
+        >"$WORK/agent-jobs-$jobs_node-broker-startup.json"
+}
+
 agent_jobs_broker() {
     jobs_node=$1
     content_provider_node "$jobs_node" || return 1
@@ -50,8 +61,10 @@ agent_jobs_broker() {
     for jobs_other in relay3 relay4 relay5; do
         [ "$jobs_other" = "$jobs_node" ] || jobs_hidden="$jobs_hidden $WORK/state-$jobs_other"
     done
+    jobs_attempt=0
+    jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
-        --property=CollectMode=inactive-or-failed --property=Restart=no \
+        --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
         --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
         --property="NetworkNamespacePath=/run/netns/$jobs_namespace" \
@@ -63,15 +76,24 @@ agent_jobs_broker() {
         --property="StandardError=append:$WORK/agent-jobs-$jobs_node-broker.err" \
         -- "$binary_directory/volparossa" compute serve \
         --runtime-root "$jobs_private/runtime" --model-root "$jobs_root/provision/model" \
-        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || return 1
-    jobs_attempt=0
+        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || {
+            agent_jobs_broker_startup start_failed || true
+            return 1
+        }
     while [ "$jobs_attempt" -lt 150 ]; do
         [ ! -S "$jobs_private/broker.sock" ] || break
-        [ "$(systemctl show --property=ActiveState --value "$jobs_unit")" != failed ] || return 1
+        if [ "$(systemctl show --property=ActiveState --value "$jobs_unit")" = failed ]; then
+            agent_jobs_broker_startup unit_failed || true
+            return 1
+        fi
         sleep 0.1
         jobs_attempt=$((jobs_attempt + 1))
     done
-    [ -S "$jobs_private/broker.sock" ] || return 1
+    if [ ! -S "$jobs_private/broker.sock" ]; then
+        agent_jobs_broker_startup socket_timeout || true
+        return 1
+    fi
+    agent_jobs_broker_startup socket_ready || return 1
     content_custody_endpoint "$jobs_node" || return 1
     agent_jobs_cli "$jobs_node" compute peer attach --broker-socket "$jobs_private/broker.sock" \
         --bind "$custody_address:18080" --advertised-hostname "$custody_hostname" \
