@@ -20,13 +20,14 @@ const JSON_LIMIT: u64 = 256 * 1024;
 const ENROLLMENT_LIMIT: u64 = 64 * 1024;
 const TREE_ENTRIES: usize = 32;
 const TREE_BYTES: u64 = 16 * 1024 * 1024;
-const CONTENT_FILES: [(&str, u64); 11] = [
+const CONTENT_FILES: [(&str, u64); 12] = [
     ("selection.json", 64 * 1024),
     ("dataset.json", 1024 * 1024),
     ("dataset.manifest", 64 * 1024),
     ("source-provenance.json", 64 * 1024),
     ("training-report.json", 32 * 1024),
     ("result.json", 64 * 1024),
+    ("evaluation.json", 64 * 1024),
     ("adapter.bundle", 4 * 1024 * 1024),
     ("training/report.json", 16 * 1024),
     ("training/adapter/README.md", 16 * 1024),
@@ -40,6 +41,16 @@ const PUBLICATION_FILES: [(&str, u64); 3] = [
     ("publication.pb", 64 * 1024),
     ("publication.json", 64 * 1024),
     ("contribution.json", 64 * 1024),
+];
+const VALIDATION_FILES: [(&str, u64); 8] = [
+    ("validation/dataset.json", 1024 * 1024),
+    ("validation/dataset.manifest", 64 * 1024),
+    ("validation/provenance.json", 64 * 1024),
+    ("validation/baseline/report.json", 16 * 1024),
+    ("validation/candidate/report.json", 16 * 1024),
+    ("baseline-report.json", 64 * 1024),
+    ("candidate-report.json", 64 * 1024),
+    ("validation.json", 64 * 1024),
 ];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -143,11 +154,19 @@ impl Store {
         Ok(serde_json::from_slice(&read_private(&file, limit)?)?)
     }
 
-    /// Publication receipts are separate from the immutable completed-content
-    /// snapshot. Persist once; retries must inspect an existing receipt explicitly.
+    /// Decisions are written once before the completed-content snapshot; later
+    /// publication receipts remain separate. Existing records are never replaced.
     pub(super) fn write_cycle_json(&self, sequence: u64, name: &str, value: &Value) -> Result<()> {
         ensure!(
-            matches!(name, "publication.json" | "contribution.json"),
+            matches!(
+                name,
+                "evaluation.json"
+                    | "publication.json"
+                    | "contribution.json"
+                    | "validation.json"
+                    | "baseline-report.json"
+                    | "candidate-report.json"
+            ),
             "train_loop_receipt_name"
         );
         let bytes = json_bytes(value, 64 * 1024)?;
@@ -157,6 +176,22 @@ impl Store {
     }
 
     pub(super) fn snapshot_cycle(&self, sequence: u64) -> Result<Snapshot> {
+        self.snapshot_files(sequence, true)
+    }
+
+    pub(super) fn snapshot_training(&self, sequence: u64) -> Result<Snapshot> {
+        self.snapshot_files(sequence, false)
+    }
+
+    pub(super) fn validate_training(&self, sequence: u64, expected: &Snapshot) -> Result<()> {
+        ensure!(
+            &self.snapshot_training(sequence)? == expected,
+            "train_loop_training_changed"
+        );
+        Ok(())
+    }
+
+    fn snapshot_files(&self, sequence: u64, complete: bool) -> Result<Snapshot> {
         let cycle = self.cycle_path(sequence)?;
         let entries = checked_tree(&cycle)?;
         ensure!(
@@ -164,7 +199,12 @@ impl Store {
             "train_loop_cycle_incomplete_temporary"
         );
         let mut snapshot = Snapshot::new();
-        for (name, limit) in CONTENT_FILES {
+        let validation = complete && fs::symlink_metadata(cycle.join("validation.json")).is_ok();
+        for (name, limit) in CONTENT_FILES
+            .into_iter()
+            .filter(|(name, _)| complete || *name != "evaluation.json")
+            .chain(VALIDATION_FILES.into_iter().filter(|_| validation))
+        {
             let bytes = read_private(&cycle.join(name), limit)?;
             ensure!(!bytes.is_empty(), "train_loop_cycle_empty_file");
             snapshot.insert(
@@ -320,6 +360,7 @@ fn fixed_limit(name: &str) -> Option<u64> {
     CONTENT_FILES
         .into_iter()
         .chain(PUBLICATION_FILES)
+        .chain(VALIDATION_FILES)
         .find_map(|(known, limit)| (known == name).then_some(limit))
 }
 
@@ -356,7 +397,14 @@ fn checked_tree(cycle: &Path) -> Result<Vec<Entry>> {
             let name = relative.to_str().context("train_loop_cycle_name")?;
             if metadata.is_dir() {
                 ensure!(
-                    matches!(name, "training" | "training/adapter"),
+                    matches!(
+                        name,
+                        "training"
+                            | "training/adapter"
+                            | "validation"
+                            | "validation/baseline"
+                            | "validation/candidate"
+                    ),
                     "train_loop_cycle_directory"
                 );
                 private_directory(&item.path())?;

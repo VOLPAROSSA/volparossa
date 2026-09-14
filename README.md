@@ -1,526 +1,339 @@
 # VOLPAROSSA
 
-> **Functional-development status:** The original v1 **A01--A15 acceptance sequence passed on
-> one unchanged build, `482e33d0`**, in a disposable Debian 13 topology. This includes real
-> two-leg WireGuard, MPTCP, protected UDP, Multipath QUIC, privacy captures and crash cleanup.
-> Newer network/content extensions are still incomplete; that result does not certify the
-> current candidate or make VOLPAROSSA a release-ready, generally supported network.
-> See the evidence-based [implementation status](docs/IMPLEMENTATION_STATUS.md) before building,
-> installing, or enabling a role.
+## DICN — Decentralized Intelligent Cooperative Network
 
-Peer downloads retain already verified chunks if another provider fails. On `fed8ab33`, the
-protected native/browser/partial-origin sequence and native static-site publication pass, as
-does owner-priority replica pause/resume followed by retrieval after the original provider stops.
-These source-bound results cover the bounded C01–C07 checkpoints. C08 remains open. The
-[new source-selection run on `8830a57a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34205965849)
-passes: automatic selection chose the origin before peer body transfer, taking 2.68 seconds
-versus 2.55 seconds for explicit origin-only retrieval of the same cold object. This is a useful
-source choice, not a measured speedup. Both commands preserve fresh origin authorization and
-the same protected route with two parallel relay paths. Automatic successful peer selection
-has since passed the constrained-uplink comparison described below; it is not a general speedup.
+**Connectivity, shared content and cooperative intelligence — powered by its participants.**
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
-Its v1 VPN overlay is the foundation for direct local links and the planned content network.
-The newly requested [cooperative AI layer](docs/DECENTRALIZED_AGENTS.md) will add contributed
-training/computation and fully automatic content-policy governance. The first development
-candidate adds explicitly provisioned SmolLM2 CPU inference/adapter training in an isolated
-worker (`volparossa compute run`, preview by default). A new explicit `content agent pack/fetch`
-candidate binds an adapter to its signed public dataset and reuses protected content retrieval;
-`compute run --adapter-root ...` can request the received adapter in the isolated worker.
-[The distinct-node guest proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881)
-now passes on `38814d30`: eight real CPU training updates, protected adapter retrieval after
-original source removal/restart, and execution with the exact received weights on another node.
-The fixed base model/runtime are explicitly provisioned, not automatically distributed.
-Source selection must consider
-eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
-Autonomous source selection/ingestion, general task orchestration and governance remain required work,
-not an implemented distributed brain or a guarantee of private remote execution.
-The next development candidate connects `compute serve` to the protected network with
-`compute peer attach`, then exposes signed public-task submission, polling/cancellation and
-concurrent row distribution. The [two-worker run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
-now has complete raw evidence of simultaneous isolated workers, separate model results,
-protected paths and cleanup. Its CI run remains failed due to a reporting-field error;
-the corrected checker reconstructs the retained measurements successfully. This does not yet
-provide autonomous task planning, private offload or unbounded per-device execution.
-The subsequent [worker-loss recovery run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
-passes: after one real worker is stopped, its peer's result is retained and only the failed
-part is explicitly rerun on a new worker through the protected network, with full cleanup.
-An explicit `compute peer workflow` candidate now sequences multiple signed public datasets,
-retains verified local results, and resumes unfinished work across separate bounded leases.
-This enlarges the overall job, not the resource allowance of any participating device;
-the current plan accepts up to 32 small datasets and is not a general task planner.
-The new [`compute peer task`](docs/DECENTRALIZED_AGENTS.md#source-bound-public-user-tasks)
-candidate retrieves a selected signed public source and distributes a summary request or an
-explicitly public user question across its contexts on independent peers. The publisher's
-original source and the requester's instruction remain separately bound. Results retain their
-source rows and worker receipts; resume reuses completed work. This first interface accepts
-the existing small public-dataset format, not arbitrary documents or private prompts.
-The [scoped user-task VM on `42761c28`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34889536964)
-passes its original raw-evidence checks: two real workers, protected source retrieval and
-unchanged completed receipts after both brokers and the route stop. Its separate historical
-Quality failure is not relabelled as green; the literal-style fix is included in `974c6555`.
-A separate [`compute peer document`](docs/DECENTRALIZED_AGENTS.md#public-document-tasks)
-candidate now accepts explicitly public UTF-8 text. The pinned tokenizer splits the entire
-document into fitting prompts, native signed packages are processed on selected peers, and
-ordered source-range answers are retained across task rounds. It is not private offload or a
-final synthesized answer. The first document VM stopped before tokenizer execution on a
-guest source-path permission error; the staged public-helper/README correction is in
-`4421b1a6`, with its new live proof pending.
-An explicit `compute train-cycle` now connects a chosen public dataset to local training and
-adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
-that same publisher's dataset through the protected network. It can continue training an
-explicitly imported adapter. Execution requires `--execute`; the resulting bundle is not
-automatically published or activated. The [live cache/warmstart cycle on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876251732)
-passes: a separate Client fetches the signed adapter/dataset, then performs eight real updates
-from its cache after both providers stop. The received adapter stays read-only, its local
-successor changes, and the base remains unchanged; this is not autonomous training/publication.
-Background execution has cooperative CPU/I/O pause/resume: explicit local
-jobs use `--spare-capacity`, and peer executors always enable it. Memory pressure still cancels;
-pauses do not extend an individual worker's deadline. The [real CPU-pressure proof on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876248467)
-passes: the same worker pauses, resumes at the same step and completes eight updates.
-Both new proofs pass exact-source raw verification, preserve original guest-root state and
-leave no owned objects. A new candidate adds read-only exposed battery/thermal observations
-to the ML budget; `compute capacity` explains its current decision without model or network
-execution. Physical-device behavior and the new manual owner-cancellation VM remain unproven;
-interactive-activity integration, B01, autonomous B05 and the broader alpha remain open.
-[`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate)
-connects repeated public training, optional peer warmstarts and signed update sharing. It can
-watch an explicit source plan until cancelled, while each worker keeps its own resource/deadline
-limits. The [live proof on `bcc1df52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34887897332)
-passes: two genuine eight-update cycles automatically publish their signed adapters, then
-another Client retrieves the exact successor and runs inference with it. This milestone is
-merged into `main`; broader autonomous source discovery, defended aggregation and B05 remain open.
-The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
-deposit original signed publications with other configured participants and inspect their
-retained copies. The source-bound protected-network custody checkpoint passes after provider
-restart and original source removal. [The autonomous repair checkpoint on `cb2e6a67`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34864727782)
-also passes: a partial holder repairs missing chunks, then serves a fresh client after its
-supplying peer stops. Automatic initial holder selection and ongoing availability remain open.
-The normal low-latency Internet path is always:
+It brings a protected multipath network, distributed content storage and a developing cooperative
+AI layer together. The ambition is more than a VPN: people contribute connections, storage and
+computation to a network they can also use.
+
+[Network](#one-network-many-paths) · [Shared content](#content-that-travels-with-the-network) ·
+[Cooperative intelligence](#a-cooperative-brain) · [Principles](#seven-virtues-seven-sins) ·
+[Development status](#development-status) · [Get started](#developing-volparossa)
+
+> **Under active development, not a supported release.** The original v1 A01–A15 acceptance
+> sequence passed on one unchanged build, `482e33d0`, in a disposable Debian 13 topology.
+> Later network, content and AI extensions have their own scoped results and unfinished work.
+> That checkpoint does not certify the current build or a complete decentralized “brain”.
+> [See what is implemented and verified →](docs/IMPLEMENTATION_STATUS.md)
+
+## What makes it a DICN?
+
+| Principle | What it means for VOLPAROSSA |
+| --- | --- |
+| **Decentralized** | The same node software runs on participants' devices. Replaceable peer contacts help discovery; no permanent central network operator or mandatory compute dispatcher is the target. |
+| **Intelligent** | Useful paths and content sources are selected according to conditions. The AI extension adds reusable trained agents, shared computation and, ultimately, automatic policy governance. |
+| **Cooperative** | Participants give as well as take, according to available capabilities. The owner's activity comes first; contributed bandwidth, storage and processing have resource budgets. |
+| **Network** | Internet links and direct local links can carry protected paths. Above them, participants exchange content and work, not just VPN traffic. |
+
+These describe the design. The [status section](#development-status) separates demonstrated
+functionality from the remaining integrations.
+
+## One network, many paths
+
+A connection is not limited by design to a pair of paths. Multiple useful paths can operate
+in parallel, each through a different relay peer, towards the same selected exit.
 
 ```mermaid
 flowchart LR
-    C[Client]
-    R1[Contributing relay A]
-    R2[Contributing relay B]
-    E[One policy-enforcing exit]
-    D[Allowed destination]
+    C["Your node<br/>client role"]
+    R1["Peer A<br/>relay role"]
+    R2["Peer B<br/>relay role"]
+    R3["Peer C<br/>relay role"]
+    RN["Further peers<br/>when useful and supported"]
+    E["Selected peer<br/>exit role"]
+    D["Allowed Internet<br/>destination"]
 
-    C == path 1: WireGuard ==> R1
-    R1 == path 1: separate WireGuard link ==> E
-    C == path 2: WireGuard ==> R2
-    R2 == path 2: separate WireGuard link ==> E
-    E --> D
+    C -->|"Path 1: direct local Wi-Fi"| R1
+    C -->|"Path 2: via existing Internet"| R2
+    C -->|"Path 3: direct Ethernet"| R3
+    C -.->|"Additional local or Internet paths"| RN
+    R1 -->|"WireGuard leg 2"| E
+    R2 -->|"WireGuard leg 2"| E
+    R3 -->|"WireGuard leg 2"| E
+    RN -.->|"WireGuard leg 2"| E
+    E -->|"Independent Internet uplink"| D
+
+    classDef participant fill:#e8f4f2,stroke:#24766c,color:#143d37;
+    classDef endpoint fill:#edf0ff,stroke:#5264ad,color:#252f58;
+    class C,R1,R2,R3,RN participant;
+    class E,D endpoint;
 ```
 
-Every parallel path uses exactly one distinct relay between the same client and exit. The normal
-client dataplane never connects directly to an exit. The v1 design uses real Linux MPTCP over
-selected relay paths for TCP, a protected single-path MASQUE association for ordinary UDP, and
-genuine Multipath QUIC carrying MASQUE CONNECT-IP over at least two data-carrying paths for
-browser QUIC. The tested checkpoint above includes these real transports.
+*Each Client → Relay arrow is WireGuard leg 1; each Relay → Exit arrow is a separate
+WireGuard leg 2. Client-to-exit payloads remain end-to-end encrypted across both.*
+The link types illustrate available choices, not a requirement for three physical adapters.
 
-## What it is—and is not
+Every parallel path uses exactly one distinct relay between the same client and exit.
+The normal client dataplane never connects directly to an exit.
 
-VOLPAROSSA is intended to be a user-operated overlay with local peer reputation,
-capability-indexed libp2p discovery, short-lived reservations, ephemeral WireGuard links, and a
-threshold-signed destination whitelist enforced at every exit.
+**Direct** means a local connection between neighboring nodes, using supported Wi-Fi mesh or
+Ethernet. **Indirect** here means reaching a peer through an existing network such as the
+Internet. Neither removes the protected relay/exit separation. **Two-leg** describes one
+path's two WireGuard links; **multipath** describes several such paths together—not a serial
+chain of extra overlay relays.
 
-It is not an anonymity guarantee, a Tor replacement, a generic open proxy, a commercial VPN, or a
-way to bypass the whitelist. It has no payment system, token, blockchain, GUI or automatic exit
-enablement. The v1 transports use no cover traffic, artificial delay, packet duplication or FEC;
-planned content replication is a separate application feature. A global observer who sees both
-ends may correlate this low-latency traffic.
+| Traffic | Protected transport |
+| --- | --- |
+| TCP | TLS 1.3 over genuine Linux MPTCP, with subflows bound to selected relay paths. |
+| General UDP | A protected single-path QUIC MASQUE association through one relay; destination pinned. |
+| Browser QUIC / HTTP/3 | Original datagrams inside MASQUE CONNECT-IP over genuine Multipath QUIC, with at least two active paths. |
 
-## Components and roles
+Real MPTCP and MPQUIC flows have each grown from two to **three data-carrying paths** in scoped
+tests. Adaptive peer admission and content downloads can also go beyond two connections.
+This is resource-aware growth, not unlimited allocation: native transport ceilings remain,
+and more paths sharing one bottleneck do not automatically add speed.
+[Path evidence and remaining limits →](docs/IMPLEMENTATION_STATUS.md)
 
-- `volparossa` is the user-facing CLI.
-- `volparossa-agent` is the unprivileged control-plane and session service.
-- `volparossa-helper` is the narrowly allowlisted privileged networking service.
-- Every node runs the same software. Production consumers contribute relay service with nonzero
-  capacity and, when they have independent Internet access, exit service as well. Nodes with only
-  local links contribute their available links/relay capability without pretending to be exits.
-  Installation defaults to all roles off; enable participation explicitly after configuring the
-  shared policy and contribution limits. Development fixtures can isolate roles for boundary tests.
-- A relay forwards only a signed, expiring route ID between two dedicated WireGuard links. It must
-  not offer host access or Internet egress.
-- An exit is the only egress role. It resolves, pins, and enforces the same verified policy manifest
-  before opening any destination flow.
+### The same nodes, different available capabilities
 
-The capability-based reciprocal participation requirement replaces optional client-only use as of
-2026-09-05. `network.uplink` defaults to `independent_internet`; `local_only` permits client + relay
-configuration without a fabricated ASN or public origin, and forbids exit mode. This is an operator
-declaration, not runtime connectivity proof. Scoped disposable tests cover concurrent offline-node
-consumption/relay service, LAN+Internet MPQUIC traffic, monitored uplink loss/recovery and 802.11s
-discovery/traffic on simulated radios. Physical Wi-Fi hardware and phone operation remain
-unverified. See [direct-link scope](docs/LOCAL_LINK_NETWORK.md) for the exact evidence and limits;
-configuration alone never counts as working-network evidence.
-Bootstrap contacts are replaceable user peers, not mandatory central infrastructure or authorities.
+Every participating consumer contributes relay service. A participant with a usable independent
+Internet uplink also contributes policy-limited exit service. A node with only local links
+contributes those links and relay capacity, without pretending to provide independent egress.
 
-The detailed design is in [ARCHITECTURE.md](docs/ARCHITECTURE.md); wire formats are in
-[PROTOCOL.md](docs/PROTOCOL.md).
+A device without its own Internet subscription can therefore reach external destinations through
+reachable participants that do have an uplink. **Somewhere in that route, a real Internet uplink
+is still necessary.** Local connectivity does not create Internet access out of nothing.
 
-## Network and content direction
+Installation leaves participation off until explicitly configured. Relay and exit labels describe
+roles in one route, not separate classes of privileged servers. For relayed sessions, the relay
+role must not provide Internet egress or access to its host. Bootstrap contacts are replaceable
+peers, not authorities.
 
-Direct Ethernet and Wi-Fi links should let a node without its own Internet subscription reach
-an available uplink through other participants. Nodes with an uplink can use useful direct and
-Internet paths together. Sharing must give the owner priority and use genuinely spare capacity;
-more paths do not automatically add bandwidth, especially on a shared uplink or radio channel.
-Cooperative owner-priority downloads now pass a scoped disposable contention/recovery/expiry
-scenario on `efc35ac9`. One configured LAN+WAN MPQUIC comparison on `b1082645` also passes,
-at 1.255x WAN-only throughput. That narrow result does not establish repeatable gain, automatic
-spare-capacity estimation or general radio-airtime sharing; see the [current evidence](docs/IMPLEMENTATION_STATUS.md).
+Direct-link and mixed LAN/WAN operation have scoped disposable-network evidence, including
+simulated Wi-Fi radios. Physical-radio, phone and general multi-hop Wi-Fi operation are not
+established by those tests. Owner-priority sharing is implemented in specific scenarios;
+universal spare-capacity detection and “no slowdown on any device” are not claimed.
+[Local links and contribution →](docs/LOCAL_LINK_NETWORK.md)
 
-The next [content-network extension](docs/CONTENT_NETWORK_PROPOSAL.md) adds bounded contributed
-storage: verifiable chunks fetched from useful peers, spare-resource redistribution, validated
-DNS sharing, signed public websites/content and recipient-encrypted offline messages. The local
-`volparossa-content` foundation now reopens persistent caches and pulls verified chunks over an
-application-supplied stream. Its protected-route VM test passed on `f0a906ca`: two separate replica
-processes reconstruct a 2.1-MB object after its publisher copy is removed, through real
-MPTCP/TLS and both WireGuard legs. That completes the bounded-storage/authenticated-transfer
-checkpoint C01, not automatic distributed discovery or a complete offline website service.
-The normal CLI now provides `volparossa content publish` and `volparossa content assemble`:
-explicit local files are signed with the existing encrypted node identity and reconstructed
-from explicitly selected owned caches. They remain offline by default. Explicit
-[`content publish --contribute`](docs/OPERATIONS.md#publishing-through-the-configured-contribution-service)
-now publishes a public file or packed website through an already configured agent service,
-without a separate `import`/`serve` step. Success requires complete storage, original-manifest
-journaling and registration; it does not promise external replicas or permanent availability.
-The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34221501655)
-passes: an independent client retrieves the complete original site by name after source-file
-removal and provider restart. This is not a promise that the provider machine can disappear.
-New `content serve`,
-`content fetch` and `content stop` commands connect explicit publications to the agent's signed
-provider discovery and protected MPTCP retrieval. The normal native and HTTPS commands now
-reconstruct the same object from two independent providers; missing HTTPS chunks use exact
-origin ranges. The [fresh provider run on `10f63244`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178615941)
-passes all three downloads, physical-boundary checks and cleanup with unchanged guest state.
-This proves the explicit native/cooperative-origin command path, not arbitrary browser HTTPS,
-general NAT reachability or a speed improvement. Independent content offers now survive native
-role-advertisement withdrawal and unchanged policy refresh without extending their deadlines.
-Both `content fetch` and `content fetch-https` support explicit `--reuse-cache` to resume from
-an existing owned cache, retrieving only missing chunks. HTTPS still obtains fresh origin
-authorization; cached bytes do not renew expiry or count as newly received peer traffic.
-See the [content instructions](docs/OPERATIONS.md#offline-content-commands) and the
-[source-scoped results](docs/IMPLEMENTATION_STATUS.md).
-For cooperative HTTPS downloads, new `content fetch-https --local-output ./asset.bin` delivers
-directly to a new `0600` file owned by the calling user, while the cache remains agent-owned.
-Fresh origin authority and the final transfer receipt are checked before publication; no
-ownership change or reusable HTTPS proof is introduced. The
-[cross-account network proof on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184629816)
-now passes both complete-cache and partial-origin cases. Existing agent-side `--output` remains available.
-Recipient-encrypted messages use the same chunk storage and transfer API; their protected-route
-VM test now passes on `b1082645`, including wrong-recipient rejection and temporary-key cleanup.
-Normal `content recipient-key`, `content publish-message` and `content open-message` commands
-now expose that encryption/decryption without test-only key files. They unlock the existing
-encrypted identity, cache only ciphertext, and write plaintext only to an explicitly requested
-new private file. Identity rotation also changes the message-recipient key; retain the old
-encrypted identity if old messages must remain readable. See the
-[message commands](docs/OPERATIONS.md#recipient-encrypted-message-commands). The updated network
-run on `4c4c8954` also passes with these normal recipient commands and encrypted identities,
-including ciphertext retrieval after publisher removal, private output and complete cleanup.
-Explicit `content import` and `content export` now bridge the user's private ciphertext cache
-and the separately owned service cache over the local control socket. They neither transfer
-recipient keys nor start a listener. The [different-UID VM run on `ec091bdd`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34176555568)
-passes normal local publication, import/export and opening with unchanged private permissions
-and complete cleanup. Ordinary native files now use the same bridge with explicit
-`--public-content`; local CLI/agent tests pass, including files above 4 MiB and empty objects.
-The [extended public-file VM on `49b6a7d1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34177846462)
-also passes, including default refusal, exact reconstruction and cleanup. This does not authenticate arbitrary HTTPS content.
-See the [handoff instructions](docs/OPERATIONS.md#moving-an-explicit-public-publication-to-or-from-the-service)
-before serving or assembling a publication held by another account.
-Public native content now also has `content fetch-name`: supply an independently trusted
-publisher key and exact publication name, with no manifest file at the consumer. Providers
-explicitly enable `serve --name-lookup`; retrieval uses the existing protected routes and
-delivers a new user-owned file. A reused cache remembers observed revisions and rejects
-conflicts or downgrades. The [network run on `d2f886c8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34186359414)
-passes retrieval without a Client-side manifest: two providers supply nine chunks / 2,097,275
-bytes, reconstructed into the user's private file with the exact hash. Both selected relay paths,
-account isolation, no-clobber and cleanup pass. This does not guarantee the globally newest version, automatic
-website hosting or permanent retention. See the
-[name-retrieval instructions](docs/OPERATIONS.md#retrieving-a-native-publication-by-publisher-and-name)
-and source-specific evidence in the implementation status.
-The new `content site pack` and `content site open` commands add native static websites:
-publish an explicit HTML/CSS/JavaScript/media directory through the same signed-content service,
-then retrieve it by publisher/name and open its verified assets on a temporary local browser URL.
-Local packing, HTTP/range handling, actual CLI-transfer/cleanup and isolated Firefox rendering
-with working CSS/JavaScript pass. The [protected-network site run on `fed8ab33`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34203091361)
-also passes: the publishing application and its source files are gone before a fresh Client
-retrieves the signed site from two independent providers and reads its HTML/CSS/JavaScript and
-byte ranges. The VM checks HTTP behavior; actual Firefox rendering is a separate local proof.
-This does not give cached pages another
-website's HTTPS origin or a dynamic backend. See the [site commands](docs/OPERATIONS.md#native-static-websites).
-An explicit `--reuse-cache --cache-only` mode is now implemented for `content fetch-name`
-and `content site open`: reopen a previously completed native download using the caller's
-trusted publisher key, original signed manifest, retained revision floor and complete local
-chunks, without opening a route or looking for peers. The original expiry still applies;
-this is neither a globally latest-version check nor offline HTTPS-origin authentication.
-The [no-route reopen proof on `4e6cc308`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34214732165)
-passes: the same cached site serves all assets after route disconnect, with zero peer/origin
-bytes, no new route/discovery, and complete cleanup. That commit's broad Quality run failed
-in a separate route-selection test; the passing site proof is not an all-checks-green claim.
-The [normal private sender network sequence on `1024e6d2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34184627558)
-also passes: publish, import, serve, protected retrieval, export and recipient opening after
-the sender's fixture secrets are removed. This is explicit encrypted-object delivery, not yet
-an automatically discoverable mailbox or guaranteed offline retention.
-The new `content mailbox` commands add a known-contact inbox: invite one sender, enroll at two
-independently trusted providers, deposit encrypted messages, then receive without supplying a
-message manifest or ID. Providers persist bounded inbox metadata and ciphertext; acknowledgements
-prevent a sender retry from putting an already received message back into that inbox. Local
-store-reopen and authenticated-stream delivery tests pass. The
-[first mailbox VM on `d1fd6d1f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34191416065)
-completes two-provider deposit, store reopen and private receive/acknowledgement, but its final
-checker rejects a valid omitted protobuf enum default. The corrected checker passes the original
-raw receipts, captures and cleanup; the historical workflow remains failed. A
-[fresh run on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192823996)
-now passes the complete sequence and original-source raw checker: sender application exit and
-route disconnect, two deposits, provider reopen, intended-recipient decryption, both ACKs and
-empty repeat, with exact hash and clean captures/cleanup. This satisfies C07's sender-exit delivery
-checkpoint. Sender and recipient are separate application identities behind one Client.
-This is not automatic contact discovery, SMTP, retention repair or a
-guarantee that a provider stays online. See the [mailbox commands](docs/OPERATIONS.md#known-contact-mailboxes).
-That `10f63244` run also joins the normal commands end to end: user publication/import,
-agent serving, independent protected retrieval, then user export/assembly. The complete
-2,097,275-byte file retains its exact hash across accounts and the network; all twenty physical
-capture windows and cleanup pass. The complementary-provider and HTTPS checks remain intact.
-A first bounded redistribution path is now wired into the agent: an explicitly configured
-replica cache can pick up other signed chunks from a provider used by a completed download,
-then offer those chunks to independently authorizing consumers. Library uptake/re-serving
-tests pass. Optional uptake now requests one chunk at a time, checking the configured links
-before granting the next chunk; a busy sample pauses credit and resumes only within the original
-deadline, without renewing the exchange budget.
-The [replication run on `603cec9d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34178099281)
-now passes the complete bounded sequence: retrieve foreground P, opportunistically acquire
-262,267 bytes of Q, stop the original node, explicitly reopen the replica service with
-`content serve --reuse-replica-cache`, then retrieve Q from a fresh Client with its exact hash.
-Real remote route retirement completes before the replicator's disconnect returns. All ten
-boundary captures are complete with zero drops or forbidden packets, and cleanup leaves guest
-state unchanged. Earlier TLS/report failures remain recorded, not retrospectively passed.
-That older run proves C03's bounded uptake/offline-provider/reopen/re-serving sequence, not
-automatic boot service or retention repair. The newer `fed8ab33` run also passes C04's local
-owner-priority criterion; it does not prove global fairness or universal no-slowdown behavior.
-The explicitly configured automatic contribution service now passes its
-[source-stop/restart network proof on `f76ac97a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34211580709): start empty,
-retain verified public downloads within one quota, and restore useful replicas at agent startup.
-After the original provider stops and the replica agent restarts, an independent Client retrieves
-the exact object from that restored replica. Capture and cleanup checks pass. See
-[automatic contribution](docs/OPERATIONS.md#automatic-public-content-contribution).
-C08 existing-web integration/benefit, retention repair and permanent availability remain open.
-More replicas alone do not establish a speedup.
-Native, named and cooperative-HTTPS chunk downloads now use up to two concurrent providers.
-A real backpressured-stream test proves overlapping progress without duplicate chunk requests,
-including bounded reassignment after missing or failed chunks. The
-[parallel-provider VM on `b22a9153`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193391288)
-also passes: kernel packet-arrival timestamps show 0.933 seconds of overlapping bulk delivery
-from the two providers, with exact reconstruction and complete capture/cleanup checks.
-This is actual overlap, not a measured speedup or unique TCP goodput.
-Replica maintenance can now reclaim expired, unshared journaled chunks before another uptake
-attempt. Live references, explicit foreground publications and mailbox stores remain protected;
-local expiry/reuse tests pass, not a new expiry-maintenance VM sequence.
-The first positive DNSSEC cache is now connected to the ordinary agent's TCP, UDP and protected
-DNS resolution. It independently validates peer evidence, excludes involved route relays and
-retains the existing resolver when evidence is missing or unsupported. Combined compilation and
-strict Clippy pass. The [public DNSSEC-chain run on `0fa80d65`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684)
-now passes real IPv4/IPv6 validation with unchanged built-in roots and local cache reuse.
-The ordinary two-Exit sharing sequence now passes on `b172d11f`, satisfying the C05 checkpoint.
-The [partial `4f90e370` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34187656229)
-proves ordinary A/AAAA requests through the protected route. The
-[subsequent `5ac9bb0e` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34189965926)
-also reaches the second Exit and returns a correct answer, but from the trusted fallback rather
-than the peer cache. That older run remains failed.
-The signed DNS RPC now pins its actual authenticated connection when two direct connections to
-the same peer exist; a real two-connection actor test passes. The
-[`b172d11f` DNS run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
-proves A/AAAA upstream validation, actual peer-cache hits without upstream/fallback, and local
-hits after the cachepeer stops. Unsigned data remains an explicit fallback; peer misses trigger
-no upstream query. Original roots/expiries, all 35 physical captures and cleanup pass.
-Protected DNS now owns a separate bounded client route instead of contending with the general
-datapath; `connect --transport protected-dns` prepares that association without claiming a DNS reply.
-See [DNS configuration](docs/OPERATIONS.md#shared-positive-dns-cache).
-The [exact `b22a9153` Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34193378918)
-passes formatting, strict Clippy, workspace tests, namespace proofs and the integration-harness
-checks. Earlier failures remain recorded. All three CodeQL analyses also pass, but the
-[separate PR alert gate](https://github.com/VOLPAROSSA/volparossa/runs/101955945979)
-remains red with 126 critical results; this is not a clean security-gate claim. See the exact
-[CI checkpoint](docs/IMPLEMENTATION_STATUS.md).
+## Content that travels with the network
 
-Existing HTTPS reuse needs genuine origin authentication through an application boundary:
-authenticated origin metadata, publisher signatures, or an explicitly configured experimental
-witness. The first cooperative-origin HTTPS library and executable now work locally: obtain
-small metadata through actual hostname/CA-verified TLS, retrieve authenticated peer chunks, and
-use same-version origin fallback when chunks are missing. Its full-body-fallback protected-route
-test passes on `2de8209f`. Partial HTTPS fallback also passes the protected-route test on
-`6cf2394b`: fetch only missing chunk ranges and verify them against the same origin manifest.
-The descriptor mode needs publisher cooperation and supports anonymous static binary resources,
-not arbitrary websites. Arbitrary peers are not trust anchors, and no
-compulsory central witness is proposed.
+Content is divided into verifiable chunks. Useful pieces can come from several holders, be
+reassembled by a requester, and—where sharing is authorized—become available to other participants.
 
-The normal CLI now exposes `content fetch-https`: authenticate the cooperative origin's canonical
-metadata over hostname/CA-verified TLS 1.3 through the protected MPTCP route, try peer chunks,
-then fetch missing ranges from that same authenticated origin. For a configured agent and
-provisioned, policy-allowed origin/provider endpoints, substitute the actual URL and new
-agent-writable paths:
+```mermaid
+flowchart TB
+    Q["Request a specific object and version"]
+    A["Establish original authority<br/>publisher signature or fresh HTTPS origin metadata"]
+    L["Valid local chunks"]
+    P["Useful peer holders<br/>parallel missing-chunk retrieval"]
+    O["Original publisher or origin<br/>missing data / supported fallback"]
+    V["Verify and reassemble<br/>before delivery"]
+    U["Deliver to the requester"]
+    S["Contribute eligible chunks<br/>within spare-resource and storage budgets"]
 
-```sh
-volparossa content fetch-https \
-  --url https://origin.example/object.bin --metadata-path /.well-known/volparossa/object \
-  --cache /agent-owned/new-https-cache --output /agent-owned/object.bin
+    Q --> A
+    A --> L
+    A --> P
+    A --> O
+    L --> V
+    P --> V
+    O --> V
+    V --> U
+    V -.->|"Only when authorized and configured"| S
+    S -.->|"Available for later requests"| P
 ```
 
-Debian system trust is the default. Optional `--ca-file public-roots.pem` selects bounded public
-PEM roots for this request only; it installs nothing and does not disable certificate or hostname
-verification. No separately supplied publisher key can replace origin authentication. Focused
-CLI/agent/control checks and the source-scoped normal-CLI KVM provider proof on `e592b610` pass;
-C08 remains incomplete. [HTTPS scope and progress](docs/CONTENT_NETWORK_PROPOSAL.md#cooperative-origin-https-retrieval)
-distinguish this command from the earlier executable-fixture passes.
-An additional explicit `--origin-digest` mode replaces `--metadata-path` when the origin supplies
-a supported SHA-256 `Repr-Digest` on the resource's own authenticated HEAD response. This needs
-no VOLPAROSSA-specific origin descriptor: providers supply an untrusted chunk index, and the
-agent checks the complete object against the origin digest before delivery or contribution.
-It currently supports the same anonymous public binary profile, with complete peer retrieval or
-one full origin GET. Missing/unsupported digest metadata is rejected, not replaced by peer trust.
-The [protected-network proof on `f3abee8e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34212634858)
-passes: two providers deliver every payload byte with zero origin body transfer after a fresh
-origin HEAD. In this fixture peers-first takes 9.23 seconds versus 2.58 seconds origin-only;
-server payload is saved, but latency does not improve. This is not arbitrary-site compatibility.
-The [independent-index follow-up on `3357169e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34218261300)
-also passes: freshly revalidated recent peers deliver the complete object using their different
-original indexes, with no origin body. Lookup replies arrive in 42/64 ms; the complete peer
-operation takes 4.91 seconds versus 2.54 seconds origin-only, so no latency win is claimed.
-Source selection now overlaps resource-admitted index requests and includes their measured cost in automatic
-admission. The [fixed 4-Mbps-origin run on `2769761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34223916952)
-completed an actual automatic peer hit: 4.09 seconds for the full command versus 6.31 seconds
-origin-only, with zero origin body. The workflow **failed in its evidence checker**, not during
-those downloads; rechecking the retained HTTPS evidence with two narrow checker corrections
-passes. The [complete corrected workflow on `6d3f44d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34227589468)
-now passes, including the later publication/name/site/cache-only phases. Its automatic command
-takes 4.32 seconds versus 6.39 seconds origin-only, again with zero origin body. These constrained-
-uplink samples do not replace the earlier faster-origin results or promise a general speedup.
-A successful cold peer-only download now also teaches its complete batch cost, instead of scaling
-each partial provider's fixed setup to a whole object. Reuse requires the same authorized object,
-provider set, route/policy, fresh original deadlines and sufficient current resources. Unknown or
-changed conditions retain conservative origin fallback. The
-[complete `fb86ea62` provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34242925635)
-passes: with the fixed 4-Mbps origin, automatic retrieval actually uses two peers and no origin
-body, taking 4.52 seconds versus 6.63 seconds origin-only. This is one constrained-uplink sample,
-not a general speedup or a three-provider HTTPS result.
-See [origin-digest usage and limits](docs/OPERATIONS.md#https-origin-digest-downloads).
-There is no interception CA, TLS bypass, automatic sharing of private responses or promise that
-all existing websites can be transparently cached. The proposal is the design reference;
-[implementation status](docs/IMPLEMENTATION_STATUS.md) records verification and remaining work.
+*This is a content-acquisition flow, not a network-route diagram. Remote payload transfers still
+use protected routes. Source choice and fallback depend on the publication's supported profile;
+the diagram does not imply that every source must be contacted.*
 
-Native and named cache downloads now use adaptive worker counts instead of a fixed pair. They
-start with at most two useful candidates and may add providers for missing content or measured
-aggregate benefit, within current memory/descriptor headroom. Resource pressure stops expansion
-and drains surplus streams at chunk boundaries. Discovery/control admission now also follows
-current resources instead of a permanent 384-total/256-per-direction connection ceiling, without
-filling that allowance speculatively or breaking existing routes when it shrinks. See
-[adaptive control connections](docs/OPERATIONS.md#adaptive-control-connections). The
-[three-provider network run on `d0251a27`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34232194290)
-passes: all fifteen unique chunks arrive from three overlapping provider streams through the
-protected route, with no origin body. HTTPS source plans now admit a bounded batch beyond two
-providers into that same resource-leased downloader; independent original indexes and fresh
-origin authentication remain required. The
-[complete provider run on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259)
-now passes both native and origin-digest HTTPS retrieval: each receives all fifteen chunks /
-3,932,160 bytes from three providers, with genuine simultaneous bulk transfer and zero origin
-body bytes. HTTPS still requires a fresh authenticated origin HEAD. This proves concurrent
-delivery, not a general speedup or arbitrary-HTTPS compatibility.
+- **Shared cache:** retrieve only needed chunks, retain verified progress after a provider fails,
+  and opportunistically pick up other eligible chunks without taking over foreground resources.
+- **Public sites and files:** publish signed native objects and static sites; retained copies can
+  serve requests after the original source disappears, while valid holders remain available.
+- **Offline messages:** known-contact mailboxes retain recipient-encrypted messages. Cache holders
+  receive ciphertext, not the recipient's decryption key.
+- **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original
+  authority and expiry rather than trusting an arbitrary peer's answer.
+- **Existing HTTPS:** supported cooperative-origin or origin-digest modes authenticate the origin
+  before using peer content. No interception CA, TLS bypass or automatic sharing of private
+  responses is introduced.
 
-TCP routes now retain reserved warm paths separately from their initial MPTCP subflows. The
-Exit can advertise an extra path when actual per-subflow kernel observations show sustained
-loss, without first removing an initial path or restarting the application connection.
-The [MPTCP growth run on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480)
-passes: the same live download grows from two to three data-carrying subflows under measured
-loss, retains its original metasockets, delivers the complete 32-MiB response and cleans up.
-All six WireGuard legs carry data. This is live path growth, not a speedup comparison;
-backend path ceilings have not yet been removed.
+The aim is faster retrieval and less origin-server traffic **when peers are advantageous**.
+Some constrained-uplink tests show a benefit; others show that the origin is faster. Peer caching
+is not always the winning choice, and current HTTPS support does not cover arbitrary websites.
+Shared storage also does not promise permanent availability, globally optimal replica placement,
+or permission to redistribute everything a user receives.
 
-The [MPQUIC warm-growth run on `5b1ba7af`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851)
-passes: one HTTP/3 flow expands from two to three active relay paths under measured packet loss,
-with fresh transport progress on all three, traffic on all six WireGuard legs, matching 32-MiB
-upload/download hashes and complete cleanup. This proves bounded live path growth, not additional
-throughput, unique application bytes per path or removal of the backend path ceiling.
+[Content design and scope →](docs/CONTENT_NETWORK_PROPOSAL.md) ·
+[Publishing, retrieval and mailboxes →](docs/OPERATIONS.md#offline-content-commands)
 
-Configured Wi-Fi meshes now adjust new-neighbor admission instead of defaulting to eight and
-rejecting everything above thirty-two. `wifi_mesh.maximum_peers: 0` means no operator ceiling;
-resources, observed channel load and actual new-peer progress govern gradual exploration.
-Missing radio measurements trigger slower exploration, not a claim of spare airtime. Existing
-peers are not forcibly removed by a lower allowance. The defensive 512-station observation
-bound and native transport path ceilings remain; this is not unlimited allocation or physical
-radio/throughput proof. The
-[Linux simulated-radio proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34238191689)
-passes admission changes with established-link retention and 131,072 bytes each way; full-agent
-adaptive growth is separate. See [adaptive mesh admission](docs/OPERATIONS.md#adaptive-mesh-admission).
+## A cooperative brain
 
-`content browser-download` uses the same cooperative-origin authentication and protected retrieval,
-then prints a short-lived, single-use localhost download URL. Open that URL directly in the
-browser while the command runs; the response is an attachment, not a page with the HTTPS origin's
-permissions. It takes `--url`, either `--metadata-path` or `--origin-digest`, and `--cache`,
-with no output or bind option.
-The link lasts at most five minutes and never outlives the original authenticated authority.
-See the [browser-download usage](docs/OPERATIONS.md#one-shot-browser-download); no CA is installed.
-Arbitrary-site compatibility and measured benefit are not claimed, and C08 remains open.
+The AI layer is intended to make many cooperating agents usable as one decentralized service:
+divide suitable tasks among participants, reuse useful models and improve compatible agents
+without starting every training job from scratch.
 
-## Safe development setup
+The development implementation already supports real local adapter training, protected sharing
+and reuse of compatible adapters, and scoped public tasks on separate peer workers. A growing
+public training loop connects selected data, local updates, evaluation and signed sharing.
 
-The bootstrap script supports Debian 13 amd64 only. It reads package metadata, prints the exact apt
-packages and candidates it found, and asks before installation. It never changes routes, DNS,
-firewall rules, sysctls, interfaces, or namespaces.
+```mermaid
+flowchart TB
+    S["Select an eligible public source<br/>relevance and rights before cache availability"]
+    F["Obtain verified data<br/>cache when useful; fetch missing selected data"]
+    M["Existing base model<br/>and optional compatible trained adapter"]
+    T["Train a local successor<br/>within the owner's resource budget"]
+    V["Evaluate the candidate<br/>against its predecessor"]
+    D{"Meets the configured<br/>promotion criteria?"}
+    P["Publish the signed adapter<br/>for reuse by compatible peers"]
+    K["Keep the accepted version<br/>do not promote this candidate"]
+
+    S --> F
+    F --> T
+    M --> T
+    T --> V
+    V --> D
+    D -->|"Yes"| P
+    D -->|"No"| K
+    P -.->|"A selected update can seed later training"| M
+```
+
+*The explicit public-data training pipeline is a development candidate, not autonomous discovery
+of all useful sources. The common base model/runtime is explicitly provisioned; the demonstrated
+network transfer covers compatible adapters and their public datasets.*
+
+Caching optimizes **how** selected data is acquired, not **which knowledge is allowed to count**.
+Missing eligible data must remain fetchable; an available cache is not automatically a balanced
+training corpus, nor is everything in it authorized for training.
+
+The first successor gate has live evidence on a small same-source held-out set. A separate,
+explicitly pinned second-source comparison is implemented with its live proof pending.
+Neither proves general intelligence or that every update is universally better.
+
+Public work can be split across selected peers, with retained results and bounded recovery
+after worker loss. Private distributed computation, general autonomous planning, defended model
+aggregation and a complete self-maintaining “brain” remain work to do. More participants offer
+more potential resources and diversity—not an automatic guarantee of smarter answers.
+
+Ordinary remote inference exposes inputs to the executing device: encrypted transport alone
+does not make private offload safe. Current distributed experiments use explicitly public,
+authorized data. The owner's activity has priority, with bounded worker resources, pause/resume
+and cancellation; broader device-activity integration remains incomplete.
+
+[Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
+
+## Seven virtues, seven sins
+
+**Modern technology, an enduring vocabulary for cooperation.**
+
+VOLPAROSSA's chosen Latin virtues and vices provide a shared language for responsible behavior.
+They are presented as broadly understandable ethical principles, not a religious membership
+test or a score of a person's moral worth. The English names below are translations; the
+practical interpretations describe how the project intends to apply them.
+
+| Virtue — positive principle | Sin / vice — risk to resist | Practical interpretation for agents |
+| --- | --- | --- |
+| **Humilitas — Humility** | **Superbia — Pride** | Acknowledge uncertainty, accept correction and do not claim authority or competence without evidence. |
+| **Humanitas — Humanity / Kindness** | **Invidia — Envy** | Support people's dignity and wellbeing; cooperate rather than undermine others or hoard useful advantages. |
+| **Mansuetudo — Gentleness** | **Ira — Wrath** | Respond proportionately, de-escalate conflict and avoid punitive or retaliatory behavior. |
+| **Diligentia — Diligence** | **Acedia — Sloth / Apathy** | Carry out entrusted work with care, make useful progress and report failures honestly. |
+| **Liberalitas — Generosity** | **Avaritia — Greed** | Contribute fairly within available means; do not exploit participants or consume their resources without restraint. |
+| **Temperantia — Temperance / Moderation** | **Gula — Gluttony** | Respect resource limits and the owner's needs; usefulness matters more than endless consumption or growth. |
+| **Castitas — Chastity** | **Luxuria — Lust** | In the project's broader application: respect consent, dignity and personal boundaries; reject exploitation. |
+
+### From principles to concrete policy
+
+The same principles inform two different layers:
+
+- **Agent behavior and training:** honesty, care, restraint, cooperation and non-exploitation.
+- **Content policy:** concrete, versioned whitelist/blacklist rules with a defined subject,
+  evidence and scope—not a ban triggered by the mere mention of a vice.
+
+The agreed policy direction prohibits illegal content and conduct such as fraud, unauthorized
+piracy and child sexual abuse material. Lawful reporting, prevention and critical discussion
+are not the prohibited conduct itself. Lawful adult pornography, gambling and harmful patterns
+of social-media use require contextual assessment; no blanket verdict has been agreed.
+Ordinary lawful shopping and social-media use remain allowed, with optional constructive advice.
+
+The selected baseline is **Netherlands/EU, plus applicable local exit restrictions**. Fully
+automatic assessment, mutual checking, conflict resolution and authorized policy activation
+are the goal. That future governance must also detect and quarantine defective agent artifacts
+without treating disagreement as proof of wrongdoing.
+
+Today, exits enforce a threshold-signed **destination/port whitelist**; this is not an automatic
+classifier for everything behind a hostname. The complete governance and agent “immune system”
+are not yet implemented. Filtering cannot guarantee a perfectly clean cache, eliminate legal
+risk, or justify breaking private encryption.
+
+[Agreed categories and automatic-governance design →](docs/DECENTRALIZED_AGENTS.md#agreed-content-policy-examples) ·
+[Current whitelist enforcement →](docs/WHITELIST.md)
+
+## Development status
+
+A passed checkpoint belongs to its recorded source revision and test scope. Results from
+different revisions are not combined into a claim that the current build is fully verified.
+
+| Area | Demonstrated checkpoints | Still to complete or broaden |
+| --- | --- | --- |
+| **Protected v1 transports** | A01–A15 on `482e33d0`: real two-leg WireGuard, MPTCP, protected UDP, MPQUIC, privacy captures and cleanup. Later scoped flows grow to three paths. | Current-build integration and remaining transport/path-growth limits; release hardening. |
+| **Local + Internet links** | Offline-node consumption/contribution, mixed LAN/WAN traffic and simulated-radio operation. | Physical radios, phone support, general mesh reachability and broader capacity detection. |
+| **Content network** | Scoped C01–C07 results: verified chunks, peer retrieval, replication, DNS sharing, static publication and encrypted delivery. | C08 existing-web coverage/benefit, automatic holder selection and ongoing availability. |
+| **Cooperative AI** | Real adapter training/reuse, B02 protected artifact exchange, public peer-job/recovery and selected-source training-loop checkpoints. | Remaining B01/B03–B07 scope: broader owner priority, general tasks, private offload, autonomous learning and defended aggregation. |
+| **Automatic governance** | Existing signed destination-policy enforcement and rollback/conflict checks. | Content judgments, decentralized decision membership, conflict resolution and the agent immune system. |
+
+The detailed chronology, failed runs, exact measurements and pending proofs live in
+[IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), rather than being duplicated here.
+The original v1 pass is [recorded with its run and evidence](https://github.com/VOLPAROSSA/volparossa/actions/runs/34047766913).
+There is no release-readiness or universal speed/privacy guarantee.
+
+## Developing VOLPAROSSA
+
+The initial target is **Debian 13 Trixie, amd64**, with systemd, kernel WireGuard, kernel MPTCP
+and nftables. Start by reviewing the dependency plan and your system:
 
 ```sh
 ./scripts/bootstrap-debian13-dev.sh --print-only
-./scripts/bootstrap-debian13-dev.sh
 ./scripts/check-system.sh
 cargo build --locked --workspace --all-features
 ```
 
-Do not run network tests on the host network. Privileged integration tests belong in disposable
-Linux network namespaces and must prove cleanup and unchanged host state. See
-[TESTING.md](docs/TESTING.md).
+The build requires the documented dependencies. Running the bootstrap script without
+`--print-only` asks before installing its displayed package plan; it does not change networking.
+Candidate Debian packaging and `just demo` are development workflows, not a supported release.
+Do not enable services based on a diagram or a historical checkpoint alone.
 
-## Installation and demo status
+| Component | Responsibility |
+| --- | --- |
+| `volparossa` | User-facing CLI for configuration, routes, content and compute workflows. |
+| `volparossa-agent` | Unprivileged discovery, control-plane and session service. |
+| `volparossa-helper` | Narrowly allowlisted privileged network operations. |
+| Isolated ML worker | Explicitly provisioned model inference/training, supervised separately from networking privileges. |
 
-The repository contains candidate Debian packaging and hardened service definitions for development
-testing, not a supported release. Consult the exact revision's packaging and integration evidence;
-the v1 checkpoint does not certify later builds or configurations. `just package-deb` and `just demo`
-remain development workflows. Do not enable the systemd services based on documentation alone.
+Network tests belong in disposable namespaces or the documented disposable VM topology,
+**never on the development host's active network**. Cleanup must preserve the host's original
+routes, DNS and firewall.
 
-When a verified release exists, the intended flow is:
+[Development and testing →](docs/TESTING.md) ·
+[Configuration, operation and removal →](docs/OPERATIONS.md) ·
+[Contribution guidelines →](CONTRIBUTING.md)
 
-```sh
-just package-deb
-sudo apt install ./dist/volparossa_0.1.0_amd64.deb
-volparossa init
-volparossa config validate
-volparossa doctor
-```
+## Documentation map
 
-`init` must be run interactively and must never print the private identity. Relay or exit mode must
-then be enabled explicitly; installing the package does not enable either role. Operational and
-uninstall guidance is in [OPERATIONS.md](docs/OPERATIONS.md).
+| Read this | For |
+| --- | --- |
+| [Implementation status](docs/IMPLEMENTATION_STATUS.md) | Exact progress, test evidence, failures and remaining work. |
+| [Architecture](docs/ARCHITECTURE.md) / [Protocol](docs/PROTOCOL.md) | Components, routing, trust boundaries and wire formats. |
+| [Local-link network](docs/LOCAL_LINK_NETWORK.md) | Direct connectivity, reciprocal contribution and owner-priority sharing. |
+| [Content network](docs/CONTENT_NETWORK_PROPOSAL.md) | Caching, HTTPS authority, publishing and offline delivery. |
+| [Cooperative agents](docs/DECENTRALIZED_AGENTS.md) | Training, public tasks, privacy and automatic policy governance. |
+| [Whitelist](docs/WHITELIST.md) | Current destination policy and enforcement. |
+| [Threat model](docs/THREAT_MODEL.md) / [Privacy](docs/PRIVACY.md) | Protection boundaries and what the network cannot promise. |
+| [Security policy](SECURITY.md) | Reporting vulnerabilities. |
 
-## Security warnings and known limitations
+## Boundaries and license
 
-- Real MPTCP and Multipath QUIC application/path evidence exists in disposable networks. It does
-  not establish reliable completion of all flows, recovery cases and newer features on the current
-  build; the [implementation status](docs/IMPLEMENTATION_STATUS.md) records the remaining failures.
-- The native mqvpn/xquic component is pinned and source-built behind a bounded process API, and
-  the production agent now drives its real datapaths. A same-UID process socket and descriptor
-  correlation do not by themselves authenticate privileged-helper origin against an untrusted
-  agent. Functional traffic evidence is not a release-security claim.
-- Kill-switch, whitelist, crash-cleanup and privacy results are scoped to the tested build and
-  topology. They are not a release-security guarantee or approval to use sensitive traffic.
-- Anti-Sybil diversity and local performance history can raise an attacker's cost but cannot
-  cryptographically prevent Sybil participation.
-- A relay and exit that collude can improve correlation; a global timing observer is outside the
-  protection promised by this architecture.
-- Local root can read process memory, keys, destinations, and traffic and can bypass the product.
+VOLPAROSSA is not a generic open proxy, an anonymity guarantee or a way around its shared policy.
+A global timing observer may correlate this low-latency traffic; colluding relay/exit operators
+and local root remain important threats. Local diversity measures mitigate, not eliminate,
+Sybil attacks. Functional demonstrations do not establish release-grade security.
 
-Read the full [threat model](docs/THREAT_MODEL.md), [privacy design](docs/PRIVACY.md), and
-[security reporting policy](SECURITY.md) before testing with sensitive data.
+There is no payment system, token, blockchain or GUI. The v1 transports introduce no cover
+traffic, artificial delay, packet duplication or FEC. Content replication is a separate
+application function, not transport-level packet duplication.
 
-## Contributing and license
-
-Original VOLPAROSSA code is licensed under GNU GPL v3.0 only. Third-party components retain their
-own licenses; see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). Contributions are welcome once
-they follow [CONTRIBUTING.md](CONTRIBUTING.md), especially the evidence and host-safety rules.
+Original code is **GPL-3.0-only**; third-party components retain their own licenses and notices.
+See [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

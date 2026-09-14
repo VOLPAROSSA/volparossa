@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::Args;
 use ed25519_dalek::VerifyingKey;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
@@ -124,7 +125,20 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
 pub(super) async fn execute_cycle(
     args: &Options,
     socket: &Path,
+    activity: watch::Receiver<bool>,
+) -> Result<Value> {
+    execute_cycle_guarded(args, socket, activity, None).await
+}
+
+/// An optional separately authenticated public evaluation source is never used
+/// as training input. Its publisher/manifest binding belongs to the caller;
+/// this guard checks current input bytes and normalized questions, not semantic
+/// overlap or contamination in any earlier training run.
+pub(super) async fn execute_cycle_guarded(
+    args: &Options,
+    socket: &Path,
     mut activity: watch::Receiver<bool>,
+    validation: Option<&[u8]>,
 ) -> Result<Value> {
     ensure!(args.execute, "train_cycle_execute_required");
     ensure_active(&activity, "train_cycle_cancelled_before_output")?;
@@ -164,6 +178,9 @@ pub(super) async fn execute_cycle(
         result = agent_artifact::fetch_training_source(&selected, socket, &args.output) => result?,
     };
     let verified = validate_source(args, &download, now()?)?;
+    if let Some(validation) = validation {
+        guard_overlap(&download.dataset, validation)?;
+    }
     let source = persist_source(args, &download, &verified)?;
     ensure_active(&activity, "train_cycle_cancelled_before_training")?;
     let options = worker_options(args, verified.expires(), now()?)?;
@@ -176,6 +193,102 @@ pub(super) async fn execute_cycle(
         "train_cycle_cancelled_after_training_outputs_retained",
     )?;
     complete(args, &download, &source, &report)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuardDataset {
+    version: u32,
+    visibility: String,
+    license: String,
+    source_revision: String,
+    train: Vec<GuardAnswered>,
+    heldout: Vec<GuardAnswered>,
+    inference: Vec<GuardQuestion>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuardAnswered {
+    question: String,
+    context: String,
+    answer: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuardQuestion {
+    question: String,
+    context: String,
+}
+
+fn guard_dataset(bytes: &[u8]) -> Result<GuardDataset> {
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= 1024 * 1024,
+        "train_cycle_validation_dataset_bound"
+    );
+    let dataset: GuardDataset = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("train_cycle_validation_schema"))?;
+    ensure!(
+        dataset.version == 1
+            && dataset.visibility == "public"
+            && dataset.license == "GPL-3.0-only"
+            && is_hex(&dataset.source_revision, 40)
+            && dataset.train.len() <= 32
+            && (1..=8).contains(&dataset.heldout.len())
+            && (1..=4).contains(&dataset.inference.len()),
+        "train_cycle_validation_public_profile"
+    );
+    let text = |value: &str, limit| {
+        !value.trim().is_empty() && value.len() <= limit && !value.contains('\0')
+    };
+    ensure!(
+        dataset.train.iter().chain(&dataset.heldout).all(|row| {
+            text(&row.question, 512) && text(&row.context, 4096) && text(&row.answer, 1024)
+        }) && dataset
+            .inference
+            .iter()
+            .all(|row| text(&row.question, 512) && text(&row.context, 4096)),
+        "train_cycle_validation_sample"
+    );
+    Ok(dataset)
+}
+
+fn normalized_question(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn guard_overlap(training_bytes: &[u8], validation_bytes: &[u8]) -> Result<()> {
+    let training = guard_dataset(training_bytes)?;
+    let validation = guard_dataset(validation_bytes)?;
+    ensure!(
+        Sha256::digest(training_bytes) != Sha256::digest(validation_bytes),
+        "train_cycle_validation_source_reused"
+    );
+    ensure!(
+        !training.train.is_empty() && validation.train.is_empty(),
+        "train_cycle_validation_must_not_train"
+    );
+    let questions: Vec<_> = validation
+        .heldout
+        .iter()
+        .map(|row| row.question.as_str())
+        .chain(validation.inference.iter().map(|row| row.question.as_str()))
+        .map(normalized_question)
+        .collect();
+    // Excluding the entire normalized question is intentionally wider than
+    // comparing an exact normalized (question, context, answer) triple.
+    ensure!(
+        training
+            .train
+            .iter()
+            .all(|row| !questions.contains(&normalized_question(&row.question))),
+        "train_cycle_validation_training_overlap"
+    );
+    Ok(())
 }
 
 fn ensure_active(activity: &watch::Receiver<bool>, code: &'static str) -> Result<()> {
@@ -397,6 +510,107 @@ mod tests {
     };
 
     use super::*;
+
+    fn overlap_inputs() -> (Value, Value) {
+        let training = serde_json::json!({"version":1,"visibility":"public","license":"GPL-3.0-only",
+            "source_revision":"a".repeat(40),
+            "train":[{"question":"What is networking?","context":"Explicit public training.","answer":"Connecting nodes."}],
+            "heldout":[{"question":"What is checked?","context":"A separate evaluation row.","answer":"A heldout response."}],
+            "inference":[{"question":"What is this test?","context":"Public parser fixtures."}]});
+        let mut validation = training.clone();
+        validation["train"] = serde_json::json!([]);
+        (training, validation)
+    }
+
+    fn overlap_error(training: &Value, validation: &Value) -> String {
+        guard_overlap(
+            &serde_json::to_vec(training).unwrap(),
+            &serde_json::to_vec(validation).unwrap(),
+        )
+        .unwrap_err()
+        .to_string()
+    }
+
+    #[test]
+    fn validation_allows_shared_nontraining_rows_and_same_repository_revision() {
+        let (training, validation) = overlap_inputs();
+        assert_eq!(training["heldout"], validation["heldout"]);
+        assert_eq!(training["inference"], validation["inference"]);
+        assert_eq!(training["source_revision"], validation["source_revision"]);
+        guard_overlap(
+            &serde_json::to_vec(&training).unwrap(),
+            &serde_json::to_vec(&validation).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validation_rejects_same_source_bytes_or_any_evaluation_training_rows() {
+        let (training, mut validation) = overlap_inputs();
+        assert_eq!(
+            overlap_error(&training, &training),
+            "train_cycle_validation_source_reused"
+        );
+        validation["train"] = serde_json::json!([{"question":"Another question?",
+            "context":"Evaluation must not train this either.","answer":"No."}]);
+        assert_eq!(
+            overlap_error(&training, &validation),
+            "train_cycle_validation_must_not_train"
+        );
+    }
+
+    #[test]
+    fn normalized_training_question_overlap_rejects_before_any_model_work() {
+        let (training, validation) = overlap_inputs();
+        for split in ["heldout", "inference"] {
+            let mut overlapping = validation.clone();
+            overlapping[split][0]["question"] = "  wHaT\u{2003}IS\t NETWORKING?\n".into();
+            overlapping[split][0]["context"] =
+                "Different context does not permit leaking a heldout question.".into();
+            assert_eq!(
+                overlap_error(&training, &overlapping),
+                "train_cycle_validation_training_overlap"
+            );
+        }
+        let mut exact_row = validation;
+        exact_row["heldout"][0] = training["train"][0].clone();
+        assert_eq!(
+            overlap_error(&training, &exact_row),
+            "train_cycle_validation_training_overlap"
+        );
+    }
+
+    #[test]
+    fn validation_guard_requires_bounded_strict_public_v1_schema() {
+        let (training, validation) = overlap_inputs();
+        for (field, replacement) in [
+            ("version", serde_json::json!(2)),
+            ("visibility", serde_json::json!("private")),
+            ("heldout", serde_json::json!([])),
+        ] {
+            let mut invalid = validation.clone();
+            invalid[field] = replacement;
+            assert_eq!(
+                overlap_error(&training, &invalid),
+                "train_cycle_validation_public_profile"
+            );
+        }
+        let mut invalid = validation;
+        invalid["unrecognized_source"] = true.into();
+        assert_eq!(
+            overlap_error(&training, &invalid),
+            "train_cycle_validation_schema"
+        );
+        assert_eq!(
+            guard_overlap(
+                &serde_json::to_vec(&training).unwrap(),
+                &vec![b' '; 1024 * 1024 + 1]
+            )
+            .unwrap_err()
+            .to_string(),
+            "train_cycle_validation_dataset_bound"
+        );
+    }
 
     fn arguments(root: &Path, publisher: &VerifyingKey) -> Options {
         let command_line = vec![

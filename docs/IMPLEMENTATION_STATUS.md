@@ -144,8 +144,18 @@ the Client UID could not read its helper under `/home/vpci/source`, causing
 `DOCUMENT_PUBLIC_INPUT_FAILED`. Cleanup completed with zero owned objects and unchanged
 guest-state hashes. Correction `4421b1a6de2b0f69bf08873e1c5c9e7a3d419e52` installs only the
 public guest helper and an owner-readable, read-only README copy; it does not widen source-tree
-permissions. Parser, file and shell checks pass; the corrected exact-source
-[VM run 34893180542](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
+permissions. Parser, file and shell checks pass. The corrected exact-source
+[VM run 34893180542](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542)
+passes public-input preparation but fails at worker startup with `compute_result_missing`,
+before any validated worker phase. Cleanup again leaves zero owned objects and identical
+guest-state hashes. That head's workspace Quality and CodeQL checks pass, but the document
+datapath remains unproven. A separate diagnostic candidate retains only a fixed startup
+category, exit code/signal and byte count when stdout ends without a result; it does not
+log raw stderr or document text and does not claim to fix the underlying startup failure.
+The [diagnostic VM on `d29455d3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896132212)
+stops earlier at `JOBS_BROKER_UNAVAILABLE` for R4, before attach/tokenizer execution. Broker
+logs are empty and the original artifact lacks unit exit-state details, so it does not identify
+or disprove the earlier worker-startup cause. Cleanup is complete with unchanged guest state.
 This is not confidential offload, source-cache discovery, automatic network replication,
 neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
@@ -235,7 +245,52 @@ All 68 focused CLI compute tests and strict CLI Clippy pass; physical-device evi
 The new `agent-owner-cancel` disposable fixture targets actual training followed by owner-only
 pidfd/SIGINT, a five-second CLI/observed-process cleanup bound, `compute_owner_busy`, no completed
 checkpoint and unchanged on-disk base/guest state. Its local parser/file/shell checks pass;
-the actual VM proof is pending. Neither this candidate nor its tests check off B01, B03 or B05.
+The [actual owner-cancel VM on `43dee7ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893645697)
+passes its exact-source report and original raw-bundle verification: owner-only SIGINT, CLI
+reaping after 3.242 ms and all four observed processes ended after 59.420 ms, without fallback
+signals or a completed checkpoint. The runtime lock is released and the 269,060,552-byte base
+model hash remains unchanged. Cleanup leaves zero owned objects; both guest-state hashes are
+`c512a02a7bd7c80acbb93c000b9c95682247d164578afc977c271261ec8edd87`.
+Review, source hashes and the original-bundle checker are retained under
+`.git/ci-evidence/34893645697/`. Physical battery/thermal and comprehensive interactive-activity
+evidence remain open; this scoped result does not check off B01, B03 or B05.
+
+The successor-selection candidate adds a mandatory `source-heldout-loss-v1` policy to new
+training-loop enrollment and version-2 state. Technical training completion no longer promotes
+every candidate: only finite, consistent reloaded held-out loss strictly lower than its
+predecessor by more than `1e-6` replaces the warmstart or enters automatic publication.
+Immutable `evaluation.json` binds actual dataset, worker reports, base, input adapter and
+candidate files; recovery and publication recheck the decision. Rejected outputs remain
+bounded/reclaimable and cannot evict the last approved warmstart or pending approved publication.
+Old version-1 loops are not silently migrated or treated as evaluated; their output is retained.
+The current training source also supplies the held-out examples, so this is not independent
+benchmarking, cross-round contamination prevention, general intelligence or completed B05.
+All 75 focused CLI compute tests and strict CLI Clippy pass, including startup diagnostics,
+promotion/rejection, restart and reclamation. The pure proof checker accepts all four possible
+two-cycle promotion outcomes and rejects inconsistent evidence. These are control/receipt
+checks, not live model evidence. The [updated VM on `405e67e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896078997)
+now passes both the exact-source checker and original raw reconstruction (299,551 bytes,
+SHA-256 `94060e97d3db4ffca3167bc2d9ca140845edbdc866ea3dbc6335c3e389ef6e87`).
+Two actual eight-update cycles approve loss reductions `1.244269 → 0.615178 → 0.345725` on
+only four target tokens from the same source. Both successors are contributed and the latest
+is retrieved over protected paths and used by another Client. Rejection was not taken in this
+VM. Cleanup leaves zero owned objects; guest-state hashes both equal
+`550a00b214a77e1dc3dee3f69eb95d6b2f57dd0b6506b973c80ba89ad1503520`.
+
+The second-source validation candidate adds optional explicit `--validation-source` enrollment
+with an exact signed manifest and a distinct validation-only public dataset. It pins/retrieves
+that same source before training and rejects normalized training-question overlap. After actual
+training, two sequential bounded inference jobs compare predecessor and candidate on identical
+second-source bytes; promotion requires both the existing source-heldout improvement and this
+second-source improvement. The `evaluating` checkpoint retains finished training, and valid
+completed stages can be reused with their original reports/deadlines. Partial inference without
+a durable supervisor receipt is retained as an explicit failure, not relabelled or overwritten.
+Twenty-file completed snapshots bind both stages and the combined decision. The live fixture
+is being extended. All 84 focused CLI compute tests and strict CLI Clippy pass; the new tests
+cover explicit source enrollment, input overlap, completed-training recovery and source-bound
+inference receipt reuse without host model execution. This remains pending model/network
+evidence, not an independent benchmark,
+historical contamination proof, broad intelligence gain or completed B05.
 
 The next `compute train-loop` candidate connects that real cycle executor to a persistent,
 owner-enabled coordinator: cache-independent round-robin selection from explicit public

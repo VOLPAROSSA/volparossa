@@ -1,11 +1,13 @@
 //! Owner-enabled continuous public training, independent source selection and durable sharing.
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
+mod evaluation;
 mod publication;
 mod seed;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod validation;
 
 use std::{
     collections::BTreeSet,
@@ -56,6 +58,9 @@ pub(crate) struct Options {
     /// JSON with independently trusted adapter/dataset publishers and names for an initial peer update.
     #[arg(long, conflicts_with = "adapter_root")]
     seed: Option<PathBuf>,
+    /// Optional exact signed validation-only public source, selected before any training.
+    #[arg(long)]
+    validation_source: Option<PathBuf>,
     #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u16).range(1..=64))]
     steps: u16,
     #[arg(long, default_value_t=2, value_parser=clap::value_parser!(u16).range(1..=2))]
@@ -141,11 +146,13 @@ struct SourceProgress {
 #[serde(rename_all = "snake_case")]
 enum Phase {
     Running,
+    Evaluating,
     Trained,
     PublishPending,
     Complete,
     Failed,
     PublicationExpired,
+    Rejected,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,6 +162,8 @@ struct Cycle {
     source: usize,
     phase: Phase,
     snapshot: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    training: Option<Snapshot>,
     #[serde(default)]
     publication: Option<Value>,
     next_publication_attempt: u64,
@@ -167,25 +176,32 @@ struct State {
     next_sequence: u64,
     cursor: usize,
     completed: u64,
+    promoted: u64,
+    rejected: u64,
     latest: Option<u64>,
     sources: Vec<SourceProgress>,
     cycles: Vec<Cycle>,
     garbage: Vec<u64>,
     seed: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation: Option<Value>,
 }
 
 impl State {
     fn new(count: usize) -> Self {
         Self {
-            version: 1,
+            version: 2,
             next_sequence: 1,
             cursor: 0,
             completed: 0,
+            promoted: 0,
+            rejected: 0,
             latest: None,
             sources: (0..count).map(|_| SourceProgress::default()).collect(),
             cycles: Vec::new(),
             garbage: Vec::new(),
             seed: None,
+            validation: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -269,13 +285,26 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
             );
         }
     }
-    let selection = json!({"version":1,"sources":plan.sources,"runtime_root":args.runtime_root,"model_root":args.model_root,
+    let mut selection = json!({"version":1,"sources":plan.sources,"runtime_root":args.runtime_root,"model_root":args.model_root,
         "cache":args.cache,"initial_adapter_root":args.adapter_root,"steps":args.steps,"threads":args.threads,
         "max_worker_seconds":args.max_seconds,"repeat_sources":args.repeat_sources,"limits":args.limits.configuration(),
         "publish_name":args.publish_name,"publication_key":args.publication_key.map(|key|hex::encode(key.as_bytes())),
         "identity":args.identity,"passphrase_file":args.passphrase_file,"publish_cache":args.publish_cache,
         "first_publication_revision":args.first_publication_revision,"seed":seed::selection(args)?,"source_choice_uses_cache_inventory":false,
+        "quality_policy":"source-heldout-loss-v1",
         "private_data_supported":false,"code_or_model_downloads":false,"automatic_model_quality_claimed":false});
+    if let Some(validation) = validation::selection(args)? {
+        for source in &plan.sources {
+            ensure!(
+                (source.key()? != validation.key()? || source.name != validation.name)
+                    && (source.manifest()?.is_none()
+                        || source.manifest()? != validation.manifest()?),
+                "train_loop_validation_source_must_differ"
+            );
+        }
+        selection["validation_source"] = serde_json::to_value(validation)?;
+        selection["quality_policy"] = json!("source-and-second-source-loss-v1");
+    }
     Ok((plan, selection))
 }
 
@@ -309,7 +338,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         .unwrap_or_else(|| State::new(plan.sources.len()));
     recover(&store, &mut state, plan.sources.len())?;
     let activity = Activity::new()?;
-    seed::prepare(
+    prepare_inputs(
         args,
         socket,
         &selection,
@@ -318,6 +347,14 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &activity.receiver,
     )
     .await?;
+    if let Some(sequence) = state
+        .cycles
+        .iter()
+        .find(|cycle| cycle.phase == Phase::Evaluating)
+        .map(|cycle| cycle.sequence)
+    {
+        finish_cycle(args, &store, &mut state, sequence, &activity.receiver).await?;
+    }
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
     while active(&activity.receiver) {
@@ -355,6 +392,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     println!(
         "{}",
         json!({"operation":"compute_train_loop","completed_cycles":state.completed,
+        "promoted_cycles":state.promoted,"rejected_cycles":state.rejected,"latest_approved_sequence":state.latest,
+        "quality_policy":selection["quality_policy"],"independent_quality_benchmark":false,
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
         "private_data_supported":false,"full_b05_claimed":false})
@@ -362,10 +401,25 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn prepare_inputs(
+    args: &Options,
+    socket: &Path,
+    selection: &Value,
+    store: &Store,
+    state: &mut State,
+    activity: &watch::Receiver<bool>,
+) -> Result<()> {
+    seed::prepare(args, socket, selection, store, state, activity).await?;
+    validation::prepare(args, socket, selection, store, state, activity).await
+}
+
 fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
     ensure!(
-        state.version == 1
+        state.version == 2
             && state.next_sequence > 0
+            && state.promoted.checked_add(state.rejected) == Some(state.completed)
+            && state.completed < state.next_sequence
+            && (state.latest.is_some() == (state.promoted > 0))
             && state.sources.len() == count
             && state.cursor < count
             && state.cycles.len() <= RETAINED_CYCLES
@@ -373,6 +427,7 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
         "train_loop_state"
     );
     let mut distinct = BTreeSet::new();
+    let mut evaluating = 0;
     for sequence in &state.garbage {
         ensure!(
             *sequence > 0
@@ -396,20 +451,46 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
         if cycle.phase == Phase::Running {
             cycle.phase = Phase::Failed;
         }
+        if cycle.phase == Phase::Evaluating {
+            evaluating += 1;
+            ensure!(
+                evaluating == 1
+                    && cycle.sequence.checked_add(1) == Some(state.next_sequence)
+                    && cycle.publication.is_none(),
+                "train_loop_pending_evaluation_state"
+            );
+            store.validate_training(
+                cycle.sequence,
+                cycle
+                    .training
+                    .as_ref()
+                    .context("train_loop_training_checkpoint_missing")?,
+            )?;
+        }
         if let Some(snapshot) = &cycle.snapshot {
             store.validate_snapshot(cycle.sequence, snapshot)?;
+            let decision = evaluation::verify(store, cycle.sequence)?;
+            ensure!(
+                decision.approved == (cycle.phase != Phase::Rejected)
+                    && decision.has_validation() == state.validation.is_some()
+                    && (cycle.phase != Phase::Rejected || cycle.publication.is_none()),
+                "train_loop_evaluation_phase_mismatch"
+            );
         }
         ensure!(
-            cycle.snapshot.is_some() != matches!(cycle.phase, Phase::Running | Phase::Failed),
+            cycle.snapshot.is_some()
+                != matches!(
+                    cycle.phase,
+                    Phase::Running | Phase::Failed | Phase::Evaluating
+                ),
             "train_loop_snapshot_required"
         );
     }
     if let Some(latest) = state.latest {
         ensure!(
-            state
-                .cycles
-                .iter()
-                .any(|cycle| cycle.sequence == latest && cycle.snapshot.is_some()),
+            state.cycles.iter().any(|cycle| cycle.sequence == latest
+                && cycle.snapshot.is_some()
+                && cycle.phase != Phase::Rejected),
             "train_loop_latest_missing"
         );
     }
@@ -424,7 +505,7 @@ fn make_room(store: &Store, state: &mut State) -> Result<bool> {
         Some(cycle.sequence) != state.latest
             && matches!(
                 cycle.phase,
-                Phase::Complete | Phase::Failed | Phase::PublicationExpired
+                Phase::Complete | Phase::Failed | Phase::PublicationExpired | Phase::Rejected
             )
     });
     let Some(index) = obsolete else {
@@ -476,24 +557,7 @@ async fn attempt(
     } else {
         seed::adapter(args, state)?
     };
-    let options = train_cycle::Options {
-        publisher_key: source.key()?,
-        dataset_name: source.name.clone(),
-        dataset_manifest_id: source.manifest()?,
-        min_revision: minimum,
-        cache: args.cache.clone(),
-        reuse_cache: true,
-        runtime_root: args.runtime_root.clone(),
-        model_root: args.model_root.clone(),
-        adapter_root: adapter,
-        output: store.cycle_path(sequence)?,
-        steps: args.steps,
-        threads: args.threads,
-        max_seconds: args.max_seconds,
-        spare_capacity: true,
-        execute: true,
-        limits: args.limits.clone(),
-    };
+    let options = cycle_options(args, source, store.cycle_path(sequence)?, minimum, adapter)?;
     state.next_sequence = sequence
         .checked_add(1)
         .context("train_loop_sequence_exhausted")?;
@@ -504,45 +568,200 @@ async fn attempt(
         source: index,
         phase: Phase::Running,
         snapshot: None,
+        training: None,
         publication: None,
         next_publication_attempt: 0,
     });
     store.save_state(&serde_json::to_value(&*state)?)?;
     // Do not select/drop this future on cancellation: the model supervisor must reap.
-    let result = train_cycle::execute_cycle(&options, socket, activity.clone()).await;
-    let cycle = state
-        .cycles
-        .last_mut()
-        .context("train_loop_cycle_missing")?;
-    if result.is_ok() {
-        let manifest = SignedManifest::decode(&read_file(
-            &options.output.join("dataset.manifest"),
-            64 * 1024,
-        )?)?;
-        let verified = manifest.verify(&source.key()?, now()?)?;
-        state.sources[index].revision = Some(verified.metadata().revision);
-        cycle.snapshot = Some(store.snapshot_cycle(sequence)?);
-        cycle.phase = if args.publish_name.is_some() {
-            Phase::Trained
-        } else {
-            Phase::Complete
-        };
-        state.latest = Some(sequence);
-        state.completed = state
-            .completed
-            .checked_add(1)
-            .context("train_loop_completed_exhausted")?;
-    } else {
-        cycle.phase = Phase::Failed;
+    let validation_data = validation::data(args, state)?;
+    let result = train_cycle::execute_cycle_guarded(
+        &options,
+        socket,
+        activity.clone(),
+        validation_data.as_deref(),
+    )
+    .await;
+    if result.is_err() {
+        state
+            .cycles
+            .last_mut()
+            .context("train_loop_cycle_missing")?
+            .phase = Phase::Failed;
         // Model/network errors can contain source text. Record a fixed phase only.
         eprintln!("compute loop_event=cycle_failed");
+    } else {
+        let training = store.snapshot_training(sequence)?;
+        let cycle = state
+            .cycles
+            .last_mut()
+            .context("train_loop_cycle_missing")?;
+        cycle.training = Some(training);
+        cycle.phase = Phase::Evaluating;
+        store.save_state(&serde_json::to_value(&*state)?)?;
+        finish_cycle(args, store, state, sequence, activity).await?;
     }
     store.save_state(&serde_json::to_value(&*state)?)?;
     println!(
         "{}",
         json!({"operation":"compute_train_loop_cycle","sequence":sequence,"source_index":index,
-        "completed":result.is_ok(),"total_completed":state.completed,"selection_used_cache_inventory":false})
+        "completed":result.is_ok(),"approved":state.cycles.last().filter(|cycle|cycle.snapshot.is_some()).map(|cycle|cycle.phase!=Phase::Rejected),
+        "latest_approved_sequence":state.latest,"quality_policy":if state.validation.is_some(){"source-and-second-source-loss-v1"}else{"source-heldout-loss-v1"},
+        "total_completed":state.completed,"selection_used_cache_inventory":false})
     );
+    Ok(())
+}
+
+fn cycle_options(
+    args: &Options,
+    source: &Source,
+    output: PathBuf,
+    minimum: Option<u64>,
+    adapter: Option<PathBuf>,
+) -> Result<train_cycle::Options> {
+    Ok(train_cycle::Options {
+        publisher_key: source.key()?,
+        dataset_name: source.name.clone(),
+        dataset_manifest_id: source.manifest()?,
+        min_revision: minimum,
+        cache: args.cache.clone(),
+        reuse_cache: true,
+        runtime_root: args.runtime_root.clone(),
+        model_root: args.model_root.clone(),
+        adapter_root: adapter,
+        output,
+        steps: args.steps,
+        threads: args.threads,
+        max_seconds: args.max_seconds,
+        spare_capacity: true,
+        execute: true,
+        limits: args.limits.clone(),
+    })
+}
+
+async fn finish_cycle(
+    args: &Options,
+    store: &Store,
+    state: &mut State,
+    sequence: u64,
+    activity: &watch::Receiver<bool>,
+) -> Result<()> {
+    ensure!(
+        active(activity),
+        "train_loop_evaluation_cancelled_training_retained"
+    );
+    let cycle = state.cycles.last().context("train_loop_cycle_missing")?;
+    ensure!(
+        cycle.sequence == sequence && cycle.phase == Phase::Evaluating,
+        "train_loop_pending_evaluation_state"
+    );
+    store.validate_training(
+        sequence,
+        cycle
+            .training
+            .as_ref()
+            .context("train_loop_training_checkpoint_missing")?,
+    )?;
+    if state.validation.is_some() {
+        validation::assess(args, store, state, sequence, activity).await?;
+    }
+    qualify_cycle(store, state, sequence, args.publish_name.is_some())?;
+    store.save_state(&serde_json::to_value(state)?)
+}
+
+fn qualify_cycle(
+    store: &Store,
+    state: &mut State,
+    sequence: u64,
+    publish: bool,
+) -> Result<evaluation::Record> {
+    let root = store.cycle_path(sequence)?;
+    let selection = store.read_cycle_json(sequence, "selection.json")?;
+    let publisher = content::parse_publisher_key(
+        selection["publisher_key"]
+            .as_str()
+            .context("train_loop_cycle_publisher")?,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let adapter: Option<PathBuf> = serde_json::from_value(selection["adapter_root"].clone())?;
+    let manifest = SignedManifest::decode(&read_file(&root.join("dataset.manifest"), 64 * 1024)?)?;
+    let verified = manifest.verify(&publisher, now()?)?;
+    let decision = if root.join("evaluation.json").try_exists()? {
+        evaluation::verify(store, sequence)?
+    } else {
+        let decision = evaluation::assess(store, sequence, state.latest, adapter.as_deref())?;
+        store.write_cycle_json(
+            sequence,
+            "evaluation.json",
+            &serde_json::to_value(&decision)?,
+        )?;
+        decision
+    };
+    ensure!(
+        decision.has_validation() == state.validation.is_some(),
+        "train_loop_validation_required"
+    );
+    select_successor(
+        state,
+        store.snapshot_cycle(sequence)?,
+        verified.metadata().revision,
+        &decision,
+        publish,
+    )?;
+    Ok(decision)
+}
+
+/// Technical completion is separate from promotion. A rejected candidate never
+/// replaces the warmstart, enters the publication queue, or retries the same
+/// completed source revision by accident; it remains bounded and reclaimable.
+fn select_successor(
+    state: &mut State,
+    snapshot: Snapshot,
+    revision: u64,
+    decision: &evaluation::Record,
+    publish: bool,
+) -> Result<()> {
+    ensure!(
+        decision.predecessor == state.latest,
+        "train_loop_evaluation_predecessor"
+    );
+    let completed = state
+        .completed
+        .checked_add(1)
+        .context("train_loop_completed_exhausted")?;
+    let promoted = state
+        .promoted
+        .checked_add(u64::from(decision.approved))
+        .context("train_loop_promoted_exhausted")?;
+    let rejected = state
+        .rejected
+        .checked_add(u64::from(!decision.approved))
+        .context("train_loop_rejected_exhausted")?;
+    let cycle = state
+        .cycles
+        .last_mut()
+        .context("train_loop_cycle_missing")?;
+    ensure!(
+        decision.sequence == cycle.sequence
+            && matches!(cycle.phase, Phase::Running | Phase::Evaluating),
+        "train_loop_evaluation_cycle"
+    );
+    state.sources[cycle.source].revision = Some(revision);
+    cycle.snapshot = Some(snapshot);
+    cycle.training = None;
+    cycle.phase = if !decision.approved {
+        Phase::Rejected
+    } else if publish {
+        Phase::Trained
+    } else {
+        Phase::Complete
+    };
+    if decision.approved {
+        state.latest = Some(cycle.sequence);
+    }
+    state.completed = completed;
+    state.promoted = promoted;
+    state.rejected = rejected;
     Ok(())
 }
 

@@ -19,6 +19,7 @@ agent_train_loop_execute() {
         --groups="$custody_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
         compute train-loop --plan "$artifact_user/loop-plan.json" --seed "$artifact_user/loop-seed.json" \
+        --validation-source "$artifact_user/loop-validation-source.json" \
         --directory "$artifact_user/loop" --runtime-root "$artifact_user/provision/venv" \
         --model-root "$artifact_user/provision/model" --cache "$loop_cache" \
         --max-cycles 2 --repeat-sources --steps 8 --threads 2 --max-seconds 600 --poll-seconds 1 \
@@ -68,6 +69,22 @@ agent_train_loop_shared() {
     return 1
 }
 
+agent_train_loop_restart_source() {
+    loop_source_unit=volparossa-alpha-agent@relay5.service
+    case " $AGENT_UNITS " in *" $loop_source_unit "*) ;; *) return 1 ;; esac
+    loop_source_before=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
+    loop_cache_before=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
+    systemctl restart "$loop_source_unit" || return 1
+    content_custody_status relay5 loop-restored 3 || return 1
+    loop_source_after=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
+    loop_cache_after=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
+    [ "$loop_source_before" -gt 0 ] && [ "$loop_source_after" -gt 0 ] \
+        && [ "$loop_source_before" != "$loop_source_after" ] && [ "$loop_cache_before" = "$loop_cache_after" ] || return 1
+    jq -n --argjson before "$loop_source_before" --argjson after "$loop_source_after" --arg inode "$loop_cache_after" \
+        '{node:"relay5",pid_before:$before,pid_after:$after,cache_device_inode:$inode,same_cache:true,restored_publications:3}' \
+        >"$WORK/agent-artifact-relay5-restart.json"
+}
+
 agent_train_loop_run() {
     provider_node_a=relay5
     provider_node_b=relay4
@@ -95,6 +112,14 @@ agent_train_loop_run() {
         --cache "$artifact_user/dataset-cache" --manifest "$artifact_user/dataset.pb" --lifetime-seconds 7200 \
         >"$WORK/agent-artifact-dataset-publish.json" || fail TRAIN_LOOP_DATASET_PUBLISH_FAILED
     artifact_publisher=$(jq -er '.publisher_key_hex' "$WORK/agent-artifact-dataset-publish.json")
+    agent_train_loop_private validation-input "$artifact_user" "$expected_commit" || fail TRAIN_LOOP_VALIDATION_INPUT_FAILED
+    agent_artifact_cli relay5 content publish --contribute --input "$artifact_user/validation-dataset.json" \
+        --name disposable-agent-validation --revision 1 --content-type application/vnd.volparossa.agent-dataset.v1+json \
+        --identity "$artifact_user/identity.key" --passphrase-file "$artifact_user/passphrase" \
+        --cache "$artifact_user/validation-cache" --manifest "$artifact_user/validation.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-train-loop-validation-publish.json" || fail TRAIN_LOOP_VALIDATION_PUBLISH_FAILED
+    agent_train_loop_private validation-original "$artifact_user" "$artifact_publisher" \
+        >"$WORK/agent-train-loop-validation-original.json" || fail TRAIN_LOOP_VALIDATION_IDENTITY_FAILED
     agent_artifact_cli relay5 content agent pack --directory "$artifact_user/train/adapter" \
         --training-report "$artifact_user/train/report.json" --dataset-manifest "$artifact_user/dataset.pb" \
         --publisher-key "$artifact_publisher" --output "$artifact_user/bundle.bin" \
@@ -107,8 +132,10 @@ agent_train_loop_run() {
     agent_artifact_private originals "$artifact_user" >"$WORK/agent-artifact-originals.json" || fail TRAIN_LOOP_ORIGINALS_INVALID
     artifact_dataset_id=$(jq -er '.dataset_manifest_id' "$WORK/agent-artifact-originals.json")
     agent_train_loop_private setup "$artifact_user" "$artifact_publisher" "$artifact_dataset_id" || fail TRAIN_LOOP_ENROLLMENT_INVALID
+    agent_train_loop_private drop-validation "$artifact_user" >"$WORK/agent-train-loop-validation-removed.json" \
+        || fail TRAIN_LOOP_VALIDATION_SOURCE_REMOVAL_FAILED
     agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail TRAIN_LOOP_SOURCE_REMOVAL_FAILED
-    agent_artifact_restart relay5 || fail TRAIN_LOOP_SOURCE_REOPEN_FAILED
+    agent_train_loop_restart_source || fail TRAIN_LOOP_SOURCE_REOPEN_FAILED
 
     # Existing encrypted owner identity and a real native store are explicit prerequisites.
     # The tiny enrollment marker only initializes this owner cache; it is never contributed.
@@ -165,12 +192,14 @@ agent_train_loop_run() {
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" last-json \
         "$WORK/agent-train-loop-stdout.jsonl" compute_train_loop >"$WORK/agent-train-loop-summary.json" || fail TRAIN_LOOP_SUMMARY_INVALID
     agent_train_loop_private collect "$artifact_user" >"$WORK/agent-train-loop-loop.json" || fail TRAIN_LOOP_ACTUAL_FILES_INVALID
-    # The two exact update receipts are mandatory. Background replication may
-    # also retain the already verified original seed/dataset; account only for
-    # those known complete objects, never an arbitrary publication count.
+    # Only approved candidates may have exact update receipts. Background
+    # replication may also retain the already verified original seed/dataset;
+    # account only for that exact allowed set, including zero approved updates.
     agent_train_loop_shared loop-shared false || fail TRAIN_LOOP_UPDATES_NOT_SHARED
+    loop_latest=$(jq -r '.state.latest // "none"' "$WORK/agent-train-loop-loop.json")
+    case $loop_latest in 1|2|none) ;; *) fail TRAIN_LOOP_LATEST_INVALID ;; esac
     PHASE=agent-train-loop-explicit-original-dataset-contribution
-    # Fixture-only explicit sharing of the already fetched original dataset. The loop's two
+    # Fixture-only explicit sharing of the already fetched original dataset. Approved
     # adapter publications above are automatic; this separate handoff is not claimed automatic.
     agent_artifact_cli relay4 content export --public-content \
         --manifest "$artifact_user/loop/cycle-0000000000000002/dataset.manifest" --publisher-key "$artifact_publisher" \
@@ -182,6 +211,7 @@ agent_train_loop_run() {
     agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
 
+    if [ "$loop_latest" != none ]; then
     PHASE=agent-train-loop-independent-import
     content_replication_select client agent-train-loop-reserve-fetch || fail TRAIN_LOOP_IMPORT_ROUTE_FAILED
     content_replication_capture reserve-fetch agent-train-loop-reserve-fetch "$WORK/agent-train-loop-reserve-fetch-selection.json" \
@@ -190,7 +220,7 @@ agent_train_loop_run() {
     [ ! -e "$artifact_cache" ] && [ ! -L "$artifact_cache" ] || fail TRAIN_LOOP_IMPORT_CACHE_NOT_NEW
     agent_artifact_cli client content agent fetch --publisher-key "$loop_publisher" \
         --dataset-publisher-key "$artifact_publisher" --name disposable-loop-update \
-        --dataset-name disposable-agent-dataset --min-revision 2 --cache "$artifact_cache" --output "$artifact_user/received" \
+        --dataset-name disposable-agent-dataset --min-revision "$loop_latest" --cache "$artifact_cache" --output "$artifact_user/received" \
         >"$WORK/agent-train-loop-fetch.json" 2>"$WORK/agent-train-loop-fetch.err" || fail TRAIN_LOOP_IMPORT_FAILED
     content_replication_snapshot client agent-train-loop-reserve-fetch-live || fail TRAIN_LOOP_IMPORT_PATHS_FAILED
     stop_privacy_observers || fail TRAIN_LOOP_IMPORT_CAPTURE_INCOMPLETE
@@ -205,6 +235,13 @@ agent_train_loop_run() {
     wait "$artifact_job_pid" || fail TRAIN_LOOP_INFERENCE_FAILED
     artifact_job_pid=
     install -m 0600 "$artifact_user/inference-isolation.json" "$WORK/agent-artifact-inference-isolation.json"
+    else
+        # No candidate passed the real heldout gate. Do not run an import of the
+        # rejected checkpoint or create a synthetic inference result in its place.
+        PHASE=agent-train-loop-no-candidate-promoted
+    fi
+    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" adoption \
+        "$WORK/agent-train-loop-loop.json" >"$WORK/agent-train-loop-adoption.json" || fail TRAIN_LOOP_ADOPTION_INVALID
     agent_train_loop_cleanup || fail TRAIN_LOOP_PRIVATE_CLEANUP_FAILED
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" evidence "$WORK" "$expected_commit" || fail TRAIN_LOOP_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

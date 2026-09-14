@@ -80,12 +80,17 @@ fn cycle_directory(store: &Store, sequence: u64, complete: bool) -> PathBuf {
 
 fn add_cycle(store: &Store, state: &mut State, sequence: u64, phase: Phase) {
     let complete = !matches!(phase, Phase::Running | Phase::Failed);
-    cycle_directory(store, sequence, complete);
+    if complete {
+        evaluation::fixture(store, sequence, phase != Phase::Rejected);
+    } else {
+        cycle_directory(store, sequence, false);
+    }
     state.cycles.push(Cycle {
         sequence,
         source: 0,
         phase,
         snapshot: complete.then(|| store.snapshot_cycle(sequence).unwrap()),
+        training: None,
         publication: (phase == Phase::PublishPending)
             .then(|| json!({"opaque_publication_fixture":true})),
         next_publication_attempt: 0,
@@ -110,6 +115,73 @@ fn round_robin_source_choice_and_retry_timing_do_not_consult_cache_inventory() {
     state.cursor = 2;
     assert_eq!(state.select(&plan, false, 110), Some(2));
     assert!(!args.cache.exists());
+}
+
+#[test]
+fn second_source_enrollment_pins_a_distinct_public_manifest_before_execution() {
+    let (root, mut args) = fixture();
+    let (plan, original) = enrollment(&args).unwrap();
+    assert!(original.get("validation_source").is_none());
+    let path = root.path().join("validation-source.json");
+    args.validation_source = Some(path.clone());
+    let mut selected = json!({"publisher_key":plan.sources[0].publisher_key,
+        "name":plan.sources[0].name,"manifest_id":"a".repeat(64)});
+    fs::write(&path, serde_json::to_vec(&selected).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(enrollment(&args).is_err());
+    selected["name"] = json!("explicit-validation-only");
+    fs::write(&path, serde_json::to_vec(&selected).unwrap()).unwrap();
+    let (_, enrolled) = enrollment(&args).unwrap();
+    assert_eq!(
+        enrolled["quality_policy"],
+        "source-and-second-source-loss-v1"
+    );
+    assert_eq!(enrolled["validation_source"]["manifest_id"], "a".repeat(64));
+    selected["manifest_id"] = Value::Null;
+    fs::write(&path, serde_json::to_vec(&selected).unwrap()).unwrap();
+    assert!(enrollment(&args).is_err());
+    assert!(!args.directory.exists() && !args.cache.exists());
+}
+
+#[test]
+fn completed_training_survives_pending_evaluation_and_saved_decision_without_retraining() {
+    let (_root, args) = fixture();
+    let (plan, selected) = enrollment(&args).unwrap();
+    let store = Store::open(&args.directory, &selected, false).unwrap();
+    evaluation::fixture(&store, 1, true);
+    let mut state = State::new(plan.sources.len());
+    state.next_sequence = 2;
+    state.cycles.push(Cycle {
+        sequence: 1,
+        source: 0,
+        phase: Phase::Evaluating,
+        snapshot: None,
+        training: Some(store.snapshot_training(1).unwrap()),
+        publication: None,
+        next_publication_attempt: 0,
+    });
+    // The decision was saved immediately before interruption; recovery must
+    // preserve training and reuse that exact decision, never overwrite it.
+    let original = store.read_cycle_json(1, "evaluation.json").unwrap();
+    recover(&store, &mut state, plan.sources.len()).unwrap();
+    assert!(state.cycles[0].phase == Phase::Evaluating);
+    assert_eq!(state.completed, 0);
+    assert!(state.latest.is_none());
+    qualify_cycle(&store, &mut state, 1, false).unwrap();
+    assert!(state.cycles[0].phase == Phase::Complete);
+    assert_eq!(state.latest, Some(1));
+    assert_eq!(state.completed, 1);
+    assert_eq!(
+        store.read_cycle_json(1, "evaluation.json").unwrap(),
+        original
+    );
+    recover(&store, &mut state, plan.sources.len()).unwrap();
+    fs::write(
+        store.cycle_path(1).unwrap().join("training/report.json"),
+        b"{}",
+    )
+    .unwrap();
+    assert!(recover(&store, &mut state, plan.sources.len()).is_err());
 }
 
 #[test]
@@ -218,6 +290,7 @@ fn retention_preserves_current_warmstart_active_work_and_pending_publications() 
     }
     state.latest = Some(1);
     state.completed = 1;
+    state.promoted = 1;
     let before = serde_json::to_value(&state).unwrap();
     assert!(!make_room(&store, &mut state).unwrap());
     assert_eq!(serde_json::to_value(&state).unwrap(), before);
@@ -250,6 +323,7 @@ fn restart_marks_interrupted_attempt_failed_and_finishes_partial_garbage_cleanup
     add_cycle(&store, &mut state, 1, Phase::Complete);
     state.latest = Some(1);
     state.completed = 1;
+    state.promoted = 1;
     cycle_directory(&store, 2, false);
     cycle_directory(&store, 3, false);
     add_cycle(&store, &mut state, 4, Phase::Running);
@@ -287,4 +361,61 @@ fn restart_marks_interrupted_attempt_failed_and_finishes_partial_garbage_cleanup
     store
         .validate_snapshot(1, restored.cycles[0].snapshot.as_ref().unwrap())
         .unwrap();
+}
+
+#[test]
+fn rejected_successor_preserves_latest_and_never_enters_publication_before_reclamation() {
+    let (_root, args) = fixture();
+    let (plan, selected) = enrollment(&args).unwrap();
+    assert_eq!(selected["quality_policy"], "source-heldout-loss-v1");
+    let store = Store::open(&args.directory, &selected, false).unwrap();
+    let mut state = State::new(plan.sources.len());
+    for (sequence, approved, expected_latest) in [(1, true, 1), (2, false, 1), (3, true, 3)] {
+        let input = state
+            .latest
+            .map(|previous| store.cycle_path(previous).unwrap().join("training/adapter"));
+        evaluation::fixture_input(&store, sequence, approved, state.latest, input.as_deref());
+        state.cycles.push(Cycle {
+            sequence,
+            source: 0,
+            phase: Phase::Running,
+            snapshot: None,
+            training: None,
+            publication: None,
+            next_publication_attempt: 0,
+        });
+        state.next_sequence = sequence + 1;
+        let decision = evaluation::verify(&store, sequence).unwrap();
+        select_successor(
+            &mut state,
+            store.snapshot_cycle(sequence).unwrap(),
+            sequence,
+            &decision,
+            true,
+        )
+        .unwrap();
+        assert_eq!(state.latest, Some(expected_latest));
+        assert_eq!(state.sources[0].revision, Some(sequence));
+        assert!(
+            state.cycles.last().unwrap().phase
+                == if approved {
+                    Phase::Trained
+                } else {
+                    Phase::Rejected
+                }
+        );
+    }
+    assert_eq!((state.completed, state.promoted, state.rejected), (3, 2, 1));
+    recover(&store, &mut state, plan.sources.len()).unwrap();
+    state.cycles[1].phase = Phase::Trained;
+    assert!(recover(&store, &mut state, plan.sources.len()).is_err());
+    state.cycles[1].phase = Phase::Rejected;
+    for sequence in 4..=8 {
+        add_cycle(&store, &mut state, sequence, Phase::Running);
+    }
+    assert!(make_room(&store, &mut state).unwrap());
+    assert!(!store.cycle_path(2).unwrap().exists());
+    assert!(store.cycle_path(1).unwrap().exists()); // Pending approved publication.
+    assert!(store.cycle_path(3).unwrap().exists()); // Current approved warmstart.
+    assert_eq!(state.latest, Some(3));
 }
