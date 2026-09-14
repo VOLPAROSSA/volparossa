@@ -316,6 +316,15 @@ the adapter, not automatically its source dataset: a receiver still needs the in
 trusted dataset available from an authorized provider. CLI `content agent fetch` also
 accepts `--dataset-publisher-key` for this case; omission preserves same-publisher behavior.
 
+After reaching `--max-cycles`, the coordinator makes no new training attempts but gives its
+already approved pending publications one final retry window of `--max-seconds`. All network
+handoffs share that single monotone deadline and retain their earlier original source/manifest
+expiry; the deadline is not restarted per item. Local preparation and durable identity writes
+finish before a handoff can be interrupted. The final `publication_drain` value distinguishes
+completion, cancellation, deadline and expiry; retained expired publications are not labelled
+successfully shared. A timed-out publication stays pending for explicit later resume. This
+does not enlarge any worker lease or authorize more training.
+
 The overall watcher has no preset end time, but runs one bounded, spare-capacity worker at a
 time. Existing source expiry, CPU/thread, memory, per-worker deadline and cache limits remain.
 It retains at most eight cycle directories; the current warmstart and pending publications

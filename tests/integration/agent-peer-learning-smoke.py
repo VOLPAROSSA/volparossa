@@ -339,8 +339,10 @@ def check(value, revision):
         require(all(CYCLE + "/" + name not in files for name in ("publication.pb", "publication.json", "contribution.json"))
                 and state["cycles"][0]["publication"] is None, "rejected Client successor was published")
     require(value["summary"]["attempts_this_invocation"] == value["summary"]["completed_cycles"] == 1
-            and value["summary"]["pending_publications"] == 0 and value["summary"]["owner_cancelled"] is False,
-            "Client did not finish one real automatic cycle")
+            and value["summary"]["pending_publications"] == 0 and value["summary"]["owner_cancelled"] is False
+            and value["summary"]["publication_drain"] == "complete"
+            and value["summary"]["publication_drain_seconds"] == 600,
+            "Client did not finish one real automatic cycle and its bounded publication drain")
     require(retained["base_after"] == {"bytes":269060552, "sha256":TRAIN["WEIGHT_HASH"]}, "base model changed")
     check_observations(retained["observations"], selected)
     require(value["source_stop"]["serving"] is False, "original R5 source still serving")

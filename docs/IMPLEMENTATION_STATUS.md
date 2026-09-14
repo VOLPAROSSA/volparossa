@@ -4,6 +4,14 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-15
 
+Current publication-retry correction: a finite training loop no longer stops immediately
+after the first handoff once its cycle budget is exhausted. It drains already approved
+publications within one shared final `max_seconds` window, without new training, retaining
+original identities, source expiry and owner cancellation. Expiry, timeout and pending work
+remain explicit. All 34 focused training-loop tests pass. The peer-learning fixture still
+requires the actual contribution receipt; the failed `08457e1e` run below remains failed
+until a new functional run establishes recovery.
+
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
 receipts and original leases remain unchanged; eligible failed rows prefer another available

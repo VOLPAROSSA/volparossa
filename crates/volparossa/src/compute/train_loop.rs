@@ -74,7 +74,8 @@ pub(crate) struct Options {
     /// Original wall deadline per worker, never enlarged by pauses or subsequent cycles.
     #[arg(long, default_value_t=600, value_parser=clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
-    /// Stop after this many new cycle attempts; omitted keeps watching until owner cancellation.
+    /// Limit new cycle attempts, then drain publications for at most one max-seconds window.
+    /// Omitted keeps watching until owner cancellation.
     #[arg(long, value_parser=clap::value_parser!(u16).range(1..=256))]
     max_cycles: Option<u16>,
     #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u16).range(1..=3600))]
@@ -410,14 +411,18 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     }
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
+    let mut publication_drain = None;
     while active(&activity.receiver) {
-        publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
         if args
             .max_cycles
             .is_some_and(|maximum| attempts >= u64::from(maximum))
         {
+            publication_drain = Some(
+                publication::drain(args, socket, &store, &mut state, &activity.receiver).await?,
+            );
             break;
         }
+        publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
         if budget.sample() == Decision::Run {
             if refresh_catalogs(args, socket, &plan, &store, &mut state, &activity.receiver).await?
             {
@@ -456,6 +461,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "catalog_source_discovery":state.catalog.is_some(),"remembered_sources":state.sources.len(),
         "peer_update_channels_enabled":state.peer_updates.is_some(),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
+        "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
     );
     Ok(())
