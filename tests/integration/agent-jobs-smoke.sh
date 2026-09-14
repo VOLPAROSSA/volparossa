@@ -154,19 +154,54 @@ agent_jobs_run() {
     jobs_batch_pid=$!
     python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" observe "$WORK" \
         >"$WORK/agent-jobs-observer.log" 2>"$WORK/agent-jobs-observer.err" || fail JOBS_CONCURRENT_WORKERS_NOT_OBSERVED
-    wait "$jobs_batch_pid" || fail JOBS_DISTRIBUTION_INCOMPLETE
+    if [ "${agent_jobs_loss:-no}" = yes ]; then
+        PHASE=agent-jobs-owned-worker-loss
+        python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" inject-loss "$WORK" \
+            >"$WORK/agent-jobs-loss-injection.log" 2>"$WORK/agent-jobs-loss-injection.err" || fail JOBS_OWNED_WORKER_LOSS_FAILED
+        if wait "$jobs_batch_pid"; then fail JOBS_WORKER_LOSS_FALSE_SUCCESS; fi
+    else
+        wait "$jobs_batch_pid" || fail JOBS_DISTRIBUTION_INCOMPLETE
+    fi
     jobs_batch_pid=
     for jobs_index in 0 1; do
         agent_jobs_cli client compute peer poll --handle "$jobs_source/batch/job-$jobs_index.json" \
             >"$WORK/agent-jobs-status-$jobs_index.json" 2>"$WORK/agent-jobs-status-$jobs_index.err" || fail JOBS_FINAL_REPORT_UNAVAILABLE
     done
+    if [ "${agent_jobs_loss:-no}" = yes ]; then
+        agent_jobs_resume_failed || fail JOBS_FAILED_ROWS_RESUME_INCOMPLETE
+    fi
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail JOBS_ROUTE_CLEANUP_FAILED
     agent_jobs_cleanup || fail JOBS_PRIVATE_CLEANUP_FAILED
-    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" evidence "$WORK" "$expected_commit" \
+    jobs_evidence_command=evidence
+    [ "${agent_jobs_loss:-no}" != yes ] || jobs_evidence_command=loss-evidence
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" "$jobs_evidence_command" "$WORK" "$expected_commit" \
         || fail JOBS_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
     PHASE=agent-jobs-complete
+}
+
+agent_jobs_resume_failed() {
+    PHASE=agent-jobs-failed-rows-reassignment
+    # Terminal original receipts precede explicit reassignment; missing/unconfirmed is not
+    # accepted in this proof. The original successful result must already be retained.
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" arm-resume "$WORK" || return 1
+    agent_jobs_cli client compute peer resume --dataset "$jobs_source/dataset.json" \
+        --dataset-manifest "$jobs_source/manifest.pb" --publisher-key "$jobs_publisher" \
+        --handle "$jobs_source/batch/job-0.json" --handle "$jobs_source/batch/job-1.json" \
+        --replacement-provider-key "$jobs_key_b" --output "$jobs_source/resumed" \
+        --max-seconds 600 --execute \
+        >"$WORK/agent-jobs-resume-result.json" 2>"$WORK/agent-jobs-resume-result.err" &
+    jobs_batch_pid=$!
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" observe-replacement "$WORK" \
+        >"$WORK/agent-jobs-replacement-observer.log" 2>"$WORK/agent-jobs-replacement-observer.err" || return 1
+    wait "$jobs_batch_pid" || return 1
+    jobs_batch_pid=
+    agent_jobs_cli client compute peer poll --handle "$jobs_source/resumed/job-0.json" \
+        >"$WORK/agent-jobs-replacement-status.json" 2>"$WORK/agent-jobs-replacement-status.err" || return 1
+    agent_jobs_cli client compute peer poll --handle "$jobs_source/batch/job-1.json" \
+        >"$WORK/agent-jobs-retained-status.json" 2>"$WORK/agent-jobs-retained-status.err" || return 1
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" capture-resume "$WORK"
 }
 
 agent_jobs_finalize_report() {
@@ -177,8 +212,11 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
-    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" finalize "$WORK" "$expected_commit" \
+    jobs_finalize_command=finalize
+    jobs_report=agent-jobs-smoke.json
+    [ "${agent_jobs_loss:-no}" != yes ] || { jobs_finalize_command=loss-finalize; jobs_report=agent-jobs-loss-smoke.json; }
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" "$jobs_finalize_command" "$WORK" "$expected_commit" \
         "$jobs_status" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
-    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-jobs-smoke.json" "$output_directory/agent-jobs-smoke.json"
-    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" report "$WORK/agent-jobs-smoke.json" "$expected_commit"
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/$jobs_report" "$output_directory/$jobs_report"
+    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" report "$WORK/$jobs_report" "$expected_commit"
 }

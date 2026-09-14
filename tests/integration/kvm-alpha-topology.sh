@@ -12,6 +12,7 @@ umask 077
 
 mode=preview
 scenario=alpha
+agent_jobs_loss=no
 wifi_link=no
 uplink_link=no
 download_sharing=no
@@ -27,7 +28,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|agent-jobs-loss|dns-cache]'
 }
 
 print_plan() {
@@ -44,6 +45,17 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_jobs_loss" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA explicit public peer worker-loss/reassignment plan:' \
+                '  reuse the exact agent-jobs source, pinned guest provisioning and protected route graph;' \
+                '  observe two actual isolated Python workers; SIGKILL only one exact pidfd-bound worker;' \
+                '  retain both brokers, require original failed/complete terminal receipts and ended workers;' \
+                '  resume original handles on the idle surviving peer, rerunning only the failed public rows;' \
+                '  observe the actual replacement, preserve original successful result and immutable old leases;' \
+                '  clean every owned process/network object; no automatic-planner or exactly-once claim.'
+            return
+        fi
         printf '%s\n' \
             'VOLPAROSSA concurrent public agent-jobs plan:' \
             '  provision one pinned guest model/runtime, private runtime copy and broker per executor;' \
@@ -332,7 +344,9 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             download_sharing=no
+            agent_jobs_loss=no
             case $2 in
+                agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
