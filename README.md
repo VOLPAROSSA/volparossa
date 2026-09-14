@@ -344,15 +344,21 @@ filling that allowance speculatively or breaking existing routes when it shrinks
 passes: all fifteen unique chunks arrive from three overlapping provider streams through the
 protected route, with no origin body. HTTPS source plans now admit a bounded batch beyond two
 providers into that same resource-leased downloader; independent original indexes and fresh
-origin authentication remain required. The first live three-provider HTTPS retrieval reconstructs
-the complete object, but its bulk transfers did not overlap; concurrent throughput remains unproved.
+origin authentication remain required. The
+[complete provider run on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259)
+now passes both native and origin-digest HTTPS retrieval: each receives all fifteen chunks /
+3,932,160 bytes from three providers, with genuine simultaneous bulk transfer and zero origin
+body bytes. HTTPS still requires a fresh authenticated origin HEAD. This proves concurrent
+delivery, not a general speedup or arbitrary-HTTPS compatibility.
 
 TCP routes now retain reserved warm paths separately from their initial MPTCP subflows. The
 Exit can advertise an extra path when actual per-subflow kernel observations show sustained
 loss, without first removing an initial path or restarting the application connection.
-Targeted runtime checks and the real two-subflow kernel observer pass; the first live download
-ended before three-subflow growth was observed, so that integration remains incomplete.
-Backend path ceilings have not yet been removed.
+The [MPTCP growth run on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480)
+passes: the same live download grows from two to three data-carrying subflows under measured
+loss, retains its original metasockets, delivers the complete 32-MiB response and cleans up.
+All six WireGuard legs carry data. This is live path growth, not a speedup comparison;
+backend path ceilings have not yet been removed.
 
 The [MPQUIC warm-growth run on `5b1ba7af`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851)
 passes: one HTTP/3 flow expands from two to three active relay paths under measured packet loss,

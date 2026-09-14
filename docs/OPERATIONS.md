@@ -817,6 +817,15 @@ bulk windows overlap across all three providers; both selected WireGuard relay p
 traffic. Complete captures and cleanup preserve the guest's original network state. This is
 useful missing-content growth, not a threefold speedup or arbitrary-provider-count guarantee.
 
+The [complete `1aab4caf` provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259)
+also passes the origin-digest HTTPS variant: three providers deliver all fifteen chunks /
+3,932,160 bytes after a fresh origin-authenticated HEAD, with zero origin body and actual
+three-way bulk overlap. Native retrieval passes the same three-provider gate. An admitted
+exploratory provider gets unresolved, previously missed chunks before established providers
+refill; a manifest alone never implies that its provider stores every chunk. Independent raw
+reconstruction verifies the complete scenario and unchanged guest state. This is concurrent
+delivery, not a general speedup or support for HTTPS origins without usable digest authority.
+
 ### Adaptive control connections
 
 The agent samples resource headroom before initial normal/mesh dialing and on its existing
@@ -884,9 +893,14 @@ TLS truncation remains an error, not an authenticated end of content.
 `mptcp-growth` is a separate disposable topology scenario, not the full alpha or a speed benchmark.
 It requires the same live download before/after expansion, actual kernel subflow ACK and receive
 deltas, data on all six WireGuard legs, the full application hash and complete cleanup. Its
-first network run ended before three-subflow growth was observed; the integration remains
-incomplete. The ordinary MPTCP CLI selection rows are reachability metadata, not these live
-per-socket byte counters.
+first network run ended before three-subflow growth was observed. The
+[corrected `1aab4caf` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480)
+now passes: the same original Client/Exit metasockets retain their initial subflows and grow
+to three simultaneously data-carrying subflows. Actual loss, new ACK/receive bytes on all three,
+all six WireGuard legs and the complete 32-MiB response hash are independently verified from
+the retained raw evidence. Disconnect removes the route and injected loss with unchanged guest
+state. The ordinary MPTCP CLI selection rows are reachability metadata, not these live
+per-socket byte counters. No general throughput gain or removal of backend path limits is claimed.
 
 ### Warm MPQUIC path growth
 

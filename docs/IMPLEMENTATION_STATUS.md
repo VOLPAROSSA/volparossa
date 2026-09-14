@@ -27,6 +27,37 @@ build and general speedup remain unproved.
 
 ## Current candidate: functional integration in progress
 
+Latest additional functional checkpoints (not a complete expanded-alpha pass):
+
+- [MPTCP growth on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480):
+  one live 32-MiB download grows from two to three data-carrying subflows while retaining the
+  original Client/Exit metasockets; all six WireGuard legs carry data and teardown completes.
+- [Native and HTTPS provider retrieval on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259):
+  each receives fifteen chunks / 3,932,160 bytes from three genuinely overlapping providers,
+  with zero origin body bytes. HTTPS authority comes from a fresh TLS-authenticated origin HEAD.
+- [MPQUIC growth on `5b1ba7af`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34838838851):
+  one HTTP/3 flow grows from two to three carrying relay paths under actual loss, with complete
+  32-MiB upload/download hashes and cleanup. Transport progress is not unique application bytes.
+
+Each report was independently reconstructed from exact-source raw evidence, with retained
+before/after guest-state equality. These checkpoints do not prove arbitrary HTTPS compatibility,
+general speedup, unlimited paths, physical-radio operation or the full agreed extension scope.
+C08 remains open. The chronological records below preserve earlier failures and narrower results;
+their pending statements describe those source revisions, not a reversal of later evidence.
+
+Major requested functional work still outstanding:
+
+- Remote publication custody, availability receipts and replica repair after a holder disappears;
+  local `publish --contribute` and incidental redistribution are not remote retention commitments.
+- Normal-browser reuse of eligible content with real origin authority; the existing attachment
+  and native-site viewers do not implement generic HTTPS resource reuse.
+- Discovering and authorizing useful new relay paths during a live route, replenishing reserves
+  and replacing fixed backend path ceilings; current live growth uses already reserved paths.
+- Wi-Fi-only joining without prearranged addresses or the fixture's auxiliary Ethernet contact;
+  general multi-hop mesh and physical-radio operation are not established by the current tests.
+- Owner-priority capacity sharing across multiple interfaces and shared bottlenecks; current
+  configured-rate budgets and scoped contention passes do not discover all spare capacity.
+
 `b0e7c36` preserves individually verified peer progress when a parallel stream fails; three real
 duplex variants in one focused test and strict agent Clippy pass. The browser-network harness
 `d82a64f` passes six local checker tests and twelve parent checks.
@@ -591,7 +622,23 @@ admitted exploratory provider first choice of unresolved, previously missed chun
 established providers refill. This avoids spending a cold probe on unrelated coverage while
 its motivating chunk is assigned elsewhere. It does not infer chunk ownership from manifest
 membership, duplicate in-flight requests or change resource/benefit thresholds. Five targeted
-parallel-transfer checks pass; the unchanged live overlap gate still needs a fresh run.
+parallel-transfer checks pass; the unchanged live overlap gate is exercised by the next run.
+
+The [corrected `1aab4caf` provider VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841784259)
+**passes** the complete scenario and independently reconstructed parent/component/raw evidence.
+Native and fresh-origin-digest HTTPS each obtain all fifteen chunks / 3,932,160 bytes from three
+providers with no origin body. The actual three-way bulk windows overlap by 100.127 ms and
+127.542 ms respectively; the HTTPS case retains each independent original index and performs
+one fresh TLS 1.3 HEAD, not a full origin GET. The original publisher has exited before the
+native fetch and the cold Client cannot read replica stores directly. Whole-object SHA-256:
+`26fc4696f0ebcd7e36a3c0a0369e2d843742b3915a222ad57b49cd53020a9011`.
+The separate fixed-4-Mbps comparison uses two peers: automatic retrieval takes 4.179 seconds
+versus 6.386 seconds origin-only, with zero origin body. This one constrained-uplink sample
+does not establish a general speedup or a three-provider speed comparison. All 100 captures /
+474 interface rows are complete, and teardown leaves zero owned objects plus byte-identical
+retained guest state. Five exact-source checker modules reproduce all component and parent
+evidence. Canonical raw SHA-256:
+`2a39c28a085fcf09961722e2247a81d3a9a750ed82d5abbaf08460ebdf1f7f42`.
 
 ### Adaptive mesh-neighbor integration
 
@@ -684,11 +731,33 @@ the response completes. A separate disposable kernel reproduction confirms that 
 SIGNAL endpoints can create new subflows while ESTABLISHED, but not after that half-close.
 The corrected TLS adapter retains authenticated `close_notify` as directional application EOF
 and defers underlying transport FIN until the complete flow closes. A real isolated MPTCP/TLS
-test retains both original ESTABLISHED metasockets, transfers a full 1-MiB response after request
+test retains both original negotiated metasockets without transport EOF, transfers a full 1-MiB response after request
 EOF, closes both descriptors on drop and still rejects truncated TLS with `UnexpectedEof`.
 The evidence checker also uses the actual helper-ingress address `169.254.240.1`, not the
 Client's public underlay address. Two TLS checks and six checker tests pass. Neither these
-local results nor endpoint-add notifications replace the still-required live three-subflow proof.
+local results nor endpoint-add notifications replace a live three-subflow proof.
+
+The subsequent Ubuntu Quality run on `1aab4caf` reaches this test but its namespace-wide
+`ss -M` observation returns no sockets. The portable regression instead observes read-half-close
+directly on its two owned MPTCP descriptors, binds their inode/address identities, and includes
+a real `SHUT_WR` negative control that must produce kernel read-half-close at both ends.
+Subflow `TCP_INFO` state is not substituted for MPTCP meta-state, and no test privileges or
+production transport behavior are broadened by this observation change.
+
+The [corrected `1aab4caf` MPTCP growth VM](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480)
+**passes** that live proof and independent exact-source report/raw reconstruction. The original
+Client/Exit metasockets and initial subflow lifetimes remain unchanged while one 32-MiB download
+grows from two to three simultaneously carrying subflows. Fresh Exit ACK deltas are
+78,384 / 378,872 / 389,438 bytes and Client receive deltas are 78,384 / 392,072 / 392,078 bytes
+over the same 439.510-ms interval. All six WireGuard legs carry data. The selected owned leg
+records 184 actual netem drops and 177 additional TCP retransmissions; no synthetic health
+notification substitutes for those observations. The full response hash agrees at both ends:
+`08b53098cfa4dbb71d16a27d93879734ed118a7041484c797dddc6d27bfabd3d`.
+All ten captures / 52 interface rows are complete. The original flow disconnects, contexts and
+paths empty, injected limits disappear, and zero owned objects plus byte-identical retained
+guest state remain. Three exact-source checker modules reproduce the evidence. Canonical raw
+SHA-256: `14fe6bddfa15a9a3aa1155c09361737691c746f83d41ee70cfe3add404e595f1`.
+This is bounded live growth, not a controlled speedup comparison or removal of the backend cap.
 
 ### Warm MPQUIC growth integration
 

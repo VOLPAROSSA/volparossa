@@ -17,6 +17,12 @@ Different parallel paths use different relays. Local link-layer mesh forwarding,
 not an additional decrypting VOLPAROSSA relay role. A reachable participant with actual Internet
 access is still necessary to reach external Internet destinations.
 
+Here, **two-leg** means the two WireGuard links of one `Client -> Relay -> Exit` path;
+**multipath** means several such paths in parallel, potentially over different local/Internet
+links. Neither term means a serial chain of additional overlay relays. The current Wi-Fi helper
+disables link-layer mesh forwarding, so its direct-neighbor tests do not establish general
+multi-hop mesh reachability.
+
 The first vertical slice is an existing Ethernet/local Wi-Fi link from a client without a
 default route to a contributing relay, followed by the existing authenticated route to an exit.
 It must carry real application data and retain no-direct-exit and policy enforcement. Next,
@@ -135,8 +141,11 @@ by default and requires explicit acknowledgement of that open local link layer. 
 authenticated control transport and two-leg/end-to-end overlay protections remain required;
 this mode does not implement SAE or add protection for other services exposed by the host on a LAN.
 
-Configuration supplies an existing wireless parent, common mesh ID, explicit 20-MHz frequency,
-nonconflicting private host address/prefix and at most 32 neighbors. The helper verifies actual
+Configuration supplies an existing wireless parent, common mesh ID, explicit 20-MHz frequency
+and nonconflicting private host address/prefix. `maximum_peers: 0` removes the optional operator
+ceiling; actual new-peer admission follows resources, channel observations and peer progress,
+within the current 512-station observation bound. See [adaptive mesh admission](OPERATIONS.md#adaptive-mesh-admission).
+The helper verifies actual
 hardware, regulatory and active-interface coexistence before creating the separate interface;
 it does not retune an existing connection or change rfkill. Only the new interface receives the
 connected address. No Internet default route, DNS setting, mesh forwarding or portal is installed.

@@ -126,7 +126,10 @@ and TCP collector in a disposable namespace. That test's private anchor exists o
 probe now passes genuine public A and AAAA validation against the unchanged built-in production
 anchors, followed by local cache reuse, in the
 [exact `0fa80d65` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34182008684).
-The ordinary two-Exit peer-hit/fallback network checkpoint remains open.
+The subsequent [two-Exit peer-hit/fallback checkpoint on `b172d11f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34192821990)
+passes real positive A/AAAA sharing, local reuse after peer shutdown and miss/fallback. This
+does not add CNAME or negative-answer sharing; see the current
+[DNS implementation evidence](IMPLEMENTATION_STATUS.md#latest-dns-integration-checkpoint).
 
 ## First delivered foundation (2026-09-07)
 
