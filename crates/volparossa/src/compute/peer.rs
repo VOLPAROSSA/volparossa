@@ -1,6 +1,7 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+mod document;
 mod readiness;
 mod resume;
 mod task;
@@ -45,6 +46,8 @@ pub(crate) enum Command {
     Workflow(Box<workflow::Options>),
     /// Split an explicitly public task over a selected signed source and compatible peers.
     Task(Box<task::Options>),
+    /// Tokenize one explicitly public document and execute all its excerpts on selected peers.
+    Document(Box<document::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -183,6 +186,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Resume(args) => return resume::run(&args, socket).await,
         Command::Workflow(args) => return workflow::run(&args, socket).await,
         Command::Task(args) => return task::run(&args, socket).await,
+        Command::Document(args) => return document::run(&args, socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -274,6 +278,10 @@ fn binding(
     ensure!(
         task.is_none() || caps.task_derivation_v1,
         "compute_peer_task_not_supported"
+    );
+    ensure!(
+        !source.is_document() || caps.document_inference_v2,
+        "compute_peer_document_not_supported"
     );
     if let Some(task) = &task {
         task.question()?;

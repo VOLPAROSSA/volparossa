@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, os::unix::fs::DirBuilderExt, sync::Arc};
 
 use tokio::{sync::watch, task::JoinSet, time::sleep};
+use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
@@ -75,7 +76,7 @@ pub(super) async fn report_with_activity(
     activity: &watch::Receiver<bool>,
 ) -> Result<serde_json::Value> {
     let (publication, source) = source(&args.source)?;
-    let assignments = assignments(source.row_count(), &args.provider_key)?;
+    let assignments = assignments_for(&source, &args.provider_key)?;
     if !args.execute {
         return Ok(
             serde_json::json!({"operation":"compute_distribute_plan","execute":false,
@@ -284,6 +285,17 @@ pub(super) async fn execute(
             Err(_) if now()? < work.handle.binding.expires_unix_seconds => {}
             Err(error) => return Err(error),
         }
+    }
+}
+
+pub(super) fn assignments_for(
+    source: &VerifiedPublicDataset,
+    providers: &[VerifyingKey],
+) -> Result<Vec<Vec<u16>>> {
+    if source.is_document() && source.row_count() == 1 && providers.len() == 1 {
+        Ok(vec![vec![0]])
+    } else {
+        assignments(source.row_count(), providers)
     }
 }
 

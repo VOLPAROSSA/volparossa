@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training and agent-owner-priority.'
 }
 
@@ -51,6 +51,12 @@ print_plan() {
                 '  paused CPU ticks and unchanged model step, resumed updates/reload under original600s deadline;' \
                 '  no owner-cancel, battery/thermal, all-activity or full-B01 claim.'
         fi
+    elif [ "$scenario" = agent-public-document ]; then
+        printf '%s\n' \
+            'Agent-public-document: pinned isolated tokenizer splits an explicitly public document without truncation;' \
+            '  sign original source and exact byte ranges; execute one package on two protected peer workers;' \
+            '  resume remaining bounded packages and then completed receipts with brokers and route stopped;' \
+            '  actual source/range/result/capture evidence and cleanup, not private documents or answer quality.'
     elif [ "$scenario" = agent-public-task ]; then
         printf '%s\n' \
             'Agent-public-task: retrieve a selected signed source over protected paths into a fresh client cache;' \
@@ -205,7 +211,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -466,6 +472,10 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-public-task-smoke.json", "agent-public-task-evidence.json",
               "agent-public-task-result.json", "agent-public-task-result.err",
               "agent-public-task-resume.json", "agent-public-task-resume.err",
+              "agent-public-document-smoke.json", "agent-public-document-evidence.json",
+              "agent-public-document-first.json", "agent-public-document-first.err",
+              "agent-public-document-result.json", "agent-public-document-result.err",
+              "agent-public-document-resume.json", "agent-public-document-resume.err",
               "agent-jobs-loss-smoke.json", "agent-jobs-loss-evidence.json", "agent-jobs-loss-control.json",
               "agent-jobs-replacement-observation.json", "agent-jobs-resume-result.json", "agent-jobs-resume-result.err",
               "agent-jobs-loss-plan.json", "agent-jobs-loss-injection.log", "agent-jobs-loss-injection.err",
@@ -567,6 +577,8 @@ def collect(home, opt, revision, scenario, guest_status,
                           if re.fullmatch(r"content-[a-z0-9-]+\.(json|txt|log|err|out)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-public-task-*"))[:32]
                           if re.fullmatch(r"agent-public-task-[a-z0-9-]+\.(json|err|log)", path.name))
+        candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-public-document-*"))[:32]
+                          if re.fullmatch(r"agent-public-document-[a-z0-9-]+\.(json|err|log)", path.name))
     for path, relative in candidates:
         if len(entries) >= FILE_COUNT_LIMIT or total >= TOTAL_LIMIT:
             break
@@ -614,7 +626,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-jobs", "agent-jobs-loss", "agent-public-task"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-jobs", "agent-jobs-loss", "agent-public-task", "agent-public-document"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -641,7 +653,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -680,7 +692,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-public-task ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 [ "$(./volparossa-mpquic --api-version)" = 7 ]
@@ -767,7 +779,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-train-loop|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

@@ -1,6 +1,7 @@
 //! Explicit public-data model jobs, isolated from the network agent and its identity.
 
 mod broker;
+mod document_plan;
 mod owner_control;
 mod peer;
 mod sandbox;
@@ -48,6 +49,8 @@ pub(crate) enum Command {
 pub(crate) enum Mode {
     Infer,
     Train,
+    #[serde(rename = "plan_document")]
+    PlanDocument,
 }
 
 #[derive(Debug, Args)]
@@ -218,27 +221,52 @@ impl Options {
             "compute_output_exists"
         );
         ensure!(self.output.file_name().is_some(), "compute_output_name");
-        let dataset = read_file(&self.dataset, MAX_DATASET_BYTES)?;
+        let dataset = read_file(
+            &self.dataset,
+            if self.mode == Mode::PlanDocument {
+                8 * MAX_DATASET_BYTES
+            } else {
+                MAX_DATASET_BYTES
+            },
+        )?;
         let public: Value = serde_json::from_slice(&dataset).context("compute_dataset_json")?;
-        ensure!(
-            public.get("version") == Some(&Value::from(1)),
-            "compute_dataset_version"
-        );
-        ensure!(
-            public.get("visibility").and_then(Value::as_str) == Some("public"),
-            "compute_public_data_required"
-        );
-        ensure!(
-            public.get("license").and_then(Value::as_str) == Some("GPL-3.0-only"),
-            "compute_dataset_license"
-        );
-        ensure!(
-            public
-                .get("source_revision")
-                .and_then(Value::as_str)
-                .is_some_and(|s| is_hex(s, 40)),
-            "compute_dataset_revision"
-        );
+        if self.mode == Mode::PlanDocument {
+            ensure!(self.adapter_root.is_none(), "compute_document_plan_adapter");
+            document_plan::validate_input(&public)?;
+        } else if public["version"] == 2 {
+            ensure!(
+                self.mode == Mode::Infer,
+                "compute_document_training_not_supported"
+            );
+            let rows = public["inference"]
+                .as_array()
+                .context("compute_document_rows")?
+                .len();
+            volparossa_content::provider::compute::dataset::validate_document_json(
+                std::str::from_utf8(&dataset)?,
+                rows,
+            )?;
+        } else {
+            ensure!(
+                public.get("version") == Some(&Value::from(1)),
+                "compute_dataset_version"
+            );
+            ensure!(
+                public.get("visibility").and_then(Value::as_str) == Some("public"),
+                "compute_public_data_required"
+            );
+            ensure!(
+                public.get("license").and_then(Value::as_str) == Some("GPL-3.0-only"),
+                "compute_dataset_license"
+            );
+            ensure!(
+                public
+                    .get("source_revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| is_hex(s, 40)),
+                "compute_dataset_revision"
+            );
+        }
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",

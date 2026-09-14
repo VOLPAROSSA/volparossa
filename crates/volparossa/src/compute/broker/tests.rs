@@ -71,6 +71,7 @@ fn broker(root: &Path) -> Broker {
             max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
             max_rows: 4,
             task_derivation_v1: true,
+            document_inference_v2: false,
         },
         jobs: VecDeque::new(),
         budget: Budget::fixed_for_test(Decision::Run),
@@ -209,6 +210,76 @@ async fn strict_rpc_roundtrip_rejects_extra_fields_oversize_and_wrong_correlatio
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn document_profile_requires_explicit_capability_before_any_worker_admission() {
+    use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity, publish};
+
+    let source_root = tempfile::tempdir().unwrap();
+    let mut cache = ChunkStore::create(
+        &source_root.path().join("cache"),
+        CacheLimits {
+            max_bytes: 1024 * 1024,
+            max_entries: 8,
+            min_free_bytes: 0,
+        },
+    )
+    .unwrap();
+    let publisher = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+    let context = "One explicitly public document excerpt.";
+    let signed = publish(
+        &mut context.as_bytes(),
+        Publication {
+            metadata: Metadata {
+                name: "broker-document".into(),
+                revision: 1,
+                content_type: "text/plain".into(),
+            },
+            length: context.len() as u64,
+            validity: Validity {
+                created: 1000,
+                expires: 2000,
+            },
+        },
+        &publisher,
+        &mut cache,
+    )
+    .unwrap();
+    let document = serde_json::json!({"version":2,"visibility":"public","license":"CC0-1.0",
+        "source_manifest_hex":hex::encode(signed.encode()),"inference":[{
+            "question":"What is tested?","context":context,"start":0,"end":context.len()}]})
+    .to_string();
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: document.clone(),
+        publication: publication(),
+    };
+    submit.binding.dataset_sha256 = sha(document.as_bytes());
+    submit.publication.dataset_json = document;
+    // The broker trusts only its same-UID agent boundary for the outer publication;
+    // this checks actual local admission without claiming network authentication or ML.
+    assert!(!broker.capabilities.document_inference_v2);
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit.clone())), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Invalid)
+    ));
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    broker.capabilities.document_inference_v2 = true;
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit)), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Unavailable)
+    ));
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[tokio::test]

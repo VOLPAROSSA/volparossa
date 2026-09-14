@@ -440,7 +440,7 @@ fn expected_work(
     })
 }
 
-fn open_directory(root: &Path, resume: bool) -> Result<Flock<File>> {
+pub(super) fn open_directory(root: &Path, resume: bool) -> Result<Flock<File>> {
     if !resume {
         private_directory(root.parent().context("compute_task_parent")?)?;
         fs::DirBuilder::new().mode(0o700).create(root)?;
@@ -475,7 +475,7 @@ fn write_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<()> 
     write_bytes(path, &bytes, replace)
 }
 
-fn write_bytes(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
+pub(super) fn write_bytes(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     use std::io::Write as _;
     let parent = path.parent().context("compute_task_file_parent")?;
     private_directory(parent)?;
@@ -638,6 +638,7 @@ mod tests {
             max_dataset_bytes: 1024 * 1024,
             max_rows: 4,
             task_derivation_v1: true,
+            document_inference_v2: false,
         };
         let attempt = fixture.root.path().join("work/package-0000/attempt-0000");
         fs::DirBuilder::new().mode(0o700).create(&attempt).unwrap();

@@ -59,6 +59,7 @@ pub(super) struct Attachment {
     trusted_publishers: BTreeSet<[u8; 32]>,
     model_fingerprint: String,
     task_derivation_v1: bool,
+    document_inference_v2: bool,
     enabled: AtomicBool,
 }
 
@@ -135,6 +136,7 @@ impl ContentRuntime {
             trusted_publishers,
             model_fingerprint: capabilities.model_fingerprint,
             task_derivation_v1: capabilities.task_derivation_v1,
+            document_inference_v2: capabilities.document_inference_v2,
             enabled: AtomicBool::new(true),
         });
         let service = Arc::new(ComputeService::new(
@@ -326,6 +328,7 @@ impl Attachment {
                     now(),
                 )?;
                 if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
+                    || (source.is_document() && !self.document_inference_v2)
                     || submit.binding.expires_unix_seconds > source.expires()
                     || derive_submission(&source, &submit.binding)? != submit.dataset_json
                     || hex::encode(Sha256::digest(submit.dataset_json.as_bytes()))
@@ -373,6 +376,7 @@ impl ComputeBackend for Attachment {
                 validate_capabilities(capabilities)?;
                 if capabilities.model_fingerprint != self.model_fingerprint
                     || capabilities.task_derivation_v1 != self.task_derivation_v1
+                    || capabilities.document_inference_v2 != self.document_inference_v2
                 {
                     return Err(ComputeError::Authentication);
                 }

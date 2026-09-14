@@ -160,6 +160,10 @@ pub struct ModelIdentity {
 }
 
 /// Resource bounds of the explicitly enabled local inference worker.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent versioned wire capability flags preserve old peers' default-false encoding"
+)]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
@@ -185,6 +189,9 @@ pub struct Capabilities {
     /// Older capability records default to false and cannot admit a derived task.
     #[serde(default, skip_serializing_if = "is_false")]
     pub task_derivation_v1: bool,
+    /// Supports publisher-signed inference-only document excerpts (dataset version two).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub document_inference_v2: bool,
 }
 
 #[allow(
@@ -517,14 +524,20 @@ mod tests {
         let original = serde_json::json!({
             "model": {"model_id":"public-model","model_revision":"pinned","base_weights":{"bytes":1,"sha256":"a".repeat(64)},"adapter_files":null},
             "model_fingerprint":"b".repeat(64),"accepting_work":true,"public_inference_only":true,
-            "runtime_slots":1,"max_threads":2,"max_job_seconds":600,"max_dataset_bytes":1048576,"max_rows":4
+            "runtime_slots":1,"max_threads":2,"max_job_seconds":600,"max_dataset_bytes":1_048_576,"max_rows":4
         });
         let mut capabilities: Capabilities = serde_json::from_value(original.clone()).unwrap();
         assert!(!capabilities.task_derivation_v1);
+        assert!(!capabilities.document_inference_v2);
         assert_eq!(serde_json::to_value(&capabilities).unwrap(), original);
         capabilities.task_derivation_v1 = true;
         assert_eq!(
             serde_json::to_value(&capabilities).unwrap()["task_derivation_v1"],
+            true
+        );
+        capabilities.document_inference_v2 = true;
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap()["document_inference_v2"],
             true
         );
     }

@@ -115,7 +115,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "max_job_seconds": compute::MAX_JOB_SECONDS, "same_uid_only": true,
                 "remote_network_authentication": "required-agent-boundary",
                 "network_access": false, "remote_execution_proved": false,
-                "task_derivation_v1": true
+                "task_derivation_v1": true,
+                "document_inference_v2": true
             })
         );
         return Ok(());
@@ -260,6 +261,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
         max_rows: 4,
         task_derivation_v1: true,
+        document_inference_v2: true,
     })
 }
 
@@ -364,6 +366,12 @@ impl Broker {
     }
 
     fn accepts_task(&self, submit: &Submit) -> bool {
+        if !self.capabilities.document_inference_v2
+            && serde_json::from_str::<Value>(&submit.dataset_json)
+                .is_ok_and(|value| value["version"] == 2)
+        {
+            return false;
+        }
         let Some(task) = &submit.binding.task else {
             return true;
         };

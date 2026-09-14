@@ -165,7 +165,9 @@ fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer => ensure!(updates == Some(0), "compute_unrequested_training"),
+        Mode::Infer | Mode::PlanDocument => {
+            ensure!(updates == Some(0), "compute_unrequested_training");
+        }
         Mode::Train => {
             ensure!(
                 updates == Some(u64::from(request.steps)),
@@ -193,6 +195,23 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .context("compute_artifacts")?;
     if mode == Mode::Infer {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
+        return Ok(());
+    }
+    if mode == Mode::PlanDocument {
+        ensure!(
+            value["model_weights_loaded"] == false,
+            "compute_document_plan_loaded_weights"
+        );
+        ensure!(
+            artifacts.len() == 1 && artifacts[0]["relative_path"] == "document-plan.json",
+            "compute_document_plan_artifact"
+        );
+        let bytes = super::read_file(&output.join("document-plan.json"), MAX_OUTPUT_BYTES)?;
+        ensure!(
+            artifacts[0]["bytes"] == bytes.len() as u64
+                && artifacts[0]["sha256"] == hex::encode(Sha256::digest(&bytes)),
+            "compute_document_plan_hash"
+        );
         return Ok(());
     }
     let expected = [
@@ -493,6 +512,25 @@ fn status_kib(text: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_plan_requires_actual_artifact_hash_without_weight_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"{\"parser_fixture_not_tokenizer_proof\":true}";
+        let mut file = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        std::io::Write::write_all(&mut file, bytes).unwrap();
+        file.persist(root.path().join("document-plan.json"))
+            .unwrap();
+        let mut report = serde_json::json!({"model_weights_loaded":false,"artifacts":[{
+            "relative_path":"document-plan.json", "bytes":bytes.len(),
+            "sha256":hex::encode(Sha256::digest(bytes))}]});
+        check_artifacts(&report, Mode::PlanDocument, root.path()).unwrap();
+        report["model_weights_loaded"] = true.into();
+        assert!(check_artifacts(&report, Mode::PlanDocument, root.path()).is_err());
+        report["model_weights_loaded"] = false.into();
+        report["artifacts"][0]["sha256"] = "a".repeat(64).into();
+        assert!(check_artifacts(&report, Mode::PlanDocument, root.path()).is_err());
+    }
 
     #[tokio::test]
     async fn bounded_framing_rejects_missing_newlines_and_oversized_records() {

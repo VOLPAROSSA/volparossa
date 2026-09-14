@@ -28,6 +28,10 @@ import time
 VERSION = 1
 MAX_REQUEST = 65536
 MAX_DATASET = 1048576
+MAX_DOCUMENT_REQUEST = 8 * 1048576
+MAX_DOCUMENT_PARTS = 16384
+MAX_DOCUMENT_PLAN = 16 * 1048576
+PUBLIC_LICENSES = {"GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"}
 MAX_LINE = 16384
 MAX_CONTROL_LINE = 1024
 MAX_CONTROLS = 128
@@ -120,7 +124,8 @@ def validate_request(value):
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
-    require(value["mode"] in ("infer", "train"), "INVALID_JOB_MODE")
+    require(value["mode"] in ("infer", "train", "plan_document"), "INVALID_JOB_MODE")
+    require(value["mode"] != "plan_document" or "adapter_root" not in value, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
     for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
@@ -148,6 +153,10 @@ def validate_sample(sample, answered):
 
 
 def validate_dataset(dataset, mode):
+    if mode == "plan_document":
+        return validate_document(dataset)
+    if type(dataset) is dict and dataset.get("version") == 2:
+        return validate_document_inference(dataset, mode)
     fields = {"version", "visibility", "license", "source_revision", "train", "heldout", "inference"}
     require(type(dataset) is dict and dataset.keys() == fields, "INVALID_DATASET_FIELDS")
     require(type(dataset["version"]) is int and dataset["version"] == VERSION
@@ -168,6 +177,53 @@ def validate_dataset(dataset, mode):
     training_questions = {row["question"].strip().casefold() for row in dataset["train"]}
     require(not training_questions.intersection(row["question"].strip().casefold()
                                                for row in dataset["heldout"]), "TRAIN_HELDOUT_OVERLAP")
+    return dataset
+
+
+def public_text(value, maximum, code):
+    require(type(value) is str, code)
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeError as error:
+        raise JobError(code) from error
+    require(0 < len(raw) <= maximum and b"\x00" not in raw, code)
+    return raw
+
+
+def public_license(value):
+    return type(value) is str and value in PUBLIC_LICENSES
+
+
+def validate_document(dataset):
+    require(type(dataset) is dict and dataset.keys() == {"version", "visibility", "license", "document", "question"},
+            "INVALID_DOCUMENT_FIELDS")
+    require(type(dataset["version"]) is int and dataset["version"] == 1
+            and dataset["visibility"] == "public" and public_license(dataset["license"]), "DOCUMENT_NOT_EXPLICIT_PUBLIC")
+    public_text(dataset["document"], MAX_DATASET, "INVALID_DOCUMENT_TEXT")
+    public_text(dataset["question"], 512, "INVALID_DOCUMENT_QUESTION")
+    require(dataset["question"].strip(), "INVALID_DOCUMENT_QUESTION")
+    return dataset
+
+
+def validate_document_inference(dataset, mode):
+    require(mode == "infer", "DOCUMENT_PROFILE_INFERENCE_ONLY")
+    require(dataset.keys() == {"version", "visibility", "license", "source_manifest_hex", "inference"}, "INVALID_DOCUMENT_PROFILE_FIELDS")
+    require(type(dataset["version"]) is int and dataset["version"] == 2
+            and dataset["visibility"] == "public" and public_license(dataset["license"]), "DOCUMENT_NOT_EXPLICIT_PUBLIC")
+    manifest = dataset["source_manifest_hex"]
+    require(type(manifest) is str and 2 <= len(manifest) <= 2 * 65536 and len(manifest) % 2 == 0
+            and re.fullmatch(r"[0-9a-f]+", manifest), "INVALID_DOCUMENT_MANIFEST")
+    rows = dataset["inference"]
+    require(type(rows) is list and 1 <= len(rows) <= 4, "INVALID_DATASET_SIZE")
+    previous_end = 0
+    for row in rows:
+        require(type(row) is dict and row.keys() == {"question", "context", "start", "end"}, "INVALID_SAMPLE_FIELDS")
+        public_text(row["question"], 512, "INVALID_SAMPLE_TEXT")
+        context = public_text(row["context"], 4096, "INVALID_SAMPLE_TEXT")
+        require(row["question"].strip() and bounded_integer(row["start"], 0, MAX_DATASET)
+                and bounded_integer(row["end"], 1, MAX_DATASET) and row["start"] >= previous_end
+                and row["end"] - row["start"] == len(context), "INVALID_DOCUMENT_RANGE")
+        previous_end = row["end"]
     return dataset
 
 
@@ -230,14 +286,22 @@ def prepare_files(request):
     require(type(config) is dict and all(config.get(key) == value for key, value in expected.items())
             and "auto_map" not in config and "quantization_config" not in config,
             "UNSUPPORTED_MODEL_ARCHITECTURE")
-    raw_dataset = read_bounded(dataset_path, MAX_DATASET)
+    raw_dataset = read_bounded(dataset_path, MAX_DOCUMENT_REQUEST if request["mode"] == "plan_document" else MAX_DATASET)
     dataset = validate_dataset(parse_json(raw_dataset), request["mode"])
-    return model_root, output_root, dataset, {
+    identity = {
         "sha256": hashlib.sha256(raw_dataset).hexdigest(), "bytes": len(raw_dataset),
-        "visibility": "public", "license": dataset["license"], "source_revision": dataset["source_revision"],
-        "training_examples": len(dataset["train"]), "heldout_examples": len(dataset["heldout"]),
-        "inference_examples": len(dataset["inference"]),
-    }, files
+        "visibility": "public", "license": dataset["license"],
+    }
+    if request["mode"] == "plan_document":
+        identity.update(version=1, document_sha256=hashlib.sha256(dataset["document"].encode()).hexdigest(),
+                        document_bytes=len(dataset["document"].encode()))
+    elif dataset["version"] == 2:
+        identity.update(version=2, source_manifest_sha256=hashlib.sha256(bytes.fromhex(dataset["source_manifest_hex"])).hexdigest(),
+                        inference_examples=len(dataset["inference"]))
+    else:
+        identity.update(source_revision=dataset["source_revision"], training_examples=len(dataset["train"]),
+                        heldout_examples=len(dataset["heldout"]), inference_examples=len(dataset["inference"]))
+    return model_root, output_root, dataset, identity, files
 
 
 def validate_adapter_config(config):
@@ -540,16 +604,72 @@ def prompt_messages(row):
             {"role": "user", "content": "Documentation:\n" + row["context"] + "\nQuestion:\n" + row["question"]}]
 
 
+def prompt_tokens(tokenizer, row):
+    # Exactly the same whole prompt is counted by planning and actual inference.
+    prompt = tokenizer.apply_chat_template(prompt_messages(row), tokenize=True, add_generation_prompt=True,
+                                           return_dict=False)
+    require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
+    return prompt
+
+
+def plan_document(tokenizer, dataset, session):
+    text, question = dataset["document"], dataset["question"]
+    limit = MAX_CONTEXT - MAX_NEW_TOKENS
+    session.check()
+    require(1 <= len(prompt_tokens(tokenizer, {"question": question, "context": ""})) <= limit,
+            "DOCUMENT_QUESTION_TOKEN_LIMIT_EXCEEDED")
+    parts, offset, start = [], 0, 0
+    while start < len(text):
+        session.check()
+        require(len(parts) < MAX_DOCUMENT_PARTS, "DOCUMENT_PART_LIMIT_EXCEEDED")
+        # A v2 inference context is at most 4096 UTF-8 bytes. Character boundaries
+        # are used only while searching; all durable ranges are original bytes.
+        remaining = min(len(text) - start, 4096)
+        valid_end, valid_tokens = start, None
+        low, high = 1, remaining
+        while low <= high:
+            session.check()
+            length = (low + high) // 2
+            context = text[start:start + length]
+            if len(context.encode("utf-8")) > 4096:
+                high = length - 1
+                continue
+            count = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+            if 1 <= count <= limit:
+                valid_end, valid_tokens = start + length, count
+                low = length + 1
+            else:
+                high = length - 1
+        # BPE prefix counts need not be monotone. We do not claim a globally
+        # longest segment: every accepted candidate is actually tokenized, and
+        # a one-character fallback keeps that detail from creating an empty part.
+        if valid_end == start:
+            context = text[start:start + 1]
+            valid_tokens = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+            require(1 <= valid_tokens <= limit, "DOCUMENT_CHARACTER_DOES_NOT_FIT")
+            valid_end = start + 1
+        context = text[start:valid_end]
+        count = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+        require(count == valid_tokens and 1 <= count <= limit, "DOCUMENT_TOKENIZATION_CHANGED")
+        end = offset + len(context.encode("utf-8"))
+        parts.append({"start": offset, "end": end, "prompt_tokens": count})
+        offset, start = end, valid_end
+    raw = text.encode("utf-8")
+    require(offset == len(raw), "DOCUMENT_COVERAGE_INVALID")
+    return {"version": 1, "source_sha256": hashlib.sha256(raw).hexdigest(), "source_bytes": len(raw),
+            "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(), "model_id": MODEL_ID,
+            "model_revision": MODEL_REVISION, "tokenizer_sha256": MODEL_HASHES["tokenizer.json"],
+            "prompt_limit": limit, "parts": parts}
+
+
 def encode_dataset(tokenizer, torch, dataset):
     result = {"train": [], "heldout": [], "inference": []}
     for split in result:
-        for row in dataset[split]:
+        for row in dataset.get(split, []):
             messages = prompt_messages(row)
             # Transformers 5.16.1 defaults to BatchEncoding; this worker deliberately
             # consumes a flat token-ID list and constructs its own tensors/masks.
-            prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
-                                                   return_dict=False)
-            require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
+            prompt = prompt_tokens(tokenizer, row)
             require(1 <= len(prompt) <= MAX_CONTEXT - MAX_NEW_TOKENS,
                     "DOCUMENT_TOKEN_LIMIT_EXCEEDED")
             if split == "inference":
@@ -675,6 +795,25 @@ def execute_job(request, session):
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
     require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
     session.check()
+    if request["mode"] == "plan_document":
+        plan = plan_document(tokenizer, dataset, session)
+        raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
+        require(len(raw) <= MAX_DOCUMENT_PLAN, "DOCUMENT_PLAN_TOO_LARGE")
+        session.check()
+        path = output_root / "document-plan.json"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        artifact = {"relative_path": "document-plan.json", **file_hash(path, maximum=MAX_DOCUMENT_PLAN)}
+        require(artifact["sha256"] == hashlib.sha256(raw).hexdigest(), "DOCUMENT_PLAN_CHANGED")
+        result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": "plan_document",
+                  "backend_versions": versions, "device": "cpu", "threads": request["threads"],
+                  "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
+                  "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
+                  "model_weights_loaded": False, "network_policy_changed": False}
+        return finish_result(result, output_root, session)
     samples = encode_dataset(tokenizer, torch, dataset)
     session.check()
     model = load_model(transformers, torch, model_root)
@@ -684,7 +823,7 @@ def execute_job(request, session):
         model, input_adapter = apply_adapter(model, prepared_adapter, peft, torch, session,
                                              trainable=request["mode"] == "train")
     session.progress("baseline")
-    baseline = evaluate(model, samples["heldout"], torch, session)
+    baseline = evaluate(model, samples["heldout"], torch, session) if samples["heldout"] else None
     baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session)
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
@@ -759,6 +898,10 @@ def execute_job(request, session):
     # in-memory frozen-parameter comparison and is required for compatible adapter reuse.
     require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
             "MODEL_WEIGHTS_CHANGED_ON_DISK")
+    return finish_result(result, output_root, session)
+
+
+def finish_result(result, output_root, session):
     session.progress("complete", result["updates_completed"])
     result["elapsed_ms"] = session.elapsed()
     if session.frames is not None:

@@ -278,8 +278,9 @@ fn prepare(args: &Options) -> Result<(Enrollment, Vec<rpc::PublicDataset>)> {
         };
         let (public, verified) = source(&args)?;
         ensure!(
-            (2..=4).contains(&verified.row_count()),
-            "compute_workflow_package_requires_two_to_four_rows"
+            (2..=4).contains(&verified.row_count())
+                || (verified.is_document() && verified.row_count() == 1),
+            "compute_workflow_package_row_profile"
         );
         packages.push(Package {
             publisher_key: public.publisher_key.clone(),
@@ -327,7 +328,7 @@ fn validate_enrollment(enrollment: &Enrollment) -> Result<()> {
             task.question()?;
         }
         ensure!(
-            (2..=4).contains(&package.rows) && ids.insert(&package.manifest_id),
+            (1..=4).contains(&package.rows) && ids.insert(&package.manifest_id),
             "compute_workflow_duplicate_or_invalid_package"
         );
     }
@@ -455,7 +456,8 @@ fn stored_source(
     ensure!(
         sha(&data) == package.dataset_sha256
             && hex::encode(verified.manifest_id()) == package.manifest_id
-            && verified.row_count() == package.rows,
+            && verified.row_count() == package.rows
+            && (package.rows >= 2 || verified.is_document()),
         "compute_workflow_stored_source_changed"
     );
     Ok((source, verified))
@@ -839,6 +841,103 @@ mod tests {
         }
     }
 
+    fn signed_profile(fixture: &Fixture, bytes: &str, mime: &str) -> Vec<u8> {
+        let mut cache = ChunkStore::open(
+            &fixture.root.path().join("cache"),
+            CacheLimits {
+                max_bytes: 1024 * 1024,
+                max_entries: 16,
+                min_free_bytes: 0,
+            },
+        )
+        .unwrap();
+        publish(
+            &mut bytes.as_bytes(),
+            Publication {
+                metadata: Metadata {
+                    name: "singleton-fixture".into(),
+                    revision: 1,
+                    content_type: mime.into(),
+                },
+                length: bytes.len() as u64,
+                validity: Validity {
+                    created: fixture.enrollment.verified_at_unix_seconds,
+                    expires: fixture.enrollment.verified_at_unix_seconds + 1200,
+                },
+            },
+            &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+            &mut cache,
+        )
+        .unwrap()
+        .encode()
+    }
+
+    #[test]
+    fn fresh_singleton_document_enrolls_restores_and_assigns_one_peer_but_v1_does_not() {
+        use volparossa_content::provider::compute::dataset::{CONTENT_TYPE, DOCUMENT_CONTENT_TYPE};
+
+        let mut fixture = fixture(1);
+        let dataset_path = fixture.root.path().join("input-0.json");
+        let manifest_path = fixture.root.path().join("input-0.bin");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&read_file(&dataset_path, MAX_PLAN_BYTES).unwrap()).unwrap();
+        legacy["inference"].as_array_mut().unwrap().truncate(1);
+        let legacy = legacy.to_string();
+        task::write_bytes(&dataset_path, legacy.as_bytes(), true).unwrap();
+        task::write_bytes(
+            &manifest_path,
+            &signed_profile(&fixture, &legacy, CONTENT_TYPE),
+            true,
+        )
+        .unwrap();
+        assert!(prepare(&fixture.options).is_err());
+        let args = Source {
+            dataset: dataset_path.clone(),
+            dataset_manifest: manifest_path.clone(),
+            publisher_key: fixture.options.provider_key[0],
+        };
+        let (_, verified) = source(&args).unwrap();
+        assert!(!verified.is_document());
+        assert!(batch::assignments_for(&verified, &fixture.options.provider_key[..1]).is_err());
+
+        let context = "One remaining public document fragment.";
+        let original = signed_profile(&fixture, context, "text/plain");
+        let document = serde_json::json!({"version":2,"visibility":"public","license":"CC0-1.0",
+            "source_manifest_hex":hex::encode(original),"inference":[{
+                "question":"What does this public text say?","context":context,"start":0,"end":context.len()}]}).to_string();
+        task::write_bytes(&dataset_path, document.as_bytes(), true).unwrap();
+        task::write_bytes(
+            &manifest_path,
+            &signed_profile(&fixture, &document, DOCUMENT_CONTENT_TYPE),
+            true,
+        )
+        .unwrap();
+        fixture.options.directory = fixture.root.path().join("document-workflow");
+        let (enrollment, sources) = prepare(&fixture.options).unwrap();
+        assert_eq!(enrollment.provider_keys.len(), 2); // Overall enrollment still pins two independent peers.
+        assert_eq!(enrollment.packages[0].rows, 1);
+        persist_enrollment(&fixture.options.directory, &enrollment, &sources).unwrap();
+        let (_, verified) = stored_source(
+            &fixture.options.directory.join("package-0000"),
+            &enrollment.packages[0],
+            enrollment.verified_at_unix_seconds,
+        )
+        .unwrap();
+        assert!(verified.is_document());
+        assert_eq!(
+            batch::assignments_for(&verified, &fixture.options.provider_key[..1]).unwrap(),
+            vec![vec![0]]
+        );
+        assert!(batch::assignments_for(&verified, &fixture.options.provider_key).is_err());
+        assert!(
+            !fixture
+                .options
+                .directory
+                .join("package-0000/attempt-0000")
+                .exists()
+        );
+    }
+
     fn handles(
         fixture: &Fixture,
         package: usize,
@@ -874,6 +973,7 @@ mod tests {
             max_dataset_bytes: 1024 * 1024,
             max_rows: 4,
             task_derivation_v1: true,
+            document_inference_v2: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {

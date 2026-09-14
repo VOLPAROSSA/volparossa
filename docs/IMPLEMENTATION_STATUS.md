@@ -112,6 +112,25 @@ worker-overlap window. Eighteen targeted peer tests and the parser/snapshot chec
 another live run is required. Completed full receipts can also be read after the original
 source expires; this never renews the source or authorizes unfinished work. These local tests
 are not a model-execution claim.
+The subsequent [run on `5f487a18`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34888010963)
+did execute both real peer workers and returned two source-bound answers. It failed afterward
+because the fixture treated two required empty lockfiles as nonempty data files; retained-result
+resume was not reached. `42761c28` checks those exact lockfiles separately without permitting
+arbitrary empty data files. Its corrective live proof is running; the older failure remains a failure.
+
+The new `compute peer document` candidate adds actual isolated-tokenizer planning for explicitly
+public UTF-8 owner input. Contiguous byte ranges cover the original without truncation; up to
+four excerpts form a native signed inference-only v2 package, and multiple package workflows
+retain full receipts and ordered range answers. Same-publisher source/fragment authentication,
+coordinator comparison against the actual original text and a new explicit peer capability
+replace invented training/held-out metadata. A final single-fragment package uses one worker.
+The local tokenizer plan does not load model weights; remote inference remains real and bounded.
+All 63 focused CLI compute tests, seven dataset tests, three wire-codec tests and three
+agent-boundary tests pass, together with strict Clippy for the four changed crates and 21
+Python worker protocol tests, with no host model execution. The new multi-package/resume
+disposable VM proof is still pending.
+This is not confidential offload, source-cache discovery, automatic network replication,
+neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
@@ -207,10 +226,22 @@ store also held the original dataset and seed, making four. The candidate now ch
 exact contributed update identities and accounts for only those known optional original
 replicas, including bytes/chunks; it does not accept an arbitrary minimum object count.
 After the explicit dataset handoff that source must also be accounted for. Final retrieval
-and inference by another client were not reached in that run and still require a new live
-pass. The original failure retains full cleanup and unchanged guest-host state. Its partial
+and inference by another client were not reached in that run. The original failure retains
+full cleanup and unchanged guest-host state. Its partial
 cycle proof is stored in `.git/ci-evidence/34885489099/partial-cycle-review.json`;
 exact-head Quality and all three CodeQL analyses passed.
+The corrective [`bcc1df52` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34887897332)
+now passes fully, including exact-source reconstruction of the original report. Two separate
+workers perform eight updates each (21.068 and 20.891 seconds), preserving the base and applying
+the exact predecessor. A separate Client retrieves the 943,733-byte second adapter and
+1,005-byte source dataset through R4 after R5 stops serving, then performs actual inference
+with the exact received weights (12.419 seconds, zero updates). Ten captures / 78 interface
+rows / 25,565 frames have no drops, forbidden or malformed packets; both protected WireGuard
+legs carry transfer data. Cleanup leaves zero owned objects and original guest-host state is
+unchanged. Artifact ZIP SHA-256: `a2e4077ef2d18980e86938a51dd87a8105181581500f03890e55dea68ca11303`;
+254,186-byte canonical reconstruction: `591a63244357bb731995c0304a695723430b88aca9b8e3c42719a35e21a7c018`.
+Exact-source Quality and all CodeQL checks also pass. PR #123 merged normally into
+`main` at `b3e2f08c1a1b9984e6ff536eb609798c24aa312c`, with the exact candidate tree.
 These two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
 See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).

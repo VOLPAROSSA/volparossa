@@ -33,6 +33,11 @@ struct Question {
 }
 
 pub(super) fn validate(json: &str, rows: usize) -> Result<()> {
+    let header: serde_json::Value = serde_json::from_str(json)?;
+    if header["version"] == 2 {
+        volparossa_content::provider::compute::dataset::validate_document_json(json, rows)?;
+        return Ok(());
+    }
     let dataset: Dataset = serde_json::from_str(json)?;
     ensure!(
         dataset.version == 1

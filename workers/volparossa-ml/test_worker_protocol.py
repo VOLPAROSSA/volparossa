@@ -6,6 +6,7 @@ import copy
 import contextlib
 import importlib.util
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -116,6 +117,113 @@ def adapter_bytes(header_change=None, last_float=0.0):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_document_and_v2_profiles_are_public_bounded_and_inference_only(self):
+        document = dict(version=1, visibility="public", license="CC-BY-4.0", document="A public café.\n", question="What is stated?")
+        self.assertEqual(WORKER.validate_dataset(document, "plan_document"), document)
+        self.assertEqual(WORKER.validate_request(dict(request(), mode="plan_document"))["mode"], "plan_document")
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED"):
+            WORKER.validate_request(dict(request(), mode="plan_document", adapter_root="/adapter"))
+        for changes in ({"document": ""}, {"document": "a\0b"}, {"document": "\ud800"}, {"document": "x" * (1048576 + 1)},
+                        {"question": " "}, {"question": "é" * 257}, {"visibility": "private"}, {"license": "unknown"}, {"extra": True}):
+            with self.subTest(changes=list(changes)), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(dict(document, **changes), "plan_document")
+        v2 = dict(version=2, visibility="public", license="CC0-1.0", source_manifest_hex="ab" * 64,
+                  inference=[dict(question="What?", context="é", start=0, end=2),
+                             dict(question="What?", context="文", start=3, end=6)])
+        self.assertEqual(WORKER.validate_dataset(v2, "infer"), v2)
+        for license_value in WORKER.PUBLIC_LICENSES:
+            WORKER.validate_dataset(dict(v2, license=license_value), "infer")
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_PROFILE_INFERENCE_ONLY"):
+            WORKER.validate_dataset(v2, "train")
+        for field, value in (("start", True), ("start", 1), ("end", 5), ("end", 1048577), ("context", "")):
+            wrong = copy.deepcopy(v2)
+            wrong["inference"][1][field] = value
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(wrong, "infer")
+        for changes in ({"source_manifest_hex": "abc"}, {"source_manifest_hex": "AB"}, {"source_manifest_hex": "ab" * 65537},
+                        {"train": []}, {"source_revision": "a" * 40}, {"inference": []}):
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(dict(v2, **changes), "infer")
+
+    def test_document_plan_preserves_exact_unicode_bytes_and_uses_full_inference_prompt(self):
+        class Tokenizer:
+            def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, return_dict):
+                assert tokenize and add_generation_prompt and not return_dict
+                assert messages[0] == WORKER.prompt_messages(dict(context="", question=""))[0]
+                return [1] * (8 + sum(len(row["content"].encode()) for row in messages) // 4)
+
+        # This tokenizer double proves control flow/ranges only, never the pinned model's token counts.
+        tokenizer, session = Tokenizer(), mock.Mock()
+        source = dict(version=1, visibility="public", license="GPL-3.0-only", document=("Public café 文🙂.\n" * 200), question="What is stated?")
+        plan = WORKER.plan_document(tokenizer, source, session)
+        encoded = source["document"].encode()
+        self.assertGreater(len(plan["parts"]), 1)
+        self.assertEqual(plan["source_sha256"], hashlib.sha256(encoded).hexdigest())
+        self.assertEqual(plan["source_bytes"], len(encoded))
+        self.assertEqual(plan["question_sha256"], hashlib.sha256(source["question"].encode()).hexdigest())
+        self.assertEqual((plan["model_revision"], plan["tokenizer_sha256"], plan["prompt_limit"]),
+                         (WORKER.MODEL_REVISION, WORKER.MODEL_HASHES["tokenizer.json"], 192))
+        offset, assembled = 0, bytearray()
+        for part in plan["parts"]:
+            self.assertEqual(part["start"], offset)
+            raw = encoded[part["start"]:part["end"]]
+            self.assertLessEqual(len(raw), 4096)
+            row = dict(question=source["question"], context=raw.decode("utf-8"))
+            self.assertEqual(part["prompt_tokens"], len(WORKER.prompt_tokens(tokenizer, row)))
+            self.assertLessEqual(part["prompt_tokens"], 192)
+            assembled.extend(raw)
+            offset = part["end"]
+        self.assertEqual(bytes(assembled), encoded)
+        with mock.patch.object(WORKER, "MAX_DOCUMENT_PARTS", 1), self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_PART_LIMIT_EXCEEDED"):
+            WORKER.plan_document(tokenizer, source, session)
+        wrong = mock.Mock()
+        wrong.apply_chat_template.return_value = [1] * 193
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_QUESTION_TOKEN_LIMIT_EXCEEDED"):
+            WORKER.plan_document(wrong, source, session)
+        wrong.apply_chat_template.side_effect = lambda messages, **_kwargs: [1] * (100 if messages[1]["content"].startswith("Documentation:\n\nQuestion:") else 193)
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_CHARACTER_DOES_NOT_FIT"):
+            WORKER.plan_document(wrong, dict(source, document="é"), session)
+
+    def test_v2_encoding_has_no_fabricated_training_or_heldout_rows(self):
+        tokenizer, backend = mock.Mock(), mock.Mock()
+        tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        backend.tensor.side_effect = lambda value, **_kwargs: value
+        source = dict(version=2, visibility="public", license="CC0-1.0", source_manifest_hex="ab" * 64,
+                      inference=[dict(question="What?", context="é", start=0, end=2)])
+        before = json.dumps(source).encode()
+        encoded = WORKER.encode_dataset(tokenizer, backend, WORKER.validate_dataset(source, "infer"))
+        self.assertEqual(encoded, dict(train=[], heldout=[], inference=[[[1, 2, 3]]]))
+        self.assertEqual(before, json.dumps(source).encode())
+        tokenizer.apply_chat_template.assert_called_once_with(WORKER.prompt_messages(source["inference"][0]),
+            tokenize=True, add_generation_prompt=True, return_dict=False)
+
+    def test_plan_branch_writes_actual_bounded_artifact_without_calling_model_loader(self):
+        # Controlled backend/tokenizer doubles test the branch and durable files, not real ML.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            value = WORKER.validate_request(dict(request(), mode="plan_document", output_root=str(root)))
+            source = dict(version=1, visibility="public", license="CC0-1.0", document="Public text.\n", question="What?")
+            tokenizer, transformers = mock.Mock(), mock.Mock()
+            tokenizer.pad_token_id = tokenizer.eos_token_id = 2
+            tokenizer.apply_chat_template.return_value = [1, 2, 3]
+            transformers.AutoTokenizer.from_pretrained.return_value = tokenizer
+            with mock.patch.object(WORKER, "prepare_files", return_value=(root / "model", root, source, {"sha256": "a" * 64}, {})), \
+                 mock.patch.object(WORKER, "configure_offline"), \
+                 mock.patch.object(WORKER, "load_backend", return_value=(mock.Mock(), transformers, mock.Mock(), WORKER.BACKENDS)), \
+                 mock.patch.object(WORKER, "load_model", side_effect=AssertionError("planner loaded weights")), \
+                 mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()):
+                result = WORKER.execute_job(value, WORKER.Session(value))
+            self.assertFalse(result["model_weights_loaded"])
+            self.assertEqual((result["mode"], result["updates_completed"]), ("plan_document", 0))
+            self.assertNotIn("outputs", result)
+            self.assertNotIn("baseline_evaluation", result)
+            self.assertEqual(result["artifacts"], [dict(relative_path="document-plan.json", **WORKER.file_hash(root / "document-plan.json"))])
+            plan = json.loads((root / "document-plan.json").read_text())
+            self.assertEqual(plan["parts"], [dict(start=0, end=13, prompt_tokens=3)])
+            self.assertEqual(json.loads((root / "report.json").read_text()), result)
+            self.assertEqual((root / "document-plan.json").stat().st_mode & 0o777, 0o600)
+
     def test_encoding_requests_flat_tokens_and_preserves_prompt_mask_and_length_limit(self):
         class Tokenizer:
             def apply_chat_template(self, _messages, *, tokenize, add_generation_prompt, return_dict=True):

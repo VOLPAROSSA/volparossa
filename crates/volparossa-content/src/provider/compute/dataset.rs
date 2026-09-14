@@ -2,7 +2,14 @@
 //!
 //! A publication signature proves the independently trusted publisher, not truthfulness,
 //! answer quality or legal provenance. This fixed initial profile accepts only the explicit
-//! public repository-document dataset schema, never browsing captures or private messages.
+//! public repository dataset or inference-only document package, never browsing captures
+//! or private messages. Document excerpts are assertions signed by their source publisher,
+//! not cryptographic range proofs of unavailable original bytes.
+
+mod document;
+pub use document::{
+    DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, validate_document_json,
+};
 
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
@@ -46,7 +53,12 @@ struct Question {
 /// Exact verified original source; callers cannot construct one from an untrusted ID alone.
 pub struct VerifiedPublicDataset {
     manifest: VerifiedManifest,
-    dataset: Dataset,
+    dataset: Profile,
+}
+
+enum Profile {
+    Repository(Dataset),
+    Document(DocumentDataset),
 }
 
 impl VerifiedPublicDataset {
@@ -62,7 +74,15 @@ impl VerifiedPublicDataset {
 
     /// Number of original independent inference rows in this bounded source.
     pub fn row_count(&self) -> usize {
-        self.dataset.inference.len()
+        match &self.dataset {
+            Profile::Repository(dataset) => dataset.inference.len(),
+            Profile::Document(dataset) => dataset.inference.len(),
+        }
+    }
+
+    /// Whether this source is a public document package, which must never be used for training.
+    pub fn is_document(&self) -> bool {
+        matches!(self.dataset, Profile::Document(_))
     }
 
     /// Deterministically serialize the selected original rows in increasing index order.
@@ -97,23 +117,27 @@ impl VerifiedPublicDataset {
         if rows.is_empty() || rows.len() > 4 || rows.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(ComputeError::Invalid);
         }
-        let mut dataset = self.dataset.clone();
-        dataset.inference = rows
-            .iter()
-            .map(|index| {
-                let mut row = self
-                    .dataset
-                    .inference
-                    .get(usize::from(*index))
-                    .cloned()
-                    .ok_or(ComputeError::Invalid)?;
-                if let Some(question) = question {
-                    question.clone_into(&mut row.question);
-                }
-                Ok::<_, ComputeError>(row)
-            })
-            .collect::<Result<_, _>>()?;
-        let json = serde_json::to_string(&dataset).map_err(|_| ComputeError::Invalid)?;
+        let json = match &self.dataset {
+            Profile::Repository(original) => {
+                let mut dataset = original.clone();
+                dataset.inference = rows
+                    .iter()
+                    .map(|index| {
+                        let mut row = original
+                            .inference
+                            .get(usize::from(*index))
+                            .cloned()
+                            .ok_or(ComputeError::Invalid)?;
+                        if let Some(question) = question {
+                            question.clone_into(&mut row.question);
+                        }
+                        Ok::<_, ComputeError>(row)
+                    })
+                    .collect::<Result<_, _>>()?;
+                serde_json::to_string(&dataset).map_err(|_| ComputeError::Invalid)?
+            }
+            Profile::Document(original) => original.derive_selected(rows, question)?,
+        };
         if json.len() > MAX_DATASET_BYTES {
             return Err(ComputeError::Invalid);
         }
@@ -138,8 +162,10 @@ pub fn verify_source(
     let manifest = SignedManifest::decode(manifest_bytes)
         .and_then(|signed| signed.verify(publisher, now))
         .map_err(|_| ComputeError::Authentication)?;
-    if manifest.metadata().content_type != CONTENT_TYPE
-        || manifest.length() != original_json.len() as u64
+    if !matches!(
+        manifest.metadata().content_type.as_str(),
+        CONTENT_TYPE | DOCUMENT_CONTENT_TYPE
+    ) || manifest.length() != original_json.len() as u64
         || manifest.object_sha256() != &<[u8; 32]>::from(Sha256::digest(original_json.as_bytes()))
     {
         return Err(ComputeError::Authentication);
@@ -156,9 +182,17 @@ pub fn verify_source(
     {
         return Err(ComputeError::Authentication);
     }
-    let dataset: Dataset =
-        serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
-    validate(&dataset)?;
+    let dataset = if manifest.metadata().content_type == DOCUMENT_CONTENT_TYPE {
+        let document: DocumentDataset =
+            serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        document.verify_source(publisher, now, manifest.validity().expires)?;
+        Profile::Document(document)
+    } else {
+        let dataset: Dataset =
+            serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        validate(&dataset)?;
+        Profile::Repository(dataset)
+    };
     Ok(VerifiedPublicDataset { manifest, dataset })
 }
 

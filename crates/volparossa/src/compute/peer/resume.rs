@@ -227,6 +227,7 @@ pub(super) fn load_handles(
                 && handle.binding.dataset_sha256
                     == sha(derive(source, rows, handle.binding.task.as_ref())?.as_bytes())
                 && (handle.binding.task.is_none() || handle.capabilities.task_derivation_v1)
+                && (!source.is_document() || handle.capabilities.document_inference_v2)
                 && handle.binding.expires_unix_seconds <= source.expires()
                 && handle.binding.model_fingerprint == handle.capabilities.model_fingerprint
                 && handle.binding.model_fingerprint
@@ -307,6 +308,7 @@ async fn replacement(
         };
         if !caps.accepting_work
             || (original.binding.task.is_some() && !caps.task_derivation_v1)
+            || (source.is_document() && !caps.document_inference_v2)
             || caps.model_fingerprint != original.binding.model_fingerprint
             || usize::from(caps.max_rows) < original.binding.row_indices.len()
         {
@@ -446,6 +448,7 @@ mod tests {
             max_dataset_bytes: 1024 * 1024,
             max_rows: 4,
             task_derivation_v1: true,
+            document_inference_v2: false,
         };
         let handle = JobHandle {
             version: 1,

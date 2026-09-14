@@ -56,6 +56,11 @@ original source and the requester's instruction remain separately bound. Results
 source rows and worker receipts; resume reuses completed work. This first interface accepts
 the existing small public-dataset format, not arbitrary documents or private prompts; its
 live two-peer user-task proof remains pending.
+A separate [`compute peer document`](docs/DECENTRALIZED_AGENTS.md#public-document-tasks)
+candidate now accepts explicitly public UTF-8 text. The pinned tokenizer splits the entire
+document into fitting prompts, native signed packages are processed on selected peers, and
+ordered source-range answers are retained across task rounds. It is not private offload or a
+final synthesized answer; the longer-document live network proof is still pending.
 An explicit `compute train-cycle` now connects a chosen public dataset to local training and
 adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
 that same publisher's dataset through the protected network. It can continue training an
@@ -71,12 +76,13 @@ passes: the same worker pauses, resumes at the same step and completes eight upd
 Both new proofs pass exact-source raw verification, preserve original guest-root state and
 leave no owned objects. Measured owner-triggered cancellation and battery/thermal/interactive
 activity integration remain unfinished; B01, autonomous B05 and the broader alpha remain open.
-The next candidate, [`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate),
+[`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate)
 connects repeated public training, optional peer warmstarts and signed update sharing. It can
 watch an explicit source plan until cancelled, while each worker keeps its own resource/deadline
-limits. Its continuous end-to-end VM proof is still pending; this is not a completed shared brain.
-The first loop run stopped before a worker was observed; cleanup passed. A reporting fix and
-durable-phase readiness diagnostics are being tested without weakening worker-isolation checks.
+limits. The [live proof on `bcc1df52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34887897332)
+passes: two genuine eight-update cycles automatically publish their signed adapters, then
+another Client retrieves the exact successor and runs inference with it. This milestone is
+merged into `main`; broader autonomous source discovery, defended aggregation and B05 remain open.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

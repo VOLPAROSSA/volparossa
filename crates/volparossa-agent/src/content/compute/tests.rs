@@ -35,6 +35,7 @@ fn capabilities() -> Capabilities {
         max_dataset_bytes: 1024 * 1024,
         max_rows: 4,
         task_derivation_v1: true,
+        document_inference_v2: false,
     }
 }
 
@@ -143,6 +144,7 @@ fn attachment(
         trusted_publishers: BTreeSet::from([publisher.verifying_key().to_bytes()]),
         model_fingerprint: capabilities().model_fingerprint,
         task_derivation_v1: true,
+        document_inference_v2: false,
         enabled: AtomicBool::new(true),
     });
     backend.registry.set(Arc::downgrade(registry)).unwrap();
