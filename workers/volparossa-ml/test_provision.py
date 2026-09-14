@@ -55,7 +55,10 @@ class ProvisionTests(unittest.TestCase):
             self.assertEqual(versions["torch"], "2.14.0+cpu")
             self.assertIn("pip", versions)
 
-    def test_execute_refuses_host_existing_root_and_missing_confirmation(self):
+    @mock.patch.object(PROVISION.sys, "version_info", (3, 13, 0))
+    @mock.patch.object(PROVISION.platform, "system", return_value="Linux")
+    @mock.patch.object(PROVISION.platform, "machine", return_value="x86_64")
+    def test_execute_refuses_host_existing_root_and_missing_confirmation(self, _machine, _system):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "new-runtime"
             args = argparse.Namespace(yes=True, disposable_guest=True, root=str(root),
@@ -78,6 +81,13 @@ class ProvisionTests(unittest.TestCase):
             alias.symlink_to(Path(directory), target_is_directory=True)
             args.root = str(alias / "other")
             with self.assertRaisesRegex(PROVISION.ProvisionError, "symlink"):
+                PROVISION.execution_root(args)
+
+    def test_unsupported_interpreter_is_refused_before_guest_or_file_operations(self):
+        args = argparse.Namespace(yes=True, disposable_guest=True, root=None, budget_bytes=None)
+        with mock.patch.object(PROVISION.sys, "version_info", (3, 12, 0)), \
+                mock.patch.object(PROVISION.subprocess, "run", side_effect=AssertionError("guest check must not run")):
+            with self.assertRaisesRegex(PROVISION.ProvisionError, "CPython 3.13"):
                 PROVISION.execution_root(args)
 
     def test_download_checks_hash_size_redirect_and_preserves_existing_file(self):
