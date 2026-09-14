@@ -1,6 +1,7 @@
 //! Explicitly configured, automatic storage-only contribution after verified public downloads.
 //! Queue entries contain no URL, recipient key, output path or reusable HTTPS authority.
 
+mod custody;
 mod publication;
 
 use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
@@ -111,6 +112,7 @@ impl ContentRuntime {
                 },
             )
             .await?;
+        custody::attach(self, context, &runtime, &active).await;
         let worker = tokio::spawn(Arc::clone(&runtime).run(
             context.clone(),
             Arc::clone(&active.registry),
@@ -122,6 +124,21 @@ impl ContentRuntime {
         *self.contribution.lock().await = Some(runtime);
         *service = Some(active);
         drop(service);
+        // A configured custody receiver can accept an initial publication even when it has
+        // no cached object yet. This generic service hint makes no per-object custody claim.
+        let offer = self.offer(
+            ProviderEndpoint::new(&config.advertised_hostname, bind.port())
+                .map_err(|_| ContentError::Invalid)?,
+        )?;
+        if context
+            .discovery
+            .register_content_offer(offer)
+            .await
+            .is_err()
+        {
+            let _ = self.stop(&context.discovery).await;
+            return Err(ContentError::Unavailable);
+        }
         content_event(context, "CONTENT_CONTRIBUTION_STARTED").await;
         Ok(())
     }

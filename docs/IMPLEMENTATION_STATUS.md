@@ -5,6 +5,9 @@ This is the repository's source of truth for implementation progress. A checked 
 Last updated: 2026-09-14
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
+Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
+whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). This is recorded design work; no
+distributed training, private AI execution or autonomous content-policy engine is implemented.
 The proposal records the full idea and a researched HTTPS integration design: authenticated
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
 experiment, through an application/browser boundary. C01–C07 now have source-bound
@@ -47,8 +50,18 @@ their pending statements describe those source revisions, not a reversal of late
 
 Major requested functional work still outstanding:
 
-- Remote publication custody, availability receipts and replica repair after a holder disappears;
-  local `publish --contribute` and incidental redistribution are not remote retention commitments.
+- Cooperative AI training/execution, model exchange, private distributed jobs and fully automatic
+  policy governance/self-checking (B01--B07); none is covered by the existing network/content passes.
+- Durable monotonic policy activation: current periodic reload verifies signatures and validity
+  but does not compare a persisted highest accepted version. Route hash pinning is not this guard.
+- Remote publication custody through the real network and replica repair after a holder disappears.
+  Explicit Deposit/Inspect, signed per-provider observations and durable complete-copy storage
+  now pass local storage/typed-stream/CLI-process tests and a real isolated agent/TLS lifecycle
+  test (empty receiver, deposit, interrupted admission, restart and complete retrieval without the
+  source cache). Three existing contribution tests and strict agent Clippy also pass. The dedicated
+  protected-network scenario is pending.
+  Automatic holder selection and repair are not implemented. Local `publish --contribute`
+  and incidental redistribution alone remain insufficient for remote custody.
 - Normal-browser reuse of eligible content with real origin authority; the existing attachment
   and native-site viewers do not implement generic HTTPS resource reuse.
 - Discovering and authorizing useful new relay paths during a live route, replenishing reserves

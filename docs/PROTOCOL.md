@@ -177,6 +177,36 @@ The bounded replica journal also accepts zero retained chunk references only for
 empty public object with the correct empty-object hash. Ordinary partial background uptake
 still never turns zero transferred chunks into a completed-publication claim.
 
+### Explicit public custody (development v1)
+
+Provider selector `version=1`, empty manifest ID, `operation=4` selects public custody on the
+existing policy-authorized provider TLS stream. The configured contribution receiver exposes
+this capability even when empty; it does not claim object possession. Ordinary Serve or mailbox
+registration alone does not enable it. Unsupported peers fail without a direct-dial fallback.
+
+The provider sends a fresh signed challenge. The publisher's local CLI signs Deposit (1) or
+Inspect (2), binding that challenge, provider key and exact original signed public manifest.
+Versioned, domain-separated canonical protobuf envelopes include sender, creation/expiry, nonce,
+message type and payload hash. Private-message content is excluded. Challenge/receipt frames
+are bounded to 2048 bytes; authorization allows one existing bounded manifest plus 2048 bytes.
+Original manifest expiry and shorter transfer/route/provider deadlines are not renewed.
+
+Deposit reuses the bounded chunk-transfer protocol. The local agent relays typed requests and
+verifies chunks against the manifest, never arbitrary byte pipes, private keys or remote paths.
+Complete is signed only after full verification, non-evicting durable admission and ready
+registration. Inspect uploads no object and rechecks actual retained bytes. A receipt binds the
+request/challenge, provider, publisher, operation, state, exact manifest ID, whole-object hash,
+logical object length, unique chunk count and original expiry. It is a fresh observation, not
+future-uptime evidence. Missing is an explicit signed state, never a complete-copy claim.
+
+Local `ContentCustody` request tag 31 and `ContentCustodyReady` response tag 23 use the existing
+version-2 protected Unix connection. After Ready, publisher authorization, typed chunk exchange
+and the signed receipt travel on that connection, followed by correlated `CONTENT_OK` and
+`ContentReceipt`. The CLI requires both the verified provider receipt and successful agent
+handoff to count a complete provider. Here `network_publication` means a confirmed complete
+remote copy; bytes/chunks describe the retained object (zero for Missing), not wire upload.
+Neither receipt type authorizes HTTPS content, automatic placement or lost-copy repair.
+
 ### Recipient-encrypted native message object (development v1)
 
 The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,
@@ -859,10 +889,12 @@ and nested-signature substitution fails without producing a projected value.
 
 ## CLI-to-agent local protocol
 
-`ControlRequest` contains version 1, a 16-byte random request ID, and exactly one operation:
+`ControlRequest` contains version 2, a 16-byte random request ID, and exactly one operation.
+Core operations include
 `Status`, `Connect`, `Disconnect`, `Peers`, `Paths`, `Sessions`, `PolicyStatus`, `SetRole`, `Roles`,
-or `Logs(maximum_records)` (1–1000). Relay and exit configuration persists independently and
-client remains the safe default. Privacy-v4 protocol directions are immutable after process start;
+or `Logs(maximum_records)` (1–1000); the content extensions above add their typed operations.
+All roles default off; production consumption requires the agreed capability-based contribution.
+Privacy-v4 protocol directions are immutable after process start;
 a real runtime role change fails closed as restart-required rather than silently changing live
 request-response exposure.
 

@@ -647,7 +647,8 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ContentTransferReady(_)
         | Payload::HttpsContentTransferReady(_)
         | Payload::NamedContentTransferReady(_)
-        | Payload::MailboxReady(_) => {
+        | Payload::MailboxReady(_)
+        | Payload::ContentCustodyReady(_) => {
             anyhow::bail!("unexpected content stream handoff outside an explicit transfer")
         }
         Payload::Content(receipt) => println!(

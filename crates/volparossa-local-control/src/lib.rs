@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod content;
+mod custody;
 mod mailbox;
 pub use content::{
     ContentCacheLimits, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
@@ -15,6 +16,7 @@ pub use content::{
     ContentTransferReady, HttpsContentFetchRequest, HttpsContentTransferReady, HttpsSourceStrategy,
     NamedContentTransferReady,
 };
+pub use custody::{ContentCustodyReady, ContentCustodyRequest};
 pub use mailbox::{MailboxReady, MailboxRemoteRequest, MailboxServeRequest};
 
 use prost::Message;
@@ -44,7 +46,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -54,9 +56,9 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ConnectRequest, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
-        ContentImportRequest, ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery,
-        MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+        ConnectRequest, ContentCustodyRequest, ContentExportRequest, ContentFetchNameRequest,
+        ContentFetchRequest, ContentImportRequest, ContentServeRequest, Empty,
+        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -125,6 +127,9 @@ pub mod control_request {
         /// Bridge one invitation-scoped signed operation on this same local socket.
         #[prost(message, tag = "30")]
         MailboxRemote(MailboxRemoteRequest),
+        /// Bridge one publisher-authorized public deposit/inspection on this same socket.
+        #[prost(message, tag = "31")]
+        ContentCustody(ContentCustodyRequest),
     }
 }
 
@@ -210,7 +215,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -220,9 +225,9 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ContentReceipt, ContentTransferReady, Empty, HttpsContentTransferReady, LogList,
-        MailboxReady, NamedContentTransferReady, PathList, PeerList, PolicySnapshot, RoleSnapshot,
-        SessionList, StatusSnapshot,
+        ContentCustodyReady, ContentReceipt, ContentTransferReady, Empty,
+        HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
+        PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -267,6 +272,9 @@ pub mod control_response {
         /// Original signed provider challenge, never a completed mailbox operation.
         #[prost(message, tag = "22")]
         MailboxReady(MailboxReady),
+        /// Original signed provider challenge, not a completed public custody operation.
+        #[prost(message, tag = "23")]
+        ContentCustodyReady(ContentCustodyReady),
     }
 }
 
@@ -674,6 +682,7 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentFetchName(request) => request.validate()?,
         control_request::Operation::MailboxServe(request) => request.validate()?,
         control_request::Operation::MailboxRemote(request) => request.validate()?,
+        control_request::Operation::ContentCustody(request) => request.validate()?,
         control_request::Operation::ContentImport(request) => request.validate()?,
         control_request::Operation::ContentExport(request) => request.validate()?,
         control_request::Operation::SetRole(change) => {
@@ -771,6 +780,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::HttpsContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
+        control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

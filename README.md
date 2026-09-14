@@ -21,6 +21,13 @@ has since passed the constrained-uplink comparison described below; it is not a 
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
+The newly requested [cooperative AI layer](docs/DECENTRALIZED_AGENTS.md) will add contributed
+training/computation and fully automatic content-policy governance. It is currently a design
+requirement, not an implemented distributed brain or a guarantee of private remote execution.
+The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
+deposit original signed publications with other configured participants and inspect their
+retained copies. Local storage and real CLI-process tests pass; protected-network acceptance,
+automatic holder selection and repair remain pending.
 The normal low-latency Internet path is always:
 
 ```mermaid

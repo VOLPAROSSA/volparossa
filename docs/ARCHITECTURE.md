@@ -56,6 +56,11 @@ replication as well as network contribution.
 
 ## Trust and process boundaries
 
+The requested [cooperative AI extension](DECENTRALIZED_AGENTS.md) adds isolated training/task
+workers, exchanged model artifacts and fully automatic policy decisions. It is additional
+unimplemented scope, not a new authority already held by `volparossa-agent`. Model caches do
+not grant execution privileges, and current destination-policy trust is unchanged.
+
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
 attempt uses a fresh Ed25519 client-session identity and fresh WireGuard keys; no exit-facing v4
 reservation artifact contains the client's permanent node ID or Peer ID. The unprivileged agent

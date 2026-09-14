@@ -80,6 +80,16 @@ Best-effort cache eviction alone cannot provide durable publishing. Retention co
 replica receipts, repair and an honest availability status are needed. No permanent-availability
 or deletion-of-all-remote-copies guarantee is implied.
 
+The next integrated implementation adds explicit remote public `custody deposit`/`inspect`:
+the publisher signs against a fresh provider challenge, sends original verified chunks through
+the protected content route and obtains provider-signed observations only after full-object
+verification, durable journal admission and ready serving. Inspect revalidates stored bytes
+without uploading; restart does not renew the original expiry. The ordinary CLI preserves
+partial successes across independent providers. Local storage, typed-stream and real CLI-process
+tests pass; those duplex tests are not a protected-network acceptance result. Automatic holder
+selection, availability repair and general uptime remain outstanding. See the
+[development commands](OPERATIONS.md#depositing-a-public-copy-with-other-participants).
+
 ### Private messages and optional mail interoperability
 
 Encrypt for the intended recipient before chunking/replication. Storage peers must not need

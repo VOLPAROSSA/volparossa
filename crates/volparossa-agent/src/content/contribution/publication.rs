@@ -207,7 +207,7 @@ async fn check_endpoint(
     Ok(())
 }
 
-fn configured_limits(config: &ContentContributionConfig) -> CacheLimits {
+pub(super) fn configured_limits(config: &ContentContributionConfig) -> CacheLimits {
     CacheLimits {
         max_bytes: config.quota_bytes,
         max_entries: config.max_entries as usize,
@@ -215,7 +215,7 @@ fn configured_limits(config: &ContentContributionConfig) -> CacheLimits {
     }
 }
 
-fn stage(
+pub(super) fn stage(
     config: &ContentContributionConfig,
     manifest: &VerifiedManifest,
 ) -> Result<(ChunkStore, tempfile::TempDir), ContentError> {
