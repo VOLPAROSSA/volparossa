@@ -21,6 +21,10 @@ agent_public_document_run() {
     document_attempt=$document_root/package-0000/work/package-0000/attempt-0000
     PHASE=agent-public-document-owner-tokenizer
     printf '%s\n' 'Disposable guest: copy the pinned runtime/model into the Client-owned compute-source; tokenize an explicit public README excerpt, execute signed ranges on two isolated peers, then remove every owned copy during normal cleanup.'
+    # The unprivileged Client cannot traverse /home/vpci/source. Install only this
+    # public helper beside its already staged dependencies, never chmod the source.
+    install -o root -g root -m 0555 "$document_script" "$WORK/bin/agent-public-document-smoke.py"
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0400 "$source_directory/README.md" "$jobs_source/document-README.md"
     # Client's real service mount intentionally hides agent-jobs-user. These are
     # independent private copies, not hardlinks or artifact transfer substitutes.
     for document_part in venv model; do
@@ -33,7 +37,7 @@ agent_public_document_run() {
     done
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$document_script" prepare "$WORK" >"$WORK/agent-public-document-input.json" \
+        -- python3 -B "$WORK/bin/agent-public-document-smoke.py" prepare "$WORK" >"$WORK/agent-public-document-input.json" \
         || fail DOCUMENT_PUBLIC_INPUT_FAILED
     content_custody_phase_start fetch
     agent_public_document_cli compute peer document --input "$jobs_source/document-input.txt" \

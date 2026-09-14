@@ -47,10 +47,30 @@ def source_excerpt(raw):
     return selected
 
 
+def public_readme(path):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o400 and 5120 <= info.st_size <= 1048576,
+            "public owner README is not the explicit bounded read-only copy")
+    raw = path.read_bytes()
+    require(len(raw) == info.st_size, "public README changed while reading")
+    return raw
+
+
 def prepare(work):
-    TRAIN["guest_guard"](root=False)
+    # This is the installed unprivileged helper, not the root-only source-tree
+    # observer. TRAIN.guest_guard's source-location test deliberately does not
+    # apply to a helper whose dependencies live in the owned guest WORK/bin.
+    require(TRAIN["socket"].gethostname() == "volparossa-alpha"
+            and JOBS["subprocess"].check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
+            and os.geteuid() != 0 and work.parent == Path("/opt") and work.name.startswith("va.")
+            and not work.is_symlink() and HERE == work / "bin", "wrong installed guest document helper")
+    helper = Path(__file__).lstat()
+    require(stat.S_ISREG(helper.st_mode) and helper.st_uid == 0 and not helper.st_mode & 0o222,
+            "guest helper is not the root-installed read-only source")
     source = JOBS["private"](work / "state-client/compute-source", "compute-source")
-    raw = (HERE.parent.parent / "README.md").read_bytes()
+    raw = public_readme(source / "document-README.md")
+    require(raw == (HERE / "agent-jobs-README.md").read_bytes(), "owner README differs from the original staged public source")
     selected = source_excerpt(raw)
     with (source / "document-input.txt").open("xb") as output:
         output.write(selected)
@@ -563,6 +583,18 @@ def self_test():
             raise AssertionError("invalid complete document contract accepted")
     with tempfile.TemporaryDirectory(prefix="document-receipt-test-") as directory:
         root = Path(directory)
+        public = root / "document-README.md"
+        public.write_bytes((HERE.parent.parent / "README.md").read_bytes())
+        public.chmod(0o400)
+        require(source_excerpt(public_readme(public)) == source_excerpt(public.read_bytes()), "staged public README changed source bytes")
+        public.chmod(0o600)
+        try:
+            public_readme(public)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("writable public README accepted")
+        public.unlink()
         write(root / "document.json", {"version": 1})
         (root / ".task.lock").touch(mode=0o600)
         before = snapshot(root)
