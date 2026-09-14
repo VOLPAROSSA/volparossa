@@ -39,12 +39,13 @@ distributed training, private AI execution or autonomous content-policy engine i
 The next public-job candidate adds an explicitly attached same-UID inference broker, signed
 protected peer submit/poll/cancel exchanges, original-publication/subset verification and
 concurrent disjoint-row dispatch. It saves task handles before admission and validates returned
-model/input/result bindings. Its real two-executor guest proof, automatic reassignment and
-general workflow continuation are still pending; B03 remains unchecked.
+model/input/result bindings. Its scoped two-executor proof is now reconstructed from the real
+raw evidence below. Automatic reassignment and general workflow continuation remain pending;
+B03 remains unchecked.
 Explicit `compute peer resume` now reconciles retained original handles and permits one bounded
 replacement attempt per unfinished part, without silently extending an old lease. Terminal
 receipts remain observable briefly after cleanup. Broker/peer tests and narrow strict Clippy
-pass; neither live recovery nor the new two-executor `agent-jobs` guest scenario has passed yet.
+pass; live recovery remains unproved and the happy-path workflow still has a historical checker failure.
 The first [two-executor run on `c52781f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34866691641)
 stopped during capability lookup, before model execution: an unused initial MPTCP socket
 outlived the Exit's 12-second TLS deadline while brokers were prepared. The candidate now
@@ -59,11 +60,27 @@ logs reached real model completion; that does not retrospectively establish miss
 observations. The detector now follows children of every bounded thread, with a real local
 thread-to-child regression. The Rust resource observer receives the same correction so that
 thread-created subprocess RSS is not omitted. Four focused supervisor tests and strict CLI
-Clippy pass; the corrected live proof remains pending. The failed run retained complete
+Clippy pass; the subsequent run is described below. The failed run retained complete
 cleanup, zero owned network objects and equal guest-state hash
 `59ebc76a8e39e0770dece290791c3f79d3f8f15be9ef7a2dbd641716ffb5a0bb`;
 its artifact ZIP SHA-256 is
 `8c64cba84e945bb6b96ec060de0d77b99affe9f62d9379e92b7454d838c7c4f2`.
+The subsequent [run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+retains all required raw observations: two simultaneously live isolated workers on R4/R5,
+distinct private runtime/dataset and held-lock inodes, exact disjoint source rows and complete
+model receipts, six captures including control / 28 interface rows / 9,488 frames with zero drops or unexpected
+outer packets, and zero residual owned network objects. It **failed** in final reporting because
+the checker expected `manifest_id` in offline-publish output, which reports a manifest path instead.
+Correction `3f5ee282` derives the ID from the original signed bytes and checks their saved hash,
+length and publisher/expiry. Complete in-memory reconstruction of the unchanged raw artifact
+passes, without synthesizing missing data; the original workflow and report remain failed.
+Checker SHA-256: `656cbe862edbf89c2da2e2dc3aceab41f18888ab6baac8475c32eeb5787bece3`;
+artifact ZIP: `219ada734fc57f070c8b03483840cdfabb3ab4842d655297f61a5bc0b7464f3b`;
+31,434-byte canonical reconstruction: `cfbf4b496200cf647ee3ee571356bad071aa2738b7d70aeef47afc3d0b799a1c`.
+Original guest-state hash before/after:
+`e592250adbcacd33204e6c855bbc04a548d7498daaeda2c2bc699dbe4ce231fe`.
+This establishes the scoped two-public-job execution, not general B03, comparative speedup,
+model quality, private offload or live worker-loss recovery.
 The explicit `compute peer workflow` candidate sequences up to 32 independently signed public
 packages (two to four rows each), with a bounded number of rounds per invocation. Exact source
 copies, immutable handles and locally validated full receipts survive process restarts;

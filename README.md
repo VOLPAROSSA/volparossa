@@ -37,8 +37,10 @@ Autonomous source selection/ingestion, general task orchestration and governance
 not an implemented distributed brain or a guarantee of private remote execution.
 The next development candidate connects `compute serve` to the protected network with
 `compute peer attach`, then exposes signed public-task submission, polling/cancellation and
-concurrent row distribution. Two real peers now return separate model results; the complete
-live concurrency/isolation test is still pending. This does not yet
+concurrent row distribution. The [two-worker run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+now has complete raw evidence of simultaneous isolated workers, separate model results,
+protected paths and cleanup. Its CI run remains failed due to a reporting-field error;
+the corrected checker reconstructs the retained measurements successfully. This does not yet
 provide autonomous task planning, private offload or unbounded per-device execution.
 An explicit `compute peer workflow` candidate now sequences multiple signed public datasets,
 retains verified local results, and resumes unfinished work across separate bounded leases.

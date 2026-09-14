@@ -262,7 +262,7 @@ of a worker still being reaped.
 questions across explicitly selected compatible peers, sends the tasks concurrently, and joins
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
-poll/cancel. It is a candidate awaiting its real multi-executor guest proof, not a proven B03
+poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
 checkpoint. Automatic peer selection, reassignment after worker loss, general multi-step
 continuation, distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
@@ -288,7 +288,15 @@ an already closed initial route socket is now replaced before application TLS. T
 completed both real model jobs and returned their two disjoint results, but failed the live
 overlap/isolation check because its process detector omitted children spawned by other threads.
 That detector and the analogous runtime resource accounting now inspect every bounded thread;
-local real-process regressions pass, while the corrected live proof remains pending.
+local real-process regressions pass. The subsequent
+[run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+retained the simultaneous actual-worker observations, both complete model receipts, protected
+path captures and full cleanup. It failed only because its final checker expected a nonexistent
+`manifest_id` field from offline publication. Checker correction `3f5ee282` instead derives the
+ID from the retained original signed bytes, checks their recorded hash/length and publisher/expiry,
+and reconstructs the complete original raw evidence successfully. No missing observations were
+invented; the historical workflow remains failed. This proves the scoped two-public-job execution,
+not general task decomposition, live reassignment, private offload or improved answer quality.
 Cleanup and unchanged guest state passed even in the failed runs. The separate
 `agent-jobs-loss` scenario additionally terminates one exact guest-owned Python worker via pidfd,
 requires terminal original receipts, and resumes only its failed rows on the idle surviving
