@@ -1017,8 +1017,9 @@ The development CLI adds `content custody deposit` and `content custody inspect`
 original public manifest and its publisher's encrypted identity, plus independently selected
 provider public keys. Receiving nodes must have the preceding contribution service configured;
 ordinary `content serve` alone is not a custody receiver. Their endpoints must remain authorized
-by the existing Exit policy. Local storage/stream/CLI-process tests pass; the new dedicated
-`content-custody` network scenario has not yet supplied a passing protected-route result.
+by the existing Exit policy. Local tests and the dedicated
+[`content-custody` network scenario on `f590aa86`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34850149035)
+pass, including two restarted receivers, source-cache removal and protected name-based retrieval.
 
 ```sh
 volparossa content custody deposit \
@@ -1050,6 +1051,18 @@ Keep the original files while establishing copies. Signed receipts establish obs
 the stated time, not future reachability, a global latest revision or permanent website uptime.
 This explicit workflow does not yet choose holders automatically or repair a lost replica.
 Private messages use the separate encrypted mailbox workflow, not public custody.
+
+The configured contribution service now also schedules bounded idle repair of **healthy partial
+public journal records** after restart. This is separate from the explicit publisher Deposit/
+Inspect commands. A receiving node must have client and relay roles, active policy and the
+existing upload/download contribution budgets; a service-only holder does not invent client
+capability. The worker can establish the normal protected route and discover generic providers
+without waiting for a foreground download. Missing object/chunk identities travel only inside
+the protected content stream. New foreground work, Stop, expiry or unavailable accounting ends
+or defers the attempt. It neither creates arbitrary new holder assignments nor promises a
+global copy count. Local runtime/stream tests pass; the dedicated repair VM is still pending.
+Missing or corrupt bytes in an already complete journal are not silently reinterpreted as a
+healthy partial record. Do not delete journaled files to trigger repair.
 
 ### One-shot browser download
 

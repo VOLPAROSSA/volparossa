@@ -18,11 +18,57 @@ The requested positive principles are **Humilitas, Humanitas, Mansuetudo, Dilige
 Liberalitas, Temperantia and Castitas**. The negative principles are **Superbia, Invidia,
 Ira, Acedia, Avaritia, Gula and Luxuria**. The user clarified their two distinct applications:
 **concrete allowed/prohibited content rules** for the whitelist/blacklist, and **general
-behavioral principles** for agents and their training. Concrete categories, examples and
-conflict rules are still being clarified. No implicit prohibited-content taxonomy or numerical
-virtue score has been selected. Describing or critically discussing a vice must be explicitly
-distinguished from promoting it in the eventual rules; naming a principle is not yet a
-reproducible classifier or policy rule.
+behavioral principles** for agents and their training. The user supplied the concrete examples
+below on 2026-09-14. Jurisdiction, category boundaries and conflict rules still need specification;
+no numerical virtue score or automatic "good person/bad person" classification is implied.
+Describing or critically discussing a vice is distinct from facilitating harmful conduct;
+naming a principle is not yet a reproducible classifier or an implemented policy rule.
+
+## Agreed content-policy examples
+
+The intended distinctions are concrete, not a blanket ban on every activity described as a
+vice. These are requirements for the future automatic engine, not new active destination rules.
+
+| Treatment | User examples | Required distinction |
+| --- | --- | --- |
+| Prohibited | Illegal content/conduct, unauthorized piracy, scams/fraud and child sexual abuse material (CSAM) | Refuse the prohibited material and tasks facilitating that conduct. Lawful reporting, prevention, victim support, legal education and critical discussion are not the conduct itself; this does not authorize distributing illegal source material as "research". |
+| Requires contextual assessment; no blanket verdict agreed yet | Lawful adult pornography, gambling, harmful compulsive/low-value social-media use and radicalizing forums/chat groups | Distinguish legal consensual adult material from exploitation; licensed lawful activity from prohibited activity; ordinary discussion from incitement, threats or recruitment to violence. A platform name, unpopular opinion or political/religious identity is not enough evidence. |
+| Remains allowed; constructive alternatives may be suggested | Lawful shopping/overconsumption, including Amazon, and ordinary viewing/posting on X/Twitter, Reddit and Facebook | Do not turn "unnecessary," environmentally undesirable or unwise spending into an automatic ban. Advice is transparent and dismissible, not covert throttling, forced redirection or public profiling of users. |
+
+An assessment must distinguish the **content or requested action** from a **pattern of use**.
+A short video is not inherently evidence of harmful compulsive use. Personalized wellbeing
+suggestions require an explicit local feature; they must not introduce default browsing-history
+retention, cross-node behavior dossiers or a model inferring moral worth from private activity.
+Agent principles guide honesty, restraint, diligence and non-exploitation while following these
+content boundaries; they do not grant authority to punish disagreement.
+
+"Outside the law" needs an applicable, versioned legal basis, not whichever country's law a
+peer happens to assert. EU and national laws can differ, as the
+[European Commission explains](https://digital-strategy.ec.europa.eu/en/factpages/tackling-illegal-content-online-digital-services-act).
+The user selected **Netherlands/EU as the common network baseline, plus applicable local exit
+restrictions** on 2026-09-14. A local restriction must not expand the common network allowance;
+an exit enforces the intersection, not whichever rule is more permissive. This choice is a
+design requirement, not implemented jurisdiction discovery or a legal determination for a node.
+The future decision records must distinguish a legal prohibition
+from a separate network-community rule and identify their authority and scope. This document
+does not determine intermediary status, applicable liability or jurisdiction for each node.
+
+Whitelist/blacklist decisions cannot promise a perfectly "clean" cache or eliminate exit risk.
+Original signatures and content hashes establish provenance/integrity, not legality, consent or
+redistribution rights. An approved hostname does not approve every object behind it. Public
+chunk admission therefore needs a decision bound to the original object's identity/version;
+an unknown object or unsigned peer accusation is not a valid approved/forbidden decision.
+Revocation must stop new serving/redistribution of the affected local object without allowing a
+remote model to delete unrelated files. Existing copies on uncooperative peers cannot be
+guaranteed erased.
+
+The engine must not break end-to-end encryption or expose private prompts/messages to public
+assessors to manufacture a universal filtering claim. How untrusted encrypted publications are
+admitted without becoming an unchecked shared-storage channel remains a required design and
+implementation problem. Cache custody currently verifies bytes and publication provenance;
+it **does not implement** the requested moral/legal content classification. Use synthetic,
+non-actionable fixtures and authorized benign corpora for development; never obtain real CSAM
+or illegally redistribute copyrighted works to build the classifier's tests/training set.
 
 ## Reuse and separation
 
@@ -100,8 +146,9 @@ Each decision binds the exact subject/version, principle-policy version, evidenc
 assessment/model versions, validity and authorized decision epoch. Conflicting assessments
 remain visible to the resolver; agreement is not established by counting duplicate agents.
 Unknown or contested assessments require an explicit outcome and bounded re-evaluation rather
-than invented certainty. Exact precedence between whitelist and blacklist, appeals/reconsideration
-and the examples used to evaluate judgments still need specification.
+than invented certainty. Exact precedence between whitelist and blacklist, reconsideration and
+the contextual categories above still need specification. Fully automatic re-evaluation remains
+the target; a mandatory human approval gate is not being substituted.
 
 Automated decision participants need an explicit membership/quorum/rotation and anti-capture
 protocol. Existing operator/network diversity is useful evidence but does not prove Sybil
@@ -110,9 +157,10 @@ trusted signing authority. A common verified epoch and split-brain/partition beh
 defined before global automatic activation can work. The current trust anchors and fail-closed
 policy stay unchanged until that migration is implemented; no single AI holds a network-wide
 master signing key and no mandatory human approval is substituted for the requested target.
-The current activation chain also lacks a durable monotonic policy-version floor: signature
-and time verification alone do not reject an older, still-valid signed manifest. This existing
-gap must be resolved for versioned automatic governance, not described as delivered protection.
+The activation chain now includes a durable version/hash floor after threshold verification;
+separate-process tests prove restart retention, rollback rejection and equal-version conflict
+rejection. This guards the existing configured authority scope. It does not define decentralized
+membership, authorize key rotation, judge content or complete automatic governance.
 
 ## Mutual checking, quarantine and repair
 
@@ -134,7 +182,8 @@ explicitly notes. No inference backend or model dependency has been selected or 
 
 ## Executable sequence and completion evidence
 
-Finish the current public-custody route integration while resolving the policy examples. Then
+Finish the current public-custody route integration while specifying how the agreed legal
+baseline and contextual category boundaries become versioned rules. Then
 build larger connected slices, without claiming these unchecked requirements are implemented:
 
 - [ ] B01: isolated on-device execution and genuine bounded training; measured owner-priority

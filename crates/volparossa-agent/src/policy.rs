@@ -1,5 +1,7 @@
 //! Root-provisioned trust anchors and fail-closed policy activation.
 
+mod floor;
+
 use std::{
     fs::{self, OpenOptions},
     io::Read,
@@ -43,9 +45,12 @@ enum TrustEnvironment {
 
 /// Loads and threshold-verifies the configured manifest. An empty manifest
 /// path intentionally yields no active policy rather than an allow-all policy.
+/// Before activation, its authority-scoped version and body hash are durably checked
+/// beneath the existing private state directory; rollback or unavailable state fails closed.
 pub fn load_active_policy(
     config: &Config,
     trust_path: &Path,
+    state_directory: &Path,
     now_ms: u64,
 ) -> Result<Option<VerifiedManifest>, PolicyLoadError> {
     if config.policy.manifest_path.trim().is_empty() {
@@ -86,9 +91,10 @@ pub fn load_active_policy(
         manifest_path,
         u64::try_from(MAX_SIGNED_MANIFEST_BYTES).expect("small bound"),
     )?;
-    verify_manifest(&manifest, now_ms, &trust_store, verification)
-        .map(Some)
-        .map_err(PolicyLoadError::Policy)
+    let verified = verify_manifest(&manifest, now_ms, &trust_store, verification)
+        .map_err(PolicyLoadError::Policy)?;
+    floor::accept(state_directory, &trust_store, &verified).map_err(PolicyLoadError::Floor)?;
+    Ok(Some(verified))
 }
 
 fn trusted_maintainer(
@@ -188,16 +194,25 @@ pub enum PolicyLoadError {
     /// Canonical threshold verification failed.
     #[error("policy manifest verification failed")]
     Policy(#[source] volparossa_policy::PolicyError),
+    /// The durable authority-scoped version/hash floor rejected activation or was unavailable.
+    #[error("durable policy activation floor rejected the manifest")]
+    Floor(#[source] floor::FloorError),
 }
 
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
     use serde_json::json;
-    use tempfile::tempdir;
+    use std::os::unix::fs::PermissionsExt as _;
     use volparossa_policy::{ManifestSpec, sign_manifest};
 
     use super::*;
+
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+    }
 
     #[test]
     fn separately_provisioned_threshold_policy_becomes_active() {
@@ -255,7 +270,7 @@ mod tests {
 
         let mut config = Config::default();
         config.policy.manifest_path = manifest_path.to_string_lossy().into_owned();
-        let verified = load_active_policy(&config, &trust_path, now_ms)
+        let verified = load_active_policy(&config, &trust_path, directory.path(), now_ms)
             .expect("verify")
             .expect("active policy");
         assert_eq!(verified.manifest_version(), 7);
@@ -298,7 +313,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert!(matches!(
-            load_active_policy(&config, &trust_path, 1),
+            load_active_policy(&config, &trust_path, directory.path(), 1),
             Err(PolicyLoadError::TrustCount)
         ));
     }
@@ -307,9 +322,14 @@ mod tests {
     fn empty_policy_path_is_fail_closed_without_trust_file() {
         let config = Config::default();
         assert!(
-            load_active_policy(&config, Path::new("/does/not/exist"), 1)
-                .expect("inactive")
-                .is_none()
+            load_active_policy(
+                &config,
+                Path::new("/does/not/exist"),
+                Path::new("/does/not/exist"),
+                1,
+            )
+            .expect("inactive")
+            .is_none()
         );
     }
 }

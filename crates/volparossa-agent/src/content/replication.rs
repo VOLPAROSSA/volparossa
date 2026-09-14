@@ -1,4 +1,6 @@
-//! Small post-download replicas; no content catalogue, new routes or consumer trust.
+//! Small post-download replicas and idle public repair; no content catalogue or consumer trust.
+
+mod repair;
 
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -13,7 +15,7 @@ use tokio::{
     task::JoinHandle,
 };
 use volparossa_content::provider::replication::{
-    ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
+    Replica, ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
     pull_public_replicas_with_admission, pull_replicas_with_admission, restore_public_replicas,
     restore_replicas,
 };
@@ -40,6 +42,8 @@ struct State {
     publications: BTreeSet<[u8; 32]>,
     usage: CacheUsage,
     next: Instant,
+    repair_cursor: Option<[u8; 32]>,
+    repair_pending: Option<Replica>,
 }
 
 pub(super) struct ReplicationRuntime {
@@ -127,6 +131,8 @@ impl ReplicationRuntime {
                 publications,
                 usage,
                 next: Instant::now(),
+                repair_cursor: None,
+                repair_pending: None,
             }),
             job: Mutex::new(None),
             background: Arc::new(Mutex::new(())),

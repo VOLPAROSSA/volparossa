@@ -7,6 +7,9 @@
 #[path = "content-acceptance-fixture/adaptive.rs"]
 mod adaptive;
 
+#[path = "content-acceptance-fixture/repair.rs"]
+mod repair;
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -43,6 +46,9 @@ async fn main() -> Result<()> {
         }
         [mode, root, foreground, reserve] if mode == "seed-replication" => {
             seed_replication(Path::new(root), Path::new(foreground), Path::new(reserve))
+        }
+        [mode, root, holder, receiver] if mode == "seed-public-repair" => {
+            repair::seed(Path::new(root), Path::new(holder), Path::new(receiver))
         }
         [mode, root, public] if mode == "seed-private" => {
             let public: [u8; 32] = hex::decode(public)?.try_into().map_err(|_| "invalid recipient public key")?;

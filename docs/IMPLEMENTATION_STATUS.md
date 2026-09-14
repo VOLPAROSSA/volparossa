@@ -8,6 +8,10 @@ New user-requested scope: [distributed content caching, publishing and offline d
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
 whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). This is recorded design work; no
 distributed training, private AI execution or autonomous content-policy engine is implemented.
+Concrete prohibited/contextual/allowed content examples are now recorded in that design;
+the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
+and contextual decision thresholds remain unimplemented. Existing byte-integrity
+and destination-policy checks must not be presented as a moral/legal cache classifier.
 The proposal records the full idea and a researched HTTPS integration design: authenticated
 origin metadata, publisher signatures, and an optional explicitly trusted witnessed-HTTPS
 experiment, through an application/browser boundary. C01–C07 now have source-bound
@@ -32,6 +36,13 @@ build and general speedup remain unproved.
 
 Latest additional functional checkpoints (not a complete expanded-alpha pass):
 
+- [Public custody on `f590aa86`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34850149035):
+  two independent configured providers accepted and freshly confirmed an original public object
+  after both agents restarted with their persistent caches. The publisher source input/cache were
+  removed; normal name-based retrieval reconstructed 2,097,275 bytes from 1,048,699 peer bytes
+  (five unique chunks; nine ordered references), with zero origin bytes. All eighteen captures /
+  eighty-four interface rows drained without drops, cleanup completed and guest-root state was
+  unchanged. This is not an independently offline publisher-node or future-availability guarantee.
 - [MPTCP growth on `1aab4caf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34841782480):
   one live 32-MiB download grows from two to three data-carrying subflows while retaining the
   original Client/Exit metasockets; all six WireGuard legs carry data and teardown completes.
@@ -48,20 +59,25 @@ general speedup, unlimited paths, physical-radio operation or the full agreed ex
 C08 remains open. The chronological records below preserve earlier failures and narrower results;
 their pending statements describe those source revisions, not a reversal of later evidence.
 
+Additional local policy integration: startup and periodic reload persist an authority-scoped
+version/hash floor after current threshold verification. Six focused policy tests pass, including
+separate-process 7-to-6 rollback refusal, equal-version hash conflict, idempotent reload, accepted
+higher version and rejected invalid signatures/storage. Strict agent Clippy passes. This closes
+the previously identified lack of a durable floor for a fixed configured authority; it does not
+authorize trust-key rotation, resist replacement of all agent-owned state or implement AI governance.
+
 Major requested functional work still outstanding:
 
 - Cooperative AI training/execution, model exchange, private distributed jobs and fully automatic
   policy governance/self-checking (B01--B07); none is covered by the existing network/content passes.
-- Durable monotonic policy activation: current periodic reload verifies signatures and validity
-  but does not compare a persisted highest accepted version. Route hash pinning is not this guard.
-- Remote publication custody through the real network and replica repair after a holder disappears.
-  Explicit Deposit/Inspect, signed per-provider observations and durable complete-copy storage
-  now pass local storage/typed-stream/CLI-process tests and a real isolated agent/TLS lifecycle
-  test (empty receiver, deposit, interrupted admission, restart and complete retrieval without the
-  source cache). Three existing contribution tests and strict agent Clippy also pass. The dedicated
-  protected-network scenario is pending.
-  Automatic holder selection and repair are not implemented. Local `publish --contribute`
-  and incidental redistribution alone remain insufficient for remote custody.
+- Automatic holder selection and network-proven replica repair after a holder disappears.
+  Explicit remote Deposit/Inspect and retained-copy retrieval now pass the source-bound custody
+  VM above. A new receiver-owned repair worker reopens healthy partial public journals, discovers
+  providers and may establish a normal protected route while idle. V4 per-chunk credits bind the
+  exact original manifest/missing set; no publisher private key, TTL renewal or LRU eviction.
+  Six credit-protocol tests and one production-runtime stream/disk/restart/reassembly test pass,
+  as does strict content/agent Clippy. The new `content-repair` protected-network proof is pending;
+  these local checks do not prove autonomous placement on new holders or maintained replica counts.
 - Normal-browser reuse of eligible content with real origin authority; the existing attachment
   and native-site viewers do not implement generic HTTPS resource reuse.
 - Discovering and authorizing useful new relay paths during a live route, replenishing reserves

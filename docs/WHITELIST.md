@@ -8,6 +8,13 @@ The user-requested [decentralized agents extension](DECENTRALIZED_AGENTS.md) add
 content whitelist/blacklist governance. It is not implemented by this destination allowlist.
 Its assessment rules, independent decision membership, conflict resolution and signed-activation
 migration are separate work; current trust anchors and enforcement remain in force meanwhile.
+The agreed [content-policy examples](DECENTRALIZED_AGENTS.md#agreed-content-policy-examples)
+distinguish prohibited illegal material/conduct, contextual assessment and allowed lawful use
+with optional advice. Destination authorization alone neither implements those judgments nor
+establishes the legality of every cached object or eliminates an exit operator's legal risk.
+The selected legal-policy baseline is Netherlands/EU plus applicable local exit restrictions;
+the latter may narrow but not broaden the common allowance. Jurisdiction-aware enforcement
+is not yet implemented by this destination manifest.
 
 ## Trust model
 
@@ -50,12 +57,24 @@ UDP, another port, arbitrary DNS, or a direct connection.
 Nodes may advertise a policy capability key and exact version/hash so compatible exits can be found,
 and signed policy bytes may be distributed through decentralized peers. Distribution does not grant
 trust. Activation occurs only after canonical decoding, threshold verification against the local
-trust store, environment checks, time/skew/lifetime bounds and semantic validation. Monotonic
-rollback prevention remains required but is not implemented in the current activation chain:
-the verifier has no previously accepted version, and the periodic policy reload replaces the
-active snapshot without a durable version floor. An older, still-valid, correctly signed
-manifest is therefore not rejected merely for being older. Do not infer downgrade protection
-from signature verification or a route's pinned policy hash.
+trust store, environment checks, time/skew/lifetime bounds and semantic validation. Startup and
+periodic reload now also compare and persist a durable policy-version floor in the agent's existing
+private state directory. A lower version or a different canonical body at the same version is
+rejected even when otherwise validly signed. The same version/hash is idempotent; a higher version
+still needs the original threshold verification before the floor can advance.
+
+`policy-floor.json` and `.policy-floor.lock` retain only authority-namespace/version/body-hash
+records, not destinations or browsing data. The namespace binds protocol, operating mode and
+the canonical configured maintainer-key/environment set. Reordering the trust file does not
+reset it; changing configured trust anchors creates a separate authority scope, not an implicitly
+authorized key-rotation chain. Missing previously initialized, corrupt, unsafe or busy state
+fails closed. Do not remove these files to repair a policy problem: that discards or disables
+the retained guard. This is not protection against an attacker able to replace all state under
+the agent's own account, nor against a legitimately signed higher-version bad policy.
+
+Six focused policy tests pass, including separate verifier processes reopening the same store.
+These prove version/hash retention and the scoped activation paths; they are not a complete
+autonomous-governance or new network-acceptance result.
 
 An existing route context remains pinned to its policy/exit for established flows. Policy expiry or
 replacement blocks new flows and causes bounded drain/reselection; it must not silently move an
