@@ -537,6 +537,10 @@ where
 ///
 /// # Errors
 /// Rejects malformed/unknown selectors, unavailable stores, expired/corrupt data or deadlines.
+#[allow(
+    clippy::too_many_lines,
+    reason = "One bounded selector dispatch keeps every protocol under the same outer deadline"
+)]
 pub async fn serve_publication<S>(
     stream: &mut S,
     registry: &PublicationRegistry,
@@ -593,11 +597,20 @@ where
         {
             return replication::serve(stream, registry, &session, limits).await;
         }
-        if selector.version == replication::CREDIT_VERSION
-            && selector.operation == replication::OPERATION
+        if matches!(
+            selector.version,
+            replication::CREDIT_VERSION | replication::REPAIR_VERSION
+        ) && selector.operation == replication::OPERATION
             && selector.manifest_id.is_empty()
         {
-            return replication::serve_with_credit(stream, registry, &session, limits).await;
+            return replication::serve_with_credit(
+                stream,
+                registry,
+                &session,
+                limits,
+                selector.version,
+            )
+            .await;
         }
         if selector.version != VERSION || selector.operation != 0 {
             return Err(ProviderError::Protocol);

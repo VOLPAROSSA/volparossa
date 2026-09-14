@@ -276,6 +276,10 @@ impl ContributionRuntime {
         self.queue.lock().await.clear();
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One owned service loop orders local copies, repair, foreground cancellation and cleanup"
+    )]
     async fn run(
         self: Arc<Self>,
         context: ControlContext,
@@ -320,6 +324,17 @@ impl ContributionRuntime {
                 continue;
             }
             let Some(pending) = self.queue.lock().await.pop_front() else {
+                drop(slot);
+                // Existing durable public replicas must not depend on another user download
+                // after restart. This owner gates normal route setup and repair by idle demand.
+                self.replication
+                    .start_repair(
+                        context.clone(),
+                        Arc::clone(&registry),
+                        Arc::clone(&foreground),
+                        stop.clone(),
+                    )
+                    .await;
                 continue;
             };
             if !pending.live() {

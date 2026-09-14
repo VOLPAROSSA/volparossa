@@ -37,6 +37,7 @@ use crate::{
 pub(super) const VERSION: u32 = 2;
 pub(super) const OPERATION: u32 = 1;
 pub(super) const CREDIT_VERSION: u32 = 3;
+pub(super) const REPAIR_VERSION: u32 = 4;
 const MAX_CREDIT_BYTES: usize = 16;
 const MAX_REQUEST_BYTES: usize = 4096;
 const MAX_FRAME_BYTES: usize = MAX_MANIFEST_BYTES + CHUNK_BYTES + 128;
@@ -265,9 +266,15 @@ pub async fn pull_replicas<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    pull_with_admission(stream, store, limits, exclusions, VERSION, false, || {
-        std::future::ready(true)
-    })
+    pull_with_admission(
+        stream,
+        store,
+        limits,
+        exclusions,
+        VERSION,
+        Uptake::Any,
+        || std::future::ready(true),
+    )
     .await
 }
 
@@ -300,7 +307,7 @@ where
         limits,
         exclusions,
         CREDIT_VERSION,
-        false,
+        Uptake::Any,
         admission,
     )
     .await
@@ -334,10 +341,55 @@ where
         limits,
         exclusions,
         CREDIT_VERSION,
-        true,
+        Uptake::Public,
         admission,
     )
     .await
+}
+
+/// Fill a bounded missing-chunk batch of an already retained public replica.
+///
+/// Original signed metadata, not an online publisher key, binds every requested chunk.
+/// Version four accepts only the exact target and missing set, without incidental fallback.
+/// Credit, original expiry, non-evicting insertion and hop limits remain unchanged. Persist
+/// returned records before registration; partial uptake is not full custody.
+///
+/// # Errors
+/// Rejects private/complete/expired targets, mailbox caches, substituted responses, exhausted
+/// quotas and the existing bounded credit-protocol framing, integrity and timeout failures.
+pub async fn pull_public_repair_with_admission<S, F, Fut>(
+    stream: &mut S,
+    store: &mut ChunkStore,
+    target: &Replica,
+    limits: ReplicationLimits,
+    admission: F,
+) -> Result<ReplicationProgress, ProviderError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    target.checked.check_time(now()?)?;
+    if target.content_type() == crate::private_message::PRIVATE_MESSAGE_CONTENT_TYPE {
+        return Err(ProviderError::Registry);
+    }
+    pull_with_admission(
+        stream,
+        store,
+        limits,
+        &ReplicationExclusions::default(),
+        REPAIR_VERSION,
+        Uptake::Repair(target),
+        admission,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum Uptake<'a> {
+    Any,
+    Public,
+    Repair(&'a Replica),
 }
 
 async fn pull_with_admission<S, F, Fut>(
@@ -346,7 +398,7 @@ async fn pull_with_admission<S, F, Fut>(
     limits: ReplicationLimits,
     exclusions: &ReplicationExclusions,
     version: u32,
-    public_only: bool,
+    uptake: Uptake<'_>,
     mut admission: F,
 ) -> Result<ReplicationProgress, ProviderError>
 where
@@ -355,11 +407,16 @@ where
     Fut: Future<Output = bool>,
 {
     let limits = limits.validate()?;
+    let public_only = !matches!(uptake, Uptake::Any);
     if public_only && store.read_mailbox_metadata()?.is_some() {
         return Err(ProviderError::Registry);
     }
     let deadline = Instant::now() + limits.session_timeout;
-    let request = Request::new(limits, exclusions, version)?;
+    let request = if let Uptake::Repair(target) = uptake {
+        Request::repair(target, limits)?
+    } else {
+        Request::new(limits, exclusions, version)?
+    };
     let mut budget = Budget::new(limits.max_wire_bytes);
     timeout_at(deadline, async {
         write(
@@ -374,12 +431,12 @@ where
         let mut replicas = BTreeMap::new();
         let mut seen = BTreeSet::new();
         loop {
-            let stopped = version == CREDIT_VERSION
-                && (seen.len() >= limits.max_chunks || !admission().await);
-            if version == CREDIT_VERSION {
+            let stopped =
+                version != VERSION && (seen.len() >= limits.max_chunks || !admission().await);
+            if version != VERSION {
                 write(
                     stream,
-                    &Credit::new(!stopped),
+                    &Credit::versioned(!stopped, version),
                     MAX_CREDIT_BYTES,
                     &mut budget,
                 )
@@ -402,6 +459,15 @@ where
                 return Err(ProviderError::Limit);
             }
             let (replica, chunk_id) = checked_frame(&frame, limits, exclusions, public_only)?;
+            if version == REPAIR_VERSION
+                && (replica.manifest_id().as_slice() != request.target_manifest
+                    || !request
+                        .wanted_chunks
+                        .iter()
+                        .any(|id| id.as_slice() == chunk_id.as_bytes()))
+            {
+                return Err(ProviderError::Protocol);
+            }
             if !seen.insert(chunk_id) {
                 return Err(ProviderError::Protocol);
             }
@@ -595,6 +661,7 @@ pub(super) async fn serve_with_credit<S>(
     registry: &PublicationRegistry,
     outer: &SelectorSession,
     local_limits: TransferLimits,
+    version: u32,
 ) -> Result<TransferProgress, ProviderError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -602,23 +669,23 @@ where
     let deadline = outer.deadline.min(Instant::now() + MAX_DURATION);
     timeout_at(deadline, async {
         let mut budget = Budget::new(MAX_WIRE_BYTES.min(local_limits.max_bytes));
-        budget.reserve((selector(CREDIT_VERSION).encoded_len() + 4) as u64)?;
+        budget.reserve((selector(version).encoded_len() + 4) as u64)?;
         let request: Request = timeout_at(
             outer.selector_deadline,
             read(stream, MAX_REQUEST_BYTES, &mut budget),
         )
         .await
         .map_err(|_| ProviderError::Timeout)??;
-        request.validate(CREDIT_VERSION)?;
+        request.validate(version)?;
         budget.maximum = budget.maximum.min(request.max_wire_bytes);
         budget.reserve(0)?;
-        let finish = Frame::finish(CREDIT_VERSION);
+        let finish = Frame::finish(version);
         let mut progress = TransferProgress::default();
         let mut sent = BTreeSet::new();
         loop {
             // One credit permits one response, never multiple chunks. No cache is open here.
             let credit: Credit = read(stream, MAX_CREDIT_BYTES, &mut budget).await?;
-            let admitted = credit.admitted()?;
+            let admitted = credit.admitted(version)?;
             if !admitted
                 || progress.chunks >= request.max_chunks as usize
                 || progress.chunks >= local_limits.max_requests
@@ -656,8 +723,9 @@ fn next_credited_frame(
 ) -> Result<Option<Frame>, ProviderError> {
     // Reserve the next credit/stop plus final finish before emitting any chunk. Both credit
     // decisions have the same canonical length. Returning a frame drops every cache handle.
-    let closing_cost =
-        Credit::new(false).encoded_len() + Frame::finish(CREDIT_VERSION).encoded_len() + 8;
+    let closing_cost = Credit::versioned(false, request.version).encoded_len()
+        + Frame::finish(request.version).encoded_len()
+        + 8;
     for (id, entry) in &registry.entries {
         if Instant::now() >= deadline {
             return Err(ProviderError::Timeout);
@@ -665,6 +733,9 @@ fn next_credited_frame(
         let Some(shared) = &entry.replication else {
             continue;
         };
+        if request.version == REPAIR_VERSION && request.target_manifest.as_slice() != id {
+            continue;
+        }
         if request
             .excluded_manifests
             .iter()
@@ -682,6 +753,11 @@ fn next_credited_frame(
                 return Err(ProviderError::Timeout);
             }
             if sent.contains(chunk.id())
+                || (request.version == REPAIR_VERSION
+                    && !request
+                        .wanted_chunks
+                        .iter()
+                        .any(|id| id.as_slice() == chunk.id().as_bytes()))
                 || request
                     .excluded_chunks
                     .iter()
@@ -694,7 +770,7 @@ fn next_credited_frame(
             };
             entry.manifest.check_time(now()?)?;
             let frame = Frame {
-                version: CREDIT_VERSION,
+                version: request.version,
                 finished: false,
                 publisher: entry.manifest.publisher().to_vec(),
                 manifest: shared.signed.encode(),
@@ -719,16 +795,20 @@ struct Credit {
     decision: u32,
 }
 impl Credit {
+    #[cfg(test)]
     const fn new(admitted: bool) -> Self {
+        Self::versioned(admitted, CREDIT_VERSION)
+    }
+    const fn versioned(admitted: bool, version: u32) -> Self {
         Self {
-            version: CREDIT_VERSION,
+            version,
             decision: if admitted { 1 } else { 2 },
         }
     }
-    fn admitted(&self) -> Result<bool, ProviderError> {
-        match (self.version, self.decision) {
-            (CREDIT_VERSION, 1) => Ok(true),
-            (CREDIT_VERSION, 2) => Ok(false),
+    fn admitted(&self, version: u32) -> Result<bool, ProviderError> {
+        match (self.version == version, self.decision) {
+            (true, 1) => Ok(true),
+            (true, 2) => Ok(false),
             _ => Err(ProviderError::Protocol),
         }
     }
@@ -756,6 +836,10 @@ struct Request {
     excluded_manifests: Vec<Vec<u8>>,
     #[prost(bytes = "vec", repeated, tag = "6")]
     excluded_chunks: Vec<Vec<u8>>,
+    #[prost(bytes = "vec", tag = "7")]
+    target_manifest: Vec<u8>,
+    #[prost(bytes = "vec", repeated, tag = "8")]
+    wanted_chunks: Vec<Vec<u8>>,
 }
 impl Request {
     fn new(
@@ -781,12 +865,51 @@ impl Request {
                 .iter()
                 .map(|id| id.as_bytes().to_vec())
                 .collect(),
+            target_manifest: Vec::new(),
+            wanted_chunks: Vec::new(),
         };
         result.validate(version)?;
         Ok(result)
     }
+    fn repair(target: &Replica, limits: ReplicationLimits) -> Result<Self, ProviderError> {
+        let missing: BTreeSet<_> = target
+            .checked
+            .chunks()
+            .iter()
+            .filter(|chunk| !target.chunk_ids.contains(chunk.id()))
+            .map(|chunk| *chunk.id())
+            .collect();
+        let result = Self {
+            version: REPAIR_VERSION,
+            max_chunks: u32::try_from(limits.max_chunks).map_err(|_| ProviderError::Limit)?,
+            max_wire_bytes: limits.max_wire_bytes,
+            max_hops: u32::from(limits.max_hops),
+            target_manifest: target.manifest_id().to_vec(),
+            wanted_chunks: missing
+                .into_iter()
+                .take(limits.max_chunks)
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
+            excluded_chunks: Vec::new(),
+            excluded_manifests: Vec::new(),
+        };
+        result.validate(REPAIR_VERSION)?;
+        Ok(result)
+    }
     fn validate(&self, version: u32) -> Result<(), ProviderError> {
+        let targeted = version == REPAIR_VERSION;
         if self.version != version
+            || !matches!(version, VERSION | CREDIT_VERSION | REPAIR_VERSION)
+            || (targeted
+                && (self.target_manifest.len() != 32
+                    || self.wanted_chunks.is_empty()
+                    || self.wanted_chunks.len() > self.max_chunks as usize
+                    || self.wanted_chunks.iter().any(|id| id.len() != 32)
+                    || self.wanted_chunks.iter().collect::<BTreeSet<_>>().len()
+                        != self.wanted_chunks.len()
+                    || !self.excluded_manifests.is_empty()
+                    || !self.excluded_chunks.is_empty()))
+            || (!targeted && (!self.target_manifest.is_empty() || !self.wanted_chunks.is_empty()))
             || self.excluded_manifests.len() + self.excluded_chunks.len() > MAX_EXCLUSIONS
             || self
                 .excluded_manifests

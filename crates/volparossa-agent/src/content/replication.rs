@@ -1,4 +1,6 @@
-//! Small post-download replicas; no content catalogue, new routes or consumer trust.
+//! Small post-download replicas and idle public repair; no content catalogue or consumer trust.
+
+mod repair;
 
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -40,6 +42,7 @@ struct State {
     publications: BTreeSet<[u8; 32]>,
     usage: CacheUsage,
     next: Instant,
+    repair_cursor: Option<[u8; 32]>,
 }
 
 pub(super) struct ReplicationRuntime {
@@ -127,6 +130,7 @@ impl ReplicationRuntime {
                 publications,
                 usage,
                 next: Instant::now(),
+                repair_cursor: None,
             }),
             job: Mutex::new(None),
             background: Arc::new(Mutex::new(())),

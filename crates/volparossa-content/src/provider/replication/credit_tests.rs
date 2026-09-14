@@ -76,6 +76,86 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn exact_public_repair_reopens_partial_journal_without_publisher_key() {
+    let fixture = Fixture::new(3);
+    let mut store = fixture.store("repair");
+    let root = fixture.temporary.path().join("repair");
+    let mut source = ChunkStore::open(&fixture.source_root, cache_limits()).unwrap();
+    let initial = admit_public_replica(
+        &fixture.signed,
+        &fixture.verified,
+        &mut source,
+        &mut store,
+        LocalReplicaLimits {
+            max_chunks: 1,
+            max_bytes: CHUNK_BYTES as u64,
+        },
+        now().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(initial.chunks, 1);
+    let retained = ChunkId::digest(b"unrelated promised bytes");
+    store
+        .put_verified_if_space(retained, b"unrelated promised bytes")
+        .unwrap();
+    drop(source);
+    drop(store);
+    let mut store = ChunkStore::open(&root, cache_limits()).unwrap();
+    let target = restore_public_replicas(&mut store, now().unwrap())
+        .unwrap()
+        .remove(0);
+    let request = Request::repair(&target, ReplicationLimits::default()).unwrap();
+    assert_eq!(request.wanted_chunks.len(), 2);
+    assert!(
+        !request
+            .wanted_chunks
+            .iter()
+            .any(|id| id.as_slice() == target.chunk_ids()[0].as_bytes())
+    );
+    assert!(request.validate(CREDIT_VERSION).is_err());
+    let (mut client, mut server) = duplex(4096);
+    let mut credits = 0;
+    let (received, transmitted) = tokio::join!(
+        pull_public_repair_with_admission(
+            &mut client,
+            &mut store,
+            &target,
+            ReplicationLimits::default(),
+            || {
+                credits += 1;
+                std::future::ready(true)
+            }
+        ),
+        super::super::serve_publication(&mut server, &fixture.registry, TransferLimits::default()),
+    );
+    let progress = received.unwrap();
+    assert_eq!(progress.chunks, 2);
+    assert_eq!(transmitted.unwrap().chunks, 2);
+    assert_eq!(progress.bytes, 2 * CHUNK_BYTES as u64);
+    assert_eq!(credits, 3);
+    persist_replicas(&mut store, &progress.replicas, now().unwrap()).unwrap();
+    assert_eq!(
+        store.get(&retained).unwrap().unwrap(),
+        b"unrelated promised bytes"
+    );
+    let complete = restore_public_replicas(&mut store, now().unwrap())
+        .unwrap()
+        .remove(0);
+    assert_eq!(complete.chunk_ids().len(), 3);
+    assert_eq!(complete.validity(), target.validity());
+    assert!(Request::repair(&complete, ReplicationLimits::default()).is_err());
+    drop(store);
+    let custody =
+        super::super::custody_storage::PublicCustodyStore::open(root, cache_limits()).unwrap();
+    assert!(
+        custody
+            .inspect_complete(target.manifest_id(), now().unwrap())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn credit_stall_sends_nothing_and_releases_cache_for_real_foreground_pull() {
     let fixture = Fixture::new(2);
     let snapshot = fixture.registry.clone();
