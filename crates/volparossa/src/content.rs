@@ -743,7 +743,7 @@ fn publish(args: &Publish) -> Result<Published> {
     })
 }
 
-fn unlock_signer(
+pub(crate) fn unlock_signer(
     identity_path: Option<&Path>,
     passphrase_file: Option<&Path>,
 ) -> Result<SigningKey> {

@@ -30,6 +30,105 @@ NODES = ("relay3", "relay4", "relay5")
 LOSS_SCOPE = ("two protected public peer jobs, one exact observed worker killed in the disposable guest; "
               "original successful result retained and only terminally failed rows explicitly reassigned to the idle surviving peer; "
               "not automatic planning, exactly-once execution, renewed original leases, private offload or full B03")
+BROKER_STARTUP_ENUMS = {
+    "LoadState": {"stub", "loaded", "not-found", "bad-setting", "error", "merged", "masked"},
+    "ActiveState": {"inactive", "activating", "active", "reloading", "deactivating", "failed", "maintenance", "refreshing"},
+    "SubState": {"dead", "start-pre", "start", "start-post", "running", "exited", "reload", "reload-signal",
+                 "reload-notify", "stop", "stop-watchdog", "stop-sigterm", "stop-sigkill", "stop-post",
+                 "final-watchdog", "final-sigterm", "final-sigkill", "failed", "auto-restart",
+                 "auto-restart-queued", "dead-before-auto-restart", "failed-before-auto-restart", "cleaning"},
+    "Result": {"success", "resources", "protocol", "timeout", "exit-code", "signal", "core-dump",
+               "watchdog", "start-limit-hit", "oom-kill", "exec-condition"},
+    "CollectMode": {"inactive", "inactive-or-failed"},
+}
+BROKER_STARTUP_NUMBERS = {"MainPID", "ExecMainCode", "ExecMainStatus", "ExecMainStartTimestampMonotonic",
+                          "ExecMainExitTimestampMonotonic", "CPUUsageNSec"}
+BROKER_STARTUP_FIELDS = set(BROKER_STARTUP_ENUMS) | BROKER_STARTUP_NUMBERS
+
+
+def broker_startup_status(raw):
+    """Parse only requested fixed systemd fields; never retain unknown values or text."""
+    fields = dict.fromkeys(sorted(BROKER_STARTUP_FIELDS))
+    if len(raw) > 4096:
+        return fields, ["size"]
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError:
+        return fields, ["encoding"]
+    if len(lines) > len(fields):
+        return fields, ["field_count"]
+    seen, errors = set(), set()
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or key not in fields:
+            errors.add("unexpected_field")
+            continue
+        if key in seen:
+            fields[key] = None
+            errors.add(key)
+            continue
+        seen.add(key)
+        if key in BROKER_STARTUP_ENUMS:
+            if value in BROKER_STARTUP_ENUMS[key]:
+                fields[key] = value
+            else:
+                errors.add(key)
+        elif key == "CPUUsageNSec" and value in {"[not set]", "18446744073709551615"}:
+            # Unavailable accounting is explicitly null, never a measured zero.
+            pass
+        elif re.fullmatch(r"0|[1-9][0-9]{0,19}", value) and int(value) < 2 ** 64:
+            fields[key] = int(value)
+        else:
+            errors.add(key)
+    errors.update(BROKER_STARTUP_FIELDS - seen)
+    return fields, sorted(errors)
+
+
+def broker_startup_record(node, outcome, attempts, started, observed, raw):
+    require(node in NODES and outcome in {"start_failed", "unit_failed", "socket_timeout", "socket_ready"},
+            "invalid broker startup identity")
+    require(type(attempts) is int and 0 <= attempts <= 150
+            and type(started) is int and type(observed) is int and 0 < started <= observed < 2 ** 64,
+            "invalid broker startup timing")
+    status, errors = broker_startup_status(raw)
+    return {"version": 1, "node": node, "outcome": outcome, "poll_attempts": attempts,
+            "clock": "monotonic", "started_monotonic_ns": started, "observed_monotonic_ns": observed,
+            "elapsed_ns": observed - started, "systemd": status, "parse_errors": errors,
+            "socket_ready": outcome == "socket_ready", "model_execution_proven": False}
+
+
+def broker_startup_self_test():
+    # Pure service-output fixtures, not a broker/model startup or timing proof.
+    fields = {"LoadState": "loaded", "ActiveState": "failed", "SubState": "failed", "Result": "exit-code",
+              "CollectMode": "inactive", "MainPID": "0", "ExecMainCode": "1", "ExecMainStatus": "226",
+              "ExecMainStartTimestampMonotonic": "1000", "ExecMainExitTimestampMonotonic": "1100",
+              "CPUUsageNSec": "[not set]"}
+    encoded = lambda value: "".join(f"{key}={item}\n" for key, item in value.items()).encode()
+    failed = broker_startup_record("relay4", "unit_failed", 3, 1000, 2000, encoded(fields))
+    require(failed["parse_errors"] == [] and failed["systemd"]["ExecMainStatus"] == 226
+            and failed["systemd"]["CPUUsageNSec"] is None and failed["elapsed_ns"] == 1000,
+            "failed unit status was lost")
+    running = dict(fields, ActiveState="active", SubState="running", Result="success", MainPID="123",
+                   ExecMainCode="0", ExecMainStatus="0", ExecMainExitTimestampMonotonic="0", CPUUsageNSec="12000000000")
+    waiting = broker_startup_record("relay4", "socket_timeout", 150, 1000, 15000001000, encoded(running))
+    ready = broker_startup_record("relay5", "socket_ready", 2, 1000, 2000, encoded(running))
+    require(waiting["systemd"]["MainPID"] == 123 and not waiting["socket_ready"]
+            and ready["socket_ready"] and not ready["model_execution_proven"], "startup outcomes conflated")
+    secret = "/private/not-a-diagnostic/input"
+    malformed = [encoded(dict(fields, Result=secret)), encoded(dict(fields, MainPID="-1")),
+                 encoded(dict(fields, CPUUsageNSec=str(2 ** 64))), encoded(dict(fields, ExecMainCode="01")),
+                 encoded(fields) + f"Environment={secret}\n".encode(), b"X" * 4097, b"\xff", b"",
+                 b"MainPID=123\nMainPID=456\n"]
+    for raw in malformed:
+        value = broker_startup_record("relay4", "start_failed", 0, 1000, 2000, raw)
+        require(value["parse_errors"] and secret not in json.dumps(value), "raw service output escaped diagnostic parser")
+    for attempts, started, observed in [(151, 1, 2), (True, 1, 2), (0, 2, 1), (0, 0, 1)]:
+        try:
+            broker_startup_record("relay4", "unit_failed", attempts, started, observed, encoded(fields))
+        except ValueError:
+            continue
+        raise AssertionError("invalid diagnostic bounds accepted")
+    print("broker startup fixed-field/timing/privacy parser self-tests PASS; no services or model executed")
 
 
 def private(path, name):
@@ -78,10 +177,16 @@ def publication(path):
             "manifest_hex": (root / "manifest.pb").read_bytes().hex(), "explicit_public_source": True}
 
 
-def derive(original, rows):
+def derive(original, rows, task=None):
     require(rows and rows == sorted(set(rows)) and all(0 <= x < len(original["inference"]) for x in rows), "invalid rows")
     value = copy.deepcopy(original)
-    value["inference"] = [original["inference"][x] for x in rows]
+    value["inference"] = [copy.deepcopy(original["inference"][x]) for x in rows]
+    if task is not None:
+        require(task.get("kind") == "answer_public_question_v1" and set(task) == {"kind", "question"}
+                and isinstance(task["question"], str) and task["question"].strip()
+                and len(task["question"].encode()) <= 512 and "\0" not in task["question"], "invalid explicit public task")
+        for row in value["inference"]:
+            row["question"] = task["question"]
     # Struct field order is the canonical Rust dataset serialization order.
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -365,7 +470,7 @@ def source_manifest_id(source, published):
     return digest
 
 
-def check_evidence(evidence, revision):
+def check_evidence(evidence, revision, task=None):
     require(evidence["success"] is True and evidence["source_revision"] == revision, "wrong source-bound job proof")
     require(evidence["provision"]["success"] is True and evidence["provision"]["installed_wheels"] == 38
             and evidence["provision"]["download_bytes"] == 523040250
@@ -388,6 +493,7 @@ def check_evidence(evidence, revision):
     require(result["operation"] == "compute_distribute" and result["complete"] is True and result["provider_count"] == 2
             and result["dataset_manifest_id"] == manifest_id and len(result["jobs"]) == 2,
             "actual distributed batch incomplete")
+    require(result.get("task") == task, "batch task binding differs")
     require(all(result[x] is False for x in ("private_data_supported", "model_layer_sharding", "result_truthfulness_guaranteed")), "unsupported compute claim")
     rows, response_bytes = [], {}
     for index, status in enumerate(evidence["statuses"]):
@@ -396,6 +502,8 @@ def check_evidence(evidence, revision):
         handle = part["handle"]
         node = layout["provider_nodes"][index]
         caps = handle["capabilities"]
+        require(binding.get("task") == task and (task is None or caps.get("task_derivation_v1") is True),
+                "executor does not support the exact requested public task")
         require(caps["model"]["model_id"] == "HuggingFaceTB/SmolLM2-135M-Instruct"
                 and caps["model"]["model_revision"] == TRAIN["MODEL_REVISION"]
                 and caps["model"]["base_weights"] == {"bytes": 269060552, "sha256": TRAIN["WEIGHT_HASH"]}
@@ -406,7 +514,7 @@ def check_evidence(evidence, revision):
                 and handle["binding"] == binding and part["state"] == status["state"] == "complete"
                 and binding["row_indices"] == [index] and binding["dataset_manifest_id"] == manifest_id
                 and binding["expires_unix_seconds"] <= publication["expires_unix_seconds"], "wrong original job binding")
-        derived = derive(original["dataset"], binding["row_indices"])
+        derived = derive(original["dataset"], binding["row_indices"], task)
         observation = next(w for w in evidence["observation"]["workers"] if w["node"] == node)
         require(observation["dataset_json"] == derived and binding["dataset_sha256"] == hashlib.sha256(derived.encode()).hexdigest(),
                 "executor received different or overlapping public rows")
@@ -829,7 +937,16 @@ def loss_self_test():
 def main():
     args = sys.argv[1:]
     if args == ["self-test"]:
+        broker_startup_self_test()
         self_test()
+    elif args == ["broker-startup-self-test"]:
+        broker_startup_self_test()
+    elif len(args) == 5 and args[0] == "broker-startup":
+        # The shell producer has a two-second timeout. Read at most one bounded record;
+        # an oversized/unparseable response yields fixed diagnostics, never raw text.
+        raw = sys.stdin.buffer.read(4097)
+        print(json.dumps(broker_startup_record(args[1], args[2], int(args[3]), int(args[4]),
+                                               time.monotonic_ns(), raw)))
     elif args == ["loss-self-test"]:
         loss_self_test()
     elif len(args) == 2 and args[0] == "prepare":

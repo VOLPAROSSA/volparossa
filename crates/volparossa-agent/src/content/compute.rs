@@ -58,6 +58,8 @@ pub(super) struct Attachment {
     endpoint: ProviderEndpoint,
     trusted_publishers: BTreeSet<[u8; 32]>,
     model_fingerprint: String,
+    task_derivation_v1: bool,
+    document_inference_v2: bool,
     enabled: AtomicBool,
 }
 
@@ -133,6 +135,8 @@ impl ContentRuntime {
             endpoint: endpoint.clone(),
             trusted_publishers,
             model_fingerprint: capabilities.model_fingerprint,
+            task_derivation_v1: capabilities.task_derivation_v1,
+            document_inference_v2: capabilities.document_inference_v2,
             enabled: AtomicBool::new(true),
         });
         let service = Arc::new(ComputeService::new(
@@ -302,6 +306,9 @@ impl Attachment {
         let binding = match &request.operation {
             Operation::Capabilities => return Ok(()),
             Operation::Submit(submit) => {
+                if submit.binding.task.is_some() && !self.task_derivation_v1 {
+                    return Err(ComputeError::Invalid);
+                }
                 if submit.binding.expires_unix_seconds <= now() {
                     return Err(ComputeError::Expired);
                 }
@@ -321,8 +328,9 @@ impl Attachment {
                     now(),
                 )?;
                 if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
+                    || (source.is_document() && !self.document_inference_v2)
                     || submit.binding.expires_unix_seconds > source.expires()
-                    || source.derive(&submit.binding.row_indices)? != submit.dataset_json
+                    || derive_submission(&source, &submit.binding)? != submit.dataset_json
                     || hex::encode(Sha256::digest(submit.dataset_json.as_bytes()))
                         != submit.binding.dataset_sha256
                 {
@@ -336,6 +344,19 @@ impl Attachment {
             return Err(ComputeError::Authentication);
         }
         Ok(())
+    }
+}
+
+pub(super) fn derive_submission(
+    source: &dataset::VerifiedPublicDataset,
+    binding: &rpc::JobBinding,
+) -> Result<String, ComputeError> {
+    match &binding.task {
+        Some(task) => source.derive_question(
+            &binding.row_indices,
+            task.question().map_err(|_| ComputeError::Invalid)?,
+        ),
+        None => source.derive(&binding.row_indices),
     }
 }
 
@@ -353,7 +374,10 @@ impl ComputeBackend for Attachment {
             self.active().await?;
             if let Outcome::Capabilities(capabilities) = &response.outcome {
                 validate_capabilities(capabilities)?;
-                if capabilities.model_fingerprint != self.model_fingerprint {
+                if capabilities.model_fingerprint != self.model_fingerprint
+                    || capabilities.task_derivation_v1 != self.task_derivation_v1
+                    || capabilities.document_inference_v2 != self.document_inference_v2
+                {
                     return Err(ComputeError::Authentication);
                 }
             }

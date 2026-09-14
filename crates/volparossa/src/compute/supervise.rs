@@ -1,6 +1,9 @@
 //! Owner-controlled lifecycle and bounded observations, outside the model worker.
 
-use std::{collections::BTreeSet, fs::File, io::Read, path::Path, time::Duration};
+use std::{
+    collections::BTreeSet, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
+    process::ExitStatus, time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
@@ -55,11 +58,9 @@ pub(super) async fn run(
         // exactly this private pipe; neither peers nor model output can issue commands.
         let mut control_stdin = if controls.is_some() { Some(stdin) } else { drop(stdin); None };
         let io = async {
-            let (result, (), status) = tokio::try_join!(
-                collect_stdout(stdout, &request.id, controls.as_ref()),
-                drain_stderr(stderr),
-                async { child.wait().await.context("compute_wait") }
-            )?;
+            let (result, status) = collect_completion(
+                &mut child, stdout, stderr, &request.id, controls.as_ref()
+            ).await?;
             check_result(&result, request)?;
             if let Some(controls) = &controls {
                 controls.check_report(&result)?;
@@ -165,7 +166,9 @@ fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer => ensure!(updates == Some(0), "compute_unrequested_training"),
+        Mode::Infer | Mode::PlanDocument => {
+            ensure!(updates == Some(0), "compute_unrequested_training");
+        }
         Mode::Train => {
             ensure!(
                 updates == Some(u64::from(request.steps)),
@@ -193,6 +196,23 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .context("compute_artifacts")?;
     if mode == Mode::Infer {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
+        return Ok(());
+    }
+    if mode == Mode::PlanDocument {
+        ensure!(
+            value["model_weights_loaded"] == false,
+            "compute_document_plan_loaded_weights"
+        );
+        ensure!(
+            artifacts.len() == 1 && artifacts[0]["relative_path"] == "document-plan.json",
+            "compute_document_plan_artifact"
+        );
+        let bytes = super::read_file(&output.join("document-plan.json"), MAX_OUTPUT_BYTES)?;
+        ensure!(
+            artifacts[0]["bytes"] == bytes.len() as u64
+                && artifacts[0]["sha256"] == hex::encode(Sha256::digest(&bytes)),
+            "compute_document_plan_hash"
+        );
         return Ok(());
     }
     let expected = [
@@ -255,11 +275,44 @@ fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
     Ok(())
 }
 
+async fn collect_completion(
+    child: &mut Child,
+    stdout: impl AsyncRead + Unpin,
+    stderr: impl AsyncRead + Unpin,
+    id: &str,
+    controls: Option<&Controls>,
+) -> Result<(Value, ExitStatus)> {
+    let missing = tokio::sync::Notify::new();
+    let finish = async {
+        tokio::try_join!(
+            async {
+                let result = collect_stdout(stdout, id, controls).await?;
+                if result.is_none() {
+                    missing.notify_one();
+                }
+                Ok(result)
+            },
+            drain_stderr(stderr),
+            async { child.wait().await.context("compute_wait") }
+        )
+    };
+    tokio::pin!(finish);
+    // Only clean EOF without a result waits for startup diagnostics. Invalid or
+    // oversized stdout still fails immediately. Retained stderr gets at most
+    // one second, within the supervisor's original cancellation/deadline scope.
+    let (result, diagnostics, status) = tokio::select! {
+        result = &mut finish => result?,
+        () = missing.notified() => tokio::time::timeout(Duration::from_secs(1), &mut finish)
+            .await.context("compute_missing_result_exit_deadline")??,
+    };
+    Ok((required_result(result, status, diagnostics)?, status))
+}
+
 async fn collect_stdout(
     stream: impl AsyncRead + Unpin,
     id: &str,
     controls: Option<&Controls>,
-) -> Result<Value> {
+) -> Result<Option<Value>> {
     let mut reader = BufReader::new(stream);
     let mut result = None;
     let mut bytes = 0_usize;
@@ -308,7 +361,7 @@ async fn collect_stdout(
             );
         }
     }
-    result.context("compute_result_missing")
+    Ok(result)
 }
 
 async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Vec<u8>>> {
@@ -333,20 +386,106 @@ async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option
     }
 }
 
-async fn drain_stderr(mut stream: impl AsyncRead + Unpin) -> Result<()> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupClass {
+    None,
+    Bubblewrap,
+    UserNamespace,
+    ProcMount,
+    ExecDenied,
+    PythonStartup,
+    Other,
+}
+
+impl StartupClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Bubblewrap => "bubblewrap",
+            Self::UserNamespace => "user_namespace",
+            Self::ProcMount => "proc_mount",
+            Self::ExecDenied => "exec_denied",
+            Self::PythonStartup => "python_startup",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StartupDiagnostics {
+    class: StartupClass,
+    bytes: usize,
+}
+
+fn startup_class(prefix: &[u8]) -> StartupClass {
+    if prefix.is_empty() {
+        StartupClass::None
+    } else if prefix.starts_with(b"bwrap: Creating new namespace failed")
+        || prefix.starts_with(b"bwrap: setting up uid map")
+        || prefix.starts_with(b"bwrap: unshare user ns")
+    {
+        StartupClass::UserNamespace
+    } else if prefix.starts_with(b"bwrap: Can't mount proc on ")
+        || prefix.starts_with(b"bwrap: Creating proc failed")
+    {
+        StartupClass::ProcMount
+    } else if prefix.starts_with(b"bwrap: execvp ")
+        || prefix.starts_with(b"bwrap: execv ")
+        || prefix.starts_with(b"prlimit:")
+        || prefix.starts_with(b"nice:")
+        || prefix.starts_with(b"ionice:")
+    {
+        // A fixed launcher/exec failure category, not proof of a particular errno.
+        StartupClass::ExecDenied
+    } else if prefix.starts_with(b"bwrap:") {
+        StartupClass::Bubblewrap
+    } else if prefix.starts_with(b"Fatal Python error:")
+        || prefix.starts_with(b"Python path configuration:")
+        || prefix.starts_with(b"Traceback (most recent call last):")
+    {
+        StartupClass::PythonStartup
+    } else {
+        StartupClass::Other
+    }
+}
+
+fn required_result(
+    result: Option<Value>,
+    status: ExitStatus,
+    diagnostics: StartupDiagnostics,
+) -> Result<Value> {
+    result.with_context(|| {
+        format!(
+            "compute_result_missing exit_code={} signal={} stderr_class={} stderr_bytes={}",
+            status.code().unwrap_or(-1),
+            status.signal().unwrap_or(0),
+            diagnostics.class.label(),
+            diagnostics.bytes,
+        )
+    })
+}
+
+async fn drain_stderr(mut stream: impl AsyncRead + Unpin) -> Result<StartupDiagnostics> {
     let mut buffer = [0_u8; 4096];
     let mut total = 0;
+    // Transient bounded matching only: never persist/echo raw exception text,
+    // paths, Python source lines, payloads or a hash identifying those inputs.
+    let mut prefix = Vec::with_capacity(1024);
     loop {
         let length = stream
             .read(&mut buffer)
             .await
             .context("compute_stderr_read")?;
         if length == 0 {
-            return Ok(());
+            return Ok(StartupDiagnostics {
+                class: startup_class(&prefix),
+                bytes: total,
+            });
         }
         total += length;
-        // Exceptions may contain input text or filesystem names. Do not retain/echo them.
         ensure!(total <= MAX_STREAM_BYTES, "compute_stderr_size");
+        let available = (1024 - prefix.len()).min(length);
+        prefix.extend_from_slice(&buffer[..available]);
     }
 }
 
@@ -493,6 +632,97 @@ fn status_kib(text: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_diagnostics_classify_only_fixed_prefixes_without_echoing_private_text() {
+        for (prefix, expected) in [
+            ("", StartupClass::None),
+            (
+                "bwrap: Creating new namespace failed: ",
+                StartupClass::UserNamespace,
+            ),
+            ("bwrap: Can't mount proc on ", StartupClass::ProcMount),
+            ("bwrap: Can't bind mount ", StartupClass::Bubblewrap),
+            ("bwrap: execvp ", StartupClass::ExecDenied),
+            ("prlimit: ", StartupClass::ExecDenied),
+            ("Fatal Python error: ", StartupClass::PythonStartup),
+            ("unexpected private diagnostic: ", StartupClass::Other),
+        ] {
+            let raw = if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}/private/owner-secret-name payload-sensitive-sentinel\n")
+            };
+            let diagnostics = drain_stderr(raw.as_bytes()).await.unwrap();
+            assert_eq!(diagnostics.class, expected);
+            assert_eq!(diagnostics.bytes, raw.len());
+            let error = required_result(None, ExitStatus::from_raw(256), diagnostics)
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with("compute_result_missing exit_code=1 signal=0 stderr_class="));
+            assert!(
+                !error.contains("owner-secret-name")
+                    && !error.contains("payload-sensitive-sentinel")
+            );
+            assert!(!format!("{diagnostics:?}").contains("private"));
+        }
+        let too_large = vec![b'x'; MAX_STREAM_BYTES + 1];
+        assert!(drain_stderr(too_large.as_slice()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn clean_missing_result_retains_exit_diagnostics_but_malformed_output_still_fails_fast() {
+        assert!(
+            collect_stdout(&b""[..], "abc", None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let error = required_result(
+            None,
+            ExitStatus::from_raw(9),
+            StartupDiagnostics {
+                class: StartupClass::None,
+                bytes: 0,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "compute_result_missing exit_code=-1 signal=9 stderr_class=none stderr_bytes=0"
+        );
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"not-json\n").await.unwrap();
+        // The writer deliberately remains open: malformed input must not wait for
+        // EOF, a final child status, or the one-second startup collection window.
+        let rejected = tokio::time::timeout(
+            Duration::from_millis(50),
+            collect_stdout(reader, "abc", None),
+        )
+        .await;
+        assert!(rejected.unwrap().is_err());
+        drop(writer);
+    }
+
+    #[test]
+    fn document_plan_requires_actual_artifact_hash_without_weight_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"{\"parser_fixture_not_tokenizer_proof\":true}";
+        let mut file = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        std::io::Write::write_all(&mut file, bytes).unwrap();
+        file.persist(root.path().join("document-plan.json"))
+            .unwrap();
+        let mut report = serde_json::json!({"model_weights_loaded":false,"artifacts":[{
+            "relative_path":"document-plan.json", "bytes":bytes.len(),
+            "sha256":hex::encode(Sha256::digest(bytes))}]});
+        check_artifacts(&report, Mode::PlanDocument, root.path()).unwrap();
+        report["model_weights_loaded"] = true.into();
+        assert!(check_artifacts(&report, Mode::PlanDocument, root.path()).is_err());
+        report["model_weights_loaded"] = false.into();
+        report["artifacts"][0]["sha256"] = "a".repeat(64).into();
+        assert!(check_artifacts(&report, Mode::PlanDocument, root.path()).is_err());
+    }
 
     #[tokio::test]
     async fn bounded_framing_rejects_missing_newlines_and_oversized_records() {

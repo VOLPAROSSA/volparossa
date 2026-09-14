@@ -113,5 +113,10 @@ strip = "debuginfo"
 [profile.dev]
 debug = 1
 
+# Keep full pinned-model hashing practical in development brokers and VM proofs.
+# Only the SHA-2 compression implementation is optimized; verification is unchanged.
+[profile.dev.package."sha2:0.10.9"]
+opt-level = 3
+
 [profile.test]
 debug = 1

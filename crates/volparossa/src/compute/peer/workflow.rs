@@ -39,6 +39,47 @@ pub(crate) struct Options {
     /// Preview only unless explicitly enabled; no subprocess recursion or model downloads.
     #[arg(long)]
     execute: bool,
+    #[arg(skip)]
+    expected_task: Option<ExpectedTask>,
+}
+
+/// Exact frontend selection, checked under the workflow lock before any dispatch.
+#[derive(Clone, Debug)]
+pub(super) struct ExpectedTask {
+    pub(super) publisher_key: String,
+    pub(super) manifest_id: String,
+    pub(super) dataset_sha256: String,
+    pub(super) rows: usize,
+    pub(super) task: rpc::PublicTask,
+    pub(super) provider_keys: Vec<String>,
+    pub(super) selected_at_unix_seconds: u64,
+}
+
+impl Options {
+    pub(super) fn task(
+        plan: Option<PathBuf>,
+        directory: PathBuf,
+        provider_keys: Vec<VerifyingKey>,
+        max_batches: u16,
+        max_seconds: u16,
+        execute: bool,
+    ) -> Self {
+        Self {
+            resume: plan.is_none(),
+            plan,
+            directory,
+            provider_key: provider_keys,
+            max_batches,
+            max_seconds,
+            execute,
+            expected_task: None,
+        }
+    }
+
+    pub(super) fn expect_task(mut self, expected: ExpectedTask) -> Self {
+        self.expected_task = Some(expected);
+        self
+    }
 }
 
 #[derive(Deserialize)]
@@ -54,6 +95,8 @@ struct PackageInput {
     dataset: PathBuf,
     dataset_manifest: PathBuf,
     publisher_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<rpc::PublicTask>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,6 +115,8 @@ struct Package {
     manifest_id: String,
     dataset_sha256: String,
     rows: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task: Option<rpc::PublicTask>,
 }
 
 #[derive(Deserialize)]
@@ -140,8 +185,11 @@ impl Progress {
                     .as_array()
                     .context("compute_workflow_outputs")?;
                 for (index, row) in part.handle.binding.row_indices.iter().enumerate() {
-                    outputs.push(serde_json::json!({"sample_index":row,"text":rows[index]["text"],
-                        "provider_key":part.handle.provider_key,"job_id":part.handle.binding.job_id}));
+                    outputs.push(
+                        serde_json::json!({"sample_index":row,"text":rows[index]["text"],
+                        "provider_key":part.handle.provider_key,"job_id":part.handle.binding.job_id,
+                        "report_sha256":status.report_sha256}),
+                    );
                 }
             }
         }
@@ -151,6 +199,25 @@ impl Progress {
 }
 
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    let report = report(args, socket).await?;
+    println!("{}", serde_json::to_string(&report)?);
+    ensure!(
+        report["pending_failure"] != true,
+        "compute_workflow_pending_state_retained"
+    );
+    Ok(())
+}
+
+pub(super) async fn report(args: &Options, socket: &Path) -> Result<serde_json::Value> {
+    let cancellation = Cancellation::new()?;
+    report_with_activity(args, socket, &cancellation.activity).await
+}
+
+pub(super) async fn report_with_activity(
+    args: &Options,
+    socket: &Path,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
     let (enrollment, lock) = if args.resume {
         super::super::private_directory(&args.directory)?;
         let lock = args
@@ -164,23 +231,27 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         (enrollment, lock)
     } else {
         let (enrollment, sources) = prepare(args)?;
+        if let Some(expected) = &args.expected_task {
+            validate_expected_task(&enrollment, expected)?;
+        }
         if args.execute {
             persist_enrollment(&args.directory, &enrollment, &sources)?;
             (enrollment, Some(lock_directory(&args.directory)?))
         } else {
-            println!(
-                "{}",
+            return Ok(
                 serde_json::json!({"operation":"compute_workflow_plan","execute":false,
                 "package_count":enrollment.packages.len(),"total_rows":enrollment.packages.iter().map(|value|value.rows).sum::<usize>(),
                 "maximum_rounds_this_invocation":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,
-                "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory})
+                "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory,
+                "pending_failure":false}),
             );
-            return Ok(());
         }
     };
     validate_enrollment(&enrollment)?;
-    let cancelled = Cancellation::new()?;
-    let result = advance(args, socket, &enrollment, &cancelled.activity).await;
+    if let Some(expected) = &args.expected_task {
+        validate_expected_task(&enrollment, expected)?;
+    }
+    let result = advance(args, socket, &enrollment, cancelled).await;
     drop(lock);
     result
 }
@@ -207,14 +278,16 @@ fn prepare(args: &Options) -> Result<(Enrollment, Vec<rpc::PublicDataset>)> {
         };
         let (public, verified) = source(&args)?;
         ensure!(
-            (2..=4).contains(&verified.row_count()),
-            "compute_workflow_package_requires_two_to_four_rows"
+            (2..=4).contains(&verified.row_count())
+                || (verified.is_document() && verified.row_count() == 1),
+            "compute_workflow_package_row_profile"
         );
         packages.push(Package {
             publisher_key: public.publisher_key.clone(),
             manifest_id: hex::encode(verified.manifest_id()),
             dataset_sha256: sha(public.dataset_json.as_bytes()),
             rows: verified.row_count(),
+            task: input.task,
         });
         sources.push(public);
     }
@@ -251,12 +324,58 @@ fn validate_enrollment(enrollment: &Enrollment) -> Result<()> {
     }
     let mut ids = BTreeSet::new();
     for package in &enrollment.packages {
+        if let Some(task) = &package.task {
+            task.question()?;
+        }
         ensure!(
-            (2..=4).contains(&package.rows) && ids.insert(&package.manifest_id),
+            (1..=4).contains(&package.rows) && ids.insert(&package.manifest_id),
             "compute_workflow_duplicate_or_invalid_package"
         );
     }
     Ok(())
+}
+
+fn validate_expected_task(enrollment: &Enrollment, expected: &ExpectedTask) -> Result<()> {
+    ensure!(
+        enrollment.packages.len() == 1
+            && enrollment.provider_keys == expected.provider_keys
+            && enrollment.verified_at_unix_seconds >= expected.selected_at_unix_seconds,
+        "compute_task_workflow_selection"
+    );
+    let package = &enrollment.packages[0];
+    ensure!(
+        package.publisher_key == expected.publisher_key
+            && package.manifest_id == expected.manifest_id
+            && package.dataset_sha256 == expected.dataset_sha256
+            && package.rows == expected.rows
+            && package.task.as_ref() == Some(&expected.task),
+        "compute_task_workflow_source_or_task"
+    );
+    Ok(())
+}
+
+/// Re-read the retained full statuses, not caller-supplied output hashes or completeness flags.
+pub(super) fn task_snapshot(
+    directory: &Path,
+    expected: &ExpectedTask,
+) -> Result<serde_json::Value> {
+    super::super::private_directory(directory)?;
+    let _lock = lock_directory(directory)?;
+    let enrollment: Enrollment = serde_json::from_slice(&read_file(
+        &directory.join("workflow.json"),
+        MAX_PLAN_BYTES,
+    )?)?;
+    validate_enrollment(&enrollment)?;
+    validate_expected_task(&enrollment, expected)?;
+    let package = &enrollment.packages[0];
+    let directory = directory.join("package-0000");
+    let (source, verified) =
+        stored_source(&directory, package, enrollment.verified_at_unix_seconds)?;
+    let progress = load_progress(&directory, &source, &verified, &enrollment)?;
+    Ok(
+        serde_json::json!({"dataset_manifest_id":package.manifest_id,"task":package.task,
+        "complete":progress.complete(),"outputs":progress.outputs()?}),
+    )
 }
 
 fn persist_enrollment(
@@ -337,7 +456,8 @@ fn stored_source(
     ensure!(
         sha(&data) == package.dataset_sha256
             && hex::encode(verified.manifest_id()) == package.manifest_id
-            && verified.row_count() == package.rows,
+            && verified.row_count() == package.rows
+            && (package.rows >= 2 || verified.is_document()),
         "compute_workflow_stored_source_changed"
     );
     Ok((source, verified))
@@ -348,7 +468,7 @@ async fn advance(
     socket: &Path,
     enrollment: &Enrollment,
     cancelled: &tokio::sync::watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
     let providers: Vec<_> = enrollment
         .provider_keys
         .iter()
@@ -387,18 +507,20 @@ async fn advance(
                 let output = directory.join(format!("attempt-{:04}", progress.attempts));
                 rounds += 1;
                 let result = if progress.attempts == 0 {
-                    batch::run(
+                    batch::report_with_activity(
                         &batch::Options::workflow(
                             source_args.clone(),
                             providers[..providers.len().min(package.rows)].to_vec(),
                             output,
                             args.max_seconds,
+                            package.task.clone(),
                         ),
                         socket,
+                        cancelled,
                     )
                     .await
                 } else {
-                    resume::run(
+                    resume::report_with_activity(
                         &resume::Options::workflow(
                             source_args.clone(),
                             progress.pending(),
@@ -407,12 +529,17 @@ async fn advance(
                             args.max_seconds,
                         ),
                         socket,
+                        cancelled,
                     )
                     .await
                 };
                 progress = load_progress(&directory, &source_args, &verified, enrollment)?;
                 if result.is_err() || !progress.complete() {
-                    stopped = "pending_handles_retained_no_busy_retry_loop";
+                    stopped = if progress.attempts == 0 {
+                        "initial_admission_failed_no_work_submitted"
+                    } else {
+                        "pending_handles_retained_no_busy_retry_loop"
+                    };
                     failed = true;
                 }
             }
@@ -420,7 +547,7 @@ async fn advance(
         completed += usize::from(progress.complete());
         packages.push(serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
             "complete":progress.complete(),"attempts":progress.attempts,"outputs":progress.outputs()?,
-            "pending_handles":progress.pending()}));
+            "pending_handles":progress.pending(),"task":package.task}));
     }
     let complete = completed == enrollment.packages.len();
     if complete {
@@ -428,17 +555,15 @@ async fn advance(
     } else if *cancelled.borrow() {
         stopped = "interrupted_handles_retained";
     }
-    println!(
-        "{}",
+    Ok(
         serde_json::json!({"version":1,"operation":"compute_workflow","execute":args.execute,
         "complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
         "rounds_this_invocation":rounds,"maximum_seconds_per_worker":args.max_seconds,"stopped":stopped,
         "packages":packages,"receipt_scope":"locally_retained_authenticated_rpc_status",
         "private_data_supported":false,"automatic_source_discovery":false,"general_task_planning":false,
-        "exactly_once_execution_guaranteed":false,"result_truthfulness_guaranteed":false})
-    );
-    ensure!(!failed, "compute_workflow_pending_state_retained");
-    Ok(())
+        "exactly_once_execution_guaranteed":false,"result_truthfulness_guaranteed":false,
+        "pending_failure":failed}),
+    )
 }
 
 fn attempt_directories(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -485,8 +610,14 @@ fn checked_handle(
         600,
     );
     let handle = resume::load_handles(&options, verified)?.remove(0);
+    let package = enrollment
+        .packages
+        .iter()
+        .find(|package| package.manifest_id == hex::encode(verified.manifest_id()))
+        .context("compute_workflow_handle_package")?;
     ensure!(
         enrollment.provider_keys.contains(&handle.provider_key)
+            && handle.binding.task == package.task
             && handle.binding.job_id.len() == 32
             && handle
                 .binding
@@ -699,6 +830,7 @@ mod tests {
             max_batches: 1,
             max_seconds: 600,
             execute: true,
+            expected_task: None,
         };
         let (enrollment, sources) = prepare(&options).unwrap();
         persist_enrollment(&options.directory, &enrollment, &sources).unwrap();
@@ -707,6 +839,103 @@ mod tests {
             options,
             enrollment,
         }
+    }
+
+    fn signed_profile(fixture: &Fixture, bytes: &str, mime: &str) -> Vec<u8> {
+        let mut cache = ChunkStore::open(
+            &fixture.root.path().join("cache"),
+            CacheLimits {
+                max_bytes: 1024 * 1024,
+                max_entries: 16,
+                min_free_bytes: 0,
+            },
+        )
+        .unwrap();
+        publish(
+            &mut bytes.as_bytes(),
+            Publication {
+                metadata: Metadata {
+                    name: "singleton-fixture".into(),
+                    revision: 1,
+                    content_type: mime.into(),
+                },
+                length: bytes.len() as u64,
+                validity: Validity {
+                    created: fixture.enrollment.verified_at_unix_seconds,
+                    expires: fixture.enrollment.verified_at_unix_seconds + 1200,
+                },
+            },
+            &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+            &mut cache,
+        )
+        .unwrap()
+        .encode()
+    }
+
+    #[test]
+    fn fresh_singleton_document_enrolls_restores_and_assigns_one_peer_but_v1_does_not() {
+        use volparossa_content::provider::compute::dataset::{CONTENT_TYPE, DOCUMENT_CONTENT_TYPE};
+
+        let mut fixture = fixture(1);
+        let dataset_path = fixture.root.path().join("input-0.json");
+        let manifest_path = fixture.root.path().join("input-0.bin");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&read_file(&dataset_path, MAX_PLAN_BYTES).unwrap()).unwrap();
+        legacy["inference"].as_array_mut().unwrap().truncate(1);
+        let legacy = legacy.to_string();
+        task::write_bytes(&dataset_path, legacy.as_bytes(), true).unwrap();
+        task::write_bytes(
+            &manifest_path,
+            &signed_profile(&fixture, &legacy, CONTENT_TYPE),
+            true,
+        )
+        .unwrap();
+        assert!(prepare(&fixture.options).is_err());
+        let args = Source {
+            dataset: dataset_path.clone(),
+            dataset_manifest: manifest_path.clone(),
+            publisher_key: fixture.options.provider_key[0],
+        };
+        let (_, verified) = source(&args).unwrap();
+        assert!(!verified.is_document());
+        assert!(batch::assignments_for(&verified, &fixture.options.provider_key[..1]).is_err());
+
+        let context = "One remaining public document fragment.";
+        let original = signed_profile(&fixture, context, "text/plain");
+        let document = serde_json::json!({"version":2,"visibility":"public","license":"CC0-1.0",
+            "source_manifest_hex":hex::encode(original),"inference":[{
+                "question":"What does this public text say?","context":context,"start":0,"end":context.len()}]}).to_string();
+        task::write_bytes(&dataset_path, document.as_bytes(), true).unwrap();
+        task::write_bytes(
+            &manifest_path,
+            &signed_profile(&fixture, &document, DOCUMENT_CONTENT_TYPE),
+            true,
+        )
+        .unwrap();
+        fixture.options.directory = fixture.root.path().join("document-workflow");
+        let (enrollment, sources) = prepare(&fixture.options).unwrap();
+        assert_eq!(enrollment.provider_keys.len(), 2); // Overall enrollment still pins two independent peers.
+        assert_eq!(enrollment.packages[0].rows, 1);
+        persist_enrollment(&fixture.options.directory, &enrollment, &sources).unwrap();
+        let (_, verified) = stored_source(
+            &fixture.options.directory.join("package-0000"),
+            &enrollment.packages[0],
+            enrollment.verified_at_unix_seconds,
+        )
+        .unwrap();
+        assert!(verified.is_document());
+        assert_eq!(
+            batch::assignments_for(&verified, &fixture.options.provider_key[..1]).unwrap(),
+            vec![vec![0]]
+        );
+        assert!(batch::assignments_for(&verified, &fixture.options.provider_key).is_err());
+        assert!(
+            !fixture
+                .options
+                .directory
+                .join("package-0000/attempt-0000")
+                .exists()
+        );
     }
 
     fn handles(
@@ -743,6 +972,8 @@ mod tests {
             max_job_seconds: 600,
             max_dataset_bytes: 1024 * 1024,
             max_rows: 4,
+            task_derivation_v1: true,
+            document_inference_v2: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {
@@ -751,9 +982,15 @@ mod tests {
                 binding: binding(
                     &source,
                     vec![u16::try_from(index).unwrap()],
-                    &source.derive(&[u16::try_from(index).unwrap()]).unwrap(),
+                    &derive(
+                        &source,
+                        &[u16::try_from(index).unwrap()],
+                        fixture.enrollment.packages[package].task.as_ref(),
+                    )
+                    .unwrap(),
                     &caps,
                     600,
+                    fixture.enrollment.packages[package].task.clone(),
                 )
                 .unwrap(),
                 capabilities: caps.clone(),
@@ -777,6 +1014,44 @@ mod tests {
             report_json: Some(report),
             error: None,
         }
+    }
+
+    #[test]
+    fn enrolled_task_survives_handles_and_cannot_be_relabelled_or_downgraded() {
+        let mut fixture = fixture(1);
+        fixture.enrollment.packages[0].task = Some(rpc::PublicTask::SummarizeContextsV1 {});
+        let (args, source, handles) = handles(&fixture, 0);
+        let path = fixture.root.path().join("task-handle.json");
+        save_new(&path, &handles[0]).unwrap();
+        let checked = checked_handle(&path, &args, &source, &fixture.enrollment).unwrap();
+        assert_eq!(checked.binding.task, fixture.enrollment.packages[0].task);
+        let mut altered = handles[0].clone();
+        altered.binding.task = Some(rpc::PublicTask::AnswerPublicQuestionV1 {
+            question: "Which fact is documented?".into(),
+        });
+        altered.binding.dataset_sha256 = sha(derive(
+            &source,
+            &altered.binding.row_indices,
+            altered.binding.task.as_ref(),
+        )
+        .unwrap()
+        .as_bytes());
+        let other = fixture.root.path().join("other-task.json");
+        save_new(&other, &altered).unwrap();
+        assert!(checked_handle(&other, &args, &source, &fixture.enrollment).is_err());
+        let mut unsupported = checked.capabilities;
+        unsupported.task_derivation_v1 = false;
+        assert!(
+            binding(
+                &source,
+                vec![0],
+                &source.derive(&[0]).unwrap(),
+                &unsupported,
+                600,
+                Some(rpc::PublicTask::SummarizeContextsV1 {})
+            )
+            .is_err()
+        );
     }
 
     #[test]

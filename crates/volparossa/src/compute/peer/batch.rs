@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, os::unix::fs::DirBuilderExt, sync::Arc};
 
 use tokio::{sync::watch, task::JoinSet, time::sleep};
+use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
@@ -21,6 +22,8 @@ pub(crate) struct Options {
     /// Without this flag there is no network I/O or remote execution.
     #[arg(long)]
     execute: bool,
+    #[arg(skip)]
+    task: Option<rpc::PublicTask>,
 }
 
 impl Options {
@@ -29,6 +32,7 @@ impl Options {
         provider_key: Vec<VerifyingKey>,
         output: PathBuf,
         max_seconds: u16,
+        task: Option<rpc::PublicTask>,
     ) -> Self {
         Self {
             source,
@@ -36,6 +40,7 @@ impl Options {
             output,
             max_seconds,
             execute: true,
+            task,
         }
     }
 }
@@ -65,26 +70,38 @@ pub(super) struct Prepared {
     clippy::too_many_lines,
     reason = "One bounded public batch retains handles across admission, cancellation and exact result joining"
 )]
-pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+pub(super) async fn report_with_activity(
+    args: &Options,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
     let (publication, source) = source(&args.source)?;
-    let assignments = assignments(source.row_count(), &args.provider_key)?;
+    let assignments = assignments_for(&source, &args.provider_key)?;
     if !args.execute {
-        println!(
-            "{}",
+        return Ok(
             serde_json::json!({"operation":"compute_distribute_plan","execute":false,
             "dataset_manifest_id":hex::encode(source.manifest_id()),"row_assignments":assignments,
-            "private_data_supported":false,"model_layer_sharding":false,"new_output":args.output})
+            "private_data_supported":false,"model_layer_sharding":false,"new_output":args.output,
+            "task":args.task}),
         );
-        return Ok(());
     }
-    let cancellation = Cancellation::new()?;
-    let activity = cancellation.activity.clone();
+    let activity = activity.clone();
+    ensure!(
+        !*activity.borrow(),
+        "compute_distribute_cancelled_before_submit"
+    );
     // Resolve exact compatible profiles before submitting anything. Capability hints may
     // race with new work; real admission still decides and failures stay partial failures.
     let mut probes = JoinSet::new();
     for (index, provider) in args.provider_key.iter().copied().enumerate() {
         let socket = socket.to_owned();
-        probes.spawn(async move { (index, capabilities(&socket, &provider).await) });
+        let activity = activity.clone();
+        probes.spawn(async move {
+            (
+                index,
+                readiness::capabilities(&socket, &provider, activity).await,
+            )
+        });
     }
     let mut profiles = vec![None; args.provider_key.len()];
     while let Some(result) = probes.join_next().await {
@@ -113,8 +130,15 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         } else {
             fingerprint = Some(caps.model_fingerprint.clone());
         }
-        let data = source.derive(&rows)?;
-        let binding = binding(&source, rows, &data, &caps, u64::from(args.max_seconds))?;
+        let data = derive(&source, &rows, args.task.as_ref())?;
+        let binding = binding(
+            &source,
+            rows,
+            &data,
+            &caps,
+            u64::from(args.max_seconds),
+            args.task.clone(),
+        )?;
         prepared.push(Prepared {
             provider: args.provider_key[index],
             dataset_json: data,
@@ -195,10 +219,19 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let report = serde_json::json!({"version":1,"operation":"compute_distribute","complete":complete,
         "dataset_manifest_id":hex::encode(source.manifest_id()),"provider_count":args.provider_key.len(),
         "outputs":outputs,"jobs":parts,"private_data_supported":false,"model_layer_sharding":false,
-        "result_truthfulness_guaranteed":false});
+        "result_truthfulness_guaranteed":false,"task":args.task});
     save_new(&args.output.join("result.json"), &report)?;
+    Ok(report)
+}
+
+pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    let cancellation = Cancellation::new()?;
+    let report = report_with_activity(args, socket, &cancellation.activity).await?;
     println!("{}", serde_json::to_string(&report)?);
-    ensure!(complete, "compute_distribute_incomplete_handles_retained");
+    ensure!(
+        !args.execute || report["complete"] == true,
+        "compute_distribute_incomplete_handles_retained"
+    );
     Ok(())
 }
 
@@ -252,6 +285,17 @@ pub(super) async fn execute(
             Err(_) if now()? < work.handle.binding.expires_unix_seconds => {}
             Err(error) => return Err(error),
         }
+    }
+}
+
+pub(super) fn assignments_for(
+    source: &VerifiedPublicDataset,
+    providers: &[VerifyingKey],
+) -> Result<Vec<Vec<u16>>> {
+    if source.is_document() && source.row_count() == 1 && providers.len() == 1 {
+        Ok(vec![vec![0]])
+    } else {
+        assignments(source.row_count(), providers)
     }
 }
 

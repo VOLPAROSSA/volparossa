@@ -1,7 +1,10 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+mod document;
+mod readiness;
 mod resume;
+mod task;
 mod workflow;
 
 use std::{
@@ -41,6 +44,10 @@ pub(crate) enum Command {
     Resume(resume::Options),
     /// Run or resume a finite sequence of signed public packages in bounded worker batches.
     Workflow(Box<workflow::Options>),
+    /// Split an explicitly public task over a selected signed source and compatible peers.
+    Task(Box<task::Options>),
+    /// Tokenize one explicitly public document and execute all its excerpts on selected peers.
+    Document(Box<document::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -120,11 +127,15 @@ impl Cancellation {
     fn new() -> Result<Self> {
         let mut interrupt =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let (stop, activity) = tokio::sync::watch::channel(false);
         let listener = tokio::spawn(async move {
-            if interrupt.recv().await.is_some() {
-                let _ = stop.send(true);
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
             }
+            let _ = stop.send(true);
         });
         Ok(Self { activity, listener })
     }
@@ -174,6 +185,8 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Distribute(args) => return batch::run(&args, socket).await,
         Command::Resume(args) => return resume::run(&args, socket).await,
         Command::Workflow(args) => return workflow::run(&args, socket).await,
+        Command::Task(args) => return task::run(&args, socket).await,
+        Command::Document(args) => return document::run(&args, socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -216,6 +229,7 @@ async fn submit(socket: &Path, args: &Submit) -> Result<serde_json::Value> {
         &dataset_json,
         &caps,
         u64::from(args.max_seconds),
+        None,
     )?;
     let handle = JobHandle {
         version: 1,
@@ -259,7 +273,19 @@ fn binding(
     data: &str,
     caps: &rpc::Capabilities,
     max_seconds: u64,
+    task: Option<rpc::PublicTask>,
 ) -> Result<rpc::JobBinding> {
+    ensure!(
+        task.is_none() || caps.task_derivation_v1,
+        "compute_peer_task_not_supported"
+    );
+    ensure!(
+        !source.is_document() || caps.document_inference_v2,
+        "compute_peer_document_not_supported"
+    );
+    if let Some(task) = &task {
+        task.question()?;
+    }
     let time = now()?;
     let expires = source
         .expires()
@@ -272,6 +298,18 @@ fn binding(
         model_fingerprint: caps.model_fingerprint.clone(),
         row_indices: rows,
         expires_unix_seconds: expires,
+        task,
+    })
+}
+
+fn derive(
+    source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
+    rows: &[u16],
+    task: Option<&rpc::PublicTask>,
+) -> Result<String> {
+    Ok(match task {
+        Some(task) => source.derive_question(rows, task.question()?)?,
+        None => source.derive(rows)?,
     })
 }
 

@@ -32,6 +32,17 @@ agent_jobs_prepare() {
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"
 }
 
+agent_jobs_broker_startup() {
+    # Fixed properties only: no journal, command line, environment or private paths.
+    # Capture before stop/reset-failed can discard the original startup outcome.
+    timeout --signal=TERM --kill-after=1s 2s systemctl show \
+        --property=LoadState,ActiveState,SubState,Result,CollectMode,MainPID,ExecMainCode,ExecMainStatus,ExecMainStartTimestampMonotonic,ExecMainExitTimestampMonotonic,CPUUsageNSec \
+        "$jobs_unit" 2>/dev/null \
+        | python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" broker-startup \
+            "$jobs_node" "$1" "$jobs_attempt" "$jobs_started" \
+        >"$WORK/agent-jobs-$jobs_node-broker-startup.json"
+}
+
 agent_jobs_broker() {
     jobs_node=$1
     content_provider_node "$jobs_node" || return 1
@@ -50,8 +61,10 @@ agent_jobs_broker() {
     for jobs_other in relay3 relay4 relay5; do
         [ "$jobs_other" = "$jobs_node" ] || jobs_hidden="$jobs_hidden $WORK/state-$jobs_other"
     done
+    jobs_attempt=0
+    jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
-        --property=CollectMode=inactive-or-failed --property=Restart=no \
+        --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
         --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
         --property="NetworkNamespacePath=/run/netns/$jobs_namespace" \
@@ -63,15 +76,24 @@ agent_jobs_broker() {
         --property="StandardError=append:$WORK/agent-jobs-$jobs_node-broker.err" \
         -- "$binary_directory/volparossa" compute serve \
         --runtime-root "$jobs_private/runtime" --model-root "$jobs_root/provision/model" \
-        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || return 1
-    jobs_attempt=0
+        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || {
+            agent_jobs_broker_startup start_failed || true
+            return 1
+        }
     while [ "$jobs_attempt" -lt 150 ]; do
         [ ! -S "$jobs_private/broker.sock" ] || break
-        [ "$(systemctl show --property=ActiveState --value "$jobs_unit")" != failed ] || return 1
+        if [ "$(systemctl show --property=ActiveState --value "$jobs_unit")" = failed ]; then
+            agent_jobs_broker_startup unit_failed || true
+            return 1
+        fi
         sleep 0.1
         jobs_attempt=$((jobs_attempt + 1))
     done
-    [ -S "$jobs_private/broker.sock" ] || return 1
+    if [ ! -S "$jobs_private/broker.sock" ]; then
+        agent_jobs_broker_startup socket_timeout || true
+        return 1
+    fi
+    agent_jobs_broker_startup socket_ready || return 1
     content_custody_endpoint "$jobs_node" || return 1
     agent_jobs_cli "$jobs_node" compute peer attach --broker-socket "$jobs_private/broker.sock" \
         --bind "$custody_address:18080" --advertised-hostname "$custody_hostname" \
@@ -104,7 +126,7 @@ agent_jobs_cleanup() {
     fi
 }
 
-agent_jobs_run() {
+agent_jobs_setup() {
     PHASE=agent-jobs-source
     jobs_source=$WORK/state-client/compute-source
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source"
@@ -142,6 +164,18 @@ agent_jobs_run() {
         --arg a "$provider_node_a" --arg b "$provider_node_b" --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
         '{provider_nodes:$nodes,route_context_id:$context,control_relay_peer_id:$control,
           provider_keys:{($a):$ka,($b):$kb}}' >"$WORK/agent-jobs-layout.json"
+}
+
+agent_jobs_run() {
+    agent_jobs_setup
+    if [ "${agent_public_document:-no}" = yes ]; then
+        agent_public_document_run
+        return
+    fi
+    if [ "${agent_public_task:-no}" = yes ]; then
+        agent_public_task_run
+        return
+    fi
     PHASE=agent-jobs-concurrent-execution
     # Existing fetch capture classification is used only for the same exact provider graph;
     # payloads here are signed compute RPCs, not a content download claim.
@@ -212,6 +246,14 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_public_document:-no}" = yes ]; then
+        agent_public_document_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_public_task:-no}" = yes ]; then
+        agent_public_task_finalize_report "$jobs_status"
+        return
+    fi
     jobs_finalize_command=finalize
     jobs_report=agent-jobs-smoke.json
     [ "${agent_jobs_loss:-no}" != yes ] || { jobs_finalize_command=loss-finalize; jobs_report=agent-jobs-loss-smoke.json; }

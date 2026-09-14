@@ -13,6 +13,8 @@ umask 077
 mode=preview
 scenario=alpha
 agent_jobs_loss=no
+agent_public_task=no
+agent_public_document=no
 agent_train_cycle=no
 agent_train_loop=no
 wifi_link=no
@@ -30,7 +32,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -47,6 +49,27 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_public_document" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA exact-source public document plan:' \
+                '  tokenize owner-authorized public text with the pinned isolated tokenizer, without truncation;' \
+                '  sign one native source and bounded contiguous excerpt packages with the same publisher;' \
+                '  execute the first package on two real protected peer workers, then resume remaining packages;' \
+                '  retain exact source-range/result/worker/capture evidence and reuse completed receipts offline;' \
+                '  enforce complete guest cleanup; no private-document or answer-quality claim.'
+            return
+        fi
+        if [ "$agent_public_task" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA source-bound public user-task plan:' \
+                '  reuse the pinned guest model, two independent brokers and protected route graph;' \
+                '  deposit the original signed source on a peer, then retrieve it into a fresh client cache;' \
+                '  distribute an explicit public user question over its unchanged contexts on two actual workers;' \
+                '  stop brokers and disconnect the route, then resume exact retained receipts without new work;' \
+                '  require real worker/input/result/capture evidence and complete guest cleanup;' \
+                '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
+            return
+        fi
         if [ "$agent_jobs_loss" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA explicit public peer worker-loss/reassignment plan:' \
@@ -366,12 +389,16 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             download_sharing=no
             agent_jobs_loss=no
+            agent_public_task=no
+            agent_public_document=no
             agent_train_cycle=no
             agent_train_loop=no
             case $2 in
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
+                agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
+                agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -565,6 +592,16 @@ fi
 if [ "$scenario" = agent-jobs ]; then
     for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py; do
         [ -f "$source_directory/tests/integration/$jobs_fixture" ] && [ ! -L "$source_directory/tests/integration/$jobs_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_public_task" = yes ]; then
+    for task_fixture in agent-public-task-smoke.sh agent-public-task-smoke.py; do
+        [ -f "$source_directory/tests/integration/$task_fixture" ] && [ ! -L "$source_directory/tests/integration/$task_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_public_document" = yes ]; then
+    for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py; do
+        [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
     done
 fi
 if [ "$scenario" = content-mailbox ]; then
@@ -1843,6 +1880,14 @@ fi
 if [ "$scenario" = agent-jobs ]; then
     # shellcheck source=tests/integration/agent-jobs-smoke.sh
     . "$source_directory/tests/integration/agent-jobs-smoke.sh"
+fi
+if [ "$agent_public_task" = yes ]; then
+    # shellcheck source=tests/integration/agent-public-task-smoke.sh
+    . "$source_directory/tests/integration/agent-public-task-smoke.sh"
+fi
+if [ "$agent_public_document" = yes ]; then
+    # shellcheck source=tests/integration/agent-public-document-smoke.sh
+    . "$source_directory/tests/integration/agent-public-document-smoke.sh"
 fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh

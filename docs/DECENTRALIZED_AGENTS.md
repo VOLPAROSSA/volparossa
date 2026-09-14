@@ -297,9 +297,12 @@ are never pruned to make room, so a full pending queue pauses further training. 
 workers are not marked complete. An initial peer import interrupted between atomic output
 publication and its state checkpoint is retained and refused on resume, not silently trusted.
 
-The separate `agent-train-loop` scenario is a candidate for two genuine cycles, automatic
-adapter publication and another node's protected import/use; no passing live result is claimed
-yet. This is not general task planning, model-quality improvement, private training, defended
+The separate [`agent-train-loop` proof on `bcc1df52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34887897332)
+passes with two genuine eight-update cycles, exact signed automatic contributions and another
+Client's protected import and real inference using the second adapter. Original raw measurements
+reconstruct the same report; cleanup leaves no owned objects and original guest-host state is
+unchanged. PR #123 integrated this milestone into `main`. This is not general task planning,
+model-quality improvement, private training, defended
 gradient/model aggregation, automatic peer-job activation or completed B05.
 
 ## Owner-first resource allocation
@@ -329,7 +332,7 @@ continuation step, not general task decomposition or unlimited execution permiss
 ## Current public peer-job candidate
 
 The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute/resume/workflow` commands. The broker must already have the
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task` commands. The broker must already have the
 pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
 off until explicitly executed. The agent attaches only a protected same-UID socket and an
 explicit allowlist of dataset publishers. It does not launch Python inside the hardened
@@ -425,6 +428,100 @@ proofs remain separate from the local coordinator tests.
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
 eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
+
+### Source-bound public user tasks
+
+`compute peer task` adds a requester instruction to the original public source, rather than
+requiring the publisher to have authored that exact question. It selects the source by trusted
+publisher/name and optional minimum revision/exact manifest ID, independently of cache inventory.
+Eligible cached bytes accelerate retrieval; a miss requests the same source over the protected
+network. Peers still require their existing publisher allowlist and explicitly advertise
+`task_derivation_v1`; unsupported peers refuse the new task.
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer task \
+  --publisher-key TRUSTED_DATASET_PUBLISHER_HEX --dataset-name public-notes \
+  --cache /absolute/agent-cache --reuse-cache \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --public-question 'What does this public context say about conserving capacity?' \
+  --directory /absolute/private-parent/task-001 --execute
+
+volparossa --control-socket /absolute/agent.sock compute peer task \
+  --directory /absolute/private-parent/task-001 --resume --execute
+```
+
+Omit `--execute` for a no-network/no-output-creation preview. Omit `--public-question` for
+the fixed instruction `Summarize the provided public context.` The question is explicitly public
+and visible to the workers; never put private text in it. Its exact bytes are bound separately
+in the signed requester job, never attributed to the original dataset publisher. Original
+context/source bytes remain unchanged and are verified at both agent boundaries.
+
+The current adapter accepts one existing signed public-dataset object with two to four inference
+contexts and two to four explicitly selected peers. It does not yet split arbitrary documents;
+each worker retains the existing 192-token prompt check without silent truncation. The user
+question allows at most 512 UTF-8 bytes. These are current input/worker limits, not a promise that
+the final whole-task interface will always have these limits.
+
+`result.json` contains ordered per-context answers with original manifest/context hashes and
+the responsible peer, job and validated report hash. It is not a further neural synthesis or
+proof that model answers are correct. Exact task/source/peer enrollment and completed local
+receipts survive resume, while partial work remains visibly incomplete. Those receipts are
+authenticated local observations, not independently portable execution attestations. The
+source signature does not authorize relabelling derived answers as publisher-authored content.
+The disposable `agent-public-task` scenario retrieves the selected source from a peer before
+execution, then stops both brokers and the route before resuming the retained results. Its
+parser and real local file-snapshot checks pass; live VM evidence is still pending and full B03
+remains open.
+
+### Public document tasks
+
+The `compute peer document` candidate splits a user-selected public UTF-8 document, rather
+than requiring pre-authored inference rows. The existing pinned tokenizer runs in the isolated
+worker without loading model weights, using the exact chat template used by inference.
+Every segment fits the full 192-token prompt budget and preserves contiguous original UTF-8
+byte ranges; no text is silently truncated. Each package has up to four segments and its own
+resumable workflow, so a whole document is not limited to one worker lease or one workflow's
+32-package plan. A final singleton uses one worker, not an invented second task.
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer document \
+  --input /absolute/public-document.txt --public-content --license CC-BY-4.0 \
+  --public-question 'What does this section explain?' \
+  --runtime-root /absolute/existing-runtime --model-root /absolute/existing-model \
+  --identity /absolute/existing-identity --passphrase-file /absolute/private-passphrase \
+  --publisher-key OWN_PUBLISHER_HEX \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --directory /absolute/private-parent/document-001 --max-batches 1 --execute
+
+volparossa --control-socket /absolute/agent.sock compute peer document \
+  --directory /absolute/private-parent/document-001 --resume --max-batches 32 --execute
+```
+
+The paths above are illustrative. Provisioning is explicit; this command installs/downloads
+no runtime, tokenizer or model. The input must already be public and you must be authorized
+to publish it under the selected license (GPL-3.0-only, CC0-1.0, CC-BY-4.0 or CC-BY-SA-4.0).
+`--public-content` explicitly authorizes disclosing both the entire source and the question;
+there is no automatic browsing/cache ingestion. Peers must independently trust the publisher
+and advertise `document_inference_v2` as well as requester-task support.
+
+The coordinator compares every excerpt against the actual original bytes before signing a
+v2 inference-only package. Packages carry the same publisher's signed original text manifest.
+That signature authenticates the publisher's excerpt assertion; a remote reference alone is
+not a cryptographic proof of byte equality without the original. Original text and packages
+are stored in a local native content cache, not automatically contributed as network replicas.
+This owner-input path does not claim to have fetched the original source from the network.
+It contains no invented training examples, held-out answers or repository revision.
+
+Current enrollment accepts at most 1 MiB of input, 16,384 segments and two to four explicit
+peers. Individual prompts/answers, resource budgets and worker leases remain bounded.
+`--max-batches` limits new rounds per invocation (1–32), not completed lifetime progress.
+`result.json` preserves ordered range answers and exact source/context/job/provider/report
+identities; it is not neural synthesis, answer-quality proof or an independently portable
+execution attestation. An unfinished invocation returns a nonzero status but retains complete
+receipts. Resume never reassigns completed work or silently renews expired source permissions.
+The new `agent-public-document` disposable scenario targets real tokenizer splitting,
+multi-package execution and receipt reuse after peer/route shutdown; live proof is pending.
+Full B03 and confidential tasks remain open.
 
 ## Private tasks and training data
 
