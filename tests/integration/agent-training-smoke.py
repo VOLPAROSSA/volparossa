@@ -101,19 +101,56 @@ def snapshot():
     return result
 
 
-def identity(pid):
+def process_record(pid):
     raw = Path(f"/proc/{pid}/stat").read_text()
-    return {"pid": pid, "start_ticks": int(raw.rsplit(")", 1)[1].split()[19])}
+    fields = raw.rsplit(")", 1)[1].split()
+    return {"pid": pid, "start_ticks": int(fields[19])}, int(fields[1])
+
+
+def identity(pid):
+    return process_record(pid)[0]
 
 
 def descendants(pid):
-    pending, result = [pid], []
-    while pending and len(result) < 32:
-        current = pending.pop()
+    # Linux assigns children to the spawning thread, not necessarily the thread-group
+    # leader. Tokio therefore requires all-task traversal, still only below this owner.
+    maximum_processes, maximum_threads, maximum_children_bytes = 32, 128, 4096
+    try:
+        owner = identity(pid)
+    except FileNotFoundError:
+        return []
+    pending, seen, result = [owner], {(pid, owner["start_ticks"])}, []
+    while pending:
+        expected = pending.pop()
+        current = expected["pid"]
         try:
-            result.append(identity(current))
-            children = Path(f"/proc/{current}/task/{current}/children").read_text()
-            pending.extend(int(x) for x in children.split())
+            if identity(current) != expected:
+                continue
+            children = set()
+            for count, task in enumerate(Path(f"/proc/{current}/task").iterdir(), 1):
+                require(count <= maximum_threads, "owned process thread observation limit")
+                try:
+                    with (task / "children").open("rb") as stream:
+                        raw = stream.read(maximum_children_bytes + 1)
+                    require(len(raw) <= maximum_children_bytes, "owned process child-list limit")
+                    children.update(int(value) for value in raw.split())
+                    require(len(children) < maximum_processes, "owned descendant process limit")
+                except FileNotFoundError:
+                    continue  # A completed thread is not evidence for another process.
+            if identity(current) != expected:
+                continue
+            result.append(expected)
+            for child in sorted(children):
+                try:
+                    record, parent = process_record(child)
+                except FileNotFoundError:
+                    continue
+                token = (child, record["start_ticks"])
+                if parent != current or token in seen:
+                    continue
+                require(len(seen) < maximum_processes, "owned descendant process limit")
+                seen.add(token)
+                pending.append(record)
         except FileNotFoundError:
             continue
     return result

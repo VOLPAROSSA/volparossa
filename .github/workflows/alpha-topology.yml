@@ -109,6 +109,7 @@ jobs:
           python3 -B tests/integration/test-content-replication-capture.py
           sh -n tests/integration/agent-training-smoke.sh
           python3 -B tests/integration/agent-training-smoke.py self-test
+          python3 -B tests/integration/test-agent-training-processes.py
           sh -n tests/integration/agent-artifact-smoke.sh
           python3 -B tests/integration/agent-artifact-smoke.py self-test
           sh -n tests/integration/agent-jobs-smoke.sh

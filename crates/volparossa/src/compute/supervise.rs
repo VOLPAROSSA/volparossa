@@ -16,6 +16,8 @@ use super::{MAX_LINE_BYTES, MAX_STREAM_BYTES, Mode, Options, WorkerRequest, chec
 pub(super) const MAX_RSS_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_OBSERVED_PROCESSES: usize = 64;
+const MAX_OBSERVED_THREADS: usize = 128;
 
 pub(super) async fn run(
     mut child: Child,
@@ -308,8 +310,11 @@ fn observe(pid: u32, output: &Path) -> Result<u64> {
     let mut visited = BTreeSet::new();
     let mut total = 0_u64;
     while let Some(current) = pending.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
         ensure!(
-            visited.len() < 64 && visited.insert(current),
+            visited.len() < MAX_OBSERVED_PROCESSES && visited.insert(current),
             "compute_process_bound"
         );
         let root = Path::new("/proc").join(current.to_string());
@@ -320,18 +325,19 @@ fn observe(pid: u32, output: &Path) -> Result<u64> {
         };
         total += status_kib(&status, "VmRSS:").unwrap_or(0);
         ensure!(total <= MAX_RSS_BYTES, "compute_memory_budget");
-        let descendants = match system_text(&root.join(format!("task/{current}/children"))) {
+        let descendants = match process_children(&root) {
             Ok(value) => value,
             Err(_) if !root.exists() => continue,
             Err(error) => return Err(error),
         };
-        for child in descendants.split_whitespace() {
-            ensure!(pending.len() < 64, "compute_process_bound");
-            pending.push(
-                child
-                    .parse::<u32>()
-                    .context("compute_process_observation")?,
-            );
+        for child in descendants {
+            if !visited.contains(&child) && !pending.contains(&child) {
+                ensure!(
+                    pending.len() < MAX_OBSERVED_PROCESSES,
+                    "compute_process_bound"
+                );
+                pending.push(child);
+            }
         }
     }
     ensure!(
@@ -339,6 +345,34 @@ fn observe(pid: u32, output: &Path) -> Result<u64> {
         "compute_storage_budget"
     );
     Ok(total)
+}
+
+fn process_children(root: &Path) -> Result<BTreeSet<u32>> {
+    // Linux records children on the *spawning thread*. Reading only task/PID
+    // would omit children created by a worker thread and undercount their RSS.
+    // Sum process RSS once; threads themselves share that address space.
+    let mut children = BTreeSet::new();
+    for (index, thread) in std::fs::read_dir(root.join("task"))?.enumerate() {
+        ensure!(index < MAX_OBSERVED_THREADS, "compute_thread_bound");
+        let thread = thread?.path();
+        let text = match system_text(&thread.join("children")) {
+            Ok(value) => value,
+            Err(_) if !thread.exists() => continue, // Thread exited during this sample.
+            Err(error) => return Err(error),
+        };
+        for child in text.split_whitespace() {
+            let child = child
+                .parse::<u32>()
+                .context("compute_process_observation")?;
+            ensure!(child > 0, "compute_process_observation");
+            children.insert(child);
+            ensure!(
+                children.len() <= MAX_OBSERVED_PROCESSES,
+                "compute_process_bound"
+            );
+        }
+    }
+    Ok(children)
 }
 
 fn output_bytes(path: &Path) -> Result<u64> {
@@ -425,5 +459,30 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         std::os::unix::fs::symlink("/etc", root.path().join("escape")).expect("symlink");
         assert!(output_bytes(root.path()).is_err());
+    }
+
+    #[test]
+    fn child_observation_includes_children_spawned_by_other_threads() {
+        // No model/network is used. Keep the spawning thread alive while inspecting
+        // its real Linux children, then kill/reap the exact probe before assertions.
+        let (started, pid) = std::sync::mpsc::channel();
+        let (done, finish) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut child = std::process::Command::new("/usr/bin/sleep")
+                .arg("10")
+                .spawn()
+                .expect("probe child");
+            started.send(child.id()).expect("probe pid");
+            let _ = finish.recv_timeout(Duration::from_secs(5));
+            let _ = child.kill();
+            child.wait().expect("probe reap");
+        });
+        let child = pid
+            .recv_timeout(Duration::from_secs(5))
+            .expect("probe ready");
+        let observed = process_children(&Path::new("/proc").join(std::process::id().to_string()));
+        let _ = done.send(());
+        worker.join().expect("probe thread");
+        assert!(observed.expect("all thread children").contains(&child));
     }
 }

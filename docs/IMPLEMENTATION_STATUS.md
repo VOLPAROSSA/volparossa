@@ -50,8 +50,20 @@ stopped during capability lookup, before model execution: an unused initial MPTC
 outlived the Exit's 12-second TLS deadline while brokers were prepared. The candidate now
 discards an already closed unused socket before obtaining a fresh one through the same helper
 authorization, without replaying application work or weakening transport checks. A real local
-descriptor regression and narrow agent Clippy pass; a new guest run is required. The failed
-run still proved complete cleanup and unchanged original guest state, not B03 functionality.
+descriptor regression and narrow agent Clippy pass. The next
+[run on `2ba9631e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34869250045)
+completed both real peer jobs, returned separate reports and reassembled the two disjoint rows.
+It still **failed** the required live concurrency/isolation observation: the detector read only
+the process leader's children, missing workers started from other Tokio threads. Both provider
+logs reached real model completion; that does not retrospectively establish missing overlap
+observations. The detector now follows children of every bounded thread, with a real local
+thread-to-child regression. The Rust resource observer receives the same correction so that
+thread-created subprocess RSS is not omitted. Four focused supervisor tests and strict CLI
+Clippy pass; the corrected live proof remains pending. The failed run retained complete
+cleanup, zero owned network objects and equal guest-state hash
+`59ebc76a8e39e0770dece290791c3f79d3f8f15be9ef7a2dbd641716ffb5a0bb`;
+its artifact ZIP SHA-256 is
+`8c64cba84e945bb6b96ec060de0d77b99affe9f62d9379e92b7454d838c7c4f2`.
 The explicit `compute peer workflow` candidate sequences up to 32 independently signed public
 packages (two to four rows each), with a bounded number of rounds per invocation. Exact source
 copies, immutable handles and locally validated full receipts survive process restarts;

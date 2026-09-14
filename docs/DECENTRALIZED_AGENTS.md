@@ -255,8 +255,13 @@ The `agent-jobs` disposable guest runner exercises two independent CPU workers o
 with separate runtime-lock inodes and process-overlap observation, signed disjoint public input
 rows, protected network traffic and source-bound results. Only the verified base model bytes are
 shared in that fixture. Its first run stopped before model execution during capability lookup;
-an already closed initial route socket is now replaced before application TLS, and a new live
-proof is pending. Cleanup and unchanged guest state passed even in the failed run. The separate
+an already closed initial route socket is now replaced before application TLS. The next
+[run on `2ba9631e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34869250045)
+completed both real model jobs and returned their two disjoint results, but failed the live
+overlap/isolation check because its process detector omitted children spawned by other threads.
+That detector and the analogous runtime resource accounting now inspect every bounded thread;
+local real-process regressions pass, while the corrected live proof remains pending.
+Cleanup and unchanged guest state passed even in the failed runs. The separate
 `agent-jobs-loss` scenario additionally terminates one exact guest-owned Python worker via pidfd,
 requires terminal original receipts, and resumes only its failed rows on the idle surviving
 peer. Its checker requires a genuinely new worker and preserved original successful output;
