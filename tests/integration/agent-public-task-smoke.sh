@@ -16,7 +16,7 @@ agent_public_task_run() {
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         --cache "$jobs_source/cache" --provider-key "$jobs_key_a" \
         >"$WORK/agent-public-task-deposit.json" 2>"$WORK/agent-public-task-deposit.err" || fail PUBLIC_TASK_SOURCE_DEPOSIT_FAILED
-    PHASE=agent-public-task-concurrent-execution
+    PHASE=agent-public-task-admission-and-execution
     agent_jobs_cli client compute peer task --publisher-key "$jobs_publisher" \
         --dataset-name disposable-agent-jobs --dataset-manifest-id "$task_manifest" \
         --cache "$jobs_source/task-agent-cache" --public-question "$task_question" \
@@ -24,8 +24,8 @@ agent_public_task_run() {
         --directory "$task_directory" --max-batches 1 --max-seconds 600 --execute \
         >"$WORK/agent-public-task-result.json" 2>"$WORK/agent-public-task-result.err" &
     jobs_batch_pid=$!
-    python3 -B "$source_directory/tests/integration/agent-jobs-smoke.py" observe "$WORK" \
-        >"$WORK/agent-jobs-observer.log" 2>"$WORK/agent-jobs-observer.err" || fail PUBLIC_TASK_WORKERS_NOT_OBSERVED
+    python3 -B "$source_directory/tests/integration/agent-public-task-smoke.py" observe "$WORK" "$jobs_batch_pid" \
+        >"$WORK/agent-jobs-observer.log" 2>"$WORK/agent-jobs-observer.err" || fail PUBLIC_TASK_ADMISSION_OR_WORKERS_NOT_OBSERVED
     wait "$jobs_batch_pid" || fail PUBLIC_TASK_EXECUTION_INCOMPLETE
     jobs_batch_pid=
     for jobs_index in 0 1; do

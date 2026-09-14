@@ -102,8 +102,16 @@ compute tests pass, alongside signed-source/agent-boundary and wire-codec checks
 Clippy and an actual no-network/no-output CLI preview. The disposable `agent-public-task`
 scenario now connects protected custody and fresh source retrieval, two actual worker
 observations, exact source/question/result bindings and retained-result resume after stopping
-both brokers and the route. Its parser/snapshot and runner checks pass; its live VM result is
-pending. These local tests are not a model-execution claim.
+both brokers and the route. The [first live run on `3487f202`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34885058532)
+fetched the original source but failed during the second provider's exact address lookup,
+before retaining any job handle or submitting work. It remains a failed run, with complete
+disposable cleanup and unchanged guest-host state. The candidate now allows at most four
+read-only capability probes within 45 seconds, with immediate owner cancellation; no Submit
+is replayed. The fixture separately observes actual retained handles before its unchanged
+worker-overlap window. Eighteen targeted peer tests and the parser/snapshot checks pass;
+another live run is required. Completed full receipts can also be read after the original
+source expires; this never renews the source or authorizes unfinished work. These local tests
+are not a model-execution claim.
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.

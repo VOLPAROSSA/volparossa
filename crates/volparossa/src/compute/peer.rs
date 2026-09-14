@@ -1,6 +1,7 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+mod readiness;
 mod resume;
 mod task;
 mod workflow;

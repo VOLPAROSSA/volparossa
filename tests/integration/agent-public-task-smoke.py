@@ -28,6 +28,45 @@ def task_root(work):
     return work / "state-client/compute-source/public-task"
 
 
+def admission_handles(paths):
+    try:
+        result = []
+        for path in paths:
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= 16384,
+                    "incomplete initial handle")
+            raw = path.read_bytes()
+            value = json.loads(raw)
+            require(value["binding"]["task"] == TASK and value["capabilities"]["task_derivation_v1"] is True,
+                    "initial handle not yet complete")
+            result.append({"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        return result
+    except (OSError, ValueError, KeyError):
+        return None  # A writer may have created the final file but not finished its JSON.
+
+
+def observe(work, pid):
+    JOBS["guest_work"](work)
+    owner = JOBS["identity"](pid)
+    started = time.monotonic_ns()
+    paths = [task_root(work) / ATTEMPT / f"job-{n}.json" for n in (0, 1)]
+    # Source fetch plus cancellable read-only capability admission precede Submit.
+    # Keep that deadline separate from the unchanged real-worker overlap window.
+    # No fixture restart, new task, source reselection or synthetic readiness.
+    while time.monotonic_ns() - started < 90_000_000_000:
+        handles = admission_handles(paths)
+        if handles:
+            write(work / "agent-public-task-admission.json", {
+                "handles": handles,
+                "started_at_monotonic_ns": started,
+                "observed_at_monotonic_ns": time.monotonic_ns(),
+                "operation": "actual_handles_retained_before_worker_observation"})
+            return JOBS["observe"](work)
+        require(JOBS["alive"](owner), "public task ended before initial admission; inspect retained task result and fixed agent events")
+        time.sleep(0.05)
+    raise ValueError("public task did not retain its real handles within the admission deadline")
+
+
 def snapshot(root):
     require(root.is_dir() and not root.is_symlink(), "missing real task directory")
     result = {}
@@ -149,6 +188,13 @@ def check_evidence(evidence, revision):
                 "retained JSON bytes differ from actual file snapshot")
     for name, value in expected.items():
         require(json.loads(files["retained_json"][name]) == value, "exported retained receipt does not match its original bytes")
+    admission = evidence["admission"]
+    require(admission["operation"] == "actual_handles_retained_before_worker_observation"
+            and 0 <= admission["observed_at_monotonic_ns"] - admission["started_at_monotonic_ns"] < 90_000_000_000
+            and admission["observed_at_monotonic_ns"] < jobs["observation"]["first_monotonic_ns"]
+            and admission["handles"] == [{k: files["snapshot"][f"{ATTEMPT}/job-{n}.json"][k]
+                                           for k in ("sha256", "bytes")} for n in (0, 1)],
+            "admission did not observe the same exact retained handles before the workers")
     for name in ("dataset.json", "work/package-0000/dataset.json"):
         require(files["retained_json"][name].encode() == bytes.fromhex(files["source_dataset_hex"]), "workflow source changed")
     for name in ("dataset.manifest", "work/package-0000/manifest.bin"):
@@ -234,7 +280,7 @@ def evidence(work, revision):
                       "control_privacy": read(work / "content-provider-custody-fetch-control.json"),
                       "gates": read(work / "content-custody-fetch-gates.json")})
     value = {name: read(work / f"agent-public-task-{name}.json", 1048576)
-             for name in ("files", "deposit", "result", "resume", "stopped", "resumed")}
+             for name in ("files", "deposit", "result", "resume", "stopped", "resumed", "admission")}
     value.update(success=True, source_revision=revision, jobs=jobs)
     check_evidence(value, revision)
     return value
@@ -340,8 +386,12 @@ def self_test():
     stopped_value = dict(brokers=[w["broker"] for w in jobs["observation"]["workers"]], all_owned_processes_ended=True, observed_at_monotonic_ns=3000)
     fixture = dict(success=True, source_revision="a" * 40, jobs=jobs, files=files, deposit=deposit, result=result, resume=resume,
         stopped=stopped_value, resumed=dict(**{**stopped_value, "observed_at_monotonic_ns": 4000}, snapshot=copy.deepcopy(files["snapshot"])))
+    fixture["admission"] = dict(operation="actual_handles_retained_before_worker_observation",
+        started_at_monotonic_ns=jobs["observation"]["first_monotonic_ns"] - 2,
+        observed_at_monotonic_ns=jobs["observation"]["first_monotonic_ns"] - 1,
+        handles=[{k: files["snapshot"][f"{ATTEMPT}/job-{n}.json"][k] for k in ("sha256", "bytes")} for n in (0, 1)])
     check_evidence(fixture, "a" * 40)
-    for name in ("question", "source", "source_bytes", "local_shortcut", "expiry", "capability", "answer", "extra_round", "changed_handle", "new_file", "live_broker"):
+    for name in ("question", "source", "source_bytes", "local_shortcut", "expiry", "capability", "answer", "extra_round", "changed_handle", "new_file", "live_broker", "admission_handle", "late_admission"):
         bad = copy.deepcopy(fixture)
         if name == "question": bad["result"]["task"]["question"] = "Different question"
         elif name == "source": bad["files"]["source_manifest_hex"] += "00"
@@ -353,7 +403,9 @@ def self_test():
         elif name == "extra_round": bad["resume"]["workflow"]["rounds_this_invocation"] = 1
         elif name == "changed_handle": bad["files"]["handles"][0]["binding"]["expires_unix_seconds"] += 1
         elif name == "new_file": bad["resumed"]["snapshot"][f"{ATTEMPT}/job-0.json"]["inode"] = [3, 4]
-        else: bad["stopped"]["all_owned_processes_ended"] = False
+        elif name == "live_broker": bad["stopped"]["all_owned_processes_ended"] = False
+        elif name == "admission_handle": bad["admission"]["handles"][0]["sha256"] = "0" * 64
+        else: bad["admission"]["observed_at_monotonic_ns"] = bad["jobs"]["observation"]["first_monotonic_ns"]
         try:
             check_evidence(bad, "a" * 40)
         except (ValueError, KeyError):
@@ -377,7 +429,7 @@ def self_test():
             raise AssertionError("aliased receipt file accepted")
         alias.unlink()
         require(snapshot(root) == before, "owned temporary alias cleanup changed retained files")
-    print("agent-public-task synthetic source/task/receipt/resume contract + 11 rejection cases and real temporary snapshot checks PASS; no model or network executed")
+    print("agent-public-task synthetic source/task/receipt/resume contract + 13 rejection cases and real temporary snapshot checks PASS; no model or network executed")
 
 
 def main(args):
@@ -388,6 +440,8 @@ def main(args):
         report(read(Path(args[1]), 2097152), args[2])
     elif command == "collect":
         collect(Path(args[1]))
+    elif command == "observe":
+        observe(Path(args[1]), int(args[2]))
     elif command in ("stopped", "resumed"):
         stopped(Path(args[1]), command)
     elif command == "evidence":

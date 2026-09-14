@@ -533,7 +533,11 @@ async fn advance(
                 };
                 progress = load_progress(&directory, &source_args, &verified, enrollment)?;
                 if result.is_err() || !progress.complete() {
-                    stopped = "pending_handles_retained_no_busy_retry_loop";
+                    stopped = if progress.attempts == 0 {
+                        "initial_admission_failed_no_work_submitted"
+                    } else {
+                        "pending_handles_retained_no_busy_retry_loop"
+                    };
                     failed = true;
                 }
             }

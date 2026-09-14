@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use volparossa_content::{SignedManifest, provider::compute::dataset::VerifiedPublicDataset};
 
 use super::{
-    Args, Cancellation, Deserialize, Path, PathBuf, Result, Serialize, Source, VerifyingKey,
-    ensure, fs, now, parse_key, read_file, rpc, sha, source, workflow,
+    Args, Cancellation, Deserialize, Path, PathBuf, Result, Serialize, VerifyingKey, ensure, fs,
+    now, parse_key, read_file, rpc, sha, workflow,
 };
 use crate::{
     compute::private_directory,
@@ -158,8 +158,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         let plan = expected_plan(&args.directory, &selected);
         write_json(&args.directory.join("workflow-plan.json"), &plan, false)?;
     }
-    let verified = verified_source(&args.directory, &selected)?;
     validate_plan(&args.directory, &selected)?;
+    let verified = source_for_run(&args.directory, &selected, args.resume, now()?)?;
     let expected = expected_work(&args.directory, &selected, &verified)?;
     ensure!(
         !*cancellation.activity.borrow(),
@@ -250,14 +250,25 @@ async fn fetch_source(
 }
 
 fn verified_source(root: &Path, selected: &Enrollment) -> Result<VerifiedPublicDataset> {
-    let args = Source {
-        publisher_key: parse_key(&selected.publisher_key).map_err(anyhow::Error::msg)?,
-        dataset: root.join("dataset.json"),
-        dataset_manifest: root.join("dataset.manifest"),
-    };
-    let (original, verified) = source(&args)?;
-    let manifest = SignedManifest::decode(&hex::decode(original.manifest_hex)?)?
-        .verify(&args.publisher_key, now()?)?;
+    verified_source_at(root, selected, now()?)
+}
+
+fn verified_source_at(
+    root: &Path,
+    selected: &Enrollment,
+    at: u64,
+) -> Result<VerifiedPublicDataset> {
+    let publisher = parse_key(&selected.publisher_key).map_err(anyhow::Error::msg)?;
+    let bytes = read_file(&root.join("dataset.manifest"), 64 * 1024)?;
+    // Keep the native expiry error distinct from invalid source bytes/signatures.
+    let manifest = SignedManifest::decode(&bytes)?.verify(&publisher, at)?;
+    let data = read_file(&root.join("dataset.json"), rpc::MAX_DATASET_BYTES)?;
+    let verified = volparossa_content::provider::compute::dataset::verify_source(
+        &bytes,
+        &publisher,
+        std::str::from_utf8(&data)?,
+        at,
+    )?;
     ensure!(
         manifest.metadata().name == selected.dataset_name
             && selected
@@ -271,6 +282,49 @@ fn verified_source(root: &Path, selected: &Enrollment) -> Result<VerifiedPublicD
         "compute_task_selected_source"
     );
     Ok(verified)
+}
+
+fn source_for_run(
+    root: &Path,
+    selected: &Enrollment,
+    resume: bool,
+    current: u64,
+) -> Result<VerifiedPublicDataset> {
+    match verified_source_at(root, selected, current) {
+        Ok(verified) => Ok(verified),
+        Err(error)
+            if resume
+                && matches!(
+                    error.downcast_ref::<volparossa_content::Error>(),
+                    Some(volparossa_content::Error::Expired)
+                ) =>
+        {
+            let work = root.join("work");
+            private_directory(&work)?;
+            let enrollment: Value =
+                serde_json::from_slice(&read_file(&work.join("workflow.json"), 64 * 1024)?)?;
+            let at = enrollment["verified_at_unix_seconds"]
+                .as_u64()
+                .context("compute_task_historical_verification_time")?;
+            ensure!(
+                at >= selected.selected_at_unix_seconds && at <= current && at > 0,
+                "compute_task_historical_verification_time"
+            );
+            let verified = verified_source_at(root, selected, at)?;
+            let expected = expected_work(root, selected, &verified)?;
+            // This revalidates the complete enrollment, source copies, exact handles,
+            // full reports and report hashes. A cached 'complete' boolean is insufficient.
+            let retained = workflow::task_snapshot(&work, &expected)?;
+            ensure!(
+                retained["complete"] == true,
+                "compute_task_expired_source_has_unfinished_work"
+            );
+            // Only reading already-completed receipts is authorized. The workflow's
+            // real-time source-expiry guard still prohibits any new admission.
+            Ok(verified)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn joined_result(
@@ -625,6 +679,64 @@ mod tests {
         json!({"operation":"compute_workflow","complete":true,"pending_failure":false,
             "packages":[{"package_index":0,"dataset_manifest_id":snapshot["dataset_manifest_id"],
                 "task":snapshot["task"],"complete":snapshot["complete"],"outputs":snapshot["outputs"]}]})
+    }
+
+    #[test]
+    fn expired_source_resume_recovers_only_original_complete_receipts_without_renewal() {
+        let fixture = fixture();
+        let work = retained_receipts(&fixture);
+        let original = read_file(&fixture.root.path().join("dataset.manifest"), 64 * 1024).unwrap();
+        let source = verified_source(fixture.root.path(), &fixture.selected).unwrap();
+        let after_expiry = source.expires() + 1;
+        assert!(verified_source_at(fixture.root.path(), &fixture.selected, after_expiry).is_err());
+        let resumed =
+            source_for_run(fixture.root.path(), &fixture.selected, true, after_expiry).unwrap();
+        assert_eq!(resumed.manifest_id(), source.manifest_id());
+        assert_eq!(resumed.expires(), source.expires());
+        let joined = joined_result(
+            fixture.root.path(),
+            &fixture.selected,
+            &resumed,
+            &fixture.expected,
+            &work,
+        )
+        .unwrap();
+        assert_eq!(joined["complete"], true);
+        assert_eq!(
+            read_file(&fixture.root.path().join("dataset.manifest"), 64 * 1024).unwrap(),
+            original
+        );
+        assert!(
+            source_for_run(fixture.root.path(), &fixture.selected, false, after_expiry).is_err()
+        );
+    }
+
+    #[test]
+    fn historical_source_never_admits_incomplete_or_relabelled_work() {
+        let fixture = fixture();
+        let expires = verified_source(fixture.root.path(), &fixture.selected)
+            .unwrap()
+            .expires();
+        let error = source_for_run(fixture.root.path(), &fixture.selected, true, expires)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("expired_source_has_unfinished_work")
+        );
+        retained_receipts(&fixture);
+        let mut changed = fixture.selected.clone();
+        changed.task = rpc::PublicTask::AnswerPublicQuestionV1 {
+            question: "A newly selected public question?".into(),
+        };
+        assert!(source_for_run(fixture.root.path(), &changed, true, expires).is_err());
+        let path = fixture.root.path().join("work/workflow.json");
+        let mut enrollment: Value =
+            serde_json::from_slice(&read_file(&path, 64 * 1024).unwrap()).unwrap();
+        enrollment["verified_at_unix_seconds"] = (expires + 1).into();
+        write_json(&path, &enrollment, true).unwrap();
+        assert!(source_for_run(fixture.root.path(), &fixture.selected, true, expires).is_err());
     }
 
     #[test]

@@ -94,7 +94,13 @@ pub(super) async fn report_with_activity(
     let mut probes = JoinSet::new();
     for (index, provider) in args.provider_key.iter().copied().enumerate() {
         let socket = socket.to_owned();
-        probes.spawn(async move { (index, capabilities(&socket, &provider).await) });
+        let activity = activity.clone();
+        probes.spawn(async move {
+            (
+                index,
+                readiness::capabilities(&socket, &provider, activity).await,
+            )
+        });
     }
     let mut profiles = vec![None; args.provider_key.len()];
     while let Some(result) = probes.join_next().await {
