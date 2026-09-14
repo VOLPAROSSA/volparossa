@@ -64,23 +64,46 @@ def bounded_text(path, maximum=16384):
         return None
 
 
-def capacity_diagnostic(pid):
+def resource_mounts(text):
+    if text is None:
+        return None
+    result = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 10 or fields[4] not in ("/proc", "/sys", "/sys/fs/cgroup"):
+            continue
+        try:
+            separator = fields.index("-")
+            require(separator >= 6 and len(fields) >= separator + 4, "invalid observed resource mount")
+            result.append({"mount_id": fields[0], "parent_id": fields[1], "root": fields[3],
+                           "mountpoint": fields[4], "options": fields[5].split(","),
+                           "filesystem": fields[separator + 1]})
+        except ValueError:
+            return None
+    return result if len(result) <= 12 else None
+
+
+def capacity_diagnostic(pid, read_text=bounded_text):
+    process = Path(f"/proc/{pid}")
+    view = process / "root"
     def pressure(kind):
-        text = bounded_text(Path("/proc/pressure") / kind, 512)
+        text = read_text(view / "proc/pressure" / kind, 512)
         try:
             some = next(line for line in text.splitlines() if line.startswith("some "))
             value = float(dict(item.split("=", 1) for item in some.split()[1:])["avg10"])
             return value if 0 <= value <= 100 else None
         except (AttributeError, StopIteration, ValueError, KeyError):
             return None
-    memory = bounded_text(Path("/proc/meminfo"))
+    memory = read_text(view / "proc/meminfo", 16384)
     available = None
     if memory is not None:
         for line in memory.splitlines():
             fields = line.split()
             if len(fields) == 3 and fields[0] == "MemAvailable:" and fields[1].isdigit() and fields[2] == "kB":
                 available = int(fields[1]) * 1024
-    membership = bounded_text(Path(f"/proc/{pid}/cgroup"))
+    # Read membership of this exact process, not /proc/self through its root:
+    # the latter would resolve to the observer rather than the coordinator.
+    membership = read_text(process / "cgroup", 16384)
     cgroup = None
     if membership is not None:
         matches = [line[3:] for line in membership.splitlines() if line.startswith("0::")]
@@ -88,16 +111,19 @@ def capacity_diagnostic(pid):
             relative = Path(matches[0].lstrip("/"))
             ancestors = []
             for _ in range(64):
-                directory = Path("/sys/fs/cgroup") / relative
+                directory = view / "sys/fs/cgroup" / relative
                 ancestors.append({"path": "/" + str(relative).removeprefix("."),
-                                  **{name: bounded_text(directory / name, 4096) for name in
+                                  **{name: read_text(directory / name, 4096) for name in
                                      ("memory.current", "memory.max", "cgroup.controllers", "cgroup.subtree_control")}})
                 if relative == Path("."):
                     break
                 relative = relative.parent
             cgroup = {"membership": matches[0], "ancestors": ancestors}
-    return {"cpu_some_avg10": pressure("cpu"), "io_some_avg10": pressure("io"),
+    mounts = resource_mounts(read_text(process / "mountinfo", 65536))
+    return {"view": "coordinator_proc_root", "observed_pid": pid,
+            "cpu_some_avg10": pressure("cpu"), "io_some_avg10": pressure("io"),
             "mem_available_bytes": available, "cgroup": cgroup,
+            "resource_mounts": mounts,
             "budget_decision_inferred": False}
 
 
@@ -120,6 +146,7 @@ def await_running(pid, root, sequence, diagnostic_path):
         snapshot = readiness_state(root, sequence)
         observed = capacity_diagnostic(pid)
         diagnostic["latest_cgroup"] = observed.pop("cgroup")
+        diagnostic["latest_resource_mounts"] = observed.pop("resource_mounts")
         diagnostic["samples"].append({"elapsed_ms": int((time.monotonic() - started) * 1000),
                                       "state": snapshot, "capacity": observed})
         diagnostic["samples"] = diagnostic["samples"][-92:]
@@ -699,6 +726,47 @@ def observation_file_test():
         save_readiness(root / "loop/state.json", state)
         require(readiness_state(root, 1)["stage"] == "running", "durable admitted cycle not recognized")
     print("agent-train-loop raw-to-final exclusive observation file test PASS; no model/network")
+    capacity_view_test()
+
+
+def capacity_view_test():
+    process = Path("/proc/12345")
+    view = process / "root"
+    supplied = {
+        process / "cgroup": "0::/user.slice/test.scope\n",
+        process / "mountinfo": "21 1 0:5 / /proc rw,nosuid - proc proc rw\n"
+            "22 1 0:6 / /sys ro,nosuid - sysfs sysfs ro\n"
+            "23 22 0:7 / /sys/fs/cgroup ro,nosuid - cgroup2 cgroup2 ro\n",
+        view / "proc/pressure/cpu": "some avg10=2.00 avg60=1.00 total=123\n",
+        view / "proc/pressure/io": "some avg10=0.00 avg60=0.00 total=0\n",
+        view / "proc/meminfo": "MemAvailable: 1048576 kB\n",
+        view / "sys/fs/cgroup/user.slice/test.scope/memory.max": "max\n",
+        view / "sys/fs/cgroup/user.slice/test.scope/memory.current": "100\n",
+        view / "sys/fs/cgroup/user.slice/memory.max": "max\n",
+        view / "sys/fs/cgroup/cgroup.controllers": "cpu memory pids\n",
+    }
+    visited = []
+    def selected(path, maximum):
+        visited.append(path)
+        value = supplied.get(path)
+        require(value is None or len(value.encode()) <= maximum, "synthetic resource exceeded read bound")
+        return value
+    actual = capacity_diagnostic(12345, selected)
+    require(actual["view"] == "coordinator_proc_root" and actual["observed_pid"] == 12345
+            and actual["cpu_some_avg10"] == 2.0 and actual["io_some_avg10"] == 0.0
+            and actual["mem_available_bytes"] == 1073741824
+            and actual["resource_mounts"][2]["filesystem"] == "cgroup2"
+            and actual["cgroup"]["ancestors"][0]["memory.max"] == "max\n"
+            and actual["budget_decision_inferred"] is False, "coordinator resource view not retained")
+    require(all(path.is_relative_to(view) or path in (process / "cgroup", process / "mountinfo") for path in visited),
+            "observer substituted guest resource files")
+    supplied = {process / "cgroup": "0::/user.slice/test.scope\n"}
+    missing = capacity_diagnostic(12345, selected)
+    require(missing["cpu_some_avg10"] is None and missing["io_some_avg10"] is None
+            and missing["mem_available_bytes"] is None and missing["resource_mounts"] is None
+            and all(row["memory.max"] is None for row in missing["cgroup"]["ancestors"]),
+            "missing coordinator view silently used guest telemetry")
+    print("agent-train-loop coordinator-root telemetry selection/missing-view tests PASS; synthetic only")
 
 
 def main():

@@ -190,17 +190,28 @@ enabled signed adapter publication. Each worker retains spare-capacity checks an
 deadline; the watcher can run until cancelled. Exact enrollment/state and completed-file hashes
 support resume. Publication retry reuses the exact signed bytes, original expiry and verified
 handoff identity. Eight-cycle retention preserves current weights and unpublished updates.
-Focused coordinator/source/storage tests pass. The first
-[agent-train-loop run on `1b186ad5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34880750517)
-failed before an isolated worker was observed, with zero attempted/completed coordinator cycles.
-It retained complete cleanup, zero owned network objects and equal original guest-state hash
-`e8b0e220f663f6c2143457b23bc9ba995d66778d28253b7fcbcfde1ff25974c1`.
-A separate definite report-CLI path-type error is corrected. The observer now waits for a
-durable Running cycle and preserves seed/admission and guest-pressure diagnostics before cleanup,
-under the same first-worker deadline. The initial artifact does not distinguish late seed
-readiness from capacity waiting; the new probe must establish that rather than infer success.
-The original failed run remains failed; no live continuous-training result is claimed.
-Its intended two cycles on an explicitly repeated source are not
+Focused coordinator/source/storage tests pass, but both initial loop VM attempts remain failed:
+[`1b186ad5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34880750517) observed no worker,
+and [`a67729e1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34883408279) confirms that
+the seed import finishes at 14 seconds but no cycle is admitted within the 90-second first-worker
+window. Both retain complete cleanup, zero owned network objects and unchanged guest state.
+The report path-type bug is fixed. The second run's guest-root pressure samples are low, but
+do not establish what the owner CLI could read inside its mount namespace. The corrected fixture
+uses network-namespace-only entry, preserving the owner's cgroup/mount view, and records
+capacity diagnostics from that actual CLI view without lowering admission thresholds.
+The [subsequent run on `bf87973a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34885489099)
+completed both real eight-update cycles on distinct R4 workers (18.704 and 18.540 seconds),
+with unchanged base weights, exact predecessor adapter inodes and two signed automatic
+contributions. It then failed a fixture guard that expected only two replicas: the actual
+store also held the original dataset and seed, making four. The candidate now checks the two
+exact contributed update identities and accounts for only those known optional original
+replicas, including bytes/chunks; it does not accept an arbitrary minimum object count.
+After the explicit dataset handoff that source must also be accounted for. Final retrieval
+and inference by another client were not reached in that run and still require a new live
+pass. The original failure retains full cleanup and unchanged guest-host state. Its partial
+cycle proof is stored in `.git/ci-evidence/34885489099/partial-cycle-review.json`;
+exact-head Quality and all three CodeQL analyses passed.
+These two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
 See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;

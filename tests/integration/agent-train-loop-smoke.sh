@@ -10,7 +10,12 @@ agent_train_loop_private() {
 }
 
 agent_train_loop_execute() {
-    exec ip netns exec "$R4" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+    # Only enter the existing node network. `ip netns exec` creates a new
+    # mount namespace and remounts /sys, which can hide the cgroup hierarchy
+    # needed by the real owner's fail-closed spare-capacity admission probe.
+    # The agent mount namespace is also unsuitable: it deliberately hides
+    # these owner-controlled model, seed and output directories.
+    exec nsenter --net="/run/netns/$R4" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
         --groups="$custody_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
         compute train-loop --plan "$artifact_user/loop-plan.json" --seed "$artifact_user/loop-seed.json" \
