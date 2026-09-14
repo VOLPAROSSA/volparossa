@@ -10,6 +10,18 @@ approval=no
 revision=
 scenario=agent-training
 plan() {
+    if [ "$scenario" = agent-owner-cancel ]; then
+        printf '%s\n' \
+            'VOLPAROSSA actual owner-cancellation plan:' \
+            '  use only the disposable Debian 13 KVM guest, private pinned CPU runtime and public source-bound Q/A;' \
+            '  start a real 64-step training job with its unchanged 600s deadline; wait for validated training phase;' \
+            '  observe actual model isolation and retain exact CLI/model PID identities and pidfds;' \
+            '  send SIGINT only to this owner UID own CLI, then require reaping and all observed descendants gone within 5s;' \
+            '  expect compute_owner_busy, no complete checkpoint; verify unchanged on-disk base and release of its runtime lock;' \
+            '  remove only this new guest model/job state and compare original routes/DNS/firewall;' \
+            '  no development-host training, physical battery/thermal, all-user-activity or full-B01 claim.'
+        return
+    fi
     printf '%s\n' \
         'VOLPAROSSA isolated public model-training plan:' \
         '  require the disposable Debian 13 KVM guest and unprivileged vpci account;' \
@@ -36,7 +48,7 @@ while [ "$#" -gt 0 ]; do
         --yes) approval=yes ;;
         --expected-commit) [ "$#" -ge 2 ] || exit 64; revision=$2; shift ;;
         --scenario) [ "$#" -ge 2 ] || exit 64; scenario=$2; shift
-            case $scenario in agent-training|agent-owner-priority) ;; *) exit 64 ;; esac ;;
+            case $scenario in agent-training|agent-owner-priority|agent-owner-cancel) ;; *) exit 64 ;; esac ;;
         *) exit 64 ;;
     esac
     shift

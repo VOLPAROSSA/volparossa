@@ -138,8 +138,8 @@ job execution has the separate source-bound checkpoint below.
 The initial resource boundary includes two CPU threads maximum, idle CPU/IO priority,
 per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
 RSS/output cancellation and an owner-cancellation input. Sampled RSS is **not** a hard cgroup
-memory cap, and this foreground CLI does not yet detect all interactive, thermal or battery
-conditions. Actual model execution and sandbox observations now pass the source-bound
+memory cap, and this foreground CLI does not detect all interactive activity or guarantee
+physical-device safety. Actual model execution and sandbox observations now pass the source-bound
 distinct-node smoke below: eight CPU optimizer updates change 230,400 LoRA parameters,
 the original base remains unchanged, and a fresh base/adapter reload is evaluated.
 B01 still needs measured owner-triggered cancellation; real CPU-pressure pause/resume now
@@ -166,6 +166,28 @@ seconds. All contenders/worker are reaped, temporary roots are removed and origi
 hashes match. This measures CPU-pressure handling, not all owner activity, owner-triggered
 cancellation, battery/thermal behavior or the entire B01 criterion. Exact artifact/checker/hash
 details are retained in [implementation status](IMPLEMENTATION_STATUS.md).
+
+The device-priority candidate additionally reads exposed Linux system-battery and thermal
+sysfs data, caching observations for at most one second. Battery charge at or below 20%
+pauses ML work; at or below 5% cancels it, including while charging/on AC. Thermal zones pause
+at 80°C and cancel at 90°C, or earlier when a lower passive/hot/critical trip minus a 5°C
+margin applies. The [Linux inactive-trip placeholder](https://github.com/torvalds/linux/blob/v6.12/drivers/thermal/thermal_core.c)
+is ignored as a limit, not treated as a temperature measurement; the software 80°C/90°C limits still apply. Malformed
+or unreadable temperatures/trips remain unknown. Present but invalid observations pause work; `not_exposed` is
+explicitly reported and does not prove absent hardware or safe temperatures. Critical observed
+reserves still cancel when another observation is unknown. The train-loop's worker admission,
+peer executors and explicitly enabled `--spare-capacity` jobs use this budget; seed imports
+and update publication are not controlled by this ML device-budget gate.
+`volparossa compute capacity` reads the same observations without changing device settings,
+running a model or contacting the network. It is an admission hint, not a reservation or a
+logind/interactive-activity detector. All 68 focused CLI compute tests and strict CLI Clippy
+pass; physical battery/thermal behavior is not yet demonstrated.
+
+The separate `agent-owner-cancel` guest fixture waits for real training, sends owner-UID
+SIGINT only to the exact CLI through its pidfd, and requires CLI reaping and all observed
+descendants ended within five seconds. It expects `compute_owner_busy`, not a completed
+checkpoint, and checks the unchanged on-disk base, released runtime lock and guest cleanup.
+Its local checker/shell tests pass; actual VM cancellation evidence is pending, so B01 stays open.
 
 ### Cache-backed adapter candidate
 
@@ -468,10 +490,13 @@ proof that model answers are correct. Exact task/source/peer enrollment and comp
 receipts survive resume, while partial work remains visibly incomplete. Those receipts are
 authenticated local observations, not independently portable execution attestations. The
 source signature does not authorize relabelling derived answers as publisher-authored content.
-The disposable `agent-public-task` scenario retrieves the selected source from a peer before
-execution, then stops both brokers and the route before resuming the retained results. Its
-parser and real local file-snapshot checks pass; live VM evidence is still pending and full B03
-remains open.
+The [disposable `agent-public-task` run on `42761c28`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34889536964)
+passes exact-source report checks and reconstruction from its original raw evidence. It
+retrieves a 721-byte signed source over the protected network, executes two real isolated
+peer workers, then stops both brokers and the route before a zero-round resume. All 15 retained
+file hashes/inodes and ordered answers remain unchanged; cleanup leaves no owned objects.
+The separate historical Quality `unreadable_literal` failure remains a failure, with its
+source correction included in `974c6555`. This scoped result does not complete B03.
 
 ### Public document tasks
 
@@ -520,7 +545,13 @@ identities; it is not neural synthesis, answer-quality proof or an independently
 execution attestation. An unfinished invocation returns a nonzero status but retains complete
 receipts. Resume never reassigns completed work or silently renews expired source permissions.
 The new `agent-public-document` disposable scenario targets real tokenizer splitting,
-multi-package execution and receipt reuse after peer/route shutdown; live proof is pending.
+multi-package execution and receipt reuse after peer/route shutdown. Its [first run on
+`974c6555`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34891322172) stopped before
+tokenizer/model execution because the Client UID could not traverse the guest source tree.
+The `4421b1a6` correction installs only the public helper and a read-only public README copy
+in the guest workspace, preserving source-tree restrictions. Local checks pass; the corrected
+[live proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
+The original failed run has complete cleanup and unchanged guest state.
 Full B03 and confidential tasks remain open.
 
 ## Private tasks and training data
@@ -607,8 +638,9 @@ build larger connected slices, without claiming these unchecked requirements are
 - [ ] B01: isolated on-device execution and genuine bounded training; measured owner-priority
   pause/resume/cancellation, not a stub model or an unconstrained background process.
   Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; real CPU-pressure
-  pause/resume passes on `d12768e3`. Measured owner-triggered cancellation and broader
-  interactive/battery/thermal handling remain incomplete.
+  pause/resume passes on `d12768e3`. Device-budget code and the manual-cancellation fixture
+  pass local checks; actual owner-cancellation, physical battery/thermal and broader
+  interactive-activity evidence remain incomplete.
 - [x] B02: transfer an original compatible trained artifact over the real protected content
   network, validate it on another node and execute it there; restart/custody retains validity.
   [Run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881), exact source
