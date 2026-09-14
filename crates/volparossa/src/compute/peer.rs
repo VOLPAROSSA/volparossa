@@ -2,6 +2,7 @@
 
 mod batch;
 mod resume;
+mod workflow;
 
 use std::{
     fs,
@@ -38,6 +39,8 @@ pub(crate) enum Command {
     Distribute(batch::Options),
     /// Reconcile retained public task handles and retry unfinished work on explicit peers.
     Resume(resume::Options),
+    /// Run or resume a finite sequence of signed public packages in bounded worker batches.
+    Workflow(Box<workflow::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -60,7 +63,7 @@ pub(crate) struct Provider {
     provider_key: VerifyingKey,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 struct Source {
     #[arg(long)]
     dataset: PathBuf,
@@ -105,6 +108,34 @@ struct JobHandle {
     capabilities: rpc::Capabilities,
 }
 
+/// Register synchronously before preparatory RPCs, so Ctrl-C cannot be lost while
+/// capabilities or existing job observations are in flight. Dropping only stops this
+/// signal listener; each executor still uses the explicit Cancel/reap protocol.
+struct Cancellation {
+    activity: tokio::sync::watch::Receiver<bool>,
+    listener: tokio::task::JoinHandle<()>,
+}
+
+impl Cancellation {
+    fn new() -> Result<Self> {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let (stop, activity) = tokio::sync::watch::channel(false);
+        let listener = tokio::spawn(async move {
+            if interrupt.recv().await.is_some() {
+                let _ = stop.send(true);
+            }
+        });
+        Ok(Self { activity, listener })
+    }
+}
+
+impl Drop for Cancellation {
+    fn drop(&mut self) {
+        self.listener.abort();
+    }
+}
+
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let report = match command {
         Command::Attach(args) => {
@@ -142,6 +173,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Cancel(args) => poll_or_cancel(socket, &args, true).await?,
         Command::Distribute(args) => return batch::run(&args, socket).await,
         Command::Resume(args) => return resume::run(&args, socket).await,
+        Command::Workflow(args) => return workflow::run(&args, socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -381,5 +413,6 @@ fn save_new(path: &Path, value: &impl Serialize) -> Result<()> {
     file.persist_noclobber(path)
         .map_err(|error| error.error)
         .context("compute_peer_new_handle_required")?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }

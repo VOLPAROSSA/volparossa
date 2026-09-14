@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeSet, os::unix::fs::DirBuilderExt};
 
-use tokio::{sync::watch, task::JoinSet};
+use tokio::task::JoinSet;
 use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
@@ -26,6 +26,25 @@ pub(crate) struct Options {
     /// Preview source/handle bindings only unless explicitly enabled.
     #[arg(long)]
     execute: bool,
+}
+
+impl Options {
+    pub(super) fn workflow(
+        source: Source,
+        handle: Vec<PathBuf>,
+        replacement_provider_key: Vec<VerifyingKey>,
+        output: PathBuf,
+        max_seconds: u16,
+    ) -> Self {
+        Self {
+            source,
+            handle,
+            replacement_provider_key,
+            output,
+            max_seconds,
+            execute: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -64,6 +83,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         );
         return Ok(());
     }
+    let cancellation = Cancellation::new()?;
+    let activity = cancellation.activity.clone();
     super::super::private_directory(
         args.output
             .parent()
@@ -74,17 +95,15 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         save_new(&args.output.join(format!("original-{index}.json")), handle)?;
     }
     let observations = observe_all(socket, handles).await?;
-    let (stop, activity) = watch::channel(false);
-    let interrupt = tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = stop.send(true);
-    });
     let mut used = BTreeSet::new();
     let mut jobs = Vec::new();
     let mut outputs = Vec::new();
     let mut retries = JoinSet::new();
     let mut unfinished = 0;
     for (index, observed) in observations.into_iter().enumerate() {
+        if let Some(status) = &observed.status {
+            batch::save_status(&args.output, &observed.handle, status)?;
+        }
         save_new(
             &args.output.join(format!("observation-{index}.json")),
             &serde_json::json!({
@@ -132,6 +151,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     while let Some(result) = retries.join_next().await {
         let (index, original, original_state, handle, result) = result?;
         let status = result.ok();
+        if let Some(status) = &status {
+            batch::save_status(&args.output, &handle, status)?;
+        }
         if let Some(complete) = status
             .as_ref()
             .filter(|value| value.state == rpc::JobState::Complete)
@@ -145,7 +167,6 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         save_new(&args.output.join(format!("retry-{index}.json")), &part)?;
         jobs.push(part);
     }
-    interrupt.abort();
     outputs.sort_by_key(|output| output["sample_index"].as_u64());
     let report = serde_json::json!({"version":1,"operation":"compute_resume","complete":unfinished == 0,
         "dataset_manifest_id":hex::encode(source.manifest_id()),"outputs":outputs,"jobs":jobs,
@@ -161,7 +182,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_handles(args: &Options, source: &VerifiedPublicDataset) -> Result<Vec<JobHandle>> {
+pub(super) fn load_handles(
+    args: &Options,
+    source: &VerifiedPublicDataset,
+) -> Result<Vec<JobHandle>> {
     ensure!(
         (1..=4).contains(&args.handle.len()) && args.replacement_provider_key.len() <= 4,
         "compute_resume_batch_bound"

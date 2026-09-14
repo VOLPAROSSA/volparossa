@@ -23,6 +23,38 @@ pub(crate) struct Options {
     execute: bool,
 }
 
+impl Options {
+    pub(super) fn workflow(
+        source: Source,
+        provider_key: Vec<VerifyingKey>,
+        output: PathBuf,
+        max_seconds: u16,
+    ) -> Self {
+        Self {
+            source,
+            provider_key,
+            output,
+            max_seconds,
+            execute: true,
+        }
+    }
+}
+
+/// A local record of the full status already checked on the authenticated RPC path.
+/// It is not a separately signed, independently portable execution attestation.
+pub(super) fn save_status(
+    output: &Path,
+    handle: &JobHandle,
+    status: &rpc::JobStatus,
+) -> Result<()> {
+    let checked = job(rpc::Outcome::Job(status.clone()), handle)?;
+    save_new(
+        &output.join(format!("receipt-{}.json", handle.binding.job_id)),
+        &serde_json::json!({"version":1,"handle":handle,"status":checked,
+            "verified_at_unix_seconds":now()?}),
+    )
+}
+
 pub(super) struct Prepared {
     pub(super) handle: JobHandle,
     pub(super) provider: VerifyingKey,
@@ -45,6 +77,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         );
         return Ok(());
     }
+    let cancellation = Cancellation::new()?;
+    let activity = cancellation.activity.clone();
     // Resolve exact compatible profiles before submitting anything. Capability hints may
     // race with new work; real admission still decides and failures stay partial failures.
     let mut probes = JoinSet::new();
@@ -57,6 +91,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         let (index, caps) = result?;
         profiles[index] = Some(caps?);
     }
+    ensure!(
+        !*activity.borrow(),
+        "compute_distribute_cancelled_before_submit"
+    );
     let mut prepared = Vec::new();
     let mut fingerprint = None;
     for (index, rows) in assignments.into_iter().enumerate() {
@@ -99,11 +137,6 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     }
     // This is an explicitly selected public dataset. Only now are its bytes exported.
     // Every job's handle survives interruption; unreachable jobs expire at their original lease.
-    let (stop, activity) = watch::channel(false);
-    let interrupt = tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = stop.send(true);
-    });
     let publication = Arc::new(publication);
     let mut tasks = JoinSet::new();
     for work in prepared {
@@ -120,6 +153,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let mut complete = true;
     while let Some(result) = tasks.join_next().await {
         let (handle, result) = result?;
+        if let Ok(status) = &result {
+            save_status(&args.output, &handle, status)?;
+        }
         match result {
             Ok(status) if status.state == rpc::JobState::Complete => {
                 let report: serde_json::Value = serde_json::from_str(
@@ -155,7 +191,6 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             }
         }
     }
-    interrupt.abort();
     complete &= outputs.iter().all(Option::is_some);
     let report = serde_json::json!({"version":1,"operation":"compute_distribute","complete":complete,
         "dataset_manifest_id":hex::encode(source.manifest_id()),"provider_count":args.provider_key.len(),

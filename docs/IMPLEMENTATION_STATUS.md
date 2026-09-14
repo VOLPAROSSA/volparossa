@@ -45,6 +45,25 @@ Explicit `compute peer resume` now reconciles retained original handles and perm
 replacement attempt per unfinished part, without silently extending an old lease. Terminal
 receipts remain observable briefly after cleanup. Broker/peer tests and narrow strict Clippy
 pass; neither live recovery nor the new two-executor `agent-jobs` guest scenario has passed yet.
+The first [two-executor run on `c52781f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34866691641)
+stopped during capability lookup, before model execution: an unused initial MPTCP socket
+outlived the Exit's 12-second TLS deadline while brokers were prepared. The candidate now
+discards an already closed unused socket before obtaining a fresh one through the same helper
+authorization, without replaying application work or weakening transport checks. A real local
+descriptor regression and narrow agent Clippy pass; a new guest run is required. The failed
+run still proved complete cleanup and unchanged original guest state, not B03 functionality.
+The explicit `compute peer workflow` candidate sequences up to 32 independently signed public
+packages (two to four rows each), with a bounded number of rounds per invocation. Exact source
+copies, immutable handles and locally validated full receipts survive process restarts;
+completed parts are reused, while pending work retains its original authorization and gets
+only explicitly bounded new attempts. These are local receipt records, not independently
+portable execution attestations. Whole-job duration is not the per-worker 600-second lease.
+General task decomposition, live workflow/reassignment proof and private execution remain open.
+Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
+before new submission and reusing full validated local receipt fixtures after restart.
+Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
+The separate `agent-jobs-loss` guest scenario now exercises actual owned-worker termination
+and explicit reassignment of only failed rows. Its fixture/checker is not a passing live proof.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

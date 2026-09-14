@@ -39,6 +39,10 @@ The next development candidate connects `compute serve` to the protected network
 `compute peer attach`, then exposes signed public-task submission, polling/cancellation and
 concurrent row distribution. Its real multi-executor test is still pending; it does not yet
 provide autonomous task planning, private offload or unbounded per-device execution.
+An explicit `compute peer workflow` candidate now sequences multiple signed public datasets,
+retains verified local results, and resumes unfinished work across separate bounded leases.
+This enlarges the overall job, not the resource allowance of any participating device;
+the current plan accepts up to 32 small datasets and is not a general task planner.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

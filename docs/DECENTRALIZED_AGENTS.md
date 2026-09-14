@@ -210,12 +210,13 @@ Task size is not the same as a worker lease: large or long-running workflows sho
 checkpointed and resumed across multiple bounded steps. No final whole-workflow size or duration
 limit is implied by the first worker's four inference rows and 600-second lease. Per-device
 resource limits remain necessary. General workflow continuation and checkpoint scheduling are
-still unimplemented; no unlimited execution permission follows from accepting a large task.
+not supplied by the initial worker. The explicit multi-package coordinator below is a first
+continuation step, not general task decomposition or unlimited execution permission.
 
 ## Current public peer-job candidate
 
 The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute` commands. The broker must already have the
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow` commands. The broker must already have the
 pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
 off until explicitly executed. The agent attaches only a protected same-UID socket and an
 explicit allowlist of dataset publishers. It does not launch Python inside the hardened
@@ -253,7 +254,41 @@ grace after observed completion, without extending any execution lease or the ei
 The `agent-jobs` disposable guest runner exercises two independent CPU workers on separate nodes,
 with separate runtime-lock inodes and process-overlap observation, signed disjoint public input
 rows, protected network traffic and source-bound results. Only the verified base model bytes are
-shared in that fixture. The first run is pending; the runner itself is not a passing checkpoint.
+shared in that fixture. Its first run stopped before model execution during capability lookup;
+an already closed initial route socket is now replaced before application TLS, and a new live
+proof is pending. Cleanup and unchanged guest state passed even in the failed run. The separate
+`agent-jobs-loss` scenario additionally terminates one exact guest-owned Python worker via pidfd,
+requires terminal original receipts, and resumes only its failed rows on the idle surviving
+peer. Its checker requires a genuinely new worker and preserved original successful output;
+the scenario itself is not yet a passing live checkpoint.
+
+### Explicit multi-package workflows
+
+`compute peer workflow --plan PLAN.json --directory NEW_PRIVATE_DIRECTORY --provider-key KEY_A
+--provider-key KEY_B --max-batches 1 --max-seconds 600 --execute` enrolls a finite version-1 plan:
+
+```json
+{"version":1,"packages":[{"dataset":"/absolute/public-dataset.json","dataset_manifest":"/absolute/public-dataset.pb","publisher_key":"INDEPENDENTLY_TRUSTED_PUBLISHER_KEY_HEX"}]}
+```
+
+Without `--execute`, enrollment only previews and performs no network I/O. The current plan
+accepts 1–32 packages, each containing 2–4 independent public inference rows; these are initial
+enrollment bounds, not a promise of arbitrary natural-language task planning. A private directory
+retains exact original source bytes, signed manifests, peer selection and per-attempt handles.
+`compute peer workflow --directory EXISTING_PRIVATE_DIRECTORY --resume --max-batches 1 --execute`
+continues that same enrollment. Each invocation advances only its explicitly bounded number of
+ordinary distribute/reconcile rounds; `Busy` or ambiguous work stays pending instead of an
+unbounded retry loop. Each new executor still receives its own bounded lease, so the complete
+sequence can span longer than 600 seconds without extending an old lease.
+
+Previously completed parts are reconstructed from full input/model/handle-bound receipts saved
+after authenticated RPC validation, not from an unchecked `complete` flag. These private local
+receipt files are not independently provider-signed portable attestations and do not prove
+answer quality. Historical result verification does not renew a source: new work must still
+pass current source-expiry and authorization checks. Source selection remains explicit and
+independent of cache presence; no automatic corpus choice, model download, confidential offload,
+cross-model planning or distributed optimizer is implied. Live multi-package and worker-loss
+proofs remain separate from the local coordinator tests.
 
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
