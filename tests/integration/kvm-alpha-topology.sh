@@ -27,10 +27,22 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|content-custody|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|dns-cache]'
 }
 
 print_plan() {
+    if [ "$scenario" = content-repair ]; then
+        printf '%s\n' \
+            'VOLPAROSSA automatic public-replica repair smoke plan:' \
+            '  start two explicitly configured empty contribution services and stop only their owned units;' \
+            '  seed one complete holder journal and one healthy one-of-three-chunk receiver journal as explicit fixture setup;' \
+            '  remove publisher source/key and start six physical captures before either agent restarts;' \
+            '  require autonomous discovery, route creation and exactly two missing chunks over protected MPTCP;' \
+            '  stop the original holder, then fetch by publisher/name into a fresh Client cache from the repaired receiver;' \
+            '  enforce cross-node cache isolation, exact object hashes and unchanged guest host cleanup;' \
+            '  no initial network placement, independent publisher-node offline or future availability claim.'
+        return
+    fi
     if [ "$scenario" = content-custody ]; then
         printf '%s\n' \
             'VOLPAROSSA public-custody protected network smoke plan:' \
@@ -303,7 +315,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|content-custody|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -450,6 +462,18 @@ if [ "$scenario" = content-replication ]; then
     done
     [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
         || { printf '%s\n' 'content replication executable unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = content-repair ]; then
+    for repair_fixture in content-repair-smoke.sh content-repair-smoke.py content-replication-smoke.sh content-replication-smoke.py \
+        content-replication-capture.py; do
+        if [ ! -f "$source_directory/tests/integration/$repair_fixture" ] \
+            || [ -L "$source_directory/tests/integration/$repair_fixture" ]; then
+            printf '%s\n' 'content repair fixture unavailable' >&2
+            exit 69
+        fi
+    done
+    [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
+        || { printf '%s\n' 'content repair executable unavailable' >&2; exit 69; }
 fi
 if [ "$scenario" = content-custody ]; then
     for custody_fixture in content-custody-smoke.sh content-custody-smoke.py \
@@ -1279,6 +1303,9 @@ cleanup() {
     for observer_pid in "$CLIENT_OBSERVER_PID" "$EXIT_OBSERVER_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
     done
+    if [ "$scenario" = content-repair ] && command -v content_repair_stop_captures >/dev/null 2>&1; then
+        content_repair_stop_captures || original_status=1
+    fi
     for observer_pid in "$PRIVACY_CLIENT_PID" "$PRIVACY_RELAY0_PID" "$PRIVACY_RELAY1_PID" \
         "$PRIVACY_RELAY2_PID" "$PRIVACY_EXIT_PID" "$PROVIDER_CONTROL_PID"; do
         [ -z "$observer_pid" ] || kill -TERM "$observer_pid" 2>/dev/null || true
@@ -1583,6 +1610,8 @@ cleanup() {
         dns_cache_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-replication ]; then
         content_replication_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content-repair ]; then
+        content_repair_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-custody ]; then
@@ -1704,6 +1733,13 @@ if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-contribution-publish-smoke.sh
     . "$source_directory/tests/integration/content-contribution-publish-smoke.sh"
 fi
+if [ "$scenario" = content-repair ]; then
+    # Shared graph, CLI and selected-path utilities only, not the older replication sequence.
+    # shellcheck source=tests/integration/content-replication-smoke.sh
+    . "$source_directory/tests/integration/content-replication-smoke.sh"
+    # shellcheck source=tests/integration/content-repair-smoke.sh
+    . "$source_directory/tests/integration/content-repair-smoke.sh"
+fi
 if [ "$scenario" = content-custody ]; then
     # Utilities only: this does not execute the larger provider acceptance sequence.
     # shellcheck source=tests/integration/content-provider-smoke.sh
@@ -1732,7 +1768,7 @@ capture_host_state "$WORK/host-state-before.json" \
 # policy hostname to the one destination address, while cleanup restores the exact guest file.
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
-if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ] \
+if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
     || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
     printf '%s\n' \
         '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
@@ -1783,7 +1819,7 @@ install -o root -g "$AGENT_GID" -m 0555 \
     "$binary_directory/examples/tls-policy-acceptance-fixture" \
     "$WORK/bin/examples/tls-policy-acceptance-fixture"
 if [ "$scenario" = content ] || [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] \
-    || [ "$scenario" = content-replication ]; then
+    || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/content-acceptance-fixture" \
         "$WORK/bin/examples/content-acceptance-fixture"
@@ -1796,6 +1832,12 @@ fi
 if [ "$scenario" = content-custody ]; then
     for custody_script in content-custody-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
+    done
+fi
+if [ "$scenario" = content-repair ]; then
+    # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
+    for repair_script in content-repair-smoke.py content-replication-smoke.py content-replication-capture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$repair_script" "$WORK/bin/$repair_script"
     done
 fi
 if [ "$scenario" = content-mailbox ]; then
@@ -1992,7 +2034,7 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
-elif [ "$scenario" = content-replication ]; then
+elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
@@ -2015,7 +2057,8 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; } \
         && { [ "$node" = client ] \
             || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
-        || { [ "$scenario" = content-replication ] && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
+        || { { [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; } \
+            && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
         # Match package access without adding the operator to the private service group.
         chgrp volparossa-users "$WORK/runtime-$node/control"
         printf 'a+ %s - - - - group:volparossa-users:--x,mask::r-x\n' "$WORK/runtime-$node" \
@@ -2068,7 +2111,7 @@ jq -S -c -n \
 set --
 if [ "$scenario" = dns-cache ]; then
     set -- --dns-cache
-elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ] \
+elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
     || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
     set -- --content-providers
 fi
@@ -2156,7 +2199,7 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
-    if [ "$scenario" = content-replication ]; then
+    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
         content_replication_configure_node
     fi
     [ "$scenario" != dns-cache ] || dns_cache_configure_node
@@ -2219,6 +2262,7 @@ write_config() {
         fi
         [ "$wifi_link" != yes ] || wifi_link_config
         [ "$scenario" != content-custody ] || content_custody_config
+        [ "$scenario" != content-repair ] || content_repair_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
         # advertisement. The native authorization chain binds this value to both service ledgers.
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
@@ -2571,7 +2615,7 @@ else
     verify_mpquic client "$CLIENT" client
     verify_mpquic exit "$EXIT_NODE" exit
     verify_mpquic exit2 "$EXIT2_NODE" exit
-    if [ "$scenario" = content-replication ]; then
+    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
         launch_mpquic relay4 "$R4" client
         verify_mpquic relay4 "$R4" client
     fi
@@ -2610,6 +2654,13 @@ launch_agent() {
         case $node in
             client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed" ;;
             relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed" ;;
+        esac
+    fi
+    if [ "$scenario" = content-repair ]; then
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-repair-seed"
+        case $node in
+            client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-repair-seed" ;;
+            relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-repair-seed" ;;
         esac
     fi
     systemd-run --no-block --unit="$agent_unit" --slice=system.slice \
@@ -4185,7 +4236,7 @@ if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != mptcp-growth ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
-    && [ "$scenario" != content-replication ] && [ "$scenario" != content-mailbox ] \
+    && [ "$scenario" != content-replication ] && [ "$scenario" != content-repair ] && [ "$scenario" != content-mailbox ] \
     && [ "$scenario" != content-custody ] && [ "$scenario" != dns-cache ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
@@ -5474,6 +5525,10 @@ if [ "$scenario" = content-custody ]; then
 fi
 if [ "$scenario" = content-replication ]; then
     content_replication_run
+    exit 0
+fi
+if [ "$scenario" = content-repair ]; then
+    content_repair_run
     exit 0
 fi
 if [ "$scenario" = dns-cache ]; then

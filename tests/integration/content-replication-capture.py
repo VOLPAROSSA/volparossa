@@ -132,17 +132,22 @@ def exact_control_port_unreachable(node, iface, source, destination, payload):
 
 
 def validate_layout(layout):
-    if not isinstance(layout, dict) or layout.get("phase") not in ("uptake", "reserve-fetch"):
+    if not isinstance(layout, dict) or layout.get("phase") not in ("uptake", "repair-uptake", "reserve-fetch"):
         raise ValueError("invalid replication capture phase")
-    expected = (("relay4", "relay5") if layout["phase"] == "uptake" else ("client", "relay4"))
+    expected = (("relay4", "relay5") if layout["phase"] in ("uptake", "repair-uptake")
+                else ("client", "relay4"))
     for field, node in (("client", expected[0]), ("provider", expected[1]), ("exit", "exit")):
         if layout.get(field) != {"node": node, "ip": PUBLIC[node]}:
             raise ValueError("substituted replication capture endpoint")
     relays = layout.get("relays")
-    if not isinstance(relays, dict) or len(relays) != 2 or any(
+    # Autonomous repair has not selected its route when capture starts. Record all three
+    # exact fixture candidates; the evidence checker later binds the two actual live paths
+    # and requires no data on the remaining candidate. Other phases stay selected-pair only.
+    relay_count = 3 if layout["phase"] == "repair-uptake" else 2
+    if not isinstance(relays, dict) or len(relays) != relay_count or any(
             node not in ("relay0", "relay1", "relay2") or PUBLIC[node] != address
             for node, address in relays.items()):
-        raise ValueError("capture requires two exact selected relay endpoints")
+        raise ValueError("capture requires exact phase-bound relay endpoints")
     return layout
 
 

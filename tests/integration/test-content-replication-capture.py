@@ -48,6 +48,35 @@ def ipv4_frame(source, destination, protocol, transport):
 
 
 class ReplicationCaptureTests(unittest.TestCase):
+    def test_autonomous_repair_records_three_candidates_without_widening_other_phases(self):
+        current = layout()
+        current["phase"] = "repair-uptake"
+        current["relays"]["relay1"] = CAPTURE.PUBLIC["relay1"]
+        self.assertEqual(CAPTURE.validate_layout(current), current)
+        for relay, address in current["relays"].items():
+            result = classify(current, relay, CAPTURE.PUBLIC["relay4"], address)
+            self.assertEqual(result[f"{relay}_client_leg_wireguard_data_datagrams"], 1)
+            result = classify(current, relay, address, CAPTURE.PUBLIC["exit"])
+            self.assertEqual(result[f"{relay}_exit_leg_wireguard_data_datagrams"], 1)
+        self.assertEqual(classify(current, "relay4", CAPTURE.PUBLIC["relay4"],
+                                  CAPTURE.PUBLIC["exit"])["direct_client_exit_packets"], 1)
+        self.assertEqual(classify(current, "relay4", CAPTURE.PUBLIC["relay4"],
+                                  CAPTURE.PUBLIC["relay5"], socket.IPPROTO_TCP,
+                                  dport=18080)["direct_provider_packets"], 1)
+        for phase in ("uptake", "reserve-fetch"):
+            invalid = layout(phase)
+            invalid["relays"]["relay1"] = CAPTURE.PUBLIC["relay1"]
+            with self.assertRaises(ValueError):
+                CAPTURE.validate_layout(invalid)
+        for field in ("client", "provider", "exit", "relays"):
+            invalid = copy.deepcopy(current)
+            if field == "relays":
+                del invalid[field]["relay1"]
+            else:
+                invalid[field]["ip"] = "203.0.113.1"
+            with self.assertRaises(ValueError):
+                CAPTURE.validate_layout(invalid)
+
     def test_both_phase_roles_count_only_selected_encrypted_legs(self):
         for phase in ("uptake", "reserve-fetch"):
             current = CAPTURE.validate_layout(layout(phase))
