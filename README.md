@@ -38,8 +38,9 @@ not an implemented distributed brain or a guarantee of private remote execution.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider
-restart and original source removal; automatic holder selection and validated replica repair
-remain pending.
+restart and original source removal. [The autonomous repair checkpoint on `cb2e6a67`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34864727782)
+also passes: a partial holder repairs missing chunks, then serves a fresh client after its
+supplying peer stops. Automatic initial holder selection and ongoing availability remain open.
 The normal low-latency Internet path is always:
 
 ```mermaid
