@@ -174,11 +174,22 @@ and [`a67729e1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/348834082
 the seed import finishes at 14 seconds but no cycle is admitted within the 90-second first-worker
 window. Both retain complete cleanup, zero owned network objects and unchanged guest state.
 The report path-type bug is fixed. The second run's guest-root pressure samples are low, but
-do not establish what the owner CLI could read inside its mount namespace. The next fixture
+do not establish what the owner CLI could read inside its mount namespace. The corrected fixture
 uses network-namespace-only entry, preserving the owner's cgroup/mount view, and records
-capacity diagnostics from that actual CLI view. It does not lower admission thresholds or
-claim the unresolved continuous-training proof has passed.
-Its intended two cycles on an explicitly repeated source are not
+capacity diagnostics from that actual CLI view without lowering admission thresholds.
+The [subsequent run on `bf87973a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34885489099)
+completed both real eight-update cycles on distinct R4 workers (18.704 and 18.540 seconds),
+with unchanged base weights, exact predecessor adapter inodes and two signed automatic
+contributions. It then failed a fixture guard that expected only two replicas: the actual
+store also held the original dataset and seed, making four. The candidate now checks the two
+exact contributed update identities and accounts for only those known optional original
+replicas, including bytes/chunks; it does not accept an arbitrary minimum object count.
+After the explicit dataset handoff that source must also be accounted for. Final retrieval
+and inference by another client were not reached in that run and still require a new live
+pass. The original failure retains full cleanup and unchanged guest-host state. Its partial
+cycle proof is stored in `.git/ci-evidence/34885489099/partial-cycle-review.json`;
+exact-head Quality and all three CodeQL analyses passed.
+These two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
 See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;

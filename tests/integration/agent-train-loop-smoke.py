@@ -340,6 +340,9 @@ def check_evidence(evidence, revision):
     require(evidence["source_revision"] == revision, "wrong source revision")
     check_chain(evidence)
     loop = evidence["loop"]
+    for name, mandatory in (("loop-shared", False), ("loop-all-shared", True)):
+        shared_updates(loop, evidence["originals"], evidence["owner_key"]["identity_public_key_hex"],
+                       evidence["sharing_status"][name], mandatory)
     TRAIN["check_worker"](evidence["training"], revision)
     TRAIN["check_isolation"](evidence["training_isolation"])
     require(evidence["training_isolation"]["node_lineage"]["node"] == "relay5", "seed did not originate on R5")
@@ -425,6 +428,69 @@ def file_digest(data):
     return dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
 
 
+def shared_updates(loop, original, owner, status, require_dataset):
+    """Exact contributed updates plus accounted optional original replicas.
+
+    Status is aggregate storage accounting, not an inventory API. The two
+    update identities are bound by their actual completed contribution receipts;
+    only the independently known source/seed can explain additional accounting.
+    The later protected import still proves real serving of the selected update.
+    """
+    require(status["serving"] is True and status["replication_enabled"] is True
+            and len(loop["cycles"]) == len(loop["state"]["cycles"]) == 2, "updates not served by the actual replica runtime")
+    required_ids, required_bytes, required_chunks = [], 0, 0
+    for index, cycle in enumerate(loop["cycles"], 1):
+        contribution = cycle["contribution"]
+        saved = loop["state"]["cycles"][index - 1]
+        encoded = bytes.fromhex(cycle["publication_hex"])
+        require(cycle["sequence"] == saved["sequence"] == index and saved["phase"] == "complete"
+                and file_digest(encoded) == cycle["publication"]
+                and contribution["manifest_id"] == cycle["publication"]["sha256"] == saved["publication"]["manifest_id"]
+                and contribution["publisher_key_hex"] == owner and contribution["revision"] == index
+                and contribution["name"] == "disposable-loop-update" and contribution["operation"] == "content_contribute"
+                and contribution["network_publication"] is True and contribution["serving"] is True
+                and contribution["bytes"] == cycle["bundle"]["bytes"]
+                and contribution["chunks"] == 4, "one exact completed update contribution is missing")
+        fields = ART["CUSTODY"]["fields"]
+        envelope = fields(encoded, 65536)
+        body = fields(envelope[1], 65536)
+        require(len(envelope[2]) == 64 and body[2].hex() == owner
+                and body[4] == contribution["expires_unix_seconds"] == saved["publication"]["expires"]
+                and hashlib.sha256(body[8]).digest() == body[7], "contributed update signature bytes or expiry changed")
+        required_ids.append(contribution["manifest_id"])
+        required_bytes += contribution["bytes"]
+        required_chunks += contribution["chunks"]
+    extras = []
+    for kind, original_field in (("dataset", "dataset"), ("adapter", "adapter_bundle")):
+        receipt = loop["seed"][kind + "_receipt"]
+        require(receipt["manifest_id"] == original[kind + "_manifest_id"]
+                and receipt["bytes"] == original[original_field]["bytes"]
+                and receipt["sha256"] == original[original_field]["sha256"]
+                and receipt["chunks"] == (1 if kind == "dataset" else 4), "unknown original replica used to explain storage")
+        extras.append((receipt["manifest_id"], receipt["bytes"], receipt["chunks"]))
+    require(len(set(required_ids + [entry[0] for entry in extras])) == 4, "original and trained publication identities overlap")
+    for mask in range(4):
+        if require_dataset and not mask & 1:
+            continue
+        selected = [item for index, item in enumerate(extras) if mask & (1 << index)]
+        count = 2 + len(selected)
+        if (status["publications"] == status["replica_publications"] == count
+                and status["replica_bytes"] == required_bytes + sum(item[1] for item in selected)
+                and status["replica_chunks"] == required_chunks + sum(item[2] for item in selected)):
+            return {"required_update_manifest_ids": required_ids,
+                    "accounted_original_manifest_ids": [item[0] for item in selected],
+                    "publications": count, "bytes": status["replica_bytes"], "chunks": status["replica_chunks"],
+                    "dataset_required": require_dataset, "aggregate_status_is_manifest_inventory": False}
+    raise ValueError("replica accounting is not the two updates plus an allowed exact original subset")
+
+
+def shared(work, label, require_dataset):
+    require(label in ("loop-shared", "loop-all-shared"), "invalid sharing guard label")
+    return shared_updates(read(work / "agent-train-loop-loop.json", 1048576), read(work / "agent-artifact-originals.json"),
+                          read(work / "agent-train-loop-owner-key.json")["identity_public_key_hex"],
+                          read(work / f"content-custody-relay4-{label}.json"), require_dataset)
+
+
 def evidence(work, revision):
     names = ("loop", "summary", "owner-key", "fetch", "initial-fetch", "dataset-export", "dataset-contribute", "source-stop", "content-isolation", "cleanup")
     result = {name.replace("-", "_"): read(work / f"agent-train-loop-{name}.json", 1048576) for name in names}
@@ -432,6 +498,12 @@ def evidence(work, revision):
         result[name.replace("-", "_")] = read(work / f"agent-artifact-{name}.json")
     result.update(source_revision=revision, peers=read(work / "a01-expected-peers.json"))
     result["source_restart"] = read(work / "agent-artifact-relay5-restart.json")
+    result["sharing_status"] = {name: read(work / f"content-custody-relay4-{name}.json")
+                                for name in ("loop-shared", "loop-all-shared")}
+    for name, mandatory in (("loop-shared", False), ("loop-all-shared", True)):
+        observed = read(work / f"agent-train-loop-{name}-inventory.json")
+        require(observed == shared_updates(result["loop"], result["originals"], result["owner_key"]["identity_public_key_hex"],
+                                            result["sharing_status"][name], mandatory), "saved sharing accounting differs")
     result["phases"] = {name: dict(route=read(work / f"agent-train-loop-{name}-live-selection.json"),
                                    layout=read(work / f"agent-train-loop-{name}-layout.json"),
                                    captures={role: read(work / f"agent-train-loop-{name}-{role}.json") for role in REP["ROLES"]})
@@ -554,6 +626,60 @@ def self_test():
         raise AssertionError("invalid synthetic coordinator chain accepted: " + repr(path))
     print("agent-train-loop chain checker: positive + 13 rejections PASS; synthetic only")
     observation_file_test()
+    shared_updates_test()
+
+
+def shared_updates_test():
+    wire = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["wire"]
+    owner = "11" * 32
+    loop = {"cycles": [], "state": {"cycles": []}, "seed": {}}
+    for sequence in (1, 2):
+        payload = bytes([sequence]) * 32
+        encoded = wire({1: wire({1: 1, 2: bytes.fromhex(owner), 3: 100, 4: 900,
+            7: hashlib.sha256(payload).digest(), 8: payload}), 2: b"s" * 64})
+        publication = file_digest(encoded)
+        loop["cycles"].append(dict(sequence=sequence, publication=publication, publication_hex=encoded.hex(), bundle=dict(bytes=1000),
+            contribution=dict(manifest_id=publication["sha256"], publisher_key_hex=owner, revision=sequence,
+                name="disposable-loop-update", operation="content_contribute", network_publication=True,
+                serving=True, bytes=1000, chunks=4, expires_unix_seconds=900)))
+        loop["state"]["cycles"].append(dict(sequence=sequence, phase="complete", publication=dict(manifest_id=publication["sha256"], expires=900)))
+    original = {"dataset_manifest_id": "22" * 32, "adapter_manifest_id": "33" * 32,
+                "dataset": dict(bytes=100, sha256="44" * 32), "adapter_bundle": dict(bytes=1000, sha256="55" * 32)}
+    for kind, content, chunks in (("dataset", "dataset", 1), ("adapter", "adapter_bundle", 4)):
+        loop["seed"][kind + "_receipt"] = dict(manifest_id=original[kind + "_manifest_id"], chunks=chunks, **original[content])
+    for mask in range(4):
+        status = dict(serving=True, replication_enabled=True, publications=2 + mask.bit_count(),
+            replica_publications=2 + mask.bit_count(), replica_bytes=2000 + (100 if mask & 1 else 0) + (1000 if mask & 2 else 0),
+            replica_chunks=8 + (1 if mask & 1 else 0) + (4 if mask & 2 else 0))
+        matched = shared_updates(loop, original, owner, status, False)
+        require(matched["publications"] == status["publications"]
+                and matched["aggregate_status_is_manifest_inventory"] is False, "allowed known replica subset rejected")
+        if mask & 1:
+            shared_updates(loop, original, owner, status, True)
+        else:
+            try:
+                shared_updates(loop, original, owner, status, True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("required original dataset absent but accepted")
+        for key in ("replica_bytes", "replica_chunks", "publications"):
+            changed = dict(status)
+            changed[key] += 1
+            try:
+                shared_updates(loop, original, owner, changed, False)
+            except ValueError:
+                continue
+            raise AssertionError("unaccounted replica storage accepted")
+    wrong = copy.deepcopy(loop)
+    wrong["cycles"][1]["contribution"]["manifest_id"] = original["dataset_manifest_id"]
+    try:
+        shared_updates(wrong, original, owner, status, False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("wrong contributed update identity accepted")
+    print("agent-train-loop exact replica-subset accounting + missing-dataset/storage/identity rejections PASS; synthetic only")
 
 
 def observation_file_test():
@@ -647,6 +773,9 @@ def main():
     args = sys.argv[1:]
     if args == ["self-test"]:
         self_test()
+    elif len(args) == 4 and args[0] == "shared":
+        require(args[3] in ("true", "false"), "invalid shared dataset requirement")
+        print(json.dumps(shared(Path(args[1]), args[2], args[3] == "true")))
     elif len(args) == 4 and args[0] == "setup":
         setup(*args[1:])
     elif len(args) == 5 and args[0] == "observe-loop":
