@@ -37,6 +37,7 @@ const MPTCP_PM_ADDR_ATTR_FAMILY: u16 = 1;
 const MPTCP_PM_ADDR_ATTR_ID: u16 = 2;
 const MPTCP_PM_ADDR_ATTR_ADDR4: u16 = 3;
 const MPTCP_PM_ADDR_ATTR_ADDR6: u16 = 4;
+const MPTCP_PM_ADDR_ATTR_PORT: u16 = 5;
 const MPTCP_PM_ADDR_ATTR_FLAGS: u16 = 6;
 const MPTCP_PM_ADDR_ATTR_IF_IDX: u16 = 7;
 
@@ -229,6 +230,13 @@ fn encode_endpoint(endpoint: &MptcpEndpoint) -> Vec<u8> {
         MPTCP_PM_ADDR_ATTR_IF_IDX,
         &endpoint.if_index.to_ne_bytes(),
     );
+    if let Some(port) = endpoint.listener_port {
+        push_attr_unchecked(
+            &mut attributes,
+            MPTCP_PM_ADDR_ATTR_PORT,
+            &port.to_ne_bytes(),
+        );
+    }
     attributes
 }
 
@@ -537,6 +545,7 @@ mod tests {
                 .expect("address"),
             if_index: 12,
             flags: EndpointFlags::SUBFLOW | EndpointFlags::BACKUP,
+            listener_port: None,
         };
         let encoded = encode_endpoint(&endpoint);
         let decoded = attributes(&encoded).expect("attributes");
@@ -547,6 +556,30 @@ mod tests {
         );
         assert!(decoded.iter().any(|(kind, payload)| {
             *kind == MPTCP_PM_ADDR_ATTR_ID && *payload == [endpoint.id]
+        }));
+        assert!(
+            decoded
+                .iter()
+                .all(|(kind, _)| *kind != MPTCP_PM_ADDR_ATTR_PORT)
+        );
+    }
+
+    #[test]
+    fn signal_listener_port_uses_the_typed_kernel_attribute() {
+        let endpoint = MptcpEndpoint {
+            id: 2,
+            address: "fd76:6f6c:7061:1111:2222:2:3333:4"
+                .parse()
+                .expect("address"),
+            if_index: 12,
+            flags: EndpointFlags::SIGNAL,
+            listener_port: Some(44_443),
+        };
+        endpoint.validate().expect("signal listener endpoint");
+        let encoded = encode_endpoint(&endpoint);
+        let decoded = attributes(&encoded).expect("attributes");
+        assert!(decoded.iter().any(|(kind, payload)| {
+            *kind == MPTCP_PM_ADDR_ATTR_PORT && *payload == 44_443_u16.to_ne_bytes()
         }));
     }
 

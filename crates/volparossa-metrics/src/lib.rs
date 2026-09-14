@@ -53,6 +53,11 @@ struct Inner {
     rtt_microseconds: AtomicU64,
     loss_parts_per_million: AtomicU32,
     policy_denials: AtomicU64,
+    dns_local_validated: AtomicU64,
+    dns_peer_validated: AtomicU64,
+    dns_upstream_validated: AtomicU64,
+    dns_trusted_fallback: AtomicU64,
+    dns_cache_miss_replies: AtomicU64,
 }
 
 /// A cheap, thread-safe handle to a bounded aggregate registry.
@@ -204,6 +209,25 @@ impl MetricsRegistry {
         saturating_add(&self.inner.policy_denials, 1);
     }
 
+    /// Publish the resolver's aggregate, monotone process-local counters without labels.
+    pub fn set_dns_resolution_counts(&self, local: u64, peer: u64, upstream: u64, fallback: u64) {
+        self.inner
+            .dns_local_validated
+            .store(local, Ordering::Relaxed);
+        self.inner.dns_peer_validated.store(peer, Ordering::Relaxed);
+        self.inner
+            .dns_upstream_validated
+            .store(upstream, Ordering::Relaxed);
+        self.inner
+            .dns_trusted_fallback
+            .store(fallback, Ordering::Relaxed);
+    }
+
+    /// Count a signed cache-miss reply queued for its authenticated peer, not delivery proof.
+    pub fn record_dns_cache_miss_reply(&self) {
+        saturating_add(&self.inner.dns_cache_miss_replies, 1);
+    }
+
     /// Read one internally consistent-enough aggregate snapshot.
     ///
     /// Metrics are observational only, so a concurrent update may appear in
@@ -224,6 +248,11 @@ impl MetricsRegistry {
             rtt_microseconds: self.inner.rtt_microseconds.load(Ordering::Relaxed),
             loss_parts_per_million: self.inner.loss_parts_per_million.load(Ordering::Relaxed),
             policy_denials: self.inner.policy_denials.load(Ordering::Relaxed),
+            dns_local_validated: self.inner.dns_local_validated.load(Ordering::Relaxed),
+            dns_peer_validated: self.inner.dns_peer_validated.load(Ordering::Relaxed),
+            dns_upstream_validated: self.inner.dns_upstream_validated.load(Ordering::Relaxed),
+            dns_trusted_fallback: self.inner.dns_trusted_fallback.load(Ordering::Relaxed),
+            dns_cache_miss_replies: self.inner.dns_cache_miss_replies.load(Ordering::Relaxed),
         }
     }
 
@@ -259,6 +288,16 @@ pub struct MetricsSnapshot {
     pub loss_parts_per_million: u32,
     /// Total policy requests denied without destination labels.
     pub policy_denials: u64,
+    /// Successful validated local-cache resolutions, without question labels.
+    pub dns_local_validated: u64,
+    /// Successful independently validated peer resolutions.
+    pub dns_peer_validated: u64,
+    /// Successful independently validated recursive resolutions.
+    pub dns_upstream_validated: u64,
+    /// Successful existing-resolver fallbacks, not DNSSEC proof.
+    pub dns_trusted_fallback: u64,
+    /// Signed cache-miss replies queued; not proof of remote receipt.
+    pub dns_cache_miss_replies: u64,
 }
 
 impl MetricsSnapshot {
@@ -311,6 +350,30 @@ impl MetricsSnapshot {
             "volparossa_policy_denials_total",
             self.policy_denials,
         );
+        for (name, count) in [
+            (
+                "volparossa_dns_local_validated_total",
+                self.dns_local_validated,
+            ),
+            (
+                "volparossa_dns_peer_validated_total",
+                self.dns_peer_validated,
+            ),
+            (
+                "volparossa_dns_upstream_validated_total",
+                self.dns_upstream_validated,
+            ),
+            (
+                "volparossa_dns_trusted_fallback_total",
+                self.dns_trusted_fallback,
+            ),
+            (
+                "volparossa_dns_cache_miss_replies_total",
+                self.dns_cache_miss_replies,
+            ),
+        ] {
+            append_counter(&mut output, name, count);
+        }
         output
     }
 }
@@ -532,6 +595,8 @@ mod tests {
         registry.record_rtt(Duration::from_millis(12)).unwrap();
         registry.record_loss_parts_per_million(2_500).unwrap();
         registry.record_policy_denial();
+        registry.set_dns_resolution_counts(4, 3, 2, 1);
+        registry.record_dns_cache_miss_reply();
 
         let rendered = registry.render();
         assert!(rendered.contains("volparossa_active_reservations 5\n"));
@@ -540,6 +605,11 @@ mod tests {
         assert!(rendered.contains("# TYPE volparossa_active_peers gauge\n"));
         assert!(!rendered.contains('{'));
         assert!(!rendered.contains("hostname"));
+        assert!(rendered.contains("volparossa_dns_local_validated_total 4\n"));
+        assert!(rendered.contains("volparossa_dns_peer_validated_total 3\n"));
+        assert!(rendered.contains("volparossa_dns_upstream_validated_total 2\n"));
+        assert!(rendered.contains("volparossa_dns_trusted_fallback_total 1\n"));
+        assert!(rendered.contains("volparossa_dns_cache_miss_replies_total 1\n"));
         assert!(registry.set_candidate_pool(10_001).is_err());
         assert!(registry.record_loss_parts_per_million(1_000_001).is_err());
     }

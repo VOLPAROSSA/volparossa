@@ -4,6 +4,56 @@ This document distinguishes the **required v1 design** from verified implementat
 claim that a diagram is working code. Consult [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
 for test-backed completion evidence.
 
+The original v1 sequence A01--A15 passed together on unchanged `482e33d0` in the disposable
+Debian 13 topology. Later direct-link/sharing changes and the content extension require their
+own evidence; the earlier pass is not a claim that the current candidate is complete.
+
+## Reciprocal peer participation (revised 2026-09-05)
+
+All network nodes run the same software. A production node consuming client service must also
+offer relay service with nonzero capacity and, when it has its own usable Internet uplink,
+policy-limited exit service. Local-only nodes contribute direct connectivity and forwarding
+without pretending to provide independent Internet egress. This supersedes the older
+optional client-only participation model. Installation leaves all roles disabled; participation is
+an explicit configuration accepting bandwidth contribution and allowed egress through the node's
+public address when one exists. Role-isolated development fixtures are for boundary testing, not an alternative
+production participation mode. There are no required central relay or exit servers.
+
+Roles are functions of a node, not permanent network classes. For each route the client, each
+relay, and exit remain distinct nodes. Offering exit service never authorizes a direct client-to-exit
+datapath, unrestricted egress, or bypassing the common signed whitelist. The native Client and Exit
+process roles remain immutable and isolated even when both workers run on the same user node.
+The implementation status must separately record combined-role runtime and topology verification;
+these requirements are not a claim that those checks have passed.
+
+The [direct-link extension](LOCAL_LINK_NETWORK.md) adds local Ethernet/Wi-Fi underlays to the
+same route model. Local links do not authorize a direct Client--Exit datapath. Independence
+and spare capacity must be measured: two relays sharing one uplink or radio channel do not
+automatically provide additive throughput.
+
+## Content-network extension (in development)
+
+The [content-network proposal](CONTENT_NETWORK_PROPOSAL.md) is the single design reference for
+bounded contributed chunk storage, multi-peer retrieval and spare-resource replication, validated
+DNS sharing, signed public publication and recipient-encrypted offline delivery. The local
+`volparossa-content` foundation has bounded persistent storage and protected-route retrieval
+evidence (C01). Recipient-encrypted messages reuse that storage/transfer layer, with caller-trusted
+keys and no implicit key store or mailbox. Explicit native/cooperative-origin retrieval through
+generic provider discovery now has an independent-node proof. Replica metadata can be restored
+from an owned cache on explicit service restart, not automatically on boot. General reachability,
+retention repair, browser integration and the remaining C02--C08 scope are unfinished; exact test
+revisions and the remote route-retirement gap are in the implementation status.
+
+This is an application layer, not an HTTPS-decrypting property of the VPN. Reconstructed bytes
+need authenticated origin/publisher authority as well as chunk integrity, and must retain
+representation, freshness, policy and browser-origin boundaries. Origin metadata, publisher
+signatures and an optional explicitly trusted witnessed-HTTPS experiment have different trust
+requirements. Neither arbitrary peers nor a mandatory central service become origin authorities.
+Content/DNS discovery is not a browsing catalogue; publication and encrypted messaging have
+different authorization and retention rules. Overlay content service does not confer Internet
+Exit capability or bypass route privacy. Owner-priority resource bounds apply to storage and
+replication as well as network contribution.
+
 ## Trust and process boundaries
 
 The permanent Ed25519 identity anchors the node's libp2p Peer ID and signed advertisements. A route
@@ -40,6 +90,15 @@ selected control relay. Direct-then-forwarded provenance is rejected; forwarded-
 provenance withdraws and quarantines the exit capability for the advertisement lifetime. Within one
 route, the exit must differ by node ID and Peer ID from the control relay and every datapath relay.
 The control relay may also become one datapath relay only after its own v4 probe and grant.
+
+These provenance restrictions are scoped to the local Client's own route choices. A node also
+serving as Relay may forward another authenticated client's exact signed request to an Exit that
+it knows separately as a Relay for its own use. That server-owned Exit capability cannot enter the
+local Client selection snapshot. Likewise, an Exit's incoming data-relay authority has its own
+bounded cache. A fresh direct advertisement does not revoke an independent server-owned route
+merely because its provenance differs; actual identity, policy and lifetime changes still apply.
+Combined-role provider discovery reserves a bounded local subset of Exit candidates before direct
+Relay fetches, so a network of identical participants is not exhausted by the first provider query.
 
 ```mermaid
 sequenceDiagram
@@ -109,8 +168,9 @@ That order is normative: no final relay is selected without real probe evidence,
 finalization precedes helper `Prepare`, and no local path is activated before every exact signed
 confirmation receipt exists. A received fail-closed `Unavailable` is a failed setup; only a truly
 ambiguous transport outcome permits an exact-byte retry within the original deadline and expiry.
-Production currently cannot complete the real probe or helper steps, so this sequence is a design
-and protocol boundary rather than an operational route claim.
+The Debian 13 role-isolated topology now exercises these production probe/helper steps through
+real MPTCP and MPQUIC traffic. Combined-role and local-only operation require their own runtime
+evidence; see the exact-revision checkpoint in IMPLEMENTATION_STATUS.md.
 
 Reservation messages bind the fresh `client_session_id`, random route-context ID, and path ID but
 carry no permanent client identity, overlay prefix, or overlay host address. Client, relay, and exit
@@ -128,12 +188,12 @@ upstream without an internal retry, and reveals only its own authenticated conne
 The exit verifies that relay plus the signed client-session scope. A datapath relay separately
 authenticates only its direct, explicitly authorized v4 request.
 
-The wire codecs and services have bounded unit and in-memory transport evidence, but the production
-agent does not yet orchestrate this complete state machine. `ExecuteProbe`, helper-backed endpoint
-preparation, and client ingress remain fail-closed `Unavailable`. The agent therefore withdraws
-every local relay/exit advertisement and provider record while either serving role is enabled. It
-never fabricates a probe, endpoint, listen port, or activation receipt. Live advertised service
-capacity remains incomplete until authenticated helper and dataplane handles exist.
+The production agent now orchestrates real probes, helper-backed endpoint preparation, ingress
+and advertised service in the disposable v1 topology; these participate in the unchanged
+`482e33d0` A01--A15 pass. Missing or expired service authority must still withdraw usable capacity
+and fail closed, never fabricate a probe, endpoint, listen port or activation receipt. Combined
+roles, local-only operation and newer sharing scenarios retain separately scoped evidence in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 Target lifecycle states are cold, reachable, warm, active, backup, degraded, and dead.
 
 ## WireGuard route construction
@@ -218,9 +278,11 @@ flowchart LR
     E --> H3[Allowed HTTP/3 destination]
 ```
 
-The Rust crate currently defines a bounded API and scheduler model; it is not evidence of an
-integrated native transport. Required-multipath mode fails closed if fewer than two data-carrying
-paths exist.
+The agent drives a pinned, source-built mqvpn/xquic process through the bounded API. Real
+HTTP/3-over-Multipath-QUIC and relay-loss evidence is included in the `482e33d0` v1 checkpoint.
+The later `efc35ac9` mixed-link run also completes warm-route failover, but its useful LAN+WAN
+gain threshold remains unmet. Required-multipath setup fails closed when required paths are unavailable; an
+established route's tested failover behavior is not permission for a silent single-path setup.
 
 ## Policy enforcement
 

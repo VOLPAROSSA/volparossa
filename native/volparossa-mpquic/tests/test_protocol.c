@@ -512,6 +512,9 @@ static void test_old_unknown_version_and_zero_nonce_are_rejected(void)
     payload[1] = 4U;
     assert(vmp_decode_request(payload, len, &request) ==
            VMP_PROTOCOL_INVALID_VALUE);
+    payload[1] = 6U;
+    assert(vmp_decode_request(payload, len, &request) ==
+           VMP_PROTOCOL_INVALID_VALUE);
     payload[1] = 99U;
     assert(vmp_decode_request(payload, len, &request) ==
            VMP_PROTOCOL_INVALID_VALUE);
@@ -808,8 +811,13 @@ static void test_response_is_compatible_and_bounded(void)
     response.path_count = 1;
     response.paths[0].path_id = 1;
     response.paths[0].smoothed_rtt_us = 1000;
+    response.paths[0].packets_lost = 2;
+    response.paths[0].delivered_bytes = 0;
+    response.paths[0].congestion_window_bytes = 64000;
+    response.paths[0].bytes_in_flight = 1200;
     response.paths[0].delivery_rate_bps = 8000000;
     response.paths[0].data_carrying = true;
+    response.paths[0].acked_transport_bytes = UINT64_C(4096);
     response.native_process_identity.role = VMP_NATIVE_ROLE_CLIENT;
     memcpy(response.native_process_identity.native_instance_id,
            test_instance, sizeof(test_instance));
@@ -854,6 +862,23 @@ static void test_response_is_compatible_and_bounded(void)
     const size_t declared = ((size_t)frame[0] << 24) | ((size_t)frame[1] << 16) |
                             ((size_t)frame[2] << 8) | frame[3];
     assert(declared == frame_len - 4);
+
+    /* Exact nested protobuf agrees with the independent Rust golden. Tag 4
+     * is absent: ACKed transport must not become unique payload delivery. */
+    static const uint8_t expected_path[] = {
+        0x2aU, 0x18U, 0x08U, 0x01U, 0x10U, 0xe8U, 0x07U, 0x18U,
+        0x02U, 0x28U, 0x80U, 0xf4U, 0x03U, 0x30U, 0xb0U, 0x09U,
+        0x38U, 0x80U, 0xa4U, 0xe8U, 0x03U, 0x40U, 0x01U, 0x48U,
+        0x80U, 0x20U,
+    };
+    bool found_path = false;
+    for (size_t index = 4U;
+         index + sizeof(expected_path) <= frame_len; ++index) {
+        if (memcmp(frame + index, expected_path, sizeof(expected_path)) == 0) {
+            found_path = true;
+        }
+    }
+    assert(found_path);
 
     response.diagnostic_code = "not allowed";
     response.diagnostic_code_len = strlen(response.diagnostic_code);

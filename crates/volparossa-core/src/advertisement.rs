@@ -75,9 +75,23 @@ impl NodeCapabilities {
     }
 }
 
+/// Operator-declared uplink capability, never proof of runtime reachability.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkUplink {
+    /// Operator-declared independent Internet connectivity; not a runtime reachability proof.
+    #[default]
+    IndependentInternet,
+    /// Only local peer links are available, so offering Exit egress is forbidden.
+    LocalOnly,
+}
+
 /// Network-origin metadata used only as fallible anti-Sybil evidence.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NetworkMetadata {
+    /// Declared uplink capability, distinct from observed transport origin.
+    #[serde(default)]
+    pub uplink: NetworkUplink,
     /// Operator identity claimed by the node.
     pub operator_id: OperatorId,
     /// Region label, such as `eu-west`.
@@ -223,6 +237,14 @@ impl NodeAdvertisement {
         {
             return Err(AdvertisementError::InvalidCountryCode);
         }
+        if self.network.uplink == NetworkUplink::LocalOnly
+            && (self.roles.exit
+                || self.network.asn.is_some()
+                || self.network.ipv4_prefix_hint.is_some()
+                || self.network.ipv6_prefix_hint.is_some())
+        {
+            return Err(AdvertisementError::InvalidUplinkCapability);
+        }
         for prefix_hint in [
             self.network.ipv4_prefix_hint.as_deref(),
             self.network.ipv6_prefix_hint.as_deref(),
@@ -254,6 +276,9 @@ fn validate_ratio(value: f64) -> Result<(), AdvertisementError> {
 /// An advertisement validation failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AdvertisementError {
+    /// A local-only advertisement claims an Internet Exit or invented public origin metadata.
+    #[error("invalid uplink capability metadata")]
+    InvalidUplinkCapability,
     /// The advertisement uses an unsupported protocol version.
     #[error("unsupported advertisement protocol version")]
     UnsupportedProtocolVersion,
@@ -320,6 +345,7 @@ mod tests {
                 sample_window_seconds: 15,
             },
             network: NetworkMetadata {
+                uplink: NetworkUplink::IndependentInternet,
                 operator_id: OperatorId::new("operator-a").expect("valid"),
                 region: "eu-west".to_owned(),
                 country_code: "NL".to_owned(),
@@ -344,6 +370,31 @@ mod tests {
         advertisement()
             .validate_at(UnixTime::from_secs(1_100))
             .expect("valid advertisement");
+    }
+
+    #[test]
+    fn local_only_advertisement_has_no_exit_or_invented_origin() {
+        let mut local = advertisement();
+        local.network.uplink = NetworkUplink::LocalOnly;
+        local.network.asn = None;
+        local.network.ipv4_prefix_hint = None;
+        local.network.ipv6_prefix_hint = None;
+        local
+            .validate_at(UnixTime::from_secs(1_100))
+            .expect("truthful local relay");
+        for mutation in 0..4 {
+            let mut invalid = local.clone();
+            match mutation {
+                0 => invalid.roles.exit = true,
+                1 => invalid.network.asn = Some(0),
+                2 => invalid.network.ipv4_prefix_hint = Some("8.8.8.0/24".to_owned()),
+                _ => invalid.network.ipv6_prefix_hint = Some("2606:4700:4700::/48".to_owned()),
+            }
+            assert_eq!(
+                invalid.validate_at(UnixTime::from_secs(1_100)),
+                Err(AdvertisementError::InvalidUplinkCapability)
+            );
+        }
     }
 
     #[test]

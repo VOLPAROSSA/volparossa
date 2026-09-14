@@ -69,6 +69,9 @@ const MAX_CONTROL_GROUP_COMPONENTS: usize = 256;
 const MAX_CONTROL_GROUP_COMPONENT_BYTES: usize = 255;
 const MAX_ISOLATION_PROPERTY_BYTES: usize = 32;
 const SYSTEMD_INVOCATION_ID_BYTES: usize = 16;
+const RESTART_REAPER_TIMEOUT_STOP_MICROSECONDS: u64 = 45_000_000;
+const RESTART_REAPER_RESTART_MICROSECONDS: u64 = 3_000_000;
+const RESTART_REAPER_FAIL_STOP_EXIT_STATUSES: [i32; 2] = [70, 71];
 const FDSTORE_PREFIX: &[u8] = b"FDSTORE=1\nFDNAME=";
 const FDSTORE_SUFFIX: &[u8] = b"\nFDPOLL=0";
 const FDSTORE_MESSAGE_BYTES: usize =
@@ -588,7 +591,12 @@ struct ServiceCgroupIsolationSnapshot {
 }
 
 #[derive(Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "this is an exact typed D-Bus property snapshot, not mutable state"
+)]
 struct RawServiceCgroupIsolationSnapshot {
+    unit_id: String,
     invocation_id: Vec<u8>,
     main_pid: u32,
     control_pid: u32,
@@ -600,8 +608,20 @@ struct RawServiceCgroupIsolationSnapshot {
     protect_control_groups: bool,
     protect_control_groups_ex: String,
     private_pids: String,
+    service_type: String,
+    remain_after_exit: bool,
+    exit_type: String,
+    success_exit_status: (Vec<i32>, Vec<i32>),
+    restart: String,
+    restart_mode: String,
+    restart_microseconds: u64,
+    restart_force_exit_status: (Vec<i32>, Vec<i32>),
+    restart_prevent_exit_status: (Vec<i32>, Vec<i32>),
     kill_mode: String,
     send_sigkill: bool,
+    final_kill_signal: i32,
+    timeout_stop_microseconds: u64,
+    timeout_stop_failure_mode: String,
 }
 
 impl ServiceCgroupIsolationSnapshot {
@@ -622,7 +642,7 @@ impl ServiceCgroupIsolationSnapshot {
         if raw.control_pid != 0 {
             return Err(invalid_inventory("ControlPID is not zero"));
         }
-        validate_control_group(&raw.control_group)?;
+        validate_service_control_group(&raw.unit_id, &raw.control_group)?;
         let control_group_id = NonZeroU64::new(raw.control_group_id)
             .ok_or_else(|| invalid_inventory("ControlGroupId is zero"))?;
         if raw.delegate || !raw.delegate_controllers.is_empty() || !raw.delegate_subgroup.is_empty()
@@ -637,8 +657,39 @@ impl ServiceCgroupIsolationSnapshot {
         if !exact_bounded_property(&raw.private_pids, "no") {
             return Err(invalid_inventory("PrivatePIDs is not disabled"));
         }
+        if !exact_bounded_property(&raw.service_type, "simple")
+            || raw.remain_after_exit
+            || !exact_bounded_property(&raw.exit_type, "main")
+        {
+            return Err(invalid_inventory("service exit tracking is not exact"));
+        }
+        if !raw.success_exit_status.0.is_empty() || !raw.success_exit_status.1.is_empty() {
+            return Err(invalid_inventory(
+                "service additional success status policy is not empty",
+            ));
+        }
+        if !exact_bounded_property(&raw.restart, "on-failure")
+            || !exact_bounded_property(&raw.restart_mode, "normal")
+            || raw.restart_microseconds != RESTART_REAPER_RESTART_MICROSECONDS
+            || !raw.restart_force_exit_status.0.is_empty()
+            || !raw.restart_force_exit_status.1.is_empty()
+            || raw.restart_prevent_exit_status.0 != RESTART_REAPER_FAIL_STOP_EXIT_STATUSES
+            || !raw.restart_prevent_exit_status.1.is_empty()
+        {
+            return Err(invalid_inventory(
+                "service restart fail-stop policy is not exact",
+            ));
+        }
         if !exact_bounded_property(&raw.kill_mode, "control-group") || !raw.send_sigkill {
             return Err(invalid_inventory("service kill policy is not exact"));
+        }
+        if raw.final_kill_signal != libc::SIGKILL
+            || raw.timeout_stop_microseconds != RESTART_REAPER_TIMEOUT_STOP_MICROSECONDS
+            || !exact_bounded_property(&raw.timeout_stop_failure_mode, "terminate")
+        {
+            return Err(invalid_inventory(
+                "service final retirement policy is not exact",
+            ));
         }
         let invocation_id: [u8; SYSTEMD_INVOCATION_ID_BYTES] = raw
             .invocation_id
@@ -682,6 +733,24 @@ fn validate_control_group(control_group: &str) -> Result<(), FdStoreError> {
         {
             return Err(invalid_inventory("ControlGroup is invalid"));
         }
+    }
+    Ok(())
+}
+
+fn validate_service_control_group(unit_id: &str, control_group: &str) -> Result<(), FdStoreError> {
+    validate_control_group(control_group)?;
+    let unit_bytes = unit_id.as_bytes();
+    if unit_bytes.len() <= b".service".len()
+        || unit_bytes.len() > MAX_CONTROL_GROUP_COMPONENT_BYTES
+        || !unit_bytes.ends_with(b".service")
+        || unit_bytes
+            .iter()
+            .any(|byte| *byte == b'/' || *byte < b' ' || *byte == 0x7f)
+        || control_group.as_bytes().rsplit(|byte| *byte == b'/').next() != Some(unit_bytes)
+    {
+        return Err(invalid_inventory(
+            "ControlGroup does not name the exact service unit",
+        ));
     }
     Ok(())
 }
@@ -2072,6 +2141,7 @@ impl SystemdDescriptorStoreSource {
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
+        let unit_id = unit.get_property::<String>("Id").await?;
         let invocation_id = unit.get_property::<Vec<u8>>("InvocationID").await?;
         drop(unit);
 
@@ -2083,6 +2153,7 @@ impl SystemdDescriptorStoreSource {
             .build()
             .await?;
         let raw = RawServiceCgroupIsolationSnapshot {
+            unit_id,
             invocation_id,
             main_pid: service.get_property::<u32>("MainPID").await?,
             control_pid: service.get_property::<u32>("ControlPID").await?,
@@ -2098,8 +2169,28 @@ impl SystemdDescriptorStoreSource {
                 .get_property::<String>("ProtectControlGroupsEx")
                 .await?,
             private_pids: service.get_property::<String>("PrivatePIDs").await?,
+            service_type: service.get_property::<String>("Type").await?,
+            remain_after_exit: service.get_property::<bool>("RemainAfterExit").await?,
+            exit_type: service.get_property::<String>("ExitType").await?,
+            success_exit_status: service
+                .get_property::<(Vec<i32>, Vec<i32>)>("SuccessExitStatus")
+                .await?,
+            restart: service.get_property::<String>("Restart").await?,
+            restart_mode: service.get_property::<String>("RestartMode").await?,
+            restart_microseconds: service.get_property::<u64>("RestartUSec").await?,
+            restart_force_exit_status: service
+                .get_property::<(Vec<i32>, Vec<i32>)>("RestartForceExitStatus")
+                .await?,
+            restart_prevent_exit_status: service
+                .get_property::<(Vec<i32>, Vec<i32>)>("RestartPreventExitStatus")
+                .await?,
             kill_mode: service.get_property::<String>("KillMode").await?,
             send_sigkill: service.get_property::<bool>("SendSIGKILL").await?,
+            final_kill_signal: service.get_property::<i32>("FinalKillSignal").await?,
+            timeout_stop_microseconds: service.get_property::<u64>("TimeoutStopUSec").await?,
+            timeout_stop_failure_mode: service
+                .get_property::<String>("TimeoutStopFailureMode")
+                .await?,
         };
         ServiceCgroupIsolationSnapshot::from_raw(self.scope.clone(), raw)
     }
@@ -2443,7 +2534,7 @@ where
         gate,
         source,
         sender,
-        baseline,
+        RemovalBaseline::SameRuntime(baseline),
         custody_name,
         expected_binding,
         custody,
@@ -2474,7 +2565,7 @@ where
         gate,
         source,
         sender,
-        baseline,
+        RemovalBaseline::Restart(baseline),
         custody_name,
         expected_binding,
         custody,
@@ -2483,6 +2574,12 @@ where
     .await
     .map(ExactRemovedInventory::into_restart_proof)
     .map_err(|_| RestartRemovalError)
+}
+
+/// Live owners authorize only their exact pair; restart owns an ordered inventory chain.
+enum RemovalBaseline {
+    SameRuntime(StableStartupInventory),
+    Restart(StableStartupInventory),
 }
 
 #[allow(
@@ -2494,7 +2591,7 @@ async fn remove_and_attest_core<S>(
     gate: &ManagerMutationGate,
     source: &S,
     sender: &NotifySender,
-    baseline: StableStartupInventory,
+    baseline: RemovalBaseline,
     custody_name: CustodyFdName,
     expected_binding: CustodyDescriptorBinding,
     custody: BorrowedCustodyPair<'_>,
@@ -2508,6 +2605,9 @@ where
         .acquire_removal(deadline)
         .await
         .map_err(RemovalFailure::before_send)?;
+    let same_runtime = matches!(baseline, RemovalBaseline::SameRuntime(_));
+    let (RemovalBaseline::SameRuntime(mut baseline) | RemovalBaseline::Restart(mut baseline)) =
+        baseline;
     if source.scope() != &baseline.snapshot.scope {
         return Err(RemovalFailure::before_send(
             FdStoreError::RemovalTargetMismatch,
@@ -2524,9 +2624,26 @@ where
         .validate_service_contract(source.scope())
         .map_err(RemovalFailure::before_send)?;
     if preflight != baseline.snapshot {
-        return Err(RemovalFailure::before_send(invalid_inventory(
-            "removal baseline changed before the send boundary",
-        )));
+        if !same_runtime {
+            return Err(RemovalFailure::before_send(invalid_inventory(
+                "removal baseline changed before the send boundary",
+            )));
+        }
+        // A sibling publication or completed removal does not revoke this live owner's exact
+        // target. Rebase under the same mutation gate, never across the removal send boundary.
+        preflight
+            .validate_removal_target(source.scope(), custody_name, &expected_binding)
+            .map_err(RemovalFailure::before_send)?;
+        let confirmed = within_deadline(deadline, source.snapshot(deadline))
+            .await
+            .map_err(RemovalFailure::before_send)?;
+        confirmed
+            .validate_removal_target(source.scope(), custody_name, &expected_binding)
+            .map_err(RemovalFailure::before_send)?;
+        if preflight != confirmed {
+            return Err(RemovalFailure::before_send(FdStoreError::UnstableInventory));
+        }
+        baseline.snapshot = confirmed;
     }
     let before =
         CustodyDescriptorBinding::from_custody(custody).map_err(RemovalFailure::before_send)?;
@@ -3467,6 +3584,7 @@ mod tests {
         control_group_id: u64,
     ) -> RawServiceCgroupIsolationSnapshot {
         RawServiceCgroupIsolationSnapshot {
+            unit_id: "volparossa-test.service".to_owned(),
             invocation_id: vec![0x5a; SYSTEMD_INVOCATION_ID_BYTES],
             main_pid,
             control_pid: 0,
@@ -3478,8 +3596,23 @@ mod tests {
             protect_control_groups: true,
             protect_control_groups_ex: "strict".to_owned(),
             private_pids: "no".to_owned(),
+            service_type: "simple".to_owned(),
+            remain_after_exit: false,
+            exit_type: "main".to_owned(),
+            success_exit_status: (Vec::new(), Vec::new()),
+            restart: "on-failure".to_owned(),
+            restart_mode: "normal".to_owned(),
+            restart_microseconds: RESTART_REAPER_RESTART_MICROSECONDS,
+            restart_force_exit_status: (Vec::new(), Vec::new()),
+            restart_prevent_exit_status: (
+                RESTART_REAPER_FAIL_STOP_EXIT_STATUSES.to_vec(),
+                Vec::new(),
+            ),
             kill_mode: "control-group".to_owned(),
             send_sigkill: true,
+            final_kill_signal: libc::SIGKILL,
+            timeout_stop_microseconds: RESTART_REAPER_TIMEOUT_STOP_MICROSECONDS,
+            timeout_stop_failure_mode: "terminate".to_owned(),
         }
     }
 
@@ -3491,15 +3624,17 @@ mod tests {
         .expect("exact fake isolation snapshot")
     }
 
-    #[test]
-    fn service_cgroup_isolation_rejects_every_non_exact_contract_field() {
-        let pid = std::process::id();
-        let scope = fake_scope(pid);
-        let exact = exact_raw_isolation(pid, 73);
-        ServiceCgroupIsolationSnapshot::from_raw(scope.clone(), exact.clone())
-            .expect("exact strict isolation contract");
-
+    fn invalid_isolation_identity_variants(
+        exact: &RawServiceCgroupIsolationSnapshot,
+        pid: u32,
+    ) -> Vec<RawServiceCgroupIsolationSnapshot> {
         let mut invalid = Vec::new();
+        let mut value = exact.clone();
+        value.unit_id = "other.service".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.unit_id = "volparossa-test.scope".to_owned();
+        invalid.push(value);
         let mut value = exact.clone();
         value.invocation_id = vec![0; SYSTEMD_INVOCATION_ID_BYTES];
         invalid.push(value);
@@ -3536,14 +3671,91 @@ mod tests {
         let mut value = exact.clone();
         value.private_pids = "yes".to_owned();
         invalid.push(value);
+        invalid
+    }
+
+    fn invalid_isolation_service_variants(
+        exact: &RawServiceCgroupIsolationSnapshot,
+    ) -> Vec<RawServiceCgroupIsolationSnapshot> {
+        let mut invalid = Vec::new();
+        let mut value = exact.clone();
+        value.service_type = "notify".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.remain_after_exit = true;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.exit_type = "cgroup".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.success_exit_status.0.push(70);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.success_exit_status.1.push(libc::SIGTERM);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart = "always".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_mode = "direct".to_owned();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_microseconds = 0;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_force_exit_status.0.push(70);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_force_exit_status.1.push(libc::SIGTERM);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_prevent_exit_status.0.pop();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_prevent_exit_status.0.reverse();
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_prevent_exit_status.0.push(72);
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_prevent_exit_status.0[1] = 70;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.restart_prevent_exit_status.1.push(libc::SIGTERM);
+        invalid.push(value);
         let mut value = exact.clone();
         value.kill_mode = "mixed".to_owned();
         invalid.push(value);
-        let mut value = exact;
+        let mut value = exact.clone();
         value.send_sigkill = false;
         invalid.push(value);
+        let mut value = exact.clone();
+        value.final_kill_signal = libc::SIGABRT;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.timeout_stop_microseconds = u64::MAX;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.timeout_stop_microseconds = 0;
+        invalid.push(value);
+        let mut value = exact.clone();
+        value.timeout_stop_failure_mode = "abort".to_owned();
+        invalid.push(value);
+        invalid
+    }
 
-        for malformed in invalid {
+    #[test]
+    fn service_cgroup_isolation_rejects_every_non_exact_contract_field() {
+        let pid = std::process::id();
+        let scope = fake_scope(pid);
+        let exact = exact_raw_isolation(pid, 73);
+        ServiceCgroupIsolationSnapshot::from_raw(scope.clone(), exact.clone())
+            .expect("exact strict isolation contract");
+
+        for malformed in invalid_isolation_identity_variants(&exact, pid)
+            .into_iter()
+            .chain(invalid_isolation_service_variants(&exact))
+        {
             assert!(ServiceCgroupIsolationSnapshot::from_raw(scope.clone(), malformed).is_err());
         }
     }
@@ -3564,6 +3776,20 @@ mod tests {
             assert!(validate_control_group(malformed).is_err(), "{malformed:?}");
         }
         assert!(validate_control_group("/system.slice/volparossa-helper.service").is_ok());
+        assert!(
+            validate_service_control_group(
+                "volparossa-helper.service",
+                "/system.slice/volparossa-helper.service"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_service_control_group(
+                "different.service",
+                "/system.slice/volparossa-helper.service"
+            )
+            .is_err()
+        );
         let oversized = format!("/{}", "a".repeat(MAX_CONTROL_GROUP_COMPONENT_BYTES + 1));
         assert!(validate_control_group(&oversized).is_err());
     }
@@ -4548,6 +4774,19 @@ mod tests {
     #[tokio::test]
     async fn exact_removal_is_payload_only_barriered_and_preserves_unrelated_inventory_and_owners()
     {
+        prove_exact_removal_with_sibling_change(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn same_runtime_removal_is_independent_of_sibling_publication_and_removal_order() {
+        prove_exact_removal_with_sibling_change(true, false).await;
+        prove_exact_removal_with_sibling_change(false, true).await;
+    }
+
+    async fn prove_exact_removal_with_sibling_change(
+        sibling_published_later: bool,
+        sibling_removed_later: bool,
+    ) {
         let directory = tempdir().expect("notification directory");
         let socket_path = directory.path().join("remove-notify.sock");
         let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
@@ -4571,18 +4810,28 @@ mod tests {
         let mut baseline_entries = Vec::from(exact_pair_entries(target_name, &binding));
         baseline_entries.extend(exact_pair_entries(unrelated_name, &unrelated_binding));
         let baseline_snapshot = snapshot(42, baseline_entries);
+        let mut publication_snapshot = baseline_snapshot.clone();
+        if sibling_published_later {
+            publication_snapshot =
+                snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+        }
+        if sibling_removed_later {
+            publication_snapshot.entries.extend(exact_pair_entries(
+                custody_name(69),
+                &CustodyDescriptorBinding([descriptor_identity(780), descriptor_identity(790)]),
+            ));
+            publication_snapshot = snapshot(42, publication_snapshot.entries);
+        }
         let successor_snapshot = snapshot(
             42,
             Vec::from(exact_pair_entries(unrelated_name, &unrelated_binding)),
         );
-        let source = FakeInventorySource::new(
-            42,
-            vec![
-                baseline_snapshot.clone(),
-                successor_snapshot.clone(),
-                successor_snapshot,
-            ],
-        );
+        let mut snapshots = vec![baseline_snapshot.clone()];
+        if sibling_published_later || sibling_removed_later {
+            snapshots.push(baseline_snapshot);
+        }
+        snapshots.extend([successor_snapshot.clone(), successor_snapshot]);
+        let source = FakeInventorySource::new(42, snapshots);
         let gate = ManagerMutationGate::new();
         let expected_removal = fdstore_remove_message(target_name);
         let receiver_thread = thread::spawn(move || {
@@ -4608,7 +4857,7 @@ mod tests {
             &gate,
             &source,
             &sender,
-            stable_inventory(baseline_snapshot, address.clone()),
+            stable_inventory(publication_snapshot, address.clone()),
             target_name,
             binding.clone(),
             custody,
@@ -4990,54 +5239,76 @@ mod tests {
 
     #[tokio::test]
     async fn removal_preflight_drift_is_before_send_and_emits_no_datagram() {
-        let directory = tempdir().expect("notification directory");
-        let socket_path = directory.path().join("preflight-drift.sock");
-        let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
-        let address = NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
-        let sender = NotifySender::new(&address).expect("removal sender");
-        let pidfd = tempfile().expect("pidfd fixture");
-        let network_namespace = tempfile().expect("network namespace fixture");
-        let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
-            .expect("borrow removal pair");
-        let binding = custody_binding(custody);
-        let target_name = custody_name(77);
-        let baseline_snapshot = snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
-        let unrelated_name = custody_name(78);
-        let unrelated =
-            CustodyDescriptorBinding([descriptor_identity(960), descriptor_identity(970)]);
-        let mut drifted_entries = baseline_snapshot.entries.clone();
-        drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
-        let source = FakeInventorySource::new(42, vec![snapshot(42, drifted_entries)]);
-        let gate = ManagerMutationGate::new();
-
-        let result = remove_and_attest(
-            &gate,
-            &source,
-            &sender,
-            stable_inventory(baseline_snapshot, address),
-            target_name,
-            binding,
-            custody,
-            HardDeadline::after(Duration::from_secs(2)).expect("preflight deadline"),
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(RemovalFailure::BeforeSend {
-                error: FdStoreError::InvalidInventory(
-                    "removal baseline changed before the send boundary"
+        for restart in [false, true] {
+            let directory = tempdir().expect("notification directory");
+            let socket_path = directory.path().join("preflight-drift.sock");
+            let receiver = UnixDatagram::bind(&socket_path).expect("bind fake notify socket");
+            let address =
+                NotifySocketAddress::parse(socket_path.as_os_str()).expect("notify address");
+            let sender = NotifySender::new(&address).expect("removal sender");
+            let pidfd = tempfile().expect("pidfd fixture");
+            let network_namespace = tempfile().expect("network namespace fixture");
+            let custody = BorrowedCustodyPair::new(pidfd.as_fd(), network_namespace.as_fd())
+                .expect("borrow removal pair");
+            let binding = custody_binding(custody);
+            let target_name = custody_name(77);
+            let baseline_snapshot =
+                snapshot(42, Vec::from(exact_pair_entries(target_name, &binding)));
+            let unrelated_name = custody_name(78);
+            let unrelated =
+                CustodyDescriptorBinding([descriptor_identity(960), descriptor_identity(970)]);
+            let mut drifted_entries = baseline_snapshot.entries.clone();
+            drifted_entries.extend(exact_pair_entries(unrelated_name, &unrelated));
+            let source = FakeInventorySource::new(
+                42,
+                vec![snapshot(42, drifted_entries), baseline_snapshot.clone()],
+            );
+            let gate = ManagerMutationGate::new();
+            let baseline = stable_inventory(baseline_snapshot, address);
+            let deadline = HardDeadline::after(Duration::from_secs(2)).expect("preflight deadline");
+            let rejected = if restart {
+                matches!(
+                    remove_restart_and_attest(
+                        &gate,
+                        &source,
+                        &sender,
+                        baseline,
+                        target_name,
+                        binding,
+                        custody,
+                        deadline,
+                    )
+                    .await,
+                    Err(RestartRemovalError)
                 )
-            })
-        ));
-        assert_no_datagram(&receiver);
-        drop(
-            gate.acquire_removal(
-                HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
-            )
-            .await
-            .expect("preflight failure leaves gate open"),
-        );
+            } else {
+                matches!(
+                    remove_and_attest(
+                        &gate,
+                        &source,
+                        &sender,
+                        baseline,
+                        target_name,
+                        binding,
+                        custody,
+                        deadline,
+                    )
+                    .await,
+                    Err(RemovalFailure::BeforeSend {
+                        error: FdStoreError::UnstableInventory
+                    })
+                )
+            };
+            assert!(rejected);
+            assert_no_datagram(&receiver);
+            drop(
+                gate.acquire_removal(
+                    HardDeadline::after(Duration::from_secs(2)).expect("open gate deadline"),
+                )
+                .await
+                .expect("preflight failure leaves gate open"),
+            );
+        }
     }
 
     #[allow(
@@ -6428,7 +6699,8 @@ mod tests {
             1
         );
         assert_eq!(transaction.matches("send_once(BARRIER_MESSAGE").count(), 1);
-        assert_eq!(transaction.matches("source.snapshot(deadline)").count(), 3);
+        // Same-runtime rebasing adds one confirming preflight; the two post-send reads remain.
+        assert_eq!(transaction.matches("source.snapshot(deadline)").count(), 4);
         for forbidden in [
             "FDSTORE_PREFIX",
             "FDPOLL=0",

@@ -8,17 +8,27 @@
 #![forbid(unsafe_code)]
 
 mod advertisement;
+mod client_ingress;
+mod client_udp_turns;
 mod control;
 mod discovery;
+mod downlink_sharing;
 mod endpoint_leases;
 #[path = "helper_v3.rs"]
 pub mod helper;
+pub mod mpquic_runtime;
+mod mptcp_flow_runtime;
+pub mod mptcp_transport;
 mod paths;
 mod policy;
+mod resource_headroom;
 mod roles;
 mod route_setup;
 mod secret;
 mod state;
+mod udp_exit_provider;
+mod uplink_sharing;
+mod wifi_mesh;
 
 use std::{
     fs::{self, OpenOptions},
@@ -32,22 +42,36 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, watch},
-    task::JoinHandle,
+    io::{AsyncReadExt, AsyncWriteExt, unix::AsyncFd},
+    sync::{RwLock, Semaphore, watch},
+    task::{JoinHandle, JoinSet},
 };
 use volparossa_config::Config;
 use volparossa_identity::IdentityStore;
+use volparossa_inspection::InspectionError;
 use volparossa_local_control::LogLevel;
 use volparossa_metrics::{LocalMetricsEndpoint, MetricsRegistry};
 use volparossa_peerstore::PeerStore;
+use volparossa_udp::{ExitResolver, MAX_DNS_MESSAGE_BYTES};
 
+use client_ingress::{
+    BrowserQuicIngressDecision, BrowserQuicIngressGate, ClientIngressRuntime,
+    ClientIngressTcpError, ClientIngressUdpError, PolicyAuthorizedDnsIngress,
+};
+use client_udp_turns::{ClientUdpIoTurn, ClientUdpTurns};
 use control::{ControlContext, bind_control_socket, serve_control};
 use discovery::{DiscoveryControlHandle, DiscoveryRuntime, DiscoveryRuntimeResources};
-use helper::HelperClient;
+
+mod content;
+use downlink_sharing::DownlinkSharingRuntime;
+use helper::{ClientIngressSocketFamily, HelperClient};
 use policy::load_active_policy;
 use roles::{RoleStore, ensure_private_state_directory};
+use route_setup::{ClientPathMaintenance, ClientRouteConnectError, ClientRouteControl};
 use secret::read_identity_credential;
 use state::AgentState;
+use uplink_sharing::UplinkSharingRuntime;
+use wifi_mesh::WifiMeshRuntime;
 
 pub use paths::{
     AgentPaths, DEFAULT_CONFIG, DEFAULT_CONTROL_SOCKET, DEFAULT_HELPER_SOCKET,
@@ -56,9 +80,17 @@ pub use paths::{
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const PATH_HEALTH_INTERVAL: Duration = Duration::from_secs(1);
+const INGRESS_POLICY_BACKOFF: Duration = Duration::from_millis(50);
+const BROWSER_QUIC_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAXIMUM_BROWSER_QUIC_RESPONSES_PER_TICK: usize = 64;
+const GENERAL_UDP_REVERSE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK: usize = 64;
+const DNS_TCP_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully loaded unprivileged service.
 pub struct Agent {
+    content: content::ContentRuntime,
     paths: AgentPaths,
     config: Arc<Config>,
     state: Arc<RwLock<AgentState>>,
@@ -83,6 +115,7 @@ impl Agent {
         let config = Config::from_path(&paths.config)?;
         let passphrase = read_identity_credential(&paths.identity_credential)?;
         let identity = IdentityStore::new(&paths.identity).load(&passphrase)?;
+        let content = content::ContentRuntime::new(&identity).map_err(|_| AgentError::Content)?;
         let role_store = RoleStore::new(paths.roles.clone());
         let roles = role_store.load_or_initialize(config.roles)?;
         let mut effective = config.clone();
@@ -98,7 +131,8 @@ impl Agent {
         fs::set_permissions(&paths.peerstore, fs::Permissions::from_mode(0o600))?;
         let metrics = MetricsRegistry::new();
         let mut state = AgentState::new(&config, roles, active_policy.clone(), metrics.clone())?;
-        let (discovery, discovery_control) = DiscoveryRuntime::new(
+        let helper = HelperClient::new(paths.helper_socket.clone(), paths.helper_token.clone());
+        let (mut discovery, discovery_control) = DiscoveryRuntime::new(
             identity,
             &config,
             peerstore,
@@ -108,8 +142,16 @@ impl Agent {
                 policy: active_policy,
                 role_store,
                 metrics: metrics.clone(),
+                helper: helper.clone(),
+                mpquic_socket: paths.mpquic_exit_socket(roles),
             },
         )?;
+        if config.dns_cache.enabled {
+            discovery.configure_dns_cache(Arc::new(ExitResolver::new(
+                config.dns_cache.upstream,
+                Some(discovery_control.dns_peer_backend()),
+            )));
+        }
         state.log(LogLevel::Info, "AGENT_INITIALIZED", unix_millis());
         if policy_failed {
             state.log(LogLevel::Warn, "POLICY_LOAD_FAILED", unix_millis());
@@ -123,8 +165,8 @@ impl Agent {
             Ok(false) => state.log(LogLevel::Warn, "MPQUIC_SOCKET_ABSENT", unix_millis()),
             Err(()) => state.log(LogLevel::Warn, "MPQUIC_SOCKET_UNSAFE", unix_millis()),
         }
-        let helper = HelperClient::new(paths.helper_socket.clone(), paths.helper_token.clone());
         Ok(Self {
+            content,
             paths,
             config: Arc::new(config),
             state: Arc::new(RwLock::new(state)),
@@ -141,37 +183,159 @@ impl Agent {
     /// # Errors
     ///
     /// Returns an error when a service actor, local endpoint, or required helper cleanup fails.
-    pub async fn run_with_shutdown<F>(self, shutdown: F) -> Result<(), AgentError>
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one owner starts and shuts down the complete bounded service actor set"
+    )]
+    pub async fn run_with_shutdown<F>(mut self, shutdown: F) -> Result<(), AgentError>
     where
         F: Future<Output = ()> + Send,
     {
-        let endpoint = bind_control_socket(&self.paths.control_socket)?;
-        let (listener, socket_guard) = endpoint.into_parts();
+        let (listener, socket_guard) =
+            bind_control_socket(&self.paths.control_socket)?.into_parts();
+        let roles = self.state.read().await.roles();
+        let sharing =
+            match UplinkSharingRuntime::start(self.helper.clone(), &self.config.sharing, roles)
+                .await
+            {
+                Ok(sharing) => sharing,
+                Err(error) => {
+                    tracing::error!(error = ?error, "upload sharing startup failed");
+                    // No discovery/route actor has started. A lost installation reply may still
+                    // own a partial queue tree; the startup cleanup token retires that exact helper's
+                    // owned resources instead of leaving silent sharing without owner priority.
+                    self.helper
+                        .cleanup_owned()
+                        .await
+                        .map_err(|_| AgentError::ShutdownCleanup)?;
+                    return Err(AgentError::UplinkSharing);
+                }
+            };
+        let download_sharing = match DownlinkSharingRuntime::start(
+            self.helper.clone(),
+            &self.config.download_sharing,
+            roles,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::error!(error = ?error, "download receive accounting startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::DownlinkSharing);
+            }
+        };
+        self.discovery.set_download_sharing(download_sharing);
+        let mesh = match WifiMeshRuntime::start(self.helper.clone(), &self.config.wifi_mesh, roles)
+            .await
+        {
+            Ok(mesh) => mesh,
+            Err(error) => {
+                tracing::error!(error = ?error, "direct Wi-Fi mesh startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::WifiMesh);
+            }
+        };
+        if self.config.wifi_mesh.enabled {
+            if let Err(error) = self.discovery.configure_mesh_network(mesh.is_some()) {
+                tracing::error!(error = ?error, "direct Wi-Fi discovery startup failed");
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::WifiMesh);
+            }
+        }
+        let client_ingress = if roles.client {
+            let ingress = match ClientIngressRuntime::start(self.helper.clone()).await {
+                Ok(ingress) => ingress,
+                Err(error) => {
+                    tracing::error!(error = ?error, "client ingress startup failed");
+                    if mesh.is_some() || sharing.is_some() || self.config.download_sharing.enabled {
+                        self.helper
+                            .cleanup_owned()
+                            .await
+                            .map_err(|_| AgentError::ShutdownCleanup)?;
+                    }
+                    return Err(AgentError::ClientIngress);
+                }
+            };
+            Some(Arc::new(ingress))
+        } else {
+            None
+        };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Discovery carries route-retirement RPCs after local producers have stopped. It must
+        // not consume the producers' shutdown signal before their retained routes settle.
+        let (discovery_shutdown_tx, discovery_shutdown_rx) = watch::channel(false);
+        let mut sharing_task = tokio::spawn(UplinkSharingRuntime::monitor(
+            sharing.as_ref().map(Arc::clone),
+            shutdown_rx.clone(),
+        ));
+        let mut mesh_task = tokio::spawn(WifiMeshRuntime::monitor(
+            mesh.as_ref().map(Arc::clone),
+            shutdown_rx.clone(),
+        ));
+        let routes = production_client_routes(&self.paths, &self.state);
+        let dns_routes = production_client_routes(&self.paths, &self.state);
         let control_context = ControlContext {
+            content: self.content.clone(),
             state: Arc::clone(&self.state),
             config: Arc::clone(&self.config),
             discovery: self.discovery_control.clone(),
             helper: self.helper.clone(),
+            routes: routes.clone(),
+            dns_routes: dns_routes.clone(),
         };
         let mut control_task = tokio::spawn(serve_control(
             listener,
-            control_context,
+            control_context.clone(),
             shutdown_rx.clone(),
         ));
         let discovery_state = Arc::clone(&self.state);
         let mut discovery_task =
-            tokio::spawn(self.discovery.run(discovery_state, shutdown_rx.clone()));
+            tokio::spawn(self.discovery.run(discovery_state, discovery_shutdown_rx));
+        // Registration uses Discovery RPCs, so start only once its actor can receive them.
+        // The existing ContentRuntime stop path owns the listener and background worker.
+        let mut contribution_shutdown = shutdown_rx.clone();
+        let mut contribution_task = tokio::spawn(async move {
+            control_context
+                .content
+                .start_contribution(&control_context)
+                .await
+                .map_err(|_| AgentError::Content)?;
+            while !*contribution_shutdown.borrow() {
+                if contribution_shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+            Ok::<(), AgentError>(())
+        });
         let maintenance_state = Arc::clone(&self.state);
         let maintenance_config = Arc::clone(&self.config);
         let maintenance_trust = self.paths.policy_trust.clone();
         let maintenance_discovery = self.discovery_control.clone();
+        let maintenance_routes = routes.clone();
         let mut maintenance_task = tokio::spawn(run_maintenance(
             maintenance_state,
             maintenance_config,
             maintenance_trust,
             maintenance_discovery,
+            maintenance_routes,
+            dns_routes.clone(),
             shutdown_rx,
+        ));
+        let mut path_health_task = tokio::spawn(run_path_maintenance(
+            Arc::clone(&self.state),
+            routes.clone(),
+            dns_routes.clone(),
+            shutdown_tx.subscribe(),
         ));
         let mut metrics_task = tokio::spawn(run_metrics_endpoint(
             self.config.privacy.metrics_enabled,
@@ -179,7 +343,22 @@ impl Agent {
             self.metrics.clone(),
             shutdown_tx.subscribe(),
         ));
-
+        let (
+            mut tcp_ingress_task,
+            mut ingress_task,
+            mut dns_ingress_task,
+            mut dns_tcp_ingress_task,
+        ) = spawn_client_ingress_tasks(
+            client_ingress.as_ref().map(Arc::clone),
+            Arc::clone(&self.state),
+            Arc::clone(&self.config),
+            self.discovery_control.clone(),
+            self.helper.clone(),
+            routes.clone(),
+            routes.clone(),
+            dns_routes.clone(),
+            &shutdown_tx,
+        );
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             () = &mut shutdown => Ok(()),
@@ -190,29 +369,1065 @@ impl Agent {
             },
             _ = &mut discovery_task => Err(AgentError::Task),
             _ = &mut maintenance_task => Err(AgentError::Task),
+            _ = &mut path_health_task => Err(AgentError::Task),
+            result = &mut contribution_task => match result {
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(())) | Err(_) => Err(AgentError::Task),
+            },
             result = &mut metrics_task => match result {
                 Ok(Err(error)) => Err(AgentError::Metrics(error)),
                 Ok(Ok(())) | Err(_) => Err(AgentError::Task),
             },
+            _ = &mut ingress_task => Err(AgentError::Task),
+            _ = &mut tcp_ingress_task => Err(AgentError::Task),
+            _ = &mut dns_ingress_task => Err(AgentError::Task),
+            _ = &mut dns_tcp_ingress_task => Err(AgentError::Task),
+            _ = &mut sharing_task => Err(AgentError::UplinkSharing),
+            _ = &mut mesh_task => Err(AgentError::WifiMesh),
         };
+        // Stop new operations first. Discovery remains live while ingress/control operations
+        // unwind and the exact client route receives its remote destruction acknowledgements.
         let _ = shutdown_tx.send(true);
         stop_task(&mut control_task).await;
-        stop_task(&mut discovery_task).await;
         stop_task(&mut maintenance_task).await;
+        stop_task(&mut path_health_task).await;
+        stop_task(&mut contribution_task).await;
         stop_task(&mut metrics_task).await;
-        drop(socket_guard);
+        stop_task(&mut ingress_task).await;
+        stop_task(&mut tcp_ingress_task).await;
+        stop_task(&mut dns_ingress_task).await;
+        stop_task(&mut dns_tcp_ingress_task).await;
+        stop_task(&mut sharing_task).await;
+        stop_task(&mut mesh_task).await;
+        let _ = self.content.stop(&self.discovery_control).await;
+        let route_cleanup = stop_discovery_after_retirement(
+            control::disconnect_client_routes(&routes, &dns_routes),
+            &discovery_shutdown_tx,
+            &mut discovery_task,
+        )
+        .await;
+        if let Some(client_ingress) = client_ingress {
+            let Ok(client_ingress) = Arc::try_unwrap(client_ingress) else {
+                let _ = self.helper.cleanup_owned().await;
+                return Err(AgentError::ShutdownCleanup);
+            };
+            if client_ingress.shutdown().await.is_err() {
+                let _ = self.helper.cleanup_owned().await;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
 
+        if let Some(mesh) = mesh {
+            if mesh.shutdown().await.is_err() {
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
+        if let Some(sharing) = sharing {
+            if sharing.shutdown().await.is_err() {
+                self.helper
+                    .cleanup_owned()
+                    .await
+                    .map_err(|_| AgentError::ShutdownCleanup)?;
+                return Err(AgentError::ShutdownCleanup);
+            }
+        }
         if self.state.read().await.has_network_state() {
             self.helper
                 .cleanup_owned()
                 .await
                 .map_err(|_| AgentError::ShutdownCleanup)?;
         }
+        // Retain the exclusive daemon socket through sharing/ingress retirement, so a new
+        // participant cannot start between teardown and the last owned-resource cleanup.
+        drop(socket_guard);
+        if route_cleanup.is_err() {
+            return Err(AgentError::ShutdownCleanup);
+        }
         run_result
     }
 }
 
+fn production_client_routes(
+    paths: &AgentPaths,
+    state: &Arc<RwLock<AgentState>>,
+) -> ClientRouteControl {
+    ClientRouteControl::new_with_agent_state(paths.mpquic_socket.clone(), Arc::clone(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ingress actors share one exact production dependency set"
+)]
+fn spawn_client_ingress_tasks(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    tcp_routes: ClientRouteControl,
+    udp_routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
+    shutdown: &watch::Sender<bool>,
+) -> (
+    JoinHandle<()>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+    JoinHandle<()>,
+) {
+    let udp_config = Arc::clone(&config);
+    let udp_discovery = discovery.clone();
+    let udp_helper = helper.clone();
+    let dns_runtime = runtime.clone();
+    let dns_state = Arc::clone(&state);
+    let dns_config = Arc::clone(&udp_config);
+    let dns_discovery = udp_discovery.clone();
+    let dns_helper = udp_helper.clone();
+    let dns_tcp_runtime = runtime.clone();
+    let dns_tcp_state = Arc::clone(&state);
+    let dns_tcp_config = Arc::clone(&udp_config);
+    let dns_tcp_discovery = udp_discovery.clone();
+    let dns_tcp_helper = udp_helper.clone();
+    let dns_tcp_routes = dns_routes.clone();
+    let tcp = tokio::spawn(run_client_tcp_ingress(
+        runtime.clone(),
+        Arc::clone(&state),
+        config,
+        discovery,
+        helper,
+        tcp_routes,
+        shutdown.subscribe(),
+    ));
+    let udp = tokio::spawn(run_client_udp_ingress(
+        runtime,
+        state,
+        udp_config,
+        udp_discovery,
+        udp_helper,
+        udp_routes,
+        shutdown.subscribe(),
+    ));
+    let dns = tokio::spawn(run_client_dns_ingress(
+        dns_runtime,
+        dns_state,
+        dns_config,
+        dns_discovery,
+        dns_helper,
+        dns_routes,
+        shutdown.subscribe(),
+    ));
+    let dns_tcp = tokio::spawn(run_client_dns_tcp_ingress(
+        dns_tcp_runtime,
+        dns_tcp_state,
+        dns_tcp_config,
+        dns_tcp_discovery,
+        dns_tcp_helper,
+        dns_tcp_routes,
+        shutdown.subscribe(),
+    ));
+    (tcp, udp, dns, dns_tcp)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one production ingress actor keeps accept, policy, route, and outcome ownership linear"
+)]
+async fn run_client_tcp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4, ipv6]) = runtime.transparent_tcp_listeners() else {
+        state.write().await.log(
+            LogLevel::Error,
+            "INGRESS_TCP_LISTENER_FAILED",
+            unix_millis(),
+        );
+        return;
+    };
+    let flow_limit = Arc::new(Semaphore::new(config.routing.maximum_active_contexts));
+    let mut flows = JoinSet::new();
+
+    loop {
+        let observed = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            completed = flows.join_next(), if !flows.is_empty() => {
+                if !matches!(completed, Some(Ok(()))) {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_TCP_FLOW_TASK_FAILED",
+                        unix_millis(),
+                    );
+                }
+                continue;
+            }
+            result = ipv4.accept() => result,
+            result = ipv6.accept() => result,
+        };
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(ClientIngressTcpError::OriginalDestination(_)) => {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_DESTINATION_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+            Err(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_ACCEPT_FAILED", unix_millis());
+                tokio::time::sleep(INGRESS_POLICY_BACKOFF).await;
+                continue;
+            }
+        };
+        let now_ms = unix_millis();
+        let Some(policy) = state.read().await.active_policy(now_ms) else {
+            let mut state = state.write().await;
+            state.record_policy_rejection();
+            state.log(LogLevel::Warn, "INGRESS_TCP_POLICY_DENIED", now_ms);
+            continue;
+        };
+        let ingress = match observed.authorize(&policy, now_ms).await {
+            Ok(ingress) => ingress,
+            Err(ClientIngressTcpError::Policy(_)) => {
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(LogLevel::Warn, "INGRESS_TCP_POLICY_DENIED", unix_millis());
+                continue;
+            }
+            Err(ClientIngressTcpError::ClientHello(InspectionError::EncryptedClientHello(_))) => {
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(LogLevel::Warn, "INGRESS_TCP_ECH_DENIED", unix_millis());
+                continue;
+            }
+            Err(
+                ClientIngressTcpError::ClientHello(_)
+                | ClientIngressTcpError::ClientHelloUnavailable,
+            ) => {
+                let mut state = state.write().await;
+                state.record_policy_rejection();
+                state.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_CLIENT_HELLO_DENIED",
+                    unix_millis(),
+                );
+                continue;
+            }
+            Err(_) => {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_FLOW_REJECTED", unix_millis());
+                continue;
+            }
+        };
+
+        let Ok(permit) = Arc::clone(&flow_limit).acquire_owned().await else {
+            return;
+        };
+        let state = Arc::clone(&state);
+        let config = Arc::clone(&config);
+        let discovery = discovery.clone();
+        let helper = helper.clone();
+        let routes = routes.clone();
+        flows.spawn(async move {
+            let _permit = permit;
+            if Box::pin(routes.connect_tcp(&config, &discovery, &helper))
+                .await
+                .is_err()
+            {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_TCP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                return;
+            }
+            let activation_ms = unix_millis();
+            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                state
+                    .write()
+                    .await
+                    .log(LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED", activation_ms);
+                return;
+            };
+            let (level, message) = if routes
+                .run_tcp_ingress(ingress, &active_policy, activation_ms)
+                .await
+                .is_ok()
+            {
+                (LogLevel::Info, "INGRESS_TCP_STREAM_COMPLETED")
+            } else {
+                (LogLevel::Warn, "INGRESS_TCP_STREAM_FAILED")
+            };
+            state.write().await.log(level, message, unix_millis());
+        });
+    }
+}
+
+#[allow(clippy::single_match_else, clippy::too_many_lines)] // Keep readiness and route ownership in one actor.
+async fn run_client_udp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4_descriptor, ipv6_descriptor]) = runtime.duplicate_udp_poll_descriptors() else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
+        return;
+    };
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
+        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
+    else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_UDP_POLL_FAILED", unix_millis());
+        return;
+    };
+    let mut browser_gate = BrowserQuicIngressGate::new();
+    let mut io_turns = ClientUdpTurns::default();
+    let mut browser_reverse_poll = tokio::time::interval(BROWSER_QUIC_REVERSE_POLL_INTERVAL);
+    browser_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut general_udp_reverse_poll = tokio::time::interval(GENERAL_UDP_REVERSE_POLL_INTERVAL);
+    general_udp_reverse_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let general_udp_retirement_deadline = routes.general_udp_retirement_deadline().await;
+        let browser_flow_active = routes.browser_quic_flow_active().await;
+        if !browser_flow_active {
+            browser_gate.reset_authorized_if_route_inactive();
+        }
+        let ready = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                continue;
+            }
+            () = tokio::time::sleep_until(
+                general_udp_retirement_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if general_udp_retirement_deadline.is_some() => {
+                routes.retire_expired().await;
+                continue;
+            }
+            _ = general_udp_reverse_poll.tick(), if general_udp_retirement_deadline.is_some() => {
+                if state.read().await.active_policy(unix_millis()).is_none() {
+                    routes.disconnect().await;
+                    continue;
+                }
+                // General UDP is not a request/response protocol: a destination can receive
+                // many datagrams before replying, or never reply. Drain the bounded native
+                // receive queue independently, keeping only one exact-bound reply in memory.
+                for _ in 0..MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK {
+                    match routes.try_receive_native_udp_response().await {
+                        Ok(Some(response)) => {
+                            if runtime.send_udp_response(
+                                response.application(),
+                                response.remote(),
+                                response.payload(),
+                            ).await.is_err() {
+                                routes.disconnect().await;
+                                state.write().await.log(
+                                    LogLevel::Warn, "INGRESS_UDP_REPLY_FAILED", unix_millis(),
+                                );
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn, "INGRESS_UDP_RESPONSE_UNAVAILABLE", unix_millis(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            result = io_turns.next(
+                &ipv4_poll, &ipv6_poll, &mut browser_reverse_poll, browser_flow_active
+            ) => match result {
+                Ok(ClientUdpIoTurn::Ingress(family, ready)) => (family, ready),
+                Ok(ClientUdpIoTurn::BrowserResponse) => {
+                    let now_ms = unix_millis();
+                    let Some(policy) = state.read().await.active_policy(now_ms) else {
+                        io_turns.end_reverse_drain();
+                        routes.disconnect().await;
+                        continue;
+                    };
+                    match routes.receive_browser_quic_response(&policy, now_ms).await {
+                        Ok(Some(response)) => {
+                            if runtime.send_udp_response(
+                                response.application(), response.remote(), response.payload()
+                            ).await.is_err() {
+                                state.write().await.log(
+                                    LogLevel::Warn, "INGRESS_MPQUIC_REPLY_FAILED", unix_millis()
+                                );
+                            }
+                        }
+                        Ok(None) => io_turns.end_reverse_drain(),
+                        Err(_) => {
+                            io_turns.end_reverse_drain();
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn, "INGRESS_MPQUIC_RESPONSE_UNAVAILABLE", unix_millis()
+                            );
+                        }
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_UDP_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+        };
+        let (family, mut ready) = ready;
+        let now_ms = unix_millis();
+        let policy = state.read().await.active_policy(now_ms);
+        let Some(policy) = policy else {
+            ready.clear_ready();
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(INGRESS_POLICY_BACKOFF) => {}
+            }
+            continue;
+        };
+        let observed_batch = match runtime.try_receive_udp(family) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Receive(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                ready.clear_ready();
+                continue;
+            }
+            Err(
+                ClientIngressUdpError::Policy(_)
+                | ClientIngressUdpError::PolicyBinding
+                | ClientIngressUdpError::DestinationBinding,
+            ) => {
+                ready.clear_ready();
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                ready.clear_ready();
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_DATAGRAM_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
+        for observed in observed_batch {
+            if observed.is_browser_quic() {
+                let ingresses = match browser_gate.inspect(observed, &policy, now_ms) {
+                    Ok(BrowserQuicIngressDecision::NeedMore) => continue,
+                    Ok(BrowserQuicIngressDecision::Authorized(ingresses)) => ingresses,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        state.write().await.record_policy_rejection();
+                        continue;
+                    }
+                    Err(_) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_MPQUIC_CLIENT_HELLO_DENIED",
+                            unix_millis(),
+                        );
+                        continue;
+                    }
+                };
+                if Box::pin(routes.ensure_browser_quic(&config, &discovery, &helper))
+                    .await
+                    .is_err()
+                {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_MPQUIC_ROUTE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                let activation_ms = unix_millis();
+                let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                    browser_gate = BrowserQuicIngressGate::new();
+                    routes.disconnect().await;
+                    state.write().await.record_policy_rejection();
+                    continue;
+                };
+                let ingresses = match browser_gate.reauthorize_after_route_ready(
+                    ingresses,
+                    &active_policy,
+                    activation_ms,
+                ) {
+                    Ok(ingresses) => ingresses,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        browser_gate = BrowserQuicIngressGate::new();
+                        routes.disconnect().await;
+                        state.write().await.record_policy_rejection();
+                        continue;
+                    }
+                    Err(_) => {
+                        eprintln!("MPQUIC_BROWSER_FAILURE_STAGE=GateReauthorization");
+                        browser_gate = BrowserQuicIngressGate::new();
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                            unix_millis(),
+                        );
+                        continue;
+                    }
+                };
+                for ingress in ingresses {
+                    match routes
+                        .send_browser_quic_ingress(ingress, &active_policy, activation_ms)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(ClientRouteConnectError::UdpIngressUnavailable) => {
+                            state.write().await.log(
+                                LogLevel::Warn,
+                                "INGRESS_MPQUIC_DATAGRAM_DROPPED",
+                                unix_millis(),
+                            );
+                        }
+                        Err(_) => {
+                            browser_gate = BrowserQuicIngressGate::new();
+                            routes.disconnect().await;
+                            state.write().await.log(
+                                LogLevel::Warn,
+                                "INGRESS_MPQUIC_DATAGRAM_REJECTED",
+                                unix_millis(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            let ingress = match observed.authorize_ip(&policy, now_ms) {
+                Ok(ingress) => ingress,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    state.write().await.record_policy_rejection();
+                    continue;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_UDP_DATAGRAM_REJECTED",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            };
+            if Box::pin(routes.ensure_general_udp(&config, &discovery, &helper))
+                .await
+                .is_err()
+            {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                continue;
+            }
+            let activation_ms = unix_millis();
+            let Some(active_policy) = state.read().await.active_policy(activation_ms) else {
+                routes.disconnect().await;
+                state.write().await.record_policy_rejection();
+                continue;
+            };
+            let ingress =
+                match ingress.reauthorize_ip_after_route_ready(&active_policy, activation_ms) {
+                    Ok(ingress) => ingress,
+                    Err(ClientIngressUdpError::Policy(_)) => {
+                        routes.disconnect().await;
+                        state.write().await.record_policy_rejection();
+                        continue;
+                    }
+                    Err(_) => {
+                        routes.disconnect().await;
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "INGRESS_UDP_DATAGRAM_REJECTED",
+                            unix_millis(),
+                        );
+                        continue;
+                    }
+                };
+            if Box::pin(routes.activate_udp_ingress(
+                ingress,
+                &active_policy,
+                Duration::from_secs(config.udp.idle_timeout_seconds),
+                activation_ms,
+            ))
+            .await
+            .is_err()
+            {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_UDP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                continue;
+            }
+            // Submission is complete. The independent reverse-drain branch above owns replies;
+            // the next application datagram must not wait for this destination to answer.
+        }
+    }
+}
+
+/// Owns the helper-acquired DNS socket. Every accepted query is policy-bound to its QNAME and
+/// crosses the existing single-relay protected QUIC route; this actor never opens a resolver
+/// socket on the Client.
+#[allow(clippy::single_match_else, clippy::too_many_lines)]
+async fn run_client_dns_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4_descriptor, ipv6_descriptor]) = runtime.duplicate_dns_udp_poll_descriptors()
+    else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
+        return;
+    };
+    let (Ok(ipv4_poll), Ok(ipv6_poll)) =
+        (AsyncFd::new(ipv4_descriptor), AsyncFd::new(ipv6_descriptor))
+    else {
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "INGRESS_DNS_POLL_FAILED", unix_millis());
+        return;
+    };
+    loop {
+        let ready = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                continue;
+            }
+            result = ipv4_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv4, ready),
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_DNS_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+            result = ipv6_poll.readable() => match result {
+                Ok(ready) => (ClientIngressSocketFamily::Ipv6, ready),
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Error,
+                        "INGRESS_DNS_POLL_FAILED",
+                        unix_millis(),
+                    );
+                    return;
+                }
+            },
+        };
+        let (family, mut ready) = ready;
+        let now_ms = unix_millis();
+        let Some(policy) = state.read().await.active_policy(now_ms) else {
+            ready.clear_ready();
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(INGRESS_POLICY_BACKOFF) => {}
+            }
+            continue;
+        };
+        let ingress = match runtime.try_receive_dns_udp(family, &policy, now_ms) {
+            Ok(ingress) => ingress,
+            Err(ClientIngressUdpError::Receive(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                ready.clear_ready();
+                continue;
+            }
+            Err(ClientIngressUdpError::Policy(_)) => {
+                ready.clear_ready();
+                state.write().await.record_policy_rejection();
+                continue;
+            }
+            Err(_) => {
+                ready.clear_ready();
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_QUERY_REJECTED",
+                    unix_millis(),
+                );
+                continue;
+            }
+        };
+        // UDP and TCP DNS use the same dedicated owner. Serialize the whole query, not only
+        // route preparation, so a losing activation cannot destroy another actor's association.
+        let _transaction = tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            acquired = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, routes.lock_dns_transaction()) => {
+                let Ok(transaction) = acquired else {
+                    state.write().await.log(LogLevel::Warn, "INGRESS_DNS_BUSY", unix_millis());
+                    continue;
+                };
+                transaction
+            },
+        };
+        if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+            .await
+            .is_err()
+        {
+            state.write().await.log(
+                LogLevel::Warn,
+                "INGRESS_DNS_ROUTE_UNAVAILABLE",
+                unix_millis(),
+            );
+            continue;
+        }
+        if Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
+            .await
+            .is_err()
+        {
+            routes.disconnect().await;
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "INGRESS_DNS_QUERY_REJECTED", unix_millis());
+            continue;
+        }
+        let response = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                routes.disconnect().await;
+                continue;
+            }
+            result = routes.receive_udp_response() => match result {
+                Ok(response) => response,
+                Err(_) => {
+                    routes.disconnect().await;
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_RESPONSE_UNAVAILABLE",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+            },
+        };
+        let sent = runtime
+            .send_udp_response(
+                response.application(),
+                response.remote(),
+                response.payload(),
+            )
+            .await
+            .is_ok();
+        routes.disconnect().await;
+        state.write().await.log(
+            if sent { LogLevel::Info } else { LogLevel::Warn },
+            if sent {
+                "INGRESS_DNS_QUERY_COMPLETED"
+            } else {
+                "INGRESS_DNS_REPLY_FAILED"
+            },
+            unix_millis(),
+        );
+    }
+}
+
+/// Own both dedicated DNS-over-TCP listeners. Each accepted stream is bound to its kernel
+/// original resolver tuple; every framed query still crosses the same protected one-relay DNS
+/// association used by UDP, and the Client never opens a resolver socket directly.
+#[allow(clippy::single_match_else, clippy::too_many_lines)]
+async fn run_client_dns_tcp_ingress(
+    runtime: Option<Arc<ClientIngressRuntime>>,
+    state: Arc<RwLock<AgentState>>,
+    config: Arc<Config>,
+    discovery: DiscoveryControlHandle,
+    helper: HelperClient,
+    routes: ClientRouteControl,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let Some(runtime) = runtime else {
+        wait_for_shutdown(&mut shutdown).await;
+        return;
+    };
+    let Ok([ipv4, ipv6]) = runtime.dns_tcp_listeners() else {
+        state.write().await.log(
+            LogLevel::Error,
+            "INGRESS_DNS_TCP_LISTENER_FAILED",
+            unix_millis(),
+        );
+        return;
+    };
+    loop {
+        let observed = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    routes.disconnect().await;
+                    return;
+                }
+                continue;
+            }
+            result = ipv4.accept() => result,
+            result = ipv6.accept() => result,
+        };
+        let (mut application, source, resolver) =
+            match observed.and_then(client_ingress::ObservedTcpIngress::into_dns_parts) {
+                Ok(parts) => parts,
+                Err(ClientIngressTcpError::OriginalDestination(_)) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_DESTINATION_REJECTED",
+                        unix_millis(),
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_ACCEPT_FAILED",
+                        unix_millis(),
+                    );
+                    tokio::time::sleep(INGRESS_POLICY_BACKOFF).await;
+                    continue;
+                }
+            };
+
+        loop {
+            let mut length = [0_u8; 2];
+            let read_length = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(
+                    DNS_TCP_IO_TIMEOUT,
+                    application.read_exact(&mut length),
+                ) => result,
+            };
+            if read_length.is_err() || read_length.is_ok_and(|result| result.is_err()) {
+                break;
+            }
+            let query_length = usize::from(u16::from_be_bytes(length));
+            if query_length == 0 || query_length > MAX_DNS_MESSAGE_BYTES {
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_QUERY_REJECTED",
+                    unix_millis(),
+                );
+                break;
+            }
+            let mut query = vec![0_u8; query_length];
+            let read_query = tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        routes.disconnect().await;
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(
+                    DNS_TCP_IO_TIMEOUT,
+                    application.read_exact(&mut query),
+                ) => result,
+            };
+            if read_query.is_err() || read_query.is_ok_and(|result| result.is_err()) {
+                break;
+            }
+            let now_ms = unix_millis();
+            let Some(policy) = state.read().await.active_policy(now_ms) else {
+                state.write().await.record_policy_rejection();
+                break;
+            };
+            let ingress = match PolicyAuthorizedDnsIngress::authorize(
+                source, resolver, query, &policy, now_ms,
+            ) {
+                Ok(ingress) => ingress,
+                Err(ClientIngressUdpError::Policy(_)) => {
+                    state.write().await.record_policy_rejection();
+                    break;
+                }
+                Err(_) => {
+                    state.write().await.log(
+                        LogLevel::Warn,
+                        "INGRESS_DNS_TCP_QUERY_REJECTED",
+                        unix_millis(),
+                    );
+                    break;
+                }
+            };
+            let _transaction = tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => return,
+                acquired = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, routes.lock_dns_transaction()) => {
+                    let Ok(transaction) = acquired else {
+                        state.write().await.log(LogLevel::Warn, "INGRESS_DNS_TCP_BUSY", unix_millis());
+                        break;
+                    };
+                    transaction
+                },
+            };
+            if Box::pin(routes.ensure_single_udp(&config, &discovery, &helper))
+                .await
+                .is_err()
+                || Box::pin(routes.activate_dns_ingress(ingress, &policy, unix_millis()))
+                    .await
+                    .is_err()
+            {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_ROUTE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                break;
+            }
+            let response = tokio::select! {
+                changed = shutdown.changed() => {
+                    routes.disconnect().await;
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                result = routes.receive_udp_response() => result,
+            };
+            let Ok(response) = response else {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_RESPONSE_UNAVAILABLE",
+                    unix_millis(),
+                );
+                break;
+            };
+            if response.application() != source || response.remote() != resolver {
+                routes.disconnect().await;
+                state.write().await.log(
+                    LogLevel::Warn,
+                    "INGRESS_DNS_TCP_RESPONSE_REJECTED",
+                    unix_millis(),
+                );
+                break;
+            }
+            let Ok(response_length) = u16::try_from(response.payload().len()) else {
+                routes.disconnect().await;
+                break;
+            };
+            let mut framed = Vec::with_capacity(2 + response.payload().len());
+            framed.extend_from_slice(&response_length.to_be_bytes());
+            framed.extend_from_slice(response.payload());
+            let sent = tokio::select! {
+                changed = shutdown.changed() => {
+                    routes.disconnect().await;
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                    continue;
+                }
+                result = tokio::time::timeout(DNS_TCP_IO_TIMEOUT, async {
+                    application.write_all(&framed).await?;
+                    application.flush().await
+                }) => matches!(result, Ok(Ok(()))),
+            };
+            routes.disconnect().await;
+            state.write().await.log(
+                if sent { LogLevel::Info } else { LogLevel::Warn },
+                if sent {
+                    "INGRESS_DNS_TCP_QUERY_COMPLETED"
+                } else {
+                    "INGRESS_DNS_TCP_REPLY_FAILED"
+                },
+                unix_millis(),
+            );
+            if !sent {
+                break;
+            }
+        }
+    }
+}
+
 async fn stop_task<T>(task: &mut JoinHandle<T>) {
+    // One actor handle may already have been polled to completion by the runtime select above.
+    // Tokio JoinHandles are not fused and panic when polled again after yielding their result.
+    if task.is_finished() {
+        return;
+    }
     if tokio::time::timeout(Duration::from_secs(5), &mut *task)
         .await
         .is_err()
@@ -220,6 +1435,19 @@ async fn stop_task<T>(task: &mut JoinHandle<T>) {
         task.abort();
         let _ = task.await;
     }
+}
+
+/// The retirement future has its own bounded result; unsuccessful cleanup is never converted
+/// into success merely because the remaining actor was subsequently stopped.
+async fn stop_discovery_after_retirement<E>(
+    retirement: impl Future<Output = Result<(), E>>,
+    shutdown: &watch::Sender<bool>,
+    discovery: &mut JoinHandle<()>,
+) -> Result<(), E> {
+    let result = retirement.await;
+    let _ = shutdown.send(true);
+    stop_task(discovery).await;
+    result
 }
 
 async fn run_metrics_endpoint(
@@ -250,6 +1478,8 @@ async fn run_maintenance(
     config: Arc<Config>,
     trust_path: std::path::PathBuf,
     discovery: DiscoveryControlHandle,
+    routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(MAINTENANCE_INTERVAL);
@@ -263,7 +1493,8 @@ async fn run_maintenance(
             }
             _ = interval.tick() => {
                 let now_ms = unix_millis();
-                let was_active = state.read().await.policy_active(now_ms);
+                let previous_policy = state.read().await.policy_snapshot(now_ms);
+                let was_active = previous_policy.active;
                 let (policy, policy_load_failed) = match load_active_policy(
                     &config,
                     &trust_path,
@@ -281,23 +1512,133 @@ async fn run_maintenance(
                         "POLICY_ACTOR_REFRESH_FAILED",
                         now_ms,
                     );
-                    break;
+                    // Native route setup can keep the single discovery owner busy beyond this
+                    // maintenance call's bounded timeout. The command remains safely queued; a
+                    // transient timeout must not terminate the whole agent process.
+                    continue;
                 }
-                let mut state = state.write().await;
+                let mut locked = state.write().await;
                 if policy_load_failed {
                     if was_active {
-                        state.log(LogLevel::Error, "POLICY_LOAD_FAILED", now_ms);
+                        locked.log(LogLevel::Error, "POLICY_LOAD_FAILED", now_ms);
                     }
                 } else if is_active != was_active {
-                    state.log(
+                    locked.log(
                         if is_active { LogLevel::Info } else { LogLevel::Warn },
                         if is_active { "POLICY_ACTIVE" } else { "POLICY_UNAVAILABLE" },
                         now_ms,
                     );
                 }
+                drop(locked);
+                let (current_policy, client_enabled) = {
+                    let state = state.read().await;
+                    (state.policy_snapshot(now_ms), state.roles().client)
+                };
+                if client_policy_revoked(&previous_policy, &current_policy, client_enabled) {
+                    if control::disconnect_client_routes(&routes, &dns_routes).await.is_err() {
+                        state.write().await.log(
+                            LogLevel::Warn,
+                            "CLIENT_CLEANUP_PENDING",
+                            now_ms,
+                        );
+                    }
+                    continue;
+                }
             }
         }
     }
+}
+
+/// Native health must not wait for policy-file I/O or a Discovery policy-refresh RPC. The
+/// separately joined task never reloads policy, creates a route or overlaps maintenance calls.
+async fn run_path_maintenance(
+    state: Arc<RwLock<AgentState>>,
+    routes: ClientRouteControl,
+    dns_routes: ClientRouteControl,
+    shutdown: watch::Receiver<bool>,
+) {
+    run_path_health_ticks(shutdown, || {
+        maintain_client_paths(&state, &routes, &dns_routes)
+    })
+    .await;
+}
+
+async fn run_path_health_ticks<F: Future<Output = ()>>(
+    mut shutdown: watch::Receiver<bool>,
+    mut maintain: impl FnMut() -> F,
+) {
+    let mut interval = tokio::time::interval(PATH_HEALTH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(&mut shutdown) => return,
+            _ = interval.tick() => maintain().await,
+        }
+    }
+}
+
+async fn maintain_client_paths(
+    state: &Arc<RwLock<AgentState>>,
+    routes: &ClientRouteControl,
+    dns_routes: &ClientRouteControl,
+) {
+    let now_ms = unix_millis();
+    let allowed = {
+        let state = state.read().await;
+        state.roles().client && state.active_policy(now_ms).is_some()
+    };
+    if !allowed {
+        if control::disconnect_client_routes(routes, dns_routes)
+            .await
+            .is_err()
+        {
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "CLIENT_CLEANUP_PENDING", now_ms);
+        }
+        return;
+    }
+    match routes.maintain_path_health(now_ms).await {
+        Ok(ClientPathMaintenance::Unchanged) => {}
+        Ok(ClientPathMaintenance::Reconfigured) => {
+            state
+                .write()
+                .await
+                .log(LogLevel::Warn, "MPQUIC_PATH_RECONFIGURED", now_ms);
+        }
+        Err(_) => {
+            routes.disconnect().await;
+            state
+                .write()
+                .await
+                .log(LogLevel::Error, "MPQUIC_PATH_FAIL_CLOSED", now_ms);
+        }
+    }
+    if dns_routes
+        .maintain_path_health(unix_millis())
+        .await
+        .is_err()
+    {
+        dns_routes.disconnect().await;
+        state
+            .write()
+            .await
+            .log(LogLevel::Error, "DNS_PATH_FAIL_CLOSED", unix_millis());
+    }
+}
+
+fn client_policy_revoked(
+    previous: &volparossa_local_control::PolicySnapshot,
+    current: &volparossa_local_control::PolicySnapshot,
+    client_enabled: bool,
+) -> bool {
+    !client_enabled
+        || !current.active
+        || previous.policy_hash != current.policy_hash
+        || previous.manifest_version != current.manifest_version
+        || previous.expires_at_ms != current.expires_at_ms
 }
 
 fn validate_integrity_file(path: &Path, maximum: u64) -> Result<(), AgentError> {
@@ -406,6 +1747,21 @@ pub enum AgentError {
     /// Local control endpoint failed.
     #[error("agent control endpoint failed")]
     Control(#[from] control::ControlServerError),
+    /// The process-owned client ingress could not be prepared or activated.
+    #[error("client ingress runtime is unavailable")]
+    ClientIngress,
+    /// Existing identity could not initialize the explicit content lifecycle.
+    #[error("native content runtime is unavailable")]
+    Content,
+    /// The explicitly configured upload scheduler could not be installed or retained.
+    #[error("owner-priority upload sharing is unavailable")]
+    UplinkSharing,
+    /// The explicitly configured receive accounting and adjacent sender budgets are unavailable.
+    #[error("owner-priority download sharing is unavailable")]
+    DownlinkSharing,
+    /// The explicitly configured direct radio adjacency could not be installed or retained.
+    #[error("direct Wi-Fi mesh is unavailable")]
+    WifiMesh,
     /// Loopback-only aggregate metrics endpoint failed.
     #[error("agent metrics endpoint failed")]
     Metrics(#[source] volparossa_metrics::MetricsError),
@@ -432,6 +1788,11 @@ impl AgentError {
             Self::Discovery(_) => "DISCOVERY_FAILED",
             Self::State(_) => "STATE_INVALID",
             Self::Control(_) => "CONTROL_FAILED",
+            Self::ClientIngress => "CLIENT_INGRESS_FAILED",
+            Self::Content => "CONTENT_RUNTIME_FAILED",
+            Self::UplinkSharing => "UPLINK_SHARING_FAILED",
+            Self::DownlinkSharing => "DOWNLINK_SHARING_FAILED",
+            Self::WifiMesh => "WIFI_MESH_FAILED",
             Self::Metrics(_) => "METRICS_FAILED",
             Self::Task => "RUNTIME_TASK_FAILED",
             Self::ShutdownCleanup => "SHUTDOWN_CLEANUP_FAILED",
@@ -446,6 +1807,216 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_does_not_repoll_a_consumed_actor_handle() {
+        let mut task = tokio::spawn(async { 7_u8 });
+        assert_eq!((&mut task).await.expect("actor task"), 7);
+
+        stop_task(&mut task).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_keeps_discovery_available_until_retirement_finishes() {
+        for confirmed in [true, false] {
+            let (shutdown, mut stopped) = watch::channel(false);
+            let (request, received) = tokio::sync::oneshot::channel();
+            let (reply, acknowledged) = tokio::sync::oneshot::channel();
+            let mut discovery = tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => panic!("discovery stopped before route retirement"),
+                    _ = received => { let _ = reply.send(()); }
+                }
+                wait_for_shutdown(&mut stopped).await;
+            });
+            let retirement = async move {
+                request
+                    .send(())
+                    .expect("retirement dispatcher still available");
+                acknowledged.await.expect("remote cleanup response");
+                if confirmed { Ok(()) } else { Err(()) }
+            };
+            let result =
+                stop_discovery_after_retirement(retirement, &shutdown, &mut discovery).await;
+            assert_eq!(result.is_ok(), confirmed);
+            assert!(*shutdown.borrow());
+            assert!(discovery.is_finished());
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_dns_shutdown_waits_for_both_client_retirements() {
+        let (shutdown, mut stopped) = watch::channel(false);
+        let (request, mut requests) = tokio::sync::mpsc::channel(2);
+        let mut discovery = tokio::spawn(async move {
+            for _ in 0..2 {
+                tokio::select! {
+                    biased;
+                    _ = stopped.changed() => panic!("discovery stopped before both owners retired"),
+                    Some(reply) = requests.recv() => {
+                        let reply: tokio::sync::oneshot::Sender<()> = reply;
+                        let _ = reply.send(());
+                    }
+                }
+            }
+            wait_for_shutdown(&mut stopped).await;
+        });
+        let retire = |sender: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>| async move {
+            let (reply, acknowledged) = tokio::sync::oneshot::channel();
+            sender
+                .send(reply)
+                .await
+                .expect("discovery remains available");
+            acknowledged
+                .await
+                .expect("exact owner retirement acknowledged");
+            Ok::<(), ()>(())
+        };
+        let both = async move {
+            let (main, dns) = tokio::join!(retire(request.clone()), retire(request));
+            main.and(dns)
+        };
+        assert!(
+            stop_discovery_after_retirement(both, &shutdown, &mut discovery)
+                .await
+                .is_ok()
+        );
+        assert!(*shutdown.borrow());
+        assert!(discovery.is_finished());
+    }
+
+    #[test]
+    fn protected_dns_and_main_retire_only_for_real_policy_or_role_revocation() {
+        let original = volparossa_local_control::PolicySnapshot {
+            manifest_version: 9,
+            policy_hash: vec![1; 32],
+            expires_at_ms: 9000,
+            verified_signatures: 2,
+            active: true,
+        };
+        assert!(!client_policy_revoked(&original, &original, true));
+        assert!(client_policy_revoked(&original, &original, false));
+        for changed in [
+            volparossa_local_control::PolicySnapshot {
+                active: false,
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                policy_hash: vec![2; 32],
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                manifest_version: 10,
+                ..original.clone()
+            },
+            volparossa_local_control::PolicySnapshot {
+                expires_at_ms: 9001,
+                ..original.clone()
+            },
+        ] {
+            assert!(client_policy_revoked(&original, &changed, true));
+        }
+    }
+
+    #[test]
+    fn general_udp_pipeline_sends_without_waiting_for_a_reply() {
+        let source = include_str!("lib.rs");
+        let actor = source
+            .split_once("async fn run_client_udp_ingress(")
+            .unwrap()
+            .1
+            .split_once("async fn run_client_dns_ingress(")
+            .unwrap()
+            .0;
+        assert!(!actor.contains("routes.receive_udp_response()"));
+        assert!(actor.contains("routes.try_receive_native_udp_response().await"));
+        assert!(actor.contains("0..MAXIMUM_GENERAL_UDP_RESPONSES_PER_TICK"));
+        assert!(actor.contains("general_udp_retirement_deadline.is_some()"));
+        assert!(actor.contains("routes.activate_udp_ingress("));
+    }
+
+    #[test]
+    fn maintenance_policy_timeout_keeps_the_actor_alive() {
+        let source = include_str!("lib.rs");
+        let refresh_failure = source
+            .split_once("if discovery.apply_policy(policy).await.is_err() {")
+            .expect("maintenance policy refresh branch")
+            .1
+            .split_once("let mut locked = state.write().await;")
+            .expect("maintenance continues with policy state")
+            .0;
+
+        assert!(refresh_failure.contains("continue;"));
+        assert!(!refresh_failure.contains("break;"));
+    }
+
+    #[tokio::test]
+    async fn path_health_maintenance_ticks_independently_and_stops_without_a_final_call() {
+        let (shutdown, stopped) = watch::channel(false);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(6),
+            run_path_health_ticks(stopped, || async {
+                let mut calls = calls.lock().unwrap();
+                calls.push(tokio::time::Instant::now());
+                if calls.len() == 3 {
+                    shutdown.send(true).unwrap();
+                }
+            }),
+        )
+        .await
+        .expect("three ordinary one-second ticks, not the thirty-second policy cadence");
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(
+                calls.len(),
+                3,
+                "no trailing health invocation after shutdown"
+            );
+            assert!(calls[1].duration_since(started) >= Duration::from_millis(950));
+            assert!(calls[2].duration_since(started) >= Duration::from_millis(1_950));
+        }
+        run_path_health_ticks(shutdown.subscribe(), || async {
+            panic!("already stopped owner must not execute its immediate interval tick");
+        })
+        .await;
+    }
+
+    #[test]
+    fn path_health_maintenance_has_one_joined_owner_and_no_policy_refresh() {
+        let source = include_str!("lib.rs");
+        let policy = source
+            .split_once("async fn run_maintenance(")
+            .unwrap()
+            .1
+            .split_once("async fn run_path_maintenance(")
+            .unwrap()
+            .0;
+        assert!(!policy.contains("maintain_path_health("));
+        assert!(policy.contains("load_active_policy("));
+        let health = source
+            .split_once("async fn run_path_maintenance(")
+            .unwrap()
+            .1
+            .split_once("fn client_policy_revoked(")
+            .unwrap()
+            .0;
+        assert!(!health.contains("load_active_policy("));
+        assert!(!health.contains("discovery.apply_policy("));
+        assert_eq!(health.matches(".maintain_path_health(").count(), 2);
+        assert!(health.contains("MissedTickBehavior::Skip"));
+        let runtime = source
+            .split_once("let mut path_health_task =")
+            .unwrap()
+            .1
+            .split_once("if let Some(client_ingress) = client_ingress {")
+            .unwrap()
+            .0;
+        assert!(runtime.contains("_ = &mut path_health_task => Err(AgentError::Task)"));
+        assert!(runtime.contains("stop_task(&mut path_health_task).await"));
+    }
 
     #[test]
     fn peerstore_is_created_owner_only_and_rejects_unsafe_existing_files() {

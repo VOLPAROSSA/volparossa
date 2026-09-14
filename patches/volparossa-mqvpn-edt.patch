@@ -1,0 +1,174 @@
+diff --git a/include/libmqvpn.h b/include/libmqvpn.h
+index ba0a186..c101f58 100644
+--- a/include/libmqvpn.h
++++ b/include/libmqvpn.h
+@@ -105,6 +105,8 @@ typedef enum {
+     MQVPN_SCHED_BACKUP_FEC =
+         2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
+     MQVPN_SCHED_WLB_UDP_PIN = 3, /* WLB + 5-tuple pin for UDP flows. */
++    MQVPN_SCHED_VOLPAROSSA_EDT =
++        4, /* Single-path choice by bounded live estimated delivery time. */
+ } mqvpn_scheduler_t;
+ 
+ typedef enum {
+diff --git a/src/flow_sched.h b/src/flow_sched.h
+index 5dabb91..e28ebc6 100644
+--- a/src/flow_sched.h
++++ b/src/flow_sched.h
+@@ -20,6 +20,7 @@
+ #define MQVPN_SCHED_WLB         1
+ #define MQVPN_SCHED_BACKUP_FEC  2
+ #define MQVPN_SCHED_WLB_UDP_PIN 3
++#define MQVPN_SCHED_VOLPAROSSA_EDT 4
+ 
+ #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
+ 
+diff --git a/src/main.c b/src/main.c
+index ad60988..80926cd 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -452,8 +452,8 @@ main(int argc, char *argv[])
+      * "backup_fec" unconditionally; see that file's parse_scheduler_name). */
+     int sched_lookup = mqvpn_sched_from_name(eff_scheduler);
+     if (sched_lookup < 0) {
+-        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', or "
+-                        "'backup_fec'\n");
++        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'wlb_udp_pin', "
++                        "'volparossa_edt', or 'backup_fec'\n");
+         return 1;
+     }
+     int scheduler = sched_lookup;
+diff --git a/src/mqvpn_conn_settings.c b/src/mqvpn_conn_settings.c
+index 5ac1b59..190e99f 100644
+--- a/src/mqvpn_conn_settings.c
++++ b/src/mqvpn_conn_settings.c
+@@ -37,6 +37,9 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
+     }
+ 
+     switch (sched) {
++    case MQVPN_SCHED_VOLPAROSSA_EDT:
++        cs->scheduler_callback = xqc_volparossa_edt_scheduler_cb;
++        break;
+     case MQVPN_SCHED_WLB:
+     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
+     case MQVPN_SCHED_BACKUP_FEC:
+diff --git a/src/mqvpn_sched_names.h b/src/mqvpn_sched_names.h
+index b82ed38..b681550 100644
+--- a/src/mqvpn_sched_names.h
++++ b/src/mqvpn_sched_names.h
+@@ -31,11 +31,12 @@
+  * (verified against src/main.c, src/mqvpn_config.c as of this table's
+  * introduction) — if an alias is ever added, add a row with the same
+  * canonical name reused for to_name() and a distinct string for from_name(). */
+-#define MQVPN_SCHED_LIST(X)                 \
+-    X(MQVPN_SCHED_MINRTT, "minrtt")         \
+-    X(MQVPN_SCHED_WLB, "wlb")               \
+-    X(MQVPN_SCHED_BACKUP_FEC, "backup_fec") \
+-    X(MQVPN_SCHED_WLB_UDP_PIN, "wlb_udp_pin")
++#define MQVPN_SCHED_LIST(X)                                  \
++    X(MQVPN_SCHED_MINRTT, "minrtt")                          \
++    X(MQVPN_SCHED_WLB, "wlb")                                \
++    X(MQVPN_SCHED_BACKUP_FEC, "backup_fec")                  \
++    X(MQVPN_SCHED_WLB_UDP_PIN, "wlb_udp_pin")                \
++    X(MQVPN_SCHED_VOLPAROSSA_EDT, "volparossa_edt")
+ 
+ #define MQVPN_CC_LIST(X)       \
+     X(MQVPN_CC_BBR2, "bbr2")   \
+diff --git a/src/platform/darwin/platform_darwin.c b/src/platform/darwin/platform_darwin.c
+index 7b004db..59ca622 100644
+--- a/src/platform/darwin/platform_darwin.c
++++ b/src/platform/darwin/platform_darwin.c
+@@ -610,6 +610,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
+     case 1: lib_sched = MQVPN_SCHED_WLB; break;
+     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+     case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
++    case 4: lib_sched = MQVPN_SCHED_VOLPAROSSA_EDT; break;
+     default: lib_sched = MQVPN_SCHED_MINRTT; break;
+     }
+     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+diff --git a/src/platform/linux/platform_linux.c b/src/platform/linux/platform_linux.c
+index 1e15006..daecde9 100644
+--- a/src/platform/linux/platform_linux.c
++++ b/src/platform/linux/platform_linux.c
+@@ -508,6 +508,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
+     case 1: lib_sched = MQVPN_SCHED_WLB; break;
+     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+     case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
++    case 4: lib_sched = MQVPN_SCHED_VOLPAROSSA_EDT; break;
+     default: lib_sched = MQVPN_SCHED_MINRTT; break;
+     }
+     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+@@ -1084,6 +1085,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
+     case 1: lib_sched = MQVPN_SCHED_WLB; break;
+     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+     case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
++    case 4: lib_sched = MQVPN_SCHED_VOLPAROSSA_EDT; break;
+     default: lib_sched = MQVPN_SCHED_MINRTT; break;
+     }
+     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+diff --git a/src/platform/windows/platform_windows.c b/src/platform/windows/platform_windows.c
+index b4cfecc..35485e8 100644
+--- a/src/platform/windows/platform_windows.c
++++ b/src/platform/windows/platform_windows.c
+@@ -577,6 +577,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
+     case 1: lib_sched = MQVPN_SCHED_WLB; break;
+     case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+     case 3: lib_sched = MQVPN_SCHED_WLB_UDP_PIN; break;
++    case 4: lib_sched = MQVPN_SCHED_VOLPAROSSA_EDT; break;
+     default: lib_sched = MQVPN_SCHED_MINRTT; break;
+     }
+     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+diff --git a/src/vpn_client.h b/src/vpn_client.h
+index 668ba71..e85586a 100644
+--- a/src/vpn_client.h
++++ b/src/vpn_client.h
+@@ -23,7 +23,7 @@ typedef struct mqvpn_client_cfg_s {
+     int log_level;               /* mqvpn_log_level_t */
+     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
+     int n_paths;          /* number of path interfaces (0 = single-path) */
+-    int scheduler;        /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
++    int scheduler;        /* mqvpn_scheduler_t numeric value */
+     const char *auth_key; /* PSK for server authentication (NULL = no auth) */
+     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
+     int n_dns;                  /* number of DNS servers */
+diff --git a/src/vpn_server.h b/src/vpn_server.h
+index b8d4e07..3aed6ee 100644
+--- a/src/vpn_server.h
++++ b/src/vpn_server.h
+@@ -24,7 +24,7 @@ typedef struct mqvpn_server_cfg_s {
+     const char *cert_file;   /* TLS certificate path */
+     const char *key_file;    /* TLS private key path */
+     int log_level;           /* mqvpn_log_level_t */
+-    int scheduler;           /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
++    int scheduler;           /* mqvpn_scheduler_t numeric value */
+     const char *auth_key;    /* PSK for client authentication (NULL = no auth) */
+     const char *user_names[64];
+     const char *user_keys[64];
+diff --git a/tests/test_conn_settings.c b/tests/test_conn_settings.c
+index a0a87d6..e5cf825 100644
+--- a/tests/test_conn_settings.c
++++ b/tests/test_conn_settings.c
+@@ -114,6 +114,11 @@ test_propagation_scheduler(void)
+     mqvpn_build_conn_settings(&in, &cs);
+     ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+                   xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
++
++    in.scheduler = MQVPN_SCHED_VOLPAROSSA_EDT;
++    mqvpn_build_conn_settings(&in, &cs);
++    ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
++                  xqc_volparossa_edt_scheduler_cb.xqc_scheduler_get_path);
+     return 0;
+ }
+ 
+diff --git a/tests/test_flow_sched.c b/tests/test_flow_sched.c
+index 836b19e..6a52f2f 100644
+--- a/tests/test_flow_sched.c
++++ b/tests/test_flow_sched.c
+@@ -500,6 +500,7 @@ test_sched_mode_constants(void)
+     ASSERT_EQ(MQVPN_SCHED_WLB, 1);
+     ASSERT_EQ(MQVPN_SCHED_BACKUP_FEC, 2);
+     ASSERT_EQ(MQVPN_SCHED_WLB_UDP_PIN, 3);
++    ASSERT_EQ(MQVPN_SCHED_VOLPAROSSA_EDT, 4);
+     ASSERT_NEQ(MQVPN_SCHED_MINRTT, MQVPN_SCHED_WLB);
+ 
+     PASS();

@@ -177,6 +177,14 @@ impl DestinationRule {
         &self.permissions
     }
 
+    pub(crate) fn matches_dns_name(&self, normalized: &str) -> bool {
+        match &self.destination {
+            Destination::ExactDomain(domain) => domain == normalized,
+            Destination::WildcardDomain(suffix) => wildcard_matches(normalized, suffix),
+            Destination::ExactIp(_) => false,
+        }
+    }
+
     pub(crate) fn is_allowed(&self, request: &NormalizedRequest) -> bool {
         if self.permissions.binary_search(&request.permission).is_err() {
             return false;

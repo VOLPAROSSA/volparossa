@@ -10,7 +10,7 @@ use std::{
 use ipnet::Ipv6Net;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use volparossa_core::is_public_routable_ip;
+use volparossa_core::{is_local_lan_ip, is_public_routable_ip};
 
 /// Maximum relay paths in one v1 route context.
 pub const MAX_PATHS: u8 = 8;
@@ -80,7 +80,7 @@ impl fmt::Debug for WireGuardPublicKey {
     }
 }
 
-/// Public, route-specific UDP endpoint safe for a signed control message.
+/// Route-specific UDP endpoint safe for an explicitly scoped signed control message.
 ///
 /// This is an underlay address used by the remote `WireGuard` peer, not one of
 /// the deterministic private overlay addresses carried inside the tunnel.
@@ -119,6 +119,41 @@ impl PublicWireGuardEndpoint {
             underlay_ip,
             listen_port,
         })
+    }
+
+    /// Construct an explicitly local endpoint after its on-link binding has been verified.
+    ///
+    /// This validates address shape only; the privileged helper separately proves the local
+    /// interface, assigned source and exact peer route. It does not create public reachability.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero keys/ports and addresses outside RFC1918 IPv4 or IPv6 ULA.
+    pub fn new_direct_local_lan(
+        public_key: WireGuardPublicKey,
+        underlay_ip: IpAddr,
+        listen_port: u16,
+    ) -> Result<Self, WireGuardError> {
+        if public_key.as_bytes() == &[0; 32] {
+            return Err(WireGuardError::InvalidTopology);
+        }
+        if !is_local_lan_ip(underlay_ip) {
+            return Err(WireGuardError::InvalidUnderlayAddress);
+        }
+        if listen_port == 0 {
+            return Err(WireGuardError::InvalidListenPort);
+        }
+        Ok(Self {
+            public_key,
+            underlay_ip,
+            listen_port,
+        })
+    }
+
+    /// Whether the endpoint requires explicit local-LAN scope and on-link route proof.
+    #[must_use]
+    pub fn is_local_lan(self) -> bool {
+        is_local_lan_ip(self.underlay_ip)
     }
 
     /// Public key configured on the route-specific interface.
@@ -635,7 +670,8 @@ impl PublicPathPlan {
             return Err(WireGuardError::InvalidPathId);
         }
         let expected_prefix = overlay_prefix(self.route_context_id, self.path_id)?;
-        if self.prefix != expected_prefix || self.addresses != overlay_addresses(expected_prefix) {
+        if self.prefix != expected_prefix || self.addresses != addresses_in_prefix(expected_prefix)
+        {
             return Err(WireGuardError::InvalidTopology);
         }
         let keys = [
@@ -667,7 +703,7 @@ impl PublicPathPlan {
         exit_key: WireGuardPublicKey,
     ) -> Result<Self, WireGuardError> {
         let prefix = overlay_prefix(route_context_id, path_id)?;
-        let addresses = overlay_addresses(prefix);
+        let addresses = addresses_in_prefix(prefix);
         let plan = Self {
             route_context_id,
             path_id,
@@ -683,7 +719,7 @@ impl PublicPathPlan {
     }
 }
 
-fn overlay_addresses(prefix: Ipv6Net) -> OverlayAddresses {
+fn addresses_in_prefix(prefix: Ipv6Net) -> OverlayAddresses {
     let base = prefix.network().segments();
     let address = |host| {
         Ipv6Addr::new(
@@ -696,6 +732,23 @@ fn overlay_addresses(prefix: Ipv6Net) -> OverlayAddresses {
         relay_exit: address(3),
         exit: address(4),
     }
+}
+
+/// Derives the complete canonical overlay address set for one route path.
+///
+/// This is the public address counterpart to [`overlay_prefix`]. Transport
+/// owners use it to prove that a helper-returned socket is bound to the Client
+/// or Exit endpoint inside the selected two-link path, rather than to an
+/// underlay address that could bypass the Relay.
+///
+/// # Errors
+///
+/// Returns an error when the route context or path identifier is invalid.
+pub fn overlay_addresses(
+    route_context_id: [u8; 16],
+    path_id: u8,
+) -> Result<OverlayAddresses, WireGuardError> {
+    overlay_prefix(route_context_id, path_id).map(addresses_in_prefix)
 }
 
 /// Derives the `fd76:6f6c:7061:.../112` ULA prefix without exposing identity material.
@@ -826,6 +879,39 @@ mod tests {
                 "{address} must fail closed",
             );
         }
+    }
+
+    #[test]
+    fn direct_local_lan_endpoints_remain_distinct_from_public_endpoints() {
+        let key = WireGuardPublicKey::from_bytes([1; 32]);
+        for address in ["10.0.0.2", "172.16.0.2", "192.168.1.2", "fd01::2"] {
+            let address = address.parse().unwrap();
+            assert!(PublicWireGuardEndpoint::new(key, address, 41_002).is_err());
+            let local = PublicWireGuardEndpoint::new_direct_local_lan(key, address, 41_002)
+                .expect("explicit local endpoint");
+            assert!(local.is_local_lan());
+        }
+        for address in [
+            "8.8.8.8",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.0.1",
+            "fe80::1",
+        ] {
+            assert!(
+                PublicWireGuardEndpoint::new_direct_local_lan(
+                    key,
+                    address.parse().unwrap(),
+                    41_002,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            PublicWireGuardEndpoint::new_direct_local_lan(key, "10.0.0.2".parse().unwrap(), 0,)
+                .is_err()
+        );
+        assert!(!endpoint(1, 41_002).is_local_lan());
     }
 
     #[test]
@@ -1005,7 +1091,7 @@ mod tests {
         let second_prefix = overlay_prefix(route, 2).expect("second path");
         assert_ne!(first_prefix, second_prefix);
         assert_eq!(first_prefix.prefix_len(), 112);
-        let addresses = overlay_addresses(first_prefix);
+        let addresses = addresses_in_prefix(first_prefix);
         assert_ne!(addresses.client, addresses.exit);
     }
 

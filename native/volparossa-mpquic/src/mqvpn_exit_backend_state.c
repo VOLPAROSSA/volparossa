@@ -4,6 +4,11 @@
 
 #include <string.h>
 
+_Static_assert(
+    sizeof(((vmp_mqvpn_exit_backend_state_t *)0)->queue) <=
+        VMP_MQVPN_EXIT_MAX_BYTES,
+    "Exit FIFO storage exceeds its hard byte bound");
+
 static const uint8_t VMP_EXIT_POOL_IPV4[4] = {10U, 76U, 0U, 0U};
 static const uint8_t VMP_EXIT_SERVER_IPV4[4] = {10U, 76U, 0U, 1U};
 static const uint8_t VMP_EXIT_SERVER_IPV6[16] = {
@@ -27,10 +32,23 @@ static void secure_zero(void *memory, size_t length)
 static bool memory_is_zero(const void *memory, size_t length)
 {
     const uint8_t *bytes = memory;
-    for (size_t index = 0U; index < length; ++index) {
-        if (bytes[index] != 0U) return false;
+    uint64_t combined = 0U;
+    /* Scan the entire supplied range, including the exact tail. memcpy keeps
+     * word loads valid for unaligned byte arrays and any object representation;
+     * checking the remaining length first prevents reading beyond the object.
+     * This preserves every FIFO zero check without a bytewise branch per byte. */
+    while (length >= sizeof(uint64_t)) {
+        uint64_t word;
+        memcpy(&word, bytes, sizeof(word));
+        combined |= word;
+        bytes += sizeof(word);
+        length -= sizeof(word);
     }
-    return true;
+    while (length > 0U) {
+        combined |= *bytes++;
+        --length;
+    }
+    return combined == 0U;
 }
 
 static bool memory_ranges_overlap(const void *left, size_t left_length,

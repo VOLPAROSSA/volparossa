@@ -1056,6 +1056,38 @@ static void test_corruption_is_invariant_before_arithmetic(void)
     expect_wiped(&state);
 }
 
+static void test_unused_fifo_zero_checks_cover_word_and_slot_edges(void)
+{
+    const size_t slots[] = {
+        0U, VMP_MQVPN_EXIT_MAX_PACKETS / 2U,
+        VMP_MQVPN_EXIT_MAX_PACKETS - 1U,
+    };
+    for (size_t slot = 0U; slot < sizeof(slots) / sizeof(slots[0]); ++slot) {
+        for (size_t edge = 0U; edge < 2U; ++edge) {
+            for (size_t byte = 0U; byte < 2U * sizeof(uint64_t); ++byte) {
+                vmp_mqvpn_exit_backend_state_t state;
+                advance_to_connected(&state, false);
+                uint8_t *entry = (uint8_t *)&state.queue[slots[slot]];
+                const size_t offset = edge == 0U ? byte :
+                    sizeof(state.queue[slots[slot]]) - 1U - byte;
+                /* Include every byte lane and the final object byte: a zero
+                 * check must reject stale data anywhere in an unused slot. */
+                entry[offset] = 0x80U;
+                bool listening = true, connected = true;
+                uint32_t session_id = 99U;
+                vmp_mqvpn_exit_assignment_t assignment;
+                memset(&assignment, 0xa5, sizeof(assignment));
+                assert(!vmp_mqvpn_exit_backend_snapshot(
+                    &state, &listening, &connected, &session_id, &assignment));
+                assert(!listening && !connected && session_id == 0U);
+                assert(memory_is_zero(&assignment, sizeof(assignment)));
+                assert(state.terminal == VMP_MQVPN_EXIT_TERMINAL_INVARIANT);
+                expect_wiped(&state);
+            }
+        }
+    }
+}
+
 static void test_disconnect_and_teardown_never_rearm(void)
 {
     vmp_mqvpn_exit_backend_state_t state;
@@ -1122,6 +1154,7 @@ int main(void)
     test_packet_rejections_fail_closed();
     test_overflow_is_sticky_and_atomic();
     test_corruption_is_invariant_before_arithmetic();
+    test_unused_fifo_zero_checks_cover_word_and_slot_edges();
     test_disconnect_and_teardown_never_rearm();
     puts("mqvpn exit backend state tests passed");
     return 0;

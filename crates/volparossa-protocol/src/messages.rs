@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use prost::Message;
 use sha2::{Digest, Sha256};
-use volparossa_core::{OperatorId, is_public_routable_ip};
+use volparossa_core::{OperatorId, is_local_lan_ip, is_public_routable_ip};
 
 use crate::envelope::fixed_array;
 use crate::{
@@ -74,6 +74,20 @@ pub enum ControlMessageType {
     NativeProbeExitResult = 24,
     /// Relay-signed endpoint-free result containing the exact nested Exit result.
     NativeProbeRelayResult = 25,
+    /// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+    NativeRouteCredentialDelivery = 26,
+    /// Adjacent receiving Relay's short-lived aggregate-share instruction to its sending Exit.
+    AdjacentReceiveBudget = 27,
+    /// Exit-signed acknowledgement of one exact installed adjacent receive budget.
+    AdjacentReceiveBudgetReceipt = 28,
+    /// Client-session-signed retirement of one exact retained route reservation.
+    RouteRetire = 29,
+    /// Concrete remote owner's acknowledgement of one exact retirement request.
+    RetirementReceipt = 30,
+    /// Authenticated cache-only positive DNSSEC query, never a DHT key.
+    DnsCacheQuery = 31,
+    /// Correlated opaque DNSSEC proof; peer signatures do not establish DNS authority.
+    DnsCacheReply = 32,
 }
 
 /// Data transport authorized by a reservation.
@@ -123,6 +137,24 @@ pub struct AdvertisementCapabilities {
 
 /// Signed route-specific `WireGuard` underlay endpoint.
 #[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum UnderlayScope {
+    PublicInternet = 0,
+    DirectLocalLan = 1,
+}
+
+/// Declared available uplink; never a runtime proof of Internet access.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum AdvertisementUplink {
+    IndependentInternet = 0,
+    LocalOnly = 1,
+}
+
+/// Signed route-specific `WireGuard` underlay endpoint.
+#[allow(missing_docs)]
 #[derive(Clone, PartialEq, Message)]
 pub struct WireguardEndpoint {
     #[prost(bytes = "vec", tag = "1")]
@@ -131,20 +163,29 @@ pub struct WireguardEndpoint {
     pub underlay_ip: Vec<u8>,
     #[prost(uint32, tag = "3")]
     pub listen_port: u32,
+    /// Local scope requires separate helper-owned on-link proof for the exact peer and lease.
+    #[prost(enumeration = "UnderlayScope", tag = "4")]
+    pub underlay_scope: i32,
 }
 
 impl WireguardEndpoint {
-    /// Validate the fixed key, publicly routable address and explicit non-zero port.
+    /// Validate the key, explicitly scoped address classification and non-zero port.
     ///
     /// # Errors
     ///
     /// Returns an invalid-field error for a zero/incorrect key, non-canonical
-    /// IP bytes, an IANA special-purpose/non-public address, or invalid port.
+    /// IP bytes, an unknown/mismatched scope, prohibited address, or invalid port. A successful
+    /// local classification does not authorize a network operation or prove on-link adjacency.
     pub fn validate(&self, field: &'static str) -> Result<(), ProtocolError> {
         require_nonzero_length::<KEY_LENGTH>(&self.public_key, field)?;
         let address =
             parse_ip_bytes(&self.underlay_ip).ok_or(ProtocolError::InvalidField(field))?;
-        if !is_public_routable_ip(address) {
+        let allowed = match UnderlayScope::try_from(self.underlay_scope) {
+            Ok(UnderlayScope::PublicInternet) => is_public_routable_ip(address),
+            Ok(UnderlayScope::DirectLocalLan) => is_local_lan_ip(address),
+            Err(_) => false,
+        };
+        if !allowed {
             return Err(ProtocolError::InvalidField(field));
         }
         validate_port(self.listen_port, field)
@@ -199,6 +240,8 @@ pub struct AdvertisementNetwork {
     pub ipv6_prefix_hint: String,
     #[prost(string, tag = "6")]
     pub operator_id: String,
+    #[prost(enumeration = "AdvertisementUplink", tag = "7")]
+    pub uplink: i32,
 }
 
 /// Locally observed quality claims represented in integer parts per million.
@@ -320,6 +363,58 @@ pub struct NativeRouteIdentity {
     pub client_native_instance_id: Vec<u8>,
     #[prost(bytes = "vec", tag = "7")]
     pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub credential_hpke_public_key: Vec<u8>,
+}
+
+/// Public authenticated associated data for one route bearer HPKE ciphertext.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialScope {
+    #[prost(bytes = "vec", tag = "1")]
+    pub reservation_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub route_context_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub finalize_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub client_session_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub client_session_public_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub auth_commitment: Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub certificate_sha256: Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    pub spki_sha256: Vec<u8>,
+    #[prost(uint64, tag = "10")]
+    pub masque_context_id: u64,
+    #[prost(bytes = "vec", tag = "11")]
+    pub client_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub exit_native_instance_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "13")]
+    pub credential_hpke_public_key: Vec<u8>,
+    #[prost(uint64, tag = "14")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "15")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "16")]
+    pub nonce: Vec<u8>,
+}
+
+/// Client-session-signed opaque RFC 9180 delivery of one native route bearer.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct NativeRouteCredentialDelivery {
+    #[prost(message, optional, tag = "1")]
+    pub scope: Option<NativeRouteCredentialScope>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub encapsulated_key: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub ciphertext: Vec<u8>,
 }
 
 /// Exit-signed authorization for one relay path.
@@ -441,6 +536,297 @@ pub struct RelayReservation {
     /// SHA-256 of the exact canonical client-session-signed relay request accepted by this relay.
     #[prost(bytes = "vec", tag = "30")]
     pub signed_client_relay_request_sha256: Vec<u8>,
+    /// This Relay requires an exact short-lived sender budget before its Exit-facing leg activates.
+    #[prost(bool, tag = "31")]
+    pub receive_budget_required: bool,
+}
+
+/// Maximum lifetime and remaining validity of an adjacent sender budget.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS: u64 = 5_000;
+/// Largest permitted single-queue burst; it is not an additional sustained-rate allowance.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES: u32 = 65_536;
+/// Largest signed adjacent budget envelope accepted before decoding.
+pub const MAX_ADJACENT_RECEIVE_BUDGET_BYTES: usize = 2_048;
+
+/// Exact direction of the first cooperative download-sharing datapath.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum AdjacentReceiveLeg {
+    /// No leg was selected.
+    Unspecified = 0,
+    /// The Exit sends protected outer-link traffic toward its directly adjacent data Relay.
+    ExitToRelay = 1,
+}
+
+/// A receiving Relay's signed rate for one exact existing Exit-facing reservation leg.
+///
+/// The receiver splits ONE aggregate allowance across these messages. A zero rate closes the
+/// sender queue; it never means unlimited. No application address or client identity is added.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct AdjacentReceiveBudget {
+    #[prost(bytes = "vec", tag = "1")]
+    pub reservation_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub route_context_id: Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    pub path_id: u32,
+    #[prost(bytes = "vec", tag = "4")]
+    pub receiver_relay_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub sender_exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub relay_reservation_sha256: Vec<u8>,
+    #[prost(enumeration = "AdjacentReceiveLeg", tag = "7")]
+    pub leg: i32,
+    #[prost(uint64, tag = "8")]
+    pub sequence: u64,
+    #[prost(uint64, tag = "9")]
+    pub rate_bytes_per_second: u64,
+    #[prost(uint32, tag = "10")]
+    pub burst_bytes: u32,
+    #[prost(uint64, tag = "11")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "12")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "13")]
+    pub nonce: Vec<u8>,
+}
+
+/// Exact sending Exit's acknowledgement, not a remote attestation of actual packet delivery.
+#[allow(missing_docs)]
+#[derive(Clone, PartialEq, Message)]
+pub struct AdjacentReceiveBudgetReceipt {
+    #[prost(bytes = "vec", tag = "1")]
+    pub receiver_relay_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub sender_exit_node_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_budget_sha256: Vec<u8>,
+    #[prost(uint64, tag = "4")]
+    pub sequence: u64,
+    #[prost(uint64, tag = "5")]
+    pub rate_bytes_per_second: u64,
+    #[prost(uint32, tag = "6")]
+    pub burst_bytes: u32,
+    #[prost(uint64, tag = "7")]
+    pub created_at_ms: u64,
+    #[prost(uint64, tag = "8")]
+    pub expires_at_ms: u64,
+    #[prost(bytes = "vec", tag = "9")]
+    pub nonce: Vec<u8>,
+}
+
+fn validate_adjacent_budget_bounds(
+    sequence: u64,
+    rate: u64,
+    burst: u32,
+) -> Result<(), ProtocolError> {
+    if sequence == 0
+        || rate > MAX_RATE_MBPS * 125_000
+        || !(1..=MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES).contains(&burst)
+    {
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive budget bounds",
+        ));
+    }
+    Ok(())
+}
+
+impl ControlPayload for AdjacentReceiveBudget {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::AdjacentReceiveBudget;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        require_nonzero_length::<ID_LENGTH>(&self.reservation_id, "budget.reservation_id")?;
+        require_nonzero_length::<ID_LENGTH>(&self.route_context_id, "budget.route_context_id")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.receiver_relay_node_id, "budget.receiver")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.sender_exit_node_id, "budget.sender")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.relay_reservation_sha256, "budget.grant_hash")?;
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "budget.nonce")?;
+        if !(1..=8).contains(&self.path_id)
+            || self.leg != AdjacentReceiveLeg::ExitToRelay as i32
+            || self.receiver_relay_node_id == self.sender_exit_node_id
+        {
+            return Err(ProtocolError::InvalidField("adjacent receive budget scope"));
+        }
+        validate_adjacent_budget_bounds(
+            self.sequence,
+            self.rate_bytes_per_second,
+            self.burst_bytes,
+        )?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            "adjacent receive budget lifetime",
+        )
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        validate_signed_fields(
+            &self.receiver_relay_node_id,
+            self.created_at_ms,
+            self.expires_at_ms,
+            &self.nonce,
+            envelope,
+            "adjacent receive budget envelope",
+        )
+    }
+}
+
+impl ControlPayload for AdjacentReceiveBudgetReceipt {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::AdjacentReceiveBudgetReceipt;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.receiver_relay_node_id,
+            "budget receipt.receiver",
+        )?;
+        require_nonzero_length::<HASH_LENGTH>(&self.sender_exit_node_id, "budget receipt.sender")?;
+        require_nonzero_length::<HASH_LENGTH>(&self.signed_budget_sha256, "budget receipt.hash")?;
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "budget receipt.nonce")?;
+        if self.receiver_relay_node_id == self.sender_exit_node_id {
+            return Err(ProtocolError::InvalidField(
+                "adjacent receive receipt actors",
+            ));
+        }
+        validate_adjacent_budget_bounds(
+            self.sequence,
+            self.rate_bytes_per_second,
+            self.burst_bytes,
+        )?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            "adjacent receive receipt lifetime",
+        )
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        validate_signed_fields(
+            &self.sender_exit_node_id,
+            self.created_at_ms,
+            self.expires_at_ms,
+            &self.nonce,
+            envelope,
+            "adjacent receive receipt envelope",
+        )
+    }
+}
+
+/// Verify a fresh adjacent budget against both original reservation signatures.
+///
+/// The caller additionally binds the grant to its exact retained helper lease and authenticated
+/// Relay connection. `previous_sequence` belongs to that lease, including after a budget expires.
+/// Revalidating the retained grant does not re-admit it or reset its lifetime/replay authority.
+///
+/// # Errors
+/// Rejects malformed/signature/replay/TTL failures, non-opted-in grants, changed actors, grant,
+/// context or path, excessive rate, and any non-increasing sequence.
+pub fn verify_adjacent_receive_budget(
+    encoded: &[u8],
+    signed_relay_reservation: &[u8],
+    now_ms: u64,
+    previous_sequence: u64,
+    replay: &mut ReplayCache,
+) -> Result<VerifiedControlMessage<AdjacentReceiveBudget>, ProtocolError> {
+    if encoded.len() > MAX_ADJACENT_RECEIVE_BUDGET_BYTES {
+        return Err(ProtocolError::Oversized {
+            what: "adjacent receive budget",
+            maximum: MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+        });
+    }
+    let (grant, _) = verify_relay_reservation(
+        signed_relay_reservation,
+        now_ms,
+        TimePolicy::default(),
+        &mut ReplayCache::new(2)?,
+    )?;
+    let verified = verify_control_message::<AdjacentReceiveBudget>(
+        encoded,
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            ..TimePolicy::default()
+        },
+        replay,
+    )?;
+    let budget = verified.message();
+    let reservation = grant.message();
+    let valid = reservation.receive_budget_required
+        && verified.sender_public_key() == grant.sender_public_key()
+        && budget.receiver_relay_node_id == reservation.relay_node_id
+        && budget.sender_exit_node_id == reservation.exit_node_id
+        && budget.reservation_id == reservation.reservation_id
+        && budget.route_context_id == reservation.route_context_id
+        && budget.path_id == reservation.path_id
+        && budget.relay_reservation_sha256.as_slice()
+            == Sha256::digest(signed_relay_reservation).as_slice()
+        && budget.sequence > previous_sequence
+        && budget.rate_bytes_per_second <= reservation.maximum_down_mbps * 125_000
+        && budget.expires_at_ms <= grant.expires_at_ms()
+        && budget.expires_at_ms.saturating_sub(now_ms) <= MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS;
+    if !valid {
+        let _ = replay.rollback(verified.sender_id(), verified.nonce());
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive budget grant binding",
+        ));
+    }
+    Ok(verified)
+}
+
+/// Verify the sending Exit's receipt against the exact signed budget and original grant.
+///
+/// # Errors
+/// Rejects an unrelated signer, scope, sequence, rate, burst, hash, or expiry, as well as the
+/// ordinary signature/canonical/replay/TTL failures. A receipt never extends the budget deadline.
+pub fn verify_adjacent_receive_budget_receipt(
+    encoded: &[u8],
+    signed_budget: &[u8],
+    signed_relay_reservation: &[u8],
+    now_ms: u64,
+    replay: &mut ReplayCache,
+) -> Result<VerifiedControlMessage<AdjacentReceiveBudgetReceipt>, ProtocolError> {
+    if encoded.len() > MAX_ADJACENT_RECEIVE_BUDGET_BYTES {
+        return Err(ProtocolError::Oversized {
+            what: "adjacent receive receipt",
+            maximum: MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+        });
+    }
+    let budget = verify_adjacent_receive_budget(
+        signed_budget,
+        signed_relay_reservation,
+        now_ms,
+        0,
+        &mut ReplayCache::new(1)?,
+    )?;
+    let receipt = verify_control_message::<AdjacentReceiveBudgetReceipt>(
+        encoded,
+        now_ms,
+        TimePolicy {
+            maximum_lifetime_ms: MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS,
+            ..TimePolicy::default()
+        },
+        replay,
+    )?;
+    let request = budget.message();
+    let response = receipt.message();
+    if response.receiver_relay_node_id != request.receiver_relay_node_id
+        || response.sender_exit_node_id != request.sender_exit_node_id
+        || response.signed_budget_sha256.as_slice() != Sha256::digest(signed_budget).as_slice()
+        || response.sequence != request.sequence
+        || response.rate_bytes_per_second != request.rate_bytes_per_second
+        || response.burst_bytes != request.burst_bytes
+        || response.expires_at_ms != request.expires_at_ms
+        || response.created_at_ms < request.created_at_ms
+    {
+        let _ = replay.rollback(receipt.sender_id(), receipt.nonce());
+        return Err(ProtocolError::InvalidField(
+            "adjacent receive receipt binding",
+        ));
+    }
+    Ok(receipt)
 }
 
 /// Client-session-signed return of one verified relay grant to the selected exit.
@@ -549,6 +935,8 @@ pub struct OpenTcp {
     pub expires_at_ms: u64,
     #[prost(bytes = "vec", tag = "9")]
     pub nonce: Vec<u8>,
+    #[prost(bytes = "vec", tag = "10")]
+    pub destination_ip: Vec<u8>,
 }
 
 /// Client-signed authorization pinning one UDP flow to one destination tuple.
@@ -616,6 +1004,7 @@ impl ControlPayload for NodeAdvertisement {
             self.network
                 .as_ref()
                 .ok_or(ProtocolError::InvalidField("advertisement.network"))?,
+            roles,
         )?;
         validate_quality(
             self.quality
@@ -746,7 +1135,96 @@ impl NativeRouteIdentity {
             &self.exit_native_instance_id,
             "native_route_identity.exit_native_instance_id",
         )?;
+        require_nonzero_length::<KEY_LENGTH>(
+            &self.credential_hpke_public_key,
+            "native_route_identity.credential_hpke_public_key",
+        )?;
         Ok(())
+    }
+}
+
+impl NativeRouteCredentialScope {
+    pub(crate) fn validate_fields(&self) -> Result<(), ProtocolError> {
+        validate_reservation_ids(
+            &self.reservation_id,
+            &self.route_context_id,
+            &self.client_session_id,
+        )?;
+        require_nonzero_length::<ID_LENGTH>(&self.finalize_id, "native credential finalize_id")?;
+        require_nonzero_length::<HASH_LENGTH>(
+            &self.exit_node_id,
+            "native credential exit_node_id",
+        )?;
+        validate_session_binding(&self.client_session_id, &self.client_session_public_key)?;
+        for (value, field) in [
+            (&self.auth_commitment, "native credential auth_commitment"),
+            (
+                &self.certificate_sha256,
+                "native credential certificate_sha256",
+            ),
+            (&self.spki_sha256, "native credential spki_sha256"),
+            (
+                &self.client_native_instance_id,
+                "native credential client instance",
+            ),
+            (
+                &self.exit_native_instance_id,
+                "native credential exit instance",
+            ),
+            (
+                &self.credential_hpke_public_key,
+                "native credential HPKE public key",
+            ),
+        ] {
+            require_nonzero_length::<HASH_LENGTH>(value, field)?;
+        }
+        if self.masque_context_id == 0 || self.masque_context_id > crate::MAX_MASQUE_CONTEXT_ID {
+            return Err(ProtocolError::InvalidField(
+                "native credential MASQUE context",
+            ));
+        }
+        require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "native credential nonce")?;
+        validate_lifetime(
+            self.created_at_ms,
+            self.expires_at_ms,
+            MAX_RESERVATION_LIFETIME_MS,
+            "native credential lifetime",
+        )
+    }
+}
+
+impl ControlPayload for NativeRouteCredentialDelivery {
+    const MESSAGE_TYPE: ControlMessageType = ControlMessageType::NativeRouteCredentialDelivery;
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        scope.validate_fields()?;
+        require_nonzero_length::<{ crate::NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH }>(
+            &self.encapsulated_key,
+            "native credential encapsulated key",
+        )?;
+        if self.ciphertext.len() != crate::NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH {
+            return Err(ProtocolError::InvalidField("native credential ciphertext"));
+        }
+        Ok(())
+    }
+
+    fn validate_envelope(&self, envelope: &SignedEnvelope) -> Result<(), ProtocolError> {
+        let scope = self
+            .scope
+            .as_ref()
+            .ok_or(ProtocolError::InvalidField("native credential scope"))?;
+        validate_signed_fields(
+            &scope.client_session_id,
+            scope.created_at_ms,
+            scope.expires_at_ms,
+            &scope.nonce,
+            envelope,
+            "native credential envelope binding",
+        )
     }
 }
 
@@ -997,7 +1475,16 @@ impl ControlPayload for OpenTcp {
             &self.client_ephemeral_id,
             "open_tcp.client_ephemeral_id",
         )?;
-        validate_canonical_hostname(&self.hostname)?;
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("open_tcp destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip)
+                .ok_or(ProtocolError::InvalidField("open_tcp.destination_ip"))?;
+        }
         validate_port(self.port, "open_tcp.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "open_tcp.policy_hash")?;
         require_nonzero_length::<NONCE_LENGTH>(&self.nonce, "open_tcp.nonce")?;
@@ -1034,16 +1521,16 @@ impl ControlPayload for UdpFlowAuthorization {
             &self.client_ephemeral_id,
             "udp_authorization.client_ephemeral_id",
         )?;
-        match (self.hostname.is_empty(), self.destination_ip.is_empty()) {
-            (false, true) => validate_canonical_hostname(&self.hostname)?,
-            (true, false) => {
-                parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
-                    "udp_authorization.destination_ip",
-                ))?;
-            }
-            _ => {
-                return Err(ProtocolError::InvalidField("udp_authorization destination"));
-            }
+        if self.hostname.is_empty() && self.destination_ip.is_empty() {
+            return Err(ProtocolError::InvalidField("udp_authorization destination"));
+        }
+        if !self.hostname.is_empty() {
+            validate_canonical_hostname(&self.hostname)?;
+        }
+        if !self.destination_ip.is_empty() {
+            parse_ip_bytes(&self.destination_ip).ok_or(ProtocolError::InvalidField(
+                "udp_authorization.destination_ip",
+            ))?;
         }
         validate_port(self.port, "udp_authorization.port")?;
         require_nonzero_length::<HASH_LENGTH>(&self.policy_hash, "udp_authorization.policy_hash")?;
@@ -1515,7 +2002,22 @@ fn validate_capacity(
     Ok(())
 }
 
-fn validate_network(network: &AdvertisementNetwork) -> Result<(), ProtocolError> {
+fn validate_network(
+    network: &AdvertisementNetwork,
+    roles: &AdvertisementRoles,
+) -> Result<(), ProtocolError> {
+    let uplink = AdvertisementUplink::try_from(network.uplink)
+        .map_err(|_| ProtocolError::InvalidField("advertisement.network.uplink"))?;
+    if uplink == AdvertisementUplink::LocalOnly
+        && (roles.exit
+            || network.asn != 0
+            || !network.ipv4_prefix_hint.is_empty()
+            || !network.ipv6_prefix_hint.is_empty())
+    {
+        return Err(ProtocolError::InvalidField(
+            "advertisement.network.local_only",
+        ));
+    }
     validate_ascii_text(&network.region, 32, "advertisement.network.region")?;
     OperatorId::new(network.operator_id.clone())
         .map_err(|_| ProtocolError::InvalidField("advertisement.network.operator_id"))?;
@@ -1605,7 +2107,10 @@ fn validate_canonical_hostname(hostname: &str) -> Result<(), ProtocolError> {
     validate_canonical_dns_name(hostname, "hostname")
 }
 
-fn validate_canonical_dns_name(hostname: &str, field: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_canonical_dns_name(
+    hostname: &str,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
     if hostname.is_empty()
         || hostname.len() > 253
         || hostname.ends_with('.')
@@ -1645,7 +2150,7 @@ fn validate_ascii_text(
     Ok(())
 }
 
-fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
+pub(crate) fn validate_rate(rate: u64, field: &'static str) -> Result<(), ProtocolError> {
     if rate == 0 || rate > MAX_RATE_MBPS {
         return Err(ProtocolError::InvalidField(field));
     }

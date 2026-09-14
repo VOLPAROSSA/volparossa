@@ -5,7 +5,7 @@ mod control;
 mod initial;
 mod scheduler;
 
-pub use client::{NativeClient, NativeClientError};
+pub use client::{NativeClient, NativeClientError, VerifiedExitMpquicEndpoint};
 pub use control::{
     AUTH_SECRET_LEN, AddPath, ControlError, GetStatus, MAX_AUTH_SECRET,
     MAX_AUTHORIZATION_FUTURE_MS, MAX_CONTROL_FRAME, MAX_INNER_PACKET, MAX_MASQUE_CONTEXT_ID,
@@ -23,4 +23,4 @@ pub use scheduler::{
 };
 
 /// Native control API version spoken by this Rust release.
-pub const NATIVE_API_VERSION: u32 = 6;
+pub const NATIVE_API_VERSION: u32 = 7;

@@ -1,2 +1,3 @@
 third_party/rust/patches/*.patch -whitespace
 patches/*.patch -whitespace
+third_party/rust/licenses/registry-fallback/** whitespace=-blank-at-eof

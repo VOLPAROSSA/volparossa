@@ -5,8 +5,9 @@ use volparossa_protocol::{
     ClientSessionCapability, ExitCapacityHold, ExitCapacityHoldRequest, ExitConfirmationReceipt,
     ExitReservation, ExitReservationConfirmation, ExitReservationFinalizeRequest,
     NodeAdvertisement, OpenTcp, RelayAuthorization, RelayProbePermit, RelayProbePermitRequest,
-    RelayProbeResult, RelayReservation, RelayReservationRequest, ReplayCache, TimePolicy,
-    UdpFlowAuthorization, verify_control_message,
+    RelayProbeResult, RelayReservation, RelayReservationRequest, ReplayCache, RetirementReceipt,
+    RouteRetire, TimePolicy, UdpFlowAuthorization, route_retire_request_hash,
+    verify_control_message,
 };
 
 fn verify<T: volparossa_protocol::ControlPayload>(data: &[u8]) {
@@ -32,4 +33,7 @@ fuzz_target!(|data: &[u8]| {
     verify::<RelayProbeResult>(data);
     verify::<ExitReservationFinalizeRequest>(data);
     verify::<ExitConfirmationReceipt>(data);
+    verify::<RouteRetire>(data);
+    verify::<RetirementReceipt>(data);
+    let _ = route_retire_request_hash(data);
 });

@@ -13,6 +13,17 @@ if [ -e /etc/volparossa/config.yaml ]; then
 fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
+    # On upgrade, replace every process that was already active so no service
+    # continues running a deleted pre-upgrade executable. `try-restart` leaves
+    # deliberately disabled/stopped roles stopped and systemd orders the three
+    # jobs through the units' Before=/After= relationships.
+    if [ "${1:-}" = configure ] && [ -n "${2:-}" ] \
+        && systemctl show --property=Version --value >/dev/null 2>&1; then
+        systemctl try-restart \
+            volparossa-helper.service \
+            volparossa-mpquic.service \
+            volparossa-agent.service
+    fi
 fi
 
 # Services and volunteer roles are deliberately not enabled or started here.

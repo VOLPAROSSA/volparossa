@@ -1,11 +1,14 @@
 [advisories]
 version = 2
 yanked = "deny"
-# These versions match RustSec ranges, but their exact crates.io source and
-# minimal upstream security backports are verified before every advisory scan
-# by scripts/check-rust-dependencies.sh. They are not accepted as vulnerable
-# upstream artifacts; Debian 13's Rust 1.85 cannot compile their fixed releases.
 ignore = [
+  # Transitive netlink-packet-core 0.8.2 deliberately treats paste as finished rather than
+  # vulnerable; there is no security defect or compatible maintained replacement in its line.
+  "RUSTSEC-2024-0436",
+  # These versions match RustSec ranges, but their exact crates.io source and minimal upstream
+  # security backports are verified before every scan by scripts/check-rust-dependencies.sh.
+  # They are not accepted as vulnerable upstream artifacts; Debian 13's Rust 1.85 cannot compile
+  # their fixed releases.
   "RUSTSEC-2026-0009",
   "RUSTSEC-2026-0118",
   "RUSTSEC-2026-0119",
@@ -27,9 +30,7 @@ allow = [
   "BSL-1.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
-  # cargo-deny 0.18.3 parses SPDX License List 3.11 identifiers here; its deprecated alias
-  # matches the crate metadata's precise GPL-3.0-only expression without changing that metadata.
-  "GPL-3.0",
+  "GPL-3.0-only",
   "ISC",
   "MIT",
   "MPL-2.0",
@@ -45,4 +46,3 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
-

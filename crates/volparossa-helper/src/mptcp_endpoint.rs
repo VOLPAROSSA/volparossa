@@ -63,6 +63,7 @@ impl DerivedMptcpPath {
             address: self.specification.local_address().into(),
             if_index,
             flags: self.flags,
+            listener_port: None,
         };
         endpoint
             .validate()
@@ -454,6 +455,7 @@ mod tests {
             address: std::net::Ipv6Addr::from(address).into(),
             if_index: u32::from(id) + 10,
             flags,
+            listener_port: None,
         }
     }
 
@@ -474,6 +476,7 @@ mod tests {
             path_id: 1,
             mode: MptcpEndpointMode::SignalAndSubflow as i32,
             backup: true,
+            listener_port: 0,
         };
         let derived =
             derive_add_path(route, ContextRole::Client, &request, &links).expect("derived path");

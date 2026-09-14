@@ -88,17 +88,18 @@ and the disposable VM must be discarded.
 Package removal stops services but preserves `/var/lib/volparossa`, including the encrypted identity.
 See `docs/OPERATIONS.md` for scoped cleanup and explicit irreversible data removal.
 
-The packaged native systemd unit is not operational yet. API v6 adds role/process-instance
-preflight and exact request correlation, and moves client auth, TLS names, signed reservation scope,
-and the exit's bounded, unparsed in-memory PEM candidate material into expiring route-session
-messages. It accepts no static product secret from the launcher. `AddPath` and
-`StartExitSession` each consume exactly one
-operation-bound UDP descriptor, but SCM_RIGHTS and its
-request hash do not authenticate privileged-helper origin. A reviewed launcher remains blocked
-until the agent orchestrates separate role-specific service identities and control sockets (the
-current single same-UID unit/socket is correlation, not authentication against the agent), helper
-acquisition binds trusted descriptor namespace and assigned-address provenance end to end, and a
-reviewed exit backend cryptographically validates and consumes the supplied listener and in-memory
-material without secret argv, environment, or files. Until then, `--build`
-exits 77 before compilation, no candidate package is created, and the installed service set must
-not be enabled.
+The development package includes a native launcher that reads `roles.client` and `roles.exit`
+from the packaged configuration. A combined node starts two copies of the same fixed native
+executable, each retaining one immutable transport role: Client uses `VOLPAROSSA_MPQUIC_SOCKET`
+and Exit uses that path with `.exit` appended. Both workers belong to the same systemd control
+group. The launcher stops both on shutdown or worker failure; systemd can then restart the pair.
+The agent sends Client and Exit operations to their respective sockets. A service-only Exit
+retains the base socket, preserving role-isolated disposable development topologies. Nodes with
+neither role do not start a native process. Route credentials and TLS material are never passed
+through process arguments, environment, or files.
+
+This process wiring is not a claim of completed reciprocal-network acceptance or release
+security. `AddPath` and `StartExitSession` consume operation-bound UDP descriptors,
+but same-UID `SCM_RIGHTS` correlation still does not authenticate privileged-helper origin. Before
+release, separate role service identities/sockets and helper-derived descriptor namespace and
+assigned-address provenance remain required.

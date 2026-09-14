@@ -279,6 +279,7 @@ if(VMP_BUILD_DAEMON)
         volparossa_mpquic_request_binding
         volparossa_mpquic_daemon_socket
         volparossa_mpquic_mqvpn_backend_state
+        volparossa_mpquic_mqvpn_exit_backend_state
         volparossa_mpquic_tunnel_assignment
         "${VMP_MQVPN_LIBRARY}"
         "${VMP_LWIP_LIBRARY}"
@@ -312,6 +313,22 @@ if(VMP_BUILD_DAEMON)
             RUNTIME DESTINATION libexec/volparossa)
 
     if(BUILD_TESTING)
+        add_executable(test_volparossa_xquic_detected_loss
+            tests/test_xquic_detected_loss.c)
+        target_include_directories(test_volparossa_xquic_detected_loss SYSTEM PRIVATE
+            "${VMP_MQVPN_SOURCE_DIR}/third_party/xquic"
+            "${VMP_MQVPN_SOURCE_DIR}/third_party/xquic/include"
+            "${VMP_BORINGSSL_INCLUDE_DIR}")
+        target_link_libraries(test_volparossa_xquic_detected_loss PRIVATE
+            "${VMP_XQUIC_LIBRARY}" "${VMP_BORINGSSL_SSL_LIBRARY}"
+            "${VMP_BORINGSSL_CRYPTO_LIBRARY}" m stdc++ dl Threads::Threads)
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(test_volparossa_xquic_detected_loss PRIVATE
+                -Wall -Wextra -Werror -UNDEBUG)
+        endif()
+        add_test(NAME volparossa_xquic_detected_loss
+                 COMMAND test_volparossa_xquic_detected_loss)
+
         add_executable(test_volparossa_mpquic_request_binding
             tests/test_request_binding.c)
         target_link_libraries(test_volparossa_mpquic_request_binding

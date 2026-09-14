@@ -52,7 +52,7 @@ pub enum PreselectionDispatchError {
     /// The canonical request cannot yield the required target and address family.
     #[error("invalid preselection transport request")]
     Request,
-    /// No unique current authenticated connection proves the requested native family.
+    /// No exact current authenticated event connection proves the requested native family.
     #[error("preselection transport provenance is unavailable")]
     Provenance,
     /// A response arrival does not belong to this exact dispatch.
@@ -66,7 +66,7 @@ pub enum PreselectionDispatchError {
     Busy,
 }
 
-/// Affine owner of one exact sent client-hop request and its pre-send connection witness.
+/// Affine owner of one exact sent client-hop request and its connection-binding mode.
 #[must_use = "a client preselection dispatch must be bound or cancelled through its originating DiscoveryService"]
 pub struct ClientPreselectionDispatch {
     request_id: OutboundRequestId,
@@ -75,7 +75,16 @@ pub struct ClientPreselectionDispatch {
     instance: Arc<()>,
     sent_at: Instant,
     deadline: Instant,
-    witness: ConnectionWitness,
+    witness: ClientConnectionWitness,
+}
+
+/// Prefer an immediate exact lineage, but permit request-response to establish the authenticated
+/// connection when the selected Relay is not connected at dispatch time. The latter is still
+/// fail-closed at response binding: the sealed response must arrive on an exact live direct
+/// connection with the request-derived native family.
+enum ClientConnectionWitness {
+    PreSend(ConnectionWitness),
+    BindResponse(IpFamily),
 }
 
 /// Affine client-hop dispatch carrying its exact caller-owned attempt context.
@@ -200,7 +209,8 @@ pub struct ClientPreselectionTransportFreshnessProof {
 }
 
 impl ClientPreselectionTransportFreshnessProof {
-    /// Return the endpoint-free public prefix from the exact authenticated connection lineage.
+    /// Return the endpoint-free, scope-distinct prefix of the authenticated connection lineage.
+    /// Local scope is neither Internet-origin diversity nor privileged on-link authority.
     #[must_use]
     pub const fn observed_network_prefix(&self) -> ObservedNetworkPrefix {
         self.observed_network_prefix
@@ -269,7 +279,7 @@ pub fn consume_bound_client_preselection_transport_for_freshness(
     })
 }
 
-/// Affine owner of one exact relay-to-exit request and its pre-send connection witness.
+/// Affine owner of one exact relay-to-exit request and its connection-binding mode.
 #[must_use = "an upstream preselection dispatch must be bound or cancelled through its originating DiscoveryService"]
 pub struct UpstreamPreselectionDispatch {
     request_id: OutboundRequestId,
@@ -278,7 +288,12 @@ pub struct UpstreamPreselectionDispatch {
     instance: Arc<()>,
     sent_at: Instant,
     deadline: Instant,
-    witness: ConnectionWitness,
+    witness: UpstreamConnectionWitness,
+}
+
+enum UpstreamConnectionWitness {
+    PreSend(ConnectionWitness),
+    BindResponse(IpFamily),
 }
 
 /// Affine relay-to-exit dispatch carrying its exact caller-owned forwarding context.
@@ -394,9 +409,9 @@ impl DiscoveryService {
 
     /// Read-only admission check for a forwarded request before shared replay capacity is spent.
     ///
-    /// This deliberately proves only that the request is currently dispatchable over one unique
-    /// authenticated Exit connection. The real dispatch repeats every check and mints its own
-    /// immediate pre-send witness, so this preflight grants no response or transport authority.
+    /// This proves role, canonical request, exact Exit target and the unoccupied upstream slot.
+    /// It deliberately does not require an already-established Exit connection: request-response
+    /// may dial it, while the sealed response remains responsible for exact connection binding.
     pub(super) fn preflight_preselection_observation_upstream(
         &self,
         request: &UpstreamPreselectionObservationRequest,
@@ -413,14 +428,7 @@ impl DiscoveryService {
         typed_request
             .validate()
             .map_err(|_| PreselectionDispatchError::Request)?;
-        let (expected_peer_id, family) =
-            upstream_target_and_family(&typed_request, *self.local_peer_id())?;
-        let _ = self
-            .swarm
-            .behaviour()
-            .connection_provenance
-            .unique_witness(expected_peer_id, family)
-            .ok_or(PreselectionDispatchError::Provenance)?;
+        let _ = upstream_target_and_family(&typed_request, *self.local_peer_id())?;
         Ok(())
     }
 
@@ -503,16 +511,52 @@ impl DiscoveryService {
         Ok(context)
     }
 
+    /// Consume an outbound transport failure only when it belongs to the exact active
+    /// client-hop transaction, returning its unchanged caller context.
+    ///
+    /// A stale or foreign failure retains the complete transaction so its originating service
+    /// can still bind, cancel, or consume the matching event. This provides a terminal failure
+    /// seam without exposing a request-ID equality oracle on the affine dispatch itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a correlation error together with the exact unchanged transaction when the
+    /// service, authenticated peer, or request identifier does not match.
+    pub fn consume_preselection_observation_outbound_failure_with_context<Context>(
+        &mut self,
+        transaction: ClientPreselectionTransaction<Context>,
+        event_peer: PeerId,
+        event_request: OutboundRequestId,
+    ) -> Result<Context, ClientPreselectionCancelFailure<Context>> {
+        if !self.client_preselection_dispatch_is_active(&transaction.dispatch)
+            || transaction.dispatch.expected_peer_id != event_peer
+            || transaction.dispatch.request_id != event_request
+        {
+            return Err(ClientPreselectionCancelFailure {
+                transaction: Box::new(transaction),
+                error: PreselectionDispatchError::Correlation,
+            });
+        }
+        let ClientPreselectionTransaction {
+            dispatch: _,
+            context,
+        } = transaction;
+        self.preselection_transaction.client_active = None;
+        Ok(context)
+    }
+
     /// Send one canonical preselection observation over its request-derived authenticated peer.
     ///
-    /// The exact target and native family are decoded only from `request`. The connection witness
-    /// is minted immediately before the synchronous libp2p send, with no suspension point.
+    /// The exact target and native family are decoded only from `request`. An already-connected
+    /// Relay is witnessed immediately. Otherwise request-response may dial the selected Relay and
+    /// the sealed response connection is witnessed before the response can be consumed.
     ///
     /// # Errors
     ///
     /// Returns a detail-free error for an occupied single-dispatch slot, disabled client role,
     /// invalid request binding, unavailable wall or monotonic time, an expired effective deadline,
-    /// or unavailable unique direct connection provenance.
+    /// or an invalid request-derived target. Missing pre-send provenance is not itself terminal:
+    /// response binding still requires the exact authenticated event connection and native family.
     pub fn dispatch_preselection_observation(
         &mut self,
         request: ClientPreselectionObservationRequest,
@@ -566,7 +610,10 @@ impl DiscoveryService {
             .behaviour()
             .connection_provenance
             .unique_witness(expected_peer_id, family)
-            .ok_or(PreselectionDispatchError::Provenance)?;
+            .map_or(
+                ClientConnectionWitness::BindResponse(family),
+                ClientConnectionWitness::PreSend,
+            );
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -589,7 +636,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
-    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// monotonic arrival time, or a stale, closed, changed, or otherwise unavailable exact
     /// connection proof. A dispatch from another service cannot affect this service's slot. Once
     /// this service recognizes its own exact active dispatch, however, every sealed response is a
     /// terminal outcome and releases the slot before arrival correlation, time, or provenance is
@@ -717,6 +764,15 @@ impl DiscoveryService {
         if arrived_at_mono < sent_at || arrived_at_mono >= deadline {
             return Err(PreselectionDispatchError::Time);
         }
+        let witness = match witness {
+            ClientConnectionWitness::PreSend(witness) => witness,
+            ClientConnectionWitness::BindResponse(family) => self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .exact_witness(expected_peer_id, event_connection, family)
+                .ok_or(PreselectionDispatchError::Provenance)?,
+        };
         let observation = self
             .swarm
             .behaviour()
@@ -766,14 +822,16 @@ impl DiscoveryService {
     /// Send one unchanged forwarded Exit request over its request-derived authenticated exit.
     ///
     /// The exact exit target and native family are decoded only from `request`. The request must
-    /// name this service as its forwarding control relay. A connection witness is minted
-    /// immediately before the synchronous libp2p send, with no suspension point.
+    /// name this service as its forwarding control relay. An existing Exit connection is
+    /// witnessed before send; otherwise request-response may dial it and the sealed response
+    /// connection is witnessed before consumption.
     ///
     /// # Errors
     ///
     /// Returns a detail-free error for an occupied upstream slot, disabled relay role, invalid
     /// request/local-control binding, unavailable wall or monotonic time, an expired effective
-    /// deadline, or unavailable unique direct exit-connection provenance.
+    /// deadline, or invalid request/local-control binding. Missing pre-send provenance is allowed;
+    /// response binding still requires exact direct Exit-connection provenance.
     pub fn dispatch_preselection_observation_upstream(
         &mut self,
         request: UpstreamPreselectionObservationRequest,
@@ -825,7 +883,10 @@ impl DiscoveryService {
             .behaviour()
             .connection_provenance
             .unique_witness(expected_peer_id, family)
-            .ok_or(PreselectionDispatchError::Provenance)?;
+            .map_or(
+                UpstreamConnectionWitness::BindResponse(family),
+                UpstreamConnectionWitness::PreSend,
+            );
         let request_id = self
             .swarm
             .behaviour_mut()
@@ -869,7 +930,7 @@ impl DiscoveryService {
     /// # Errors
     ///
     /// Returns a detail-free error for a service-instance, peer, or request mismatch, an invalid
-    /// monotonic arrival time, or a stale, ambiguous, closed, changed, or otherwise unavailable
+    /// monotonic arrival time, or a stale, closed, changed, or otherwise unavailable exact
     /// exit-connection proof. Exact correlation consumes the upstream slot before later time or
     /// provenance checks.
     pub fn bind_preselection_observation_upstream_response(
@@ -1002,6 +1063,15 @@ impl DiscoveryService {
         if arrived_at_mono < sent_at || arrived_at_mono >= deadline {
             return Err(PreselectionDispatchError::Time);
         }
+        let witness = match witness {
+            UpstreamConnectionWitness::PreSend(witness) => witness,
+            UpstreamConnectionWitness::BindResponse(family) => self
+                .swarm
+                .behaviour()
+                .connection_provenance
+                .exact_witness(expected_peer_id, event_connection, family)
+                .ok_or(PreselectionDispatchError::Provenance)?,
+        };
         let observation = self
             .swarm
             .behaviour()
@@ -1223,7 +1293,7 @@ mod tests {
     };
 
     use crate::{
-        BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles,
+        BehaviourEvent, DiscoveryEvent, DiscoveryProtocolRoles, PreselectionResponderReject,
         preselection_wire::{
             ClientPreselectionObservationCodec, UpstreamPreselectionObservationCodec,
             client_preselection_observation_behaviour, upstream_preselection_observation_behaviour,
@@ -2115,7 +2185,9 @@ mod tests {
     #[tokio::test]
     async fn forwarded_request_never_uses_a_direct_exit_connection() {
         let created_at_ms = now_ms();
-        let control = actor(&identity::Keypair::generate_ed25519(), 11, created_at_ms);
+        let control_key = identity::Keypair::generate_ed25519();
+        let control_peer = control_key.public().to_peer_id();
+        let control = actor(&control_key, 11, created_at_ms);
         let exit_key = identity::Keypair::generate_ed25519();
         let exit = actor(&exit_key, 12, created_at_ms);
         let exit_peer = exit_key.public().to_peer_id();
@@ -2129,17 +2201,62 @@ mod tests {
             ObservationAddressFamily::Ipv4,
             created_at_ms,
         );
-        assert!(matches!(
-            service.dispatch_preselection_observation(
+        let dispatch = service
+            .dispatch_preselection_observation(
                 fixture.request,
-                Instant::now() + Duration::from_secs(1)
-            ),
-            Err(PreselectionDispatchError::Provenance)
-        ));
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("the request is queued for its control Relay, never the connected Exit");
+        assert_eq!(dispatch.expected_peer_id, control_peer);
+        service
+            .cancel_preselection_observation_dispatch(dispatch)
+            .expect("exact cancellation");
     }
 
     #[tokio::test]
-    async fn family_and_total_connection_count_gate_dispatch() {
+    async fn absent_connection_dispatches_and_binds_only_the_response_connection() {
+        let created_at_ms = now_ms();
+        let relay_key = identity::Keypair::generate_ed25519();
+        let relay = actor(&relay_key, 13, created_at_ms);
+        let peer = relay_key.public().to_peer_id();
+        let mut service = client_service(identity::Keypair::generate_ed25519());
+        let request = client_request(
+            PreselectionObservationRole::Relay,
+            relay,
+            None,
+            ObservationAddressFamily::Ipv4,
+            created_at_ms,
+        );
+
+        let dispatch = service
+            .dispatch_preselection_observation(
+                request.request,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("request-response may establish the selected Relay connection");
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        established(
+            &mut service,
+            peer,
+            CONNECTION,
+            &dialer("/ip4/1.1.1.8/tcp/443"),
+            0,
+        );
+        let _transport = service
+            .bind_preselection_observation_response_at(
+                dispatch,
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                sent_at,
+                now_ms(),
+            )
+            .expect("the sealed response connection supplies exact live provenance");
+    }
+
+    #[tokio::test]
+    async fn family_and_exact_event_connection_gate_response_binding() {
         let created_at_ms = now_ms();
         let relay_key = identity::Keypair::generate_ed25519();
         let relay = actor(&relay_key, 14, created_at_ms);
@@ -2155,10 +2272,22 @@ mod tests {
             ObservationAddressFamily::Ipv6,
             created_at_ms,
         );
-        assert!(matches!(
-            wrong_family.dispatch_preselection_observation(
+        let dispatch = wrong_family
+            .dispatch_preselection_observation(
                 request.request,
-                Instant::now() + Duration::from_secs(1)
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("dispatch can retain response-time binding");
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        assert!(matches!(
+            wrong_family.bind_preselection_observation_response_at(
+                dispatch,
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                sent_at,
+                now_ms(),
             ),
             Err(PreselectionDispatchError::Provenance)
         ));
@@ -2174,13 +2303,25 @@ mod tests {
             ObservationAddressFamily::Ipv4,
             created_at_ms,
         );
-        assert!(matches!(
-            multiple.dispatch_preselection_observation(
+        let dispatch = multiple
+            .dispatch_preselection_observation(
                 request.request,
-                Instant::now() + Duration::from_secs(1)
-            ),
-            Err(PreselectionDispatchError::Provenance)
-        ));
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("dispatch can retain response-time binding");
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        let transport = multiple
+            .bind_preselection_observation_response_at(
+                dispatch,
+                peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                sent_at,
+                now_ms(),
+            )
+            .expect("sealed response binds its exact authenticated connection");
+        drop(transport);
     }
 
     #[tokio::test]
@@ -3069,7 +3210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_change_close_and_new_sibling_each_invalidate_dispatch() {
+    async fn connection_change_and_close_invalidate_but_exact_sibling_does_not() {
         let (mut changed_service, _, relay, peer, old) = direct_context();
         let dispatch = dispatch_direct(&mut changed_service, relay);
         let request_id = dispatch.request_id;
@@ -3111,17 +3252,17 @@ mod tests {
         let arrived_at = dispatch.sent_at;
         let sibling = dialer("/ip4/8.8.8.8/tcp/443");
         established(&mut sibling_service, peer, CONNECTION + 1, &sibling, 1);
-        assert!(matches!(
-            sibling_service.bind_preselection_observation_response_at(
+        let transport = sibling_service
+            .bind_preselection_observation_response_at(
                 dispatch,
                 peer,
                 ConnectionId::new_unchecked(CONNECTION),
                 request_id,
                 arrived_at,
                 now_ms(),
-            ),
-            Err(PreselectionDispatchError::Provenance)
-        ));
+            )
+            .expect("new sibling does not replace the exact response connection");
+        drop(transport);
     }
 
     #[tokio::test]
@@ -3407,6 +3548,7 @@ mod tests {
         let policy = crate::LocalPreselectionPolicy::new(1, [9; 32], created_at_ms + 60_000)
             .expect("shaped policy");
         let mut signer = |message: &[u8]| exit_key.sign(message).ok()?.try_into().ok();
+        let mut rejected = false;
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -3416,7 +3558,13 @@ mod tests {
                         exit_public_key,
                         &mut signer,
                     ) => {
-                        assert!(matches!(event, DiscoveryEvent::Other(_)));
+                        match event {
+                            DiscoveryEvent::PreselectionResponderRejected(
+                                PreselectionResponderReject::UpstreamAuthority
+                            ) => rejected = true,
+                            DiscoveryEvent::Other(_) => {}
+                            _ => panic!("responder emitted an unexpected public event"),
+                        }
                     }
                     event = next_other(&mut relay) => {
                         match event {
@@ -3427,7 +3575,10 @@ mod tests {
                                         ..
                                     },
                                 ),
-                            ) if request_id == outbound => break,
+                            ) if request_id == outbound => {
+                                assert!(rejected, "authority rejection must be observable");
+                                break;
+                            }
                             SwarmEvent::Behaviour(
                                 BehaviourEvent::PreselectionObservationUpstream(
                                     request_response::Event::Message {
@@ -3452,7 +3603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_preflight_is_read_only_and_requires_unique_exit_provenance() {
+    async fn upstream_preflight_and_dispatch_allow_dial_then_bind_exact_exit_response() {
         let created_at_ms = now_ms();
         let local_key = identity::Keypair::generate_ed25519();
         let exit_key = identity::Keypair::generate_ed25519();
@@ -3466,17 +3617,9 @@ mod tests {
         );
         let mut service = relay_service(local_key);
         let request = upstream_request(&fixture);
-        assert_eq!(
-            service.preflight_preselection_observation_upstream(&request),
-            Err(PreselectionDispatchError::Provenance),
-            "an unconnected Exit must fail before a caller spends replay capacity"
-        );
-
-        let endpoint = dialer("/ip4/8.8.8.8/tcp/443");
-        established(&mut service, exit_peer, CONNECTION, &endpoint, 0);
         service
             .preflight_preselection_observation_upstream(&request)
-            .expect("current unique Exit provenance");
+            .expect("an unconnected exact Exit remains dialable");
         service
             .preflight_preselection_observation_upstream(&request)
             .expect("preflight itself must not occupy the affine upstream slot");
@@ -3485,10 +3628,21 @@ mod tests {
                 upstream_request(&fixture),
                 Instant::now() + Duration::from_secs(1),
             )
-            .expect("dispatch repeats admission and owns the slot only at send");
-        service
-            .cancel_preselection_observation_upstream_dispatch(dispatch)
-            .expect("exact upstream cancellation");
+            .expect("dispatch queues a dial to the request-derived Exit");
+        let request_id = dispatch.request_id;
+        let sent_at = dispatch.sent_at;
+        let endpoint = dialer("/ip4/8.8.8.8/tcp/443");
+        established(&mut service, exit_peer, CONNECTION, &endpoint, 0);
+        let _transport = service
+            .bind_preselection_observation_upstream_response_at(
+                dispatch,
+                exit_peer,
+                ConnectionId::new_unchecked(CONNECTION),
+                request_id,
+                sent_at,
+                now_ms(),
+            )
+            .expect("the sealed response connection supplies exact Exit provenance");
     }
 
     #[tokio::test]
@@ -3880,7 +4034,11 @@ mod tests {
                 production,
                 "pub struct ClientPreselectionDispatch {"
             )),
-            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:ConnectionWitness,"
+            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:ClientConnectionWitness,"
+        );
+        assert_eq!(
+            compact(item_body(production, "enum ClientConnectionWitness {")),
+            "PreSend(ConnectionWitness),BindResponse(IpFamily),"
         );
         assert_eq!(
             compact(item_body(
@@ -3929,7 +4087,11 @@ mod tests {
                 production,
                 "pub struct UpstreamPreselectionDispatch {"
             )),
-            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:ConnectionWitness,"
+            "request_id:OutboundRequestId,request_hash:[u8;32],expected_peer_id:PeerId,instance:Arc<()>,sent_at:Instant,deadline:Instant,witness:UpstreamConnectionWitness,"
+        );
+        assert_eq!(
+            compact(item_body(production, "enum UpstreamConnectionWitness {")),
+            "PreSend(ConnectionWitness),BindResponse(IpFamily),"
         );
         assert_eq!(
             compact(item_body(
@@ -4031,15 +4193,14 @@ mod tests {
         let signature = dispatch.split('{').next().expect("signature");
         assert!(!signature.contains("PeerId"));
         assert!(!signature.contains("IpFamily"));
-        let adjacent = concat!(
-            "letwitness=self.swarm.behaviour().connection_provenance",
-            ".unique_witness(expected_peer_id,family)",
-            ".ok_or(PreselectionDispatchError::Provenance)?;",
-            "letrequest_id=self.swarm.behaviour_mut().preselection_observation",
-            ".send_request(&expected_peer_id,request);"
-        );
-        assert_eq!(compact(dispatch).matches(adjacent).count(), 1);
-        let witness = dispatch.find(".unique_witness(").expect("witness");
+        let compact_dispatch = compact(dispatch);
+        assert!(compact_dispatch.contains(
+            "letwitness=self.swarm.behaviour().connection_provenance.unique_witness(expected_peer_id,family).map_or(ClientConnectionWitness::BindResponse(family),ClientConnectionWitness::PreSend,);"
+        ));
+        assert!(compact_dispatch.contains(
+            "letrequest_id=self.swarm.behaviour_mut().preselection_observation.send_request(&expected_peer_id,request);"
+        ));
+        let witness = dispatch.find(".unique_witness(").expect("optional witness");
         let send = dispatch.find(".send_request(").expect("send");
         for forbidden in [".await", "yield_now", "sleep(", "spawn("] {
             assert!(!dispatch[witness..send].contains(forbidden));
@@ -4099,20 +4260,16 @@ mod tests {
         let upstream_signature = upstream_dispatch.split('{').next().expect("signature");
         assert!(!upstream_signature.contains("PeerId"));
         assert!(!upstream_signature.contains("IpFamily"));
-        let upstream_adjacent = concat!(
-            "letwitness=self.swarm.behaviour().connection_provenance",
-            ".unique_witness(expected_peer_id,family)",
-            ".ok_or(PreselectionDispatchError::Provenance)?;",
-            "letrequest_id=self.swarm.behaviour_mut().preselection_observation_upstream",
-            ".send_request(&expected_peer_id,request);"
-        );
-        assert_eq!(
-            compact(upstream_dispatch)
-                .matches(upstream_adjacent)
-                .count(),
-            1
-        );
-        let upstream_witness = upstream_dispatch.find(".unique_witness(").expect("witness");
+        let compact_dispatch = compact(upstream_dispatch);
+        assert!(compact_dispatch.contains(
+            "letwitness=self.swarm.behaviour().connection_provenance.unique_witness(expected_peer_id,family).map_or(UpstreamConnectionWitness::BindResponse(family),UpstreamConnectionWitness::PreSend,);"
+        ));
+        assert!(compact_dispatch.contains(
+            "letrequest_id=self.swarm.behaviour_mut().preselection_observation_upstream.send_request(&expected_peer_id,request);"
+        ));
+        let upstream_witness = upstream_dispatch
+            .find(".unique_witness(")
+            .expect("optional witness");
         let upstream_send = upstream_dispatch.find(".send_request(").expect("send");
         for forbidden in [".await", "yield_now", "sleep(", "spawn("] {
             assert!(!upstream_dispatch[upstream_witness..upstream_send].contains(forbidden));

@@ -7,7 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::NATIVE_API_VERSION;
 
 /// Domain separating response request-correlation digests from every other hash.
-pub const NATIVE_REQUEST_DIGEST_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-REQUEST-V6\0";
+pub const NATIVE_REQUEST_DIGEST_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-REQUEST-V7\0";
 
 const NATIVE_INSTANCE_ID_LEN: usize = 32;
 const SIGNED_ID_LEN: usize = 16;
@@ -479,9 +479,15 @@ pub struct NativePathStatus {
     /// Estimated delivery rate in bits per second.
     #[prost(uint64, tag = "7")]
     pub delivery_rate_bps: u64,
-    /// True only after the path was validated and has carried payload.
+    /// True only after a validated path has acknowledged QUIC transport bytes.
     #[prost(bool, tag = "8")]
     pub data_carrying: bool,
+    /// Cumulative acknowledged QUIC transport bytes for this exact path lifetime.
+    ///
+    /// Includes framing and possible retransmissions; not unique inner-payload delivery.
+    /// A decrease is not fresh progress and must invalidate retained health measurements.
+    #[prost(uint64, tag = "9")]
+    pub acked_transport_bytes: u64,
 }
 
 /// Fail-closed frame/validation errors.
@@ -511,7 +517,7 @@ pub fn encode_request(request: &NativeRequest) -> Result<Vec<u8>, ControlError> 
     encode_frame(request)
 }
 
-/// Computes the v6 response-correlation digest of one canonical unframed request.
+/// Computes the v7 response-correlation digest of one canonical unframed request.
 ///
 /// # Errors
 ///
@@ -986,15 +992,6 @@ pub(crate) fn validate_start_exit(value: &StartExitSession) -> Result<(), Contro
         value.masque_context_id,
         value.transport_mode,
     )?;
-    if !matches!(
-        TransportMode::try_from(value.transport_mode),
-        Ok(TransportMode::SinglePathGeneralUdp)
-    ) || value.minimum_paths != 1
-    {
-        return Err(ControlError::Invalid(
-            "v6 exit listener supports exactly one general-UDP path",
-        ));
-    }
     validate_auth_secret(&value.auth_secret)?;
     validate_expiry(value.expires_at_ms)?;
     if value.exit_spki_sha256.len() != 32 || value.exit_spki_sha256.iter().all(|byte| *byte == 0) {
@@ -1206,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn request_round_trip_is_v6_framed_and_validated() {
+    fn request_round_trip_is_v7_framed_and_validated() {
         let request = request(native_request::Operation::StartSession(start(
             TransportMode::MultipathQuic,
             2,
@@ -1245,16 +1242,16 @@ mod tests {
     #[test]
     fn request_digest_binds_domain_length_target_and_operation() {
         const EXPECTED: [u8; 32] = [
-            0x3d, 0xa7, 0x5b, 0xac, 0xc9, 0x56, 0xf3, 0x7f, 0x48, 0x91, 0xab, 0xbd, 0xfc, 0xf9,
-            0x2b, 0x78, 0x8b, 0x16, 0x61, 0xab, 0xa8, 0x14, 0x6b, 0xe6, 0xbc, 0x7f, 0x88, 0x13,
-            0x75, 0x23, 0x5f, 0xfd,
+            0x02, 0xa6, 0x39, 0xcb, 0xa5, 0xbf, 0x85, 0x1a, 0xe2, 0x73, 0x0d, 0x9b, 0xdc, 0xf2,
+            0x4f, 0xd1, 0xba, 0xed, 0x64, 0xd7, 0xbb, 0x7f, 0x7a, 0x9a, 0xcb, 0x97, 0x10, 0x5a,
+            0x6f, 0x3f, 0xa1, 0xb1,
         ];
         let request = request(native_request::Operation::GetStatus(GetStatus {
             route_context_id: vec![1; 16],
         }));
         let payload = request.encode_to_vec();
         let mut expected = Sha256::new();
-        expected.update(b"VOLPAROSSA-MPQUIC-REQUEST-V6\0");
+        expected.update(b"VOLPAROSSA-MPQUIC-REQUEST-V7\0");
         expected.update(u32::try_from(payload.len()).expect("length").to_be_bytes());
         expected.update(&payload);
         assert_eq!(
@@ -1479,7 +1476,7 @@ mod tests {
             3,
         )))
         .encode_to_vec();
-        assert_eq!(valid[..2], [0x08, 0x06]);
+        assert_eq!(valid[..2], [0x08, 0x07]);
 
         let mut overlong_version = valid.clone();
         overlong_version.splice(1..2, [0x86, 0x00]);
@@ -1490,7 +1487,7 @@ mod tests {
         assert!(decode_request(&unknown).is_err());
 
         let mut duplicate = valid;
-        duplicate.extend_from_slice(&[0x08, 0x06]);
+        duplicate.extend_from_slice(&[0x08, 0x07]);
         assert!(decode_request(&duplicate).is_err());
     }
 
@@ -1593,7 +1590,7 @@ mod tests {
             2,
             3,
         )));
-        for version in [1, 2, 3, 4, 5, 99] {
+        for version in [1, 2, 3, 4, 5, 6, 99] {
             invalid.api_version = version;
             assert!(encode_request(&invalid).is_err());
         }
@@ -1618,6 +1615,21 @@ mod tests {
             value.masque_context_id = MAX_MASQUE_CONTEXT_ID + 1;
         }
         assert!(encode_request(&invalid).is_err());
+    }
+
+    #[test]
+    fn native_ack_transport_counter_matches_c_wire_without_user_byte_claim() {
+        // Exact nested path payload also checked by native tests/test_protocol.c.
+        let wire = [
+            0x08, 0x01, 0x10, 0xe8, 0x07, 0x18, 0x02, 0x28, 0x80, 0xf4, 0x03, 0x30, 0xb0, 0x09,
+            0x38, 0x80, 0xa4, 0xe8, 0x03, 0x40, 0x01, 0x48, 0x80, 0x20,
+        ];
+        let path = NativePathStatus::decode(wire.as_slice()).expect("C native path status");
+        assert_eq!(path.path_id, 1);
+        assert_eq!(path.delivered_bytes, 0);
+        assert_eq!(path.acked_transport_bytes, 4096);
+        assert!(path.data_carrying);
+        assert_eq!(path.encode_to_vec(), wire);
     }
 
     fn overlay_ip(path_id: u8, host: u8) -> Vec<u8> {

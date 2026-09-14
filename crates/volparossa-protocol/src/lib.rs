@@ -6,48 +6,73 @@
 //! over decoding the raw signed envelope directly.
 
 mod canonical;
+mod dns_cache;
 mod envelope;
 mod messages;
 mod native_preselection_probe;
 mod native_route;
+mod native_route_credential;
 mod preselection_observation;
 mod reservation_requests;
+mod route_retire;
+
+pub use route_retire::{
+    MAX_ROUTE_RETIRE_BYTES, MAX_ROUTE_RETIRE_LIFETIME_MS, RetirementReceipt, RouteRetire,
+    route_retire_request_hash,
+};
 
 pub use canonical::{decode_canonical, encode_canonical};
+pub use dns_cache::{
+    DnsCacheQuery, DnsCacheReply, MAX_DNS_CACHE_BUNDLE_BYTES, MAX_DNS_CACHE_LIFETIME_MS,
+    dns_cache_request_hash,
+};
 pub use envelope::{
     ControlPayload, ReplayCache, SignedEnvelope, TimePolicy, VerifiedControlMessage,
     generate_nonce, node_id_from_public_key, sign_control_message, sign_control_message_with,
     verify_control_message,
 };
 pub use messages::{
+    AdjacentReceiveBudget, AdjacentReceiveBudgetReceipt, AdjacentReceiveLeg,
     AdvertisementCapabilities, AdvertisementCapacity, AdvertisementNetwork, AdvertisementPolicy,
-    AdvertisementQuality, AdvertisementRoles, ControlMessageType, ExitConfirmationReceipt,
-    ExitReservation, ExitReservationConfirmation, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
-    RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, WireguardEndpoint,
-    exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
-    relay_reservation_request_sha256, verify_relay_reservation,
+    AdvertisementQuality, AdvertisementRoles, AdvertisementUplink, ControlMessageType,
+    ExitConfirmationReceipt, ExitReservation, ExitReservationConfirmation,
+    MAX_ADJACENT_RECEIVE_BUDGET_BURST_BYTES, MAX_ADJACENT_RECEIVE_BUDGET_BYTES,
+    MAX_ADJACENT_RECEIVE_BUDGET_LIFETIME_MS, NativeRouteCredentialDelivery,
+    NativeRouteCredentialScope, NativeRouteIdentity, NodeAdvertisement, OpenTcp,
+    RelayAuthorization, RelayReservation, Transport, UdpFlowAuthorization, UnderlayScope,
+    WireguardEndpoint, exit_confirmation_envelope_hash, finalized_reservation_bundle_hash,
+    relay_reservation_request_sha256, verify_adjacent_receive_budget,
+    verify_adjacent_receive_budget_receipt, verify_relay_reservation,
 };
 pub use native_preselection_probe::{
     IssuedNativeProbeRelayReady, IssuedNativeProbeRelayResult, IssuedNativeProbeStart,
-    MAX_NATIVE_PROBE_CANDIDATES, MAX_NATIVE_PROBE_LIFETIME_MS, MIN_NATIVE_PROBE_CANDIDATES,
-    NativeProbeCandidateSet, NativeProbeEndpointBinding, NativeProbeExitReady,
-    NativeProbeExitResult, NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope,
-    NativeProbePermit, NativeProbePermitRequest, NativeProbeRelayLocalProofs,
-    NativeProbeRelayReady, NativeProbeRelayResult, NativeProbeStart, VerifiedNativeProbeExitReady,
-    VerifiedNativeProbeExitResult, VerifiedNativeProbePermit, VerifiedNativeProbeRelayReady,
-    VerifiedNativeProbeResult, VerifiedNativeProbeStartForRelay, native_probe_candidate_set_hash,
-    native_probe_challenge_hash, native_probe_exit_ready_hash, native_probe_exit_result_hash,
-    native_probe_permit_hash, native_probe_permit_request_hash,
+    MAX_NATIVE_PROBE_AUTHORIZATION_CHAIN_SIZE, MAX_NATIVE_PROBE_CANDIDATES,
+    MAX_NATIVE_PROBE_CONTROL_ADDRESS_BYTES, MAX_NATIVE_PROBE_LIFETIME_MS, MAX_NATIVE_PROBE_PATHS,
+    MIN_NATIVE_PROBE_CANDIDATES, NativeProbeAuthorizationChain, NativeProbeCandidateSet,
+    NativeProbeEndpointBinding, NativeProbeExitReady, NativeProbeExitResult,
+    NativeProbeForwardingProof, NativeProbeLeaseProof, NativeProbePathScope, NativeProbePermit,
+    NativeProbePermitRequest, NativeProbeRelayLocalProofs, NativeProbeRelayReady,
+    NativeProbeRelayResult, NativeProbeStart, VerifiedNativeProbeAuthorizationChain,
+    VerifiedNativeProbeExitReady, VerifiedNativeProbeExitResult, VerifiedNativeProbePermit,
+    VerifiedNativeProbeRelayReady, VerifiedNativeProbeResult, VerifiedNativeProbeStartForRelay,
+    native_probe_candidate_set_hash, native_probe_challenge_hash, native_probe_exit_ready_hash,
+    native_probe_exit_result_hash, native_probe_permit_hash, native_probe_permit_request_hash,
     native_probe_prepared_lease_commitment, native_probe_relay_ready_hash, native_probe_start_hash,
     sign_native_probe_relay_ready, sign_native_probe_relay_ready_with,
     sign_native_probe_relay_result, sign_native_probe_relay_result_with, sign_native_probe_start,
-    verify_native_probe_exit_ready, verify_native_probe_exit_result_for_relay,
-    verify_native_probe_permit, verify_native_probe_relay_ready, verify_native_probe_result,
+    verify_native_probe_authorization_chain, verify_native_probe_exit_ready,
+    verify_native_probe_exit_result_for_relay, verify_native_probe_permit,
+    verify_native_probe_relay_ready, verify_native_probe_result,
     verify_native_probe_start_for_relay,
 };
 pub use native_route::{
     NATIVE_ROUTE_AUTH_BEARER_LENGTH, NATIVE_ROUTE_AUTH_COMMITMENT_DOMAIN,
     native_route_auth_commitment,
+};
+pub use native_route_credential::{
+    NATIVE_ROUTE_CREDENTIAL_CIPHERTEXT_LENGTH, NATIVE_ROUTE_CREDENTIAL_ENCAPSULATED_KEY_LENGTH,
+    NATIVE_ROUTE_CREDENTIAL_HPKE_KEY_LENGTH, NativeRouteCredentialError,
+    NativeRouteCredentialKeyPair, SealedNativeRouteCredential, seal_native_route_credential,
 };
 pub use preselection_observation::{
     BoundDirectPreselectionTranscript, BoundForwardedPreselectionTranscript,

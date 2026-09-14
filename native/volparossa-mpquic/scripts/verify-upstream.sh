@@ -186,8 +186,14 @@ verify_bundled_file wintun-readme "$source_root/third_party/wintun/README.md" \
     124fd31fc8c48a528bdc43e9fb8b1d0bc2439f37833eea141c1670a1b85e9e67
 
 verify_patch mqvpn "$repo_root/patches/volparossa-mqvpn.patch" \
-    91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887
+    4ce314d8eb539dc362359f7fb901b6a76c827126b3c7091ee9b04528f556dd34
+verify_patch mqvpn-exit "$repo_root/patches/volparossa-mqvpn-exit-paths.patch" \
+    da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427
 verify_patch xquic "$repo_root/patches/volparossa-xquic.patch" \
-    acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b
+    52b1a30297fb4793067f00b6695dcdfdfba25d684ae45fdda37dc61bed6f13f9
+verify_patch mqvpn-edt "$repo_root/patches/volparossa-mqvpn-edt.patch" \
+    eeea5b5d09e1225633e0a1fdd1f78c64384cc18bc676088b18bd5f1f41a1f00f
+verify_patch xquic-edt "$repo_root/patches/volparossa-xquic-edt.patch" \
+    21472637e2b8e48c16af835a10137a67f450e07b565bb87241aa3f8895452a80
 
 echo "all upstream commits, trees, tags, gitlinks, origins, bundled files, licenses, and patches match the lock"

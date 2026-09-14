@@ -39,7 +39,7 @@ endpoints, reachability, aggregate path measurements, delivery history, uptime/f
 hash, and last-success timestamps. Configuration stores operator choices and role/capacity limits.
 Policy manifests store public allowlist and maintainer material.
 
-By default VOLPAROSSA must not persist:
+Default VPN/control-plane storage must not persist:
 
 - URLs, DNS query history, payloads, full browsing hostnames, or destination-IP history;
 - private session or WireGuard keys;
@@ -52,6 +52,40 @@ public address. Ephemeral route-context, flow, session, path, capability, hold, 
 receipt state expires with its bounded context. Crash recovery may retain only the minimum opaque
 ownership authority needed to safely destroy VOLPAROSSA-created network state; it must not convert
 that authority into browsing history.
+
+## Planned content storage and sharing
+
+The requested [content layer](CONTENT_NETWORK_PROPOSAL.md) adds a separate bounded storage
+purpose; it does not turn ordinary routed traffic or logs into a browsing archive. Public
+publication/shared-cache bytes can be visible to their holders. Chunk identifiers, queries,
+replica placement and timing can reveal known content or interests even without a plaintext URL;
+hashed URLs are not private discovery keys. Do not publish a durable user-to-content association.
+
+An explicitly configured replica cache now persists original public manifests and retained
+chunk IDs in a private cache-bound journal, so a later explicit service start can restore them.
+It records no provider contacts or browsing history and grants no new publisher/origin trust.
+Manifest metadata is not encrypted merely because the directory is private. Service stop
+withdraws availability but keeps owned chunks and metadata; expiry stops serving, not guaranteed
+deletion from disk or from other nodes. No background cache or boot service starts by default.
+
+Private messages must be encrypted for their recipient before replication, with separate
+authorization, quotas and expiry. Ciphertext still exposes size, timing and availability, and
+replication does not guarantee anonymity, delivery or deletion of every remote copy. Public
+shareability requires its own evidence: missing cookies are insufficient, and encryption does
+not authorize retaining a `no-store` response. Shared DNS objects retain validation and remaining
+TTL, never query history or another user's private DNS view.
+
+The current native-message library encrypts before storage and keeps recipient keys and returned
+plaintext in zeroizing memory. Public manifest metadata still exposes sender, opaque name, size
+and lifetime. It does not provide forward secrecy after recipient-key compromise, key discovery,
+mailbox metadata privacy or delivery guarantees. Only an explicit disposable acceptance fixture
+writes a temporary recipient key and known test plaintext; those files are private, excluded
+from artifacts and explicitly cleaned up. This does not enable default browsing/message capture.
+
+HTTPS adapters must preserve origin authentication, browser isolation, credentials and cache
+semantics without an interception CA or TLS bypass. An optional HTTPS witness would introduce
+explicit additional trust, not an automatic public/default service. These are design boundaries;
+the scoped protected-route content proof is not automatic distributed discovery or a browser runtime.
 
 ## Logs
 
@@ -86,9 +120,12 @@ DNS leaks must be blocked by the client namespace kill switch.
 The privacy separation is not established by signatures or diagrams. Acceptance A12 requires an
 exit-namespace packet capture proving that only incoming relays are visible, and A13 requires
 client-side packet capture plus route evidence proving that no direct client-exit control or
-dataplane path exists. Those captures have not run. The real probe producer, helper backend, agent
-route orchestration, and client ingress are also blocked, so no sensitive traffic should rely on
-these properties yet.
+dataplane path exists. Those captures and the real probe/helper/agent/ingress chain passed as part
+of A01--A15 on unchanged `482e33d0`: the retained native/MPTCP capture windows were complete, with
+zero socket drops, and cleanup left no owned objects and unchanged guest state. See the exact
+run and artifact in [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). This establishes that
+topology's result, not a guarantee against correlation or proof for later sharing/content changes.
+Sensitive traffic should not rely on development builds as a release-security assurance.
 
 ## Operator guidance
 

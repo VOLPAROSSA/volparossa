@@ -60,7 +60,8 @@ jobs:
       - name: Install pinned dependency-audit tools
         run: |
           tool_root="${RUNNER_TEMP}/cargo-tools"
-          cargo install --locked --root "$tool_root" --version 0.18.3 cargo-deny
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 install --locked --root "$tool_root" --version 0.18.6 cargo-deny
           cargo install --locked --root "$tool_root" --version 0.22.1 cargo-audit
           printf '%s\n' "$tool_root/bin" >>"$GITHUB_PATH"
 
@@ -107,10 +108,17 @@ jobs:
           --all-features -- -D warnings
 
       - name: Run workspace tests
+        env:
+          # Only disposable namespace creation may use sudo when Ubuntu blocks userns.
+          # Sudo fallback drops to the original runner UID/GID; all paths remove capabilities.
+          VOLPAROSSA_TEST_ALLOW_SUDO_NETNS: '1'
         run: cargo test --locked --offline --workspace --all-features
 
-      - name: Report functional QUIC UDP namespace proof outcome
+      - name: Report namespace-backed proof outcomes
         run: |
+          cargo test --locked --offline -p volparossa-linux-uapi --lib \
+            egress::tests::egress_disposable_link_loss_return_and_capless_first_bind \
+            -- --exact --nocapture --test-threads=1
           cargo test --locked --offline -p volparossa-helper --lib --all-features \
             worker_v3::functional_backend::tests::committed_client_and_exit_handoff_one_validated_quic_udp_descriptor \
             -- --exact --nocapture --test-threads=1

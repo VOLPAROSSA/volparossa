@@ -1320,6 +1320,7 @@ mod tests {
             exit: Some(exit),
             scope: typed_request.scope.clone(),
             upstream_network_prefix: Some(ObservationNetworkPrefix {
+                scope: 0,
                 address_family: ObservationAddressFamily::Ipv4 as i32,
                 network_prefix: vec![8, 8, 4],
             }),

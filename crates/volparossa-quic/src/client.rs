@@ -37,8 +37,8 @@ use crate::{
 };
 
 const FD_BINDING_LEN: usize = 32;
-const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V6\0";
-const START_EXIT_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-START-EXIT-FD-V6\0";
+const ADD_PATH_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-ADD-PATH-FD-V7\0";
+const START_EXIT_FD_DOMAIN: &[u8] = b"VOLPAROSSA-MPQUIC-START-EXIT-FD-V7\0";
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SOCKET_PATH_BYTES: usize = 4_096;
 
@@ -47,6 +47,87 @@ enum DescriptorPurpose {
     None,
     AddPath,
     StartExit,
+}
+
+/// Native-verified endpoint for one retained route-specific Exit listener.
+///
+/// This authority implements neither `Clone` nor `Copy`; it is produced only after the exact
+/// descriptor-bound `StartExitSession` request was accepted by the preflighted Exit process.
+#[must_use = "the verified Exit endpoint must remain bound to its committed client path"]
+#[derive(Debug)]
+pub struct VerifiedExitMpquicEndpoint {
+    route_context_id: [u8; 16],
+    path_id: u32,
+    listener_ip: [u8; 16],
+    listener_port: u16,
+    expected_client_ip: [u8; 16],
+    expected_client_port: u16,
+    reservation_hash: [u8; 32],
+    exit_native_instance_id: [u8; 32],
+    minimum_paths: u32,
+    listener_set_ready: bool,
+}
+
+impl VerifiedExitMpquicEndpoint {
+    /// Exact route context accepted by the Exit process.
+    #[must_use]
+    pub const fn route_context_id(&self) -> &[u8; 16] {
+        &self.route_context_id
+    }
+
+    /// Context-local Relay/WireGuard path accepted by the Exit process.
+    #[must_use]
+    pub const fn path_id(&self) -> u32 {
+        self.path_id
+    }
+
+    /// Path-specific Exit overlay address.
+    #[must_use]
+    pub const fn listener_ip(&self) -> &[u8; 16] {
+        &self.listener_ip
+    }
+
+    /// Exact retained Exit UDP port.
+    #[must_use]
+    pub const fn listener_port(&self) -> u16 {
+        self.listener_port
+    }
+
+    /// Path-specific Client overlay address permitted by the Exit listener.
+    #[must_use]
+    pub const fn expected_client_ip(&self) -> &[u8; 16] {
+        &self.expected_client_ip
+    }
+
+    /// Exact Client source port permitted by the Exit listener.
+    #[must_use]
+    pub const fn expected_client_port(&self) -> u16 {
+        self.expected_client_port
+    }
+
+    /// Digest of the exact Relay reservation authorizing this path.
+    #[must_use]
+    pub const fn reservation_hash(&self) -> &[u8; 32] {
+        &self.reservation_hash
+    }
+
+    /// Exit process incarnation which retained the listener descriptor.
+    #[must_use]
+    pub const fn exit_native_instance_id(&self) -> &[u8; 32] {
+        &self.exit_native_instance_id
+    }
+
+    /// Required listener count for this hard-multipath association.
+    #[must_use]
+    pub const fn minimum_paths(&self) -> u32 {
+        self.minimum_paths
+    }
+
+    /// Whether this admission made the complete listener set operational.
+    #[must_use]
+    pub const fn listener_set_ready(&self) -> bool {
+        self.listener_set_ready
+    }
 }
 
 /// Strict client for the unprivileged native process boundary.
@@ -176,20 +257,65 @@ impl NativeClient {
     /// rejection. The descriptor is consumed on every success and failure path. It must be the
     /// exact unconnected, bound, nonblocking UDP listener named by the canonical request, with
     /// close-on-exec set and address/port reuse disabled. These current socket checks do not prove
-    /// helper origin, assigned-address state, or network-namespace identity. The current native
-    /// implementation still fails closed after consuming the listener until a descriptor-consuming
-    /// exit transport factory is implemented.
+    /// helper origin, assigned-address state, or network-namespace identity.
     pub async fn start_exit_session(
         &self,
         value: StartExitSession,
         listener: OwnedFd,
-    ) -> Result<(), NativeClientError> {
+    ) -> Result<VerifiedExitMpquicEndpoint, NativeClientError> {
         let listener = validate_exit_listener_descriptor(&value, listener)?;
-        self.execute_ok(
-            native_request::Operation::StartExitSession(value),
-            Some(listener),
-        )
-        .await
+        let mut endpoint = VerifiedExitMpquicEndpoint {
+            route_context_id: value
+                .route_context_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| NativeClientError::Correlation)?,
+            path_id: value.path_id,
+            listener_ip: value
+                .listener_ip
+                .as_slice()
+                .try_into()
+                .map_err(|_| NativeClientError::Correlation)?,
+            listener_port: u16::try_from(value.listener_port)
+                .map_err(|_| NativeClientError::Correlation)?,
+            expected_client_ip: value
+                .expected_client_ip
+                .as_slice()
+                .try_into()
+                .map_err(|_| NativeClientError::Correlation)?,
+            expected_client_port: u16::try_from(value.expected_client_port)
+                .map_err(|_| NativeClientError::Correlation)?,
+            reservation_hash: value
+                .reservation_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| NativeClientError::Correlation)?,
+            exit_native_instance_id: value
+                .exit_native_instance_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| NativeClientError::Correlation)?,
+            minimum_paths: value.minimum_paths,
+            listener_set_ready: false,
+        };
+        let response = self
+            .exchange(
+                native_request::Operation::StartExitSession(value),
+                Some(listener),
+            )
+            .await?;
+        if response.received_datagram.is_some()
+            || response.tunnel_assignment.is_some()
+            || !response.paths.is_empty()
+        {
+            return Err(NativeClientError::Correlation);
+        }
+        match response_result(&response)? {
+            NativeResultCode::Ok => endpoint.listener_set_ready = true,
+            NativeResultCode::InsufficientPaths => {}
+            result => return Err(rejected(response, result)),
+        }
+        Ok(endpoint)
     }
 
     /// Adds one candidate route-namespace path socket.
@@ -1286,11 +1412,12 @@ mod tests {
                 path_id: 1,
                 smoothed_rtt_us: 1_000,
                 packets_lost: 0,
-                delivered_bytes: 4_096,
+                delivered_bytes: 0,
                 congestion_window_bytes: 64_000,
                 bytes_in_flight: 512,
                 delivery_rate_bps: 8_000_000,
                 data_carrying: true,
+                acked_transport_bytes: 4_096,
             }];
             stream
                 .write_all(&crate::encode_response(&response).expect("response"))
@@ -1305,6 +1432,8 @@ mod tests {
             .expect("status");
         assert_eq!(statuses.len(), 1);
         assert!(statuses[0].data_carrying);
+        assert_eq!(statuses[0].delivered_bytes, 0);
+        assert_eq!(statuses[0].acked_transport_bytes, 4_096);
         server.await.expect("server");
     }
 
@@ -1493,7 +1622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_exit_sends_one_listener_shaped_fd_with_distinct_canonical_binding() {
+    async fn rejected_start_exit_consumes_one_listener_shaped_fd() {
         let (_directory, path, listener) = secure_listener();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
@@ -1535,14 +1664,14 @@ mod tests {
     #[test]
     fn descriptor_binding_domains_do_not_cross_correlate() {
         const EXPECTED_ADD_PATH: [u8; FD_BINDING_LEN] = [
-            0x2d, 0xac, 0xd7, 0x22, 0xbe, 0x6f, 0x87, 0x3a, 0xe4, 0xa9, 0x27, 0x27, 0xad, 0x74,
-            0xd4, 0x66, 0x1d, 0x2e, 0x4c, 0x5a, 0xc8, 0x60, 0x0e, 0xca, 0xa1, 0xbe, 0x1d, 0x91,
-            0x81, 0xa1, 0xa9, 0xbd,
+            0x95, 0x3e, 0x0b, 0xc1, 0x66, 0x8d, 0x94, 0x9f, 0xa4, 0x16, 0xd3, 0x03, 0x96, 0x55,
+            0xc2, 0x8a, 0x44, 0x07, 0xcd, 0x49, 0x7e, 0x9e, 0x03, 0x0e, 0x6b, 0xb5, 0xa0, 0xc9,
+            0x36, 0x20, 0xab, 0xfb,
         ];
         const EXPECTED_START_EXIT: [u8; FD_BINDING_LEN] = [
-            0x6f, 0x6d, 0x88, 0xc3, 0x8f, 0x60, 0xac, 0x2b, 0xa7, 0x7f, 0x3f, 0x17, 0xf6, 0xe4,
-            0x36, 0xc1, 0x6e, 0x8e, 0xf1, 0x63, 0x64, 0x57, 0x59, 0x77, 0xab, 0x7d, 0x1f, 0xfd,
-            0xfc, 0xe1, 0x16, 0xf0,
+            0x11, 0xa5, 0x4d, 0x14, 0xc1, 0x4e, 0x1e, 0x21, 0x54, 0x33, 0x63, 0x0f, 0x45, 0x18,
+            0xc5, 0xf6, 0x78, 0xc2, 0x33, 0xc6, 0x18, 0xfb, 0x37, 0x4e, 0x39, 0x26, 0x5e, 0xac,
+            0x0c, 0xbf, 0x09, 0xcd,
         ];
         let request = NativeRequest {
             api_version: NATIVE_API_VERSION,

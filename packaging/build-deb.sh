@@ -68,7 +68,7 @@ printf '%s\n' \
     '  native/volparossa-mpquic/scripts/build-upstream.sh' \
     '  stage fixed binaries, configuration, units, notices, and resolved Cargo licenses' \
     "  dpkg-deb -> dist/volparossa_${version}_${architecture}.deb" \
-    'Writes, when --build is explicit: target/, native build output, dist/, and one validated temporary directory.' \
+    'Writes, when --build is explicit: the Cargo target directory, native build output, dist/, and one validated temporary directory.' \
     'Never installs a package or service and never changes networking.'
 if [ -x "$native_launcher" ]; then
     printf '%s\n' 'Native launcher prerequisite: READY.'
@@ -98,11 +98,19 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 cd "$repository_directory"
+cargo_target_directory=$(cargo metadata --locked --offline --no-deps --format-version 1 | \
+    jq -er '.target_directory | select(type == "string" and startswith("/"))')
+if [ -z "$cargo_target_directory" ]; then
+    printf '%s\n' 'Cargo did not report one absolute target directory.' >&2
+    exit 1
+fi
+release_directory=$cargo_target_directory/release
 cargo build --locked --release --workspace --all-features
 
 for binary_name in volparossa volparossa-agent volparossa-helper; do
-    if [ ! -x "$repository_directory/target/release/$binary_name" ]; then
-        printf 'Required release binary is missing: target/release/%s\n' "$binary_name" >&2
+    if [ ! -x "$release_directory/$binary_name" ]; then
+        printf 'Required release binary is missing: %s/%s\n' \
+            "$release_directory" "$binary_name" >&2
         exit 1
     fi
 done
@@ -136,9 +144,10 @@ install -d \
     "$package_root/usr/share/doc/volparossa" \
     "$package_root/usr/share/doc/volparossa/native-licenses"
 
-install -m 0755 target/release/volparossa "$package_root/usr/bin/volparossa"
-install -m 0755 target/release/volparossa-agent "$package_root/usr/bin/volparossa-agent"
-install -m 0755 target/release/volparossa-helper "$package_root/usr/libexec/volparossa/volparossa-helper"
+install -m 0755 "$release_directory/volparossa" "$package_root/usr/bin/volparossa"
+install -m 0755 "$release_directory/volparossa-agent" "$package_root/usr/bin/volparossa-agent"
+install -m 0755 "$release_directory/volparossa-helper" \
+    "$package_root/usr/libexec/volparossa/volparossa-helper"
 install -m 0755 "$native_binary" "$package_root/usr/libexec/volparossa/volparossa-mpquic"
 install -m 0755 "$native_launcher" "$package_root/usr/libexec/volparossa/volparossa-mpquic-launch"
 install -m 0640 config/examples/default.yaml "$package_root/etc/volparossa/config.yaml"
@@ -172,8 +181,17 @@ done
 
 
 metadata_file=$staging_parent/cargo-metadata.json
+release_packages=$staging_parent/release-packages.txt
+cargo tree --locked --offline --workspace --all-features \
+    --target x86_64-unknown-linux-gnu --prefix none --format '{p}' \
+    | sed -E 's/ \([^)]*\)$//' | LC_ALL=C sort -u > "$release_packages"
 cargo metadata --locked --offline --filter-platform x86_64-unknown-linux-gnu \
-    --format-version 1 > "$metadata_file"
+    --format-version 1 \
+    | jq --rawfile release_packages "$release_packages" '
+        .packages |= map(. as $package
+            | select(($release_packages | split("\n"))
+                | index($package.name + " v" + $package.version)))
+      ' > "$metadata_file"
 "$script_directory/collect-cargo-licenses.sh" "$metadata_file" \
     "$package_root/usr/share/doc/volparossa/cargo-licenses"
 installed_size=$(du -sk "$package_root/etc" "$package_root/usr" | \

@@ -6,7 +6,7 @@ every future version are rejected without fallback. Historical schemas are retai
 archaeology and refusal tests; they are not registered or negotiated.
 
 The checked-in [control-v4 schema](../proto/volparossa/control/v4/control.proto) covers
-`SignedEnvelope` and all twenty-five signed `ControlPayload` messages. The separate checked-in
+`SignedEnvelope` and the signed `ControlPayload` messages. The separate checked-in
 [discovery-v4 schema](../proto/volparossa/discovery/v4/discovery.proto) mirrors the hand-written
 advertisement, exit-forwarding, and datapath-relay request-response wrappers. Descriptor and fuzz
 gates verify tag/enum parity; the two forwarding-hop Rust marker types remain distinct even though
@@ -38,6 +38,257 @@ operations use exactly one selected control relay on both forwarding hops. A gen
 `Unavailable` is definitive for that setup and is not a retry trigger; only a local transport
 outcome with no response evidence may become `AmbiguousAfterDispatch` for a bounded exact-byte
 retry.
+
+### Destruction-only remote route retirement
+
+Control-v4 adds signed `RouteRetire` (29) and `RetirementReceipt` (30), each at most 4096 bytes
+with at most 15 seconds of envelope lifetime. A request is signed by the original ephemeral
+Client session, not its permanent node identity. Payload tags are `1: route context` (16 bytes),
+`2: reservation` (16), `3: original policy hash` (32), `4: session ID` (32), and `5: session
+public key` (32). The receiver still needs its exact retained grant/ownership scope and the
+authenticated adjacent peer; a signature alone grants no arbitrary-context deletion.
+
+The Client uses `DatapathRelayOperation::RouteRetire` (9) for its retained control/data relays.
+Only a Relay forwards `ExitForwardOperation::RouteRetire` (14) on the upstream Exit channel;
+the Client-facing Exit-forward codec refuses that operation. No destination, permanent Client
+Peer ID or endpoint is added. Cleanup may outlive the original policy/role, but it cannot renew
+traffic, create a route or acquire new egress authority.
+
+A receipt binds `1: context`, `2: reservation`, `3: exact signed-request hash`, `4: concrete
+signer node ID`, `5: confirmed_destroyed=true`, and `6: signed Exit receipt` (Relay only).
+The hash uses `volparossa/route-retire-request/v4\0`, the request byte length as big-endian u32,
+and the complete canonical signed request including nonce. Nesting is exactly one level.
+Consumers independently verify both node signatures, request correlation and original scopes;
+an outer Relay signature cannot replace the Exit signature. A generic unavailable/rejected
+response is not cleanup confirmation. Remote acknowledgements are not independent proof that
+a malicious peer erased its state; actual owned-runtime teardown still needs functional evidence.
+
+### Native content application stream (development v1)
+
+The optional `volparossa-content` library uses separate application data frames over an
+already supplied protected stream, not a new libp2p control protocol or a direct-exit path.
+The caller independently authenticates the exact native publication manifest. A provider
+needs cached bytes and an approved verified manifest, not the publisher's signing key.
+
+Each frame has a 4-byte big-endian length and one canonical protobuf message. Requests are
+at most 64 bytes; responses at most 256 KiB + 64 bytes. Unknown/noncanonical fields, wrong
+versions, out-of-scope hashes, mismatched lengths and corrupt bytes are rejected.
+
+| Frame | Protobuf field tags |
+|---|---|
+| Chunk request | `1: version=1`, `2: SHA-256 bytes`, `3: expected length`, `4: finish=false` |
+| Session finish | `1: version=1`, `4: finish=true`; hash absent and length zero |
+| Chunk response | `1: version=1`, `2: exact requested hash`, `3: exact requested length`, `4: found`, `5: payload bytes` |
+
+One request is outstanding at a time. Missing responses have `found=false` and no payload;
+successful bytes must match both manifest length and digest before cache insertion. Cached
+chunks skip requests. Default limits are 1,024 requests, 256 MiB of requested payload including
+misses, 15 seconds per complete exchange and 300 seconds per session. Errors terminate reuse
+of that stream. The caller verifies the complete object's hash before publishing output.
+These native frames do not authenticate an HTTPS origin, discover providers or grant egress.
+
+### Explicit native provider discovery and selection (development v1)
+
+The separate generic capability index is `/volparossa/v1/provider/content`. Clients ask a
+current authenticated control Relay over `/volparossa/content-discovery/1`; that Relay queries
+providers and fetches their offers over `/volparossa/content-service/1`. Neither protocol nor
+the DHT carries object IDs, browsing URLs, chunk interests or a publication-key catalogue.
+Requests/replies bind version 1, a fresh 32-byte echoed nonce, peer/request identity and the
+current control connection. At most 16 offers (2048 bytes each), 36 KiB response frames and 32
+pending requests are accepted, with a 15-second deadline. A service hint is not route authority.
+
+The provider's canonical Ed25519-signed offer has envelope tags `1: body`, `2: signature`.
+Body fields are `1: version=1`, `2: provider key`, `3: created`, `4: exclusive expiry`,
+`5: fresh 32-byte nonce`, `6: type=1`, `7: payload SHA-256`, `8: payload`; payload fields are
+`1: canonical DNS hostname`, `2: nonzero TCP port`. The signing domain is
+`VOLPAROSSA/content-provider-offer/v1\0`; maximum lifetime is 300 seconds. The public key must
+derive the authenticated provider Peer ID. It authenticates that node's hint, not hostname
+ownership, publisher authority, available content/capacity or a signed-policy permission.
+
+After independent manifest and destination-policy verification, the consumer opens the normal
+protected MPTCP/TLS application flow. A 64-byte-maximum canonical selector precedes the existing
+chunk exchange: `1: version=1`, `2: SHA-256 of the exact canonical signed manifest`. The reply
+echoes those fields and adds `3: status` (1 accepted, 2 missing, 3 unavailable). The service
+looks up an explicitly registered manifest/cache pair, never a network-supplied filesystem path.
+Selector and transfer share one original session deadline. Normal local-control version 2 adds
+request operation tags 20/21/22/23 for serve/fetch/stop/status and response payload tag 18 for a bounded
+content receipt; unknown operations remain rejected by older agents. This is not a name service,
+automatic replica placement or an HTTPS trust constructor.
+
+Local `ContentFetchNameRequest` adds optional bool `cache_only` at tag 7; true requires
+`reuse_cache`. `NamedContentTransferReady` echoes it at tag 2, and the CLI rejects a changed
+mode before chunk transfer. Omitted/false retains online named retrieval. Cache-only loads
+the original signed public-native envelope from the owned cache and rechecks the independently
+supplied publisher/name, original expiry, durable revision/conflict floor and complete bytes.
+It performs no route setup or provider exchange; final provider/control/origin accounting must
+be empty/zero. This is not an offline HTTPS authorization constructor or a global freshness proof.
+
+Exact representation-digest lookup uses an additive selector `version=6`, `operation=4` and
+an empty manifest ID. Its canonical request (at most 128 bytes) binds a fresh 32-byte nonce,
+SHA-256, complete length, creation time and at most fifteen seconds of validity. The reply
+echoes that scope and returns missing or one original signed public manifest within
+`MAX_MANIFEST_BYTES + 256`; its expiry cannot outlive either request or manifest. The bounded
+registry scan excludes private-message entries and does not query mailbox storage. This
+lookup creates no DHT object index, name authority or origin trust. A consumer must obtain
+independent whole-object authority and verify the complete ordered bytes; ordinary v1
+manifest-bound chunk transfer remains separate from this untrusted-index lookup.
+
+Optional post-download redistribution uses a separate selector version: v2 sends bounded
+extra chunks; the normal agent uses v3 with one receiver credit per chunk and a checked finish
+on receiver stop. No silent v2 fallback occurs. Request, selector, metadata, credit, chunk and
+finish bytes all share the original protocol-byte budget and deadline. The provider releases
+cache handles and the registry lock while waiting for credit. Original signed manifests and
+expiry remain unchanged; a storage peer's signature check is not consumer publisher authority.
+
+Normal local control's optional `ContentReplicationConfig` adds tag 5 `reuse_replica_cache`
+(bool, default false). Explicit true reopens only an owned replica store; it does not start a
+service without Serve. The private fixed-name cache-bound journal stores canonical original
+manifests, publisher hints, original creation times, local hop counts and retained chunk IDs,
+bounded to 64 records / 8 MiB. Restoration verifies signatures and live chunks before listener
+start; it never reissues manifests, refreshes expiry or adopts foreign directories.
+
+Local control adds explicit `ContentImport` (25) and `ContentExport` (26). Both default to
+private-message objects; optional bool tag 5 `allow_public_content` defaults false and explicitly
+allows an ordinary native publication. An older agent cannot silently enable this new opt-in.
+After the validated request, `ContentTransferReady` (response tag 19) binds exact manifest ID,
+object length and chunk count. Existing chunk-transfer frames then run on that same authorized
+Unix connection, followed by a correlated final `ContentReceipt`. Ready is not completion.
+The control frame stays at 256 KiB; chunk payloads use their separate existing bound. Whole
+handoff lifetime is 30 seconds, each exchange at most five seconds. Complete private-message
+objects remain bounded to 4 MiB plus their envelope, even when the opt-in flag is set. Public
+native objects use the existing 0--256 MiB / 0--1024 chunk bounds; empty objects exchange only
+the existing finish frame. Full native hash verification streams chunks without buffering an
+entire object. Neither a public opt-in nor native publisher trust authenticates an HTTPS origin.
+The destination is newly
+created under its receiving account. No ownership change, permission grant, network listener,
+private key transfer or decryption is part of either operation. Syntactic envelope validation
+does not prove that a malicious local publisher actually encrypted the bytes it supplied.
+
+Explicit `ContentImport.contribute` at bool tag 6 selects complete public admission into the
+already configured contribution service. It requires `allow_public_content=true`, empty `cache`
+and absent `limits`; destination and quota come only from agent configuration. Private-message
+content is refused in this mode. `ContentTransferReady.contribute` at tag 4 echoes the exact
+mode before the same bounded chunk exchange; absent/false preserves ordinary handoff behavior.
+The new `ContentReceipt.network_publication` bool at tag 16 becomes true only after complete
+hash verification, non-evicting admission, original-envelope journal persistence, registration
+and service announcement. Clients require that flag, active serving, a nonzero registration
+count and the exact object counts. It is not an external replica receipt or new origin authority.
+The bounded replica journal also accepts zero retained chunk references only for a valid signed
+empty public object with the correct empty-object hash. Ordinary partial background uptake
+still never turns zero transferred chunks into a completed-publication claim.
+
+### Recipient-encrypted native message object (development v1)
+
+The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,
+`2: 32-byte HPKE encapsulated key`, `3: ciphertext including authentication tag`. The fixed
+RFC 9180 base-mode suite is DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305, with info
+`volparossa/private-native-message/rfc9180/v1`. Plaintext is bounded to 4 MiB; the envelope adds
+fewer than 64 bytes. Native content type is `application/vnd.volparossa.private-message.v1`,
+revision 1, and each publication has a fresh opaque 32-byte lowercase-hex name.
+
+Canonical associated-data protobuf fields are `1: version`, `2: sender Ed25519 public key`,
+`3: name`, `4: revision`, `5: content type`, `6: created`, `7: expires`, `8: envelope length`.
+The signed native manifest authenticates sender and ordered ciphertext chunks; all chunk and
+whole-object checks precede decryption. HPKE base mode alone is not sender authentication.
+The caller independently authenticates recipient encryption and sender signing keys. These
+objects define neither discovery, private-key persistence, mailbox replay/acknowledgements,
+forward secrecy after recipient-key compromise nor HTTPS-origin authority.
+
+### Known-contact mailbox operations (development v1)
+
+The additive provider selector is `version=5`, empty manifest ID, `operation=3`. It runs on the
+same independently authenticated provider TLS stream through the normal protected route. Old
+providers reject it; no direct-provider or unprotected fallback exists. The recipient explicitly
+trusts two provider keys and one sender, not keys learned from arbitrary cached metadata.
+
+Canonical mailbox envelopes contain body tag 1 and Ed25519 signature tag 2. Body fields are
+`1: version=1`, `2: signing key`, `3: created`, `4: expires`, `5: random 32-byte nonce`,
+`6: type`, `7: SHA-256 payload hash`, `8: canonical payload`. Signatures use the domain
+`VOLPAROSSA/native-mailbox/v1\0` followed by the canonical body. Types are invitation (1),
+challenge (2), request authorization (3), and operation receipt (4). Unknown/noncanonical fields,
+lengths, signatures, unsupported types and original expiry fail closed.
+
+Invitation payload fields are `1: opaque mailbox ID`, `2: allowed sender Ed25519 key`,
+`3: recipient HPKE key`, `4: exactly two sorted distinct provider Ed25519 keys`,
+`5: maximum retained bytes`, `6: maximum messages including unexpired acknowledgement records`.
+The owner signs the exact immutable association. The invitation is at most 2 KiB, valid for at
+most 31 days, and permits at most 64 messages / 64 MiB. Embedded owner keys permit bounded
+self-registration only; they do not establish an independently trusted contact for consumers.
+
+The provider sends a fresh signed one-connection challenge. The caller signs authorization over
+`1: challenge-envelope hash`, `2: exact provider`, `3: original signed invitation`,
+`4: operation`, `5: original Deposit manifest only`, `6: Get/Acknowledge message ID only`.
+Operations are Register (1), Deposit (2), List (3), Get (4), Acknowledge (5). Only the invited
+sender can Deposit; only the owner can perform the other operations. A new connection has a new
+challenge, so copying an old authorization does not replay it after a connection/provider restart.
+Challenges and authorizations expire after at most 120 seconds and each connection consumes one
+operation. Ciphertext remains the existing RFC 9180 object, not a new encryption construction.
+
+The provider's receipt binds `1: request-envelope hash`, `2: invitation-envelope hash`,
+`3: operation`, `4: bounded original manifests`, `5: exact message ID`, `6: retained-until`,
+`7: acknowledged`, `8: ciphertext bytes`. Deposit/Get retain the original manifest and expiry;
+List never makes a provider a sender-signing authority. Metadata frames are bounded to 278,528
+bytes (64 manifests of at most 4 KiB plus framing); ciphertext uses exact bounded chunk frames
+and at most 4 MiB plus the existing envelope per message. Deposit is acknowledged only after
+hash verification and durable storage. Acknowledgement tombstones survive reopening until the
+original expiry; retries cannot recreate an acknowledged message. Receipts are not proof that
+a provider remains honest, reachable or able to repair a lost replica.
+
+Local control adds `MailboxServe` (29), `MailboxRemote` (30), and `MailboxReady` response (22).
+The caller verifies the exact signed provider challenge, signs locally, and performs one typed
+operation over that same authorized Unix socket. The agent bridges only the specified invitation,
+operation and object, never arbitrary commands or a raw tunnel. A correlated final existing
+`ContentReceipt` is required in addition to the signed mailbox receipt. No private key, passphrase,
+plaintext output path or decrypted payload is transferred to the agent.
+
+Exact provider discovery adds optional repeated Peer IDs at `ContentDiscoveryRequest` tag 4;
+empty keeps generic discovery, while one/two distinct IDs request a fresh exact set. The current
+control Relay resolves an unknown provider with Kademlia and retrieves its short-lived signed
+offer. Only the exact queried peer's bounded addresses can be used for that request. The Client
+does not dial providers for discovery, and mailbox IDs, contacts and message names are not DHT
+records. This neither provides anonymous metadata nor replaces independent key authentication.
+
+### Cooperative-origin HTTPS descriptor (development v1)
+
+The consumer obtains this descriptor through its own hostname/CA-verified TLS 1.3 connection
+with `http/1.1` ALPN, never from a peer-authority constructor. Canonical protobuf fields are
+`1: version=1`, `2: exact canonical HTTPS resource URL`, `3: request profile=1`, `4: status=200`,
+`5: content type`, `6: content length`, `7: issued Unix time`, `8: exclusive expiry`,
+`9: origin-authorized Ed25519 publisher key`, `10: signed native manifest`. Profile 1 is
+anonymous GET, binary `application/octet-stream`, identity encoding, no credentials/variant.
+The descriptor media type is `application/vnd.volparossa.origin-manifest.v1`.
+
+This cooperative profile requires bounded Content-Length HTTP/1.1 responses, explicit public
+max-age and canonical IMF-fixdate Date. Duplicate/ambiguous fields, redirects, encodings,
+cookies, variants, Transfer-Encoding, Expires or nonzero Age are refused. Reuse is bounded by
+descriptor/signed expiry, issued+max-age, conservative Date/request-start freshness and elapsed
+monotonic time; replication does not refresh it. The HTTP wrapper stays in memory and only it
+publishes output as origin-authorized content. Missing peer pieces trigger a single explicit
+`Range: bytes=start-end` for the first contiguous missing chunk run over another verified origin
+TLS connection. A 206 must carry exactly matching Content-Range, original total length and
+Content-Length; each returned chunk must match the retained authenticated manifest. Unknown
+totals, multipart responses or mismatched offsets are rejected. A server ignoring Range may
+return 200 only as a complete original representation, checked against all chunks/whole hash
+and counted at its full payload cost. No ETag is treated as cryptographic integrity, and neither
+partial nor full fallback renews origin authority. A complete cache needs no fallback connection.
+No general-browser semantics, reusable TLS proof or peer discovery is implied.
+
+The local-control `HttpsContentFetchRequest` adds optional bool `origin_digest` at tag 9.
+Omitted/false preserves the descriptor mode and requires its explicit metadata path; true
+requires an empty metadata path and selects the consumer's own resource HEAD/TLS `Repr-Digest`
+authorization. `HttpsContentTransferReady` echoes that bool at tag 5, and the CLI refuses a
+different mode before requesting chunks. The control-frame limit and protocol version are
+unchanged. A digest-mode native manifest is only a transport index: the agent must verify the
+entire object against the authenticated representation digest before Ready or contribution.
+The existing correlated final receipt and original HTTP/monotonic expiry remain mandatory;
+neither the index signature nor persisted bytes become reusable HTTPS authority. Local/browser
+JSON identifies `authentication_scope` as `origin-repr-digest` or legacy `cooperative-origin`;
+`transport_manifest_id` names the original transport envelope, not an origin trust anchor.
+Digest-mode workers may select different original provider indexes on the unchanged v1
+transfer wire, only when their whole hash, length, public media type and complete ordered
+chunk layout agree. Each worker retains its provider's original index and expiry; one writer
+assembles the object and the consumer still verifies the complete origin-authorized digest.
+This does not relax native/named transfers' exact-manifest selection or admit private messages.
 
 ## Signed control envelope
 
@@ -240,7 +491,8 @@ the endpoint-free subject/scope binding, opaque bound transcript tokens, process
 correlation, and attempt ceilings. It has no getter or decomposition surface and contains no local
 socket, connection ID, send/arrival event, prefix-derived direct origin, RTT, reachability,
 `FreshPeerEvidence`, route-session, reservation, or dispatch authority. The client-side attempt
-owner is production code, but no downstream route orchestrator invokes its crate-private handle.
+owner is production code. The local `Connect` route gate now invokes its crate-private handle from
+an explicit validated client route profile; this control step alone still grants no route.
 
 The completed A1a owner advances through one actor-owned affine A1c join. It accepts exactly one
 `BoundClientPreselectionTransport` in canonical request order for each retained transcript and
@@ -261,18 +513,18 @@ zero proximity and egress-quality scores, and `network_address_usable = false`. 
 `locally_blocked = false` means only that no local blocklist hit was supplied, not that policy was
 proved. The existing hard filter therefore rejects the batch until a separate native-path sampler
 adds dataplane evidence. The actor calls this join/mint and returns only opaque
-`PreparedPreselectionEvidence`. A crate-private, callerless native-preselection child can consume
-that value through its test seam while the five-second receipts are still live, but no production
-runtime invokes it. Neither the Prepared handoff nor the child grants admission, reservation,
-route, usability or datapath authority. The server-side responders and forwarding wrapper operate
-independently of this client value.
+`PreparedPreselectionEvidence`. A crate-private native-preselection child now consumes that value
+from the production `Connect` gate while the five-second receipts are still live. It mints an
+independent bounded owner and dispatches the first endpoint-free native Permit request only through
+the selected control Relay; neither the Prepared handoff nor this Permit stage grants admission,
+reservation, route, usability or datapath authority.
 
 ### Native-preselection contract and server-side Permit provider
 
 Tags 19 through 25 define an endpoint-separated native-probe transcript and affine verification
 states. The private client owner consumes the exact Prepared handoff before its signed five-second
 receipt window closes, discards the control-plane reachability observations and mints a distinct
-attempt bounded to at most 30 seconds by policy and actor expiry. This does not extend or reinterpret
+attempt bounded to at most five minutes by policy and actor expiry. This does not extend or reinterpret
 the original receipt lifetime. One candidate set contains the control Relay plus one to eight other
 data Relays, for two to nine preselection candidates total; later route selection still admits at
 most eight paths.
@@ -297,14 +549,14 @@ and affine states, never by ordering wall clocks owned by different nodes; each 
 enforces its own bounded lifetime, expiry ceiling and the normal clock-skew policy. Replay failures
 and cross-binding substitutions roll back only the newly admitted entries and fail closed.
 
-The client-side native attempt, ExitReady and ExitResult remain callerless contract/test
-foundations. The Exit now composes one production server-side Permit handler on the existing
-forwarded control protocol. That handler remains dormant in the current product: the local
-publisher intentionally serves no Exit advertisement or usable Exit capability yet, so a normal
-runtime cannot satisfy its exact-local-advertisement gate. An agent unit fixture injects a valid
-signed local Exit advertisement to prove the exact gate validators; a separate discovery transport
-integration proves connection-bound response handoff. No test claims the whole handler succeeds
-end to end. Once a truthful producer exists, the handler accepts
+The client-side native attempt now has one production Permit dispatcher; ExitReady and ExitResult
+remain callerless contract/test foundations. The Exit composes one production server-side Permit
+handler on the existing forwarded control protocol. Relay and Exit runtimes install their exact
+signed local service advertisement and bounded provider indexes from explicit configuration and
+current capacity. This opens the handler's local-advertisement gate, but the advertisement remains
+an untrusted claim and not usable datapath evidence. A separate discovery transport integration
+proves connection-bound response handoff; no test yet completes the whole handler exchange end to
+end. The handler accepts
 only the exact signed native Permit request received from an authenticated control Relay, rechecks
 the current full Relay capability and exact locally served Exit advertisement, and consumes a
 purpose-specific token for that exact libp2p `ConnectionId` when handing the response back.
@@ -319,8 +571,8 @@ The module-private, non-Clone Exit readiness/result owner
 still uses raw test-seam data-Relay identities. Its typed projection from the `Copy`
 `ExitEndpointLease` proves neither helper-resource custody nor same-connection helper-runtime
 provenance or cleanup authority, and the private helper/datapath observation has no constructor.
-There is no production client Permit dispatcher, Ready/Result caller, helper lifecycle/cleanup
-owner, challenge delivery, live WireGuard probe, measured readiness/capacity, terminal
+There is no production Ready/Result caller, helper lifecycle/cleanup owner, challenge delivery,
+live WireGuard probe, measured readiness/capacity, terminal
 helper-evidence producer, usability promotion or route admission. Permit, ExitReady and ExitResult
 each cap their own lifetime at the lower of the parent expiry and local production time plus 30
 seconds. Private phase owners retain the process-unique Exit boot incarnation and reject
@@ -566,9 +818,16 @@ attempt with real evidence and capacity is not reserved twice. Tests use an expl
 matches exact expected permit/result bytes after normal cryptographic and scope verification;
 there is no accept-all production or test provider.
 
-The `/volparossa/datapath-relay/4` ExecuteProbe wrapper is framing only and does not change this
-boundary. Likewise, signed route binding is not helper/kernel tunnel evidence and does not mark the
-capacity ledger tunnel-established. Real helper-owned endpoint preparation, readiness,
+The `/volparossa/datapath-relay/4` `ExecuteProbe` wrapper is framing only and does not change this
+boundary. The same v4 wrapper now also gives native preselection two exact operations:
+`NativeProbeReady` carries only a client-signed endpoint-free request plus its Exit-signed Permit and
+accepts only `NativeProbeRelayReady`; `NativeProbeStart` carries only the client-signed Start and
+accepts only `NativeProbeRelayResult`. Both target the selected data Relay identity and retain
+separate 16-byte correlation IDs. These wrappers are still not helper/kernel tunnel evidence and do
+not mark the capacity ledger tunnel-established. The strict helper additionally refuses Client
+activation until a standard nested Exit/Relay-signed `RelayReservation` binds the helper-prepared
+Client key, selected Relay endpoint, exact route context and hard expiry. Neither native wrapper
+currently obtains that post-Prepare authority. Real helper-owned endpoint preparation, readiness,
 activation, handshake/counter proof, route supervision, and cleanup remain required before a
 production datapath can be claimed.
 
@@ -622,12 +881,12 @@ rejected before dispatch.
 | Operation | Typed effect |
 |---|---|
 | `PrepareLeaseBatch` | prepare the exact role/cardinality set for paths 1–8 and return only opaque non-secret handles plus helper-owned public evidence |
-| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one Client/Exit singleton or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
+| `ActivateLeaseBatch` | bind every prepared lease to one exact public peer key/endpoint and one bounded signed relay reservation; the production backend accepts one to eight ordered Client/Exit path leases or the exact ordered Relay pair, verifies all applicable signed authority and, for Relay, activates the exact helper-internal two-direction forwarding fence |
 | `CommitLeaseBatch` | succeed only after a recent correlated WireGuard handshake and strict RX/TX counter growth for every lease; Relay additionally requires growth of both exact forwarding counters and commits only when every proof passes |
 | `DestroyContext` | idempotently remove one context and all contained state; Relay first restores policy-drop and proves the active fence absent |
-| `AddMptcpEndpoint` | request one derived committed-path MPTCP endpoint; currently returns `Unavailable` in production |
-| `RemoveMptcpEndpoint` | remove one exact owned MPTCP endpoint; currently returns `Unavailable` in production |
-| `AcquireTransportSocket` | tag 27: bind one committed context/path/role to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts only unconnected QUIC UDP for an exact committed Client/Exit singleton, while MPTCP and Relay remain unavailable |
+| `AddMptcpEndpoint` | add one kernel endpoint derived inside the worker namespace from an exact live committed Client MPTCP lease; arbitrary addresses/interfaces and Exit/Relay leases are rejected |
+| `RemoveMptcpEndpoint` | remove one exact worker-owned Client MPTCP endpoint; missing, stale, wrong-generation or non-Client ownership fails closed |
+| `AcquireTransportSocket` | tag 27: bind one exact path in a committed context to connected MPTCP, listening MPTCP, or unconnected QUIC UDP metadata and transfer one separately correlated CLOEXEC descriptor; production accepts unconnected QUIC UDP for an exact committed Client/Exit lease, genuine connected MPTCP only for Client, and a genuine MPTCP listener only for Exit, while Relay remains unavailable |
 | `ReconcileExpiredPrepare` | tag 28: after setup expiry, re-evaluate one exact same-runtime ambiguous Prepare lineage and succeed only after its exact generation is proven absent |
 | `CleanupOwned` | remove only resources matching a random 32-byte process-start ownership token |
 | `PrepareClientIngress` | tag 31: request a pre-route client runtime with exactly four closed socket kinds crossed with IPv4/IPv6; production returns `Unavailable` before state or network work |
@@ -690,6 +949,14 @@ deadline covers connect, credential validation, both writes, and both responses;
 between frames. Intent registration is runtime-global helper state, not a server-enforced binding to
 that connection. Same-stream use is the HelperClient invariant that prevents a pathname/socket swap
 between registration and dispatch.
+
+A successful Prepare is retained by the agent as one affine runtime-bound lifecycle owner rather
+than returned as freely cloneable phase authority. On every new Unix stream used for Activate,
+Commit or exact retirement Destroy, the agent first sends `BindHelperRuntime(None)`, requires the
+same retained 32-byte runtime ID, and only then sends the canonical phase request on that stream.
+Runtime change sends no phase request. The bounded route supervisor retains this owner while a
+phase call settles and transfers it to its existing retirement/retry worker on failure, timeout or
+cancellation. This does not add Ready/Result, restart adoption or a usable route datapath.
 
 This pre-alpha protocol-v3 refinement is deployed lockstep with the packaged agent and helper. It
 does not provide a mixed-version rolling-upgrade path: an old agent omits required tag 6, a new agent
@@ -890,15 +1157,19 @@ affine owner through systemd custody, durable `MayOwnPrepare`, dispatch, and cle
 settlement. No production route-manager caller reaches this transaction. Production starts one boot-scoped,
 secret-free canonical/CAS ownership actor before publishing its cleanup token or socket, and joins
 it after expiry-driver and engine cleanup. Startup may durably settle never-dispatched `Intent` and
-one bounded restart state: a full set of already durable `CleanupConfirmed` targets. Each
+two bounded restart states. The first is a full set of already durable `CleanupConfirmed` targets. Each
 exact-present pair is removed once in canonical name order and must produce a stable complete
 predecessor-minus-pair successor; already-absent members are skipped. Journal revalidation plus a
 fresh final manager barrier and two stable exact-empty snapshots precede one-shot full-set evidence
 for `CleanupConfirmed -> Absent`. Restart removal errors erase retry authority and stop that
-process. The deliberately refusing cleanup executor leaves every inherited `MayOwnCustody` or
-`MayOwnPrepare` byte-identical and blocks
-the internal socket-publication boundary. No inherited-custody recovery backend, restart reaper, or
-cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
+process. The second is exactly one same-boot, same-helper-image, single-path
+`MayOwnCustody + ExactPresent` pre-dispatch namespace. A fixed `/proc/self/exe` reaper receives one
+challenge-bound namespace FD over authenticated bounded `SOCK_SEQPACKET`, proves the role baseline,
+retires only an exact Relay restricted fence when present, and is sandbox-attested and exactly
+pidfd-reaped before a startup-only actor CAS. The existing `CleanupConfirmed` removal/absence chain
+then completes before socket publication. The general cleanup executor still leaves
+`MayOwnPrepare`, no-store, multi-target and multi-path cases byte-identical. No broad
+inherited-custody recovery backend or cross-runtime receipt exists yet. A helper restart changes the runtime ID, so retained agent
 authority remains quarantined rather than being misreported as absent; an absent journal is not
 cleanup evidence.
 
@@ -918,6 +1189,27 @@ listener, TPROXY/DNS/kill-switch nftables transaction, privileged per-identity t
 rollback, or live datapath is connected.
 
 ## Agent-to-native MPQUIC API
+
+### Current API7 transport-progress boundary
+
+The current native process API is version 7. Preflight rejects older executables before route
+setup; there is no downgrade. Canonical request and both descriptor-binding domains use `V7`.
+`NativePathStatus` adds `acked_transport_bytes` (u64, tag 9), the cumulative acknowledged QUIC
+packet bytes from the pinned backend. It is independent of `delivered_bytes`, which remains zero
+when unique inner-payload accounting is unavailable. Both counters are independently checked for
+regression. Path-health/growth uses actual transport-ACK progress, not a fabricated inner count.
+The local `PathSummary` adds the same explicitly named u64 at tag 8, printed as
+`acked_transport_bytes=` beside the unchanged `bytes=` user counter. Warm/non-native paths have
+no such native measurement and report zero. Transport counters alone prove neither unique
+application bytes nor useful aggregate throughput; complete application hashes and carrying-path
+evidence remain necessary. See the [native implementation contract](../native/volparossa-mpquic/README.md)
+and [current integration status](IMPLEMENTATION_STATUS.md#warm-mpquic-growth-integration).
+
+### Historical API6 implementation notes
+
+The following API6 design/checkpoint notes predate the current integrated runtime. Their old
+version/domain literals and statements about dormant backends are historical, not current API7
+configuration or completion claims; current code and the integration status above take precedence.
 
 `NativeRequest` contains canonical API version 6, a nonzero 16-byte nonce, a target native-process
 instance, and one operation. Versions 1 through 5 and every future version are rejected before
@@ -1054,10 +1346,12 @@ address, and wipes retained state on fatal transport failure. This does not prov
 exit allocated the address uniquely for the route lifetime, that the helper assigned it in the
 exact namespace, or that a real packet traversed it. Each path wire record reserves fields for path
 ID, smoothed RTT, loss, unique delivered payload bytes, congestion window, bytes in flight,
-delivery rate, and validation/real-carriage state. The pinned backend currently exposes ACKed
-transport bytes rather than unique payload bytes, so the runtime returns
-`unique_delivery_metric_unsupported` instead of claiming that evidence. These fields are necessary
-to prevent a native process from falsely reporting mere path configuration as multipath operation.
+delivery rate, and validation/real-carriage state. The runtime now publishes an exact current path
+set only when the pinned backend supplies every required metric and a valid normalized path state.
+It uses ACKed transport bytes only for the real-carriage boolean and keeps unique delivered payload
+bytes at zero, because transport framing and retransmissions make the former unsuitable for the
+latter. These fields are necessary to prevent a native process from falsely reporting mere path
+configuration as multipath operation.
 
 ## Policy manifest encoding
 
@@ -1068,6 +1362,25 @@ destination, and 16384 total permissions. A canonical body commits to monotonic 
 maintainer set/environment, exact and wildcard domains, exact IP rules, and exact TCP/UDP ports.
 Production defaults require three unique valid signatures from five trusted production maintainers;
 development maintainers are rejected in production mode. See [WHITELIST.md](WHITELIST.md).
+
+## Native static-site object v1
+
+Native content type `application/vnd.volparossa.site.v1` uses the existing signed publication
+envelope, chunk hashes, publisher/name lookup and protected transfer. There is no new publisher
+identity, signature scheme or HTTPS-origin authority. The complete object consists of a four-byte
+big-endian index length, a canonical protobuf index, then contiguous asset bytes. Index fields
+are `uint32 version = 1` (value 1) and repeated `Asset assets = 2`. Each Asset has string `path = 1`,
+string `content_type = 2`, `uint64 offset = 3` and `uint64 length = 4`; offsets are relative to the
+payload immediately after the index. Entries are strictly sorted by path and cover the exact
+payload with no gaps, overlap or trailing bytes. Canonical re-encoding must equal the index bytes.
+
+Bounds are 256 assets, a 256-KiB index, 1024-byte UTF-8 paths, 128-byte lowercase ASCII MIME types
+without parameters, and the existing 256-MiB complete-object limit. Absolute paths reject empty,
+dot/hidden, whitespace, control, backslash, percent, query and fragment components. `/index.html`
+with `text/html` is mandatory. Filesystem selection and symlink refusal belong to the explicit
+pack command; the codec performs no filesystem lookup. HTTP URL decoding/query handling happens
+only in the local viewer and never changes the authenticated asset index. A structurally valid
+bundle is not authenticated until the outer native manifest and complete payload are verified.
 
 ## Versioning rules
 
