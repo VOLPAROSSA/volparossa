@@ -2,6 +2,7 @@
 """Stdlib-only provisioning checks. No packages, model weights or network used."""
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -30,6 +31,36 @@ class Response(io.BytesIO):
 
 
 class ProvisionTests(unittest.TestCase):
+    def test_graph_reads_own_metadata_not_vendored_distribution_metadata(self):
+        # Execute the actual stdlib-only selector from the guest program without
+        # importing/installing pip, packaging or the model runtime on this host.
+        graph = ast.parse(PROVISION.CHECK_WHEEL_GRAPH)
+        selector = next(node for node in graph.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "wheel_metadata_member")
+        namespace = {}
+        exec(compile(ast.Module(body=[selector], type_ignores=[]),
+                     "guest-wheel-metadata-selector", "exec"), namespace)
+        select = namespace["wheel_metadata_member"]
+        own = "fixture-1.0.dist-info/METADATA"
+        nested = "fixture/_vendor/other-2.0.dist-info/METADATA"
+        for members, expected in [
+            ([own], own), ([nested, own], own),
+            ([nested], None), ([], None),
+            ([own, "unrelated-1.0.dist-info/METADATA"], None),
+        ]:
+            with self.subTest(members=members), io.BytesIO() as buffer:
+                with zipfile.ZipFile(buffer, "w") as archive:
+                    for member in members:
+                        archive.writestr(member, b"Metadata-Version: 2.1\n")
+                buffer.seek(0)
+                with zipfile.ZipFile(buffer) as archive:
+                    if expected is None:
+                        with self.assertRaisesRegex(AssertionError, "top-level METADATA"):
+                            select(archive)
+                    else:
+                        self.assertEqual(select(archive), expected)
+
     def test_preview_is_network_and_write_free_with_complete_fixed_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "must-not-be-created"

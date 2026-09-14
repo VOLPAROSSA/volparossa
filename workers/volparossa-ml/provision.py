@@ -187,6 +187,16 @@ from pip._vendor.packaging.specifiers import SpecifierSet
 from pip._vendor.packaging.tags import sys_tags
 from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
 from pip._vendor.packaging.version import Version
+
+def wheel_metadata_member(archive):
+    # The wheel's own dist-info is at archive root; vendored libraries may keep
+    # nested dist-info metadata too. Do not treat that as another distribution.
+    # https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-contents
+    members=[x for x in archive.namelist()
+             if x.count('/')==1 and x.endswith('.dist-info/METADATA')]
+    assert len(members)==1, ('expected one top-level METADATA', archive.filename, len(members))
+    return members[0]
+
 pins=json.loads(pathlib.Path(sys.argv[2]).read_text())
 wheelhouse=pathlib.Path(sys.argv[3]); env=default_environment(); env['extra']=''
 versions={canonicalize_name(x['name']):Version(x['version']) for x in pins['wheels']}
@@ -195,9 +205,7 @@ for item in pins['wheels']:
     assert tags.intersection(sys_tags()), ('wrong platform',item['path'])
     assert canonicalize_name(item['name'])==name and versions[name]==version
     with zipfile.ZipFile(wheelhouse/item['path']) as archive:
-        members=[x for x in archive.namelist() if x.endswith('.dist-info/METADATA')]
-        assert len(members)==1
-        meta=email.message_from_bytes(archive.read(members[0]))
+        meta=email.message_from_bytes(archive.read(wheel_metadata_member(archive)))
     assert canonicalize_name(meta['Name'])==name and Version(meta['Version'])==version
     assert Version(env['python_full_version']) in SpecifierSet(meta.get('Requires-Python',''))
     for raw in meta.get_all('Requires-Dist',[]):
