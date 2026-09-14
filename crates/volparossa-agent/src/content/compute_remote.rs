@@ -27,7 +27,8 @@ impl ContentRuntime {
     ) -> Result<(), ContentError> {
         let _foreground = self.foreground.enter();
         // No global retrieval lock across jobs. Each RPC retains its own route/stream.
-        timeout(Duration::from_secs(150), async {
+        let mut stage = "COMPUTE_RPC_LOCAL_REQUEST_FAILED";
+        let result = timeout(Duration::from_secs(150), async {
             let provider_key: [u8; 32] = remote
                 .provider_key
                 .as_slice()
@@ -56,15 +57,32 @@ impl ContentRuntime {
                 .map_err(|_| ContentError::Unavailable)?
                 .map_err(|_| ContentError::Invalid)?;
             validate_request(&request, &self.signer)?;
-            let response =
-                exchange(context, peer, provider_key, &policy, &self.signer, &request).await?;
+            let response = exchange(
+                context,
+                peer,
+                provider_key,
+                &policy,
+                &self.signer,
+                &request,
+                &mut stage,
+            )
+            .await?;
+            stage = "COMPUTE_RPC_LOCAL_REPLY_FAILED";
             compute::write_response(local, &response)
                 .await
                 .map_err(|_| ContentError::Unavailable)?;
             send(local, request_id, "COMPUTE_RPC_OK", Payload::Ack(Empty {})).await
         })
         .await
-        .map_err(|_| ContentError::Unavailable)?
+        .map_err(|_| ContentError::Unavailable)
+        .and_then(std::convert::identity);
+        if result.is_err() {
+            // Fixed codes only in the existing bounded in-memory log: no requester,
+            // provider, task ID, prompt, hostname, result or upstream exception text.
+            // An EOF after READY must not hide which boundary actually failed.
+            super::content_event(context, stage).await;
+        }
+        result
     }
 }
 
@@ -126,7 +144,9 @@ async fn exchange(
     policy: &VerifiedPolicy,
     signer: &SigningKey,
     request: &compute::Request,
+    stage: &mut &'static str,
 ) -> Result<compute::Response, ContentError> {
+    *stage = "COMPUTE_RPC_ROUTE_SETUP_FAILED";
     Box::pin(
         context
             .routes
@@ -142,6 +162,7 @@ async fn exchange(
     if !context.routes.content_provider_is_distinct(&peer).await {
         return Err(ContentError::Policy);
     }
+    *stage = "COMPUTE_RPC_DISCOVERY_FAILED";
     let mut providers = context
         .discovery
         .lookup_content_providers(control, &[peer])
@@ -151,12 +172,14 @@ async fn exchange(
         return Err(ContentError::Unavailable);
     }
     let provider = providers.pop().ok_or(ContentError::Unavailable)?;
+    *stage = "COMPUTE_RPC_OFFER_BINDING_FAILED";
     if provider.peer_id != peer
         || provider.offer.provider_key() != &provider_key
         || provider.offer.validity().expires <= now()
     {
         return Err(ContentError::Invalid);
     }
+    *stage = "COMPUTE_RPC_ROUTE_BINDING_FAILED";
     checked_policy(context, Some(policy)).await?;
     if context.routes.content_discovery_control().await != Some(control)
         || !context.routes.content_provider_is_distinct(&peer).await
@@ -164,39 +187,48 @@ async fn exchange(
         return Err(ContentError::Policy);
     }
     let endpoint = provider.offer.endpoint();
+    *stage = "COMPUTE_RPC_ROUTE_FLOW_FAILED";
     let mut flow = context
         .routes
         .open_content_stream(policy, endpoint.hostname(), endpoint.port(), unix_millis())
         .await
         .map_err(|_| ContentError::Unavailable)?;
+    *stage = "COMPUTE_RPC_PROVIDER_TLS_FAILED";
     let mut remote = tls::connect(flow.stream_mut(), peer, &provider.offer)
         .await
         .map_err(|_| ContentError::Unavailable)?;
+    *stage = "COMPUTE_RPC_CHALLENGE_FAILED";
     let challenge = wire::begin(&mut remote, &provider_key)
         .await
         .map_err(|_| ContentError::Unavailable)?;
+    *stage = "COMPUTE_RPC_PREEXPORT_CHECK_FAILED";
     checked_policy(context, Some(policy)).await?;
     validate_request(request, signer)?;
     if provider.offer.validity().expires <= now() {
         return Err(ContentError::Unavailable);
     }
     let payload = serde_json::to_vec(request).map_err(|_| ContentError::Invalid)?;
+    *stage = "COMPUTE_RPC_SIGNED_EXCHANGE_FAILED";
     let bytes = wire::exchange(&mut remote, challenge, signer, payload)
         .await
         .map_err(|_| ContentError::Unavailable)?;
+    *stage = "COMPUTE_RPC_REPLY_BINDING_FAILED";
     let response: compute::Response =
         serde_json::from_slice(&bytes).map_err(|_| ContentError::Invalid)?;
     if response.version != compute::VERSION || response.request_id != request.request_id {
         return Err(ContentError::Invalid);
     }
+    *stage = "COMPUTE_RPC_PROVIDER_CLOSE_FAILED";
     tls::finish(&mut remote)
         .await
         .map_err(|_| ContentError::Unavailable)?;
     drop(remote);
+    *stage = "COMPUTE_RPC_ROUTE_CLOSE_FAILED";
     tls::finish(flow.stream_mut())
         .await
         .map_err(|_| ContentError::Unavailable)?;
     flow.shutdown();
+    *stage = "COMPUTE_RPC_FINAL_POLICY_FAILED";
     checked_policy(context, Some(policy)).await?;
     if provider.offer.validity().expires <= now() {
         return Err(ContentError::Unavailable);
