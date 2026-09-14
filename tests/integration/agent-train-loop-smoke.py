@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import runpy
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -40,6 +41,98 @@ def setup(path, publisher, manifest):
     (root / "loop-passphrase").chmod(0o600)
 
 
+def readiness_state(root, sequence):
+    path = root / "loop/state.json"
+    if not path.exists():
+        return {"stage": "state_absent", "seed_ready": False, "cycles": []}
+    state = read(path)
+    require(state["version"] == 1 and isinstance(state["cycles"], list) and len(state["cycles"]) <= 8,
+            "invalid durable coordinator readiness state")
+    cycles = [{"sequence": row["sequence"], "phase": row["phase"]} for row in state["cycles"]]
+    current = next((row for row in cycles if row["sequence"] == sequence), None)
+    stage = current["phase"] if current else "admission_wait" if state["seed"] is not None else "seed_wait"
+    return {"stage": stage, "seed_ready": state["seed"] is not None,
+            "cycles": cycles, "next_sequence": state["next_sequence"], "completed": state["completed"]}
+
+
+def bounded_text(path, maximum=16384):
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(maximum + 1)
+        return data.decode("ascii") if len(data) <= maximum else None
+    except (OSError, UnicodeError):
+        return None
+
+
+def capacity_diagnostic(pid):
+    def pressure(kind):
+        text = bounded_text(Path("/proc/pressure") / kind, 512)
+        try:
+            some = next(line for line in text.splitlines() if line.startswith("some "))
+            value = float(dict(item.split("=", 1) for item in some.split()[1:])["avg10"])
+            return value if 0 <= value <= 100 else None
+        except (AttributeError, StopIteration, ValueError, KeyError):
+            return None
+    memory = bounded_text(Path("/proc/meminfo"))
+    available = None
+    if memory is not None:
+        for line in memory.splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[0] == "MemAvailable:" and fields[1].isdigit() and fields[2] == "kB":
+                available = int(fields[1]) * 1024
+    membership = bounded_text(Path(f"/proc/{pid}/cgroup"))
+    cgroup = None
+    if membership is not None:
+        matches = [line[3:] for line in membership.splitlines() if line.startswith("0::")]
+        if len(matches) == 1 and matches[0].startswith("/") and ".." not in Path(matches[0]).parts:
+            relative = Path(matches[0].lstrip("/"))
+            ancestors = []
+            for _ in range(64):
+                directory = Path("/sys/fs/cgroup") / relative
+                ancestors.append({"path": "/" + str(relative).removeprefix("."),
+                                  **{name: bounded_text(directory / name, 4096) for name in
+                                     ("memory.current", "memory.max", "cgroup.controllers", "cgroup.subtree_control")}})
+                if relative == Path("."):
+                    break
+                relative = relative.parent
+            cgroup = {"membership": matches[0], "ancestors": ancestors}
+    return {"cpu_some_avg10": pressure("cpu"), "io_some_avg10": pressure("io"),
+            "mem_available_bytes": available, "cgroup": cgroup,
+            "budget_decision_inferred": False}
+
+
+def save_readiness(path, diagnostic):
+    # Fixed owned diagnostic only. Atomic replacement preserves a last observation if the
+    # existing shell deadline terminates this observer before its normal finally block.
+    owner = path.parent.stat()
+    temporary = path.with_name(path.name + ".next")
+    write(temporary, diagnostic)
+    os.chown(temporary, owner.st_uid, owner.st_gid)
+    os.replace(temporary, path)
+
+
+def await_running(pid, root, sequence, diagnostic_path):
+    expected = TRAIN["identity"](pid)
+    started = time.monotonic()
+    diagnostic = {"version": 1, "sequence": sequence, "cli": expected,
+                  "total_first_worker_limit_seconds": 90, "samples": [], "worker_search_started": False}
+    while True:
+        snapshot = readiness_state(root, sequence)
+        observed = capacity_diagnostic(pid)
+        diagnostic["latest_cgroup"] = observed.pop("cgroup")
+        diagnostic["samples"].append({"elapsed_ms": int((time.monotonic() - started) * 1000),
+                                      "state": snapshot, "capacity": observed})
+        diagnostic["samples"] = diagnostic["samples"][-92:]
+        ready = snapshot["stage"] == "running"
+        diagnostic["worker_search_started"] = ready
+        save_readiness(diagnostic_path, diagnostic)
+        if ready:
+            return
+        require(TRAIN["alive"](expected), "coordinator exited before a durable Running cycle")
+        require(time.monotonic() - started < 90, "coordinator did not admit a Running cycle within existing first-worker budget")
+        time.sleep(1)
+
+
 def observe_loop(pid, path, namespace, service_pid):
     root = ART["private_root"](path) if os.getuid() else Path(path)
     observations = []
@@ -47,6 +140,7 @@ def observe_loop(pid, path, namespace, service_pid):
         cycle = root / "loop" / f"cycle-{sequence:016x}"
         output = root / f"loop-{sequence}-isolation.json"
         raw = root / f"loop-{sequence}-isolation.raw.json"
+        await_running(pid, root, sequence, root / f"loop-{sequence}-readiness.json")
         ART["observe"](pid, raw, root / "provision", cycle / "dataset.json", root / "private-canary",
                        "training", "relay4", namespace, service_pid)
         evidence = read(raw)
@@ -460,6 +554,24 @@ def observation_file_test():
         else:
             raise AssertionError("existing final observation overwritten")
         require(output.read_bytes() == saved and raw.read_bytes() == raw_bytes, "replay changed existing evidence")
+        invalid = root / "invalid-report.json"
+        write(invalid, {"report_kind": "deliberately-invalid-checker-fixture"})
+        result = subprocess.run([sys.executable, "-B", str(HERE / "agent-train-loop-smoke.py"),
+                                 "report", str(invalid), "a" * 40],
+                                check=False, capture_output=True, timeout=10)
+        require(result.returncode != 0 and b"incomplete source-bound loop report" in result.stderr
+                and b"AttributeError" not in result.stderr, "report CLI failed before validating the actual supplied file")
+        require(readiness_state(root, 1)["stage"] == "state_absent", "missing state relabeled ready")
+        (root / "loop").mkdir(mode=0o700)
+        state = {"version": 1, "cycles": [], "seed": None, "next_sequence": 1, "completed": 0}
+        save_readiness(root / "loop/state.json", state)
+        require(readiness_state(root, 1)["stage"] == "seed_wait", "unfinished seed relabeled admitted")
+        state["seed"] = {"synthetic_metadata_only": True}
+        save_readiness(root / "loop/state.json", state)
+        require(readiness_state(root, 1)["stage"] == "admission_wait", "seed completion relabeled model execution")
+        state["cycles"] = [{"sequence": 1, "phase": "running"}]
+        save_readiness(root / "loop/state.json", state)
+        require(readiness_state(root, 1)["stage"] == "running", "durable admitted cycle not recognized")
     print("agent-train-loop raw-to-final exclusive observation file test PASS; no model/network")
 
 
@@ -482,7 +594,7 @@ def main():
     elif len(args) == 8 and args[0] == "finalize":
         finalize(Path(args[1]), args[2], int(args[3]), args[4] == "true", int(args[5]), args[6], args[7])
     elif len(args) == 3 and args[0] == "report":
-        report(read(args[1], 1048576), args[2])
+        report(read(Path(args[1]), 1048576), args[2])
     else:
         raise SystemExit("invalid agent-train-loop fixture command")
 

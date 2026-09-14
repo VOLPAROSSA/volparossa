@@ -197,6 +197,12 @@ agent_train_loop_cleanup() {
         loop_observer_pid=
     fi
     [ -n "${artifact_user:-}" ] && [ -f "$WORK/bin/agent-train-loop-smoke.py" ] || return 0
+    for loop_sequence in 1 2; do
+        loop_diagnostic=$artifact_user/loop-$loop_sequence-readiness.json
+        if [ -f "$loop_diagnostic" ] && [ ! -L "$loop_diagnostic" ]; then
+            install -m 0600 "$loop_diagnostic" "$WORK/agent-train-loop-$loop_sequence-readiness.json"
+        fi
+    done
     if [ ! -f "$WORK/agent-train-loop-cleanup.json" ]; then
         agent_train_loop_private cleanup "$artifact_user" >"$WORK/agent-train-loop-cleanup.json" || return 1
     fi
