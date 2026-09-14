@@ -42,6 +42,16 @@ const PUBLICATION_FILES: [(&str, u64); 3] = [
     ("publication.json", 64 * 1024),
     ("contribution.json", 64 * 1024),
 ];
+const VALIDATION_FILES: [(&str, u64); 8] = [
+    ("validation/dataset.json", 1024 * 1024),
+    ("validation/dataset.manifest", 64 * 1024),
+    ("validation/provenance.json", 64 * 1024),
+    ("validation/baseline/report.json", 16 * 1024),
+    ("validation/candidate/report.json", 16 * 1024),
+    ("baseline-report.json", 64 * 1024),
+    ("candidate-report.json", 64 * 1024),
+    ("validation.json", 64 * 1024),
+];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -150,7 +160,12 @@ impl Store {
         ensure!(
             matches!(
                 name,
-                "evaluation.json" | "publication.json" | "contribution.json"
+                "evaluation.json"
+                    | "publication.json"
+                    | "contribution.json"
+                    | "validation.json"
+                    | "baseline-report.json"
+                    | "candidate-report.json"
             ),
             "train_loop_receipt_name"
         );
@@ -161,6 +176,22 @@ impl Store {
     }
 
     pub(super) fn snapshot_cycle(&self, sequence: u64) -> Result<Snapshot> {
+        self.snapshot_files(sequence, true)
+    }
+
+    pub(super) fn snapshot_training(&self, sequence: u64) -> Result<Snapshot> {
+        self.snapshot_files(sequence, false)
+    }
+
+    pub(super) fn validate_training(&self, sequence: u64, expected: &Snapshot) -> Result<()> {
+        ensure!(
+            &self.snapshot_training(sequence)? == expected,
+            "train_loop_training_changed"
+        );
+        Ok(())
+    }
+
+    fn snapshot_files(&self, sequence: u64, complete: bool) -> Result<Snapshot> {
         let cycle = self.cycle_path(sequence)?;
         let entries = checked_tree(&cycle)?;
         ensure!(
@@ -168,7 +199,12 @@ impl Store {
             "train_loop_cycle_incomplete_temporary"
         );
         let mut snapshot = Snapshot::new();
-        for (name, limit) in CONTENT_FILES {
+        let validation = complete && fs::symlink_metadata(cycle.join("validation.json")).is_ok();
+        for (name, limit) in CONTENT_FILES
+            .into_iter()
+            .filter(|(name, _)| complete || *name != "evaluation.json")
+            .chain(VALIDATION_FILES.into_iter().filter(|_| validation))
+        {
             let bytes = read_private(&cycle.join(name), limit)?;
             ensure!(!bytes.is_empty(), "train_loop_cycle_empty_file");
             snapshot.insert(
@@ -324,6 +360,7 @@ fn fixed_limit(name: &str) -> Option<u64> {
     CONTENT_FILES
         .into_iter()
         .chain(PUBLICATION_FILES)
+        .chain(VALIDATION_FILES)
         .find_map(|(known, limit)| (known == name).then_some(limit))
 }
 
@@ -360,7 +397,14 @@ fn checked_tree(cycle: &Path) -> Result<Vec<Entry>> {
             let name = relative.to_str().context("train_loop_cycle_name")?;
             if metadata.is_dir() {
                 ensure!(
-                    matches!(name, "training" | "training/adapter"),
+                    matches!(
+                        name,
+                        "training"
+                            | "training/adapter"
+                            | "validation"
+                            | "validation/baseline"
+                            | "validation/candidate"
+                    ),
                     "train_loop_cycle_directory"
                 );
                 private_directory(&item.path())?;

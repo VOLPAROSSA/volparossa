@@ -100,8 +100,9 @@ async fn prepare(
         .as_ref()
         .context("train_loop_snapshot_required")?;
     store.validate_snapshot(cycle.sequence, snapshot)?;
+    let decision = super::evaluation::verify(store, cycle.sequence)?;
     ensure!(
-        super::evaluation::verify(store, cycle.sequence)?.approved,
+        decision.approved && decision.has_validation() == args.validation_source.is_some(),
         "train_loop_unapproved_publication"
     );
     let root = store.cycle_path(cycle.sequence)?;

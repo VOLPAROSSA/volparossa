@@ -354,7 +354,43 @@ The current source supplies both training and held-out examples; within-source d
 does not establish an independently selected benchmark or exclude cross-round contamination.
 This is a scoped measured promotion rule, not evidence of general intelligence, no forgetting,
 globally monotone improvement or robust peer evaluation. Independent evaluation/selection and
-specialist retention remain required work. The updated actual training-loop proof is pending.
+specialist retention remain required work. The [actual proof on `405e67e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896078997)
+passes its exact-source checker and raw reconstruction: two genuine eight-update cycles,
+loss `1.244269 → 0.615178 → 0.345725` on four target tokens, both approved and contributed,
+then actual protected retrieval and inference by another Client. That live run took no rejection
+branch. Cleanup left zero owned objects and unchanged guest-host state; this is still only the
+small, same-source selection proof described above.
+
+### Explicit second-source validation candidate
+
+Add `--validation-source /absolute/path/validation-source.json` to a new loop's normal command.
+This private JSON has the same `publisher_key`, `name`, optional `min_revision` and
+`manifest_id` fields as a source-plan row, but **requires an exact manifest ID**. Select it
+independently of cache availability, with a different publisher/name pair from every training
+source. It must be a signed public v1 dataset with `train: []`, 1–8 held-out rows and 1–4
+inference rows. The runtime verifies its signature and bytes, uses the cache when available,
+and retrieves that exact source over protected routes on a miss. It never substitutes a
+more convenient cached dataset.
+
+Enrollment fixes `source-and-second-source-loss-v1` and pins the retrieved source before any
+loop training. Every newly fetched training source is checked for normalized-question overlap
+with the validation rows before model work. Each completed training cycle then runs two
+sequential, isolated `infer` jobs: the retained predecessor (or initial adapter/base) and the
+new candidate, on identical second-source bytes, without gradient updates. Promotion requires
+the original source-heldout gate **and** second-source loss improvement greater than `1e-6`.
+Both jobs retain the ordinary owner priority, resource limits and source-expiry deadlines.
+
+The `evaluating` phase saves the finished training checkpoint before comparison. Validated
+completed inference stages and their original deadlines are reused on resume without training
+the candidate again. A partial inference output lacking its supervisor's durable result is
+retained as an explicit interrupted-stage error, not silently accepted or overwritten. Completed
+cycle snapshots bind all source files, both actual reports and the final decision. Rejection
+still preserves the previous approved adapter and remains eligible for bounded reclamation.
+
+Repeatedly selecting on this set makes it a validation/selection set, not a fresh independent
+test benchmark. Question matching does not detect semantic overlap or prove that a pretrained
+base/imported seed never saw the content. It does not establish general intelligence or global
+quality improvement. The upgraded disposable training-loop proof is pending; B05 stays open.
 
 ## Owner-first resource allocation
 

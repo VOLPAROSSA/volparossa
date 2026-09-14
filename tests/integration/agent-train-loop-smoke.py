@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import runpy
+import shutil
 import stat
 import subprocess
 import sys
@@ -27,13 +28,19 @@ FILES = ("README.md", "adapter_config.json", "adapter_model.safetensors")
 CONTENT_FILES = ("selection.json", "dataset.json", "dataset.manifest", "source-provenance.json",
                  "training-report.json", "result.json", "adapter.bundle", "training/report.json",
                  *("training/adapter/" + name for name in FILES))
-POLICY = "source-heldout-loss-v1"
-SCOPE = ("R5 publishes a public dataset/seed; R4 independently imports that seed and runs two owner-enabled eight-update "
-         "cycles on the same explicitly repeated dataset. Only candidates improving that source's heldout loss by more "
-         "than 1e-6 replace the predecessor and are automatically contributed. Cycle two uses the latest approved adapter "
+VALIDATION_FILES = ("validation/dataset.json", "validation/dataset.manifest", "validation/provenance.json",
+                    "validation/baseline/report.json", "validation/candidate/report.json", "baseline-report.json",
+                    "candidate-report.json", "validation.json")
+POLICY = "source-and-second-source-loss-v1"
+SCOPE = ("R5 publishes a public training dataset/seed and a separately named, pinned validation-only public dataset; "
+         "R4 retrieves all three over protected MPTCP and runs two owner-enabled eight-update cycles on the explicitly "
+         "repeated training source. Each cycle also runs real sequential predecessor/candidate inference on exactly the "
+         "same second-source bytes. Only candidates improving both measured heldout losses by more than 1e-6 replace "
+         "the predecessor and are automatically contributed. Cycle two uses the latest approved adapter "
          "or the original seed. When an update is approved, Main Client imports the latest approved update and original "
          "separately signed dataset through protected MPTCP and performs inference; otherwise no new adapter is adopted "
-         "or imported. Shared explicitly provisioned base/runtime; not independent evaluation, cross-round heldout "
+         "or imported. Current normalized training-question overlap is rejected; shared explicitly provisioned "
+         "base/runtime and a repeatedly used second-source selection set, not an independent benchmark, historical "
          "decontamination, general quality improvement, fresh corpus discovery, joint optimization, full B05 or full alpha")
 
 
@@ -48,6 +55,47 @@ def setup(path, publisher, manifest):
     (root / "loop-passphrase").chmod(0o600)
 
 
+def validation_input(path, revision):
+    root = ART["private_root"](path)
+    require(len(revision) == 40 and all(char in "0123456789abcdef" for char in revision), "invalid validation revision")
+    context = "VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64."
+    require(context in (HERE / "agent-artifact-README.md").read_text(), "public validation source changed")
+    dataset = dict(version=1, visibility="public", license="GPL-3.0-only", source_revision=revision, train=[],
+        heldout=[dict(question="Which operating system and architecture is VOLPAROSSA being built for?",
+                      context=context, answer="Debian 13 amd64.")],
+        inference=[dict(question="What sort of network is VOLPAROSSA?", context=context)])
+    write(root / "validation-dataset.json", dataset)
+
+
+def validation_original(path, publisher):
+    root = ART["private_root"](path)
+    require(TRAIN["HASH"].fullmatch(publisher), "invalid validation publisher")
+    dataset = (root / "validation-dataset.json").read_bytes()
+    manifest = (root / "validation.pb").read_bytes()
+    require(0 < len(dataset) <= 1048576 and 0 < len(manifest) <= 65536, "invalid validation source bound")
+    selection = dict(publisher_key=publisher, name="disposable-agent-validation", min_revision=1,
+                     manifest_id=file_digest(manifest)["sha256"])
+    write(root / "loop-validation-source.json", selection)
+    return dict(selection=selection, dataset=file_digest(dataset), manifest=file_digest(manifest),
+                dataset_hex=dataset.hex(), manifest_hex=manifest.hex())
+
+
+def drop_validation(path):
+    root = ART["private_root"](path)
+    for name in ("validation-dataset.json", "validation.pb", "validation-cache"):
+        target = root / name
+        info = target.lstat()
+        require(info.st_uid == os.getuid() and not stat.S_ISLNK(info.st_mode), "owned validation source changed")
+        if name == "validation-cache":
+            require(stat.S_ISDIR(info.st_mode), "validation cache is not the owned directory")
+            shutil.rmtree(target)
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "validation input is not an owned regular file")
+            target.unlink()
+    return dict(validation_source_bytes_removed=True, validation_manifest_original_removed=True,
+                validation_publisher_cache_removed=True, selected_public_source_metadata_retained=True)
+
+
 def readiness_state(root, sequence):
     path = root / "loop/state.json"
     if not path.exists():
@@ -57,8 +105,10 @@ def readiness_state(root, sequence):
             "invalid durable coordinator readiness state")
     cycles = [{"sequence": row["sequence"], "phase": row["phase"]} for row in state["cycles"]]
     current = next((row for row in cycles if row["sequence"] == sequence), None)
-    stage = current["phase"] if current else "admission_wait" if state["seed"] is not None else "seed_wait"
+    stage = (current["phase"] if current else "seed_wait" if state["seed"] is None else
+             "validation_wait" if state.get("validation") is None else "admission_wait")
     return {"stage": stage, "seed_ready": state["seed"] is not None,
+            "validation_ready": state.get("validation") is not None,
             "cycles": cycles, "next_sequence": state["next_sequence"], "completed": state["completed"]}
 
 
@@ -205,7 +255,41 @@ def observe_loop(pid, path, namespace, service_pid):
         while TRAIN["alive"](evidence["worker"]):
             require(time.monotonic() < deadline, "observed worker exceeded original wall deadline")
             time.sleep(0.05)
-    require(observations[0]["worker"] != observations[1]["worker"], "one worker relabeled as two cycles")
+        for stage, selected in (("baseline", adapter), ("candidate", cycle / "training/adapter")):
+            observations.append(observe_validation(pid, root, cycle, sequence, stage, selected, namespace, service_pid))
+    require(len({(item["worker"]["pid"], item["worker"]["start_ticks"]) for item in observations}) == 6,
+            "training and validation stages did not use six distinct actual workers")
+
+
+def observe_validation(pid, root, cycle, sequence, stage, adapter, namespace, service_pid):
+    raw = root / f"loop-{sequence}-{stage}-isolation.raw.json"
+    output = root / f"loop-{sequence}-{stage}-isolation.json"
+    # ART's 'training' selector only avoids its fixed received/adapter pathname;
+    # mode=Infer is established by the actual final report, not this helper label.
+    ART["observe"](pid, raw, root / "provision", cycle / "validation/dataset.json", root / "private-canary",
+                   "training", "relay4", namespace, service_pid)
+    evidence = read(raw)
+    process = Path(f"/proc/{evidence['worker']['pid']}")
+    mounts = [line.split()[5].split(",") for line in (process / "mountinfo").read_text().splitlines()
+              if line.split()[4] == "/adapter"]
+    require(len(mounts) == 1 and "ro" in mounts[0], "validation adapter is not readonly")
+    expected, actual = (cycle / "validation" / stage).stat(), (process / "root/output").stat()
+    require((expected.st_dev, expected.st_ino) == (actual.st_dev, actual.st_ino), "wrong actual validation stage output")
+    exact = {}
+    for name in FILES:
+        expected, actual = (adapter / name).stat(), (process / "root/adapter" / name).stat()
+        exact[name] = (expected.st_dev, expected.st_ino) == (actual.st_dev, actual.st_ino)
+    require(all(exact.values()), "validation used another adapter")
+    evidence.update(sequence=sequence, validation_stage=stage, adapter_readonly=True,
+                    adapter_exact_inodes=exact, output_exact_inode=True)
+    write(output, evidence)
+    owner = raw.stat()
+    os.chown(output, owner.st_uid, owner.st_gid)
+    deadline = time.monotonic() + 605
+    while TRAIN["alive"](evidence["worker"]):
+        require(time.monotonic() < deadline, "actual validation worker exceeded original deadline")
+        time.sleep(0.05)
+    return evidence
 
 
 def publish_observation(raw, output, sequence, exact, previous=None):
@@ -284,6 +368,10 @@ def collect(path):
                            report=file_hash(cycle / "training-report.json", 65536),
                            report_hex=(cycle / "training-report.json").read_bytes().hex(),
                            content_files={name: file_hash(cycle / name, 4 * 1024 ** 2) for name in CONTENT_FILES},
+                           validation=dict(files=export_files(cycle, VALIDATION_FILES),
+                               stages={stage:dict(isolation=read(root / f"loop-{sequence}-{stage}-isolation.json"),
+                                   raw_isolation=read(root / f"loop-{sequence}-{stage}-isolation.raw.json"))
+                                   for stage in ("baseline", "candidate")}),
                            evaluation=evaluation, evaluation_file=file_hash(cycle / "evaluation.json", 16384),
                            evaluation_hex=(cycle / "evaluation.json").read_bytes().hex(),
                            publication=file_hash(publication, 65536) if evaluation["approved"] else None,
@@ -291,10 +379,31 @@ def collect(path):
                            contribution=read(contributed) if evaluation["approved"] else None,
                            rejected_publication_files_absent=not evaluation["approved"]))
     return dict(state=read(loop / "state.json"), enrollment=read(loop / "enrollment.json"),
+                validation_input=export_files(loop / "validation-input", ("dataset.json", "dataset.manifest", "provenance.json")),
                 seed=read(loop / "seed-input/provenance.json"), cycles=cycles,
                 seed_files={name: file_hash(loop / "seed-input/adapter" / name, 2 * 1024 ** 2) for name in FILES},
                 seed_dataset=file_hash(loop / "seed-input/dataset.json", 1048576),
                 base_after=file_hash(root / "provision/model/model.safetensors", 300000000))
+
+
+def export_files(root, names):
+    result = {}
+    for name in names:
+        info = file_hash(root / name, 1048576)
+        raw = (root / name).read_bytes()
+        require(file_digest(raw) == info, "retained source or validation report changed during export")
+        result[name] = dict(info, hex=raw.hex())
+    return result
+
+
+def exported(record):
+    raw = bytes.fromhex(record["hex"])
+    require(file_digest(raw) == {key:record[key] for key in ("bytes", "sha256")}, "exported original bytes changed")
+    return raw
+
+
+def identities(files):
+    return {name:{key:info[key] for key in ("bytes", "sha256")} for name, info in files.items()}
 
 
 def last_json(path, operation):
@@ -321,7 +430,8 @@ def check_evaluation(cycle, previous, predecessor, publisher):
     require(baseline["target_tokens"] == adapted["target_tokens"] == reloaded["target_tokens"]
             and math.isclose(adapted["loss"], reloaded["loss"], rel_tol=1e-5, abs_tol=1e-6),
             "heldout target set or actual checkpoint reload differs")
-    approved = reloaded["loss"] < baseline["loss"] - 1e-6
+    validation = check_validation(cycle)
+    approved = reloaded["loss"] < baseline["loss"] - 1e-6 and validation["approved"]
     require(set(cycle["content_files"]) == set(CONTENT_FILES), "completed candidate file identity set differs")
     for name, actual in (("dataset.json", cycle["dataset"]), ("dataset.manifest", cycle["manifest"]),
                          ("training-report.json", cycle["report"]), ("adapter.bundle", cycle["bundle"]),
@@ -332,7 +442,7 @@ def check_evaluation(cycle, previous, predecessor, publisher):
             and file_digest(raw_decision) == cycle["evaluation_file"] and json.loads(raw_decision) == decision,
             "raw immutable report or evaluation bytes differ")
     expected = dict(version=1, policy=POLICY,
-        scope="current-source-heldout-only-not-independent-benchmark-or-general-answer-quality", epsilon=1e-6,
+        scope="source-and-pinned-second-source-selection-only-not-independent-test-benchmark", epsilon=1e-6,
         sequence=cycle["sequence"], predecessor=previous,
         baseline_kind="configured_adapter" if previous is None else "approved_predecessor", approved=approved,
         source_manifest_id=cycle["manifest"]["sha256"], source_publisher_key=publisher,
@@ -341,10 +451,92 @@ def check_evaluation(cycle, previous, predecessor, publisher):
         base_model=trained["model"]["files"]["model.safetensors"], base_parameters=trained["base_after"],
         input_adapter={name: trained["input_adapter"][name] for name in ("files", "applied_parameters")},
         candidate_adapter=cycle["adapter_files"], candidate_parameters=trained["adapter_after"],
-        baseline=baseline, adapted=adapted, reloaded=reloaded)
+        baseline=baseline, adapted=adapted, reloaded=reloaded, validation=validation)
     require(decision == expected and trained["adapter_before"] == predecessor["adapter_after"],
             "evaluation policy, decision, source or predecessor binding differs")
     return approved
+
+
+def check_validation(cycle):
+    files = cycle["validation"]["files"]
+    require(set(files) == set(VALIDATION_FILES), "actual validation file set incomplete")
+    parsed = {name:json.loads(exported(value)) for name, value in files.items() if name != "validation/dataset.manifest"}
+    require(file_digest(exported(files["validation/dataset.manifest"])) == identities(files)["validation/dataset.manifest"],
+            "validation manifest export differs")
+    source, dataset = parsed["validation/provenance.json"], parsed["validation/dataset.json"]
+    require(source["dataset"] == identities(files)["validation/dataset.json"]
+            and source["manifest"] == identities(files)["validation/dataset.manifest"]
+            and source["manifest_id"] == source["manifest"]["sha256"]
+            and source["manifest_id"] != cycle["manifest"]["sha256"]
+            and source["dataset"]["sha256"] != cycle["dataset"]["sha256"]
+            and dataset["version"] == 1 and dataset["visibility"] == "public" and dataset["license"] == "GPL-3.0-only"
+            and dataset["train"] == [] and len(dataset["heldout"]) == len(dataset["inference"]) == 1,
+            "validation reused training source or contains training rows")
+    trained, reports, previous_end = cycle["training"], {}, None
+    for stage in ("baseline", "candidate"):
+        envelope = parsed[stage + "-report.json"]
+        report = envelope["report"]
+        require({key:value for key,value in report.items() if key != "supervisor"}
+                == parsed[f"validation/{stage}/report.json"], "actual validation worker report was substituted")
+        require(report["version"] == 1 and report["kind"] == "result" and report["status"] == "ok"
+                and report["mode"] == "infer" and report["device"] == "cpu" and report["threads"] == 2
+                and report["updates_completed"] == 0 and report["artifacts"] == []
+                and report["model"] == trained["model"] and report["backend_versions"] == trained["backend_versions"]
+                and report["dataset"]["sha256"] == source["dataset"]["sha256"]
+                and report["dataset"]["bytes"] == source["dataset"]["bytes"]
+                and report["dataset"]["source_revision"] == dataset["source_revision"]
+                and report["dataset"]["training_examples"] == 0
+                and report["dataset"]["heldout_examples"] == report["dataset"]["inference_examples"] == 1
+                and len(report["outputs"]) == 1 and isinstance(report["outputs"][0], str)
+                and report["better_answers_claimed"] is False and report["network_policy_changed"] is False,
+                "real bounded zero-update inference on exact second-source input missing")
+        supervisor = report["supervisor"]
+        seconds = supervisor["deadline_seconds"]
+        require(supervisor["child_reaped"] is True and supervisor["network_access"] is False
+                and supervisor["gpu_access"] is False and supervisor["spare_capacity"] is True
+                and supervisor["sandbox"] == "bubblewrap-private-user-net-pid-ipc-mount"
+                and 0 < supervisor["max_observed_rss_bytes"] <= supervisor["rss_limit_bytes"]
+                and type(seconds) is int and 0 < seconds <= 600,
+                "validation bypasses real owner bounds or child cleanup")
+        require(envelope["version"] == 1 and source["verified_at_unix_seconds"] <= envelope["started_at_unix_seconds"]
+                <= envelope["verified_at_unix_seconds"] <= envelope["deadline_unix_seconds"]
+                and envelope["deadline_unix_seconds"] == envelope["started_at_unix_seconds"] + seconds
+                and envelope["verified_at_unix_seconds"] < min(source["expires_unix_seconds"], cycle["result"]["source_expires_unix_seconds"])
+                and envelope["deadline_unix_seconds"] <= min(source["expires_unix_seconds"], cycle["result"]["source_expires_unix_seconds"])
+                and 0 <= report["elapsed_ms"] <= seconds * 1000
+                and (previous_end is None or envelope["started_at_unix_seconds"] >= previous_end),
+                "validation renewed expiry or overlapped sequential stages")
+        previous_end = envelope["verified_at_unix_seconds"]
+        adapter = report["input_adapter"]
+        require(adapter["applied"] is True and adapter["model_id"] == trained["model"]["id"]
+                and adapter["model_revision"] == trained["model"]["revision"]
+                and adapter["base_parameters_before_apply"] == adapter["base_parameters_after_apply"] == trained["base_before"],
+                "validation adapter changed the common base")
+        if stage == "baseline":
+            require(adapter == trained["input_adapter"], "baseline did not load exact training predecessor")
+        else:
+            require(adapter["files"] == cycle["adapter_files"] and adapter["applied_parameters"] == trained["adapter_after"],
+                    "candidate validation did not load actual newly saved weights")
+        metric = report["baseline_evaluation"]
+        require(set(metric) == {"loss", "target_tokens"} and type(metric["loss"]) in (int, float)
+                and math.isfinite(metric["loss"]) and metric["loss"] >= 0
+                and type(metric["target_tokens"]) is int and metric["target_tokens"] > 0, "invalid second-source metric")
+        reports[stage] = report
+    baseline, candidate = (reports[stage]["baseline_evaluation"] for stage in ("baseline", "candidate"))
+    require(baseline["target_tokens"] == candidate["target_tokens"], "second-source evaluation target tokens changed")
+    observed_files = {name:info for name,info in identities(files).items() if name != "validation.json"}
+    observed_files.update({name:cycle["content_files"][name] for name in
+                          ("training-report.json", "result.json", "selection.json", *("training/adapter/" + name for name in FILES))})
+    expected = dict(version=1, policy="second-source-heldout-loss-v1",
+        scope="explicit-second-source-selection-set-not-independent-benchmark-or-historical-contamination-proof", epsilon=1e-6,
+        sequence=cycle["sequence"], approved=candidate["loss"] < baseline["loss"] - 1e-6,
+        source_manifest_id=source["manifest_id"], publisher_key=source["selection"]["publisher_key"],
+        source_revision=dataset["source_revision"], source_expires_unix_seconds=source["expires_unix_seconds"],
+        files=observed_files, model_id=trained["model"]["id"], model_revision=trained["model"]["revision"],
+        baseline_input_adapter=reports["baseline"]["input_adapter"], candidate_input_adapter=reports["candidate"]["input_adapter"],
+        baseline=baseline, candidate=candidate)
+    require(parsed["validation.json"] == expected, "saved second-source validation decision or raw file bindings differ")
+    return expected
 
 
 def check_chain(evidence):
@@ -386,7 +578,9 @@ def check_chain(evidence):
         require(result["training_report_sha256"] == cycle["report"]["sha256"]
                 and result["bundle"]["sha256"] == cycle["bundle"]["sha256"], "actual report/bundle hash differs")
         accepted = check_evaluation(cycle, latest, previous, source)
-        require(saved["snapshot"] == dict(cycle["content_files"], **{"evaluation.json": cycle["evaluation_file"]}),
+        require(saved["training"] is None
+                and saved["snapshot"] == dict(cycle["content_files"], **{"evaluation.json": cycle["evaluation_file"]},
+                                              **identities(cycle["validation"]["files"])),
                 "durable candidate snapshot does not bind actual files and immutable evaluation")
         require(saved["phase"] == ("complete" if accepted else "rejected"), "durable phase contradicts measured evaluation")
         if not accepted:
@@ -436,13 +630,14 @@ def adoption(loop):
     return dict(quality_policy=POLICY, approved_sequences=approved, latest_sequence=latest,
                 new_adapter_adopted=latest is not None, protected_import_performed=latest is not None,
                 inference_performed=latest is not None,
-                no_new_adapter_reason=None if latest is not None else "both_source_heldout_candidates_rejected",
+                no_new_adapter_reason=None if latest is not None else "both_candidates_rejected_by_enrolled_loss_gates",
                 independent_evaluation_claimed=False, general_quality_improvement_claimed=False)
 
 
 def check_evidence(evidence, revision):
     require(evidence["source_revision"] == revision, "wrong source revision")
     check_chain(evidence)
+    check_second_source(evidence)
     loop = evidence["loop"]
     for name, mandatory in (("loop-shared", False), ("loop-all-shared", True)):
         shared_updates(loop, evidence["originals"], evidence["owner_key"]["identity_public_key_hex"],
@@ -452,6 +647,7 @@ def check_evidence(evidence, revision):
     require(evidence["training_isolation"]["node_lineage"]["node"] == "relay5", "seed did not originate on R5")
     node_lineage = None
     previous = None
+    validation_workers = []
     for cycle in loop["cycles"]:
         TRAIN["check_worker"](cycle["training"], revision)
         observed = cycle["isolation"]
@@ -467,6 +663,21 @@ def check_evidence(evidence, revision):
             require(observed["node_lineage"] == node_lineage, "coordinator moved to another node")
         node_lineage = observed["node_lineage"]
         require(cycle["training"]["supervisor"]["spare_capacity"] is True, "autonomous worker bypasses owner budget")
+        last_worker = observed["worker"]
+        for stage in ("baseline", "candidate"):
+            saved = cycle["validation"]["stages"][stage]
+            actual = saved["isolation"]
+            require({key:value for key,value in actual.items() if key not in
+                     ("sequence", "validation_stage", "adapter_readonly", "adapter_exact_inodes", "output_exact_inode")}
+                    == saved["raw_isolation"], "validation observation changed original process or input evidence")
+            TRAIN["check_isolation"](actual)
+            require(actual["node_lineage"] == node_lineage and actual["sequence"] == cycle["sequence"]
+                    and actual["validation_stage"] == stage and actual["adapter_readonly"] is True
+                    and set(actual["adapter_exact_inodes"]) == set(FILES) and all(actual["adapter_exact_inodes"].values())
+                    and actual["output_exact_inode"] is True and actual["worker"]["start_ticks"] > last_worker["start_ticks"],
+                    "actual sequential second-source stage, private adapter or output inode missing")
+            last_worker = actual["worker"]
+            validation_workers.append(actual)
         if not cycle["evaluation"]["approved"]:
             continue
         previous = cycle["sequence"]
@@ -487,6 +698,7 @@ def check_evidence(evidence, revision):
         require(evidence["inference_isolation"]["node_lineage"]["node"] == "client"
                 and evidence["inference_isolation"]["received_adapter_readonly"] is True
                 and all(evidence["inference_isolation"]["received_adapter_exact_inodes"].values()), "wrong importer worker")
+    workers.extend(validation_workers)
     require(len({(item["worker"]["pid"], item["worker"]["start_ticks"]) for item in workers}) == len(workers), "actual worker identities reused")
     require(len(set(namespaces)) == len(namespaces), "producer/trainer/importer node namespaces overlap")
     require(loop["base_after"] == dict(bytes=269060552, sha256=TRAIN["WEIGHT_HASH"]), "original base weights changed")
@@ -515,7 +727,8 @@ def check_evidence(evidence, revision):
                     and receipt["bytes"] == receipt["peer_bytes"] > 0
                     and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0, "final object bypassed protected R4")
     REP["validate_phase"](evidence["phases"]["uptake"], "uptake", peers,
-                          evidence["originals"]["adapter_bundle"]["bytes"] + evidence["originals"]["dataset"]["bytes"])
+                          evidence["originals"]["adapter_bundle"]["bytes"] + evidence["originals"]["dataset"]["bytes"]
+                          + evidence["validation_original"]["dataset"]["bytes"])
     if latest is not None:
         REP["validate_phase"](evidence["phases"]["reserve-fetch"], "reserve-fetch", peers,
                               loop["cycles"][latest - 1]["bundle"]["bytes"] + evidence["originals"]["dataset"]["bytes"])
@@ -535,10 +748,63 @@ def check_evidence(evidence, revision):
     require(evidence["source_restart"]["pid_before"] == evidence["training_isolation"]["node_lineage"]["service"]["pid"]
             and evidence["source_restart"]["pid_before"] != evidence["source_restart"]["pid_after"]
             and evidence["source_restart"]["same_cache"] is True
-            and evidence["source_restart"]["restored_publications"] == 2, "original provider restart/reopen missing")
+            and evidence["source_restart"]["restored_publications"] == 3, "original provider restart/reopen missing")
     require(evidence["provision"]["success"] is True and evidence["provision"]["training_performed"] is False,
             "explicit verified guest provisioning missing")
     require(all(evidence["cleanup"].values()) and all(evidence["content_isolation"].values()), "owned cleanup or cross-node storage isolation missing")
+
+
+def check_second_source(evidence):
+    loop, original = evidence["loop"], evidence["validation_original"]
+    files = loop["validation_input"]
+    require(set(files) == {"dataset.json", "dataset.manifest", "provenance.json"}
+            and loop["state"]["validation"] == identities(files), "pinned validation input snapshot changed")
+    raw, encoded = exported(files["dataset.json"]), exported(files["dataset.manifest"])
+    dataset, provenance = json.loads(raw), json.loads(exported(files["provenance.json"]))
+    require(raw.hex() == original["dataset_hex"] and file_digest(raw) == original["dataset"]
+            and encoded.hex() == original["manifest_hex"] and file_digest(encoded) == original["manifest"]
+            and loop["enrollment"]["validation_source"] == original["selection"] == provenance["selection"]
+            and original["selection"]["name"] == "disposable-agent-validation"
+            and original["selection"]["publisher_key"] == evidence["dataset_publish"]["publisher_key_hex"]
+            == evidence["validation_publish"]["publisher_key_hex"]
+            and original["selection"]["manifest_id"] == provenance["manifest_id"] == original["manifest"]["sha256"]
+            and provenance["dataset"] == original["dataset"] and provenance["manifest"] == original["manifest"],
+            "validation source differs from the separately published and enrolled original")
+    fields = ART["CUSTODY"]["fields"]
+    envelope = fields(encoded, 65536)
+    body = fields(envelope[1], 65536)
+    payload = fields(body[8], 65536)
+    require(len(envelope[2]) == 64 and body[1] == 1 and body[6] == 1
+            and body[2].hex() == original["selection"]["publisher_key"]
+            and body[3] <= provenance["verified_at_unix_seconds"] < body[4]
+            and body[4] == provenance["expires_unix_seconds"] == evidence["validation_publish"]["expires_unix_seconds"]
+            and body[7] == hashlib.sha256(body[8]).digest()
+            and payload[1] == b"disposable-agent-validation" and payload[2] == 1
+            and payload[3] == ART["DATASET_TYPE"].encode() and payload[4] == len(raw)
+            and payload[6] == hashlib.sha256(raw).digest(), "original validation signature bytes/object binding differs")
+    train_raw = bytes.fromhex(evidence["training_dataset_hex"])
+    training = json.loads(train_raw)
+    normalize = lambda text: " ".join(text.split()).lower()
+    questions = {normalize(row["question"]) for row in dataset["heldout"] + dataset["inference"]}
+    require(file_digest(train_raw) == evidence["originals"]["dataset"] and dataset["train"] == []
+            and dataset["source_revision"] == training["source_revision"] == evidence["source_revision"]
+            and original["manifest"]["sha256"] != evidence["originals"]["dataset_manifest_id"]
+            and original["dataset"]["sha256"] != evidence["originals"]["dataset"]["sha256"]
+            and all(normalize(row["question"]) not in questions for row in training["train"]),
+            "fixture reused training source or leaked current training questions into second-source rows")
+    receipt = provenance["source_receipt"]
+    require(receipt["manifest_id"] == provenance["manifest_id"] and receipt["sha256"] == original["dataset"]["sha256"]
+            and receipt["bytes"] == receipt["peer_bytes"] == original["dataset"]["bytes"]
+            and receipt["chunks"] == receipt["providers_used"] == 1 and receipt["provider_peer_ids"] == [evidence["peers"]["relay5"]]
+            and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0,
+            "new validation source was not actually retrieved through the protected provider route")
+    for cycle in loop["cycles"]:
+        for name, value in files.items():
+            require(cycle["validation"]["files"]["validation/" + name] == value,
+                    "a cycle changed the previously pinned validation input")
+        require(provenance["verified_at_unix_seconds"] <= cycle["provenance"]["verified_at_unix_seconds"],
+                "validation set was selected after training-source admission")
+    require(all(evidence["validation_removed"].values()), "original validation inputs/cache remain")
 
 
 def file_digest(data):
@@ -591,8 +857,16 @@ def shared_updates(loop, original, owner, status, require_dataset):
                 and receipt["sha256"] == original[original_field]["sha256"]
                 and receipt["chunks"] == (1 if kind == "dataset" else 4), "unknown original replica used to explain storage")
         extras.append((receipt["manifest_id"], receipt["bytes"], receipt["chunks"]))
-    require(len(set(required_ids + [entry[0] for entry in extras])) == len(required_ids) + 2, "original and trained publication identities overlap")
-    for mask in range(4):
+    if loop.get("validation_input") is not None:
+        source = json.loads(exported(loop["validation_input"]["provenance.json"]))
+        receipt = source["source_receipt"]
+        require(receipt["manifest_id"] == source["manifest_id"]
+                and receipt["sha256"] == source["dataset"]["sha256"]
+                and receipt["bytes"] == source["dataset"]["bytes"] and receipt["chunks"] == 1,
+                "unknown validation replica used to explain storage")
+        extras.append((receipt["manifest_id"], receipt["bytes"], receipt["chunks"]))
+    require(len(set(required_ids + [entry[0] for entry in extras])) == len(required_ids) + len(extras), "original and trained publication identities overlap")
+    for mask in range(1 << len(extras)):
         if require_dataset and not mask & 1:
             continue
         selected = [item for index, item in enumerate(extras) if mask & (1 << index)]
@@ -615,7 +889,8 @@ def shared(work, label, require_dataset):
 
 
 def evidence(work, revision):
-    names = ("loop", "summary", "owner-key", "adoption", "initial-fetch", "dataset-export", "dataset-contribute", "source-stop", "content-isolation", "cleanup")
+    names = ("loop", "summary", "owner-key", "adoption", "initial-fetch", "dataset-export", "dataset-contribute", "source-stop",
+             "validation-original", "validation-publish", "validation-removed", "content-isolation", "cleanup")
     result = {name.replace("-", "_"): read(work / f"agent-train-loop-{name}.json", 1048576) for name in names}
     for name in ("training", "training-isolation", "originals", "dataset-publish", "adapter-publish", "source-removed", "provision"):
         result[name.replace("-", "_")] = read(work / f"agent-artifact-{name}.json")
@@ -627,6 +902,7 @@ def evidence(work, revision):
             require(not path.exists() and not path.is_symlink(), "rejected candidates have unexpected import/inference output")
         result[name.replace("-", "_")] = read(path) if latest is not None else None
     result.update(source_revision=revision, peers=read(work / "a01-expected-peers.json"))
+    result["training_dataset_hex"] = (work / "agent-artifact-original-dataset.json").read_bytes().hex()
     result["source_restart"] = read(work / "agent-artifact-relay5-restart.json")
     result["sharing_status"] = {name: read(work / f"content-custody-relay4-{name}.json")
                                 for name in ("loop-shared", "loop-all-shared")}
@@ -649,10 +925,11 @@ def cleanup(path):
     if root.exists():
         ART["private_root"](root)
         for sequence in (1, 2):
-            for suffix in (".raw.json", ".json"):
-                record = root / f"loop-{sequence}-isolation{suffix}"
-                if record.exists():
-                    ended &= all(not TRAIN["alive"](member) for member in read(record)["owned_processes"])
+            for stage in ("", "-baseline", "-candidate"):
+                for suffix in (".raw.json", ".json"):
+                    record = root / f"loop-{sequence}{stage}-isolation{suffix}"
+                    if record.exists():
+                        ended &= all(not TRAIN["alive"](member) for member in read(record)["owned_processes"])
         require(ended, "observed autonomous worker/coordinator still alive")
     return dict(ART["cleanup"](root), autonomous_owned_processes_ended=ended)
 
@@ -681,7 +958,58 @@ def report(value, revision):
     check_evidence(value["evidence"], revision)
 
 
-def synthetic_chain(decisions=(True, True), losses=None):
+def synthetic_validation(cycle, publisher, approved):
+    def encoded(raw):
+        return dict(file_digest(raw), hex=raw.hex())
+    def document(value):
+        return encoded(json.dumps(value).encode())
+    dataset = dict(version=1, visibility="public", license="GPL-3.0-only", source_revision="a" * 40, train=[],
+        heldout=[dict(question="A separately selected test question?", context="Public parser fixture.", answer="Yes.")],
+        inference=[dict(question="A separate inference?", context="Public parser fixture.")])
+    manifest = encoded(b"synthetic second-source manifest, not a signature proof")
+    raw_dataset = document(dataset)
+    source = dict(version=1, selection=dict(publisher_key=publisher, name="disposable-agent-validation", min_revision=1,
+        manifest_id=manifest["sha256"]), manifest_id=manifest["sha256"], verified_at_unix_seconds=100,
+        expires_unix_seconds=900, dataset={key:raw_dataset[key] for key in ("sha256", "bytes")},
+        manifest={key:manifest[key] for key in ("sha256", "bytes")}, source_receipt={})
+    files = {"validation/dataset.json":raw_dataset, "validation/dataset.manifest":manifest,
+             "validation/provenance.json":document(source)}
+    trained, reports = cycle["training"], {}
+    for stage, start in (("baseline", 200), ("candidate", 220)):
+        adapter = copy.deepcopy(trained["input_adapter"])
+        if stage == "candidate":
+            adapter.update(files=cycle["adapter_files"], applied_parameters=trained["adapter_after"])
+        report = dict(version=1, kind="result", status="ok", mode="infer", device="cpu", threads=2,
+            updates_completed=0, artifacts=[], model=trained["model"], backend_versions=trained["backend_versions"],
+            dataset=dict(source["dataset"], source_revision="a" * 40, training_examples=0, heldout_examples=1,
+                inference_examples=1, visibility="public", license="GPL-3.0-only"),
+            outputs=["Parser fixture only; no model ran."], better_answers_claimed=False, network_policy_changed=False,
+            input_adapter=adapter, baseline_evaluation=dict(loss=2.0 if stage == "baseline" else 1.5 if approved else 2.5,
+                target_tokens=8), elapsed_ms=1000)
+        files[f"validation/{stage}/report.json"] = document(report)
+        report["supervisor"] = dict(child_reaped=True, network_access=False, gpu_access=False, spare_capacity=True,
+            sandbox="bubblewrap-private-user-net-pid-ipc-mount", max_observed_rss_bytes=1000, rss_limit_bytes=2000,
+            deadline_seconds=600)
+        envelope = dict(version=1, started_at_unix_seconds=start, verified_at_unix_seconds=start + 10,
+                        deadline_unix_seconds=start + 600, report=report)
+        files[stage + "-report.json"] = document(envelope)
+        reports[stage] = report
+    bound = identities(files)
+    bound.update({name:cycle["content_files"][name] for name in
+        ("training-report.json", "result.json", "selection.json", *("training/adapter/" + name for name in FILES))})
+    record = dict(version=1, policy="second-source-heldout-loss-v1",
+        scope="explicit-second-source-selection-set-not-independent-benchmark-or-historical-contamination-proof", epsilon=1e-6,
+        sequence=cycle["sequence"], approved=approved, source_manifest_id=manifest["sha256"], publisher_key=publisher,
+        source_revision="a" * 40, source_expires_unix_seconds=900, files=bound, model_id=trained["model"]["id"],
+        model_revision=trained["model"]["revision"], baseline_input_adapter=reports["baseline"]["input_adapter"],
+        candidate_input_adapter=reports["candidate"]["input_adapter"], baseline=reports["baseline"]["baseline_evaluation"],
+        candidate=reports["candidate"]["baseline_evaluation"])
+    files["validation.json"] = document(record)
+    cycle["validation"] = dict(files=files)
+    return record
+
+
+def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True, True)):
     # Parser-only file/metric fixtures, never model execution or network evidence.
     def digest(number, size=100):
         return dict(bytes=size, sha256=f"{number:064x}")
@@ -699,18 +1027,22 @@ def synthetic_chain(decisions=(True, True), losses=None):
     state = dict(version=2, completed=2, latest=None, promoted=0, rejected=0, next_sequence=3, cycles=[], garbage=[])
     loop = dict(enrollment=enrollment, state=state, seed_files=original["adapter_files"], seed_dataset=original["dataset"], cycles=[])
     previous, previous_files = training, original["adapter_files"]
-    for sequence, approved in enumerate(decisions, 1):
-        candidate_loss = losses[sequence - 1] if losses is not None else 1.5 if approved else 2.5
+    for sequence, locally_approved in enumerate(decisions, 1):
+        approved = locally_approved and second_decisions[sequence - 1]
+        candidate_loss = losses[sequence - 1] if losses is not None else 1.5 if locally_approved else 2.5
         files = adapters(100 * sequence)
         trained = dict(input_adapter=dict(files=previous_files, applied_parameters=previous["adapter_after"]),
                        adapter_before=previous["adapter_after"], adapter_after=dict(sha256=f"{50 + sequence:064x}", parameters=230400),
                        base_before=base, base_after=base, outputs=["public fixture"],
                        dataset=dict(source_revision="a" * 40),
+                       backend_versions=dict(torch="2.14.0+cpu", transformers="5.16.1", peft="0.20.0"),
                        model=dict(id="HuggingFaceTB/SmolLM2-135M-Instruct", revision=TRAIN["MODEL_REVISION"],
                                   files={"model.safetensors":dict(bytes=269060552, sha256=TRAIN["WEIGHT_HASH"])}),
                        baseline_evaluation=dict(loss=2.0, target_tokens=10),
                        adapted_evaluation=dict(loss=candidate_loss, target_tokens=10),
                        reloaded_evaluation=dict(loss=candidate_loss, target_tokens=10))
+        trained["input_adapter"].update(applied=True, model_id=trained["model"]["id"], model_revision=TRAIN["MODEL_REVISION"],
+                                        base_parameters_before_apply=base, base_parameters_after_apply=base)
         raw_report = json.dumps(trained).encode()
         bundle, publication, report_hash = digest(60 + sequence), digest(70 + sequence), file_digest(raw_report)
         result = dict(operation="compute_train_cycle", complete=True, updates_completed=8, input_adapter_applied=True,
@@ -730,20 +1062,23 @@ def synthetic_chain(decisions=(True, True), losses=None):
                            "training-report.json": report_hash, "adapter.bundle": bundle,
                            **{"training/adapter/" + name: info for name, info in files.items()}})
         cycle["content_files"] = identities
+        validation = synthetic_validation(cycle, source, second_decisions[sequence - 1])
         cycle["evaluation"] = dict(version=1, policy=POLICY,
-            scope="current-source-heldout-only-not-independent-benchmark-or-general-answer-quality", epsilon=1e-6,
+            scope="source-and-pinned-second-source-selection-only-not-independent-test-benchmark", epsilon=1e-6,
             sequence=sequence, predecessor=state["latest"],
             baseline_kind="configured_adapter" if state["latest"] is None else "approved_predecessor", approved=approved,
             source_manifest_id=original["dataset_manifest_id"], source_publisher_key=source, source_revision="a" * 40,
             files=identities, model_id=trained["model"]["id"], model_revision=TRAIN["MODEL_REVISION"],
             base_model=trained["model"]["files"]["model.safetensors"], base_parameters=base,
-            input_adapter=trained["input_adapter"], candidate_adapter=files, candidate_parameters=trained["adapter_after"],
+            input_adapter={key:trained["input_adapter"][key] for key in ("files", "applied_parameters")},
+            candidate_adapter=files, candidate_parameters=trained["adapter_after"], validation=validation,
             baseline=trained["baseline_evaluation"], adapted=trained["adapted_evaluation"], reloaded=trained["reloaded_evaluation"])
         raw_decision = json.dumps(cycle["evaluation"]).encode()
         cycle.update(evaluation_file=file_digest(raw_decision), evaluation_hex=raw_decision.hex())
         loop["cycles"].append(cycle)
         state["cycles"].append(dict(sequence=sequence, phase="complete" if approved else "rejected",
-            snapshot=dict(identities, **{"evaluation.json":cycle["evaluation_file"]}),
+            training=None, snapshot=dict(identities, **{"evaluation.json":cycle["evaluation_file"]},
+                **{name:{key:value[key] for key in ("sha256", "bytes")} for name,value in cycle["validation"]["files"].items()}),
             publication=dict(manifest_id=publication["sha256"]) if approved else None))
         if approved:
             state["latest"] = sequence
@@ -775,6 +1110,7 @@ def self_test():
     # All four actual-decision branches are parser fixtures, not claimed ML outcomes.
     for decisions in ((True, True), (True, False), (False, True), (False, False)):
         check_chain(synthetic_chain(decisions))
+        check_chain(synthetic_chain(second_decisions=decisions))
     check_chain(synthetic_chain((False, True), (2.0 - 1e-6, 0.0)))
     value = synthetic_chain()
     original, training, owner = value["originals"], value["training"], value["owner_key"]["identity_public_key_hex"]
@@ -821,7 +1157,21 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("rejected candidate publication accepted")
-    print("agent-train-loop chain checker: four promotion branches, strict epsilon/zero-loss + 23 rejections PASS; synthetic only")
+    for filename, field, replacement in (("candidate-report.json", "mode", "train"),
+                                         ("candidate-report.json", "updates_completed", 1),
+                                         ("baseline-report.json", "input_adapter", {})):
+        changed = synthetic_chain()
+        files = changed["loop"]["cycles"][0]["validation"]["files"]
+        envelope = json.loads(exported(files[filename]))
+        envelope["report"][field] = replacement
+        raw = json.dumps(envelope).encode()
+        files[filename] = dict(file_digest(raw), hex=raw.hex())
+        try:
+            check_chain(changed)
+        except (KeyError, ValueError):
+            continue
+        raise AssertionError("non-inference or wrong-adapter second-source report accepted")
+    print("agent-train-loop checker: both gates/four outcomes, epsilon/zero-loss + 26 rejections PASS; synthetic only")
     observation_file_test()
     shared_updates_test()
 
@@ -884,6 +1234,17 @@ def shared_updates_test():
                 replica_chunks=4 * count + (1 if original_mask & 1 else 0) + (4 if original_mask & 2 else 0))
             matched = shared_updates(selected, original, owner, status, bool(original_mask & 1))
             require(len(matched["required_update_manifest_ids"]) == count, "rejected update counted as required")
+    with_validation = copy.deepcopy(loop)
+    provenance = {"manifest_id":"66" * 32, "dataset":dict(bytes=123, sha256="77" * 32),
+                  "source_receipt":dict(manifest_id="66" * 32, bytes=123, chunks=1, sha256="77" * 32)}
+    raw = json.dumps(provenance).encode()
+    with_validation["validation_input"] = {"provenance.json":dict(file_digest(raw), hex=raw.hex())}
+    for mask in range(8):
+        expected = dict(serving=True, replication_enabled=True, publications=2 + mask.bit_count(),
+            replica_publications=2 + mask.bit_count(), replica_bytes=2000 + (100 if mask & 1 else 0)
+                + (1000 if mask & 2 else 0) + (123 if mask & 4 else 0),
+            replica_chunks=8 + (1 if mask & 1 else 0) + (4 if mask & 2 else 0) + (1 if mask & 4 else 0))
+        shared_updates(with_validation, original, owner, expected, bool(mask & 1))
     wrong = copy.deepcopy(loop)
     wrong["cycles"][1]["contribution"]["manifest_id"] = original["dataset_manifest_id"]
     try:
@@ -933,6 +1294,9 @@ def observation_file_test():
         save_readiness(root / "loop/state.json", state)
         require(readiness_state(root, 1)["stage"] == "seed_wait", "unfinished seed relabeled admitted")
         state["seed"] = {"synthetic_metadata_only": True}
+        save_readiness(root / "loop/state.json", state)
+        require(readiness_state(root, 1)["stage"] == "validation_wait", "unfinished second-source fetch relabeled admitted")
+        state["validation"] = {"synthetic_source_metadata_only": True}
         save_readiness(root / "loop/state.json", state)
         require(readiness_state(root, 1)["stage"] == "admission_wait", "seed completion relabeled model execution")
         state["cycles"] = [{"sequence": 1, "phase": "running"}]
@@ -991,6 +1355,12 @@ def main():
         print(json.dumps(shared(Path(args[1]), args[2], args[3] == "true")))
     elif len(args) == 4 and args[0] == "setup":
         setup(*args[1:])
+    elif len(args) == 3 and args[0] == "validation-input":
+        validation_input(*args[1:])
+    elif len(args) == 3 and args[0] == "validation-original":
+        print(json.dumps(validation_original(*args[1:])))
+    elif len(args) == 2 and args[0] == "drop-validation":
+        print(json.dumps(drop_validation(args[1])))
     elif len(args) == 5 and args[0] == "observe-loop":
         observe_loop(int(args[1]), args[2], Path(args[3]), int(args[4]))
     elif len(args) == 2 and args[0] == "collect":

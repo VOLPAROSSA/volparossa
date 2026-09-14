@@ -19,6 +19,7 @@ agent_train_loop_execute() {
         --groups="$custody_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
         compute train-loop --plan "$artifact_user/loop-plan.json" --seed "$artifact_user/loop-seed.json" \
+        --validation-source "$artifact_user/loop-validation-source.json" \
         --directory "$artifact_user/loop" --runtime-root "$artifact_user/provision/venv" \
         --model-root "$artifact_user/provision/model" --cache "$loop_cache" \
         --max-cycles 2 --repeat-sources --steps 8 --threads 2 --max-seconds 600 --poll-seconds 1 \
@@ -68,6 +69,22 @@ agent_train_loop_shared() {
     return 1
 }
 
+agent_train_loop_restart_source() {
+    loop_source_unit=volparossa-alpha-agent@relay5.service
+    case " $AGENT_UNITS " in *" $loop_source_unit "*) ;; *) return 1 ;; esac
+    loop_source_before=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
+    loop_cache_before=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
+    systemctl restart "$loop_source_unit" || return 1
+    content_custody_status relay5 loop-restored 3 || return 1
+    loop_source_after=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
+    loop_cache_after=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
+    [ "$loop_source_before" -gt 0 ] && [ "$loop_source_after" -gt 0 ] \
+        && [ "$loop_source_before" != "$loop_source_after" ] && [ "$loop_cache_before" = "$loop_cache_after" ] || return 1
+    jq -n --argjson before "$loop_source_before" --argjson after "$loop_source_after" --arg inode "$loop_cache_after" \
+        '{node:"relay5",pid_before:$before,pid_after:$after,cache_device_inode:$inode,same_cache:true,restored_publications:3}' \
+        >"$WORK/agent-artifact-relay5-restart.json"
+}
+
 agent_train_loop_run() {
     provider_node_a=relay5
     provider_node_b=relay4
@@ -95,6 +112,14 @@ agent_train_loop_run() {
         --cache "$artifact_user/dataset-cache" --manifest "$artifact_user/dataset.pb" --lifetime-seconds 7200 \
         >"$WORK/agent-artifact-dataset-publish.json" || fail TRAIN_LOOP_DATASET_PUBLISH_FAILED
     artifact_publisher=$(jq -er '.publisher_key_hex' "$WORK/agent-artifact-dataset-publish.json")
+    agent_train_loop_private validation-input "$artifact_user" "$expected_commit" || fail TRAIN_LOOP_VALIDATION_INPUT_FAILED
+    agent_artifact_cli relay5 content publish --contribute --input "$artifact_user/validation-dataset.json" \
+        --name disposable-agent-validation --revision 1 --content-type application/vnd.volparossa.agent-dataset.v1+json \
+        --identity "$artifact_user/identity.key" --passphrase-file "$artifact_user/passphrase" \
+        --cache "$artifact_user/validation-cache" --manifest "$artifact_user/validation.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-train-loop-validation-publish.json" || fail TRAIN_LOOP_VALIDATION_PUBLISH_FAILED
+    agent_train_loop_private validation-original "$artifact_user" "$artifact_publisher" \
+        >"$WORK/agent-train-loop-validation-original.json" || fail TRAIN_LOOP_VALIDATION_IDENTITY_FAILED
     agent_artifact_cli relay5 content agent pack --directory "$artifact_user/train/adapter" \
         --training-report "$artifact_user/train/report.json" --dataset-manifest "$artifact_user/dataset.pb" \
         --publisher-key "$artifact_publisher" --output "$artifact_user/bundle.bin" \
@@ -107,8 +132,10 @@ agent_train_loop_run() {
     agent_artifact_private originals "$artifact_user" >"$WORK/agent-artifact-originals.json" || fail TRAIN_LOOP_ORIGINALS_INVALID
     artifact_dataset_id=$(jq -er '.dataset_manifest_id' "$WORK/agent-artifact-originals.json")
     agent_train_loop_private setup "$artifact_user" "$artifact_publisher" "$artifact_dataset_id" || fail TRAIN_LOOP_ENROLLMENT_INVALID
+    agent_train_loop_private drop-validation "$artifact_user" >"$WORK/agent-train-loop-validation-removed.json" \
+        || fail TRAIN_LOOP_VALIDATION_SOURCE_REMOVAL_FAILED
     agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail TRAIN_LOOP_SOURCE_REMOVAL_FAILED
-    agent_artifact_restart relay5 || fail TRAIN_LOOP_SOURCE_REOPEN_FAILED
+    agent_train_loop_restart_source || fail TRAIN_LOOP_SOURCE_REOPEN_FAILED
 
     # Existing encrypted owner identity and a real native store are explicit prerequisites.
     # The tiny enrollment marker only initializes this owner cache; it is never contributed.

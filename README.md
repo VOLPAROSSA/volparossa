@@ -97,7 +97,13 @@ candidate with lower measured held-out loss becomes the next warmstart or is aut
 published. Rejected candidates leave the current version intact and remain reclaimable.
 The decision is bound to retained source/model reports, not to cache popularity. This first
 gate evaluates examples supplied with the current training source, not an independent benchmark
-or a guarantee of generally smarter agents; its new live training-loop proof is still pending.
+or a guarantee of generally smarter agents. Its [live proof on `405e67e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896078997)
+passes: two measured approvals, actual signed sharing and protected peer adoption; no rejection
+was taken in that VM, and the comparison covered only four target tokens from the same source.
+The next candidate adds an explicitly pinned second public validation source. It compares the
+actual predecessor and trained candidate on the same second-source bytes before promotion;
+training-question overlap is rejected before model work. This is a reusable selection set,
+not an independent test benchmark. Its live proof is pending too.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

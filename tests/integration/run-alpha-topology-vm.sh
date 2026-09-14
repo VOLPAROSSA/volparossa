@@ -82,10 +82,12 @@ print_plan() {
     elif [ "$scenario" = agent-train-loop ]; then
         printf '%s\n' \
             'Agent-train-loop: R5 signed seed/dataset; R4 protected import and two automatic warmstart cycles;' \
-            '  compare each actual source-heldout result; only approved successors replace the seed/latest and publish;' \
+            '  pin a separately signed validation source before training, fetching exact bytes through protected paths;' \
+            '  run real predecessor and candidate inference on the same second source after each cycle;' \
+            '  require source-heldout and second-source improvement before replacing the seed/latest or publishing;' \
             '  if any successor is approved, a different Client imports it over protected paths and runs inference;' \
             '  rejected candidates stay local and reclaimable; exact actual outcomes and cleanup are required;' \
-            '  same repeated public dataset, not independent evaluation, general quality, fresh corpus or full B05.'
+            '  repeated training and selection sets, not an independent test benchmark, general quality or full B05.'
     elif [ "$scenario" = agent-train-cycle ]; then
         printf '%s\n' \
             'Agent-train-cycle: complete protected distinct-node adapter transfer, then stop providers;' \

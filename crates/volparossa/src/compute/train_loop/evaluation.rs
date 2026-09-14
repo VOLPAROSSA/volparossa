@@ -54,6 +54,8 @@ pub(super) struct Record {
     pub(super) predecessor: Option<u64>,
     baseline_kind: BaselineKind,
     pub(super) approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation: Option<super::validation::Record>,
     source_manifest_id: String,
     source_publisher_key: String,
     source_revision: String,
@@ -68,6 +70,12 @@ pub(super) struct Record {
     baseline: Metric,
     adapted: Metric,
     reloaded: Metric,
+}
+
+impl Record {
+    pub(super) fn has_validation(&self) -> bool {
+        self.validation.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -190,7 +198,17 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
     let baseline = metric(&report["baseline_evaluation"])?;
     let adapted = metric(&report["adapted_evaluation"])?;
     let reloaded = metric(&report["reloaded_evaluation"])?;
-    let approved = improvement(baseline, adapted, reloaded)?;
+    let local_improvement = improvement(baseline, adapted, reloaded)?;
+    let validation = if store
+        .cycle_path(sequence)?
+        .join("validation.json")
+        .try_exists()?
+    {
+        Some(super::validation::verify(store, sequence)?)
+    } else {
+        None
+    };
+    let approved = local_improvement && validation.as_ref().is_none_or(|record| record.approved);
     let candidate_adapter = ADAPTER_FILES
         .into_iter()
         .map(|(name, _)| {
@@ -202,8 +220,18 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
         .collect();
     Ok(Record {
         version: 1,
-        policy: POLICY.into(),
-        scope: SCOPE.into(),
+        policy: if validation.is_some() {
+            "source-and-second-source-loss-v1"
+        } else {
+            POLICY
+        }
+        .into(),
+        scope: if validation.is_some() {
+            "source-and-pinned-second-source-selection-only-not-independent-test-benchmark"
+        } else {
+            SCOPE
+        }
+        .into(),
         epsilon: EPSILON,
         sequence,
         predecessor,
@@ -215,6 +243,7 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
             BaselineKind::PinnedBase
         },
         approved,
+        validation,
         source_manifest_id,
         source_publisher_key,
         source_revision,

@@ -152,6 +152,10 @@ guest-state hashes. That head's workspace Quality and CodeQL checks pass, but th
 datapath remains unproven. A separate diagnostic candidate retains only a fixed startup
 category, exit code/signal and byte count when stdout ends without a result; it does not
 log raw stderr or document text and does not claim to fix the underlying startup failure.
+The [diagnostic VM on `d29455d3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896132212)
+stops earlier at `JOBS_BROKER_UNAVAILABLE` for R4, before attach/tokenizer execution. Broker
+logs are empty and the original artifact lacks unit exit-state details, so it does not identify
+or disprove the earlier worker-startup cause. Cleanup is complete with unchanged guest state.
 This is not confidential offload, source-cache discovery, automatic network replication,
 neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
@@ -264,7 +268,29 @@ benchmarking, cross-round contamination prevention, general intelligence or comp
 All 75 focused CLI compute tests and strict CLI Clippy pass, including startup diagnostics,
 promotion/rejection, restart and reclamation. The pure proof checker accepts all four possible
 two-cycle promotion outcomes and rejects inconsistent evidence. These are control/receipt
-checks, not live model evidence; the updated VM training-loop proof is pending.
+checks, not live model evidence. The [updated VM on `405e67e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34896078997)
+now passes both the exact-source checker and original raw reconstruction (299,551 bytes,
+SHA-256 `94060e97d3db4ffca3167bc2d9ca140845edbdc866ea3dbc6335c3e389ef6e87`).
+Two actual eight-update cycles approve loss reductions `1.244269 → 0.615178 → 0.345725` on
+only four target tokens from the same source. Both successors are contributed and the latest
+is retrieved over protected paths and used by another Client. Rejection was not taken in this
+VM. Cleanup leaves zero owned objects; guest-state hashes both equal
+`550a00b214a77e1dc3dee3f69eb95d6b2f57dd0b6506b973c80ba89ad1503520`.
+
+The second-source validation candidate adds optional explicit `--validation-source` enrollment
+with an exact signed manifest and a distinct validation-only public dataset. It pins/retrieves
+that same source before training and rejects normalized training-question overlap. After actual
+training, two sequential bounded inference jobs compare predecessor and candidate on identical
+second-source bytes; promotion requires both the existing source-heldout improvement and this
+second-source improvement. The `evaluating` checkpoint retains finished training, and valid
+completed stages can be reused with their original reports/deadlines. Partial inference without
+a durable supervisor receipt is retained as an explicit failure, not relabelled or overwritten.
+Twenty-file completed snapshots bind both stages and the combined decision. The live fixture
+is being extended. All 84 focused CLI compute tests and strict CLI Clippy pass; the new tests
+cover explicit source enrollment, input overlap, completed-training recovery and source-bound
+inference receipt reuse without host model execution. This remains pending model/network
+evidence, not an independent benchmark,
+historical contamination proof, broad intelligence gain or completed B05.
 
 The next `compute train-loop` candidate connects that real cycle executor to a persistent,
 owner-enabled coordinator: cache-independent round-robin selection from explicit public
