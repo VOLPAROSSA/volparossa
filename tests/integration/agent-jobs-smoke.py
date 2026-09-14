@@ -78,10 +78,16 @@ def publication(path):
             "manifest_hex": (root / "manifest.pb").read_bytes().hex(), "explicit_public_source": True}
 
 
-def derive(original, rows):
+def derive(original, rows, task=None):
     require(rows and rows == sorted(set(rows)) and all(0 <= x < len(original["inference"]) for x in rows), "invalid rows")
     value = copy.deepcopy(original)
-    value["inference"] = [original["inference"][x] for x in rows]
+    value["inference"] = [copy.deepcopy(original["inference"][x]) for x in rows]
+    if task is not None:
+        require(task.get("kind") == "answer_public_question_v1" and set(task) == {"kind", "question"}
+                and isinstance(task["question"], str) and task["question"].strip()
+                and len(task["question"].encode()) <= 512 and "\0" not in task["question"], "invalid explicit public task")
+        for row in value["inference"]:
+            row["question"] = task["question"]
     # Struct field order is the canonical Rust dataset serialization order.
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -365,7 +371,7 @@ def source_manifest_id(source, published):
     return digest
 
 
-def check_evidence(evidence, revision):
+def check_evidence(evidence, revision, task=None):
     require(evidence["success"] is True and evidence["source_revision"] == revision, "wrong source-bound job proof")
     require(evidence["provision"]["success"] is True and evidence["provision"]["installed_wheels"] == 38
             and evidence["provision"]["download_bytes"] == 523040250
@@ -388,6 +394,7 @@ def check_evidence(evidence, revision):
     require(result["operation"] == "compute_distribute" and result["complete"] is True and result["provider_count"] == 2
             and result["dataset_manifest_id"] == manifest_id and len(result["jobs"]) == 2,
             "actual distributed batch incomplete")
+    require(result.get("task") == task, "batch task binding differs")
     require(all(result[x] is False for x in ("private_data_supported", "model_layer_sharding", "result_truthfulness_guaranteed")), "unsupported compute claim")
     rows, response_bytes = [], {}
     for index, status in enumerate(evidence["statuses"]):
@@ -396,6 +403,8 @@ def check_evidence(evidence, revision):
         handle = part["handle"]
         node = layout["provider_nodes"][index]
         caps = handle["capabilities"]
+        require(binding.get("task") == task and (task is None or caps.get("task_derivation_v1") is True),
+                "executor does not support the exact requested public task")
         require(caps["model"]["model_id"] == "HuggingFaceTB/SmolLM2-135M-Instruct"
                 and caps["model"]["model_revision"] == TRAIN["MODEL_REVISION"]
                 and caps["model"]["base_weights"] == {"bytes": 269060552, "sha256": TRAIN["WEIGHT_HASH"]}
@@ -406,7 +415,7 @@ def check_evidence(evidence, revision):
                 and handle["binding"] == binding and part["state"] == status["state"] == "complete"
                 and binding["row_indices"] == [index] and binding["dataset_manifest_id"] == manifest_id
                 and binding["expires_unix_seconds"] <= publication["expires_unix_seconds"], "wrong original job binding")
-        derived = derive(original["dataset"], binding["row_indices"])
+        derived = derive(original["dataset"], binding["row_indices"], task)
         observation = next(w for w in evidence["observation"]["workers"] if w["node"] == node)
         require(observation["dataset_json"] == derived and binding["dataset_sha256"] == hashlib.sha256(derived.encode()).hexdigest(),
                 "executor received different or overlapping public rows")

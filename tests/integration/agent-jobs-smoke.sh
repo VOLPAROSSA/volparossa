@@ -104,7 +104,7 @@ agent_jobs_cleanup() {
     fi
 }
 
-agent_jobs_run() {
+agent_jobs_setup() {
     PHASE=agent-jobs-source
     jobs_source=$WORK/state-client/compute-source
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source"
@@ -142,6 +142,14 @@ agent_jobs_run() {
         --arg a "$provider_node_a" --arg b "$provider_node_b" --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
         '{provider_nodes:$nodes,route_context_id:$context,control_relay_peer_id:$control,
           provider_keys:{($a):$ka,($b):$kb}}' >"$WORK/agent-jobs-layout.json"
+}
+
+agent_jobs_run() {
+    agent_jobs_setup
+    if [ "${agent_public_task:-no}" = yes ]; then
+        agent_public_task_run
+        return
+    fi
     PHASE=agent-jobs-concurrent-execution
     # Existing fetch capture classification is used only for the same exact provider graph;
     # payloads here are signed compute RPCs, not a content download claim.
@@ -212,6 +220,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_public_task:-no}" = yes ]; then
+        agent_public_task_finalize_report "$jobs_status"
+        return
+    fi
     jobs_finalize_command=finalize
     jobs_report=agent-jobs-smoke.json
     [ "${agent_jobs_loss:-no}" != yes ] || { jobs_finalize_command=loss-finalize; jobs_report=agent-jobs-loss-smoke.json; }

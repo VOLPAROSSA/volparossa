@@ -99,8 +99,11 @@ source, chosen peers, handles and validated receipts, returning ordered per-cont
 Its current scope is two to four existing inference contexts, not arbitrary-document splitting,
 neural result synthesis, confidential prompts or the whole B03 criterion. The 48 focused CLI
 compute tests pass, alongside signed-source/agent-boundary and wire-codec checks, scoped strict
-Clippy and an actual no-network/no-output CLI preview. The new disposable two-peer task/resume
-scenario is being connected; these local tests are not a live model-execution claim.
+Clippy and an actual no-network/no-output CLI preview. The disposable `agent-public-task`
+scenario now connects protected custody and fresh source retrieval, two actual worker
+observations, exact source/question/result bindings and retained-result resume after stopping
+both brokers and the route. Its parser/snapshot and runner checks pass; its live VM result is
+pending. These local tests are not a model-execution claim.
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.

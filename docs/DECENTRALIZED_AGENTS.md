@@ -465,7 +465,10 @@ proof that model answers are correct. Exact task/source/peer enrollment and comp
 receipts survive resume, while partial work remains visibly incomplete. Those receipts are
 authenticated local observations, not independently portable execution attestations. The
 source signature does not authorize relabelling derived answers as publisher-authored content.
-The disposable two-peer user-task/resume proof is being connected; full B03 remains open.
+The disposable `agent-public-task` scenario retrieves the selected source from a peer before
+execution, then stops both brokers and the route before resuming the retained results. Its
+parser and real local file-snapshot checks pass; live VM evidence is still pending and full B03
+remains open.
 
 ## Private tasks and training data
 
