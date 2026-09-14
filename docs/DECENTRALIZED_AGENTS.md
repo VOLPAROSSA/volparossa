@@ -212,6 +212,37 @@ limit is implied by the first worker's four inference rows and 600-second lease.
 resource limits remain necessary. General workflow continuation and checkpoint scheduling are
 still unimplemented; no unlimited execution permission follows from accepting a large task.
 
+## Current public peer-job candidate
+
+The development CLI now has an explicit `compute serve` broker and `compute peer
+attach/capabilities/submit/poll/cancel/distribute` commands. The broker must already have the
+pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
+off until explicitly executed. The agent attaches only a protected same-UID socket and an
+explicit allowlist of dataset publishers. It does not launch Python inside the hardened
+network-agent service or accept remote commands, model downloads or filesystem paths.
+
+Peer requests use short challenge-bound signed exchanges inside the existing authenticated
+provider TLS over protected MPTCP/WireGuard, never a direct Client-to-Exit or provider dial.
+Public dataset signatures, original object/chunk hashes, expiry and exact derived row bytes
+are checked before export and again by the receiver. A fresh identity signature alone is not
+permission to submit an arbitrary source. Polling and cancellation require the same authenticated
+owner and entire original job binding. Expiry prevents new admission, but not owner cancellation
+of a worker still being reaped.
+
+`compute peer distribute` currently divides two through four independent public inference
+questions across explicitly selected compatible peers, sends the tasks concurrently, and joins
+results in their original row order. It saves immutable handles before submission, retains
+partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
+poll/cancel. It is a candidate awaiting its real multi-executor guest proof, not a proven B03
+checkpoint. Automatic peer selection, reassignment after worker loss, general multi-step
+continuation, distributed optimizer/model-layer execution, confidential private tasks and
+correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
+who reported a result, not whether the result is true.
+
+Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
+present. An explicit submit consumes a preselected signed dataset, whether obtained from an
+eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
+
 ## Private tasks and training data
 
 Encrypted transport does not hide plaintext from the device performing ordinary inference.

@@ -7,7 +7,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compute;
+mod compute_control;
 mod content;
+pub use compute_control::{ComputeAttachRequest, ComputeReady, ComputeRemoteRequest};
 mod custody;
 mod mailbox;
 pub use content::{
@@ -46,7 +49,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -56,9 +59,10 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ConnectRequest, ContentCustodyRequest, ContentExportRequest, ContentFetchNameRequest,
-        ContentFetchRequest, ContentImportRequest, ContentServeRequest, Empty,
-        HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest, MailboxServeRequest, RoleChange,
+        ComputeAttachRequest, ComputeRemoteRequest, ConnectRequest, ContentCustodyRequest,
+        ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
+        ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest,
+        MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -130,6 +134,12 @@ pub mod control_request {
         /// Bridge one publisher-authorized public deposit/inspection on this same socket.
         #[prost(message, tag = "31")]
         ContentCustody(ContentCustodyRequest),
+        /// Attach an explicitly enabled local inference broker to the protected provider.
+        #[prost(message, tag = "32")]
+        ComputeAttach(ComputeAttachRequest),
+        /// Upgrade this same local connection for one signed protected peer job RPC.
+        #[prost(message, tag = "33")]
+        ComputeRemote(ComputeRemoteRequest),
     }
 }
 
@@ -215,7 +225,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -225,7 +235,7 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ContentCustodyReady, ContentReceipt, ContentTransferReady, Empty,
+        ComputeReady, ContentCustodyReady, ContentReceipt, ContentTransferReady, Empty,
         HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
         PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
@@ -275,6 +285,9 @@ pub mod control_response {
         /// Original signed provider challenge, not a completed public custody operation.
         #[prost(message, tag = "23")]
         ContentCustodyReady(ContentCustodyReady),
+        /// Same-socket compute request readiness, never a completed task.
+        #[prost(message, tag = "24")]
+        ComputeReady(ComputeReady),
     }
 }
 
@@ -676,6 +689,8 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
             }
         }
         control_request::Operation::ContentServe(request) => request.validate()?,
+        control_request::Operation::ComputeAttach(request) => request.validate()?,
+        control_request::Operation::ComputeRemote(request) => request.validate()?,
         control_request::Operation::ContentFetch(request) => request.validate()?,
         control_request::Operation::ContentFetchHttps(request) => request.validate()?,
         control_request::Operation::ContentDownloadHttps(request) => request.validate_download()?,
@@ -781,6 +796,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::NamedContentTransferReady(ready) => ready.validate()?,
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
+        control_response::Payload::ComputeReady(ready) => ready.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

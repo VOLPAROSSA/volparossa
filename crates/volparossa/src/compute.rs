@@ -1,5 +1,7 @@
 //! Explicit public-data model jobs, isolated from the network agent and its identity.
 
+mod broker;
+mod peer;
 mod sandbox;
 mod supervise;
 
@@ -24,6 +26,13 @@ const MAX_STREAM_BYTES: usize = 256 * 1024;
 pub(crate) enum Command {
     /// Preview or explicitly run an isolated job on an already provisioned open model.
     Run(Box<Options>),
+    /// Explicit same-UID public-inference service using the fixed isolated worker.
+    Serve(Box<broker::Serve>),
+    /// Attach a local broker or perform a bounded protected peer job exchange.
+    Peer {
+        #[command(subcommand)]
+        command: Box<peer::Command>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
@@ -82,8 +91,12 @@ struct WorkerRequest {
     max_seconds: u16,
 }
 
-pub(crate) async fn run(command: Command) -> Result<()> {
-    let Command::Run(options) = command;
+pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
+    let options = match command {
+        Command::Run(options) => options,
+        Command::Serve(options) => return broker::run(*options).await,
+        Command::Peer { command } => return peer::run(*command, socket).await,
+    };
     options.validate()?;
     if !options.execute {
         println!(

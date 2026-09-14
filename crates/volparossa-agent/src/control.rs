@@ -175,6 +175,7 @@ async fn process_connection(
                 | control_request::Operation::ContentFetchName(_)
                 | control_request::Operation::MailboxRemote(_)
                 | control_request::Operation::ContentCustody(_)
+                | control_request::Operation::ComputeRemote(_)
         )
     ) {
         let mut ready_sent = false;
@@ -211,6 +212,16 @@ async fn process_connection(
             }
             Some(control_request::Operation::ContentCustody(remote)) => {
                 Box::pin(context.content.custody_remote(
+                    remote.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::ComputeRemote(remote)) => {
+                Box::pin(context.content.compute_remote(
                     remote.clone(),
                     &context,
                     &mut stream,
@@ -272,6 +283,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         | control_request::Operation::ContentFetchName(_)
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::ContentCustody(_)
+        | control_request::Operation::ComputeRemote(_)
         | control_request::Operation::ContentDownloadHttps(_) => {
             // These require the same authorized stream, never a second socket or generic dispatch.
             response(
@@ -284,6 +296,10 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         control_request::Operation::ContentServe(request) => {
             content_response(request_id, context.content.serve(request, context).await)
         }
+        control_request::Operation::ComputeAttach(request) => content_response(
+            request_id,
+            context.content.compute_attach(&request, context).await,
+        ),
         control_request::Operation::MailboxServe(request) => content_response(
             request_id,
             context.content.mailbox_serve(request, context).await,

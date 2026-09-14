@@ -4623,6 +4623,7 @@ dependencies = [
  "rcgen",
  "rustix",
  "rustls",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -4776,6 +4777,8 @@ name = "volparossa-local-control"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "tokio",
 ]

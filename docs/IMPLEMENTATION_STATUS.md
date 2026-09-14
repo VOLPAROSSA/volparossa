@@ -36,6 +36,11 @@ sources independently of cache availability, fetching missing/fresh data rather 
 substituting cached popular sources. Generalized source selection, external-corpus ingestion,
 bias measurement and peer execution remain integrations to build. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
+The next public-job candidate adds an explicitly attached same-UID inference broker, signed
+protected peer submit/poll/cancel exchanges, original-publication/subset verification and
+concurrent disjoint-row dispatch. It saves task handles before admission and validates returned
+model/input/result bindings. Its real two-executor guest proof, automatic reassignment and
+general workflow continuation are still pending; B03 remains unchecked.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

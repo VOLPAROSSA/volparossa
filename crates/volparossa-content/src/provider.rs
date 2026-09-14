@@ -5,6 +5,7 @@
 //! provider key and supplies a policy-authorized protected stream. This module never dials,
 //! listens, discovers peers, or adopts a directory named by a network request.
 
+pub mod compute;
 pub mod custody;
 pub mod custody_storage;
 pub mod digest;
@@ -270,6 +271,7 @@ pub struct PublicationRegistry {
     name_lookup: bool,
     mailbox: Option<Arc<crate::mailbox::wire::MailboxService>>,
     custody: Option<Arc<custody::CustodyService>>,
+    compute: Option<Arc<compute::ComputeService>>,
 }
 #[derive(Clone)]
 struct RegisteredPublication {
@@ -311,6 +313,22 @@ impl PublicationRegistry {
     /// Whether this service explicitly accepts publisher-authorized public custody operations.
     pub fn has_custody(&self) -> bool {
         self.custody.is_some()
+    }
+
+    /// Attach an explicitly configured compute broker to this provider snapshot.
+    /// This does not grant remote callers model, dataset or resource authority.
+    pub fn set_compute(&mut self, service: Arc<compute::ComputeService>) {
+        self.compute = Some(service);
+    }
+
+    /// Withdraw the explicitly attached compute service without deleting publications.
+    pub fn clear_compute(&mut self) {
+        self.compute = None;
+    }
+
+    /// Whether a caller explicitly attached a compute service, independent of public files.
+    pub fn has_compute(&self) -> bool {
+        self.compute.is_some()
     }
 
     /// Register the original independently verified envelope without opting into replication.
@@ -554,6 +572,19 @@ where
         let selector: Selector = timeout_at(session.selector_deadline, read_frame(stream))
             .await
             .map_err(|_| ProviderError::Timeout)??;
+        if selector.version == compute::SELECTOR_VERSION
+            && selector.operation == compute::SELECTOR_OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            registry
+                .compute
+                .as_ref()
+                .ok_or(ProviderError::Missing)?
+                .serve(stream)
+                .await
+                .map_err(|_| ProviderError::Protocol)?;
+            return Ok(TransferProgress::default());
+        }
         if selector.version == custody::SELECTOR_VERSION
             && selector.operation == custody::SELECTOR_OPERATION
             && selector.manifest_id.is_empty()

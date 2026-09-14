@@ -35,6 +35,10 @@ Source selection must consider
 eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
 Autonomous source selection/ingestion, peer execution and governance remain required work,
 not an implemented distributed brain or a guarantee of private remote execution.
+The next development candidate connects `compute serve` to the protected network with
+`compute peer attach`, then exposes signed public-task submission, polling/cancellation and
+concurrent row distribution. Its real multi-executor test is still pending; it does not yet
+provide autonomous task planning, private offload or unbounded per-device execution.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider
