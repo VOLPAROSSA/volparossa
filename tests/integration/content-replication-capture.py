@@ -30,6 +30,7 @@ COUNTERS = (
     "client_leg_wireguard_data_datagrams", "exit_leg_wireguard_data_datagrams",
     "client_leg_wireguard_data_bytes", "exit_leg_wireguard_data_bytes",
     "wireguard_handshake_packets", "wireguard_keepalive_packets",
+    "wireguard_port_unreachable_packets", "mdns_membership_packets",
     "provider_request_packets", "provider_response_packets", "provider_response_payload_bytes",
     "control_packets", "control_port_unreachable_packets", "mdns_packets", "neighbor_packets", "ipv4_frames", "ipv6_frames",
     "forbidden_packets", "direct_client_exit_packets", "direct_provider_packets",
@@ -92,6 +93,8 @@ def fixture_mdns_addresses():
 
 
 MDNS_INTERFACE_ADDRESSES = fixture_mdns_addresses()
+
+
 def fixture_control_links():
     """Exact physical peers from topology link_nodes, not the whole private prefix.
 
@@ -165,6 +168,71 @@ def exact_control_port_unreachable(node, iface, source, destination, payload):
             and 41000 in (sport, dport))
 
 
+def valid_internet_checksum(payload):
+    if len(payload) % 2:
+        payload += b"\x00"
+    total = sum(struct.unpack(f"!{len(payload) // 2}H", payload))
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    return total == 0xffff
+
+
+def wireguard_shape(header, length):
+    """The same bounded encrypted-datagram shape used for actual leg accounting."""
+    if len(header) < 4:
+        return None
+    kind = struct.unpack("<I", header[:4])[0]
+    if kind in (1, 2, 3) and length == {1: 148, 2: 92, 3: 64}[kind]:
+        return "handshake"
+    if kind == 4 and 32 <= length <= MAX_WIREGUARD_DATA_BYTES \
+            and (length % 16 == 0 or length == MAX_WIREGUARD_DATA_BYTES):
+        return "keepalive" if length == 32 else "data"
+    return None
+
+
+def exact_repair_wireguard_unreachable(layout, node, iface, source, destination, payload):
+    """A closed relay WG socket can quote a retry; it is never successfully delivered data.
+
+    D2 observed this one direction on the R4-to-relay client leg during repair. No
+    Exit/provider pair, arbitrary ICMP error, control UDP or unrecognizable quote is allowed.
+    The quote can be a prefix, but must contain a complete 16-byte WG header and declare
+    an original UDP length satisfying the existing exact WireGuard datagram profile.
+    """
+    if layout["phase"] != "repair-uptake" or destination != PUBLIC["relay4"] \
+            or len(payload) < 52 or payload[:2] != b"\x03\x03" or payload[4:8] != bytes(4) \
+            or not valid_internet_checksum(payload):
+        return False
+    matched = any(source == address and (node, iface) in (
+        ("relay4", "ar" + relay[-1]), (relay, "r" + relay[-1] + "a"))
+        for relay, address in layout["relays"].items())
+    quoted = quoted_udp(payload)
+    if not matched or quoted is None:
+        return False
+    qsource, sport, qdestination, dport = quoted
+    if (qsource, qdestination) != (destination, source) or sport == 0 or dport == 0 \
+            or 41000 in (sport, dport):
+        return False
+    quote = payload[8:]
+    offset = (quote[0] & 15) * 4
+    udp_length = struct.unpack("!H", quote[offset + 4:offset + 6])[0]
+    return (offset == 20 and len(quote) >= offset + 8 + 16
+            and offset + udp_length == struct.unpack("!H", quote[2:4])[0]
+            and len(quote) <= offset + udp_length
+            and wireguard_shape(quote[offset + 8:], udp_length - 8) is not None)
+
+
+def exact_repair_mdns_membership(layout, node, iface, source, destination, payload, frame):
+    """Only the observed single-group IGMPv3 mDNS join on an assigned fixture link."""
+    return (layout["phase"] == "repair-uptake"
+            and source in MDNS_INTERFACE_ADDRESSES.get((node, iface), ())
+            and destination == "224.0.0.22" and len(payload) == 16
+            and payload[:2] == b"\x22\x00" and payload[4:12] == b"\x00\x00\x00\x01\x04\x00\x00\x00"
+            and payload[12:] == socket.inet_aton("224.0.0.251")
+            and valid_internet_checksum(payload)
+            and frame is not None and len(frame) >= 54 and frame[14] == 0x46
+            and frame[22] == 1 and frame[34:38] == b"\x94\x04\x00\x00")
+
+
 def validate_layout(layout):
     if not isinstance(layout, dict) or layout.get("phase") not in ("uptake", "repair-uptake", "reserve-fetch"):
         raise ValueError("invalid replication capture phase")
@@ -193,7 +261,7 @@ def role_node(layout, role):
     return node
 
 
-def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
+def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, frame=None):
     """Return increments for one decoded IP packet on an explicitly captured interface.
 
     The layout is prevalidated by capture(). Neither a control-port exception nor an
@@ -232,9 +300,15 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
         return {"control_packets": 1}
     if protocol == socket.IPPROTO_ICMP and exact_control_port_unreachable(node, iface, src, dst, payload):
         return {"control_packets": 1, "control_port_unreachable_packets": 1}
+    if protocol == socket.IPPROTO_ICMP and exact_repair_wireguard_unreachable(
+            layout, node, iface, src, dst, payload):
+        return {"control_packets": 1, "wireguard_port_unreachable_packets": 1}
     # Control connectivity is distinct from directly reaching an Exit dataplane.
     if pair == {client, exit_ip}:
         return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
+    if protocol == socket.IPPROTO_IGMP and exact_repair_mdns_membership(
+            layout, node, iface, src, dst, payload, frame):
+        return {"control_packets": 1, "mdns_membership_packets": 1}
     # Pinned libp2p-mdns uses a separate ephemeral-port send socket, not source5353.
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport == 5353 \
             and dst == "224.0.0.251" and src in MDNS_INTERFACE_ADDRESSES.get((node, iface), ()):
@@ -256,13 +330,12 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface):
                 leg = "exit_leg"
             if leg is None or len(payload) < 4:
                 continue
-            message_type = struct.unpack("<I", payload[:4])[0]
-            if message_type in (1, 2, 3) and len(payload) == {1: 148, 2: 92, 3: 64}[message_type]:
+            shape = wireguard_shape(payload, len(payload))
+            if shape == "handshake":
                 return {"wireguard_handshake_packets": 1}
-            if message_type == 4 and 32 <= len(payload) <= MAX_WIREGUARD_DATA_BYTES \
-                    and (len(payload) % 16 == 0 or len(payload) == MAX_WIREGUARD_DATA_BYTES):
-                if len(payload) == 32:
-                    return {"wireguard_keepalive_packets": 1}
+            if shape == "keepalive":
+                return {"wireguard_keepalive_packets": 1}
+            if shape == "data":
                 return {f"{leg}_wireguard_data_datagrams": 1,
                         f"{leg}_wireguard_data_bytes": len(payload),
                         f"{relay}_{leg}_wireguard_data_datagrams": 1}
@@ -419,6 +492,7 @@ def fixture_header_sample(packet, iface, frame):
     if version == 4 and protocol == socket.IPPROTO_ICMP:
         if len(payload) >= 2:
             result.update(icmp_type=payload[0], icmp_code=payload[1])
+            result["icmp_checksum_valid"] = valid_internet_checksum(payload)
         quote = quoted_udp(payload)
         if quote is not None:
             qsource, qsport, qdestination, qdport = quote
@@ -427,10 +501,15 @@ def fixture_header_sample(packet, iface, frame):
             offset = (payload[8] & 15) * 4
             result["quoted_udp"]["classification"] = udp_diagnostic_label(
                 qsource, qsport, qdestination, qdport, payload[8 + offset + 8:])
+            length = struct.unpack("!H", payload[8 + offset + 4:8 + offset + 6])[0]
+            result["quoted_udp_length"] = length
+            result["quoted_wireguard_shape"] = wireguard_shape(payload[8 + offset + 8:], length - 8)
+            result["quoted_wireguard_header_bytes"] = min(16, len(payload) - 8 - offset - 8)
     if version == 4 and protocol == socket.IPPROTO_IGMP:
         result["igmp"] = {"parse": "incomplete"}
         if len(payload) >= 8:
-            info = {"type": payload[0], "bytes": len(payload)}
+            info = {"type": payload[0], "bytes": len(payload),
+                    "checksum_valid": valid_internet_checksum(payload)}
             # Actual header values are bounded numeric protocol metadata, not content.
             if len(frame) >= 34:
                 info["ttl"] = frame[22]
@@ -525,7 +604,7 @@ def capture(layout, output, ready, role, interfaces):
                 updates = {"neighbor_packets": 1}
             else:
                 record[f"ipv{packet[0]}_frames"] += 1
-                updates = classify(layout, role, *packet[1:], sockets[observer])
+                updates = classify(layout, role, *packet[1:], sockets[observer], frame=frame)
                 if layout["phase"] == "uptake" and updates.get("provider_response_payload_bytes", 0):
                     flow = packet[2:6]
                     provider_flows.setdefault(flow, len(provider_flows))

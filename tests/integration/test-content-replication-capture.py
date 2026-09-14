@@ -47,7 +47,113 @@ def ipv4_frame(source, destination, protocol, transport):
     return bytes(12) + b"\x08\x00" + header + transport
 
 
+def checksummed(payload):
+    payload = bytearray(payload)
+    payload[2:4] = b"\0\0"
+    padded = payload + (b"\0" if len(payload) % 2 else b"")
+    total = sum(struct.unpack(f"!{len(padded) // 2}H", padded))
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    payload[2:4] = struct.pack("!H", total ^ 0xffff)
+    return bytes(payload)
+
+
+def repair_layout():
+    current = layout()
+    current["phase"] = "repair-uptake"
+    current["relays"]["relay1"] = CAPTURE.PUBLIC["relay1"]
+    return CAPTURE.validate_layout(current)
+
+
+def membership_frame(source, destination="224.0.0.22", payload=None, ttl=1, options=b"\x94\x04\0\0"):
+    if payload is None:
+        payload = checksummed(bytes([0x22, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0])
+                              + socket.inet_aton("224.0.0.251"))
+    frame = bytearray(ipv4_frame(source, destination, socket.IPPROTO_IGMP, payload))
+    frame[14] = 0x46
+    frame[22] = ttl
+    frame[16:18] = struct.pack("!H", 24 + len(payload))
+    frame[34:34] = options
+    return bytes(frame)
+
+
 class ReplicationCaptureTests(unittest.TestCase):
+    def test_repair_membership_requires_exact_mdns_group_link_and_actual_ip_header(self):
+        current = repair_layout()
+        expected = {"control_packets": 1, "mdns_membership_packets": 1}
+        for node, iface, source in (("relay4", "underlay", "49.165.5.1"),
+                ("relay4", "ar0", "10.241.90.1"), ("relay0", "r0a", "10.241.90.1"),
+                ("relay1", "r1a", "10.241.94.1"), ("relay2", "r2a", "10.241.92.1"),
+                ("exit", "xr5", "10.241.25.1"), ("relay5", "r5b1", "10.241.52.1")):
+            frame = membership_frame(source)
+            packet = CAPTURE.decode_frame(frame)
+            self.assertEqual(CAPTURE.classify(current, node, *packet[1:], iface, frame=frame), expected)
+            self.assertEqual(CAPTURE.classify(current, node, *packet[1:], iface), {"forbidden_packets": 1})
+            self.assertEqual(CAPTURE.classify(current, node, *packet[1:], "wrong0", frame=frame),
+                             {"forbidden_packets": 1})
+        for frame in (membership_frame("203.0.113.1"), membership_frame("10.241.94.1"),
+                membership_frame("10.241.90.1", destination="224.0.0.2"),
+                membership_frame("10.241.90.1", ttl=2),
+                membership_frame("10.241.90.1", options=bytes(4))):
+            self.assertEqual(CAPTURE.classify(current, "relay4", *CAPTURE.decode_frame(frame)[1:],
+                                              "ar0", frame=frame), {"forbidden_packets": 1})
+        valid = membership_frame("10.241.90.1")
+        for position, value in ((0, 0x16), (1, 1), (4, 1), (7, 2), (8, 1),
+                                 (9, 1), (11, 1), (15, 252)):
+            payload = bytearray(CAPTURE.decode_frame(valid)[-1])
+            payload[position] = value
+            frame = membership_frame("10.241.90.1", payload=checksummed(payload))
+            self.assertEqual(CAPTURE.classify(current, "relay4", *CAPTURE.decode_frame(frame)[1:],
+                                              "ar0", frame=frame), {"forbidden_packets": 1})
+        bad = bytearray(valid)
+        bad[40] ^= 1  # IGMP checksum, not application bytes.
+        for phase, frame in (("uptake", valid), ("repair-uptake", bytes(bad)),
+                              ("repair-uptake", membership_frame("10.241.90.1",
+                               payload=CAPTURE.decode_frame(valid)[-1] + b"extra"))):
+            current["phase"] = phase
+            self.assertEqual(CAPTURE.classify(current, "relay4", *CAPTURE.decode_frame(frame)[1:],
+                                              "ar0", frame=frame), {"forbidden_packets": 1})
+
+    def test_repair_wireguard_error_is_reverse_exact_client_leg_quote_not_delivered_data(self):
+        current = repair_layout()
+        expected = {"control_packets": 1, "wireguard_port_unreachable_packets": 1}
+        for relay in ("relay0", "relay1", "relay2"):
+            remote = CAPTURE.PUBLIC[relay]
+            for kind, length in ((1, 148), (2, 92), (3, 64), (4, 32), (4, 1452)):
+                transport = struct.pack("!HHHH", 43001, 44001, length + 8, 0)
+                transport += struct.pack("<I", kind) + bytes(length - 4)
+                original = ipv4_frame("49.165.5.1", remote, socket.IPPROTO_UDP, transport)[14:]
+                # A legal bounded ICMP quotation can omit the encrypted datagram's tail.
+                error = checksummed(b"\x03\x03" + bytes(6) + original[:44])
+                for node, iface in (("relay4", "ar" + relay[-1]), (relay, "r" + relay[-1] + "a")):
+                    self.assertEqual(classify(current, node, remote, "49.165.5.1", socket.IPPROTO_ICMP,
+                                              payload=error, iface=iface), expected)
+                    self.assertEqual(classify(current, node, remote, "49.165.5.1", socket.IPPROTO_ICMP,
+                                              payload=error, iface="wrong0"), {"forbidden_packets": 1})
+        # Preserve privacy denials even if an ICMP body resembles the newly recognized error.
+        for role, source, destination, iface in (("exit", "46.162.3.1", "49.165.5.1", "xr0"),
+                ("relay4", "50.166.6.1", "49.165.5.1", "r4c"),
+                ("relay4", "10.241.90.2", "49.165.5.1", "ar0"),
+                ("relay4", "49.165.5.1", "42.158.0.1", "ar0")):
+            self.assertEqual(classify(current, role, source, destination, socket.IPPROTO_ICMP,
+                                      payload=error, iface=iface).get("forbidden_packets"), 1)
+        original = ipv4_frame("49.165.5.1", "42.158.0.1", socket.IPPROTO_UDP,
+                             struct.pack("!HHHH", 43001, 44001, 156, 0) + b"\x01\0\0\0" + bytes(144))[14:]
+        valid = checksummed(b"\x03\x03" + bytes(6) + original)
+        for position, value in ((0, 11), (1, 4), (4, 1), (8, 0x46), (14, 0x20),
+                                 (17, socket.IPPROTO_TCP), (24, 203), (33, 8), (36, 5)):
+            invalid = bytearray(valid)
+            invalid[position] = value
+            self.assertEqual(classify(current, "relay4", "42.158.0.1", "49.165.5.1", socket.IPPROTO_ICMP,
+                                      payload=checksummed(invalid), iface="ar0"), {"forbidden_packets": 1}, position)
+        corrupted = bytearray(valid)
+        corrupted[2] ^= 1
+        for invalid in (bytes(corrupted), checksummed(valid[:51]), checksummed(valid + b"extra")):
+            self.assertEqual(classify(current, "relay4", "42.158.0.1", "49.165.5.1", socket.IPPROTO_ICMP,
+                                      payload=invalid, iface="ar0"), {"forbidden_packets": 1})
+        self.assertEqual(classify(layout(), "relay4", "42.158.0.1", "49.165.5.1", socket.IPPROTO_ICMP,
+                                  payload=valid, iface="ar0"), {"forbidden_packets": 1})
+
     def test_autonomous_repair_records_three_candidates_without_widening_other_phases(self):
         current = layout()
         current["phase"] = "repair-uptake"
