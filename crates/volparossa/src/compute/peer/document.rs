@@ -63,9 +63,11 @@ pub(crate) struct Options {
     provider_key: Vec<VerifyingKey>,
     #[arg(long, default_value_t = 86400, value_parser = clap::value_parser!(u64).range(1..=2678400))]
     lifetime_seconds: u64,
-    /// Total new package rounds this invocation, not a limit on overall document duration.
+    /// Package rounds per invocation, or per continuation window with --follow.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
+    #[command(flatten)]
+    follow: super::follow::Options,
     /// Unchanged bounded lease for each tokenizer/peer worker.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
@@ -97,7 +99,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "{}",
             json!({"operation":"compute_document_plan", "execute":false,
             "input":args.input,"directory":args.directory,"resume":args.resume,
-            "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,
+            "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
             "maximum_document_bytes":MAX_DOCUMENT_BYTES,"private_data_supported":false,
             "tokenizer_execution":false,"network_execution":false})
         );
@@ -239,7 +241,7 @@ async fn advance(
         .collect::<Result<Vec<_>>>()?;
     let mut packages = Vec::new();
     let mut answers = Vec::new();
-    let mut rounds: u16 = 0;
+    let mut rounds = 0_u64;
     let mut stopped = false;
     for (index, package) in enrollment.packages.iter().enumerate() {
         let root = args.directory.join(format!("package-{index:04}"));
@@ -253,7 +255,7 @@ async fn advance(
             None
         };
         if snapshot.as_ref().is_none_or(|s| s["complete"] != true)
-            && rounds < args.max_batches
+            && (args.follow.follow || rounds < u64::from(args.max_batches))
             && !stopped
             && !*cancelled.borrow()
         {
@@ -261,20 +263,25 @@ async fn advance(
                 (!established).then(|| root.join("workflow-plan.json")),
                 work.clone(),
                 providers.clone(),
-                args.max_batches - rounds,
+                if args.follow.follow {
+                    args.max_batches
+                } else {
+                    args.max_batches - u16::try_from(rounds)?
+                },
                 args.max_seconds,
                 true,
             )
-            .expect_task(expected.clone());
+            .expect_task(expected.clone())
+            .with_follow(args.follow.clone());
             let report = workflow::report_with_activity(&options, socket, cancelled).await?;
             let used = report["rounds_this_invocation"]
                 .as_u64()
                 .context("compute_document_rounds")?;
             rounds = rounds
-                .checked_add(u16::try_from(used)?)
+                .checked_add(used)
                 .context("compute_document_round_overflow")?;
             ensure!(
-                rounds <= args.max_batches,
+                args.follow.follow || rounds <= u64::from(args.max_batches),
                 "compute_document_invocation_budget"
             );
             snapshot = Some(workflow::task_snapshot(&work, &expected)?);
@@ -296,7 +303,8 @@ async fn advance(
         "source_manifest_id":enrollment.source_manifest_id,"source_sha256":plan.source_sha256,
         "source_bytes":plan.source_bytes,"public_question":input.question,"license":input.license,
         "total_parts":plan.parts.len(),"packages":packages,"answers":answers,"rounds_this_invocation":rounds,
-        "interrupted":*cancelled.borrow(),"joining":"ordered_source_ranges_not_neural_synthesis",
+        "interrupted":*cancelled.borrow(),"follow":args.follow.follow,
+        "joining":"ordered_source_ranges_not_neural_synthesis",
         "source_selection_uses_cache_inventory":false,"private_data_supported":false,
         "content_cache":"local_native_signed_publications_not_automatic_network_contribution",
         "model_answer_correctness_proven":false,"full_b03_claimed":false}),

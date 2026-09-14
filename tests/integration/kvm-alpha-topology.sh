@@ -13,6 +13,7 @@ umask 077
 mode=preview
 scenario=alpha
 agent_jobs_loss=no
+agent_jobs_follow=no
 agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
@@ -32,7 +33,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -68,6 +69,16 @@ print_plan() {
                 '  stop brokers and disconnect the route, then resume exact retained receipts without new work;' \
                 '  require real worker/input/result/capture evidence and complete guest cleanup;' \
                 '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
+            return
+        fi
+        if [ "$agent_jobs_follow" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA automatic public peer-job continuation plan:' \
+                '  one workflow --follow uses the pinned guest model and two protected peer workers;' \
+                '  observe overlapping real workers and terminate one exact guest worker via pidfd;' \
+                '  preserve the completed result and original handles while automatically retrying failed rows;' \
+                '  observe a new worker on the surviving peer without a manual resume command;' \
+                '  retain original leases, owner cancellation and complete disposable cleanup.'
             return
         fi
         if [ "$agent_jobs_loss" = yes ]; then
@@ -389,6 +400,7 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             download_sharing=no
             agent_jobs_loss=no
+            agent_jobs_follow=no
             agent_public_task=no
             agent_public_document=no
             agent_train_cycle=no
@@ -397,6 +409,7 @@ while [ "$#" -gt 0 ]; do
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
+                agent-jobs-follow) scenario=agent-jobs; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -590,7 +603,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
 if [ "$scenario" = agent-jobs ]; then
-    for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py; do
+    for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py agent-jobs-follow-smoke.sh agent-jobs-follow-smoke.py; do
         [ -f "$source_directory/tests/integration/$jobs_fixture" ] && [ ! -L "$source_directory/tests/integration/$jobs_fixture" ] || exit 69
     done
 fi
@@ -1880,6 +1893,10 @@ fi
 if [ "$scenario" = agent-jobs ]; then
     # shellcheck source=tests/integration/agent-jobs-smoke.sh
     . "$source_directory/tests/integration/agent-jobs-smoke.sh"
+    if [ "$agent_jobs_follow" = yes ]; then
+        # shellcheck source=tests/integration/agent-jobs-follow-smoke.sh
+        . "$source_directory/tests/integration/agent-jobs-follow-smoke.sh"
+    fi
 fi
 if [ "$agent_public_task" = yes ]; then
     # shellcheck source=tests/integration/agent-public-task-smoke.sh
@@ -2001,6 +2018,9 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
 fi
 if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-smoke.py" "$WORK/bin/agent-jobs-smoke.py"
+    if [ "$agent_jobs_follow" = yes ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-follow-smoke.py" "$WORK/bin/agent-jobs-follow-smoke.py"
+    fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
 if [ "$agent_train_loop" = yes ]; then

@@ -168,6 +168,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_jobs_follow:-no}" = yes ]; then
+        agent_jobs_follow_run
+        return
+    fi
     if [ "${agent_public_document:-no}" = yes ]; then
         agent_public_document_run
         return
@@ -246,6 +250,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_jobs_follow:-no}" = yes ]; then
+        agent_jobs_follow_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_public_document:-no}" = yes ]; then
         agent_public_document_finalize_report "$jobs_status"
         return

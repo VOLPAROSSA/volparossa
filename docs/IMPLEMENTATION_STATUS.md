@@ -4,6 +4,16 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-15
 
+Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
+accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
+receipts and original leases remain unchanged; eligible failed rows prefer another available
+compatible enrolled peer. Owner cancellation, original source expiry and retained-attempt limits
+stop continuation. All 27 focused peer tests pass, including incomplete-cancellation exit status
+and default manual behavior. The new `agent-jobs-follow` disposable scenario targets real worker
+loss and automatic recovery under one owner command; its live result is pending. No general
+planning, private offload, answer synthesis or completed B03 is claimed.
+See [automatic continuation](DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
+
 Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly
 enrolled signed adapter channels, resolves their exact datasets only against independently
 selected sources, and locally compares an imported update against the actual current adapter
@@ -11,9 +21,13 @@ with two real inference calls on the pinned validation source. Only a measured i
 adopted. The next local training cycle uses those exact imported files, retains separate foreign
 and local lineage, and still needs the normal local promotion gates before publication. The
 96 preceding focused compute tests, nine peer-related tests (including original import and
-lineage checks), and strict CLI Clippy pass. The additional two-node learning fixture and its
-mandatory report gate are ready; this is not yet live proof of automatic peer adoption and
-continued training.
+lineage checks), and strict CLI Clippy pass. The [combined run on `08457e1e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34906223498)
+reached actual peer import, two comparison inferences, adoption, an eight-update local training
+cycle and two further validation inferences. It **failed** the final peer-learning check: the
+new local publication remained `publish_pending` after the one-cycle invocation ended. The
+original catalog's later independent Client import was not reached, so its earlier failure is
+not claimed fixed. Cleanup completed with unchanged guest-host state. Completed cross-node
+learning and republication remain unproven.
 See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
 
 The preceding version-2 `compute train-loop` enrollment now follows

@@ -523,8 +523,11 @@ not a claim that the whole network must contain only 16 peers or eight agents.
 
 The runtime and focused import/lineage checks pass locally. The additional disposable scenario
 requires a separate node to fetch, compare, adopt and actually continue training
-after the original dataset service stops. Until that run passes, automatic cross-node continued
-learning remains a development candidate. This is selection and reuse of compatible adapters,
+after the original dataset service stops. The [first run on `08457e1e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34906223498)
+performed the peer comparison, adoption, eight local training updates and validation, but its
+final check failed because the local successor was still awaiting publication when the
+one-cycle invocation ended. Full cross-node continued learning and republication therefore
+remain a development candidate. This is selection and reuse of compatible adapters,
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
@@ -556,7 +559,7 @@ continuation step, not general task decomposition or unlimited execution permiss
 ## Current public peer-job candidate
 
 The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task` commands. The broker must already have the
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task/document` commands. The broker must already have the
 pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
 off until explicitly executed. The agent attaches only a protected same-UID socket and an
 explicit allowlist of dataset publishers. It does not launch Python inside the hardened
@@ -575,10 +578,11 @@ questions across explicitly selected compatible peers, sends the tasks concurren
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
 poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
-checkpoint. Automatic peer selection/reassignment, general multi-step
-continuation, distributed optimizer/model-layer execution, confidential private tasks and
+checkpoint. General automatic peer selection, task planning,
+distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
-who reported a result, not whether the result is true.
+who reported a result, not whether the result is true. Explicit recovery and the new
+owner-enabled continuation candidate are described below.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry
@@ -652,6 +656,39 @@ proofs remain separate from the local coordinator tests.
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
 eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
+
+### Automatic continuation of enrolled work
+
+Add `--follow` to `compute peer workflow`, `task` or `document` to continue the same enrolled
+public work without issuing a manual `--resume` after every bounded round:
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer workflow \
+  --plan /absolute/plan.json --directory /absolute/private-parent/workflow-001 \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --max-batches 1 --follow --execute
+```
+
+With this option, `--max-batches` bounds each continuation window rather than the entire owner
+invocation. `--follow-poll-seconds` controls the wait between windows (default 5, range 1–60).
+Completed results stay unchanged. When the original retry rules permit replacement, unfinished
+rows first try another compatible, available enrolled peer, retaining the original peer as a
+fallback. Busy/unavailable peers can be reconsidered after waiting; malformed sources,
+incompatible models and storage/verification errors are not converted into endless retries.
+
+The owner retains one workflow lock and cancellation path throughout. Each actual worker keeps
+its own unchanged lease; following never renews an original handle or duplicates ambiguous work
+under an unexpired lease. The invocation stops on completion, owner cancellation, original source
+expiry or the existing 128-retained-attempts-per-package boundary. Cancellation keeps partial
+results and reports incomplete work with a nonzero status. Without `--follow`, the previous
+bounded-invocation behavior is unchanged; without `--execute`, neither mode dispatches jobs.
+
+The 27 focused peer tests pass, including continuation counters, cancellation, option parsing,
+alternate-peer ordering and exact completed-receipt reuse. The `agent-jobs-follow` disposable
+fixture targets one command surviving a real worker loss and starting a replacement on another
+peer, with original handles and complete network cleanup retained. Its live result is pending.
+This is continuation of explicit public tasks, not a general planner, private inference,
+exactly-once execution, neural answer synthesis or a completed B03 checkpoint.
 
 ### Source-bound public user tasks
 
@@ -741,7 +778,8 @@ It contains no invented training examples, held-out answers or repository revisi
 
 Current enrollment accepts at most 1 MiB of input, 16,384 segments and two to four explicit
 peers. Individual prompts/answers, resource budgets and worker leases remain bounded.
-`--max-batches` limits new rounds per invocation (1–32), not completed lifetime progress.
+`--max-batches` limits new rounds per invocation (1–32), or per continuation window with
+`--follow`, not completed lifetime progress.
 `result.json` preserves ordered range answers and exact source/context/job/provider/report
 identities; it is not neural synthesis, answer-quality proof or an independently portable
 execution attestation. An unfinished invocation returns a nonzero status but retains complete
