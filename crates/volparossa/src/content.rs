@@ -19,6 +19,7 @@ use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
 mod browser_download;
+mod custody;
 mod handoff;
 mod https_download;
 mod mailbox;
@@ -34,6 +35,9 @@ pub(crate) enum Command {
     /// Explicit two-provider encrypted mailbox invitations, deposits and inbox retrieval.
     #[command(subcommand)]
     Mailbox(mailbox::Command),
+    /// Deposit or inspect original public publications at independently selected providers.
+    #[command(subcommand)]
+    Custody(custody::Command),
     /// Chunk and sign a local file; optionally contribute it through the configured agent.
     Publish(Publish),
     /// Show the public message-recipient key of an existing encrypted node identity.
@@ -343,6 +347,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Site(args) => return site::run(args, socket).await,
         Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
+        Command::Custody(args) => return custody::run(args, socket).await,
         Command::Publish(args) => publish_command(&args, socket).await?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,
         Command::PublishMessage(args) => private_message::publish_message(&args)?,

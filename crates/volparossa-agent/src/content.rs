@@ -4,6 +4,7 @@
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
 mod contribution;
+mod custody;
 mod https;
 mod mailbox;
 mod named;
@@ -312,7 +313,10 @@ impl ContentRuntime {
                 _ = refresh.tick() => {
                     if automatic {
                         let registry = registry.lock().await;
-                        if !registry.has_live_publications(now()) && !registry.has_mailbox() {
+                        if !registry.has_live_publications(now())
+                            && !registry.has_mailbox()
+                            && !registry.has_custody()
+                        {
                             drop(registry);
                             let _ = discovery.withdraw_content_offer().await;
                             continue;
@@ -721,6 +725,14 @@ fn make_offer(
 
 fn now() -> u64 {
     unix_millis() / 1000
+}
+
+fn check_publication_time(manifest: &VerifiedManifest) -> Result<(), ContentError> {
+    let validity = manifest.validity();
+    if !(validity.created..validity.expires).contains(&now()) {
+        return Err(ContentError::Invalid);
+    }
+    Ok(())
 }
 
 async fn content_event(context: &ControlContext, code: &'static str) {

@@ -20,6 +20,46 @@ use volparossa_content::{
 };
 
 #[tokio::test]
+async fn repeated_references_fit_exact_unique_storage_quota_and_restore_complete_object() {
+    let root = tempfile::tempdir().expect("test root");
+    let expected: Vec<_> = [17_u8, 29, 17]
+        .into_iter()
+        .flat_map(|byte| vec![byte; CHUNK_BYTES])
+        .collect();
+    let (manifest, mut source) = publication(root.path(), &expected);
+    assert_eq!(manifest.chunks().len(), 3);
+    assert_eq!(manifest.length(), 3 * CHUNK_BYTES as u64);
+    let limits = CacheLimits {
+        max_bytes: 2 * CHUNK_BYTES as u64,
+        max_entries: 2,
+        min_free_bytes: 0,
+    };
+    let path = root.path().join("two-unique-chunks");
+    let mut destination = ChunkStore::create(&path, limits).expect("exact two-chunk quota");
+    let (download, upload) = transfer_once(&manifest, &mut destination, &mut source).await;
+    let unique = TransferProgress {
+        chunks: 2,
+        bytes: 2 * CHUNK_BYTES as u64,
+        missing: 0,
+    };
+    assert_eq!(download, unique);
+    assert_eq!(upload, unique);
+    assert_eq!(
+        destination.usage(),
+        CacheUsage {
+            bytes: unique.bytes,
+            entries: 2
+        }
+    );
+    drop(destination);
+    let mut destination = ChunkStore::open(&path, limits).expect("reopen exact quota");
+    let output = root.path().join("reassembled.bin");
+    reassemble_to_file(&manifest, &mut [&mut destination], now(), &output)
+        .expect("all original ordered chunks and complete object hash");
+    assert_eq!(fs::read(output).expect("verified full object"), expected);
+}
+
+#[tokio::test]
 async fn two_partial_peers_fill_a_persistent_cache_after_publisher_disappears() {
     let root = tempfile::tempdir().expect("test root");
     let origin = tempfile::tempdir_in(root.path()).expect("publisher directory");

@@ -5,6 +5,8 @@
 //! provider key and supplies a policy-authorized protected stream. This module never dials,
 //! listens, discovers peers, or adopts a directory named by a network request.
 
+pub mod custody;
+pub mod custody_storage;
 pub mod digest;
 pub mod named;
 pub mod replication;
@@ -267,6 +269,7 @@ pub struct PublicationRegistry {
     entries: BTreeMap<[u8; 32], RegisteredPublication>,
     name_lookup: bool,
     mailbox: Option<Arc<crate::mailbox::wire::MailboxService>>,
+    custody: Option<Arc<custody::CustodyService>>,
 }
 #[derive(Clone)]
 struct RegisteredPublication {
@@ -298,6 +301,16 @@ impl PublicationRegistry {
     /// Whether an explicitly attached mailbox still owns this service independently of public content.
     pub fn has_mailbox(&self) -> bool {
         self.mailbox.is_some()
+    }
+
+    /// Attach explicitly configured public custody; cloned snapshots share its service owner.
+    pub fn set_custody(&mut self, service: Arc<custody::CustodyService>) {
+        self.custody = Some(service);
+    }
+
+    /// Whether this service explicitly accepts publisher-authorized public custody operations.
+    pub fn has_custody(&self) -> bool {
+        self.custody.is_some()
     }
 
     /// Register the original independently verified envelope without opting into replication.
@@ -537,6 +550,18 @@ where
         let selector: Selector = timeout_at(session.selector_deadline, read_frame(stream))
             .await
             .map_err(|_| ProviderError::Timeout)??;
+        if selector.version == custody::SELECTOR_VERSION
+            && selector.operation == custody::SELECTOR_OPERATION
+            && selector.manifest_id.is_empty()
+        {
+            return registry
+                .custody
+                .as_ref()
+                .ok_or(ProviderError::Missing)?
+                .serve(stream, session.remaining(limits)?)
+                .await
+                .map_err(|_| ProviderError::Protocol);
+        }
         if selector.version == crate::mailbox::wire::SELECTOR_VERSION
             && selector.operation == crate::mailbox::wire::SELECTOR_OPERATION
             && selector.manifest_id.is_empty()

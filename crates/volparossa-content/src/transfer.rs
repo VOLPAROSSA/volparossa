@@ -17,7 +17,9 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::{CHUNK_BYTES, ChunkId, ChunkStore, MAX_CHUNKS, MAX_OBJECT_BYTES, VerifiedManifest};
 
+mod bridge;
 pub mod parallel;
+pub(crate) use bridge::bridge_peer;
 
 const VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 64;
@@ -169,7 +171,8 @@ impl Session {
 /// object signed by some peer-supplied key. Cache hits skip requests. Missing pieces are
 /// counted, not declared complete: callers may repeat with another protected peer stream,
 /// then use `reassemble_to_file` to publish only a complete authenticated object.
-/// The receiving cache must have room for the whole object to avoid evicting its prefix.
+/// The receiving cache must fit the object's unique chunks to avoid evicting its prefix;
+/// repeated ordered references consume storage once, without reducing the logical size bound.
 /// Verified pieces received before an error remain useful and quota-accounted.
 ///
 /// # Errors
@@ -210,7 +213,18 @@ where
     *progress = TransferProgress::default();
     let mut session = Session::new(limits)?;
     check_time(manifest)?;
-    store.require_object_capacity(manifest.length())?;
+    let mut unique = BTreeMap::new();
+    for chunk in manifest.chunks() {
+        if unique
+            .insert(*chunk.id(), chunk.length())
+            .is_some_and(|length| length != chunk.length())
+        {
+            return Err(crate::Error::InvalidManifest.into());
+        }
+    }
+    // Canonical manifests contain full chunks and at most one shorter final chunk, so this
+    // existing byte-capacity check also counts exactly the required unique storage entries.
+    store.require_object_capacity(unique.values().map(|length| u64::from(*length)).sum())?;
     for chunk in manifest.chunks() {
         session.check_deadline()?;
         check_time(manifest)?;
