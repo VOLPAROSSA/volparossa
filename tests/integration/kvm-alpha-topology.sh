@@ -27,10 +27,21 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|content-custody|dns-cache]'
 }
 
 print_plan() {
+    if [ "$scenario" = content-custody ]; then
+        printf '%s\n' \
+            'VOLPAROSSA public-custody protected network smoke plan:' \
+            '  start explicitly configured, initially empty contribution caches on distinct provider nodes;' \
+            '  use ordinary publisher CLI identity/manifest and authenticated Deposit/Inspect on protected MPTCP routes;' \
+            '  require actual complete copies at two providers without sending publisher private keys or local paths;' \
+            '  remove original source bytes, restart providers and fill a fresh consumer cache over the protected route;' \
+            '  retain original publication expiry, complete role-specific captures and unchanged guest host cleanup;' \
+            '  no automatic placement/repair, future availability or general offline mesh claim.'
+        return
+    fi
     if [ "$scenario" = mptcp-growth ]; then
         printf '%s\n' \
             'VOLPAROSSA live MPTCP path-growth smoke plan:' \
@@ -292,7 +303,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|content-custody|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -439,6 +450,19 @@ if [ "$scenario" = content-replication ]; then
     done
     [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
         || { printf '%s\n' 'content replication executable unavailable' >&2; exit 69; }
+fi
+if [ "$scenario" = content-custody ]; then
+    for custody_fixture in content-custody-smoke.sh content-custody-smoke.py \
+        content-provider-smoke.sh content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
+        if [ ! -f "$source_directory/tests/integration/$custody_fixture" ] \
+            || [ -L "$source_directory/tests/integration/$custody_fixture" ]; then
+            printf '%s\n' 'public custody fixture unavailable' >&2
+            exit 69
+        fi
+    done
+    for custody_tool in head base64; do
+        command -v "$custody_tool" >/dev/null 2>&1 || exit 69
+    done
 fi
 if [ "$scenario" = content-mailbox ]; then
     for mailbox_fixture in content-mailbox-smoke.sh content-mailbox-smoke.py content-provider-smoke.sh \
@@ -1306,6 +1330,9 @@ cleanup() {
     if [ "$scenario" = content-mailbox ] && command -v content_mailbox_cleanup >/dev/null 2>&1; then
         content_mailbox_cleanup || original_status=1
     fi
+    if [ "$scenario" = content-custody ] && command -v content_custody_cleanup >/dev/null 2>&1; then
+        content_custody_cleanup || original_status=1
+    fi
     if [ "$scenario" = content-provider ] && command -v content_publication_cleanup >/dev/null 2>&1; then
         content_publication_cleanup || original_status=1
     fi
@@ -1558,6 +1585,8 @@ cleanup() {
         content_replication_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-mailbox ]; then
         content_mailbox_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = content-custody ]; then
+        content_custody_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-provider ]; then
         content_provider_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-https ]; then
@@ -1675,6 +1704,13 @@ if [ "$scenario" = content-replication ]; then
     # shellcheck source=tests/integration/content-contribution-publish-smoke.sh
     . "$source_directory/tests/integration/content-contribution-publish-smoke.sh"
 fi
+if [ "$scenario" = content-custody ]; then
+    # Utilities only: this does not execute the larger provider acceptance sequence.
+    # shellcheck source=tests/integration/content-provider-smoke.sh
+    . "$source_directory/tests/integration/content-provider-smoke.sh"
+    # shellcheck source=tests/integration/content-custody-smoke.sh
+    . "$source_directory/tests/integration/content-custody-smoke.sh"
+fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
     # shellcheck source=tests/integration/content-provider-smoke.sh
@@ -1697,7 +1733,7 @@ capture_host_state "$WORK/host-state-before.json" \
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
 if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ] \
-    || [ "$scenario" = content-mailbox ]; then
+    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
     printf '%s\n' \
         '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
         '50.166.6.1 provider-b.volparossa.test provider-b.volparossa.test.' \
@@ -1756,6 +1792,11 @@ if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
     install -o root -g "$AGENT_GID" -m 0555 \
         "$binary_directory/examples/https-content-acceptance-fixture" \
         "$WORK/bin/examples/https-content-acceptance-fixture"
+fi
+if [ "$scenario" = content-custody ]; then
+    for custody_script in content-custody-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
+    done
 fi
 if [ "$scenario" = content-mailbox ]; then
     for mailbox_script in content-mailbox-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
@@ -1971,7 +2012,7 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
-    if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ]; } \
+    if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; } \
         && { [ "$node" = client ] \
             || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
         || { [ "$scenario" = content-replication ] && { [ "$node" = client ] || [ "$node" = relay4 ]; }; }; then
@@ -2028,7 +2069,7 @@ set --
 if [ "$scenario" = dns-cache ]; then
     set -- --dns-cache
 elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-message ] \
-    || [ "$scenario" = content-mailbox ]; then
+    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
     set -- --content-providers
 fi
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
@@ -2177,6 +2218,7 @@ write_config() {
             printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
         fi
         [ "$wifi_link" != yes ] || wifi_link_config
+        [ "$scenario" != content-custody ] || content_custody_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
         # advertisement. The native authorization chain binds this value to both service ledgers.
         printf 'routing:\n  client_minimum_upload_mbps: 8\n'
@@ -2558,7 +2600,7 @@ launch_agent() {
         esac
     fi
     set --
-    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-message ] || [ "$scenario" = content-mailbox ]; } && [ "$node" = client ]; then
+    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-message ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; } && [ "$node" = client ]; then
         # The identical agent UID must not permit a fixture-local replica file shortcut.
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-provider-seed"
         set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed"
@@ -4143,7 +4185,8 @@ if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != mptcp-growth ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
-    && [ "$scenario" != content-replication ] && [ "$scenario" != content-mailbox ] && [ "$scenario" != dns-cache ]; then
+    && [ "$scenario" != content-replication ] && [ "$scenario" != content-mailbox ] \
+    && [ "$scenario" != content-custody ] && [ "$scenario" != dns-cache ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4707,12 +4750,14 @@ start_privacy_observers() {
             [ "$scenario" = content-message ] || return 1 ;;
         content-mailbox-send-privacy|content-mailbox-receive-privacy)
             [ "$scenario" = content-mailbox ] || return 1 ;;
+        content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
+            [ "$scenario" = content-custody ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
     privacy_content_flag=
     if [ "$scenario" = content-provider ] || [ "$privacy_prefix" = content-message-publication-privacy ] \
-        || [ "$scenario" = content-mailbox ]; then
+        || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
         set -- --content-providers
         privacy_content_flag=--content-providers
     fi
@@ -5421,6 +5466,10 @@ if [ "$scenario" = content-provider ]; then
 fi
 if [ "$scenario" = content-mailbox ]; then
     content_mailbox_run
+    exit 0
+fi
+if [ "$scenario" = content-custody ]; then
+    content_custody_run
     exit 0
 fi
 if [ "$scenario" = content-replication ]; then
