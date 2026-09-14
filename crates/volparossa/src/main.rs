@@ -269,7 +269,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         } => initialize_identity(identity, passphrase_file.as_deref()),
         CliCommand::Identity { command } => maintain_identity_command(command).await,
         CliCommand::Content { command } => content::run(*command, &cli.control_socket).await,
-        CliCommand::Compute { command } => compute::run(command).await,
+        CliCommand::Compute { command } => compute::run(command, &cli.control_socket).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,
@@ -645,6 +645,10 @@ fn verify_policy(config_path: &Path, manifest_path: &Path, trust_path: &Path) ->
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Exhaustive typed control-response rendering, including rejecting unexpected stream handoffs"
+)]
 fn print_response(response: ControlResponse) -> Result<()> {
     match response
         .payload
@@ -655,7 +659,8 @@ fn print_response(response: ControlResponse) -> Result<()> {
         | Payload::HttpsContentTransferReady(_)
         | Payload::NamedContentTransferReady(_)
         | Payload::MailboxReady(_)
-        | Payload::ContentCustodyReady(_) => {
+        | Payload::ContentCustodyReady(_)
+        | Payload::ComputeReady(_) => {
             anyhow::bail!("unexpected content stream handoff outside an explicit transfer")
         }
         Payload::Content(receipt) => println!(

@@ -33,8 +33,31 @@ original source removal/restart, and execution with the exact received weights o
 The fixed base model/runtime are explicitly provisioned, not automatically distributed.
 Source selection must consider
 eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
-Autonomous source selection/ingestion, peer execution and governance remain required work,
+Autonomous source selection/ingestion, general task orchestration and governance remain required work,
 not an implemented distributed brain or a guarantee of private remote execution.
+The next development candidate connects `compute serve` to the protected network with
+`compute peer attach`, then exposes signed public-task submission, polling/cancellation and
+concurrent row distribution. The [two-worker run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+now has complete raw evidence of simultaneous isolated workers, separate model results,
+protected paths and cleanup. Its CI run remains failed due to a reporting-field error;
+the corrected checker reconstructs the retained measurements successfully. This does not yet
+provide autonomous task planning, private offload or unbounded per-device execution.
+The subsequent [worker-loss recovery run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+passes: after one real worker is stopped, its peer's result is retained and only the failed
+part is explicitly rerun on a new worker through the protected network, with full cleanup.
+An explicit `compute peer workflow` candidate now sequences multiple signed public datasets,
+retains verified local results, and resumes unfinished work across separate bounded leases.
+This enlarges the overall job, not the resource allowance of any participating device;
+the current plan accepts up to 32 small datasets and is not a general task planner.
+An explicit `compute train-cycle` now connects a chosen public dataset to local training and
+adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
+that same publisher's dataset through the protected network. It can continue training an
+explicitly imported adapter. Execution requires `--execute`; the resulting bundle is not
+automatically published or activated. Its separate live warmstart/cache-cycle proof is pending.
+Background execution now has a cooperative CPU/I/O pause/resume candidate: explicit local
+jobs use `--spare-capacity`, and peer executors always enable it. Memory pressure still cancels;
+pauses do not extend an individual worker's deadline. Actual model-under-pressure proof and
+battery/thermal/interactive-activity integration remain unfinished.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

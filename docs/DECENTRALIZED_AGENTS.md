@@ -132,7 +132,8 @@ new private output. The fixed worker performs inference or rank-4 LoRA training,
 actual base/adapter tensors, saves safetensors, loads a fresh base plus saved adapter and
 evaluates again. Rust enforces the wall-clock deadline, bounded protocol, resource-pressure
 cancellation and external artifact hashes. There is no unsandboxed fallback, private-input
-training, automatic cache training, peer job execution or automatic policy activation yet.
+training, automatic cache training or automatic policy activation yet. Explicit public peer
+job execution has the separate source-bound checkpoint below.
 
 The initial resource boundary includes two CPU threads maximum, idle CPU/IO priority,
 per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
@@ -144,6 +145,18 @@ the original base remains unchanged, and a fresh base/adapter reload is evaluate
 B01 still needs measured owner-priority pause/resume/cancellation; improved answer quality, distributed
 training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
+
+The owner-priority candidate adds `--spare-capacity` to `compute run` and `compute train-cycle`;
+`compute serve` uses the same mechanism by default. Fixed, sequenced private-pipe commands
+pause and resume at model/optimizer checkpoints, with acknowledgements from the execution
+thread. CPU `some avg10 >= 20` or I/O `some avg10 >= 10` pauses; five seconds of continuously
+sampled quiet permits resumption. Unknown pressure cannot authorize work; unknown or less than
+512 MiB available memory across the host and unified-cgroup parent limits cancels and reaps it.
+Existing RSS/output limits and the original wall-clock deadline continue while paused. The
+broker advertises no free slot under observed pressure. These are coarse capacity observations,
+not universal owner-activity detection or a hard cgroup reservation. Native operations are not
+preempted mid-call; unacknowledged commands have a bounded timeout. Standard-library worker
+process/pipe and focused Rust tests pass; actual model-pressure evidence is still pending.
 
 ### Cache-backed adapter candidate
 
@@ -189,6 +202,34 @@ This completes B02's explicit transfer/reuse scope, not automatic model activati
 answer quality. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
 
+### Explicit cache-backed training cycle
+
+`compute train-cycle --publisher-key KEY --dataset-name NAME --dataset-manifest-id SHA256
+--cache AGENT_CACHE --reuse-cache --runtime-root VENV --model-root MODEL
+--adapter-root IMPORTED/adapter --output NEW_PRIVATE_CYCLE --steps 8 --execute`
+joins source retrieval, actual local training and adapter packaging without separate manual
+file-copy steps. Use absolute paths and pre-provisioned runtime/model directories; the adapter
+and exact manifest pin are optional. Without `--execute`, it only prints the selected plan.
+
+The operator chooses the publisher and dataset name before cache lookup. The optional exact
+manifest pin, revision floor, fixed dataset type and 1-MiB object bound are checked by the agent
+before peer-body retrieval, and again by the consuming CLI. An explicitly preferred complete,
+unexpired cache object needs no route or provider; a miss retains the same publisher/name and
+uses the normal protected retrieval path. This is not a globally newest-version claim, an
+arbitrary-origin download, or permission to substitute another popular cached source. Source
+signatures establish provenance, not legal/training-rights or model-quality guarantees.
+
+The cycle records its selection before fetching and retains the original signed dataset,
+source receipt, supervised training report and `adapter.bundle` in a new private directory.
+An optional previously imported adapter is used as the actual warmstart; it is not silently
+selected from cache. Training uses the existing isolated fixed worker, at most two CPU threads,
+1–64 optimizer steps and at most 600 seconds, further bounded by source expiry. Interruption
+cancels and awaits worker cleanup; incomplete files are retained rather than reported complete.
+Publish the bundle separately with the normal content command. There is no automatic adapter
+activation, source discovery, retraining loop, distributed gradient aggregation or policy change.
+The separate `agent-train-cycle` guest scenario is intended to prove actual warmstart updates
+from protected received cache after the supplying service stops; its live proof remains pending.
+
 ## Owner-first resource allocation
 
 Training and opportunistic model redistribution use only the node's available contribution
@@ -210,7 +251,108 @@ Task size is not the same as a worker lease: large or long-running workflows sho
 checkpointed and resumed across multiple bounded steps. No final whole-workflow size or duration
 limit is implied by the first worker's four inference rows and 600-second lease. Per-device
 resource limits remain necessary. General workflow continuation and checkpoint scheduling are
-still unimplemented; no unlimited execution permission follows from accepting a large task.
+not supplied by the initial worker. The explicit multi-package coordinator below is a first
+continuation step, not general task decomposition or unlimited execution permission.
+
+## Current public peer-job candidate
+
+The development CLI now has an explicit `compute serve` broker and `compute peer
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow` commands. The broker must already have the
+pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
+off until explicitly executed. The agent attaches only a protected same-UID socket and an
+explicit allowlist of dataset publishers. It does not launch Python inside the hardened
+network-agent service or accept remote commands, model downloads or filesystem paths.
+
+Peer requests use short challenge-bound signed exchanges inside the existing authenticated
+provider TLS over protected MPTCP/WireGuard, never a direct Client-to-Exit or provider dial.
+Public dataset signatures, original object/chunk hashes, expiry and exact derived row bytes
+are checked before export and again by the receiver. A fresh identity signature alone is not
+permission to submit an arbitrary source. Polling and cancellation require the same authenticated
+owner and entire original job binding. Expiry prevents new admission, but not owner cancellation
+of a worker still being reaped.
+
+`compute peer distribute` currently divides two through four independent public inference
+questions across explicitly selected compatible peers, sends the tasks concurrently, and joins
+results in their original row order. It saves immutable handles before submission, retains
+partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
+poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
+checkpoint. Automatic peer selection/reassignment, general multi-step
+continuation, distributed optimizer/model-layer execution, confidential private tasks and
+correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
+who reported a result, not whether the result is true.
+
+`compute peer resume` now explicitly reopens supplied task handles against the same original
+signed public source, reconciles completed/running/missing/failed observations, and can retry
+unfinished parts once on independently supplied compatible peers. An ambiguous, unexpired lease
+is not reassigned; an expired unreachable lease stays labelled unconfirmed, not observed stopped.
+Original IDs/deadlines remain unchanged and replacement attempts get distinct saved handles.
+Results report which rows were requested, including when only part of the original dataset was
+resumed. This is bounded explicit recovery, not an automatic general workflow scheduler or an
+exactly-once execution guarantee. Its source/handle tests and the explicit live worker-loss/recovery
+checkpoint below pass. Terminal broker receipts receive a nonrenewable 60-second observation
+grace after observed completion, without extending any execution lease or the eight-record cap.
+
+The `agent-jobs` disposable guest runner exercises two independent CPU workers on separate nodes,
+with separate runtime-lock inodes and process-overlap observation, signed disjoint public input
+rows, protected network traffic and source-bound results. Only the verified base model bytes are
+shared in that fixture. Its first run stopped before model execution during capability lookup;
+an already closed initial route socket is now replaced before application TLS. The next
+[run on `2ba9631e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34869250045)
+completed both real model jobs and returned their two disjoint results, but failed the live
+overlap/isolation check because its process detector omitted children spawned by other threads.
+That detector and the analogous runtime resource accounting now inspect every bounded thread;
+local real-process regressions pass. The subsequent
+[run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+retained the simultaneous actual-worker observations, both complete model receipts, protected
+path captures and full cleanup. It failed only because its final checker expected a nonexistent
+`manifest_id` field from offline publication. Checker correction `3f5ee282` instead derives the
+ID from the retained original signed bytes, checks their recorded hash/length and publisher/expiry,
+and reconstructs the complete original raw evidence successfully. No missing observations were
+invented; the historical workflow remains failed. This proves the scoped two-public-job execution,
+not general task decomposition, live reassignment, private offload or improved answer quality.
+Cleanup and unchanged guest state passed even in the failed runs. The separate
+`agent-jobs-loss` scenario additionally terminates one exact guest-owned Python worker via pidfd,
+requires terminal original receipts, and resumes only its failed rows on the idle surviving
+peer. Its checker requires a genuinely new worker and preserved original successful output;
+[its run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+now passes with exact-source raw reconstruction equal to the original reports: R4's actual
+worker is killed, the concurrent R5 result survives unchanged, and only R4's failed row is
+executed once on a new R5 worker. Both selected two-leg WireGuard paths carry data; all six
+captures have zero drops/unexpected outer packets. Original handles/deadlines remain intact,
+cleanup leaves zero owned objects and guest-state hashes match. This proves bounded explicit
+public-job recovery, not automatic general planning or private computation; B03 remains open.
+
+### Explicit multi-package workflows
+
+`compute peer workflow --plan PLAN.json --directory NEW_PRIVATE_DIRECTORY --provider-key KEY_A
+--provider-key KEY_B --max-batches 1 --max-seconds 600 --execute` enrolls a finite version-1 plan:
+
+```json
+{"version":1,"packages":[{"dataset":"/absolute/public-dataset.json","dataset_manifest":"/absolute/public-dataset.pb","publisher_key":"INDEPENDENTLY_TRUSTED_PUBLISHER_KEY_HEX"}]}
+```
+
+Without `--execute`, enrollment only previews and performs no network I/O. The current plan
+accepts 1–32 packages, each containing 2–4 independent public inference rows; these are initial
+enrollment bounds, not a promise of arbitrary natural-language task planning. A private directory
+retains exact original source bytes, signed manifests, peer selection and per-attempt handles.
+`compute peer workflow --directory EXISTING_PRIVATE_DIRECTORY --resume --max-batches 1 --execute`
+continues that same enrollment. Each invocation advances only its explicitly bounded number of
+ordinary distribute/reconcile rounds; `Busy` or ambiguous work stays pending instead of an
+unbounded retry loop. Each new executor still receives its own bounded lease, so the complete
+sequence can span longer than 600 seconds without extending an old lease.
+
+Previously completed parts are reconstructed from full input/model/handle-bound receipts saved
+after authenticated RPC validation, not from an unchecked `complete` flag. These private local
+receipt files are not independently provider-signed portable attestations and do not prove
+answer quality. Historical result verification does not renew a source: new work must still
+pass current source-expiry and authorization checks. Source selection remains explicit and
+independent of cache presence; no automatic corpus choice, model download, confidential offload,
+cross-model planning or distributed optimizer is implied. Live multi-package and worker-loss
+proofs remain separate from the local coordinator tests.
+
+Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
+present. An explicit submit consumes a preselected signed dataset, whether obtained from an
+eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
 
 ## Private tasks and training data
 

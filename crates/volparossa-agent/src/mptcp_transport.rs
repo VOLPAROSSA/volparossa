@@ -1,7 +1,11 @@
 //! Production adoption of helper-owned MPTCP transport capabilities.
 
-use std::{collections::BTreeSet, io, net::SocketAddr, time::Duration};
+use std::{collections::BTreeSet, io, net::SocketAddr, os::fd::AsRawFd, time::Duration};
 
+use nix::{
+    errno::Errno,
+    sys::socket::{MsgFlags, recv},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::{Instant, sleep_until};
@@ -227,7 +231,16 @@ impl ClientMptcpTransport {
             .certificate_der
             .clone()
             .ok_or(MptcpTransportError::InvalidMetadata)?;
-        let stream = if let Some(stream) = self.initial_stream.take() {
+        // Route preparation connects this first socket before application TLS starts.
+        // The Exit may have closed it after its bounded ClientHello deadline while
+        // the caller was preparing work. Do not give the first real request a known
+        // EOF: discard only that unused socket and acquire through the same helper
+        // capability. This is neither ordinary-TCP fallback nor application replay.
+        let initial = self
+            .initial_stream
+            .take()
+            .filter(|stream| pending_stream_usable(stream.as_tcp_stream()));
+        let stream = if let Some(stream) = initial {
             stream
         } else {
             let signal = self
@@ -260,6 +273,39 @@ impl ClientMptcpTransport {
         )
         .await
     }
+}
+
+/// Non-consuming availability hint for an unused pre-TLS socket. A positive result
+/// is not liveness/authentication proof; normal MPTCP/TLS checks remain mandatory.
+fn pending_stream_usable(stream: &impl AsRawFd) -> bool {
+    match recv(
+        stream.as_raw_fd(),
+        &mut [0_u8; 1],
+        MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+    ) {
+        Ok(0) => false,
+        Ok(_) | Err(Errno::EAGAIN | Errno::EINTR) => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn unused_socket_probe_detects_eof_without_consuming_data() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    // Real local descriptors exercise the nonblocking/peek seam only; this is not
+    // an MPTCP datapath claim and changes no host network configuration.
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    assert!(pending_stream_usable(&reader));
+    writer.write_all(b"x").unwrap();
+    assert!(pending_stream_usable(&reader));
+    let mut byte = [0_u8; 1];
+    reader.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"x");
+    drop(writer);
+    assert!(!pending_stream_usable(&reader));
 }
 
 pub(crate) async fn wait_for_selected_subflows<F>(

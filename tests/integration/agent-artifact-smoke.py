@@ -3,6 +3,7 @@
 """Actual distinct-node training, protected artifact transfer and received-weight reuse."""
 
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -23,6 +24,9 @@ read, require = TRAIN["read"], TRAIN["require"]
 file_hash, write = TRAIN["file_hash"], TRAIN["write"]
 SCOPE = ("one producer node trains and publishes; a distinct Client retrieves the signed adapter/dataset over protected MPTCP and explicitly reuses received weights; "
          "one common explicitly provisioned readonly base/runtime, not distributed optimization, base-model distribution or model quality")
+CYCLE_SCOPE = ("the complete distinct-node adapter transfer followed by one explicitly selected public training cycle on the receiving Client after provider stop; "
+               "verified cached dataset and readonly received adapter, eight real warmstart updates and a new local bundle; "
+               "not automatic training/publication, globally latest data, distributed optimization or model quality")
 DATASET_TYPE = "application/vnd.volparossa.agent-dataset.v1+json"
 ADAPTER_TYPE = "application/vnd.volparossa.adapter.v1"
 SOURCE_NAMES = ("train", "dataset.json", "dataset-cache", "adapter-cache", "bundle.bin", "identity.key",
@@ -106,7 +110,7 @@ def cleanup(path):
     root = private_root(path, missing=True)
     ended = True
     if root.exists():
-        for label in ("training", "inference"):
+        for label in ("training", "inference", "cycle"):
             evidence = root / f"{label}-isolation.json"
             if evidence.is_file():
                 ended &= not any(TRAIN["alive"](member) for member in read(evidence)["owned_processes"])
@@ -117,7 +121,7 @@ def cleanup(path):
 
 
 def observe(pid, output, provision, source, canary, label, node, namespace, service_pid):
-    require(label in ("training", "inference"), "invalid observation label")
+    require(label in ("training", "inference", "cycle"), "invalid observation label")
     require(node in ("client", "relay3", "relay4", "relay5"), "invalid logical compute node")
     cli_namespace = os.readlink(f"/proc/{pid}/ns/net")
     service_namespace = os.readlink(f"/proc/{service_pid}/ns/net")
@@ -135,15 +139,16 @@ def observe(pid, output, provision, source, canary, label, node, namespace, serv
     evidence = read(temporary)
     require(TRAIN["identity"](service_pid) == service, "node service changed during observation")
     evidence["node_lineage"] = lineage
-    if label == "inference":
+    if label in ("inference", "cycle"):
         worker = Path(f"/proc/{evidence['worker']['pid']}")
         require(TRAIN["identity"](evidence["worker"]["pid"]) == evidence["worker"], "worker identity changed")
         options = [line.split()[5].split(",") for line in (worker / "mountinfo").read_text().splitlines()
                    if line.split()[4] == "/adapter"]
         require(len(options) == 1 and "ro" in options[0], "actual received adapter mount is not readonly")
         checks = {}
+        adapter = source.parent / "adapter" if label == "inference" else source.parent.parent / "received/adapter"
         for name in ("README.md", "adapter_config.json", "adapter_model.safetensors"):
-            mounted, actual = (worker / "root/adapter" / name).stat(), (source.parent / "adapter" / name).stat()
+            mounted, actual = (worker / "root/adapter" / name).stat(), (adapter / name).stat()
             checks[name] = (mounted.st_dev, mounted.st_ino) == (actual.st_dev, actual.st_ino)
         require(all(checks.values()), "worker used an adapter other than the received files")
         evidence["received_adapter_readonly"] = True
@@ -174,6 +179,35 @@ def check_lineage(train_owner, infer_owner, producer, restart):
                 "compute CLI did not execute inside its claimed real service namespace")
 
 
+def check_control_binding(layout, peers, fetch, binding):
+    probe = binding["producer_layout"]
+    owner = layout["control_relay_peer_id"]
+    nodes = layout["provider_nodes"]
+    require(all(probe[key] == layout[key] for key in ("provider_nodes", "producer_node", "consumer_node", "provider_keys"))
+            and probe["control_relay_peer_id"] == binding["probe_status"]["control_relay_peer_id"]
+            and owner == binding["fetch_status"]["control_relay_peer_id"]
+            and owner in {peers[node] for node in ("relay0", "relay1", "relay2")}
+            and owner not in {peers[node] for node in nodes}
+            and all(re.fullmatch(r"[0-9a-f]{32}", item["route_context_id"]) for item in (probe, layout))
+            and probe["route_context_id"] != layout["route_context_id"],
+            "fresh control selection changed producer identity or reused the disconnected probe")
+    require(all(fetch[kind + "_receipt"]["control_relay_peer_id"] == owner for kind in ("adapter", "dataset")),
+            "artifact objects were fetched through a different control owner")
+    addresses = CUSTODY["SHARED"]["PUBLIC_IPS"]
+    control = next(node for node in ("relay0", "relay1", "relay2") if peers[node] == owner)
+    routes = binding["routes"]
+    require(set(routes) == set(nodes), "actual control route coverage incomplete")
+    for index, node in enumerate(nodes):
+        for direction, device, gateway, source, destination in (
+                ("out", f"cp{index}", f"10.241.{80+index}.2", addresses[control], addresses[node]),
+                ("back", f"pc{index}", f"10.241.{80+index}.1", addresses[node], addresses[control])):
+            rows = routes[node][direction]
+            require(isinstance(rows, list) and len(rows) == 1
+                    and all(rows[0].get(key) == value for key, value in
+                            dict(dev=device, gateway=gateway, prefsrc=source, dst=destination).items()),
+                    "actual fresh-owner route differs from its exact filtered control link")
+
+
 def check_evidence(evidence, revision):
     require(evidence["success"] is True and evidence["source_revision"] == revision, "incomplete adapter reuse")
     TRAIN["check_worker"](evidence["training"], revision)
@@ -193,6 +227,7 @@ def check_evidence(evidence, revision):
     require(len(set(layout["provider_keys"].values())) == 2
             and layout["control_relay_peer_id"] not in {peers[n] for n in nodes}
             and all(CUSTODY["peer_key"](peers[n]) == layout["provider_keys"][n] for n in nodes), "provider identity binding differs")
+    check_control_binding(layout, peers, evidence["fetch"], evidence["control_binding"])
     producer = layout["producer_node"]
     require(producer in nodes and layout["consumer_node"] == "client" and producer != "client",
             "producer and consumer are not different logical nodes")
@@ -279,6 +314,13 @@ def build_evidence(work, revision):
     evidence = {name.replace("-", "_"): read(work / f"agent-artifact-{name}.json") for name in names}
     evidence["cleanup"] = evidence.pop("private_cleanup")
     evidence.update(success=True, source_revision=revision, peers=read(work / "a01-expected-peers.json"))
+    evidence["control_binding"] = {
+        "producer_layout": read(work / "agent-artifact-producer-layout.json"),
+        "probe_status": read(work / "agent-artifact-client-status.json"),
+        "fetch_status": read(work / "agent-artifact-client-fetch-status.json"),
+        "routes": {node: {direction: read(work / f"content-provider-control-{node}-{direction}.json")
+                          for direction in ("out", "back")}
+                   for node in evidence["layout"]["provider_nodes"]}}
     producer = evidence["layout"]["producer_node"]
     evidence["providers"] = {node: {
         "restart": read(work / f"agent-artifact-{node}-restart.json") if node == producer else None,
@@ -295,31 +337,267 @@ def build_evidence(work, revision):
     write(work / "agent-artifact-evidence.json", evidence)
 
 
-def finalize(work, revision, status, complete, remaining, phase, blocker):
-    evidence = read(work / "agent-artifact-evidence.json") if (work / "agent-artifact-evidence.json").is_file() else None
+def finalize(work, revision, status, complete, remaining, phase, blocker, cycle=False):
+    name = "agent-train-cycle" if cycle else "agent-artifact"
+    evidence = read(work / f"{name}-evidence.json") if (work / f"{name}-evidence.json").is_file() else None
     host = read(work / "a15-evidence.json") if (work / "a15-evidence.json").is_file() else {}
-    report = {"report_kind": "volparossa-public-agent-artifact", "source_revision": revision,
+    report = {"report_kind": "volparossa-public-" + name, "source_revision": revision,
               "success": status == 0 and complete and remaining == 0 and host.get("unchanged") is True and evidence is not None,
               "phase": phase, "observed_blocker": None if blocker == "NONE" else blocker,
-              "scope": SCOPE, "distributed_training_claimed": False, "base_model_distributed_claimed": False,
+              "scope": CYCLE_SCOPE if cycle else SCOPE, "distributed_training_claimed": False, "base_model_distributed_claimed": False,
               "full_alpha_claimed": False, "evidence": evidence,
               "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host}
-    write(work / "agent-artifact-smoke.json", report)
+    write(work / f"{name}-smoke.json", report)
 
 
 def check_report(report, revision):
-    require(report["report_kind"] == "volparossa-public-agent-artifact" and report["source_revision"] == revision
-            and report["success"] is True and report["scope"] == SCOPE, "incomplete artifact report")
+    cycle = report["report_kind"] == "volparossa-public-agent-train-cycle"
+    require(report["report_kind"] == ("volparossa-public-agent-train-cycle" if cycle else "volparossa-public-agent-artifact")
+            and report["source_revision"] == revision and report["success"] is True
+            and report["scope"] == (CYCLE_SCOPE if cycle else SCOPE), "incomplete artifact report")
     require(report["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and report["host_state"]["unchanged"] is True
             and report["host_state"]["before_sha256"] == report["host_state"]["after_sha256"], "guest cleanup differs")
     require(all(report[k] is False for k in ("distributed_training_claimed", "base_model_distributed_claimed", "full_alpha_claimed")), "unsupported scope")
     check_evidence(report["evidence"], revision)
+    if cycle:
+        check_cycle(report["evidence"], revision)
+
+
+def cycle_files(path):
+    root = private_root(path)
+    cycle = root / "cycle"
+    training = read(cycle / "training-report.json")
+    worker = read(cycle / "training/report.json")
+    require(worker == {k: v for k, v in training.items() if k != "supervisor"}, "saved worker report differs")
+    files = {name: file_hash(cycle / "training/adapter" / name, 2 * 1024 ** 2)
+             for name in ("README.md", "adapter_config.json", "adapter_model.safetensors")}
+    # Reconstruct the fixed canonical protobuf index from actual saved bytes. This
+    # checks the produced local bundle without interpreting tensors or peer code.
+    def varint(value):
+        encoded = bytearray()
+        while value > 127:
+            encoded.append((value & 127) | 128)
+            value >>= 7
+        return bytes(encoded) + bytes([value])
+
+    def integer(tag, value):
+        return varint(tag << 3) + varint(value) if value else b""
+
+    def blob(tag, value):
+        return varint((tag << 3) | 2) + varint(len(value)) + value
+
+    manifest = file_hash(cycle / "dataset.manifest", 65536)
+    index = (integer(1, 1) + blob(2, training["model"]["id"].encode())
+             + blob(3, training["model"]["revision"].encode()) + blob(4, bytes.fromhex(TRAIN["WEIGHT_HASH"]))
+             + integer(5, 4) + integer(6, 8) + blob(7, b"q_proj") + blob(7, b"v_proj")
+             + blob(8, bytes.fromhex(manifest["sha256"])))
+    payload = b""
+    for name, info in files.items():
+        entry = (blob(1, name.encode()) + integer(2, len(payload)) + integer(3, info["bytes"])
+                 + blob(4, bytes.fromhex(info["sha256"])))
+        index += blob(9, entry)
+        payload += (cycle / "training/adapter" / name).read_bytes()
+    expected_bundle = len(index).to_bytes(4, "big") + index + payload
+    bundle = file_hash(cycle / "adapter.bundle", 4 * 1024 ** 2)
+    require(bundle == {"bytes": len(expected_bundle), "sha256": hashlib.sha256(expected_bundle).hexdigest()},
+            "new adapter bundle is not the canonical actual files and exact dataset identity")
+    return {"selection": read(cycle / "selection.json"), "provenance": read(cycle / "source-provenance.json"),
+            "result": read(cycle / "result.json"), "dataset": file_hash(cycle / "dataset.json", 1048576),
+            "manifest": manifest, "training_report": file_hash(cycle / "training-report.json", 65536),
+            "bundle": bundle, "adapter_files": files, "canonical_bundle_matches_actual_files": True,
+            "received_after": received(path), "private_directory": stat.S_IMODE(cycle.stat().st_mode) == 0o700,
+            "original_sources_absent": all(not (root / name).exists() for name in SOURCE_NAMES)}
+
+
+def check_cycle(evidence, revision):
+    cycle = evidence["cycle"]
+    result, files, trained, isolation = (cycle[name] for name in ("result", "files", "training", "isolation"))
+    original, first = evidence["originals"], evidence["training"]
+    TRAIN["check_worker"](trained, revision)
+    TRAIN["check_isolation"](isolation)
+    require(result == files["result"] and result["operation"] == "compute_train_cycle" and result["complete"] is True
+            and result["updates_completed"] == 8 and result["input_adapter_applied"] is True, "cycle not completed")
+    require(all(result[key] is False for key in ("network_published", "private_data_supported", "model_quality_proven",
+                "autonomous_training", "model_activated_for_peer_jobs")), "unsupported training-cycle claim")
+    selection, provenance, receipt = files["selection"], files["provenance"], result["source_receipt"]
+    publisher, expiry = evidence["dataset_publish"]["publisher_key_hex"], evidence["dataset_publish"]["expires_unix_seconds"]
+    require(selection["publisher_key"] == provenance["publisher_key"] == receipt["publisher_key"] == publisher
+            and selection["dataset_name"] == provenance["dataset_name"] == receipt["name"] == "disposable-agent-dataset"
+            and selection["minimum_revision"] == receipt["revision"] == 1
+            and selection["expected_dataset_manifest_id"] == provenance["dataset_manifest_id"]
+            == result["dataset_manifest_id"] == result["bundle"]["dataset_manifest_id"]
+            == receipt["manifest_id"] == files["manifest"]["sha256"] == original["dataset_manifest_id"],
+            "cycle selected a different signed source")
+    require(provenance["signed_manifest_sha256"] == original["dataset_manifest_id"]
+            and provenance["expires_unix_seconds"] == result["source_expires_unix_seconds"]
+            == receipt["publication_expires_unix_seconds"] == result["bundle"]["dataset_expires"] == expiry
+            and 0 < provenance["verified_at_unix_seconds"] < expiry, "cycle extended or lost original expiry")
+    require(selection["prefer_cached"] is True and selection["cache_only"] is False and selection["reuse_cache"] is True
+            and selection["cache_miss_selects_different_source"] is False and selection["automatic_source_discovery"] is False
+            and selection["globally_latest_version_claimed"] is False, "wrong explicit cached-source policy")
+    require(receipt == provenance["source_receipt"] and receipt["peer_bytes"] == receipt["providers_used"]
+            == receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0
+            and receipt["provider_peer_ids"] == [] and receipt["origin_authenticated"] is False
+            and receipt["globally_latest"] is False, "cycle bypassed provider-stop cache proof")
+    require(files["dataset"] == original["dataset"] and trained["dataset"] == first["dataset"]
+            and result["dataset_sha256"] == provenance["dataset_sha256"] == receipt["sha256"] == original["dataset"]["sha256"]
+            and receipt["bytes"] == provenance["dataset_bytes"] == original["dataset"]["bytes"], "cycle trained different bytes")
+    require(trained["input_adapter"]["applied"] is True and trained["input_adapter"]["files"] == original["adapter_files"]
+            and trained["input_adapter"]["applied_parameters"] == trained["adapter_before"] == first["adapter_after"]
+            and result["input_adapter"] == trained["input_adapter"]
+            and trained["base_before"] == first["base_after"], "cycle did not warmstart received weights on unchanged base")
+    require(files["received_after"] == evidence["received"] and files["original_sources_absent"] is True
+            and files["private_directory"] is True and files["canonical_bundle_matches_actual_files"] is True,
+            "cycle changed inputs, used original source or lacks actual canonical output")
+    require(result["training_report_sha256"] == files["training_report"]["sha256"]
+            and result["bundle"]["sha256"] == files["bundle"]["sha256"]
+            and result["bundle"]["bytes"] == files["bundle"]["bytes"]
+            and files["bundle"]["sha256"] != original["adapter_bundle"]["sha256"]
+            and result["bundle"]["content_type"] == ADAPTER_TYPE
+            and result["bundle"]["network_published"] is False, "wrong new local artifact")
+    actual = {item["relative_path"].removeprefix("adapter/"): {k: item[k] for k in ("bytes", "sha256")}
+              for item in trained["artifacts"]}
+    require(actual == files["adapter_files"] and actual["adapter_model.safetensors"]["sha256"]
+            != original["adapter_files"]["adapter_model.safetensors"]["sha256"], "actual saved weights unchanged")
+    require(isolation["node_lineage"] == evidence["inference_isolation"]["node_lineage"]
+            and isolation["received_adapter_readonly"] is True
+            and set(isolation["received_adapter_exact_inodes"]) == set(original["adapter_files"])
+            and all(isolation["received_adapter_exact_inodes"].values()), "cycle ran outside receiver or used different writable adapter")
+
+
+def build_cycle_evidence(work, revision):
+    evidence = read(work / "agent-artifact-evidence.json")
+    evidence["cycle"] = {name: read(work / f"agent-artifact-cycle-{name}.json")
+                         for name in ("result", "files", "training", "isolation")}
+    check_cycle(evidence, revision)
+    write(work / "agent-train-cycle-evidence.json", evidence)
+
+
+def cycle_self_test():
+    # Synthetic checker inputs only. No backend, model or networking is executed.
+    revision, digest = "a" * 40, "b" * 64
+    identity = {"bytes": 10, "sha256": digest}
+    old_files = {name: identity.copy() for name in ("README.md", "adapter_config.json", "adapter_model.safetensors")}
+    new_files = copy.deepcopy(old_files)
+    new_files["adapter_model.safetensors"]["sha256"] = "c" * 64
+    base, previous, updated = ({"sha256": char * 64, "parameters": count}
+                              for char, count in (("d", 134515008), ("e", 230400), ("f", 230400)))
+    data = dict(source_revision=revision, visibility="public", license="GPL-3.0-only", training_examples=2, heldout_examples=1)
+    trained = dict(status="ok", mode="train", device="cpu", threads=2, updates_completed=8, training_losses=[1.0] * 8,
+        backend_versions=dict(torch="2.14.0+cpu", transformers="5.16.1", peft="0.20.0"),
+        model=dict(id="HuggingFaceTB/SmolLM2-135M-Instruct", revision=TRAIN["MODEL_REVISION"],
+                   files={"model.safetensors": {"bytes": 269060552, "sha256": TRAIN["WEIGHT_HASH"]}}), dataset=data,
+        base_before=base, base_after=base, reloaded_base=base, adapter_before=previous, adapter_after=updated,
+        reloaded_adapter=updated, base_weights_unchanged=True, adapter_weights_changed=True, checkpoint_reloaded=True,
+        better_answers_claimed=False, distributed_training_claimed=False, network_policy_changed=False,
+        artifacts=[dict(relative_path="adapter/" + name, **info) for name, info in new_files.items()],
+        input_adapter=dict(applied=True, files=old_files, applied_parameters=previous),
+        supervisor=dict(sandbox="bubblewrap-private-user-net-pid-ipc-mount", network_access=False,
+                        gpu_access=False, child_reaped=True, max_observed_rss_bytes=1, rss_limit_bytes=2))
+    for name in ("baseline_evaluation", "adapted_evaluation", "reloaded_evaluation"):
+        trained[name] = dict(loss=1.0, target_tokens=1)
+    receipt = dict(publisher_key=digest, name="disposable-agent-dataset", revision=1, manifest_id=digest,
+        publication_expires_unix_seconds=100, peer_bytes=0, providers_used=0, origin_body_bytes=0,
+        origin_range_requests=0, provider_peer_ids=[], origin_authenticated=False, globally_latest=False, **identity)
+    selection = dict(publisher_key=digest, dataset_name=receipt["name"], minimum_revision=1,
+        expected_dataset_manifest_id=digest, prefer_cached=True, cache_only=False, reuse_cache=True,
+        cache_miss_selects_different_source=False, automatic_source_discovery=False, globally_latest_version_claimed=False)
+    provenance = dict(publisher_key=digest, dataset_name=receipt["name"], dataset_manifest_id=digest,
+        signed_manifest_sha256=digest, expires_unix_seconds=100, verified_at_unix_seconds=50,
+        source_receipt=receipt, dataset_sha256=digest, dataset_bytes=10)
+    bundle = dict(dataset_manifest_id=digest, dataset_expires=100, sha256="1" * 64, bytes=40,
+                  content_type=ADAPTER_TYPE, network_published=False)
+    result = dict(operation="compute_train_cycle", complete=True, updates_completed=8, input_adapter_applied=True,
+        network_published=False, private_data_supported=False, model_quality_proven=False, autonomous_training=False,
+        model_activated_for_peer_jobs=False, source_receipt=receipt, dataset_manifest_id=digest,
+        source_expires_unix_seconds=100, dataset_sha256=digest, input_adapter=trained["input_adapter"],
+        training_report_sha256=digest, bundle=bundle)
+    files = dict(result=result, selection=selection, provenance=provenance, manifest=identity, dataset=identity,
+        received_after={"fixture": True}, original_sources_absent=True, private_directory=True,
+        canonical_bundle_matches_actual_files=True, training_report=identity,
+        bundle={key: bundle[key] for key in ("sha256", "bytes")}, adapter_files=new_files)
+    isolation = dict(observed=True, network_devices=["lo"], ipv4_routes=[], effective_capabilities=0,
+        namespaces=dict.fromkeys(("net", "pid", "ipc", "mnt"), "isolated"),
+        guest_namespaces=dict.fromkeys(("net", "pid", "ipc", "mnt"), "guest"),
+        host_home_visible=False, outside_canary_visible=False, exact_input_inodes=dict.fromkeys("abc", True),
+        mounts=dict.fromkeys(("/runtime", "/model", "/dataset.json"), ["ro"]),
+        node_lineage={"node": "client"}, received_adapter_readonly=True,
+        received_adapter_exact_inodes=dict.fromkeys(old_files, True))
+    evidence = dict(cycle=dict(result=result, files=files, training=trained, isolation=isolation),
+        originals=dict(dataset=identity, dataset_manifest_id=digest, adapter_files=old_files, adapter_bundle=identity),
+        training=dict(dataset=data, adapter_after=previous, base_after=base),
+        dataset_publish=dict(publisher_key_hex=digest, expires_unix_seconds=100),
+        received=files["received_after"], inference_isolation=dict(node_lineage=isolation["node_lineage"]))
+    check_cycle(evidence, revision)
+    for path, value in (("result.dataset_manifest_id", "0" * 64), ("result.source_expires_unix_seconds", 101),
+                        ("result.source_receipt.peer_bytes", 10), ("training.adapter_before", {"sha256": "0" * 64, "parameters": 230400}),
+                        ("training.updates_completed", 0), ("files.canonical_bundle_matches_actual_files", False),
+                        ("isolation.received_adapter_readonly", False), ("result.network_published", True)):
+        bad = copy.deepcopy(evidence)
+        target = bad["cycle"]
+        fields = path.split(".")
+        for field in fields[:-1]:
+            target = target[field]
+        target[fields[-1]] = value
+        try:
+            check_cycle(bad, revision)
+        except ValueError:
+            continue
+        raise AssertionError("invalid synthetic cycle accepted: " + path)
+    print("agent-train-cycle checker positive + eight rejection cases PASS; synthetic only")
+
+
+def control_binding_self_test():
+    fixture = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["fixture"]()
+    peers, addresses = fixture["expected_peers"], CUSTODY["SHARED"]["PUBLIC_IPS"]
+    for control in ("relay0", "relay1"):
+        layout = dict(fixture["layout"], producer_node="relay4", consumer_node="client",
+                      route_context_id="b" * 32, control_relay_peer_id=peers[control])
+        probe = dict(layout, route_context_id="a" * 32, control_relay_peer_id=peers["relay0"])
+        fetch = {kind + "_receipt": {"control_relay_peer_id": peers[control]} for kind in ("adapter", "dataset")}
+        routes = {}
+        for index, node in enumerate(layout["provider_nodes"]):
+            routes[node] = {
+                "out": [dict(dev=f"cp{index}", gateway=f"10.241.{80+index}.2",
+                             prefsrc=addresses[control], dst=addresses[node])],
+                "back": [dict(dev=f"pc{index}", gateway=f"10.241.{80+index}.1",
+                              prefsrc=addresses[node], dst=addresses[control])]}
+        binding = dict(producer_layout=probe, probe_status={"control_relay_peer_id": peers["relay0"]},
+                       fetch_status={"control_relay_peer_id": peers[control]}, routes=routes)
+        check_control_binding(layout, peers, fetch, binding)
+    # Changed-owner positive above binds new status, actual object receipts and both
+    # kernel route directions; changing a label alone cannot turn the old proof green.
+    mutations = [
+        lambda b, f: b["fetch_status"].update(control_relay_peer_id=peers["relay0"]),
+        lambda b, f: b["probe_status"].update(control_relay_peer_id=peers["relay1"]),
+        lambda b, f: b["producer_layout"].update(producer_node="relay5"),
+        lambda b, f: b["producer_layout"].update(route_context_id="b" * 32),
+        lambda b, f: f["adapter_receipt"].update(control_relay_peer_id=peers["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(prefsrc=addresses["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["back"][0].update(dst=addresses["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(dev="underlay"),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(gateway="10.241.80.1"),
+        lambda b, f: b["routes"].pop("relay5"),
+    ]
+    for mutate in mutations:
+        bad_binding, bad_fetch = copy.deepcopy(binding), copy.deepcopy(fetch)
+        mutate(bad_binding, bad_fetch)
+        try:
+            check_control_binding(layout, peers, bad_fetch, bad_binding)
+        except ValueError:
+            continue
+        raise AssertionError("stale or relabeled artifact control owner accepted")
+    print("agent-artifact owner binding: unchanged/changed positives + ten rejections PASS; synthetic only")
 
 
 def main():
     args = sys.argv[1:]
+    if args == ["cycle-self-test"]:
+        cycle_self_test()
+        return
     if args == ["self-test"]:
+        control_binding_self_test()
         source = (HERE.parent.parent / "README.md").read_text()
         value = dataset("a" * 40, source)
         require(value["heldout"][0]["question"] != value["train"][0]["question"], "heldout overlap")
@@ -356,14 +634,18 @@ def main():
         check_training(Path(args[1]), args[2])
     elif len(args) == 3 and args[0] == "evidence":
         build_evidence(Path(args[1]), args[2])
+    elif len(args) == 3 and args[0] == "cycle-evidence":
+        build_cycle_evidence(Path(args[1]), args[2])
+    elif len(args) == 2 and args[0] == "cycle-files":
+        print(json.dumps(cycle_files(args[1])))
     elif len(args) == 2 and args[0] in ("originals", "drop-source", "cleanup"):
         print(json.dumps({"originals": originals, "drop-source": drop_source, "cleanup": cleanup}[args[0]](args[1])))
     elif len(args) in (2, 3) and args[0] == "received":
         print(json.dumps(received(args[1], args[2] if len(args) == 3 else "received")))
     elif len(args) == 10 and args[0] == "observe":
         observe(int(args[1]), *(Path(x) for x in args[2:6]), args[6], args[7], Path(args[8]), int(args[9]))
-    elif len(args) == 8 and args[0] == "finalize":
-        finalize(Path(args[1]), args[2], int(args[3]), args[4] == "true", int(args[5]), args[6], args[7])
+    elif len(args) == 8 and args[0] in ("finalize", "cycle-finalize"):
+        finalize(Path(args[1]), args[2], int(args[3]), args[4] == "true", int(args[5]), args[6], args[7], args[0] == "cycle-finalize")
     elif len(args) == 3 and args[0] == "report":
         check_report(read(Path(args[1]), 1048576), args[2])
         print("actual distinct-node public adapter transfer/reuse report PASS")

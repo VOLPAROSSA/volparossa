@@ -23,8 +23,8 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact]' \
-        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh and agent-training.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training and agent-owner-priority.'
 }
 
 print_plan() {
@@ -39,12 +39,35 @@ print_plan() {
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
-    if [ "$scenario" = agent-training ]; then
+    if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ]; then
         printf '%s\n' \
             'Agent-training scenario: only the CLI, official CPU wheels and pinned SmolLM2 135M;' \
             '  explicit private guest provisioning with a 3GiB budget; eight real LoRA optimizer updates;' \
             '  exact base/adapter hashes and reload, actual isolated worker namespaces and cleanup;' \
             '  no native MPQUIC, overlay topology, distributed training or better-answer claim.'
+        if [ "$scenario" = agent-owner-priority ]; then
+            printf '%s\n' \
+                'Owner-priority: real bounded guest CPU pressure, validated same-worker paused/resumed ACKs;' \
+                '  paused CPU ticks and unchanged model step, resumed updates/reload under original600s deadline;' \
+                '  no owner-cancel, battery/thermal, all-activity or full-B01 claim.'
+        fi
+    elif [ "$scenario" = agent-jobs-loss ]; then
+        printf '%s\n' \
+            'Agent-jobs-loss scenario: reuse two provisioned node brokers and the protected public-job graph;' \
+            '  pidfd-bound SIGKILL of one observed guest-only Python worker; require actual terminal receipts;' \
+            '  explicitly resume only failed rows on the idle survivor, preserve original completed output;' \
+            '  require real replacement process/input/lease and cleanup; no automatic or exactly-once claim.'
+    elif [ "$scenario" = agent-jobs ]; then
+        printf '%s\n' \
+            'Agent-jobs scenario: provision once inside guest; two private runtime copies and independent node brokers;' \
+            '  distribute disjoint signed public rows over protected paths, observe simultaneous actual workers;' \
+            '  exact source/result hashes and cleanup; no automatic reassignment, private offload or full B03 claim.'
+    elif [ "$scenario" = agent-train-cycle ]; then
+        printf '%s\n' \
+            'Agent-train-cycle: complete protected distinct-node adapter transfer, then stop providers;' \
+            '  exact chosen unexpired dataset from agent cache plus readonly imported adapter;' \
+            '  eight Client warmstart updates, changed local bundle, unchanged base and complete cleanup;' \
+            '  no autonomous learning, automatic publication, global freshness or quality claim.'
     elif [ "$scenario" = agent-artifact ]; then
         printf '%s\n' \
             'Agent-artifact scenario: one producer node genuinely trains with pinned private guest model/runtime;' \
@@ -170,7 +193,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -231,7 +254,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -423,9 +446,22 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "content-custody-smoke.json", "content-custody-evidence.json",
               "content-repair-smoke.json", "content-repair-evidence.json",
               "agent-training-smoke.json", "agent-training-evidence.json",
+              "agent-owner-priority-smoke.json", "agent-owner-priority-pressure.json",
+              "agent-owner-priority-pressure.stderr",
               "agent-training-worker.json", "agent-training-isolation.json",
               "agent-training-provision.json", "agent-training-observer.stderr",
+              "agent-jobs-smoke.json", "agent-jobs-evidence.json", "agent-jobs-observation.json",
+              "agent-jobs-loss-smoke.json", "agent-jobs-loss-evidence.json", "agent-jobs-loss-control.json",
+              "agent-jobs-replacement-observation.json", "agent-jobs-resume-result.json", "agent-jobs-resume-result.err",
+              "agent-jobs-loss-plan.json", "agent-jobs-loss-injection.log", "agent-jobs-loss-injection.err",
+              "agent-jobs-resume-ready.json", "agent-jobs-resume-files.json", "agent-jobs-replacement-observer.err",
+              "agent-jobs-status-0.json", "agent-jobs-status-1.json", "agent-jobs-replacement-status.json", "agent-jobs-retained-status.json",
+              "agent-jobs-result.json", "agent-jobs-result.err", "agent-jobs-provision.json", "agent-jobs-provision.err",
               "agent-artifact-smoke.json", "agent-artifact-evidence.json",
+              "agent-train-cycle-smoke.json", "agent-train-cycle-evidence.json",
+              "agent-artifact-cycle-result.json", "agent-artifact-cycle-training.json",
+              "agent-artifact-cycle-isolation.json", "agent-artifact-cycle-files.json",
+              "agent-artifact-cycle.err", "agent-artifact-cycle-observer.err",
               "agent-artifact-training.json", "agent-artifact-inference.json",
               "agent-artifact-provision.json", "agent-artifact-provision.err",
               "agent-artifact-training.err", "agent-artifact-inference.err",
@@ -558,7 +594,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-artifact"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-artifact", "agent-train-cycle", "agent-jobs", "agent-jobs-loss"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -585,18 +621,18 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
-if [ "$scenario" = agent-training ]; then
+if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ]; then
     guest_phase agent-training
     test "$(hostname)" = volparossa-alpha
     test "$(systemd-detect-virt)" = kvm
     tar -xzf source.tar.gz
     cd source
-    exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit"
+    exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit" --scenario "$scenario"
 fi
 if [ "$scenario" = wifi-mesh ]; then
     guest_phase wifi-mesh-backend
@@ -624,7 +660,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-if [ "$scenario" = agent-artifact ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 [ "$(./volparossa-mpquic --api-version)" = 7 ]
@@ -711,7 +747,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

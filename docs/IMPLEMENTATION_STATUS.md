@@ -34,8 +34,100 @@ It shares an explicitly provisioned read-only base/runtime; no base-distribution
 Cache-only retrieval is explicit and off by default. Autonomous training must select eligible
 sources independently of cache availability, fetching missing/fresh data rather than silently
 substituting cached popular sources. Generalized source selection, external-corpus ingestion,
-bias measurement and peer execution remain integrations to build. No
+bias measurement and general task orchestration remain integrations to build. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
+The next public-job candidate adds an explicitly attached same-UID inference broker, signed
+protected peer submit/poll/cancel exchanges, original-publication/subset verification and
+concurrent disjoint-row dispatch. It saves task handles before admission and validates returned
+model/input/result bindings. Its scoped two-executor proof is now reconstructed from the real
+raw evidence below. Automatic reassignment and general workflow continuation remain pending;
+B03 remains unchecked.
+Explicit `compute peer resume` now reconciles retained original handles and permits one bounded
+replacement attempt per unfinished part, without silently extending an old lease. Terminal
+receipts remain observable briefly after cleanup. Broker/peer tests and narrow strict Clippy
+pass. The historical happy-path checker failure is retained below; the subsequent live
+worker-loss/recovery checkpoint now passes on `0d756a64`.
+The first [two-executor run on `c52781f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34866691641)
+stopped during capability lookup, before model execution: an unused initial MPTCP socket
+outlived the Exit's 12-second TLS deadline while brokers were prepared. The candidate now
+discards an already closed unused socket before obtaining a fresh one through the same helper
+authorization, without replaying application work or weakening transport checks. A real local
+descriptor regression and narrow agent Clippy pass. The next
+[run on `2ba9631e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34869250045)
+completed both real peer jobs, returned separate reports and reassembled the two disjoint rows.
+It still **failed** the required live concurrency/isolation observation: the detector read only
+the process leader's children, missing workers started from other Tokio threads. Both provider
+logs reached real model completion; that does not retrospectively establish missing overlap
+observations. The detector now follows children of every bounded thread, with a real local
+thread-to-child regression. The Rust resource observer receives the same correction so that
+thread-created subprocess RSS is not omitted. Four focused supervisor tests and strict CLI
+Clippy pass; the subsequent run is described below. The failed run retained complete
+cleanup, zero owned network objects and equal guest-state hash
+`59ebc76a8e39e0770dece290791c3f79d3f8f15be9ef7a2dbd641716ffb5a0bb`;
+its artifact ZIP SHA-256 is
+`8c64cba84e945bb6b96ec060de0d77b99affe9f62d9379e92b7454d838c7c4f2`.
+The subsequent [run on `4e22b7ce`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34871353888)
+retains all required raw observations: two simultaneously live isolated workers on R4/R5,
+distinct private runtime/dataset and held-lock inodes, exact disjoint source rows and complete
+model receipts, six captures including control / 28 interface rows / 9,488 frames with zero drops or unexpected
+outer packets, and zero residual owned network objects. It **failed** in final reporting because
+the checker expected `manifest_id` in offline-publish output, which reports a manifest path instead.
+Correction `3f5ee282` derives the ID from the original signed bytes and checks their saved hash,
+length and publisher/expiry. Complete in-memory reconstruction of the unchanged raw artifact
+passes, without synthesizing missing data; the original workflow and report remain failed.
+Checker SHA-256: `656cbe862edbf89c2da2e2dc3aceab41f18888ab6baac8475c32eeb5787bece3`;
+artifact ZIP: `219ada734fc57f070c8b03483840cdfabb3ab4842d655297f61a5bc0b7464f3b`;
+31,434-byte canonical reconstruction: `cfbf4b496200cf647ee3ee571356bad071aa2738b7d70aeef47afc3d0b799a1c`.
+Original guest-state hash before/after:
+`e592250adbcacd33204e6c855bbc04a548d7498daaeda2c2bc699dbe4ce231fe`.
+This establishes the scoped two-public-job execution, not general B03, comparative speedup,
+model quality, private offload or live worker-loss recovery.
+The explicit `compute peer workflow` candidate sequences up to 32 independently signed public
+packages (two to four rows each), with a bounded number of rounds per invocation. Exact source
+copies, immutable handles and locally validated full receipts survive process restarts;
+completed parts are reused, while pending work retains its original authorization and gets
+only explicitly bounded new attempts. These are local receipt records, not independently
+portable execution attestations. Whole-job duration is not the per-worker 600-second lease.
+General task decomposition, live workflow/reassignment proof and private execution remain open.
+Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
+before new submission and reusing full validated local receipt fixtures after restart.
+Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
+The separate [agent-jobs-loss run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873353570)
+now passes, including exact-source reconstruction equal to both original component and final
+reports. The guest terminates the observed R4 Python worker via pidfd/SIGKILL while R5 stays
+alive, preserves R5's completed result and original handles, and explicitly executes only the
+failed row once on a genuinely new R5 worker. Six captures / 28 interface rows / 12,454 frames
+have zero drops or unexpected outer packets; both selected WireGuard paths carry data
+(774/616 datagrams per leg). Cleanup leaves zero owned objects; guest-state hash before/after
+is `7c7da50e0b2570c1ec2c4de8f7a37ed6c6db5a2d89158cd81596d65ba78d7962`.
+Artifact ZIP SHA-256: `73eaf3bcfe315e2fe67898076829284ea94e8b9925f78791bc452a168e7e0d73`;
+77,280-byte canonical reconstruction: `2ea8f1c769db736928bc42d267d0b765e26dcbdc9584e4a45424bc0cd8beb020`.
+This proves bounded explicit public-job recovery, not automatic task decomposition, exactly-once
+execution, private offload or the whole B03 criterion.
+The explicit `compute train-cycle` candidate now connects an independently selected signed
+public dataset, cache-preferred/protected retrieval, the actual bounded local training worker
+and a public-ready adapter bundle. The same dataset identity survives a cache miss; fixed
+type/size/optional exact identity are checked in the agent before peer-body retrieval. Complete
+unexpired cached input can be used without provider availability, but this is not global freshness
+or autonomous unbiased source selection. The cycle supports an explicitly imported warmstart
+adapter, preserves selection/source/result provenance and does not auto-publish or activate
+outputs. Source expiry bounds execution as well as final packaging. Five focused named-content
+tests, one request-codec test and strict agent Clippy pass. The separate live cache/warmstart
+cycle proof remains pending: [the first run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873357867)
+completed producer training but stopped before the receiving-client cycle when the new route
+selected a different control relay. The fixture had bound its provider links to the earlier
+probe's relay. That failed run retains full cleanup and unchanged guest state; it proves no
+warmstart cycle. B01 and B05 remain unchecked. Three focused training-cycle tests and
+five existing adapter-CLI tests pass with strict CLI Clippy. Their synthetic saved-report/adapter
+fixture proves source binding and packaging, not real training; that requires the guest run.
+The next owner-priority candidate adds a persistent private owner-control pipe to the actual
+worker. `compute run` and `compute train-cycle` opt in with `--spare-capacity`; peer brokers
+always use it and refuse new work while sampled capacity is unavailable. CPU/I/O pressure
+pauses model work at an execution checkpoint and resumes after five seconds of observed quiet;
+insufficient effective host/cgroup memory cancels and reaps the worker. Pauses never extend
+the original deadline. Bounded control/ACK and real standard-library process tests pass, but
+measured pause/resume during actual model work still requires its separate disposable guest
+proof. Interactive-input, battery and thermal sensing are not implemented; B01 remains open.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

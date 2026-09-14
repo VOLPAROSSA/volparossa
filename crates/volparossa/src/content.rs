@@ -18,7 +18,7 @@ use volparossa_content::{
 use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
-mod agent_artifact;
+pub(crate) mod agent_artifact;
 mod browser_download;
 mod custody;
 mod handoff;
@@ -319,8 +319,8 @@ pub(crate) struct Assemble {
     limits: Limits,
 }
 
-#[derive(Debug, Args)]
-struct Limits {
+#[derive(Clone, Debug, Args)]
+pub(crate) struct Limits {
     /// Maximum chunk payload bytes in each cache; opening never evicts to fit.
     #[arg(long, default_value_t = MAX_OBJECT_BYTES, value_parser = clap::value_parser!(u64).range(1..))]
     quota_bytes: u64,
@@ -410,7 +410,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn parse_content_name(value: &str) -> Result<String, String> {
+pub(crate) fn parse_content_name(value: &str) -> Result<String, String> {
     if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
         return Err("expected 1 through 128 UTF-8 bytes without control characters".into());
     }
@@ -669,7 +669,7 @@ fn assemble(args: &Assemble) -> Result<serde_json::Value> {
     }))
 }
 
-fn parse_publisher_key(value: &str) -> Result<VerifyingKey, String> {
+pub(crate) fn parse_publisher_key(value: &str) -> Result<VerifyingKey, String> {
     let mut bytes = [0; 32];
     if value.len() != 64 {
         return Err("publisher key must be exactly 64 hexadecimal characters".to_owned());

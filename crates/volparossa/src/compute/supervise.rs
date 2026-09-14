@@ -12,10 +12,16 @@ use tokio::{
 };
 
 use super::{MAX_LINE_BYTES, MAX_STREAM_BYTES, Mode, Options, WorkerRequest, check_message};
+use super::{
+    owner_control::{Action, Controls},
+    spare_capacity::{Budget, Decision},
+};
 
 pub(super) const MAX_RSS_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_OBSERVED_PROCESSES: usize = 64;
+const MAX_OBSERVED_THREADS: usize = 128;
 
 pub(super) async fn run(
     mut child: Child,
@@ -35,19 +41,31 @@ pub(super) async fn run(
     let mut peak_rss = 0;
     let mut ticks = tokio::time::interval(Duration::from_millis(250));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let result = {
+    let mut budget = Budget::new();
+    let controls = options.spare_capacity.then(Controls::default);
+    let result = async {
+        if let Some(controls) = &controls {
+            let action = pressure_action(budget.sample())?;
+            input.extend(controls.issue(action, &request.id)?.context("compute_initial_control")?);
+        }
+        tokio::time::timeout(Duration::from_secs(1), stdin.write_all(&input))
+            .await.context("compute_request_write_deadline")?
+            .context("compute_request_write")?;
+        // Legacy workers receive EOF after the request. Controlled workers retain
+        // exactly this private pipe; neither peers nor model output can issue commands.
+        let mut control_stdin = if controls.is_some() { Some(stdin) } else { drop(stdin); None };
         let io = async {
-            stdin
-                .write_all(&input)
-                .await
-                .context("compute_request_write")?;
-            drop(stdin);
             let (result, (), status) = tokio::try_join!(
-                collect_stdout(stdout, &request.id),
+                collect_stdout(stdout, &request.id, controls.as_ref()),
                 drain_stderr(stderr),
                 async { child.wait().await.context("compute_wait") }
             )?;
             check_result(&result, request)?;
+            if let Some(controls) = &controls {
+                controls.check_report(&result)?;
+            } else {
+                ensure!(result.get("owner_control").is_none(), "compute_unrequested_owner_control");
+            }
             ensure!(status.success(), "compute_worker_exit");
             check_artifacts(&result, request.mode, &options.output)?;
             check_input_adapter(&result, options)?;
@@ -65,15 +83,24 @@ pub(super) async fn run(
                 },
                 result = &mut io => break result,
                 _ = ticks.tick() => {
-                    let observation = observe(pid, &options.output);
+                    let observation = observe(pid, &options.output, !options.spare_capacity);
                     match observation {
                         Ok(rss) => peak_rss = peak_rss.max(rss),
                         Err(error) => break Err(error),
                     }
+                    if let Some(controls) = &controls {
+                        let action = pressure_action(budget.sample())?;
+                        if let Some(record) = controls.issue(action, &request.id)? {
+                            tokio::time::timeout(Duration::from_secs(1),
+                                control_stdin.as_mut().context("compute_control_stdin")?.write_all(&record))
+                                .await.context("compute_control_write_deadline")?
+                                .context("compute_control_write")?;
+                        }
+                    }
                 }
             }
         }
-    };
+    }.await;
     if result.is_err() {
         // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
         // PID namespace teardown kills/reaps descendants; no host process-group scan.
@@ -91,12 +118,24 @@ pub(super) async fn run(
         "rss_limit_bytes": MAX_RSS_BYTES,
         "rss_enforcement": "250ms-observed-cancel-not-cgroup-hard-limit",
         "owner_activity_action": "cancel",
+        "spare_capacity": options.spare_capacity,
+        "pressure_action": if options.spare_capacity { "cooperative-pause-resume-memory-cancel" } else { "cancel" },
+        "last_capacity_observation": controls.as_ref().map(|_| budget.observation()),
+        "pause_extends_deadline": false,
         "deadline_seconds": options.max_seconds,
         "child_reaped": true,
         "distributed_execution_claimed": false,
         "private_training_claimed": false
     });
     Ok(result)
+}
+
+fn pressure_action(decision: Decision) -> Result<Action> {
+    match decision {
+        Decision::Run => Ok(Action::Resume),
+        Decision::Pause => Ok(Action::Pause),
+        Decision::Cancel => bail!("compute_memory_pressure"),
+    }
 }
 
 fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
@@ -216,7 +255,11 @@ fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
     Ok(())
 }
 
-async fn collect_stdout(stream: impl AsyncRead + Unpin, id: &str) -> Result<Value> {
+async fn collect_stdout(
+    stream: impl AsyncRead + Unpin,
+    id: &str,
+    controls: Option<&Controls>,
+) -> Result<Value> {
     let mut reader = BufReader::new(stream);
     let mut result = None;
     let mut bytes = 0_usize;
@@ -228,8 +271,36 @@ async fn collect_stdout(stream: impl AsyncRead + Unpin, id: &str) -> Result<Valu
         ensure!(result.is_none(), "compute_output_after_result");
         let value = check_message(&line, id)?;
         if value.get("kind").and_then(Value::as_str) == Some("result") {
+            if let Some(controls) = controls {
+                controls.terminal()?;
+            }
             result = Some(value);
         } else {
+            if matches!(value["phase"].as_str(), Some("paused" | "resumed")) {
+                controls
+                    .context("compute_unrequested_control_ack")?
+                    .acknowledge(&value)?;
+                let sequence = value["control_sequence"]
+                    .as_u64()
+                    .context("compute_control_sequence")?;
+                let step = value["step"]
+                    .as_u64()
+                    .filter(|step| *step <= 64)
+                    .context("compute_control_step")?;
+                let elapsed = value["elapsed_ms"]
+                    .as_u64()
+                    .filter(|elapsed| *elapsed < 600_000)
+                    .context("compute_control_elapsed")?;
+                eprintln!(
+                    "compute owner_ack phase={} sequence={sequence} step={step} elapsed_ms={elapsed}",
+                    value["phase"].as_str().context("compute_control_phase")?
+                );
+            } else {
+                ensure!(
+                    value.get("control_sequence").is_none(),
+                    "compute_unexpected_control_sequence"
+                );
+            }
             // Only the validated phase label is logged, never raw backend text or data.
             eprintln!(
                 "compute phase={}",
@@ -302,14 +373,19 @@ pub(super) fn headroom() -> Result<()> {
     Ok(())
 }
 
-fn observe(pid: u32, output: &Path) -> Result<u64> {
-    headroom()?;
+fn observe(pid: u32, output: &Path, legacy_headroom: bool) -> Result<u64> {
+    if legacy_headroom {
+        headroom()?;
+    }
     let mut pending = vec![pid];
     let mut visited = BTreeSet::new();
     let mut total = 0_u64;
     while let Some(current) = pending.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
         ensure!(
-            visited.len() < 64 && visited.insert(current),
+            visited.len() < MAX_OBSERVED_PROCESSES && visited.insert(current),
             "compute_process_bound"
         );
         let root = Path::new("/proc").join(current.to_string());
@@ -320,18 +396,19 @@ fn observe(pid: u32, output: &Path) -> Result<u64> {
         };
         total += status_kib(&status, "VmRSS:").unwrap_or(0);
         ensure!(total <= MAX_RSS_BYTES, "compute_memory_budget");
-        let descendants = match system_text(&root.join(format!("task/{current}/children"))) {
+        let descendants = match process_children(&root) {
             Ok(value) => value,
             Err(_) if !root.exists() => continue,
             Err(error) => return Err(error),
         };
-        for child in descendants.split_whitespace() {
-            ensure!(pending.len() < 64, "compute_process_bound");
-            pending.push(
-                child
-                    .parse::<u32>()
-                    .context("compute_process_observation")?,
-            );
+        for child in descendants {
+            if !visited.contains(&child) && !pending.contains(&child) {
+                ensure!(
+                    pending.len() < MAX_OBSERVED_PROCESSES,
+                    "compute_process_bound"
+                );
+                pending.push(child);
+            }
         }
     }
     ensure!(
@@ -339,6 +416,34 @@ fn observe(pid: u32, output: &Path) -> Result<u64> {
         "compute_storage_budget"
     );
     Ok(total)
+}
+
+fn process_children(root: &Path) -> Result<BTreeSet<u32>> {
+    // Linux records children on the *spawning thread*. Reading only task/PID
+    // would omit children created by a worker thread and undercount their RSS.
+    // Sum process RSS once; threads themselves share that address space.
+    let mut children = BTreeSet::new();
+    for (index, thread) in std::fs::read_dir(root.join("task"))?.enumerate() {
+        ensure!(index < MAX_OBSERVED_THREADS, "compute_thread_bound");
+        let thread = thread?.path();
+        let text = match system_text(&thread.join("children")) {
+            Ok(value) => value,
+            Err(_) if !thread.exists() => continue, // Thread exited during this sample.
+            Err(error) => return Err(error),
+        };
+        for child in text.split_whitespace() {
+            let child = child
+                .parse::<u32>()
+                .context("compute_process_observation")?;
+            ensure!(child > 0, "compute_process_observation");
+            children.insert(child);
+            ensure!(
+                children.len() <= MAX_OBSERVED_PROCESSES,
+                "compute_process_bound"
+            );
+        }
+    }
+    Ok(children)
 }
 
 fn output_bytes(path: &Path) -> Result<u64> {
@@ -411,11 +516,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_acks_require_owner_issuance_and_cannot_appear_on_legacy_stdout() {
+        let controls = Controls::default();
+        let ack = b"{\"version\":1,\"id\":\"abc\",\"kind\":\"progress\",\"phase\":\"paused\",\"control_sequence\":1,\"step\":0,\"elapsed_ms\":10}\n";
+        assert!(collect_stdout(&ack[..], "abc", None).await.is_err());
+        assert!(
+            collect_stdout(&ack[..], "abc", Some(&controls))
+                .await
+                .is_err()
+        );
+        controls.issue(Action::Pause, "abc").unwrap();
+        let mut stream = ack.to_vec();
+        stream.extend(b"{\"version\":1,\"id\":\"abc\",\"kind\":\"result\",\"status\":\"error\"}\n");
+        assert!(
+            collect_stdout(stream.as_slice(), "abc", Some(&controls))
+                .await
+                .is_ok()
+        );
+        assert!(controls.issue(Action::Resume, "abc").unwrap().is_none());
+        assert!(
+            collect_stdout(stream.as_slice(), "abc", Some(&controls))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn a_second_result_cannot_override_the_first() {
         let line = "{\"version\":1,\"id\":\"abc\",\"kind\":\"result\",\"status\":\"ok\"}\n";
         let doubled = line.repeat(2);
-        assert!(collect_stdout(doubled.as_bytes(), "abc").await.is_err());
-        assert!(collect_stdout(line.as_bytes(), "abc").await.is_ok());
+        assert!(
+            collect_stdout(doubled.as_bytes(), "abc", None)
+                .await
+                .is_err()
+        );
+        assert!(collect_stdout(line.as_bytes(), "abc", None).await.is_ok());
     }
 
     #[test]
@@ -425,5 +560,30 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         std::os::unix::fs::symlink("/etc", root.path().join("escape")).expect("symlink");
         assert!(output_bytes(root.path()).is_err());
+    }
+
+    #[test]
+    fn child_observation_includes_children_spawned_by_other_threads() {
+        // No model/network is used. Keep the spawning thread alive while inspecting
+        // its real Linux children, then kill/reap the exact probe before assertions.
+        let (started, pid) = std::sync::mpsc::channel();
+        let (done, finish) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut child = std::process::Command::new("/usr/bin/sleep")
+                .arg("10")
+                .spawn()
+                .expect("probe child");
+            started.send(child.id()).expect("probe pid");
+            let _ = finish.recv_timeout(Duration::from_secs(5));
+            let _ = child.kill();
+            child.wait().expect("probe reap");
+        });
+        let child = pid
+            .recv_timeout(Duration::from_secs(5))
+            .expect("probe ready");
+        let observed = process_children(&Path::new("/proc").join(std::process::id().to_string()));
+        let _ = done.send(());
+        worker.join().expect("probe thread");
+        assert!(observed.expect("all thread children").contains(&child));
     }
 }

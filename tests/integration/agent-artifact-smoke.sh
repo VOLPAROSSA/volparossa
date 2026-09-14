@@ -70,6 +70,30 @@ agent_artifact_observe() {
         >"$WORK/agent-artifact-$artifact_label-observer.log" 2>"$WORK/agent-artifact-$artifact_label-observer.err"
 }
 
+agent_artifact_train_cycle() {
+    exec ip netns exec "$CLIENT" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
+        --groups="$custody_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+        compute train-cycle --publisher-key "$artifact_publisher" --dataset-name disposable-agent-dataset \
+        --dataset-manifest-id "$artifact_dataset_id" --min-revision 1 --cache "$artifact_cache" --reuse-cache \
+        --runtime-root "$artifact_user/provision/venv" --model-root "$artifact_user/provision/model" \
+        --adapter-root "$artifact_user/received/adapter" --output "$artifact_user/cycle" \
+        --steps 8 --threads 2 --max-seconds 600 --execute
+}
+
+agent_artifact_run_cycle() {
+    PHASE=agent-train-cycle
+    artifact_dataset_id=$(jq -er '.dataset_manifest_id' "$WORK/agent-artifact-originals.json")
+    agent_artifact_train_cycle >"$WORK/agent-artifact-cycle-result.json" 2>"$WORK/agent-artifact-cycle.err" &
+    artifact_job_pid=$!
+    agent_artifact_observe "$artifact_job_pid" cycle "$artifact_user/cycle/dataset.json" || fail TRAIN_CYCLE_OBSERVER_FAILED
+    wait "$artifact_job_pid" || fail TRAIN_CYCLE_EXECUTION_FAILED
+    artifact_job_pid=
+    install -m 0600 "$artifact_user/cycle-isolation.json" "$WORK/agent-artifact-cycle-isolation.json"
+    install -m 0600 "$artifact_user/cycle/training-report.json" "$WORK/agent-artifact-cycle-training.json"
+    agent_artifact_private cycle-files "$artifact_user" >"$WORK/agent-artifact-cycle-files.json" || fail TRAIN_CYCLE_FILES_INVALID
+}
+
 agent_artifact_prepare() {
     PHASE=agent-artifact-provision
     artifact_user=$WORK/client-fixtures/agent-artifact-user
@@ -111,7 +135,6 @@ agent_artifact_run() {
         || fail ARTIFACT_PROVIDERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    content_provider_control_underlay
     artifact_client_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
     case $artifact_client_pid in ''|0|*[!0-9]*) fail ARTIFACT_CLIENT_PID_INVALID ;; esac
     nsenter --target "$artifact_client_pid" --mount setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -173,13 +196,22 @@ agent_artifact_run() {
     agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail ARTIFACT_SOURCE_REMOVAL_FAILED
     agent_artifact_restart "$provider_node_a" || fail ARTIFACT_PROVIDER_RESTART_FAILED
     content_custody_status "$provider_node_b" artifact-still-empty 0 || fail ARTIFACT_UNUSED_PROVIDER_CHANGED
+    PHASE=agent-artifact-fresh-control
     benchmark_select_route agent-artifact mptcp || fail ARTIFACT_FRESH_ROUTE_UNAVAILABLE
     benchmark_bind_slots "$WORK/agent-artifact-selection.json" || fail ARTIFACT_FRESH_ROUTE_INVALID
     custody_context=$(jq -er '.route_context_id' "$WORK/agent-artifact-selection.json")
     agent_artifact_cli client content status >"$WORK/agent-artifact-client-fetch-status.json" || fail ARTIFACT_FRESH_CONTROL_UNAVAILABLE
-    jq -e --arg peer "$provider_control_peer" '.control_relay_peer_id == $peer' \
-        "$WORK/agent-artifact-client-fetch-status.json" >/dev/null || fail ARTIFACT_CONTROL_OWNER_CHANGED
-    jq --arg context "$custody_context" '.route_context_id=$context' \
+    # The probe's disconnected route owns no subsequent fetch. Training/restart may
+    # legitimately select another control relay; bind new links to that actual owner.
+    # Delaying setup avoids stale cp/pc links, filters and routes from the probe.
+    provider_control_peer=$(jq -er '.control_relay_peer_id | select(type == "string" and length > 0)' \
+        "$WORK/agent-artifact-client-fetch-status.json") || fail ARTIFACT_FRESH_CONTROL_UNAVAILABLE
+    jq -e --arg peer "$provider_control_peer" --arg a "$provider_node_a" --arg b "$provider_node_b" \
+        '.[$a] != $peer and .[$b] != $peer and ([.relay0,.relay1,.relay2] | index($peer) != null)' \
+        "$WORK/a01-expected-peers.json" >/dev/null || fail ARTIFACT_FRESH_CONTROL_INVALID
+    content_provider_control_underlay
+    jq --arg context "$custody_context" --arg control "$provider_control_peer" \
+        '.route_context_id=$context | .control_relay_peer_id=$control' \
         "$WORK/agent-artifact-producer-layout.json" >"$WORK/agent-artifact-layout.json"
     PHASE=agent-artifact-fetch
     artifact_cache=$WORK/state-client/agent-artifact-cache
@@ -189,6 +221,9 @@ agent_artifact_run() {
         --name disposable-agent-adapter --dataset-name disposable-agent-dataset --min-revision 1 \
         --cache "$artifact_cache" --output "$artifact_user/received" \
         >"$WORK/agent-artifact-fetch.json" 2>"$WORK/agent-artifact-fetch.err" || fail ARTIFACT_PROTECTED_FETCH_FAILED
+    jq -e --arg control "$provider_control_peer" \
+        '.adapter_receipt.control_relay_peer_id == $control and .dataset_receipt.control_relay_peer_id == $control' \
+        "$WORK/agent-artifact-fetch.json" >/dev/null || fail ARTIFACT_FETCH_CONTROL_OWNER_CHANGED
     content_custody_phase_finish 2
     benchmark_disconnect_route agent-artifact || fail ARTIFACT_ROUTE_CLEANUP_FAILED
     [ "$(stat -Lc '%a:%u:%g' "$artifact_cache")" = "700:$AGENT_UID:$AGENT_GID" ] || fail ARTIFACT_AGENT_CACHE_OWNERSHIP
@@ -216,11 +251,17 @@ agent_artifact_run() {
         --cache "$artifact_cache" --reuse-cache --cache-only --output "$artifact_user/reopened" \
         >"$WORK/agent-artifact-cache-only.json" 2>"$WORK/agent-artifact-cache-only.err" || fail ARTIFACT_CACHE_REOPEN_FAILED
     agent_artifact_private received "$artifact_user" reopened >"$WORK/agent-artifact-reopened.json" || fail ARTIFACT_REOPEN_HASH_FAILED
+    [ "${agent_train_cycle:-no}" != yes ] || agent_artifact_run_cycle
     agent_artifact_cleanup || fail ARTIFACT_PRIVATE_CLEANUP_FAILED
     python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" evidence "$WORK" "$expected_commit" \
         || fail ARTIFACT_EVIDENCE_INVALID
+    if [ "${agent_train_cycle:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" cycle-evidence "$WORK" "$expected_commit" \
+            || fail TRAIN_CYCLE_EVIDENCE_INVALID
+    fi
     OBSERVED_BLOCKER=NONE
     PHASE=agent-artifact-complete
+    [ "${agent_train_cycle:-no}" != yes ] || PHASE=agent-train-cycle-complete
 }
 
 agent_artifact_cleanup() {
@@ -238,12 +279,19 @@ agent_artifact_cleanup() {
 agent_artifact_finalize_report() {
     artifact_status=$1
     for artifact_log in "$WORK"/agent-artifact-*.json "$WORK"/agent-artifact-*.err "$WORK"/agent-artifact-*.log \
+        "$WORK"/agent-train-cycle-*.json \
         "$WORK"/content-custody-*.json "$WORK"/content-provider-custody-*.json "$WORK"/content-provider-control-*.json; do
         [ ! -f "$artifact_log" ] || [ -L "$artifact_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$artifact_log" "$output_directory/$(basename -- "$artifact_log")"
     done
-    python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" finalize "$WORK" "$expected_commit" \
+    artifact_finalize=finalize
+    artifact_report=agent-artifact-smoke.json
+    if [ "${agent_train_cycle:-no}" = yes ]; then
+        artifact_finalize=cycle-finalize
+        artifact_report=agent-train-cycle-smoke.json
+    fi
+    python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" "$artifact_finalize" "$WORK" "$expected_commit" \
         "$artifact_status" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
-    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-artifact-smoke.json" "$output_directory/agent-artifact-smoke.json"
-    python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" report "$WORK/agent-artifact-smoke.json" "$expected_commit"
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/$artifact_report" "$output_directory/$artifact_report"
+    python3 -B "$source_directory/tests/integration/agent-artifact-smoke.py" report "$WORK/$artifact_report" "$expected_commit"
 }

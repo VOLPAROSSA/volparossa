@@ -54,6 +54,78 @@ pub(crate) struct Pack {
     output: PathBuf,
 }
 
+impl Pack {
+    pub(crate) fn completed_training(
+        directory: PathBuf,
+        training_report: PathBuf,
+        dataset_manifest: PathBuf,
+        publisher_key: VerifyingKey,
+        output: PathBuf,
+    ) -> Self {
+        Self {
+            directory,
+            training_report,
+            dataset_manifest,
+            publisher_key,
+            output,
+        }
+    }
+}
+
+/// Explicit source selection; availability never chooses a different training publication.
+pub(crate) struct TrainingSource {
+    pub(crate) publisher_key: VerifyingKey,
+    pub(crate) name: String,
+    pub(crate) manifest_id: Option<[u8; 32]>,
+    pub(crate) min_revision: Option<u64>,
+    pub(crate) cache: PathBuf,
+    pub(crate) reuse_cache: bool,
+    pub(crate) limits: Limits,
+}
+
+pub(crate) struct TrainingDownload {
+    pub(crate) signed_manifest: Vec<u8>,
+    pub(crate) dataset: Vec<u8>,
+    pub(crate) receipt: Value,
+    pub(crate) expires: u64,
+}
+
+pub(crate) async fn fetch_training_source(
+    args: &TrainingSource,
+    socket: &Path,
+    private_parent: &Path,
+) -> Result<TrainingDownload> {
+    let query = FetchName {
+        publisher_key: args.publisher_key,
+        name: args.name.clone(),
+        min_revision: args.min_revision,
+        cache: args.cache.clone(),
+        reuse_cache: args.reuse_cache,
+        cache_only: false,
+        local_output: private_parent.join("unused-output"),
+        limits: args.limits.clone(),
+    };
+    let download = named_download::prepare_bounded(
+        &query,
+        socket,
+        private_parent,
+        &named_download::Requirement {
+            content_type: DATASET_CONTENT_TYPE,
+            maximum_bytes: MAX_DATASET,
+            manifest_id: args.manifest_id,
+        },
+    )
+    .await?;
+    let dataset = read_download(download.as_file(), MAX_DATASET)?;
+    download.check_live()?;
+    Ok(TrainingDownload {
+        signed_manifest: download.signed_manifest().encode(),
+        dataset,
+        receipt: download.report(),
+        expires: download.expires(),
+    })
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct Fetch {
     /// Independently trusted publisher of both the adapter and dataset.
@@ -93,7 +165,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
     Ok(())
 }
 
-fn pack(args: &Pack) -> Result<Value> {
+pub(crate) fn pack(args: &Pack) -> Result<Value> {
     ensure_new_output(&args.output)?;
     private_directory(&args.directory)?;
     let report: Value = serde_json::from_slice(&read_file(&args.training_report, MAX_SMALL_FILE)?)?;
