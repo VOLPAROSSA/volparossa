@@ -107,8 +107,27 @@ async fn restarted_runtime_repairs_exact_missing_public_chunks_and_serves_after_
     assert_eq!(uptake.unwrap().chunks, 2);
     assert_eq!(transmitted.unwrap().chunks, 2);
     let registry = Mutex::new(registry);
-    runtime.reclaim(&registry, now()).await.unwrap();
+    // A status/serving owner can hold the registry after real chunks and their
+    // journal have committed. That is not a reason to lose completion forever.
+    let registration_owner = registry.lock().await;
+    assert!(matches!(
+        runtime.finalize_pending(&registry).await,
+        Err(CompletionError::Registry)
+    ));
+    assert!(runtime.state.lock().await.repair_pending.is_some());
     assert!(runtime.repair_candidate().await.unwrap().is_none());
+    drop(registration_owner);
+    assert_eq!(
+        runtime.finalize_pending(&registry).await.unwrap(),
+        Some(true)
+    );
+    // Verification itself does not consume pending state: production consumes it only
+    // after publishing the completion event. A cancelled event therefore remains retryable.
+    assert!(runtime.state.lock().await.repair_pending.is_some());
+    assert_eq!(
+        runtime.finalize_pending(&registry).await.unwrap(),
+        Some(true)
+    );
     let held = PublicCustodyStore::open(root.clone(), limits)
         .unwrap()
         .inspect_complete(manifest.manifest_id(), now())

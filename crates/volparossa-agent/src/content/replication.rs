@@ -15,7 +15,7 @@ use tokio::{
     task::JoinHandle,
 };
 use volparossa_content::provider::replication::{
-    ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
+    Replica, ReplicationExclusions, ReplicationLimits, ReplicationProgress, persist_replicas,
     pull_public_replicas_with_admission, pull_replicas_with_admission, restore_public_replicas,
     restore_replicas,
 };
@@ -43,6 +43,7 @@ struct State {
     usage: CacheUsage,
     next: Instant,
     repair_cursor: Option<[u8; 32]>,
+    repair_pending: Option<Replica>,
 }
 
 pub(super) struct ReplicationRuntime {
@@ -131,6 +132,7 @@ impl ReplicationRuntime {
                 usage,
                 next: Instant::now(),
                 repair_cursor: None,
+                repair_pending: None,
             }),
             job: Mutex::new(None),
             background: Arc::new(Mutex::new(())),

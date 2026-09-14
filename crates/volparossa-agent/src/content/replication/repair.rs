@@ -30,6 +30,12 @@ use super::{
 #[cfg(test)]
 mod tests;
 
+#[derive(Debug)]
+enum CompletionError {
+    Registry,
+    Verification,
+}
+
 impl ReplicationRuntime {
     /// A persistent journal supplies work after restart, not a remembered publisher session.
     pub(in crate::content) async fn start_repair(
@@ -60,7 +66,17 @@ impl ReplicationRuntime {
                 && state.roles().relay
                 && state.active_policy(unix_millis()).is_some()
         };
-        if !permitted || self.state.lock().await.next > std::time::Instant::now() {
+        if !permitted {
+            return;
+        }
+        // Durable progress survives a later TLS-close error, foreground cancellation or
+        // momentarily busy registry. Complete journals are not new network candidates;
+        // retry this local-only stage before applying the network retry cooldown.
+        if self.state.lock().await.repair_pending.is_some() {
+            let _ = self.complete_repair(&context, &registry).await;
+            return;
+        }
+        if self.state.lock().await.next > std::time::Instant::now() {
             return;
         }
         let Ok(Some(target)) = self.repair_candidate().await else {
@@ -221,38 +237,37 @@ impl ReplicationRuntime {
                                 current.policy_hash() == policy.policy_hash()
                             })
                     })
-                    .await?;
-                super::super::tls::finish(&mut stream)
-                    .await
-                    .map_err(|_| ContentError::Unavailable)?;
+                    .await;
+                let progress = match progress {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        content_event(context, "CONTENT_REPAIR_TRANSFER_COMMIT_FAILED").await;
+                        return Err(error);
+                    }
+                };
+                if super::super::tls::finish(&mut stream).await.is_err() {
+                    content_event(context, "CONTENT_REPAIR_APPLICATION_CLOSE_FAILED").await;
+                    return Err(ContentError::Unavailable);
+                }
                 drop(stream);
-                super::super::tls::finish(flow.stream_mut())
-                    .await
-                    .map_err(|_| ContentError::Unavailable)?;
-                self.reclaim(registry, now()).await?;
+                if super::super::tls::finish(flow.stream_mut()).await.is_err() {
+                    content_event(context, "CONTENT_REPAIR_ROUTE_CLOSE_FAILED").await;
+                    return Err(ContentError::Unavailable);
+                }
                 Ok::<_, ContentError>(progress)
             }
             .await;
             flow.shutdown();
             if let Ok(progress) = result {
                 if !progress.replicas.is_empty() {
-                    let custody = PublicCustodyStore::open(self.root.clone(), self.limits)
-                        .map_err(|_| ContentError::Invalid)?;
-                    let complete = custody
-                        .inspect_complete(target.manifest_id(), now())
-                        .map_err(|_| ContentError::Invalid)?
-                        .is_some();
-                    content_event(
-                        context,
-                        if complete {
-                            "CONTENT_REPAIR_COMPLETE"
-                        } else {
-                            "CONTENT_REPAIR_CHUNKS_AVAILABLE"
-                        },
-                    )
-                    .await;
-                    return Ok(());
+                    return self.complete_repair(context, registry).await;
                 }
+            }
+            if self.state.lock().await.repair_pending.is_some() {
+                // Do not redownload verified durable progress after a failed close.
+                // The next permitted idle tick independently reconciles local storage;
+                // this network operation still reports its actual failure.
+                return Err(ContentError::Unavailable);
             }
         }
         Err(ContentError::Unavailable)
@@ -284,9 +299,71 @@ impl ReplicationRuntime {
         )
         .await
         .map_err(|_| ContentError::Unavailable)?;
+        let mut state = self.state.lock().await;
         persist_replicas(&mut store, &progress.replicas, now())
             .map_err(|_| ContentError::Invalid)?;
-        self.state.lock().await.usage = store.usage();
+        state.usage = store.usage();
+        if !progress.replicas.is_empty() {
+            state.repair_pending = Some(target.clone());
+        }
         Ok(progress)
+    }
+
+    async fn complete_repair(
+        &self,
+        context: &ControlContext,
+        registry: &Mutex<PublicationRegistry>,
+    ) -> Result<(), ContentError> {
+        let code = match self.finalize_pending(registry).await {
+            Ok(Some(true)) => "CONTENT_REPAIR_COMPLETE",
+            Ok(Some(false)) => "CONTENT_REPAIR_CHUNKS_AVAILABLE",
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                content_event(
+                    context,
+                    match error {
+                        CompletionError::Registry => "CONTENT_REPAIR_REGISTRY_DEFERRED",
+                        CompletionError::Verification => "CONTENT_REPAIR_VERIFICATION_DEFERRED",
+                    },
+                )
+                .await;
+                return Err(ContentError::Unavailable);
+            }
+        };
+        // Completion describes the independently verified stored object/registration.
+        // A preceding close-failure event remains a failure, not clean transport proof.
+        content_event(context, code).await;
+        // Keep pending through the event await too: foreground cancellation before the
+        // observable completion must leave a retry, not a now-ineligible complete journal.
+        self.state.lock().await.repair_pending = None;
+        Ok(())
+    }
+
+    async fn finalize_pending(
+        &self,
+        registry: &Mutex<PublicationRegistry>,
+    ) -> Result<Option<bool>, CompletionError> {
+        let Some(target) = self.state.lock().await.repair_pending.clone() else {
+            return Ok(None);
+        };
+        let at = now();
+        if at >= target.validity().expires {
+            self.state.lock().await.repair_pending = None;
+            return Err(CompletionError::Verification);
+        }
+        self.reclaim(registry, at)
+            .await
+            .map_err(|_| CompletionError::Registry)?;
+        let registry = registry.try_lock().map_err(|_| CompletionError::Registry)?;
+        if !registry.contains_at(target.manifest_id(), &self.root) {
+            return Err(CompletionError::Registry);
+        }
+        let custody = PublicCustodyStore::open(self.root.clone(), self.limits)
+            .map_err(|_| CompletionError::Verification)?;
+        let complete = custody
+            .inspect_complete(target.manifest_id(), at)
+            .map_err(|_| CompletionError::Verification)?
+            .is_some();
+        Ok(Some(complete))
     }
 }
