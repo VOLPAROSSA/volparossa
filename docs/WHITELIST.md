@@ -50,12 +50,24 @@ UDP, another port, arbitrary DNS, or a direct connection.
 Nodes may advertise a policy capability key and exact version/hash so compatible exits can be found,
 and signed policy bytes may be distributed through decentralized peers. Distribution does not grant
 trust. Activation occurs only after canonical decoding, threshold verification against the local
-trust store, environment checks, time/skew/lifetime bounds and semantic validation. Monotonic
-rollback prevention remains required but is not implemented in the current activation chain:
-the verifier has no previously accepted version, and the periodic policy reload replaces the
-active snapshot without a durable version floor. An older, still-valid, correctly signed
-manifest is therefore not rejected merely for being older. Do not infer downgrade protection
-from signature verification or a route's pinned policy hash.
+trust store, environment checks, time/skew/lifetime bounds and semantic validation. Startup and
+periodic reload now also compare and persist a durable policy-version floor in the agent's existing
+private state directory. A lower version or a different canonical body at the same version is
+rejected even when otherwise validly signed. The same version/hash is idempotent; a higher version
+still needs the original threshold verification before the floor can advance.
+
+`policy-floor.json` and `.policy-floor.lock` retain only authority-namespace/version/body-hash
+records, not destinations or browsing data. The namespace binds protocol, operating mode and
+the canonical configured maintainer-key/environment set. Reordering the trust file does not
+reset it; changing configured trust anchors creates a separate authority scope, not an implicitly
+authorized key-rotation chain. Missing previously initialized, corrupt, unsafe or busy state
+fails closed. Do not remove these files to repair a policy problem: that discards or disables
+the retained guard. This is not protection against an attacker able to replace all state under
+the agent's own account, nor against a legitimately signed higher-version bad policy.
+
+Six focused policy tests pass, including separate verifier processes reopening the same store.
+These prove version/hash retention and the scoped activation paths; they are not a complete
+autonomous-governance or new network-acceptance result.
 
 An existing route context remains pinned to its policy/exit for established flows. Policy expiry or
 replacement blocks new flows and causes bounded drain/reselection; it must not silently move an

@@ -48,12 +48,17 @@ general speedup, unlimited paths, physical-radio operation or the full agreed ex
 C08 remains open. The chronological records below preserve earlier failures and narrower results;
 their pending statements describe those source revisions, not a reversal of later evidence.
 
+Additional local policy integration: startup and periodic reload persist an authority-scoped
+version/hash floor after current threshold verification. Six focused policy tests pass, including
+separate-process 7-to-6 rollback refusal, equal-version hash conflict, idempotent reload, accepted
+higher version and rejected invalid signatures/storage. Strict agent Clippy passes. This closes
+the previously identified lack of a durable floor for a fixed configured authority; it does not
+authorize trust-key rotation, resist replacement of all agent-owned state or implement AI governance.
+
 Major requested functional work still outstanding:
 
 - Cooperative AI training/execution, model exchange, private distributed jobs and fully automatic
   policy governance/self-checking (B01--B07); none is covered by the existing network/content passes.
-- Durable monotonic policy activation: current periodic reload verifies signatures and validity
-  but does not compare a persisted highest accepted version. Route hash pinning is not this guard.
 - Remote publication custody through the real network and replica repair after a holder disappears.
   Explicit Deposit/Inspect, signed per-provider observations and durable complete-copy storage
   now pass local storage/typed-stream/CLI-process tests and a real isolated agent/TLS lifecycle

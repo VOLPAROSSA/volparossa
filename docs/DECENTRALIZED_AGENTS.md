@@ -110,9 +110,10 @@ trusted signing authority. A common verified epoch and split-brain/partition beh
 defined before global automatic activation can work. The current trust anchors and fail-closed
 policy stay unchanged until that migration is implemented; no single AI holds a network-wide
 master signing key and no mandatory human approval is substituted for the requested target.
-The current activation chain also lacks a durable monotonic policy-version floor: signature
-and time verification alone do not reject an older, still-valid signed manifest. This existing
-gap must be resolved for versioned automatic governance, not described as delivered protection.
+The activation chain now includes a durable version/hash floor after threshold verification;
+separate-process tests prove restart retention, rollback rejection and equal-version conflict
+rejection. This guards the existing configured authority scope. It does not define decentralized
+membership, authorize key rotation, judge content or complete automatic governance.
 
 ## Mutual checking, quarantine and repair
 

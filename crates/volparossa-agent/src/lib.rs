@@ -121,11 +121,15 @@ impl Agent {
         let mut effective = config.clone();
         effective.roles = roles;
         effective.validate()?;
-        let (active_policy, policy_failed) =
-            match load_active_policy(&config, &paths.policy_trust, unix_millis()) {
-                Ok(policy) => (policy, false),
-                Err(_) => (None, true),
-            };
+        let (active_policy, policy_failed) = match load_active_policy(
+            &config,
+            &paths.policy_trust,
+            &paths.state_directory,
+            unix_millis(),
+        ) {
+            Ok(policy) => (policy, false),
+            Err(_) => (None, true),
+        };
         prepare_peerstore(&paths.peerstore)?;
         let peerstore = PeerStore::open(&paths.peerstore)?;
         fs::set_permissions(&paths.peerstore, fs::Permissions::from_mode(0o600))?;
@@ -320,12 +324,14 @@ impl Agent {
         let maintenance_state = Arc::clone(&self.state);
         let maintenance_config = Arc::clone(&self.config);
         let maintenance_trust = self.paths.policy_trust.clone();
+        let maintenance_state_directory = self.paths.state_directory.clone();
         let maintenance_discovery = self.discovery_control.clone();
         let maintenance_routes = routes.clone();
         let mut maintenance_task = tokio::spawn(run_maintenance(
             maintenance_state,
             maintenance_config,
             maintenance_trust,
+            maintenance_state_directory,
             maintenance_discovery,
             maintenance_routes,
             dns_routes.clone(),
@@ -1473,10 +1479,12 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
 }
 
+#[allow(clippy::too_many_arguments)] // Existing lifecycle owners plus configured durable policy state.
 async fn run_maintenance(
     state: Arc<RwLock<AgentState>>,
     config: Arc<Config>,
     trust_path: std::path::PathBuf,
+    state_directory: std::path::PathBuf,
     discovery: DiscoveryControlHandle,
     routes: ClientRouteControl,
     dns_routes: ClientRouteControl,
@@ -1498,6 +1506,7 @@ async fn run_maintenance(
                 let (policy, policy_load_failed) = match load_active_policy(
                     &config,
                     &trust_path,
+                    &state_directory,
                     now_ms,
                 ) {
                     Ok(policy) => (policy, false),
