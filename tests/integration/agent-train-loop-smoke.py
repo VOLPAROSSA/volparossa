@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import runpy
+import stat
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -44,9 +46,10 @@ def observe_loop(pid, path, namespace, service_pid):
     for sequence in (1, 2):
         cycle = root / "loop" / f"cycle-{sequence:016x}"
         output = root / f"loop-{sequence}-isolation.json"
-        ART["observe"](pid, output, root / "provision", cycle / "dataset.json", root / "private-canary",
+        raw = root / f"loop-{sequence}-isolation.raw.json"
+        ART["observe"](pid, raw, root / "provision", cycle / "dataset.json", root / "private-canary",
                        "training", "relay4", namespace, service_pid)
-        evidence = read(output)
+        evidence = read(raw)
         worker = Path(f"/proc/{evidence['worker']['pid']}")
         adapter = root / "loop/seed-input/adapter" if sequence == 1 else root / "loop/cycle-0000000000000001/training/adapter"
         mounts = [line.split()[5].split(",") for line in (worker / "mountinfo").read_text().splitlines()
@@ -57,10 +60,8 @@ def observe_loop(pid, path, namespace, service_pid):
             mounted, actual = (worker / "root/adapter" / name).stat(), (adapter / name).stat()
             exact[name] = (mounted.st_dev, mounted.st_ino) == (actual.st_dev, actual.st_ino)
         require(all(exact.values()), "worker did not use the exact seed/predecessor adapter")
-        evidence.update(sequence=sequence, warmstart_readonly=True, warmstart_exact_inodes=exact)
+        evidence = publish_observation(raw, output, sequence, exact)
         owner = output.stat()
-        write(output, evidence)
-        os.chown(output, owner.st_uid, owner.st_gid)
         observations.append(evidence)
         if sequence == 1:
             ready = root / "loop-first-worker.ready"
@@ -71,6 +72,28 @@ def observe_loop(pid, path, namespace, service_pid):
             require(time.monotonic() < deadline, "observed worker exceeded original wall deadline")
             time.sleep(0.05)
     require(observations[0]["worker"] != observations[1]["worker"], "one worker relabeled as two cycles")
+
+
+def publish_observation(raw, output, sequence, exact):
+    require(raw.parent == output.parent and sequence in (1, 2)
+            and raw.name == f"loop-{sequence}-isolation.raw.json"
+            and output.name == f"loop-{sequence}-isolation.json", "unexpected observer output names")
+    owner = raw.lstat()
+    require(stat.S_ISREG(owner.st_mode) and stat.S_IMODE(owner.st_mode) == 0o600
+            and owner.st_nlink == 1 and owner.st_uid == raw.parent.stat().st_uid,
+            "raw observer output ownership differs")
+    require(set(exact) == set(FILES) and all(value is True for value in exact.values()), "warmstart inodes differ")
+    evidence = read(raw)
+    evidence.update(sequence=sequence, warmstart_readonly=True, warmstart_exact_inodes=exact)
+    write(output, evidence)  # Exclusive creation: never overwrite the saved raw or final record.
+    os.chown(output, owner.st_uid, owner.st_gid)
+    published = output.lstat()
+    require((published.st_uid, published.st_gid, stat.S_IMODE(published.st_mode))
+            == (owner.st_uid, owner.st_gid, 0o600), "final observation owner or mode differs")
+    current = raw.lstat()
+    require((current.st_dev, current.st_ino, current.st_uid, current.st_gid, current.st_size)
+            == (owner.st_dev, owner.st_ino, owner.st_uid, owner.st_gid, owner.st_size), "raw observation was replaced")
+    return evidence
 
 
 def bundle_files(cycle, trained):
@@ -110,6 +133,7 @@ def collect(path):
         require(read(cycle / "training/report.json") == {k: v for k, v in trained.items() if k != "supervisor"}, "worker/supervisor report differs")
         files, manifest, bundle = bundle_files(cycle, trained)
         cycles.append(dict(sequence=sequence, training=trained, isolation=read(root / f"loop-{sequence}-isolation.json"),
+                           raw_isolation=read(root / f"loop-{sequence}-isolation.raw.json"),
                            result=read(cycle / "result.json"), provenance=read(cycle / "source-provenance.json"),
                            selection=read(cycle / "selection.json"), adapter_files=files, manifest=manifest, bundle=bundle,
                            dataset=file_hash(cycle / "dataset.json", 1048576),
@@ -202,6 +226,9 @@ def check_evidence(evidence, revision):
     for cycle in loop["cycles"]:
         TRAIN["check_worker"](cycle["training"], revision)
         observed = cycle["isolation"]
+        require({key: value for key, value in observed.items()
+                 if key not in ("sequence", "warmstart_readonly", "warmstart_exact_inodes")} == cycle["raw_isolation"],
+                "final observation changed its original raw process/input evidence")
         TRAIN["check_isolation"](observed)
         require(observed["node_lineage"]["node"] == "relay4" and observed["warmstart_readonly"] is True
                 and set(observed["warmstart_exact_inodes"]) == set(FILES)
@@ -299,9 +326,10 @@ def cleanup(path):
     if root.exists():
         ART["private_root"](root)
         for sequence in (1, 2):
-            record = root / f"loop-{sequence}-isolation.json"
-            if record.exists():
-                ended &= all(not TRAIN["alive"](member) for member in read(record)["owned_processes"])
+            for suffix in (".raw.json", ".json"):
+                record = root / f"loop-{sequence}-isolation{suffix}"
+                if record.exists():
+                    ended &= all(not TRAIN["alive"](member) for member in read(record)["owned_processes"])
         require(ended, "observed autonomous worker/coordinator still alive")
     return dict(ART["cleanup"](root), autonomous_owned_processes_ended=ended)
 
@@ -404,6 +432,35 @@ def self_test():
             continue
         raise AssertionError("invalid synthetic coordinator chain accepted: " + repr(path))
     print("agent-train-loop chain checker: positive + 13 rejections PASS; synthetic only")
+    observation_file_test()
+
+
+def observation_file_test():
+    # Actual exclusive filesystem publication, no model, subprocess or network fixture.
+    with tempfile.TemporaryDirectory(prefix="volparossa-loop-observation-") as directory:
+        root = Path(directory)
+        raw, output = root / "loop-1-isolation.raw.json", root / "loop-1-isolation.json"
+        original = dict(observed=True, worker=dict(pid=123, start_ticks=456), exact_input_inodes={"fixture": True})
+        write(raw, original)
+        before, raw_bytes = raw.stat(), raw.read_bytes()
+        exact = dict.fromkeys(FILES, True)
+        final = publish_observation(raw, output, 1, exact)
+        after = output.stat()
+        require(read(output) == final and read(raw) == original and raw.read_bytes() == raw_bytes,
+                "raw evidence overwritten or final evidence absent")
+        require((after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode))
+                == (before.st_uid, before.st_gid, 0o600)
+                and (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                and final["warmstart_exact_inodes"] == exact, "published file lost owner/inode evidence")
+        saved = output.read_bytes()
+        try:
+            publish_observation(raw, output, 1, exact)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("existing final observation overwritten")
+        require(output.read_bytes() == saved and raw.read_bytes() == raw_bytes, "replay changed existing evidence")
+    print("agent-train-loop raw-to-final exclusive observation file test PASS; no model/network")
 
 
 def main():
