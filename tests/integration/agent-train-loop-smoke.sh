@@ -45,6 +45,24 @@ agent_train_loop_isolation() {
         >"$WORK/agent-train-loop-content-isolation.json"
 }
 
+agent_train_loop_shared() {
+    loop_shared_label=$1
+    loop_shared_dataset=$2
+    loop_shared_attempt=0
+    while [ "$loop_shared_attempt" -lt 60 ]; do
+        if content_custody_cli relay4 content status \
+            >"$WORK/content-custody-relay4-$loop_shared_label.json" \
+            2>"$WORK/content-custody-relay4-$loop_shared_label.err" \
+            && python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" shared \
+                "$WORK" "$loop_shared_label" "$loop_shared_dataset" \
+                >"$WORK/agent-train-loop-$loop_shared_label-inventory.json" \
+                2>"$WORK/agent-train-loop-$loop_shared_label-inventory.err"; then return 0; fi
+        sleep 0.5
+        loop_shared_attempt=$((loop_shared_attempt + 1))
+    done
+    return 1
+}
+
 agent_train_loop_run() {
     provider_node_a=relay5
     provider_node_b=relay4
@@ -142,7 +160,10 @@ agent_train_loop_run() {
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" last-json \
         "$WORK/agent-train-loop-stdout.jsonl" compute_train_loop >"$WORK/agent-train-loop-summary.json" || fail TRAIN_LOOP_SUMMARY_INVALID
     agent_train_loop_private collect "$artifact_user" >"$WORK/agent-train-loop-loop.json" || fail TRAIN_LOOP_ACTUAL_FILES_INVALID
-    content_custody_status relay4 loop-shared 2 || fail TRAIN_LOOP_UPDATES_NOT_SHARED
+    # The two exact update receipts are mandatory. Background replication may
+    # also retain the already verified original seed/dataset; account only for
+    # those known complete objects, never an arbitrary publication count.
+    agent_train_loop_shared loop-shared false || fail TRAIN_LOOP_UPDATES_NOT_SHARED
     PHASE=agent-train-loop-explicit-original-dataset-contribution
     # Fixture-only explicit sharing of the already fetched original dataset. The loop's two
     # adapter publications above are automatic; this separate handoff is not claimed automatic.
@@ -153,7 +174,7 @@ agent_train_loop_run() {
     agent_artifact_cli relay4 content contribute \
         --manifest "$artifact_user/loop/cycle-0000000000000002/dataset.manifest" --publisher-key "$artifact_publisher" \
         --cache "$artifact_user/loop-dataset-export" >"$WORK/agent-train-loop-dataset-contribute.json" || fail TRAIN_LOOP_DATASET_CONTRIBUTION_FAILED
-    content_custody_status relay4 loop-all-shared 3 || fail TRAIN_LOOP_DATASET_NOT_SHARED
+    agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
 
     PHASE=agent-train-loop-independent-import
