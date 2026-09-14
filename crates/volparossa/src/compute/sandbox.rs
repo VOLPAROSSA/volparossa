@@ -14,6 +14,9 @@ pub(super) const TMPFS_BYTES: u64 = 16 * 1024 * 1024;
 #[allow(clippy::too_many_lines)]
 pub(super) fn command(options: &Options) -> Command {
     let mut command = Command::new("/usr/bin/bwrap");
+    if let Some(adapter) = &options.adapter_root {
+        command.arg("--ro-bind").arg(adapter).arg("/adapter");
+    }
     command
         .env_clear()
         .args([

@@ -87,6 +87,19 @@ sampling must avoid rewarding peers for flooding the cache with copies of one so
 Validate candidate updates against held-out data before activation, with bounded rollback or
 quarantine; signature/hash checks alone do not detect poisoned or low-quality models.
 
+The user additionally required on 2026-09-14 that the cache must **not define the available
+knowledge or training corpus**. Select eligible sources/examples for relevance, provenance,
+coverage and diversity before deciding how to acquire them. Prefer existing verified chunks
+when advantageous, but fetch missing/fresh chunks from other holders or the original approved
+publisher/origin. A cache miss is not a reason to silently substitute a more popular cached
+source. Preserve original authority, expiry, access rights, privacy and contribution budgets
+on fallback; do not invent arbitrary Internet egress or unlimited background crawling.
+Ordinary cache-only mode is an explicit offline/resource choice, not the autonomous-training
+default. A future selector must measure coverage and sample less-represented eligible sources;
+cache locality may influence execution placement, not whether a relevant source is considered.
+Origin fallback alone does not prove freedom from selection bias. This selector and generalized
+external-dataset ingestion are still required work, not implemented by the initial adapter codec.
+
 - Reuse content-addressed chunks, original signed manifests, protected peer retrieval and
   custody for public model weights, compatible updates and evaluation artifacts. Caching an
   artifact must not activate it. A signature proves provenance, not model correctness.
@@ -129,6 +142,35 @@ conditions. Actual model execution and sandbox observations must pass the dispos
 smoke before claiming B01; improved answer quality, distributed training and the full brain
 remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
+
+### Cache-backed adapter candidate
+
+The next implementation connects the worker to ordinary signed native content:
+
+1. Publish the explicit public training JSON with content type
+   `application/vnd.volparossa.agent-dataset.v1+json` using `content publish`.
+2. `content agent pack --directory JOB/adapter --training-report JOB/report.json
+   --dataset-manifest DATASET.manifest --publisher-key KEY --output ADAPTER.bundle`
+   binds the exact three files and the job's dataset hash to the verified dataset manifest.
+   Publish the resulting bundle as `application/vnd.volparossa.adapter.v1`.
+3. `content agent fetch --publisher-key KEY --name ADAPTER_NAME --dataset-name DATASET_NAME
+   --cache AGENT_CACHE --output NEW_PRIVATE_DIRECTORY` retrieves both objects through the
+   existing protected peer path, verifies their original publisher and exact dataset link,
+   and exports `adapter/`, `dataset.json` and `provenance.json`. Both publications must have
+   the explicitly trusted publisher. A changed dataset revision is refused, not silently
+   substituted for the one used to train the adapter.
+4. An explicit `compute run --adapter-root .../adapter --dataset .../dataset.json` can use
+   that adapter for inference or continued training. The fixed worker checks all 120 FP32
+   tensors, exact shapes, finite values, fixed LoRA configuration and base identity before
+   applying them. Peer-provided JSON never supplies runtime classes, scripts or operators.
+
+All paths above are examples; supply absolute paths/private output parents and the normal
+compute runtime/model/output arguments. `--execute` is required for computation; fetching
+does not activate an adapter. `--cache-only --reuse-cache` is an explicit offline option,
+not the default. Five focused Pack/CLI tests, four codec/native-chunk tests and ten worker
+protocol/adapter-validation tests pass locally. These are not a live-model or two-node pass;
+the real protected-transfer/remote-use scenario remains to be executed. Native peer fetch
+does not yet implement general external-corpus ingestion or bias-aware source selection.
 
 ## Owner-first resource allocation
 

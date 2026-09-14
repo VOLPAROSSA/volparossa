@@ -18,6 +18,7 @@ use volparossa_content::{
 use volparossa_identity::IdentityStore;
 use zeroize::Zeroizing;
 
+mod agent_artifact;
 mod browser_download;
 mod custody;
 mod handoff;
@@ -29,6 +30,9 @@ mod site;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Pack a trained adapter or retrieve an authenticated adapter/dataset pair from peers.
+    #[command(subcommand)]
+    Agent(agent_artifact::Command),
     /// Pack explicit static website assets or open a publisher-authenticated site from peers.
     #[command(subcommand)]
     Site(site::Command),
@@ -344,6 +348,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         ContentFetchRequest, ContentServeRequest, Empty, control_request::Operation,
     };
     let report = match command {
+        Command::Agent(args) => return agent_artifact::run(args, socket).await,
         Command::Site(args) => return site::run(args, socket).await,
         Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,

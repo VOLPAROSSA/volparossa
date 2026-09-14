@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import signal
 import stat
+import struct
 import sys
 import time
 
@@ -53,6 +54,22 @@ MODEL_HASHES = {
     "special_tokens_map.json": "2b7379f3ae813529281a5c602bc5a11c1d4e0a99107aaa597fe936c1e813ca52",
     "tokenizer.json": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
     "tokenizer_config.json": "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df",
+}
+ADAPTER_FILES = {"adapter_config.json": 16384, "adapter_model.safetensors": 2 * 1024 * 1024,
+                 "README.md": 16384}
+# Admission only: these inert defaults are never passed to a backend constructor.
+# Pinned PEFT 0.20.0 emits them when saving the fixed LoRA configuration.
+ADAPTER_DEFAULTS = {
+    "auto_mapping": None, "peft_version": "0.20.0", "exclude_modules": None,
+    "fan_in_fan_out": False, "use_rslora": False, "modules_to_save": None,
+    "init_lora_weights": True, "layers_to_transform": None, "layers_pattern": None,
+    "rank_pattern": {}, "alpha_pattern": {}, "megatron_config": None,
+    "megatron_core": "megatron.core", "trainable_token_indices": None,
+    "loftq_config": {}, "eva_config": None, "corda_config": None, "lora_ga_config": None,
+    "use_dora": False, "velora_config": None, "alora_invocation_tokens": None,
+    "use_qalora": False, "qalora_group_size": 16, "monteclora_config": None,
+    "layer_replication": None, "lora_bias": False, "target_parameters": None,
+    "use_bdlora": None, "arrow_config": None, "ensure_weight_tying": False,
 }
 HEX32 = re.compile(r"[0-9a-f]{32}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -95,13 +112,15 @@ def bounded_integer(value, low, high):
 
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
-    optional = {"steps", "threads", "max_seconds"}
+    optional = {"steps", "threads", "max_seconds", "adapter_root"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
     require(value["mode"] in ("infer", "train"), "INVALID_JOB_MODE")
-    for field in ("model_root", "dataset_path", "output_root"):
+    for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
+        if field == "adapter_root" and field not in value:
+            continue
         path = value[field]
         require(type(path) is str and 1 < len(path.encode("utf-8")) <= 4096
                 and path.startswith("/") and "\x00" not in path, "INVALID_JOB_PATH")
@@ -214,6 +233,126 @@ def prepare_files(request):
         "training_examples": len(dataset["train"]), "heldout_examples": len(dataset["heldout"]),
         "inference_examples": len(dataset["inference"]),
     }, files
+
+
+def validate_adapter_config(config):
+    fixed = {"base_model_name_or_path": MODEL_ID, "revision": MODEL_REVISION,
+             "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 4, "lora_alpha": 8,
+             "lora_dropout": 0.0, "bias": "none", "inference_mode": True}
+    required = fixed.keys() | {"target_modules"}
+    require(type(config) is dict and required <= config.keys()
+            and config.keys() <= required | ADAPTER_DEFAULTS.keys(), "UNSUPPORTED_ADAPTER_CONFIG")
+    for key, expected in (fixed | {k: v for k, v in ADAPTER_DEFAULTS.items() if k in config}).items():
+        require(type(config[key]) is type(expected) and config[key] == expected,
+                "UNSUPPORTED_ADAPTER_CONFIG")
+    targets = config["target_modules"]
+    require(type(targets) is list and len(targets) == 2 and all(type(x) is str for x in targets)
+            and set(targets) == {"q_proj", "v_proj"}, "UNSUPPORTED_ADAPTER_CONFIG")
+
+
+def adapter_shapes():
+    return {f"base_model.model.model.layers.{layer}.self_attn.{module}.lora_{matrix}.weight": shape
+            for layer in range(30)
+            for module, width in (("q_proj", 576), ("v_proj", 192))
+            for matrix, shape in (("A", [4, 576]), ("B", [width, 4]))}
+
+
+def validate_adapter_weights(raw):
+    """Bound the complete safetensors structure and FP32 values before backend loading."""
+    require(8 < len(raw) <= ADAPTER_FILES["adapter_model.safetensors"], "INVALID_ADAPTER_WEIGHTS")
+    header_length = int.from_bytes(raw[:8], "little")
+    require(0 < header_length <= 65536 and 8 + header_length < len(raw), "INVALID_ADAPTER_HEADER")
+    header = parse_json(raw[8:8 + header_length])
+    require(type(header) is dict, "INVALID_ADAPTER_HEADER")
+    metadata = header.pop("__metadata__", None)
+    require(metadata is None or metadata == {"format": "pt"}, "INVALID_ADAPTER_METADATA")
+    shapes = adapter_shapes()
+    require(header.keys() == shapes.keys(), "UNSUPPORTED_ADAPTER_TENSOR_KEYS")
+    segments = []
+    for name, shape in shapes.items():
+        tensor = header[name]
+        require(type(tensor) is dict and tensor.keys() == {"dtype", "shape", "data_offsets"}
+                and tensor["dtype"] == "F32" and tensor["shape"] == shape
+                and all(type(x) is int for x in tensor["shape"]), "UNSUPPORTED_ADAPTER_TENSOR_FORMAT")
+        offsets = tensor["data_offsets"]
+        require(type(offsets) is list and len(offsets) == 2
+                and all(type(x) is int for x in offsets)
+                and 0 <= offsets[0] < offsets[1] <= len(raw) - 8 - header_length
+                and offsets[1] - offsets[0] == math.prod(shape) * 4,
+                "INVALID_ADAPTER_TENSOR_OFFSETS")
+        segments.append(offsets)
+    ordered = sorted(segments)
+    require(ordered[0][0] == 0 and ordered[-1][1] == len(raw) - 8 - header_length == 230400 * 4
+            and all(a[1] == b[0] for a, b in zip(ordered, ordered[1:])),
+            "INVALID_ADAPTER_TENSOR_LAYOUT")
+    payload = memoryview(raw)[8 + header_length:]
+    require(all(math.isfinite(value[0]) for value in struct.iter_unpack("<f", payload)),
+            "NONFINITE_ADAPTER_WEIGHTS")
+
+
+def prepare_adapter(value, output_root, owned_checkpoint=False):
+    root, metadata = plain_path(value, True)
+    require(metadata.st_uid == os.geteuid() and not stat.S_IMODE(metadata.st_mode) & 0o022,
+            "ADAPTER_DIRECTORY_WRITABLE_BY_OTHERS")
+    if owned_checkpoint:
+        require(root == output_root / "adapter", "INVALID_OWNED_CHECKPOINT_PATH")
+    else:
+        require(not root.is_relative_to(output_root) and not output_root.is_relative_to(root),
+                "ADAPTER_OUTPUT_PATH_OVERLAP")
+    require({p.name for p in root.iterdir()} == ADAPTER_FILES.keys(), "UNSUPPORTED_ADAPTER_FILES")
+    files, payloads = {}, {}
+    for name, maximum in ADAPTER_FILES.items():
+        path = root / name
+        files[name] = file_hash(path, maximum=maximum)
+        require(files[name]["bytes"] > 0 and not path.stat().st_mode & 0o022, "INVALID_ADAPTER_FILE")
+        payloads[name] = read_bounded(path, maximum)
+        require(hashlib.sha256(payloads[name]).hexdigest() == files[name]["sha256"], "ADAPTER_FILE_CHANGED")
+    validate_adapter_config(parse_json(payloads["adapter_config.json"]))
+    try:
+        require("\x00" not in payloads["README.md"].decode("utf-8"), "INVALID_ADAPTER_README")
+    except UnicodeError as error:
+        raise JobError("INVALID_ADAPTER_README") from error
+    validate_adapter_weights(payloads["adapter_model.safetensors"])
+    return root, files, payloads["adapter_model.safetensors"]
+
+
+def new_lora(model, peft, trainable=True):
+    return peft.get_peft_model(model, peft.LoraConfig(
+        task_type="CAUSAL_LM", r=4, lora_alpha=8, lora_dropout=0.0,
+        target_modules=["q_proj", "v_proj"], bias="none", inference_mode=not trainable))
+
+
+def apply_adapter(model, prepared, peft, torch, session, trainable):
+    from safetensors.torch import load
+    from peft.utils.save_and_load import get_peft_model_state_dict, set_peft_model_state_dict
+
+    _, files, raw = prepared
+    # No peer-controlled config, module name, class, auto_mapping or Hub path reaches PEFT.
+    weights = load(raw)
+    expected = adapter_shapes()
+    require(weights.keys() == expected.keys(), "UNSUPPORTED_ADAPTER_TENSOR_KEYS")
+    for name, tensor in weights.items():
+        session.check()
+        require(tensor.dtype == torch.float32 and tensor.device.type == "cpu"
+                and list(tensor.shape) == expected[name] and torch.isfinite(tensor).all().item(),
+                "UNSUPPORTED_ADAPTER_TENSOR_FORMAT")
+    model = new_lora(model, peft, trainable)
+    before = parameter_hash(model, False, session)
+    loaded = set_peft_model_state_dict(model, weights, adapter_name="default",
+                                      ignore_mismatched_sizes=False, low_cpu_mem_usage=False)
+    require(not loaded.unexpected_keys and not any(".lora_" in x for x in loaded.missing_keys),
+            "ADAPTER_APPLICATION_INCOMPLETE")
+    applied = get_peft_model_state_dict(model, adapter_name="default", save_embedding_layers=False)
+    require(applied.keys() == weights.keys()
+            and all(torch.equal(applied[name], value) for name, value in weights.items()),
+            "APPLIED_ADAPTER_WEIGHTS_DIFFER")
+    after = parameter_hash(model, False, session)
+    require(before == after, "BASE_WEIGHTS_CHANGED_BY_ADAPTER")
+    applied_parameters = parameter_hash(model, True, session)
+    require(applied_parameters["parameters"] == 230400, "UNEXPECTED_TRAINABLE_PARAMETERS")
+    return model, {"model_id": MODEL_ID, "model_revision": MODEL_REVISION, "files": files,
+                   "applied_parameters": applied_parameters, "base_parameters_before_apply": before,
+                   "base_parameters_after_apply": after, "applied": True}
 
 
 class Session:
@@ -407,6 +546,8 @@ def save_checkpoint(model, output_root, session):
 def execute_job(request, session):
     session.progress("preparing")
     model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
+    prepared_adapter = (prepare_adapter(request["adapter_root"], output_root)
+                        if "adapter_root" in request else None)
     configure_offline()
     torch, transformers, peft, versions = load_backend(request["threads"])
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -414,6 +555,10 @@ def execute_job(request, session):
     require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
     samples = encode_dataset(tokenizer, torch, dataset)
     model = load_model(transformers, torch, model_root)
+    input_adapter = None
+    if prepared_adapter is not None:
+        model, input_adapter = apply_adapter(model, prepared_adapter, peft, torch, session,
+                                             trainable=request["mode"] == "train")
     session.progress("baseline")
     baseline = evaluate(model, samples["heldout"], torch, session)
     baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session)
@@ -423,16 +568,19 @@ def execute_job(request, session):
               "dataset": data_identity, "baseline_evaluation": baseline, "outputs": baseline_outputs,
               "updates_completed": 0, "artifacts": [], "better_answers_claimed": False,
               "network_policy_changed": False, "distributed_training_claimed": False}
+    if input_adapter is not None:
+        result["input_adapter"] = input_adapter
     if request["mode"] == "train":
-        model = peft.get_peft_model(model, peft.LoraConfig(
-            task_type="CAUSAL_LM", r=4, lora_alpha=8, lora_dropout=0.0,
-            target_modules=["q_proj", "v_proj"], bias="none"))
+        if input_adapter is None:
+            model = new_lora(model, peft)
         trainable = [tensor for name, tensor in model.named_parameters() if tensor.requires_grad]
         require(sum(tensor.numel() for tensor in trainable) == 230400
                 and all((".lora_" in name) == tensor.requires_grad for name, tensor in model.named_parameters()),
                 "UNEXPECTED_TRAINABLE_PARAMETERS")
         base_before = parameter_hash(model, False, session)
         adapter_before = parameter_hash(model, True, session)
+        if input_adapter is not None:
+            require(adapter_before == input_adapter["applied_parameters"], "WARMSTART_ADAPTER_CHANGED")
         optimizer = torch.optim.AdamW(trainable, lr=0.0005, weight_decay=0.0)
         losses = []
         for step in range(request["steps"]):
@@ -457,9 +605,8 @@ def execute_job(request, session):
         gc.collect()
         session.progress("reload", request["steps"])
         fresh = load_model(transformers, torch, model_root)
-        reloaded = peft.PeftModel.from_pretrained(fresh, str(adapter_root),
-                                                 local_files_only=True, is_trainable=False,
-                                                 use_safetensors=True)
+        checkpoint = prepare_adapter(str(adapter_root), output_root, owned_checkpoint=True)
+        reloaded, _ = apply_adapter(fresh, checkpoint, peft, torch, session, trainable=False)
         reload_base = parameter_hash(reloaded, False, session)
         reload_adapter = parameter_hash(reloaded, True, session)
         require(reload_base == base_before and reload_adapter == adapter_after, "CHECKPOINT_RELOAD_WEIGHTS_DIFFER")
@@ -473,6 +620,14 @@ def execute_job(request, session):
                       base_weights_unchanged=True, adapter_weights_changed=True, checkpoint_reloaded=True,
                       lora={"rank": 4, "alpha": 8, "target_modules": ["q_proj", "v_proj"]},
                       outputs=generate(reloaded, samples["inference"], tokenizer, torch, session), artifacts=artifacts)
+    if prepared_adapter is not None:
+        root, original_files, _ = prepared_adapter
+        require(all(file_hash(root / name, maximum=ADAPTER_FILES[name]) == metadata
+                    for name, metadata in original_files.items()), "INPUT_ADAPTER_CHANGED_ON_DISK")
+        if request["mode"] == "infer":
+            require(parameter_hash(model, True, session) == input_adapter["applied_parameters"]
+                    and parameter_hash(model, False, session) == input_adapter["base_parameters_after_apply"],
+                    "INPUT_ADAPTER_CHANGED_DURING_INFERENCE")
     # Check original on-disk weights again; the public artifact identity is independent of
     # in-memory frozen-parameter comparison and is required for compatible adapter reuse.
     require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,

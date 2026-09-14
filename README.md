@@ -24,9 +24,13 @@ Its v1 VPN overlay is the foundation for direct local links and the planned cont
 The newly requested [cooperative AI layer](docs/DECENTRALIZED_AGENTS.md) will add contributed
 training/computation and fully automatic content-policy governance. The first development
 candidate adds explicitly provisioned SmolLM2 CPU inference/adapter training in an isolated
-worker (`volparossa compute run`, preview by default). Its actual training proof is pending;
-automatic reuse of eligible cached datasets/models, peer execution and governance are still
-required integration, not an implemented distributed brain or a guarantee of private remote execution.
+worker (`volparossa compute run`, preview by default). A new explicit `content agent pack/fetch`
+candidate binds an adapter to its signed public dataset and reuses protected content retrieval;
+`compute run --adapter-root ...` can request the received adapter in the isolated worker.
+Actual training and cross-node model-use proofs are pending. Source selection must consider
+eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
+Autonomous source selection/ingestion, peer execution and governance remain required work,
+not an implemented distributed brain or a guarantee of private remote execution.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

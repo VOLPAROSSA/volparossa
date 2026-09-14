@@ -10,8 +10,19 @@ whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). Its first local CPU-wo
 now includes pinned explicit provisioning, inference/LoRA training, saved-adapter reload and
 a Rust-supervised mandatory sandbox. Five narrow Rust supervisor tests and the Python
 protocol/provisioning tests pass; actual training and sandbox execution await the dedicated
-disposable-guest proof. B01 remains unchecked. Cache-backed training and peer execution are
-explicit remaining integrations, not automatic consequences of having cached data. No
+disposable-guest proof. The first model-runtime attempt on
+[`86d2d0f5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34858211717)
+stopped during wheel-metadata verification after the pinned downloads, before any training.
+The selector now distinguishes the wheel's own top-level metadata from nested vendored metadata;
+six provisioning tests pass, but a new guest result is required. B01 remains unchecked.
+A new `content agent pack/fetch` candidate binds the exact adapter files to the original signed
+public dataset and fetches both through the existing protected content plane. Five CLI and four
+codec tests pass; the worker's ten protocol tests cover the explicit read-only input adapter.
+These local tests do not prove cross-node use of a genuinely trained model: B02 remains unchecked.
+Cache-only retrieval is explicit and off by default. Autonomous training must select eligible
+sources independently of cache availability, fetching missing/fresh data rather than silently
+substituting cached popular sources. Generalized source selection, external-corpus ingestion,
+bias measurement and peer execution remain integrations to build. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement

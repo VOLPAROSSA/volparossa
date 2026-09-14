@@ -44,6 +44,9 @@ pub(crate) struct Options {
     /// Private directory containing verified model assets, not executable remote code.
     #[arg(long)]
     model_root: PathBuf,
+    /// Explicit verified adapter directory; cache storage alone never activates an adapter.
+    #[arg(long)]
+    adapter_root: Option<PathBuf>,
     /// Explicit public Q/A dataset. This is never inferred from browsing or private files.
     #[arg(long)]
     dataset: PathBuf,
@@ -72,6 +75,8 @@ struct WorkerRequest {
     model_root: &'static str,
     dataset_path: &'static str,
     output_root: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_root: Option<&'static str>,
     steps: u16,
     threads: u16,
     max_seconds: u16,
@@ -87,6 +92,7 @@ pub(crate) async fn run(command: Command) -> Result<()> {
                 "version": 1, "kind": "volparossa-compute-plan", "execute": false,
                 "mode": options.mode, "runtime_root": options.runtime_root,
                 "model_root": options.model_root, "dataset": options.dataset,
+                "adapter_root": options.adapter_root,
                 "new_output": options.output, "steps": options.steps,
                 "threads": options.threads, "max_seconds": options.max_seconds,
                 "network": "isolated-loopback-only", "device": "cpu",
@@ -144,6 +150,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         model_root: "/model",
         dataset_path: "/dataset.json",
         output_root: "/output",
+        adapter_root: options.adapter_root.as_ref().map(|_| "/adapter"),
         steps: options.steps,
         threads: options.threads,
         max_seconds: options.max_seconds,
@@ -163,6 +170,9 @@ impl Options {
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
         private_directory(&self.runtime_root)?;
         private_directory(&self.model_root)?;
+        if let Some(adapter) = &self.adapter_root {
+            private_directory(adapter)?;
+        }
         ensure!(self.output.is_absolute(), "compute_output_absolute");
         private_directory(self.output.parent().context("compute_output_parent")?)?;
         ensure!(

@@ -7,8 +7,10 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -32,6 +34,27 @@ def dataset():
             "inference": [{"question": "Which Debian release?", "context": "Debian 13 is supported."}]}
 
 
+def adapter_config():
+    return {"base_model_name_or_path": WORKER.MODEL_ID, "revision": WORKER.MODEL_REVISION,
+            "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 4, "lora_alpha": 8,
+            "lora_dropout": 0.0, "bias": "none", "inference_mode": True,
+            "target_modules": ["q_proj", "v_proj"], **WORKER.ADAPTER_DEFAULTS}
+
+
+def adapter_bytes(header_change=None, last_float=0.0):
+    # Synthetic safetensors parser fixture, not trained weights or execution evidence.
+    header, offset = {"__metadata__": {"format": "pt"}}, 0
+    for name, shape in WORKER.adapter_shapes().items():
+        length = shape[0] * shape[1] * 4
+        header[name] = {"dtype": "F32", "shape": shape, "data_offsets": [offset, offset + length]}
+        offset += length
+    if header_change:
+        header_change(header)
+    raw_header = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    raw_header += b" " * (-len(raw_header) % 8)
+    return len(raw_header).to_bytes(8, "little") + raw_header + bytes(offset - 4) + struct.pack("<f", last_float)
+
+
 class WorkerProtocolTests(unittest.TestCase):
     def test_request_schema_preserves_id_and_enforces_real_resource_caps(self):
         parsed = WORKER.validate_request(request())
@@ -50,6 +73,82 @@ class WorkerProtocolTests(unittest.TestCase):
         invalid["command"] = "unused"
         with self.assertRaises(WORKER.JobError):
             WORKER.validate_request(invalid)
+
+    def test_optional_adapter_path_preserves_old_request_and_supports_both_modes(self):
+        self.assertNotIn("adapter_root", WORKER.validate_request(request()))
+        for mode in ("infer", "train"):
+            source = dict(request(), adapter_root="/adapter", mode=mode)
+            self.assertEqual(WORKER.validate_request(source)["adapter_root"], "/adapter")
+        for value in (None, "", "relative", "/", "/a\x00b", 42):
+            with self.assertRaisesRegex(WORKER.JobError, "INVALID_JOB_PATH"):
+                WORKER.validate_request(dict(request(), adapter_root=value))
+
+    def test_adapter_configuration_is_admission_only_with_no_dynamic_operator(self):
+        config = adapter_config()
+        WORKER.validate_adapter_config(config)
+        WORKER.validate_adapter_config(dict(config, target_modules=["v_proj", "q_proj"]))
+        for name, value in (("base_model_name_or_path", "other/model"), ("revision", "main"),
+                            ("r", 8), ("r", True), ("lora_alpha", 16), ("lora_dropout", 0.1),
+                            ("target_modules", "all-linear"), ("target_modules", ["q_proj", "q_proj"]),
+                            ("bias", "all"), ("auto_mapping", {"parent_library": "unsafe"}),
+                            ("init_lora_weights", "pissa"), ("modules_to_save", ["lm_head"]),
+                            ("use_dora", True), ("layer_replication", [[0, 30]]),
+                            ("runtime_config", {}), ("unrecognized_extension", None)):
+            with self.subTest(name=name), self.assertRaisesRegex(WORKER.JobError, "UNSUPPORTED_ADAPTER_CONFIG"):
+                WORKER.validate_adapter_config(dict(config, **{name: value}))
+
+    def test_safetensors_requires_all_exact_fp32_shapes_dense_offsets_and_finite_values(self):
+        WORKER.validate_adapter_weights(adapter_bytes())
+        self.assertEqual(len(WORKER.adapter_shapes()), 120)
+        name = next(iter(WORKER.adapter_shapes()))
+        mutations = [
+            lambda h: h.pop(name),
+            lambda h: h.update({"unexpected.weight": h[name]}),
+            lambda h: h[name].update(dtype="F16"),
+            lambda h: h[name].update(shape=[8, 576]),
+            lambda h: h[name].update(data_offsets=[4, 9220]),
+            lambda h: h.update({"__metadata__": {"custom_loader": "unsafe"}}),
+        ]
+        for mutation in mutations:
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_adapter_weights(adapter_bytes(mutation))
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaisesRegex(WORKER.JobError, "NONFINITE_ADAPTER_WEIGHTS"):
+                WORKER.validate_adapter_weights(adapter_bytes(last_float=value))
+        with self.assertRaises(WORKER.JobError):
+            WORKER.validate_adapter_weights(adapter_bytes() + b"trailing")
+
+    def test_actual_temporary_adapter_files_are_hash_bound_and_not_executable_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "adapter"
+            root.mkdir(mode=0o700)
+            output = Path(directory) / "output"
+            output.mkdir(mode=0o700)
+            contents = {"adapter_config.json": json.dumps(adapter_config()).encode(),
+                        "adapter_model.safetensors": adapter_bytes(), "README.md": b"Synthetic parser fixture.\n"}
+            for name, raw in contents.items():
+                (root / name).write_bytes(raw)
+                (root / name).chmod(0o600)
+            actual_root, files, weights = WORKER.prepare_adapter(str(root), output)
+            self.assertEqual(actual_root, root)
+            self.assertEqual(weights, contents["adapter_model.safetensors"])
+            self.assertEqual(set(files), set(WORKER.ADAPTER_FILES))
+            for name, item in files.items():
+                self.assertEqual(item, WORKER.file_hash(root / name))
+            with self.assertRaisesRegex(WORKER.JobError, "ADAPTER_OUTPUT_PATH_OVERLAP"):
+                WORKER.prepare_adapter(str(root), Path(directory))
+            (root / "extra.py").write_bytes(b"never executed")
+            with self.assertRaisesRegex(WORKER.JobError, "UNSUPPORTED_ADAPTER_FILES"):
+                WORKER.prepare_adapter(str(root), output)
+            (root / "extra.py").unlink()
+            (root / "README.md").unlink()
+            (root / "README.md").symlink_to(output)
+            with self.assertRaises((OSError, WORKER.JobError)):
+                WORKER.prepare_adapter(str(root), output)
+            (root / "README.md").unlink()
+            (root / "README.md").write_bytes(b"x" * 16385)
+            with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
+                WORKER.prepare_adapter(str(root), output)
 
     def test_duplicate_keys_and_nonfinite_json_are_rejected(self):
         for raw in (b'{"version":1,"version":1}', b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}'):

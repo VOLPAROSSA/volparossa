@@ -50,6 +50,7 @@ pub(super) async fn run(
             check_result(&result, request)?;
             ensure!(status.success(), "compute_worker_exit");
             check_artifacts(&result, request.mode, &options.output)?;
+            check_input_adapter(&result, options)?;
             Ok(result)
         };
         tokio::pin!(io);
@@ -175,6 +176,41 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         ensure!(
             artifact.get("sha256").and_then(Value::as_str) == Some(hash.as_str()),
             "compute_artifact_hash"
+        );
+    }
+    Ok(())
+}
+
+fn check_input_adapter(value: &Value, options: &Options) -> Result<()> {
+    let Some(root) = &options.adapter_root else {
+        ensure!(
+            value.get("input_adapter").is_none(),
+            "compute_unrequested_adapter"
+        );
+        return Ok(());
+    };
+    let input = &value["input_adapter"];
+    ensure!(
+        input["applied"] == true
+            && input["applied_parameters"]["parameters"].as_u64() == Some(230_400),
+        "compute_adapter_not_applied"
+    );
+    ensure!(
+        input["base_parameters_before_apply"].is_object()
+            && input["base_parameters_before_apply"] == input["base_parameters_after_apply"],
+        "compute_adapter_changed_base"
+    );
+    for name in [
+        "README.md",
+        "adapter_config.json",
+        "adapter_model.safetensors",
+    ] {
+        let bytes = super::read_file(&root.join(name), 2 * 1024 * 1024)?;
+        ensure!(
+            input["files"][name]["bytes"].as_u64() == Some(bytes.len() as u64)
+                && input["files"][name]["sha256"].as_str()
+                    == Some(hex::encode(Sha256::digest(&bytes)).as_str()),
+            "compute_input_adapter_hash"
         );
     }
     Ok(())
