@@ -85,6 +85,8 @@ print_plan() {
             '  pin a separately signed validation source before training, fetching exact bytes through protected paths;' \
             '  run real predecessor and candidate inference on the same second source after each cycle;' \
             '  require source-heldout and second-source improvement before replacing the seed/latest or publishing;' \
+            '  require a fresh Client to discover an approved peer update, compare it against the base, adopt and train;' \
+            '  five additional isolated workers, protected original transfers and gated Client publication; no copied seed;' \
             '  if any successor is approved, a different Client imports it over protected paths and runs inference;' \
             '  rejected candidates stay local and reclaimable; exact actual outcomes and cleanup are required;' \
             '  repeated training and selection sets, not an independent test benchmark, general quality or full B05.'
@@ -500,6 +502,9 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-train-cycle-smoke.json", "agent-train-cycle-evidence.json",
               "agent-train-loop-smoke.json", "agent-train-loop-evidence.json", "agent-train-loop-loop.json",
               "agent-train-loop-summary.json", "agent-train-loop-worker.err", "agent-train-loop-observer.err",
+              "agent-peer-learning-smoke.json", "agent-peer-learning-evidence.json", "agent-peer-learning-files.json",
+              "agent-peer-learning-selected.json", "agent-peer-learning-summary.json", "agent-peer-learning-cleanup.json",
+              "agent-peer-learning-initial-fetch.json", "agent-peer-learning-worker.err", "agent-peer-learning-observer.err",
               "agent-train-loop-fetch.json", "agent-train-loop-fetch.err", "agent-train-loop-initial-fetch.err",
               "agent-artifact-cycle-result.json", "agent-artifact-cycle-training.json",
               "agent-artifact-cycle-isolation.json", "agent-artifact-cycle-files.json",

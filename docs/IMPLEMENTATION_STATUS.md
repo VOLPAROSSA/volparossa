@@ -4,12 +4,30 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-15
 
-Current cooperative-learning slice: version-2 `compute train-loop` enrollment now follows
+Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly
+enrolled signed adapter channels, resolves their exact datasets only against independently
+selected sources, and locally compares an imported update against the actual current adapter
+with two real inference calls on the pinned validation source. Only a measured improvement is
+adopted. The next local training cycle uses those exact imported files, retains separate foreign
+and local lineage, and still needs the normal local promotion gates before publication. The
+96 preceding focused compute tests, nine peer-related tests (including original import and
+lineage checks), and strict CLI Clippy pass. The additional two-node learning fixture and its
+mandatory report gate are ready; this is not yet live proof of automatic peer adoption and
+continued training.
+See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
+
+The preceding version-2 `compute train-loop` enrollment now follows
 explicitly selected, signed public source catalogs. The runtime refreshes catalog metadata,
 retains stable source/revision progress, fetches newly selected exact datasets independently of
 cache availability, and binds the original catalog authorization and expiry to real cycle
-admission. The 92 focused compute tests and four signed-catalog/local-stream tests pass; the
-actual catalog-update/network/training fixture is ready, but its live result is not yet claimed. See
+admission. The [live run on `50d53733`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903399004)
+completed both real eight-update cycles, four validation inferences, catalog expansion to the
+new uncached dataset and a zero-attempt restart. It then **failed** during independent Client
+import with `CONTENT_UNAVAILABLE`; the full scenario is not proven. Both original catalogs,
+the new dataset, validation source and both published updates independently pass signature
+verification. Cleanup completed with unchanged guest-host state. The new combined proof retains
+this original gate and adds fixed, non-sensitive provider failure categories to distinguish the
+next failure; cache/registry contention is a hypothesis, not an established cause. See
 [catalog usage and bounds](DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
 
 The prior [second-source run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
@@ -40,7 +58,7 @@ Ten captures / 79 interfaces / 27,656 frames contain no forbidden, direct-exit, 
 dropped packets; both relay legs carry data. Cleanup leaves zero owned objects and matching
 guest-host hashes. B05 remains incomplete for its remaining cooperative-learning scope.
 
-Public-document execution is still unproven. On `b0c10425`, the retained startup diagnostic
+Public-document execution now has scoped live proof. On the earlier `b0c10425`, the startup diagnostic
 shows an active/running broker without its socket after 150 polls (17.612 s elapsed,
 17.399 s CPU), not a failed service. Before binding, that build synchronously hashes the full
 269,060,552-byte pinned model in unoptimized development code. `35fd9551` therefore optimizes
@@ -49,9 +67,15 @@ verification and existing timeout. Its [actual rerun](https://github.com/VOLPARO
 observes both broker sockets ready in 0.454/0.464 seconds, but fails later before Python starts:
 the owner tokenizer reports `stderr_class=proc_mount`. The document fixture inherited the
 network service's masked mount view; the candidate now uses the existing net-only owner-launch
-pattern while preserving service protections and the actual worker sandbox. This correction
-still needs its own live run. The failed run retains complete cleanup and unchanged guest-host
-state; it is not a proven document workflow.
+pattern while preserving service protections and the actual worker sandbox. The corrected
+[run on `1bd44d11`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903185520)
+passes its workflow and exact-source raw reconstruction: 5,120 original bytes become nine
+byte-covering portions in three signed task packages, with five real peer-job receipts and
+overlapping workers on two nodes. After both brokers and their worker families stop, a resume
+completes from unchanged retained files with zero new rounds. Four original Ed25519 manifests
+verify; six captures / 28 interfaces / 45,450 frames contain no forbidden/direct traffic or
+drops. Cleanup leaves zero owned objects and unchanged guest-host state. PR #125 is merged;
+this is public document execution, not private distributed inference or general reasoning.
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic

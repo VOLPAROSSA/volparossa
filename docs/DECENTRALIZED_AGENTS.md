@@ -470,9 +470,64 @@ stream of new source names. Source selection remains round-robin, not a learned 
 coverage model. Local signed-transfer, registry/restart and authorization/deadline checks pass.
 The disposable scenario publishes dataset B and catalog revision two only after the first real
 training worker starts, checks B is not cached, and requires the next cycle to discover/use B.
-It then reopens the actual coordinator without repeating completed work. Its pure fixture checks
-pass; the real network/model run is pending. General external-corpus
-ingestion, broad source discovery, defended aggregation and complete B05 remain open.
+It then reopens the actual coordinator without repeating completed work. The
+[run on `50d53733`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903399004)
+performs both real training cycles, all four validation jobs, cold acquisition of dataset B and
+the zero-attempt restart, but fails at the later independent Client import with
+`CONTENT_UNAVAILABLE`. Original signatures verify and cleanup preserves guest-host state;
+the full scenario remains failed. General external-corpus ingestion, broad source discovery,
+defended aggregation and complete B05 remain open.
+
+### Learning from peer updates
+
+The new optional `--peer-updates /absolute/path/peer-channels.json` lets an ongoing local
+training loop consider compatible adapters published by explicitly chosen peers. It requires
+the independently pinned `--validation-source` described above. The channel file is owner-private
+JSON, for example:
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {"publisher_key": "<64 lowercase hexadecimal characters>", "name": "public-agent-updates", "min_revision": 1}
+  ]
+}
+```
+
+The coordinator discovers a signed adapter revision through the existing protected content
+plane. Its bundled dataset ID must resolve to exactly one **independently selected** training
+source, either a fixed plan entry or a currently eligible enrolled catalog entry, with exact
+manifest ID and revision. An unknown dataset stays pending; the adapter publisher cannot add
+new dataset authorities merely by referencing them. Missing authorized bytes remain fetchable
+from peers rather than being replaced with something convenient in the cache.
+
+Import retains the original signed adapter and dataset, exact extracted files and retrieval
+receipts. The local worker then runs two isolated, zero-update inference jobs on the same pinned
+validation bytes: the actual current adapter/base and the candidate. Adoption requires equal
+target counts and a loss reduction greater than `1e-6`; a publisher's quality claim is not used.
+Declared training/validation question overlap is rejected before comparison. The usual owner
+priority, resource bounds, cancellation and original source-expiry limits still apply.
+
+A successful peer comparison changes the selected warmstart, **not** the local completed-cycle
+counter. The next real local training job applies those exact imported weights. Its checkpoint
+binds the foreign publication, comparison and input-file identities separately from any previous
+local cycle. A new local successor must still pass both ordinary promotion gates before it can
+replace that warmstart and be shared under the local publisher's identity. Rejected local work
+does not silently replace the accepted peer adapter.
+
+One candidate is processed at a time, with at most 16 enrolled channels and eight retained peer
+rounds. Retention preserves the active imported weights and only reclaims the coordinator's
+recognized inactive files. Completed comparisons and original identities are checked on reopen;
+finished work is not counted as fresh training. These are explicit development resource bounds,
+not a claim that the whole network must contain only 16 peers or eight agents.
+
+The runtime and focused import/lineage checks pass locally. The additional disposable scenario
+requires a separate node to fetch, compare, adopt and actually continue training
+after the original dataset service stops. Until that run passes, automatic cross-node continued
+learning remains a development candidate. This is selection and reuse of compatible adapters,
+not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
+planning or a complete continuously self-improving brain. Reusing a small validation set also
+does not establish general quality, diversity, or immunity to malicious updates.
 
 ## Owner-first resource allocation
 

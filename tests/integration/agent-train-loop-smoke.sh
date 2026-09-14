@@ -282,7 +282,9 @@ agent_train_loop_run() {
         --manifest "$artifact_user/loop/cycle-$loop_dataset_cycle/dataset.manifest" --publisher-key "$artifact_publisher" \
         --cache "$artifact_user/loop-dataset-export" >"$WORK/agent-train-loop-dataset-contribute.json" || fail TRAIN_LOOP_DATASET_CONTRIBUTION_FAILED
     agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
+    agent_peer_learning_share_validation || fail PEER_LEARNING_VALIDATION_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
+    agent_peer_learning_run
 
     if [ "$loop_latest" != none ]; then
     PHASE=agent-train-loop-independent-import
@@ -333,6 +335,7 @@ agent_train_loop_cleanup() {
         loop_observer_pid=
     fi
     [ -n "${artifact_user:-}" ] && [ -f "$WORK/bin/agent-train-loop-smoke.py" ] || return 0
+    agent_peer_learning_cleanup || return 1
     for loop_sequence in 1 2; do
         loop_diagnostic=$artifact_user/loop-$loop_sequence-readiness.json
         if [ -f "$loop_diagnostic" ] && [ ! -L "$loop_diagnostic" ]; then
@@ -346,13 +349,20 @@ agent_train_loop_cleanup() {
 
 agent_train_loop_finalize_report() {
     loop_status=$1
+    loop_report_status=0
     for loop_log in "$WORK"/agent-train-loop-*.json "$WORK"/agent-train-loop-*.jsonl "$WORK"/agent-train-loop-*.err \
         "$WORK"/agent-train-loop-*.log "$WORK"/agent-artifact-*.json "$WORK"/agent-artifact-*.err "$WORK"/content-custody-*.json; do
         [ ! -f "$loop_log" ] || [ -L "$loop_log" ] || \
-            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$loop_log" "$output_directory/$(basename -- "$loop_log")"
+            install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$loop_log" "$output_directory/$(basename -- "$loop_log")" \
+            || loop_report_status=1
     done
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" finalize "$WORK" "$expected_commit" \
-        "$loop_status" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
-    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-train-loop-smoke.json" "$output_directory/agent-train-loop-smoke.json"
-    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" report "$WORK/agent-train-loop-smoke.json" "$expected_commit"
+        "$loop_status" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || loop_report_status=1
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-train-loop-smoke.json" "$output_directory/agent-train-loop-smoke.json" \
+        || loop_report_status=1
+    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" report "$WORK/agent-train-loop-smoke.json" "$expected_commit" \
+        || loop_report_status=1
+    # Preserve both diagnostic reports even when the earlier proof is incomplete.
+    agent_peer_learning_finalize "$loop_status" || loop_report_status=1
+    return "$loop_report_status"
 }

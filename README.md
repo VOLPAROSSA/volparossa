@@ -200,9 +200,10 @@ Caching optimizes **how** selected data is acquired, not **which knowledge is al
 Missing eligible data must remain fetchable; an available cache is not automatically a balanced
 training corpus, nor is everything in it authorized for training.
 
-The first successor gate has live evidence on a small same-source held-out set. A separate,
-explicitly pinned second-source comparison is implemented with its live proof pending.
-Neither proves general intelligence or that every update is universally better.
+Successor selection has live evidence on a small same-source held-out set and a separately
+pinned validation source. Automatic local comparison and adoption of peer updates is the next
+development candidate. These narrow checks do not prove general intelligence or that every
+update is universally better.
 
 Public work can be split across selected peers, with retained results and bounded recovery
 after worker loss. Private distributed computation, general autonomous planning, defended model

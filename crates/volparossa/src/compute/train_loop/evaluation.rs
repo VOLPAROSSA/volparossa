@@ -52,6 +52,8 @@ pub(super) struct Record {
     epsilon: f64,
     pub(super) sequence: u64,
     pub(super) predecessor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_predecessor: Option<Value>,
     baseline_kind: BaselineKind,
     pub(super) approved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +86,7 @@ enum BaselineKind {
     PinnedBase,
     ConfiguredAdapter,
     ApprovedPredecessor,
+    ApprovedPeerUpdate,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -154,6 +157,54 @@ struct Evidence {
     files: Identities,
 }
 
+/// A foreign model is an explicit warmstart, not a fictitious local training cycle.
+/// The immutable selection retains its locally verified import/comparison identity.
+fn validate_peer_origin(
+    store: &Store,
+    origin: &Value,
+    predecessor: Option<u64>,
+    selected: &Value,
+    input: Option<&InputAdapter>,
+) -> Result<()> {
+    let sequence = origin["import_sequence"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .context("train_evaluation_peer_sequence")?;
+    let cycle = store.cycle_path(1)?;
+    let directory = cycle
+        .parent()
+        .context("train_evaluation_peer_parent")?
+        .join(format!("peer-update-{sequence:016x}/import/adapter"));
+    ensure!(
+        origin["kind"] == "peer_update"
+            && origin["local_predecessor"] == serde_json::to_value(predecessor)?
+            && origin["revision"].as_u64().is_some_and(|n| n > 0)
+            && selected["adapter_root"] == serde_json::to_value(directory)?
+            && input.is_some_and(|input| serde_json::to_value(&input.files)
+                .is_ok_and(|files| files == origin["adapter_files"])),
+        "train_evaluation_peer_predecessor_binding"
+    );
+    for field in [
+        "adapter_manifest_id",
+        "dataset_manifest_id",
+        "comparison_sha256",
+    ] {
+        ensure!(
+            origin[field]
+                .as_str()
+                .is_some_and(|id| super::super::is_hex(id, 64)),
+            "train_evaluation_peer_proof_identity"
+        );
+    }
+    content::parse_publisher_key(
+        origin["publisher_key"]
+            .as_str()
+            .context("train_evaluation_peer_publisher")?,
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
 impl Evidence {
     fn load(store: &Store, sequence: u64) -> Result<Self> {
         let root = store.cycle_path(sequence)?;
@@ -187,7 +238,16 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
         source_binding(&evidence, &report, &result, &selection)?;
     let (base_parameters, candidate_parameters) = technical_binding(&evidence, &report, &result)?;
     let input_adapter = input_binding(&report, &result, &selection)?;
-    if let Some(previous) = predecessor {
+    let peer_predecessor = selection.get("peer_predecessor").cloned();
+    if let Some(origin) = &peer_predecessor {
+        validate_peer_origin(
+            store,
+            origin,
+            predecessor,
+            &selection,
+            input_adapter.as_ref(),
+        )?;
+    } else if let Some(previous) = predecessor {
         ensure!(
             input_adapter.is_some()
                 && selection["adapter_root"]
@@ -235,13 +295,16 @@ fn recompute(store: &Store, sequence: u64, predecessor: Option<u64>) -> Result<R
         epsilon: EPSILON,
         sequence,
         predecessor,
-        baseline_kind: if predecessor.is_some() {
+        baseline_kind: if peer_predecessor.is_some() {
+            BaselineKind::ApprovedPeerUpdate
+        } else if predecessor.is_some() {
             BaselineKind::ApprovedPredecessor
         } else if input_adapter.is_some() {
             BaselineKind::ConfiguredAdapter
         } else {
             BaselineKind::PinnedBase
         },
+        peer_predecessor,
         approved,
         validation,
         source_manifest_id,

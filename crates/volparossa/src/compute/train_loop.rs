@@ -3,6 +3,8 @@
 
 mod catalogs;
 mod evaluation;
+mod peer_evaluation;
+mod peer_updates;
 mod publication;
 mod seed;
 mod storage;
@@ -59,6 +61,9 @@ pub(crate) struct Options {
     /// JSON with independently trusted adapter/dataset publishers and names for an initial peer update.
     #[arg(long, conflicts_with = "adapter_root")]
     seed: Option<PathBuf>,
+    /// Explicit public peer-adapter channels; adoption requires a pinned validation source.
+    #[arg(long)]
+    peer_updates: Option<PathBuf>,
     /// Optional exact signed validation-only public source, selected before any training.
     #[arg(long)]
     validation_source: Option<PathBuf>,
@@ -190,6 +195,8 @@ struct State {
     validation: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     catalog: Option<catalogs::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_updates: Option<peer_updates::Registry>,
 }
 
 impl State {
@@ -208,6 +215,7 @@ impl State {
             seed: None,
             validation: None,
             catalog: None,
+            peer_updates: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -328,6 +336,13 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         selection["source_discovery"] = json!("signed-same-publisher-catalogs-v1");
         selection["maximum_remembered_sources"] = json!(MAX_SOURCES);
     }
+    if let Some(peers) = peer_updates::selection(args)? {
+        ensure!(
+            args.validation_source.is_some(),
+            "train_loop_peer_validation_required"
+        );
+        selection["peer_updates"] = peers;
+    }
     if let Some(validation) = validation::selection(args)? {
         for source in &plan.sources {
             ensure!(
@@ -343,6 +358,7 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     Ok((plan, selection))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let (plan, selection) = enrollment(args)?;
     if !args.execute {
@@ -383,6 +399,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &activity.receiver,
     )
     .await?;
+    peer_updates::restore(args, &store, &mut state, &selection)?;
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -406,6 +423,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             {
                 pool = source_pool(&plan, &state);
             }
+            peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
                     attempt(
@@ -436,6 +454,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "quality_policy":selection["quality_policy"],"independent_quality_benchmark":false,
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
         "catalog_source_discovery":state.catalog.is_some(),"remembered_sources":state.sources.len(),
+        "peer_update_channels_enabled":state.peer_updates.is_some(),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
         "private_data_supported":false,"full_b05_claimed":false})
     );
@@ -637,24 +656,17 @@ async fn attempt(
     let source = &plan.sources[index];
     let sequence = state.next_sequence;
     let minimum = required_revision(source, &state.sources[index], args.repeat_sources)?;
-    let adapter = if let Some(previous) = state.latest {
-        let cycle = state
-            .cycles
-            .iter()
-            .find(|cycle| cycle.sequence == previous)
-            .context("train_loop_latest_missing")?;
-        store.validate_snapshot(
-            previous,
-            cycle
-                .snapshot
-                .as_ref()
-                .context("train_loop_latest_snapshot")?,
-        )?;
-        Some(store.cycle_path(previous)?.join("training/adapter"))
-    } else {
-        seed::adapter(args, state)?
-    };
-    let mut options = cycle_options(args, source, store.cycle_path(sequence)?, minimum, adapter)?;
+    let current = current_adapter(args, store, state)?;
+    let mut options = cycle_options(
+        args,
+        source,
+        store.cycle_path(sequence)?,
+        minimum,
+        current.adapter_root,
+    )?;
+    if current.origin["kind"] == "peer_update" {
+        options.peer_predecessor = Some(current.origin);
+    }
     if let Some(registry) = &state.catalog {
         options.source_catalog = registry.proof_for(plan, index);
     }
@@ -712,6 +724,53 @@ async fn attempt(
     Ok(())
 }
 
+struct CurrentAdapter {
+    adapter_root: Option<PathBuf>,
+    origin: Value,
+}
+
+fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<CurrentAdapter> {
+    if let Some(registry) = &state.peer_updates {
+        if let Some(peer) = peer_updates::active(args, registry, state.latest)? {
+            return Ok(CurrentAdapter {
+                adapter_root: Some(peer.adapter_root),
+                origin: peer.origin,
+            });
+        }
+    }
+    if let Some(previous) = state.latest {
+        let cycle = state
+            .cycles
+            .iter()
+            .find(|cycle| cycle.sequence == previous)
+            .context("train_loop_latest_missing")?;
+        store.validate_snapshot(
+            previous,
+            cycle
+                .snapshot
+                .as_ref()
+                .context("train_loop_latest_snapshot")?,
+        )?;
+        Ok(CurrentAdapter {
+            adapter_root: Some(store.cycle_path(previous)?.join("training/adapter")),
+            origin: json!({"kind":"local_cycle","sequence":previous}),
+        })
+    } else {
+        let adapter_root = seed::adapter(args, state)?;
+        let kind = if state.seed.is_some() {
+            "seed_import"
+        } else if adapter_root.is_some() {
+            "configured_adapter"
+        } else {
+            "pinned_base"
+        };
+        Ok(CurrentAdapter {
+            adapter_root,
+            origin: json!({"kind":kind}),
+        })
+    }
+}
+
 fn cycle_options(
     args: &Options,
     source: &Source,
@@ -724,6 +783,7 @@ fn cycle_options(
         dataset_name: source.name.clone(),
         dataset_manifest_id: source.manifest()?,
         source_catalog: None,
+        peer_predecessor: None,
         min_revision: minimum,
         cache: args.cache.clone(),
         reuse_cache: true,
@@ -859,6 +919,9 @@ fn select_successor(
     };
     if decision.approved {
         state.latest = Some(cycle.sequence);
+        if let Some(registry) = &mut state.peer_updates {
+            peer_updates::clear_active(registry);
+        }
     }
     state.completed = completed;
     state.promoted = promoted;

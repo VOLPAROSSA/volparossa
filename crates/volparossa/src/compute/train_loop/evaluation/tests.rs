@@ -244,6 +244,51 @@ fn warmstart_binds_actual_input_and_verifies_after_predecessor_pruning() {
 }
 
 #[test]
+fn peer_warmstart_retains_foreign_origin_separately_from_local_history() {
+    let (_root, path, store) = owner();
+    fixture(&store, 1, true);
+    let adapter = path.join("peer-update-0000000000000007/import/adapter");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&adapter)
+        .unwrap();
+    for (name, _) in ADAPTER_FILES {
+        write(&adapter.join(name), b"explicit non-executable peer fixture");
+    }
+    fixture_input(&store, 2, true, None, Some(&adapter));
+    let before = verify(&store, 2).unwrap();
+    let mut selection = store.read_cycle_json(2, "selection.json").unwrap();
+    let origin = json!({"kind":"peer_update","import_sequence":7,"revision":3,
+        "local_predecessor":1,"adapter_manifest_id":hex::encode([1;32]),
+        "dataset_manifest_id":hex::encode([2;32]),"comparison_sha256":hex::encode([3;32]),
+        "publisher_key":hex::encode(ed25519_dalek::SigningKey::from_bytes(&[4;32]).verifying_key().as_bytes()),
+        "adapter_files":before.input_adapter.unwrap().files});
+    selection["peer_predecessor"] = origin.clone();
+    write_json(
+        &store.cycle_path(2).unwrap().join("selection.json"),
+        &selection,
+    );
+    let record = assess(&store, 2, Some(1), Some(&adapter)).unwrap();
+    assert_eq!(record.baseline_kind, BaselineKind::ApprovedPeerUpdate);
+    assert_eq!(record.predecessor, Some(1));
+    assert_eq!(record.peer_predecessor, Some(origin));
+    write_json(
+        &store.cycle_path(2).unwrap().join("evaluation.json"),
+        &serde_json::to_value(&record).unwrap(),
+    );
+    assert_eq!(verify(&store, 2).unwrap(), record);
+    assert!(assess(&store, 2, None, Some(&adapter)).is_err());
+    selection["peer_predecessor"]["adapter_files"]["adapter_model.safetensors"]["sha256"] =
+        hex::encode([99; 32]).into();
+    write_json(
+        &store.cycle_path(2).unwrap().join("selection.json"),
+        &selection,
+    );
+    assert!(assess(&store, 2, Some(1), Some(&adapter)).is_err());
+}
+
+#[test]
 fn finite_equal_heldout_tokens_and_actual_reloaded_improvement_are_required() {
     let metric = |loss| Metric {
         loss,

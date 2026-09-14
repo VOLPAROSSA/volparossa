@@ -121,6 +121,8 @@ jobs:
           sh -n tests/integration/agent-artifact-smoke.sh
           sh -n tests/integration/agent-train-loop-smoke.sh
           python3 -B tests/integration/agent-train-loop-smoke.py self-test
+          sh -n tests/integration/agent-peer-learning-smoke.sh
+          python3 -B tests/integration/agent-peer-learning-smoke.py self-test
           python3 -B tests/integration/agent-artifact-smoke.py self-test
           python3 -B tests/integration/agent-artifact-smoke.py cycle-self-test
           sh -n tests/integration/agent-jobs-smoke.sh
@@ -804,6 +806,12 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/agent-train-loop-smoke.json"
           python3 -B tests/integration/agent-train-loop-smoke.py report "$report" "$GITHUB_SHA"
+          peer_report="$VOLPAROSSA_ALPHA_OUTPUT/agent-peer-learning-smoke.json"
+          python3 -B tests/integration/agent-peer-learning-smoke.py report "$peer_report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$peer_report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$peer_report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \

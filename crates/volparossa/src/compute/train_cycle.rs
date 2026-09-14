@@ -40,6 +40,9 @@ pub(crate) struct Options {
     /// Internal signed-catalog authorization from the enrolled training coordinator.
     #[arg(skip)]
     pub(super) source_catalog: Option<Value>,
+    /// Locally approved peer warmstart, supplied only by the owning coordinator.
+    #[arg(skip)]
+    pub(super) peer_predecessor: Option<Value>,
     /// Signed revision floor, not proof of the globally newest publication.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub(super) min_revision: Option<u64>,
@@ -267,7 +270,7 @@ fn normalized_question(text: &str) -> String {
         .to_lowercase()
 }
 
-fn guard_overlap(training_bytes: &[u8], validation_bytes: &[u8]) -> Result<()> {
+pub(super) fn guard_overlap(training_bytes: &[u8], validation_bytes: &[u8]) -> Result<()> {
     let training = guard_dataset(training_bytes)?;
     let validation = guard_dataset(validation_bytes)?;
     ensure!(
@@ -353,6 +356,13 @@ fn selection(args: &Options) -> Result<Value> {
         selected["source_catalog"] = proof.clone();
         selected["automatic_source_discovery"] = true.into();
         selected["source_discovery_scope"] = "enrolled-same-publisher-catalog".into();
+    }
+    if let Some(origin) = &args.peer_predecessor {
+        ensure!(
+            origin["kind"] == "peer_update" && args.adapter_root.is_some(),
+            "train_cycle_peer_predecessor"
+        );
+        selected["peer_predecessor"] = origin.clone();
     }
     Ok(selected)
 }

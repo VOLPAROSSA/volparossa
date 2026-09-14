@@ -93,10 +93,10 @@ print_plan() {
         if [ "$agent_train_loop" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA owner-enabled autonomous public train-loop plan:' \
-                '  R5 public seed/dataset, R4 protected import and two actual eight-update warmstart cycles;' \
-                '  automatically share two R4-owner-signed updates; explicitly re-offer unchanged original dataset;' \
-                '  another Client imports both over protected MPTCP and performs actual isolated inference;' \
-                '  same repeated source, exact worker/input/capture/cleanup evidence; no full B05 or alpha claim.'
+                '  signed R5 catalog refresh discovers a later source; R4 runs two actual warmstart cycles and both quality gates;' \
+                '  share only approved R4 updates; explicitly re-offer original training and validation datasets before R5 stops;' \
+                '  a fresh Client must discover, compare, adopt and further train from actual received peer weights without a seed;' \
+                '  retain separate ordinary import/inference proof and complete process/network cleanup; no full B05 or alpha claim.'
             return
         fi
         if [ "$agent_train_cycle" = yes ]; then
@@ -576,7 +576,7 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     done
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py agent-train-loop-catalog.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.sh agent-peer-learning-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
     done
 fi
@@ -1899,6 +1899,8 @@ if [ "$agent_train_loop" = yes ]; then
     . "$source_directory/tests/integration/content-replication-smoke.sh"
     # shellcheck source=tests/integration/agent-train-loop-smoke.sh
     . "$source_directory/tests/integration/agent-train-loop-smoke.sh"
+    # shellcheck source=tests/integration/agent-peer-learning-smoke.sh
+    . "$source_directory/tests/integration/agent-peer-learning-smoke.sh"
 fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
@@ -2002,7 +2004,7 @@ if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py content-replication-smoke.py content-replication-capture.py; do
+    for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
     done
 fi
