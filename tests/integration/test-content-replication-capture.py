@@ -226,6 +226,77 @@ class ReplicationCaptureTests(unittest.TestCase):
         self.assertEqual(CAPTURE.MDNS_INTERFACE_ADDRESSES["relay4", "ar1"],
                          {"10.241.94.1", "10.241.94.2"})
 
+    def test_repair_restart_control_is_exact_link_bound_and_never_a_data_exception(self):
+        cases = (("relay4", "r4b1", 50, "49.165.5.1", "40.156.1.1"),
+                 ("relay1", "r1x", 21, "44.160.1.1", "46.162.3.1"),
+                 ("relay0", "r0x2", 26, "42.158.0.1", "51.167.7.1"),
+                 ("relay4", "ar1", 94, "49.165.5.1", "44.160.1.1"),
+                 ("client", "cb2", 41, "43.159.1.1", "41.157.2.1"))
+        for node, iface, segment, local_public, remote_public in cases:
+            current = layout("reserve-fetch") if node == "client" else layout()
+            if node != "client":
+                current["phase"] = "repair-uptake"
+                current["relays"]["relay1"] = CAPTURE.PUBLIC["relay1"]
+            local, remote = f"10.241.{segment}.1", f"10.241.{segment}.2"
+            self.assertEqual(CAPTURE.EXACT_CONTROL_LINKS[node, iface],
+                             ({local, local_public}, {remote, remote_public}))
+            for source, destination in ((local, remote), (remote, local),
+                                         (local_public, remote), (local, remote_public)):
+                self.assertEqual(classify(current, node, source, destination,
+                                          dport=41000, iface=iface), {"control_packets": 1})
+                udp = struct.pack("!HHHH", 45678, 41000, 8, 0)
+                quote = ipv4_frame(source, destination, socket.IPPROTO_UDP, udp)[14:]
+                error = b"\x03\x03" + bytes(6) + quote
+                self.assertEqual(classify(current, node, destination, source, socket.IPPROTO_ICMP,
+                                          payload=error, iface=iface),
+                                 {"control_packets": 1, "control_port_unreachable_packets": 1})
+                self.assertEqual(classify(current, node, destination, source, socket.IPPROTO_ICMP,
+                                          payload=error, iface="wrong0"), {"forbidden_packets": 1})
+            for source, destination, port, interface in ((local, remote, 443, iface),
+                    (local, remote, 41000, "wrong0"), (local, local_public, 41000, iface),
+                    ("10.241.99.1", remote, 41000, iface), (local, "203.0.113.1", 41000, iface)):
+                self.assertEqual(classify(current, node, source, destination,
+                                          dport=port, iface=interface), {"forbidden_packets": 1})
+
+    def test_forbidden_wireguard_quote_and_igmp_get_headers_not_a_pass(self):
+        marker = b"never-store-this-content"
+        udp = struct.pack("!HHHH", 45678, 23000, 12 + len(marker), 0) + b"\x04\0\0\0" + marker
+        quote = ipv4_frame("49.165.5.1", "42.158.0.1", socket.IPPROTO_UDP, udp)[14:]
+        frame = ipv4_frame("42.158.0.1", "49.165.5.1", socket.IPPROTO_ICMP, b"\x03\x03" + bytes(6) + quote)
+        packet = CAPTURE.decode_frame(frame)
+        self.assertEqual(CAPTURE.classify(layout(), "relay4", *packet[1:], "ar0"),
+                         {"forbidden_packets": 1})
+        sample = CAPTURE.fixture_header_sample(packet, "ar0", frame)
+        self.assertEqual(sample["quoted_udp"], {"source": "relay4.public", "destination": "relay0.public",
+                         "source_port": "other_nonzero", "destination_port": "other_nonzero",
+                         "classification": "wireguard_header"})
+        self.assertNotIn(marker.decode(), json.dumps(sample))
+        report = bytes([0x22, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 0]) + socket.inet_aton("224.0.0.251")
+        frame = ipv4_frame("10.241.90.1", "224.0.0.22", socket.IPPROTO_IGMP, report)
+        packet = CAPTURE.decode_frame(frame)
+        self.assertEqual(CAPTURE.classify(layout(), "relay4", *packet[1:], "ar0"),
+                         {"forbidden_packets": 1})
+        sample = CAPTURE.fixture_header_sample(packet, "ar0", frame)
+        self.assertEqual(sample["source"], "relay4.ar0")
+        self.assertEqual(sample["igmp"]["records"], [{"type": 4, "auxiliary_words": 0,
+                                                      "source_count": 0, "group": "mdns.multicast"}])
+        self.assertEqual(sample["igmp"]["parse"], "complete")
+        incomplete = CAPTURE.decode_frame(ipv4_frame("10.241.90.1", "224.0.0.22", socket.IPPROTO_IGMP,
+                                                     report[:-1]))
+        self.assertEqual(CAPTURE.fixture_header_sample(incomplete, "ar0", b"")["igmp"]["parse"], "incomplete")
+
+    def test_failure_headers_are_deduplicated_capped_and_unknown_addresses_redacted(self):
+        record = {"forbidden_header_samples": [], "forbidden_header_sample_overflow_packets": 0}
+        for protocol in range(1, CAPTURE.MAX_HEADER_SAMPLES + 4):
+            packet = (4, protocol, "203.0.113.123", 45678, "192.0.2.45", 23456, b"private-payload")
+            for _ in range(2):
+                CAPTURE.record_forbidden_header(record, packet, "ar0", b"")
+        self.assertEqual(len(record["forbidden_header_samples"]), CAPTURE.MAX_HEADER_SAMPLES)
+        self.assertEqual(record["forbidden_header_sample_overflow_packets"], 6)
+        self.assertTrue(all(row["packets"] == 2 for row in record["forbidden_header_samples"]))
+        for text in ("203.0.113.123", "192.0.2.45", "private-payload", "45678", "23456"):
+            self.assertNotIn(text, json.dumps(record))
+
     def test_layout_and_frame_bounds_reject_substitution_fragments_and_truncation(self):
         current = layout()
         for path, value in (("phase", "forged"), ("client", dict(node="client", ip="43.159.1.1")),
