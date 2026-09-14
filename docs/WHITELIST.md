@@ -4,6 +4,11 @@ VOLPAROSSA exits are policy-enforcing proxies, never open proxies. Every enabled
 client must validate the same canonical, versioned manifest and exact hash. Missing, expired,
 ambiguous, mismatched, or insufficiently signed policy fails closed.
 
+The user-requested [decentralized agents extension](DECENTRALIZED_AGENTS.md) adds **fully automatic**
+content whitelist/blacklist governance. It is not implemented by this destination allowlist.
+Its assessment rules, independent decision membership, conflict resolution and signed-activation
+migration are separate work; current trust anchors and enforcement remain in force meanwhile.
+
 ## Trust model
 
 Production defaults require three unique valid Ed25519 signatures from five configured production
@@ -45,8 +50,12 @@ UDP, another port, arbitrary DNS, or a direct connection.
 Nodes may advertise a policy capability key and exact version/hash so compatible exits can be found,
 and signed policy bytes may be distributed through decentralized peers. Distribution does not grant
 trust. Activation occurs only after canonical decoding, threshold verification against the local
-trust store, environment checks, time/skew/lifetime bounds, semantic validation, and monotonic
-rollback prevention.
+trust store, environment checks, time/skew/lifetime bounds and semantic validation. Monotonic
+rollback prevention remains required but is not implemented in the current activation chain:
+the verifier has no previously accepted version, and the periodic policy reload replaces the
+active snapshot without a durable version floor. An older, still-valid, correctly signed
+manifest is therefore not rejected merely for being older. Do not infer downgrade protection
+from signature verification or a route's pinned policy hash.
 
 An existing route context remains pinned to its policy/exit for established flows. Policy expiry or
 replacement blocks new flows and causes bounded drain/reselection; it must not silently move an

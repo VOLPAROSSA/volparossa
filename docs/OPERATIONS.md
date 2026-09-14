@@ -953,8 +953,9 @@ This block requires the existing `sharing` and `download_sharing` settings, with
 interfaces and usable capacities; it does not configure those interfaces, enable roles or
 grant new Exit policy permissions. The hostname and TCP port must already be permitted by the
 active signed policy. The directory must be new or the same exclusively owned contribution
-cache; arbitrary existing directories are not adopted. The listener starts empty, and only
-valid retained publications are offered after startup or admission.
+cache; arbitrary existing directories are not adopted. An empty configured listener now offers
+its generic receiving capability so publishers can contact it. This does not advertise possession
+of any object; object lookup and complete-custody receipts require actual verified retained bytes.
 
 Enabling this setting is explicit consent to retain and serve successfully verified public
 native/named objects and supported anonymous cooperative-HTTPS or origin-digest content. Private messages and
@@ -1009,6 +1010,46 @@ The [publish/restart/network proof on `ac782769`](https://github.com/VOLPAROSSA/
 passes: an ordinary publisher supplies a site through this command, its source files are
 removed, the provider restarts with the same journal, and an independent client fetches all
 2,097,628 bytes by trusted publisher/name. The provider node remains online for that retrieval.
+
+### Depositing a public copy with other participants
+
+The development CLI adds `content custody deposit` and `content custody inspect`. Use the
+original public manifest and its publisher's encrypted identity, plus independently selected
+provider public keys. Receiving nodes must have the preceding contribution service configured;
+ordinary `content serve` alone is not a custody receiver. Their endpoints must remain authorized
+by the existing Exit policy. Local storage/stream/CLI-process tests pass; the new dedicated
+`content-custody` network scenario has not yet supplied a passing protected-route result.
+
+```sh
+volparossa content custody deposit \
+  --manifest ./notes.v1.pb --cache ./content-cache \
+  --identity /path/to/existing/identity.key \
+  --provider-key <provider-a-public-key-hex> \
+  --provider-key <provider-b-public-key-hex>
+
+volparossa content custody inspect \
+  --manifest ./notes.v1.pb --identity /path/to/existing/identity.key \
+  --provider-key <provider-a-public-key-hex> \
+  --provider-key <provider-b-public-key-hex>
+```
+
+Deposit streams verified chunks through the normal agent/Relay/Exit route; it does not pass
+source paths or publisher private keys to a peer. Each receiver verifies the whole object,
+commits its existing non-evicting replica journal and registers the copy before signing a
+Complete receipt. Retries retain the original manifest and expiry. Admission respects existing
+storage quotas and does not evict another live publication to make room.
+
+Inspect needs no source cache and performs no upload. It obtains a fresh signed Complete or
+Missing observation of that exact original publication. JSON retains each signed observation
+and reports which provider handoffs completed, even when another provider fails. The command
+returns nonzero unless every requested provider confirms a complete copy; a successful Missing
+observation is therefore an incomplete-custody result, not a complete copy. Reported object
+bytes describe retained logical content, not upload traffic (a retry can upload no new bytes).
+
+Keep the original files while establishing copies. Signed receipts establish observations at
+the stated time, not future reachability, a global latest revision or permanent website uptime.
+This explicit workflow does not yet choose holders automatically or repair a lost replica.
+Private messages use the separate encrypted mailbox workflow, not public custody.
 
 ### One-shot browser download
 
