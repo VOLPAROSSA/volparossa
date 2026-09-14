@@ -135,7 +135,6 @@ agent_artifact_run() {
         || fail ARTIFACT_PROVIDERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    content_provider_control_underlay
     artifact_client_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
     case $artifact_client_pid in ''|0|*[!0-9]*) fail ARTIFACT_CLIENT_PID_INVALID ;; esac
     nsenter --target "$artifact_client_pid" --mount setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" \
@@ -197,13 +196,22 @@ agent_artifact_run() {
     agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail ARTIFACT_SOURCE_REMOVAL_FAILED
     agent_artifact_restart "$provider_node_a" || fail ARTIFACT_PROVIDER_RESTART_FAILED
     content_custody_status "$provider_node_b" artifact-still-empty 0 || fail ARTIFACT_UNUSED_PROVIDER_CHANGED
+    PHASE=agent-artifact-fresh-control
     benchmark_select_route agent-artifact mptcp || fail ARTIFACT_FRESH_ROUTE_UNAVAILABLE
     benchmark_bind_slots "$WORK/agent-artifact-selection.json" || fail ARTIFACT_FRESH_ROUTE_INVALID
     custody_context=$(jq -er '.route_context_id' "$WORK/agent-artifact-selection.json")
     agent_artifact_cli client content status >"$WORK/agent-artifact-client-fetch-status.json" || fail ARTIFACT_FRESH_CONTROL_UNAVAILABLE
-    jq -e --arg peer "$provider_control_peer" '.control_relay_peer_id == $peer' \
-        "$WORK/agent-artifact-client-fetch-status.json" >/dev/null || fail ARTIFACT_CONTROL_OWNER_CHANGED
-    jq --arg context "$custody_context" '.route_context_id=$context' \
+    # The probe's disconnected route owns no subsequent fetch. Training/restart may
+    # legitimately select another control relay; bind new links to that actual owner.
+    # Delaying setup avoids stale cp/pc links, filters and routes from the probe.
+    provider_control_peer=$(jq -er '.control_relay_peer_id | select(type == "string" and length > 0)' \
+        "$WORK/agent-artifact-client-fetch-status.json") || fail ARTIFACT_FRESH_CONTROL_UNAVAILABLE
+    jq -e --arg peer "$provider_control_peer" --arg a "$provider_node_a" --arg b "$provider_node_b" \
+        '.[$a] != $peer and .[$b] != $peer and ([.relay0,.relay1,.relay2] | index($peer) != null)' \
+        "$WORK/a01-expected-peers.json" >/dev/null || fail ARTIFACT_FRESH_CONTROL_INVALID
+    content_provider_control_underlay
+    jq --arg context "$custody_context" --arg control "$provider_control_peer" \
+        '.route_context_id=$context | .control_relay_peer_id=$control' \
         "$WORK/agent-artifact-producer-layout.json" >"$WORK/agent-artifact-layout.json"
     PHASE=agent-artifact-fetch
     artifact_cache=$WORK/state-client/agent-artifact-cache
@@ -213,6 +221,9 @@ agent_artifact_run() {
         --name disposable-agent-adapter --dataset-name disposable-agent-dataset --min-revision 1 \
         --cache "$artifact_cache" --output "$artifact_user/received" \
         >"$WORK/agent-artifact-fetch.json" 2>"$WORK/agent-artifact-fetch.err" || fail ARTIFACT_PROTECTED_FETCH_FAILED
+    jq -e --arg control "$provider_control_peer" \
+        '.adapter_receipt.control_relay_peer_id == $control and .dataset_receipt.control_relay_peer_id == $control' \
+        "$WORK/agent-artifact-fetch.json" >/dev/null || fail ARTIFACT_FETCH_CONTROL_OWNER_CHANGED
     content_custody_phase_finish 2
     benchmark_disconnect_route agent-artifact || fail ARTIFACT_ROUTE_CLEANUP_FAILED
     [ "$(stat -Lc '%a:%u:%g' "$artifact_cache")" = "700:$AGENT_UID:$AGENT_GID" ] || fail ARTIFACT_AGENT_CACHE_OWNERSHIP

@@ -179,6 +179,35 @@ def check_lineage(train_owner, infer_owner, producer, restart):
                 "compute CLI did not execute inside its claimed real service namespace")
 
 
+def check_control_binding(layout, peers, fetch, binding):
+    probe = binding["producer_layout"]
+    owner = layout["control_relay_peer_id"]
+    nodes = layout["provider_nodes"]
+    require(all(probe[key] == layout[key] for key in ("provider_nodes", "producer_node", "consumer_node", "provider_keys"))
+            and probe["control_relay_peer_id"] == binding["probe_status"]["control_relay_peer_id"]
+            and owner == binding["fetch_status"]["control_relay_peer_id"]
+            and owner in {peers[node] for node in ("relay0", "relay1", "relay2")}
+            and owner not in {peers[node] for node in nodes}
+            and all(re.fullmatch(r"[0-9a-f]{32}", item["route_context_id"]) for item in (probe, layout))
+            and probe["route_context_id"] != layout["route_context_id"],
+            "fresh control selection changed producer identity or reused the disconnected probe")
+    require(all(fetch[kind + "_receipt"]["control_relay_peer_id"] == owner for kind in ("adapter", "dataset")),
+            "artifact objects were fetched through a different control owner")
+    addresses = CUSTODY["SHARED"]["PUBLIC_IPS"]
+    control = next(node for node in ("relay0", "relay1", "relay2") if peers[node] == owner)
+    routes = binding["routes"]
+    require(set(routes) == set(nodes), "actual control route coverage incomplete")
+    for index, node in enumerate(nodes):
+        for direction, device, gateway, source, destination in (
+                ("out", f"cp{index}", f"10.241.{80+index}.2", addresses[control], addresses[node]),
+                ("back", f"pc{index}", f"10.241.{80+index}.1", addresses[node], addresses[control])):
+            rows = routes[node][direction]
+            require(isinstance(rows, list) and len(rows) == 1
+                    and all(rows[0].get(key) == value for key, value in
+                            dict(dev=device, gateway=gateway, prefsrc=source, dst=destination).items()),
+                    "actual fresh-owner route differs from its exact filtered control link")
+
+
 def check_evidence(evidence, revision):
     require(evidence["success"] is True and evidence["source_revision"] == revision, "incomplete adapter reuse")
     TRAIN["check_worker"](evidence["training"], revision)
@@ -198,6 +227,7 @@ def check_evidence(evidence, revision):
     require(len(set(layout["provider_keys"].values())) == 2
             and layout["control_relay_peer_id"] not in {peers[n] for n in nodes}
             and all(CUSTODY["peer_key"](peers[n]) == layout["provider_keys"][n] for n in nodes), "provider identity binding differs")
+    check_control_binding(layout, peers, evidence["fetch"], evidence["control_binding"])
     producer = layout["producer_node"]
     require(producer in nodes and layout["consumer_node"] == "client" and producer != "client",
             "producer and consumer are not different logical nodes")
@@ -284,6 +314,13 @@ def build_evidence(work, revision):
     evidence = {name.replace("-", "_"): read(work / f"agent-artifact-{name}.json") for name in names}
     evidence["cleanup"] = evidence.pop("private_cleanup")
     evidence.update(success=True, source_revision=revision, peers=read(work / "a01-expected-peers.json"))
+    evidence["control_binding"] = {
+        "producer_layout": read(work / "agent-artifact-producer-layout.json"),
+        "probe_status": read(work / "agent-artifact-client-status.json"),
+        "fetch_status": read(work / "agent-artifact-client-fetch-status.json"),
+        "routes": {node: {direction: read(work / f"content-provider-control-{node}-{direction}.json")
+                          for direction in ("out", "back")}
+                   for node in evidence["layout"]["provider_nodes"]}}
     producer = evidence["layout"]["producer_node"]
     evidence["providers"] = {node: {
         "restart": read(work / f"agent-artifact-{node}-restart.json") if node == producer else None,
@@ -511,12 +548,56 @@ def cycle_self_test():
     print("agent-train-cycle checker positive + eight rejection cases PASS; synthetic only")
 
 
+def control_binding_self_test():
+    fixture = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["fixture"]()
+    peers, addresses = fixture["expected_peers"], CUSTODY["SHARED"]["PUBLIC_IPS"]
+    for control in ("relay0", "relay1"):
+        layout = dict(fixture["layout"], producer_node="relay4", consumer_node="client",
+                      route_context_id="b" * 32, control_relay_peer_id=peers[control])
+        probe = dict(layout, route_context_id="a" * 32, control_relay_peer_id=peers["relay0"])
+        fetch = {kind + "_receipt": {"control_relay_peer_id": peers[control]} for kind in ("adapter", "dataset")}
+        routes = {}
+        for index, node in enumerate(layout["provider_nodes"]):
+            routes[node] = {
+                "out": [dict(dev=f"cp{index}", gateway=f"10.241.{80+index}.2",
+                             prefsrc=addresses[control], dst=addresses[node])],
+                "back": [dict(dev=f"pc{index}", gateway=f"10.241.{80+index}.1",
+                              prefsrc=addresses[node], dst=addresses[control])]}
+        binding = dict(producer_layout=probe, probe_status={"control_relay_peer_id": peers["relay0"]},
+                       fetch_status={"control_relay_peer_id": peers[control]}, routes=routes)
+        check_control_binding(layout, peers, fetch, binding)
+    # Changed-owner positive above binds new status, actual object receipts and both
+    # kernel route directions; changing a label alone cannot turn the old proof green.
+    mutations = [
+        lambda b, f: b["fetch_status"].update(control_relay_peer_id=peers["relay0"]),
+        lambda b, f: b["probe_status"].update(control_relay_peer_id=peers["relay1"]),
+        lambda b, f: b["producer_layout"].update(producer_node="relay5"),
+        lambda b, f: b["producer_layout"].update(route_context_id="b" * 32),
+        lambda b, f: f["adapter_receipt"].update(control_relay_peer_id=peers["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(prefsrc=addresses["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["back"][0].update(dst=addresses["relay0"]),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(dev="underlay"),
+        lambda b, f: b["routes"]["relay4"]["out"][0].update(gateway="10.241.80.1"),
+        lambda b, f: b["routes"].pop("relay5"),
+    ]
+    for mutate in mutations:
+        bad_binding, bad_fetch = copy.deepcopy(binding), copy.deepcopy(fetch)
+        mutate(bad_binding, bad_fetch)
+        try:
+            check_control_binding(layout, peers, bad_fetch, bad_binding)
+        except ValueError:
+            continue
+        raise AssertionError("stale or relabeled artifact control owner accepted")
+    print("agent-artifact owner binding: unchanged/changed positives + ten rejections PASS; synthetic only")
+
+
 def main():
     args = sys.argv[1:]
     if args == ["cycle-self-test"]:
         cycle_self_test()
         return
     if args == ["self-test"]:
+        control_binding_self_test()
         source = (HERE.parent.parent / "README.md").read_text()
         value = dataset("a" * 40, source)
         require(value["heldout"][0]["question"] != value["train"][0]["question"], "heldout overlap")
