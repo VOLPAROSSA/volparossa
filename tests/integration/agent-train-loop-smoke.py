@@ -457,6 +457,20 @@ def check_evaluation(cycle, previous, predecessor, publisher):
     return approved
 
 
+def check_validation_outputs(outputs):
+    require(isinstance(outputs, list) and len(outputs) == 1, "wrong second-source output count")
+    output = outputs[0]
+    require(isinstance(output, dict)
+            and set(output) == {"sample_index", "text", "generated_tokens", "text_truncated"},
+            "second-source output is not the fixed worker result profile")
+    require(type(output["sample_index"]) is int and output["sample_index"] == 0
+            and isinstance(output["text"], str)
+            and len(json.dumps(output["text"], ensure_ascii=True).encode("ascii")) <= 1024
+            and type(output["generated_tokens"]) is int and 0 <= output["generated_tokens"] <= 64
+            and type(output["text_truncated"]) is bool,
+            "second-source output index, text, token bound or truncation flag differs")
+
+
 def check_validation(cycle):
     files = cycle["validation"]["files"]
     require(set(files) == set(VALIDATION_FILES), "actual validation file set incomplete")
@@ -478,6 +492,7 @@ def check_validation(cycle):
         report = envelope["report"]
         require({key:value for key,value in report.items() if key != "supervisor"}
                 == parsed[f"validation/{stage}/report.json"], "actual validation worker report was substituted")
+        check_validation_outputs(report["outputs"])
         require(report["version"] == 1 and report["kind"] == "result" and report["status"] == "ok"
                 and report["mode"] == "infer" and report["device"] == "cpu" and report["threads"] == 2
                 and report["updates_completed"] == 0 and report["artifacts"] == []
@@ -487,7 +502,6 @@ def check_validation(cycle):
                 and report["dataset"]["source_revision"] == dataset["source_revision"]
                 and report["dataset"]["training_examples"] == 0
                 and report["dataset"]["heldout_examples"] == report["dataset"]["inference_examples"] == 1
-                and len(report["outputs"]) == 1 and isinstance(report["outputs"][0], str)
                 and report["better_answers_claimed"] is False and report["network_policy_changed"] is False,
                 "real bounded zero-update inference on exact second-source input missing")
         supervisor = report["supervisor"]
@@ -578,7 +592,7 @@ def check_chain(evidence):
         require(result["training_report_sha256"] == cycle["report"]["sha256"]
                 and result["bundle"]["sha256"] == cycle["bundle"]["sha256"], "actual report/bundle hash differs")
         accepted = check_evaluation(cycle, latest, previous, source)
-        require(saved["training"] is None
+        require(saved.get("training") is None
                 and saved["snapshot"] == dict(cycle["content_files"], **{"evaluation.json": cycle["evaluation_file"]},
                                               **identities(cycle["validation"]["files"])),
                 "durable candidate snapshot does not bind actual files and immutable evaluation")
@@ -983,7 +997,9 @@ def synthetic_validation(cycle, publisher, approved):
             updates_completed=0, artifacts=[], model=trained["model"], backend_versions=trained["backend_versions"],
             dataset=dict(source["dataset"], source_revision="a" * 40, training_examples=0, heldout_examples=1,
                 inference_examples=1, visibility="public", license="GPL-3.0-only"),
-            outputs=["Parser fixture only; no model ran."], better_answers_claimed=False, network_policy_changed=False,
+            outputs=[dict(sample_index=0, text="Parser fixture only; no model ran.",
+                          generated_tokens=8, text_truncated=False)],
+            better_answers_claimed=False, network_policy_changed=False,
             input_adapter=adapter, baseline_evaluation=dict(loss=2.0 if stage == "baseline" else 1.5 if approved else 2.5,
                 target_tokens=8), elapsed_ms=1000)
         files[f"validation/{stage}/report.json"] = document(report)
@@ -1077,7 +1093,7 @@ def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True,
         cycle.update(evaluation_file=file_digest(raw_decision), evaluation_hex=raw_decision.hex())
         loop["cycles"].append(cycle)
         state["cycles"].append(dict(sequence=sequence, phase="complete" if approved else "rejected",
-            training=None, snapshot=dict(identities, **{"evaluation.json":cycle["evaluation_file"]},
+            snapshot=dict(identities, **{"evaluation.json":cycle["evaluation_file"]},
                 **{name:{key:value[key] for key in ("sha256", "bytes")} for name,value in cycle["validation"]["files"].items()}),
             publication=dict(manifest_id=publication["sha256"]) if approved else None))
         if approved:
@@ -1112,6 +1128,11 @@ def self_test():
         check_chain(synthetic_chain(decisions))
         check_chain(synthetic_chain(second_decisions=decisions))
     check_chain(synthetic_chain((False, True), (2.0 - 1e-6, 0.0)))
+    explicit_null = synthetic_chain()
+    for cycle in explicit_null["loop"]["state"]["cycles"]:
+        require("training" not in cycle, "fixture differs from completed-cycle serde omission")
+        cycle["training"] = None
+    check_chain(explicit_null)
     value = synthetic_chain()
     original, training, owner = value["originals"], value["training"], value["owner_key"]["identity_public_key_hex"]
     loop = value["loop"]
@@ -1121,6 +1142,7 @@ def self_test():
         (("loop", "enrollment", "source_choice_uses_cache_inventory"), True),
         (("summary", "pending_publications"), 1),
         (("loop", "state", "latest"), 1),
+        (("loop", "state", "cycles", 0, "training"), {}),
         (("loop", "cycles", 1, "result", "updates_completed"), 7),
         (("loop", "cycles", 1, "manifest", "sha256"), "0" * 64),
         (("loop", "cycles", 1, "provenance", "expires_unix_seconds"), 901),
@@ -1171,9 +1193,32 @@ def self_test():
         except (KeyError, ValueError):
             continue
         raise AssertionError("non-inference or wrong-adapter second-source report accepted")
-    print("agent-train-loop checker: both gates/four outcomes, epsilon/zero-loss + 26 rejections PASS; synthetic only")
+    print("agent-train-loop checker: both gates/four outcomes, omitted/null completed training, epsilon/zero-loss + 27 rejections PASS; synthetic only")
+    validation_outputs_test()
     observation_file_test()
     shared_updates_test()
+
+
+def validation_outputs_test():
+    # Exact worker.generate result shape; these are parser fixtures, not generated answers.
+    output = dict(sample_index=0, text="Synthetic public answer.", generated_tokens=8, text_truncated=False)
+    check_validation_outputs([output])
+    check_validation_outputs([dict(output, text="", generated_tokens=0)])
+    check_validation_outputs([dict(output, text="\u00e9", generated_tokens=64, text_truncated=True)])
+    invalid = [None, [], [output, output], ["old incorrect string fixture"], [dict(output, extra=True)],
+               [{key:value for key,value in output.items() if key != "text_truncated"}]]
+    for field, value in (("sample_index", 1), ("sample_index", False), ("text", None),
+                         ("text", "x" * 1023), ("text", "\u00e9" * 171),
+                         ("generated_tokens", -1), ("generated_tokens", 65),
+                         ("generated_tokens", True), ("text_truncated", "false")):
+        invalid.append([dict(output, **{field:value})])
+    for value in invalid:
+        try:
+            check_validation_outputs(value)
+        except ValueError:
+            continue
+        raise AssertionError("invalid fixed-worker second-source output accepted")
+    print("agent-train-loop actual worker output profile + 15 shape/index/text/token/flag rejections PASS; synthetic only")
 
 
 def shared_updates_test():
