@@ -27,7 +27,11 @@ candidate adds explicitly provisioned SmolLM2 CPU inference/adapter training in 
 worker (`volparossa compute run`, preview by default). A new explicit `content agent pack/fetch`
 candidate binds an adapter to its signed public dataset and reuses protected content retrieval;
 `compute run --adapter-root ...` can request the received adapter in the isolated worker.
-Actual training and cross-node model-use proofs are pending. Source selection must consider
+[The distinct-node guest proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881)
+now passes on `38814d30`: eight real CPU training updates, protected adapter retrieval after
+original source removal/restart, and execution with the exact received weights on another node.
+The fixed base model/runtime are explicitly provisioned, not automatically distributed.
+Source selection must consider
 eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
 Autonomous source selection/ingestion, peer execution and governance remain required work,
 not an implemented distributed brain or a guarantee of private remote execution.

@@ -138,9 +138,11 @@ The initial resource boundary includes two CPU threads maximum, idle CPU/IO prio
 per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
 RSS/output cancellation and an owner-cancellation input. Sampled RSS is **not** a hard cgroup
 memory cap, and this foreground CLI does not yet detect all interactive, thermal or battery
-conditions. Actual model execution and sandbox observations must pass the disposable-guest
-smoke before claiming B01; improved answer quality, distributed training and the full brain
-remain separate work. A small development model is not sufficient evidence for reliable
+conditions. Actual model execution and sandbox observations now pass the source-bound
+distinct-node smoke below: eight CPU optimizer updates change 230,400 LoRA parameters,
+the original base remains unchanged, and a fresh base/adapter reload is evaluated.
+B01 still needs measured owner-priority pause/resume/cancellation; improved answer quality, distributed
+training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
 
 ### Cache-backed adapter candidate
@@ -168,14 +170,23 @@ All paths above are examples; supply absolute paths/private output parents and t
 compute runtime/model/output arguments. `--execute` is required for computation; fetching
 does not activate an adapter. `--cache-only --reuse-cache` is an explicit offline option,
 not the default. Five focused Pack/CLI tests, four codec/native-chunk tests and eleven worker
-protocol/adapter-validation tests pass locally. These are not a live-model or two-node pass;
-the new `agent-artifact` guest scenario trains/publishes in one producer's actual namespace,
+protocol/adapter-validation tests pass locally. Separately, the
+[`agent-artifact` guest run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881)
+on exact source `38814d30221c11ff73ef688f7a430c8b26fec3fe` now proves a live-model/two-node pass.
+It trains/publishes in one producer's actual namespace,
 restarts its durable contribution store after removing trainer files/key/cache, and requires
 a different Client to fetch both objects over protected MPTCP and execute the received adapter.
 The observer binds both jobs to distinct node service processes/namespaces and checks the
 actual read-only input inodes. The fixture deliberately shares a pre-provisioned read-only
-base/runtime; it does not prove base-model distribution. This scenario is still awaiting a
-passing live result. Native peer fetch
+base/runtime; it does not prove base-model distribution. R4's eight optimizer updates are
+followed by its durable-cache restart, a distinct Client's protected retrieval of 943,733 adapter
+bytes and 1,005 dataset bytes with zero origin bytes, and actual use of the same 230,400 trained
+parameters through read-only received inodes. Cache-only reopening after provider stop,
+complete private/network cleanup and unchanged original guest-state hashes also pass.
+The exact-source checker independently reconstructs the retained raw evidence; artifact and
+hash details are recorded in [implementation status](IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
+This completes B02's explicit transfer/reuse scope, not automatic model activation or improved
+answer quality. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
 
 ## Owner-first resource allocation
@@ -194,6 +205,12 @@ job. Preserve local-first work when it is faster or required by privacy. Expirin
 idempotent task IDs and bounded re-assignment handle disconnecting peers; validation/repair
 work must itself have a budget. Zero disturbance or additive speedup cannot be guaranteed
 without measurement on representative devices.
+
+Task size is not the same as a worker lease: large or long-running workflows should be split,
+checkpointed and resumed across multiple bounded steps. No final whole-workflow size or duration
+limit is implied by the first worker's four inference rows and 600-second lease. Per-device
+resource limits remain necessary. General workflow continuation and checkpoint scheduling are
+still unimplemented; no unlimited execution permission follows from accepting a large task.
 
 ## Private tasks and training data
 
@@ -267,7 +284,8 @@ host; removal means withdrawing execution/serving authority and deleting only lo
 artifacts under the owner's storage policy. Network-wide erasure of every copy is not promised.
 Validated formats still require resource isolation: even a syntactically valid model can
 consume excessive resources, as the [ONNX Runtime model-validation guidance](https://onnxruntime.ai/docs/)
-explicitly notes. No inference backend or model dependency has been selected or added yet.
+explicitly notes. The pinned development backend above is implemented; this is not approval
+to execute arbitrary peer-selected models or dependencies.
 
 ## Executable sequence and completion evidence
 
@@ -277,8 +295,13 @@ build larger connected slices, without claiming these unchecked requirements are
 
 - [ ] B01: isolated on-device execution and genuine bounded training; measured owner-priority
   pause/resume/cancellation, not a stub model or an unconstrained background process.
-- [ ] B02: transfer an original compatible trained artifact over the real protected content
+  Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; measured
+  owner-priority pause/resume/cancellation remains incomplete.
+- [x] B02: transfer an original compatible trained artifact over the real protected content
   network, validate it on another node and execute it there; restart/custody retains validity.
+  [Run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881), exact source
+  `38814d30221c11ff73ef688f7a430c8b26fec3fe`, proves this explicit public-adapter scope with a
+  pre-provisioned common base/runtime; automatic activation/distributed training are not included.
 - [ ] B03: decompose and distribute useful user jobs across independent nodes, collect verified
   results and recover from worker loss with bounded duplication and actual resource accounting.
 - [ ] B04: demonstrate private input, training-update and result handling against the stated
@@ -291,5 +314,6 @@ build larger connected slices, without claiming these unchecked requirements are
 - [ ] B07: detect an injected bad update/worker, quarantine it without a cascade of false bans,
   recover useful work and restore an accepted artifact under the same contribution budgets.
 
-These requirements add real remaining work. Existing A01--A15 and C01--C07 evidence does not
-prove any B checkpoint, and no new completion percentage or delivery-time guarantee follows.
+These requirements add real remaining work. Existing A01--A15 and C01--C07 evidence alone does
+not prove B checkpoints; B02 has its own exact-source run above. No new completion percentage
+or delivery-time guarantee follows.
