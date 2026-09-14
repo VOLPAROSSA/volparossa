@@ -4,6 +4,7 @@ mod broker;
 mod peer;
 mod sandbox;
 mod supervise;
+mod train_cycle;
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -26,6 +27,8 @@ const MAX_STREAM_BYTES: usize = 256 * 1024;
 pub(crate) enum Command {
     /// Preview or explicitly run an isolated job on an already provisioned open model.
     Run(Box<Options>),
+    /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
+    TrainCycle(Box<train_cycle::Options>),
     /// Explicit same-UID public-inference service using the fixed isolated worker.
     Serve(Box<broker::Serve>),
     /// Attach a local broker or perform a bounded protected peer job exchange.
@@ -94,6 +97,7 @@ struct WorkerRequest {
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let options = match command {
         Command::Run(options) => options,
+        Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,
     };

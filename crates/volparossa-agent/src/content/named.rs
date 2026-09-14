@@ -26,12 +26,33 @@ struct Selected {
 struct PreparedDownload {
     selected: Selected,
     query: NameQuery,
-    // None is the explicit cache-only path, never permission to fetch without policy.
+    // None means an explicitly permitted local cache hit, never permission to fetch without policy.
     policy: Option<VerifiedPolicy>,
     store: ChunkStore,
     source_root: PathBuf,
     source_limits: CacheLimits,
     receipt: ContentReceipt,
+}
+
+fn consumer_requirements(
+    request: &ContentFetchNameRequest,
+    manifest: &VerifiedManifest,
+) -> Result<(), ContentError> {
+    if request
+        .expected_content_type
+        .as_ref()
+        .is_some_and(|expected| expected != &manifest.metadata().content_type)
+        || request
+            .max_object_bytes
+            .is_some_and(|maximum| manifest.length() > maximum)
+        || request
+            .expected_manifest_id
+            .as_ref()
+            .is_some_and(|expected| expected.as_slice() != manifest.manifest_id())
+    {
+        return Err(ContentError::Invalid);
+    }
+    Ok(())
 }
 
 fn cache_error(error: &volparossa_content::Error) -> ContentError {
@@ -143,6 +164,28 @@ fn cached_selection(
     Ok((Selected { signed, manifest }, receipt))
 }
 
+fn preferred_selection(
+    request: &ContentFetchNameRequest,
+    store: &mut ChunkStore,
+    query: &NameQuery,
+) -> Result<Option<(Selected, ContentReceipt)>, ContentError> {
+    if !request.prefer_cached || request.cache_only {
+        return Ok(None);
+    }
+    match cached_selection(store, query) {
+        Ok((selected, receipt)) => {
+            // A cached revision of another requested exact identity is a cache miss,
+            // not a substitute for that identity. Network selection still honors the floor.
+            if consumer_requirements(request, &selected.manifest).is_err() {
+                return Ok(None);
+            }
+            Ok(Some((selected, receipt)))
+        }
+        Err(ContentError::Unavailable) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 async fn metadata_round(
     context: &ControlContext,
     policy: &VerifiedPolicy,
@@ -243,8 +286,14 @@ async fn retrieve(
     let cache_limits = limits(request.limits)?;
     let mut store = download_cache(&request.cache, cache_limits, request.reuse_cache)?;
     checked_download_access(context, None).await?;
-    if request.cache_only {
+    let cached = if request.cache_only {
         let (selected, receipt) = cached_selection(&mut store, &query)?;
+        consumer_requirements(&request, &selected.manifest)?;
+        Some((selected, receipt))
+    } else {
+        preferred_selection(&request, &mut store, &query)?
+    };
+    if let Some((selected, receipt)) = cached {
         return Ok(PreparedDownload {
             selected,
             query,
@@ -309,6 +358,9 @@ async fn retrieve_network(
     {
         return Err(ContentError::Invalid);
     }
+    // Reject the selected metadata before any body retrieval, not only when the
+    // completed cache object is subsequently handed to the local CLI consumer.
+    consumer_requirements(&request, &verified)?;
     let (provider_peer_ids, peer_bytes) =
         ContentRuntime::pull_providers(context, &verified, &mut store, &policy, providers).await?;
     let bytes =
@@ -351,6 +403,7 @@ pub(super) async fn download(
     request_id: &[u8],
     ready_sent: &mut bool,
 ) -> Result<(), ContentError> {
+    let requested_cache_only = request.cache_only;
     let PreparedDownload {
         selected,
         query,
@@ -379,7 +432,7 @@ pub(super) async fn download(
             "NAMED_CONTENT_TRANSFER_READY",
             Payload::NamedContentTransferReady(NamedContentTransferReady {
                 manifest: selected.signed.encode(),
-                cache_only: policy.is_none(),
+                cache_only: requested_cache_only,
             }),
         )
         .await?;
@@ -406,7 +459,8 @@ pub(super) async fn download(
         query
             .verify_candidate(&selected.signed, now())
             .map_err(|_| ContentError::Unavailable)?;
-        // A cache-only request must not schedule background networking as a side effect.
+        // Neither cache-only nor an explicitly preferred local cache hit may schedule
+        // background networking as a side effect of this local retrieval.
         if policy.is_some() {
             context
                 .content
@@ -484,6 +538,81 @@ mod tests {
         .unwrap();
         let manifest = signed.verify(&key.verifying_key(), now()).unwrap();
         (signed, manifest)
+    }
+
+    #[test]
+    fn named_consumer_checks_bound_the_selected_object_before_body_transfer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source =
+            ChunkStore::create(&directory.path().join("source"), cache_limits()).unwrap();
+        let key = SigningKey::generate(&mut rand_core::OsRng);
+        let (_, manifest) = publication(&key, 1, &mut source);
+        let mut request = ContentFetchNameRequest::default();
+        assert!(consumer_requirements(&request, &manifest).is_ok());
+        request.expected_content_type = Some(manifest.metadata().content_type.clone());
+        request.max_object_bytes = Some(manifest.length());
+        request.expected_manifest_id = Some(manifest.manifest_id().to_vec());
+        assert!(consumer_requirements(&request, &manifest).is_ok());
+        request.max_object_bytes = Some(manifest.length() - 1);
+        assert!(consumer_requirements(&request, &manifest).is_err());
+        request.max_object_bytes = Some(manifest.length());
+        request.expected_manifest_id = Some(vec![0; 32]);
+        assert!(consumer_requirements(&request, &manifest).is_err());
+        request.expected_manifest_id = None;
+        request.expected_content_type =
+            Some("application/vnd.volparossa.agent-dataset.v1+json".into());
+        assert!(consumer_requirements(&request, &manifest).is_err());
+    }
+
+    #[test]
+    fn preferred_cache_hit_keeps_selection_and_misses_without_substitution() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cache =
+            ChunkStore::create(&directory.path().join("cache"), cache_limits()).unwrap();
+        let key = SigningKey::generate(&mut rand_core::OsRng);
+        let (signed, manifest) = publication(&key, 1, &mut cache);
+        cache
+            .remember_named_manifest(&signed, &key.verifying_key(), now())
+            .unwrap();
+        let query = NameQuery::new(key.verifying_key().to_bytes(), "Exact Name", 0).unwrap();
+        let mut request = ContentFetchNameRequest {
+            expected_manifest_id: Some(manifest.manifest_id().to_vec()),
+            prefer_cached: true,
+            ..ContentFetchNameRequest::default()
+        };
+        let (selected, receipt) = preferred_selection(&request, &mut cache, &query)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.manifest.manifest_id(), manifest.manifest_id());
+        assert_eq!(receipt.peer_bytes, 0);
+        assert_eq!(receipt.providers_used, 0);
+        assert!(receipt.control_relay_peer_id.is_empty());
+        request.expected_manifest_id = Some(vec![0; 32]);
+        assert!(
+            preferred_selection(&request, &mut cache, &query)
+                .unwrap()
+                .is_none()
+        );
+        request.expected_manifest_id = None;
+        let absent = NameQuery::new(key.verifying_key().to_bytes(), "Other Name", 0).unwrap();
+        assert!(
+            preferred_selection(&request, &mut cache, &absent)
+                .unwrap()
+                .is_none()
+        );
+        request.prefer_cached = false;
+        assert!(
+            preferred_selection(&request, &mut cache, &query)
+                .unwrap()
+                .is_none()
+        );
+        request.prefer_cached = true;
+        let (_, higher) = publication(&key, 2, &mut cache);
+        cache.observe_name_revision(&higher, now()).unwrap();
+        assert!(matches!(
+            preferred_selection(&request, &mut cache, &query),
+            Err(ContentError::NameRollback)
+        ));
     }
 
     #[tokio::test]

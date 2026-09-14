@@ -195,6 +195,19 @@ pub struct ContentFetchNameRequest {
     /// No route preparation, discovery, provider exchange or origin access is permitted.
     #[prost(bool, tag = "7")]
     pub cache_only: bool,
+    /// Optional consumer type restriction, checked before downloading any peer body.
+    #[prost(string, optional, tag = "8")]
+    pub expected_content_type: Option<String>,
+    /// Per-object consumer bound, independent of the cache's total storage quota.
+    #[prost(uint64, optional, tag = "9")]
+    pub max_object_bytes: Option<u64>,
+    /// Optional exact signed-publication identity; not permission to ignore revision floors.
+    #[prost(bytes = "vec", optional, tag = "10")]
+    pub expected_manifest_id: Option<Vec<u8>>,
+    /// Prefer a complete unexpired locally verified publication, otherwise retrieve the
+    /// same publisher/name normally. Not a globally latest-version observation.
+    #[prost(bool, tag = "11")]
+    pub prefer_cached: bool,
 }
 
 impl ContentFetchNameRequest {
@@ -205,6 +218,18 @@ impl ContentFetchNameRequest {
             || self.name.chars().any(char::is_control)
             || self.min_revision == Some(0)
             || (self.cache_only && !self.reuse_cache)
+            || self.expected_content_type.as_ref().is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 128
+                    || !value.bytes().all(|b| b.is_ascii_graphic())
+            })
+            || self
+                .max_object_bytes
+                .is_some_and(|value| value == 0 || value > 256 * 1024 * 1024)
+            || self
+                .expected_manifest_id
+                .as_ref()
+                .is_some_and(|value| value.len() != 32)
         {
             return Err(ControlProtocolError::Invalid("invalid native name request"));
         }
@@ -556,6 +581,7 @@ mod tests {
             }),
             reuse_cache: true,
             cache_only: false,
+            ..ContentFetchNameRequest::default()
         };
         let request = ControlRequest {
             protocol_version: CONTROL_PROTOCOL_VERSION,
@@ -660,6 +686,46 @@ mod tests {
             ready
         );
         assert!(ready.validate().is_ok());
+    }
+
+    #[test]
+    fn named_consumer_constraints_are_optional_bounded_and_roundtrip_exactly() {
+        let mut request = ContentFetchNameRequest {
+            publisher_key: vec![2; 32],
+            name: "dataset".into(),
+            cache: "/private/cache".into(),
+            limits: Some(ContentCacheLimits {
+                quota_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            }),
+            ..ContentFetchNameRequest::default()
+        };
+        let legacy = request.encode_to_vec();
+        assert_eq!(
+            ContentFetchNameRequest::decode(legacy.as_slice()).unwrap(),
+            request
+        );
+        request.expected_content_type =
+            Some("application/vnd.volparossa.agent-dataset.v1+json".into());
+        request.max_object_bytes = Some(1024 * 1024);
+        request.expected_manifest_id = Some(vec![7; 32]);
+        request.prefer_cached = true;
+        assert!(request.validate().is_ok());
+        let encoded = request.encode_to_vec();
+        assert_ne!(encoded, legacy);
+        assert_eq!(
+            ContentFetchNameRequest::decode(encoded.as_slice()).unwrap(),
+            request
+        );
+        request.max_object_bytes = Some(0);
+        assert!(request.validate().is_err());
+        request.max_object_bytes = Some(1024);
+        request.expected_manifest_id = Some(vec![7; 31]);
+        assert!(request.validate().is_err());
+        request.expected_manifest_id = None;
+        request.expected_content_type = Some("text/plain\nother".into());
+        assert!(request.validate().is_err());
     }
 
     #[test]

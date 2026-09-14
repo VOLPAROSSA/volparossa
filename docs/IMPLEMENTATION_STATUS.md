@@ -34,7 +34,7 @@ It shares an explicitly provisioned read-only base/runtime; no base-distribution
 Cache-only retrieval is explicit and off by default. Autonomous training must select eligible
 sources independently of cache availability, fetching missing/fresh data rather than silently
 substituting cached popular sources. Generalized source selection, external-corpus ingestion,
-bias measurement and peer execution remain integrations to build. No
+bias measurement and general task orchestration remain integrations to build. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
 The next public-job candidate adds an explicitly attached same-UID inference broker, signed
 protected peer submit/poll/cancel exchanges, original-publication/subset verification and
@@ -76,6 +76,18 @@ before new submission and reusing full validated local receipt fixtures after re
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
 The separate `agent-jobs-loss` guest scenario now exercises actual owned-worker termination
 and explicit reassignment of only failed rows. Its fixture/checker is not a passing live proof.
+The explicit `compute train-cycle` candidate now connects an independently selected signed
+public dataset, cache-preferred/protected retrieval, the actual bounded local training worker
+and a public-ready adapter bundle. The same dataset identity survives a cache miss; fixed
+type/size/optional exact identity are checked in the agent before peer-body retrieval. Complete
+unexpired cached input can be used without provider availability, but this is not global freshness
+or autonomous unbiased source selection. The cycle supports an explicitly imported warmstart
+adapter, preserves selection/source/result provenance and does not auto-publish or activate
+outputs. Source expiry bounds execution as well as final packaging. Five focused named-content
+tests, one request-codec test and strict agent Clippy pass. The separate live cache/warmstart
+cycle proof is pending; B01 and B05 remain unchecked. Three focused training-cycle tests and
+five existing adapter-CLI tests pass with strict CLI Clippy. Their synthetic saved-report/adapter
+fixture proves source binding and packaging, not real training; that requires the guest run.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

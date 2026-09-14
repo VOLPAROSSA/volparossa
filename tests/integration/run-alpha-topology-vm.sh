@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-jobs|agent-jobs-loss]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh and agent-training.'
 }
 
@@ -56,6 +56,12 @@ print_plan() {
             'Agent-jobs scenario: provision once inside guest; two private runtime copies and independent node brokers;' \
             '  distribute disjoint signed public rows over protected paths, observe simultaneous actual workers;' \
             '  exact source/result hashes and cleanup; no automatic reassignment, private offload or full B03 claim.'
+    elif [ "$scenario" = agent-train-cycle ]; then
+        printf '%s\n' \
+            'Agent-train-cycle: complete protected distinct-node adapter transfer, then stop providers;' \
+            '  exact chosen unexpired dataset from agent cache plus readonly imported adapter;' \
+            '  eight Client warmstart updates, changed local bundle, unchanged base and complete cleanup;' \
+            '  no autonomous learning, automatic publication, global freshness or quality claim.'
     elif [ "$scenario" = agent-artifact ]; then
         printf '%s\n' \
             'Agent-artifact scenario: one producer node genuinely trains with pinned private guest model/runtime;' \
@@ -181,7 +187,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-jobs|agent-jobs-loss) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -444,6 +450,10 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-jobs-status-0.json", "agent-jobs-status-1.json", "agent-jobs-replacement-status.json", "agent-jobs-retained-status.json",
               "agent-jobs-result.json", "agent-jobs-result.err", "agent-jobs-provision.json", "agent-jobs-provision.err",
               "agent-artifact-smoke.json", "agent-artifact-evidence.json",
+              "agent-train-cycle-smoke.json", "agent-train-cycle-evidence.json",
+              "agent-artifact-cycle-result.json", "agent-artifact-cycle-training.json",
+              "agent-artifact-cycle-isolation.json", "agent-artifact-cycle-files.json",
+              "agent-artifact-cycle.err", "agent-artifact-cycle-observer.err",
               "agent-artifact-training.json", "agent-artifact-inference.json",
               "agent-artifact-provision.json", "agent-artifact-provision.err",
               "agent-artifact-training.err", "agent-artifact-inference.err",
@@ -576,7 +586,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-artifact", "agent-jobs", "agent-jobs-loss"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-artifact", "agent-train-cycle", "agent-jobs", "agent-jobs-loss"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -603,7 +613,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-jobs|agent-jobs-loss) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -642,7 +652,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 [ "$(./volparossa-mpquic --api-version)" = 7 ]
@@ -729,7 +739,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-jobs|agent-jobs-loss) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

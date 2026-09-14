@@ -34,6 +34,7 @@ pub(super) async fn run(args: &FetchName, socket: &Path) -> Result<()> {
 /// Created only after publisher/name validation, complete bytes and correlated final receipt.
 pub(super) struct VerifiedNamedDownload {
     temporary: tempfile::NamedTempFile,
+    signed_manifest: SignedManifest,
     manifest: VerifiedManifest,
     receipt: ContentReceipt,
     expires: u64,
@@ -42,6 +43,10 @@ pub(super) struct VerifiedNamedDownload {
 }
 
 impl VerifiedNamedDownload {
+    pub(super) fn signed_manifest(&self) -> &SignedManifest {
+        &self.signed_manifest
+    }
+
     pub(super) fn as_file(&self) -> &std::fs::File {
         self.temporary.as_file()
     }
@@ -83,16 +88,52 @@ pub(super) async fn prepare(
 ) -> Result<VerifiedNamedDownload> {
     timeout(
         Duration::from_secs(600),
-        download(args, socket, private_parent),
+        download(args, socket, private_parent, None),
     )
     .await
     .context("named download deadline exceeded; verified agent cache chunks may remain")?
+}
+
+/// Additional consumer bounds, applied to authenticated metadata before receiving bytes.
+pub(super) struct Requirement {
+    pub(super) content_type: &'static str,
+    pub(super) maximum_bytes: u64,
+    pub(super) manifest_id: Option<[u8; 32]>,
+}
+
+impl Requirement {
+    fn check(&self, manifest: &VerifiedManifest) -> Result<()> {
+        if manifest.metadata().content_type != self.content_type
+            || manifest.length() > self.maximum_bytes
+            || self
+                .manifest_id
+                .is_some_and(|id| manifest.manifest_id() != &id)
+        {
+            bail!("named content does not match the explicitly selected bounded object");
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn prepare_bounded(
+    args: &FetchName,
+    socket: &Path,
+    private_parent: &Path,
+    requirement: &Requirement,
+) -> Result<VerifiedNamedDownload> {
+    timeout(
+        Duration::from_secs(600),
+        download(args, socket, private_parent, Some(requirement)),
+    )
+    .await
+    .context("bounded named download deadline exceeded; verified agent cache chunks may remain")?
 }
 
 async fn download(
     args: &FetchName,
     socket: &Path,
     private_parent: &Path,
+    requirement: Option<&Requirement>,
 ) -> Result<VerifiedNamedDownload> {
     let query = NameQuery::new(
         args.publisher_key.to_bytes(),
@@ -107,6 +148,10 @@ async fn download(
         limits: Some(args.limits.wire_limits()),
         reuse_cache: args.reuse_cache,
         cache_only: args.cache_only,
+        expected_content_type: requirement.map(|value| value.content_type.to_owned()),
+        max_object_bytes: requirement.map(|value| value.maximum_bytes),
+        expected_manifest_id: requirement.and_then(|value| value.manifest_id.map(|id| id.to_vec())),
+        prefer_cached: requirement.is_some(),
     };
     let (mut stream, request_id, response) =
         crate::control::begin_request(socket, Operation::ContentFetchName(request)).await?;
@@ -119,8 +164,11 @@ async fn download(
     if ready.cache_only != args.cache_only {
         bail!("named readiness changed the requested cache-only mode");
     }
-    let manifest =
-        query.verify_candidate(&SignedManifest::decode(&ready.manifest)?, now_seconds()?)?;
+    let signed_manifest = SignedManifest::decode(&ready.manifest)?;
+    let manifest = query.verify_candidate(&signed_manifest, now_seconds()?)?;
+    if let Some(requirement) = requirement {
+        requirement.check(&manifest)?;
+    }
     let expires = manifest.validity().expires;
     let authority_observed_at = Instant::now();
     let remaining = expires
@@ -163,6 +211,7 @@ async fn download(
     )?;
     let download = VerifiedNamedDownload {
         temporary,
+        signed_manifest,
         manifest,
         receipt,
         expires,

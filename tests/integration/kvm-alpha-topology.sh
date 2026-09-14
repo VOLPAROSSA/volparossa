@@ -13,6 +13,7 @@ umask 077
 mode=preview
 scenario=alpha
 agent_jobs_loss=no
+agent_train_cycle=no
 wifi_link=no
 uplink_link=no
 download_sharing=no
@@ -28,7 +29,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-jobs|agent-jobs-loss|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|dns-cache]'
 }
 
 print_plan() {
@@ -65,6 +66,16 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-artifact ]; then
+        if [ "$agent_train_cycle" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA explicit public train-cycle plan:' \
+                '  retain complete distinct producer/Client protected adapter transfer and inference;' \
+                '  after provider stop, select the exact unexpired public dataset from the received cache;' \
+                '  train eight genuine warmstart updates from readonly received weights on the Client;' \
+                '  verify changed weights, unchanged base, exact dataset-bound new local bundle and cleanup;' \
+                '  no automatic publication, globally latest source, quality or autonomous training claim.'
+            return
+        fi
         printf '%s\n' \
             'VOLPAROSSA real public agent-artifact reuse plan:' \
             '  explicitly provision a pinned CPU model/runtime in a private disposable guest directory;' \
@@ -345,7 +356,9 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             download_sharing=no
             agent_jobs_loss=no
+            agent_train_cycle=no
             case $2 in
+                agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;

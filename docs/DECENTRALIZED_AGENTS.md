@@ -189,6 +189,34 @@ This completes B02's explicit transfer/reuse scope, not automatic model activati
 answer quality. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
 
+### Explicit cache-backed training cycle
+
+`compute train-cycle --publisher-key KEY --dataset-name NAME --dataset-manifest-id SHA256
+--cache AGENT_CACHE --reuse-cache --runtime-root VENV --model-root MODEL
+--adapter-root IMPORTED/adapter --output NEW_PRIVATE_CYCLE --steps 8 --execute`
+joins source retrieval, actual local training and adapter packaging without separate manual
+file-copy steps. Use absolute paths and pre-provisioned runtime/model directories; the adapter
+and exact manifest pin are optional. Without `--execute`, it only prints the selected plan.
+
+The operator chooses the publisher and dataset name before cache lookup. The optional exact
+manifest pin, revision floor, fixed dataset type and 1-MiB object bound are checked by the agent
+before peer-body retrieval, and again by the consuming CLI. An explicitly preferred complete,
+unexpired cache object needs no route or provider; a miss retains the same publisher/name and
+uses the normal protected retrieval path. This is not a globally newest-version claim, an
+arbitrary-origin download, or permission to substitute another popular cached source. Source
+signatures establish provenance, not legal/training-rights or model-quality guarantees.
+
+The cycle records its selection before fetching and retains the original signed dataset,
+source receipt, supervised training report and `adapter.bundle` in a new private directory.
+An optional previously imported adapter is used as the actual warmstart; it is not silently
+selected from cache. Training uses the existing isolated fixed worker, at most two CPU threads,
+1–64 optimizer steps and at most 600 seconds, further bounded by source expiry. Interruption
+cancels and awaits worker cleanup; incomplete files are retained rather than reported complete.
+Publish the bundle separately with the normal content command. There is no automatic adapter
+activation, source discovery, retraining loop, distributed gradient aggregation or policy change.
+The separate `agent-train-cycle` guest scenario is intended to prove actual warmstart updates
+from protected received cache after the supplying service stops; its live proof remains pending.
+
 ## Owner-first resource allocation
 
 Training and opportunistic model redistribution use only the node's available contribution
