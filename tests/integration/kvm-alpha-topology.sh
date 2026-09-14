@@ -27,10 +27,22 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache]'
 }
 
 print_plan() {
+    if [ "$scenario" = mptcp-growth ]; then
+        printf '%s\n' \
+            'VOLPAROSSA live MPTCP path-growth smoke plan:' \
+            '  select two initial paths and one authorized warm R0/R1/R2 path, with eligible separate R3 control;' \
+            '  use one capless ordinary TCP application, the existing release gate and exact 32 MiB download/hash;' \
+            '  bound all three disposable relay download legs to the existing fixed 8 Mbps profile;' \
+            '  apply fixed 15 percent loss only on one selected disposable Exit xrN download egress;' \
+            '  require same-flow kernel tokens/cookies/tuples and fresh ACK/receive deltas on 2 then 3 subflows;' \
+            '  require complete private captures and six WireGuard legs, never CLI Reachable as payload evidence;' \
+            '  restore only owned qdiscs, disconnect and emit mptcp-growth-smoke.json with unchanged-host cleanup.'
+        return
+    fi
     if [ "$scenario" = mpquic-growth ]; then
         printf '%s\n' \
             'VOLPAROSSA live MPQUIC path-growth smoke plan:' \
@@ -280,7 +292,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-mailbox|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -389,11 +401,11 @@ if [ "$scenario" = reciprocity ] || [ "$scenario" = local-link ] || [ "$scenario
             || { printf 'reciprocity fixture unavailable: %s\n' "$reciprocity_fixture" >&2; exit 69; }
     done
 fi
-if [ "$scenario" = mpquic-growth ]; then
-    for growth_fixture in mpquic-growth-smoke.sh mpquic-growth-smoke.py content-network-smoke.py; do
+if [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ]; then
+    for growth_fixture in "$scenario-smoke.sh" "$scenario-smoke.py" mpquic-growth-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$growth_fixture" ] \
             || [ -L "$source_directory/tests/integration/$growth_fixture" ]; then
-            printf '%s\n' 'MPQUIC growth fixture unavailable' >&2
+            printf '%s\n' 'Multipath growth fixture unavailable' >&2
             exit 69
         fi
     done
@@ -984,6 +996,36 @@ mpquic_growth_finalize_report() {
     jq -e '.success == true' "$WORK/mpquic-growth-smoke.json" >/dev/null
 }
 
+mptcp_growth_finalize_report() {
+    mptcp_status=$1
+    mptcp_evidence=$(optional_json_evidence "$WORK/mptcp-growth-evidence.json")
+    jq -cn --arg revision "$expected_commit" --arg run_id "$RUN_ID" \
+        --arg phase "$PHASE" --arg blocker "$OBSERVED_BLOCKER" \
+        --argjson status "$mptcp_status" --argjson evidence "$mptcp_evidence" \
+        --argjson topology "$TOPOLOGY_READY" --argjson helpers "$HELPERS_READY" \
+        --argjson agents "$AGENTS_READY" --argjson no_direct_exit "$CLIENT_EXIT_ROUTE_ABSENT" \
+        --argjson complete "$CLEANUP_COMPLETE" --argjson remaining "$REMAINING_OWNED_OBJECTS" \
+        --slurpfile host "$WORK/a15-evidence.json" '
+        {schema_version:1,report_kind:"volparossa-mptcp-growth-runtime",
+          source_revision:$revision,run_id:$run_id,phase:$phase,
+          success:($status == 0 and $evidence.success == true and $complete and
+            $remaining == 0 and $host[0].unchanged == true and $topology and
+            $helpers and $agents and $no_direct_exit),transfer:$evidence,
+          observed_blocker:(if $blocker == "" then null else $blocker end),
+          cleanup:{complete:$complete,remaining_owned_objects:$remaining},
+          host_state:($host[0] | del(.acceptance_id)),
+          scope:"one genuine TLS/MPTCP application flow grows from two to three kernel-data-carrying subflows; no speed or A01-A15 claim"}
+    ' >"$WORK/mptcp-growth-smoke.json" || return 1
+    for mptcp_artifact in "$WORK"/mptcp-growth-*.json "$WORK"/mptcp-growth-*.txt \
+        "$WORK"/mptcp-growth-*.out "$WORK"/mptcp-growth-*.err "$WORK"/mptcp-growth-*.log; do
+        if [ ! -f "$mptcp_artifact" ] || [ -L "$mptcp_artifact" ]; then continue; fi
+        [ "$(stat -Lc '%s' "$mptcp_artifact")" -le 8388608 ] || return 1
+        install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$mptcp_artifact" \
+            "$output_directory/$(basename -- "$mptcp_artifact")" || return 1
+    done
+    jq -e '.success == true' "$WORK/mptcp-growth-smoke.json" >/dev/null
+}
+
 write_report() {
     report_status=$1
     topology_scale=$(optional_json_evidence "$WORK/topology-scale.json")
@@ -1282,6 +1324,9 @@ cleanup() {
     if [ "$scenario" = mpquic-growth ] && command -v mpquic_growth_cleanup >/dev/null 2>&1; then
         mpquic_growth_cleanup || original_status=1
     fi
+    if [ "$scenario" = mptcp-growth ] && command -v mptcp_growth_cleanup >/dev/null 2>&1; then
+        mptcp_growth_cleanup || original_status=1
+    fi
     capture_worker_network_diagnostics
 
     # Early A01 failures happen before capture_product_logs() is defined. Query every still-live
@@ -1505,6 +1550,8 @@ cleanup() {
     FINISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     if [ "$scenario" = mpquic-growth ]; then
         mpquic_growth_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = mptcp-growth ]; then
+        mptcp_growth_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = dns-cache ]; then
         dns_cache_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-replication ]; then
@@ -1586,6 +1633,10 @@ fi
 if [ "$scenario" = mpquic-growth ]; then
     # shellcheck source=tests/integration/mpquic-growth-smoke.sh
     . "$source_directory/tests/integration/mpquic-growth-smoke.sh"
+fi
+if [ "$scenario" = mptcp-growth ]; then
+    # shellcheck source=tests/integration/mptcp-growth-smoke.sh
+    . "$source_directory/tests/integration/mptcp-growth-smoke.sh"
 fi
 if [ "$scenario" = mixed-link ]; then
     # shellcheck source=tests/integration/mixed-link-smoke.sh
@@ -2003,7 +2054,7 @@ write_config() {
         exit) advertised_asn=64514; advertised_prefix=46.162.3.0/24 ;;
         exit2) exit_capacity=1; advertised_asn=64518; advertised_prefix=51.167.7.0/24 ;;
     esac
-    if [ "$scenario" = mpquic-growth ] && [ "$node" = relay3 ]; then
+    if { [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ]; } && [ "$node" = relay3 ]; then
         # Three eligible data relays also need a fourth eligible, distinct control relay.
         # The ordinary 1Mbps provider fixture cannot meet this route's signed 8Mbps minimum.
         # Existing r3x/xr3 links and exact reciprocal routes carry this replaceable contact;
@@ -2098,7 +2149,7 @@ write_config() {
             || printf '    - %s\n' "$bootstrap_three"
         printf 'roles:\n  client: %s\n  relay: %s\n  exit: %s\n' \
             "$client_role" "$relay_role" "$exit_role"
-        if [ "$scenario" = mpquic-growth ] && [ "$node" = client ]; then
+        if { [ "$scenario" = mpquic-growth ] || [ "$scenario" = mptcp-growth ]; } && [ "$node" = client ]; then
             printf 'selection:\n  active_multipath_paths: 2\n  minimum_multipath_paths: 2\n'
             printf '  maximum_multipath_paths: 3\n  warm_backup_paths: 1\n'
         fi
@@ -3676,7 +3727,7 @@ import time
 run_id = bytes.fromhex(sys.argv[1])
 case_name = sys.argv[2]
 attempt = int(sys.argv[3])
-if case_name not in {"a03-single", "a03-aggregate", "a04-failover", "a14-custody"}:
+if case_name not in {"a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth"}:
     raise SystemExit("invalid bounded MPTCP download case")
 if attempt < 0 or attempt >= 30:
     raise SystemExit("invalid bounded MPTCP download attempt")
@@ -3957,7 +4008,7 @@ while running:
                 evidence_path = os.path.join(sys.argv[3], f"tcp-evidence-{attempt}.json")
             else:
                 matched = None
-                for case_name in ("a03-single", "a03-aggregate", "a04-failover", "a14-custody"):
+                for case_name in ("a03-single", "a03-aggregate", "a04-failover", "a14-custody", "mptcp-growth"):
                     prefix = b"volparossa-" + case_name.encode("ascii") + b":" + run_id
                     if len(received) == len(prefix) + 4 and received.startswith(prefix):
                         matched = (case_name, prefix)
@@ -4089,6 +4140,7 @@ fi
 
 if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != mpquic-growth ] \
+    && [ "$scenario" != mptcp-growth ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
     && [ "$scenario" != content-replication ] && [ "$scenario" != content-mailbox ] && [ "$scenario" != dns-cache ]; then
@@ -4643,6 +4695,8 @@ start_privacy_observers() {
         privacy|mptcp-privacy) ;;
         mpquic-growth-initial-privacy|mpquic-growth-expanded-privacy)
             [ "$scenario" = mpquic-growth ] || return 1 ;;
+        mptcp-growth-initial-privacy|mptcp-growth-expanded-privacy)
+            [ "$scenario" = mptcp-growth ] || return 1 ;;
         content-a-privacy|content-b-privacy)
             [ "$scenario" = content ] || [ "$scenario" = content-message ] || return 1 ;;
         content-https-complete-privacy|content-https-missing-privacy)
@@ -5347,6 +5401,10 @@ finish_mptcp_download() {
 
 if [ "$scenario" = mpquic-growth ]; then
     mpquic_growth_run
+    exit 0
+fi
+if [ "$scenario" = mptcp-growth ]; then
+    mptcp_growth_run
     exit 0
 fi
 if [ "$scenario" = content ] || [ "$scenario" = content-message ]; then

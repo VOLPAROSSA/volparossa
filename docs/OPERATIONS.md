@@ -868,6 +868,22 @@ passes established-peer retention while admission changes from zero to two, then
 131,072 bytes each way with matching hashes and normal/socket-loss cleanup. This exercises the
 real Linux kernel backend on simulated radios, not the full adaptive agent or physical capacity.
 
+### Warm MPTCP path growth
+
+A TCP route retains its full reserved path set but initially establishes only its selected
+active subset. The Exit observes actual existing MPTCP sockets once per second and may advertise
+one authorized warm endpoint after sustained retransmission loss with continuing ACK progress.
+This does not reopen the application flow, change its Exit or remove the initial paths. An
+unhelpful extra endpoint can retire after the grace interval only when the initial set remains
+established for all observed live flows; unsupported observations leave current flows intact.
+No new user flag or host setting is required. Native path ceilings remain in force.
+
+`mptcp-growth` is a separate disposable topology scenario, not the full alpha or a speed benchmark.
+It requires the same live download before/after expansion, actual kernel subflow ACK and receive
+deltas, data on all six WireGuard legs, the full application hash and complete cleanup. Its
+network result is still pending. The ordinary MPTCP CLI selection rows are reachability metadata,
+not these live per-socket byte counters.
+
 ### Warm MPQUIC path growth
 
 An existing multipath browser route can now consume one of its already authorized warm paths
@@ -886,7 +902,10 @@ uses a real 32-MiB HTTP/3 upload and download, and applies fixed 15% loss only t
 Relay veth. It requires two-to-three native payload deltas, all six WireGuard legs, exact hashes,
 route retirement and unchanged guest state. The first two runs found fixture selection and
 native-counter integration faults; both are corrected. The API7 rerun proves initial ACK progress
-but still fails to activate the third path under loss. A diagnostic follow-up is pending.
+but still fails to activate the third path under loss. Its diagnostic follow-up identifies an
+incorrect retransmission-based loss counter for unreliable datagrams. The corrected native
+mapping reports actual detected losses without changing the growth conditions; the new live
+network run remains pending.
 Local state-machine/fixture checks are not a three-path network pass. The existing eight-path backend
 ceiling and other transport limits are not removed by this bounded integration.
 

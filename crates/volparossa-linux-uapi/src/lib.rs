@@ -1,6 +1,7 @@
 //! Minimal safe wrappers around Linux UAPI calls not exposed by the standard library.
 //!
-//! The only unsafe operations are the audited `getsockopt(2)` call in [`mptcp_info`], the fixed
+//! The only unsafe operations are the audited `getsockopt(2)` calls in [`mptcp_info`] and
+//! [`mptcp_subflow_info`], the fixed
 //! nsfs `ioctl(2)` calls in [`namespace_type`] and [`owning_user_namespace`], the fixed
 //! [`socket_network_namespace`], the fixed [`cgroup_v2_id`] handle query, and close-on-exec
 //! duplication wrappers, taking immediate RAII ownership of descriptors installed by the bounded
@@ -33,9 +34,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod egress;
+mod mptcp_subflows;
 pub use egress::{
     EgressObservation, IndependentEgress, InterfaceTraffic, observe_interface_traffic,
 };
+pub use mptcp_subflows::{MptcpSubflowInfo, mptcp_subflow_info};
 
 use std::{
     env,

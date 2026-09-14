@@ -344,7 +344,16 @@ def validate_application(evidence, app, manifests, cache_only):
     expected, publication = evidence["input"], evidence["publish"]
     peers, layout, isolation = evidence["expected_peers"], evidence["layout"], evidence["isolation"]
     ready, final = app["ready"], app["final"]
-    provider_ids = [] if cache_only else [peers[node] for node in layout["provider_nodes"]]
+    # Both advertised replicas contain the complete site. Unlike the disjoint-chunk
+    # aggregation proof, this ordinary viewer must not require an unnecessary worker
+    # merely to touch every replica. Receipts still name the exact actual sources.
+    provider_ids = ready["provider_peer_ids"]
+    allowed_ids = {peers[node] for node in layout["provider_nodes"]}
+    require(isinstance(provider_ids, list) and all(isinstance(peer, str) for peer in provider_ids)
+            and len(provider_ids) == len(set(provider_ids))
+            and (not provider_ids if cache_only else
+                 1 <= len(provider_ids) <= len(allowed_ids) and set(provider_ids) <= allowed_ids),
+            "site sources are empty, repeated, unauthorized or nonlocal in cache-only mode")
     for receipt, operation in ((ready, "native_site_ready"), (final, "native_site_closed")):
         require(receipt["operation"] == operation and receipt["publisher_key"] == expected["publisher_key"]
                 and receipt["name"] == NAME and receipt["revision"] == 1 and receipt["assets"] == 4

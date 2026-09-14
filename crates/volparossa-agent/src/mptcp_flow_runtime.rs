@@ -25,6 +25,9 @@ use crate::{
     unix_millis,
 };
 
+mod observed;
+pub(crate) mod path_growth;
+
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
 const OPEN_TCP_TIMEOUT: Duration = Duration::from_secs(12);
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,6 +73,7 @@ enum ExitRuntimeEvent<A, T> {
     RouteExpired,
     Accepted(A),
     FlowCompleted(Result<T, tokio::task::JoinError>),
+    MaintainPaths,
 }
 
 async fn next_exit_runtime_event<A, T: 'static>(
@@ -77,6 +81,7 @@ async fn next_exit_runtime_event<A, T: 'static>(
     accepting: bool,
     accept: impl Future<Output = A>,
     flows: &mut JoinSet<T>,
+    maintenance: &mut time::Interval,
 ) -> ExitRuntimeEvent<A, T> {
     tokio::select! {
         () = time::sleep(remaining) => ExitRuntimeEvent::RouteExpired,
@@ -86,6 +91,7 @@ async fn next_exit_runtime_event<A, T: 'static>(
                 completed.expect("a non-empty exit flow set must yield a completion"),
             )
         }
+        _ = maintenance.tick() => ExitRuntimeEvent::MaintainPaths,
     }
 }
 
@@ -189,13 +195,19 @@ impl ProductionMptcpExitRuntime {
         let Self {
             helper,
             helper_owner,
-            transport,
+            mut transport,
             tls,
             egress,
             limits,
             expires_at_ms,
         } = self;
         let egress = Arc::new(egress);
+        let mut growth = path_growth::WarmGrowth::new(transport.growth_scope());
+        let mut maintenance = time::interval(Duration::from_secs(1));
+        maintenance.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut growth_enabled = true;
+        let maintenance_deadline = time::Instant::now()
+            + Duration::from_millis(expires_at_ms.saturating_sub(unix_millis()));
         let mut flows = JoinSet::new();
         let mut accepted_any = false;
         let mut failed = false;
@@ -212,6 +224,7 @@ impl ProductionMptcpExitRuntime {
                     accepting,
                     transport.listener().accept(),
                     &mut flows,
+                    &mut maintenance,
                 ),
             )
             .await;
@@ -225,25 +238,13 @@ impl ProductionMptcpExitRuntime {
                     let tls = tls.clone();
                     let egress = Arc::clone(&egress);
                     let flow_shutdown = shutdown.clone();
+                    let (observation, observer) = observed::ObservationSlot::new();
+                    growth.register(observer);
                     flows.spawn(async move {
-                        Box::pin(until_exit_shutdown(flow_shutdown, async move {
-                            let mut protected = tls
-                                .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
-                                .await
-                                .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
-                            let authorized = egress
-                                .read_authorized_open_tcp(
-                                    &mut protected,
-                                    unix_millis(),
-                                    OPEN_TCP_TIMEOUT,
-                                )
-                                .await
-                                .map_err(|_| ProductionMptcpExitError::Authorization)?;
-                            egress
-                                .run_tcp_egress(&authorized, protected, unix_millis(), limits)
-                                .await
-                                .map_err(|_| ProductionMptcpExitError::Egress)
-                        }))
+                        Box::pin(until_exit_shutdown(
+                            flow_shutdown,
+                            run_observed_exit_flow(tls, egress, mptcp, limits, observation),
+                        ))
                         .await
                         .unwrap_or(Err(ProductionMptcpExitError::Accept))
                     });
@@ -255,6 +256,24 @@ impl ProductionMptcpExitRuntime {
                 ExitRuntimeEvent::FlowCompleted(result) => {
                     report_exit_flow_result(result, &mut failed, &mut flow_completed).await;
                 }
+                ExitRuntimeEvent::MaintainPaths => {
+                    if growth_enabled {
+                        let Some(enabled) = maintain_path_health(
+                            &mut transport,
+                            &helper,
+                            &mut growth,
+                            shutdown.clone(),
+                            expires_at_ms,
+                            maintenance_deadline,
+                        )
+                        .await
+                        else {
+                            failed = true;
+                            break;
+                        };
+                        growth_enabled = enabled;
+                    }
+                }
                 ExitRuntimeEvent::RouteExpired => break,
             }
         }
@@ -265,24 +284,7 @@ impl ProductionMptcpExitRuntime {
             .then_some(())
             .ok_or(ProductionMptcpExitError::Accept);
 
-        let _ = transport.shutdown(&helper).await;
-        let cleanup = ProductionMptcpExitCleanup {
-            helper,
-            helper_owner,
-            transport: None,
-        };
-        match cleanup.destroy().await {
-            Ok(()) => ProductionMptcpExitCompletion {
-                reservation_id,
-                result: flow_result,
-                cleanup: None,
-            },
-            Err(cleanup) => ProductionMptcpExitCompletion {
-                reservation_id,
-                result: Err(ProductionMptcpExitError::CleanupPending),
-                cleanup: Some(cleanup),
-            },
-        }
+        complete_exit_runtime(reservation_id, flow_result, helper, helper_owner, transport).await
     }
 
     pub(crate) async fn shutdown(self) -> Result<(), ProductionMptcpExitCleanup> {
@@ -301,6 +303,127 @@ impl ProductionMptcpExitRuntime {
         .destroy()
         .await
     }
+}
+
+async fn complete_exit_runtime(
+    reservation_id: [u8; 16],
+    flow_result: Result<(), ProductionMptcpExitError>,
+    helper: HelperClient,
+    helper_owner: RuntimeBoundPreparedLeaseBatch,
+    transport: ExitMptcpTransport,
+) -> ProductionMptcpExitCompletion {
+    let _ = transport.shutdown(&helper).await;
+    let cleanup = ProductionMptcpExitCleanup {
+        helper,
+        helper_owner,
+        transport: None,
+    };
+    match cleanup.destroy().await {
+        Ok(()) => ProductionMptcpExitCompletion {
+            reservation_id,
+            result: flow_result,
+            cleanup: None,
+        },
+        Err(cleanup) => ProductionMptcpExitCompletion {
+            reservation_id,
+            result: Err(ProductionMptcpExitError::CleanupPending),
+            cleanup: Some(cleanup),
+        },
+    }
+}
+
+async fn run_observed_exit_flow(
+    tls: Tls13MptcpServer,
+    egress: Arc<ActiveTcpEgressRoute>,
+    mptcp: volparossa_mptcp::MptcpStream,
+    limits: TcpEgressLimits,
+    observation: observed::ObservationSlot,
+) -> Result<StreamTransferStats, ProductionMptcpExitError> {
+    let mut protected = tls
+        .accept(mptcp, TLS_HANDSHAKE_TIMEOUT)
+        .await
+        .map_err(|_| ProductionMptcpExitError::TlsHandshake)?;
+    let authorized = egress
+        .read_authorized_open_tcp(&mut protected, unix_millis(), OPEN_TCP_TIMEOUT)
+        .await
+        .map_err(|_| ProductionMptcpExitError::Authorization)?;
+    let protected = observation
+        .attach(protected)
+        .map_err(|_| ProductionMptcpExitError::Accept)?;
+    let result = egress
+        .run_tcp_egress(&authorized, protected, unix_millis(), limits)
+        .await
+        .map_err(|_| ProductionMptcpExitError::Egress);
+    drop(observation);
+    result
+}
+
+async fn maintain_path_health(
+    transport: &mut ExitMptcpTransport,
+    helper: &HelperClient,
+    growth: &mut path_growth::WarmGrowth,
+    shutdown: watch::Receiver<bool>,
+    expires_at_ms: u64,
+    original_deadline: time::Instant,
+) -> Option<bool> {
+    let now = time::Instant::now();
+    let remaining = Duration::from_millis(expires_at_ms.saturating_sub(unix_millis()))
+        .min(original_deadline.saturating_duration_since(now));
+    if remaining.is_zero() {
+        return None;
+    }
+    let deadline = now + remaining;
+    let decision = growth.observe(transport.warm_path(), now);
+    if time::Instant::now() >= deadline {
+        return None;
+    }
+    match until_exit_shutdown(
+        shutdown,
+        time::timeout_at(
+            deadline,
+            maintain_warm_path(transport, helper, growth, decision),
+        ),
+    )
+    .await
+    {
+        Some(Ok(Ok(()))) => Some(true),
+        Some(Ok(Err(_))) => {
+            tracing::warn!(
+                event_code = "MPTCP_WARM_ENDPOINT_FAILED",
+                "MPTCP endpoint ownership could not be confirmed; growth disabled"
+            );
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+async fn maintain_warm_path(
+    transport: &mut ExitMptcpTransport,
+    helper: &HelperClient,
+    growth: &mut path_growth::WarmGrowth,
+    decision: path_growth::Decision,
+) -> Result<(), crate::mptcp_transport::MptcpTransportError> {
+    match decision {
+        path_growth::Decision::Hold => {}
+        path_growth::Decision::Activate { warm, risky } => {
+            transport.activate_warm(helper, warm).await?;
+            growth.activated(warm, risky, time::Instant::now());
+            tracing::info!(
+                event_code = "MPTCP_WARM_PROBE_ADDED",
+                "Authorized warm MPTCP endpoint signalled for observed failover value"
+            );
+        }
+        path_growth::Decision::RetireExtra(path) => {
+            transport.retire_extra(helper, path).await?;
+            growth.retired();
+            tracing::info!(
+                event_code = "MPTCP_WARM_PROBE_RETIRED",
+                "Unhelpful extra MPTCP endpoint retired with initial paths retained"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Completion returned to the actor so it can release the exact reservation.
@@ -605,6 +728,10 @@ mod tests {
     async fn completed_exit_flow_is_reported_while_next_accept_waits() {
         let mut flows = JoinSet::new();
         flows.spawn(async { Ok::<(), ProductionMptcpExitError>(()) });
+        let mut maintenance = time::interval_at(
+            time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
 
         let event = time::timeout(
             Duration::from_secs(1),
@@ -613,6 +740,7 @@ mod tests {
                 true,
                 std::future::pending::<()>(),
                 &mut flows,
+                &mut maintenance,
             ),
         )
         .await
@@ -641,5 +769,29 @@ mod tests {
             MAXIMUM_DIRECTIONAL_BYTES
         );
         assert_eq!(limits.idle_timeout(), STREAM_IDLE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn mptcp_warm_maintenance_runs_while_accept_and_flows_are_pending() {
+        let mut flows = JoinSet::new();
+        flows.spawn(std::future::pending::<()>());
+        let mut maintenance = time::interval(Duration::from_secs(1));
+        assert!(matches!(
+            time::timeout(
+                Duration::from_secs(1),
+                next_exit_runtime_event(
+                    Duration::from_secs(60),
+                    true,
+                    std::future::pending::<()>(),
+                    &mut flows,
+                    &mut maintenance,
+                )
+            )
+            .await
+            .unwrap(),
+            ExitRuntimeEvent::MaintainPaths
+        ));
+        flows.abort_all();
+        while flows.join_next().await.is_some() {}
     }
 }

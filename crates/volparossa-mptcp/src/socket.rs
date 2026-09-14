@@ -77,6 +77,18 @@ impl MptcpStream {
         volparossa_linux_uapi::mptcp_info(&self.0)
     }
 
+    /// Read bounded kernel-identified subflow tuples and TCP metrics on this same socket.
+    ///
+    /// # Errors
+    /// Rejects unsupported, incomplete or incompatible kernel observations; no fallback metrics
+    /// or partial set is returned. See [`volparossa_linux_uapi::mptcp_subflow_info`].
+    pub fn subflow_info(
+        &self,
+        maximum_subflows: usize,
+    ) -> io::Result<Vec<crate::MptcpSubflowInfo>> {
+        volparossa_linux_uapi::mptcp_subflow_info(&self.0, maximum_subflows)
+    }
+
     /// Fails closed unless the kernel proves `MP_CAPABLE` negotiation without TCP fallback.
     ///
     /// # Errors

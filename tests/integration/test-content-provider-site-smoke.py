@@ -86,6 +86,26 @@ def fixture(control_node="relay2"):
 
 
 class SiteProof(unittest.TestCase):
+    def test_complete_replicas_allow_one_actual_source_without_claiming_aggregation(self):
+        evidence = fixture()
+        peer = evidence["application"]["ready"]["provider_peer_ids"][0]
+        for key in ("ready", "final"):
+            evidence["application"][key].update(providers_used=1, provider_peer_ids=[peer])
+        CHECK["validate_evidence"](evidence)
+        for invalid_ids in ([], [peer, peer], ["unadvertised-provider"]):
+            with self.subTest(invalid_ids=invalid_ids):
+                changed = copy.deepcopy(evidence)
+                for key in ("ready", "final"):
+                    changed["application"][key].update(
+                        providers_used=len(invalid_ids), provider_peer_ids=invalid_ids)
+                with self.assertRaises(ValueError):
+                    CHECK["validate_evidence"](changed)
+        changed = copy.deepcopy(evidence)
+        changed["application"]["final"]["provider_peer_ids"] = [
+            changed["expected_peers"][changed["layout"]["provider_nodes"][1]]]
+        with self.assertRaises(ValueError):
+            CHECK["validate_evidence"](changed)
+
     def test_cache_only_requires_same_authority_no_route_or_discovery_and_zero_provider_payload(self):
         evidence = fixture()
         CHECK["validate_evidence"](evidence)

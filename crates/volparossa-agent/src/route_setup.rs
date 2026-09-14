@@ -3906,7 +3906,14 @@ impl RouteSetupRequest {
         active_path_count: usize,
         traversal_hints: Vec<volparossa_routing::TraversalEndpointHint>,
     ) -> PrepareLeaseBatch {
-        let path_count = u32::try_from(active_path_count).unwrap_or(MAX_HELPER_PATHS);
+        // Reserve kernel room for later ADD_ADDR on already committed warm MPTCP paths;
+        // this does not advertise an address or require it at initial flow readiness.
+        let endpoint_capacity = if self.parameters.allowed_transports == [Transport::TcpMptcp] {
+            selected.len()
+        } else {
+            active_path_count
+        };
+        let path_count = u32::try_from(endpoint_capacity).unwrap_or(MAX_HELPER_PATHS);
         PrepareLeaseBatch {
             route_context_id: self.parameters.route_context_id.to_vec(),
             role: ContextRole::Client as i32,
@@ -5823,6 +5830,15 @@ impl ProductionRoute {
                 .iter()
                 .copied()
                 .eq(signal.selected_path_ids().iter().copied())
+            && self
+                .established
+                .active_path_ids
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .iter()
+                .copied()
+                .eq(signal.initial_active_path_ids().iter().copied())
     }
 
     /// Consume an exact committed UDP route and acquire its Client QUIC descriptor from helper.
@@ -6475,8 +6491,14 @@ fn mptcp_session_start_dispatches(
         wrappers.push((relay.clone(), request_id, deadline_unix_ms));
     }
 
-    let start = MptcpSessionStartRequest::new(route.signed_exit_reservation.clone(), proofs)
-        .map_err(|_| ())?;
+    let mut initial = route.active_path_ids.clone();
+    initial.sort_unstable();
+    let start = MptcpSessionStartRequest::new_with_initial_paths(
+        route.signed_exit_reservation.clone(),
+        proofs,
+        initial,
+    )
+    .map_err(|_| ())?;
     let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).map_err(|_| ())?;
     wrappers
         .into_iter()
@@ -6509,10 +6531,13 @@ fn verified_mptcp_exit_session_signal(
         .map(VerifiedRelayGrant::path_id)
         .collect::<Vec<_>>();
     selected_path_ids.sort_unstable();
+    let mut initial = route.active_path_ids.clone();
+    initial.sort_unstable();
     if signal.validate().is_err()
         || signal.reservation_id() != route.request.parameters.reservation_id
         || signal.route_context_id() != route.request.parameters.route_context_id
         || signal.selected_path_ids() != selected_path_ids
+        || signal.initial_active_path_ids() != initial
     {
         return Err(ClientRouteConnectError::MptcpExitListenerSignalUnavailable);
     }

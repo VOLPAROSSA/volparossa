@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 pub use netlink::MptcpNetlinkClient;
 pub use socket::{MptcpListener, MptcpStream, connect, listen, probe_kernel_support};
-pub use volparossa_linux_uapi::{MptcpInfo, mptcp_info};
+pub use volparossa_linux_uapi::{MptcpInfo, MptcpSubflowInfo, mptcp_info, mptcp_subflow_info};
 
 /// Upper bound imposed by the v1 protocol and configuration.
 pub const MAX_PATHS: u8 = 8;
@@ -1679,6 +1679,14 @@ mod tests {
             .write_all(&[2])
             .await
             .expect("second acknowledgement");
+        // Keep the exact subflow lifetimes alive until the Client has sampled FULL_INFO.
+        let mut observed = [0_u8; 1];
+        stream
+            .as_tcp_stream_mut()
+            .read_exact(&mut observed)
+            .await
+            .expect("Client completed subflow observations");
+        assert_eq!(observed, [3]);
         manager
             .cleanup_context("live_exit_signal")
             .await
@@ -1761,16 +1769,29 @@ mod tests {
         let evidence = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let info = stream.require_negotiated().expect("genuine MPTCP");
-                if info.total_subflows >= 2 {
-                    break info;
+                let subflows = stream.subflow_info(4).expect("kernel FULL_INFO baseline");
+                if info.total_subflows >= 2
+                    && subflows.iter().filter(|flow| flow.tcp_state == 1).count() >= 2
+                {
+                    break (info, subflows);
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("second MPTCP subflow");
-        assert!(evidence.total_subflows >= 2 && !evidence.fallback);
-        eprintln!("client: {} subflows active", evidence.total_subflows);
+        assert!(evidence.0.total_subflows >= 2 && !evidence.0.fallback);
+        assert!(
+            evidence
+                .1
+                .iter()
+                .any(|flow| flow.local == client_one && flow.remote == remote)
+        );
+        assert!(
+            stream.subflow_info(1).is_err(),
+            "never return a truncated subflow set"
+        );
+        eprintln!("client: {} subflows active", evidence.0.total_subflows);
 
         stream
             .as_tcp_stream_mut()
@@ -1792,10 +1813,49 @@ mod tests {
             .require_negotiated()
             .expect("MPTCP remained negotiated");
         assert!(final_info.bytes_sent >= 65 * 1024 * 1024);
+        let final_subflows = stream
+            .subflow_info(4)
+            .expect("kernel FULL_INFO after payload");
+        assert_live_subflow_progress(&evidence.1, &final_subflows);
+        stream
+            .as_tcp_stream_mut()
+            .write_all(&[3])
+            .await
+            .expect("release observed server subflows");
         manager
             .cleanup_context("live_two_subflows")
             .await
             .expect("MPTCP endpoint cleanup");
+    }
+
+    fn assert_live_subflow_progress(before: &[MptcpSubflowInfo], after: &[MptcpSubflowInfo]) {
+        for (local, remote) in [
+            (overlay_address(1, 1), overlay_address(1, 4)),
+            (overlay_address(2, 1), overlay_address(3, 4)),
+        ] {
+            let observed = after
+                .iter()
+                .find(|flow| flow.local.ip() == local && flow.remote.ip() == remote)
+                .expect("both real overlay subflow tuples remain present");
+            assert_eq!(observed.remote.port(), 40123);
+            assert_eq!(observed.tcp_state, 1);
+            assert!(
+                observed.bytes_acked > 512 * 1024,
+                "each exact subflow acknowledged data"
+            );
+            assert!(observed.data_segments_sent > 0 && observed.smoothed_rtt_us > 0);
+            let previous = before
+                .iter()
+                .find(|flow| flow.subflow_id == observed.subflow_id)
+                .expect("same kernel subflow lifetime before and after payload");
+            assert_eq!(
+                (observed.local, observed.remote),
+                (previous.local, previous.remote)
+            );
+            assert!(observed.bytes_acked > previous.bytes_acked);
+            assert!(observed.bytes_received >= previous.bytes_received);
+            assert!(observed.total_retransmissions >= previous.total_retransmissions);
+        }
     }
 
     fn interface_counter(interface: &str, counter: &str) -> u64 {

@@ -39,6 +39,22 @@ impl Tls13MptcpStream {
         };
         volparossa_mptcp::mptcp_info(stream)
     }
+
+    /// Observe bounded subflow tuples and TCP metrics without unwrapping this TLS stream.
+    ///
+    /// # Errors
+    /// Rejects unsupported or incomplete kernel observations, ordinary-TCP fallback and invalid
+    /// bounds. No new descriptor is opened and no partial subflow set is returned.
+    pub fn subflow_info(
+        &self,
+        maximum_subflows: usize,
+    ) -> std::io::Result<Vec<volparossa_mptcp::MptcpSubflowInfo>> {
+        let stream = match self {
+            Self::Client(stream) => stream.get_ref().0,
+            Self::Server(stream) => stream.get_ref().0,
+        };
+        volparossa_mptcp::mptcp_subflow_info(stream, maximum_subflows)
+    }
 }
 
 /// TLS 1.3-only client transport over a helper-acquired route-namespace MPTCP socket.

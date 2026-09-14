@@ -56,6 +56,7 @@ pub(crate) struct ExitMptcpListenerSignal {
     route_context_id: [u8; 16],
     port: u16,
     selected_path_ids: Vec<u32>,
+    initial_active_path_ids: Vec<u32>,
     certificate_der: Vec<u8>,
 }
 
@@ -81,6 +82,7 @@ impl ExitMptcpListenerSignal {
         Ok(Self {
             route_context_id,
             port,
+            initial_active_path_ids: selected_path_ids.clone(),
             selected_path_ids,
             certificate_der,
         })
@@ -105,12 +107,14 @@ impl ExitMptcpListenerSignal {
         {
             return Err(MptcpTransportError::InvalidMetadata);
         }
-        Self::new(
+        let mut verified = Self::new(
             route_context_id,
             port,
             signal.selected_path_ids().iter().copied(),
             signal.certificate_der().to_vec(),
-        )
+        )?;
+        verified.initial_active_path_ids = signal.initial_active_path_ids().to_vec();
+        Ok(verified)
     }
 
     pub(crate) const fn route_context_id(&self) -> [u8; 16] {
@@ -118,7 +122,7 @@ impl ExitMptcpListenerSignal {
     }
 
     pub(crate) fn path_id(&self) -> u32 {
-        self.selected_path_ids[0]
+        self.initial_active_path_ids[0]
     }
 
     pub(crate) const fn port(&self) -> u16 {
@@ -127,6 +131,10 @@ impl ExitMptcpListenerSignal {
 
     pub(crate) fn selected_path_ids(&self) -> &[u32] {
         &self.selected_path_ids
+    }
+
+    pub(crate) fn initial_active_path_ids(&self) -> &[u32] {
+        &self.initial_active_path_ids
     }
 
     #[allow(
@@ -150,7 +158,7 @@ impl ClientMptcpTransport {
         context_handle: Vec<u8>,
         local_port: u16,
     ) -> Result<Self, MptcpTransportError> {
-        let selected_paths = signal.selected_path_ids.clone();
+        let selected_paths = signal.initial_active_path_ids.clone();
         let certificate_der = signal.certificate_der.clone();
         let request = client_acquire_request(&signal, context_handle.clone(), local_port)?;
         let acquired = helper.acquire_transport_socket(request).await?;
@@ -304,22 +312,17 @@ where
     }
 }
 
-/// A helper-owned Exit listener plus its exact MPTCP path announcements.
-#[allow(
-    dead_code,
-    reason = "the standard Exit responder will retain this owner after signalling is connected"
-)]
+/// A helper-owned Exit listener plus its exact initial and dormant MPTCP path authority.
 pub(crate) struct ExitMptcpTransport {
     listener: MptcpListener,
     route_context_id: Vec<u8>,
     context_handle: Vec<u8>,
     active_paths: Vec<u32>,
+    selected_paths: Vec<u32>,
+    initial_paths: Vec<u32>,
+    listener_port: u16,
 }
 
-#[allow(
-    dead_code,
-    reason = "the standard Exit responder will retain this owner after signalling is connected"
-)]
 impl ExitMptcpTransport {
     /// Acquire the real `IPPROTO_MPTCP` listener inside a committed Exit route namespace.
     pub(crate) async fn acquire_and_activate(
@@ -327,7 +330,7 @@ impl ExitMptcpTransport {
         signal: ExitMptcpListenerSignal,
         context_handle: Vec<u8>,
     ) -> Result<Self, MptcpTransportError> {
-        let paths = signal.selected_path_ids.clone();
+        let paths = signal.initial_active_path_ids.clone();
         let request = exit_acquire_request(&signal, context_handle.clone())?;
         let acquired = helper.acquire_transport_socket(request).await?;
         let listener = adopt_exit_listener(acquired)?;
@@ -360,12 +363,82 @@ impl ExitMptcpTransport {
             route_context_id: signal.route_context_id.to_vec(),
             context_handle,
             active_paths,
+            selected_paths: signal.selected_path_ids,
+            initial_paths: paths,
+            listener_port: signal.port,
         })
     }
 
     /// Borrow the bound real MPTCP listener.
     pub(crate) const fn listener(&self) -> &MptcpListener {
         &self.listener
+    }
+
+    pub(crate) fn growth_scope(&self) -> crate::mptcp_flow_runtime::path_growth::PathScope {
+        crate::mptcp_flow_runtime::path_growth::PathScope::new(
+            self.route_context_id
+                .as_slice()
+                .try_into()
+                .expect("verified context ID"),
+            self.listener_port,
+            &self.selected_paths,
+            &self.initial_paths,
+        )
+    }
+
+    pub(crate) fn warm_path(&self) -> Option<u32> {
+        self.selected_paths
+            .iter()
+            .copied()
+            .find(|path| !self.initial_paths.contains(path) && !self.active_paths.contains(path))
+    }
+
+    pub(crate) async fn activate_warm(
+        &mut self,
+        helper: &HelperClient,
+        path: u32,
+    ) -> Result<(), MptcpTransportError> {
+        if self.initial_paths.len() < 2 || self.warm_path() != Some(path) {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        // Record intent before the RPC: a cancelled/ambiguous helper reply must not lose the
+        // exact endpoint cleanup obligation. The route owner stops further growth on any error.
+        self.active_paths.push(path);
+        helper
+            .add_mptcp_endpoint(AddMptcpEndpoint {
+                route_context_id: self.route_context_id.clone(),
+                context_handle: self.context_handle.clone(),
+                path_id: path,
+                mode: MptcpEndpointMode::Signal as i32,
+                backup: false,
+                listener_port: 0,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn retire_extra(
+        &mut self,
+        helper: &HelperClient,
+        path: u32,
+    ) -> Result<(), MptcpTransportError> {
+        // Initial active count is a local startup floor, not a newly invented signed minimum.
+        // Never remove an initial endpoint based on one of several concurrent flow samples.
+        if self.initial_paths.len() < 2
+            || self.initial_paths.contains(&path)
+            || !self.active_paths.contains(&path)
+        {
+            return Err(MptcpTransportError::InvalidMetadata);
+        }
+        helper
+            .remove_mptcp_endpoint(RemoveMptcpEndpoint {
+                route_context_id: self.route_context_id.clone(),
+                context_handle: self.context_handle.clone(),
+                path_id: path,
+            })
+            .await?;
+        self.active_paths.retain(|active| *active != path);
+        Ok(())
     }
 
     /// Remove every exact Exit endpoint before releasing the listener.
@@ -628,6 +701,42 @@ mod tests {
         invalid.address = vec![127, 0, 0, 1];
         invalid.port = 0;
         assert!(socket_address(Some(&invalid)).is_err());
+    }
+
+    #[test]
+    fn initial_subset_binds_listener_to_active_path_and_preserves_warm_authority() {
+        let certificate = vec![0x30, 1];
+        let digest = Sha256::digest(&certificate);
+        let wire = DiscoveryExitMptcpSessionSignal::new_with_initial_paths(
+            [1; 16],
+            [7; 16],
+            44_443,
+            vec![1, 2, 3],
+            certificate,
+            vec![2, 3],
+        )
+        .expect("reserved path one stays warm");
+        let signal =
+            ExitMptcpListenerSignal::try_from_discovery(&wire, &digest).expect("verified subset");
+        assert_eq!(signal.selected_path_ids(), [1, 2, 3]);
+        assert_eq!(signal.initial_active_path_ids(), [2, 3]);
+        assert_eq!(signal.path_id(), 2);
+        assert_eq!(
+            client_acquire_request(&signal, vec![9; 32], 52_001)
+                .expect("client")
+                .path_id,
+            2
+        );
+        assert_eq!(
+            exit_acquire_request(&signal, vec![8; 32])
+                .expect("exit")
+                .path_id,
+            2
+        );
+        assert_eq!(
+            additional_path_ids(signal.initial_active_path_ids()).collect::<Vec<_>>(),
+            vec![3]
+        );
     }
 
     #[test]

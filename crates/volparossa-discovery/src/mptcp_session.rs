@@ -66,6 +66,8 @@ pub struct MptcpSessionStartRequest {
     signed_exit_reservation: Vec<u8>,
     #[prost(message, repeated, tag = "2")]
     paths: Vec<MptcpSessionPathProof>,
+    #[prost(uint32, repeated, tag = "3")]
+    initial_active_path_ids: Vec<u32>,
 }
 
 impl MptcpSessionStartRequest {
@@ -79,9 +81,37 @@ impl MptcpSessionStartRequest {
         signed_exit_reservation: Vec<u8>,
         paths: Vec<MptcpSessionPathProof>,
     ) -> Result<Self, MptcpSessionFrameError> {
+        let initial_active_path_ids = paths
+            .iter()
+            .map(|proof| {
+                signed_payload::<RelayReservation>(
+                    &proof.signed_relay_reservation,
+                    ControlMessageType::RelayReservation,
+                )
+                .map(|relay| relay.path_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new_with_initial_paths(signed_exit_reservation, paths, initial_active_path_ids)
+    }
+
+    /// Keep every reserved path proof, but initially activate only this canonical subset.
+    ///
+    /// This is a startup preference within the signed authority, not new path authority. Every
+    /// selected Relay must forward the same complete frame; the Client checks the exact returned
+    /// subset before connecting. Missing initial-path metadata is not an all-path fallback.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid proofs or an initial set with fewer than two, duplicate or unreserved IDs.
+    pub fn new_with_initial_paths(
+        signed_exit_reservation: Vec<u8>,
+        paths: Vec<MptcpSessionPathProof>,
+        initial_active_path_ids: Vec<u32>,
+    ) -> Result<Self, MptcpSessionFrameError> {
         let value = Self {
             signed_exit_reservation,
             paths,
+            initial_active_path_ids,
         };
         value.validate()?;
         Ok(value)
@@ -115,6 +145,7 @@ impl MptcpSessionStartRequest {
         }
 
         let mut previous_path_id = 0;
+        let mut reserved = Vec::with_capacity(self.paths.len());
         for proof in &self.paths {
             let relay = signed_payload::<RelayReservation>(
                 &proof.signed_relay_reservation,
@@ -142,7 +173,9 @@ impl MptcpSessionStartRequest {
                 return Err(MptcpSessionFrameError::Invalid);
             }
             previous_path_id = relay.path_id;
+            reserved.push(relay.path_id);
         }
+        validate_initial_paths(&self.initial_active_path_ids, &reserved)?;
         Ok(())
     }
 
@@ -156,6 +189,12 @@ impl MptcpSessionStartRequest {
     #[must_use]
     pub fn paths(&self) -> &[MptcpSessionPathProof] {
         &self.paths
+    }
+
+    /// Paths that must be active at startup; other reserved paths remain warm.
+    #[must_use]
+    pub fn initial_active_path_ids(&self) -> &[u32] {
+        &self.initial_active_path_ids
     }
 }
 
@@ -175,6 +214,8 @@ pub struct ExitMptcpSessionSignal {
     selected_path_ids: Vec<u32>,
     #[prost(bytes = "vec", tag = "5")]
     certificate_der: Vec<u8>,
+    #[prost(uint32, repeated, tag = "6")]
+    initial_active_path_ids: Vec<u32>,
 }
 
 impl ExitMptcpSessionSignal {
@@ -190,12 +231,37 @@ impl ExitMptcpSessionSignal {
         selected_path_ids: Vec<u32>,
         certificate_der: Vec<u8>,
     ) -> Result<Self, MptcpSessionFrameError> {
+        let initial_active_path_ids = selected_path_ids.clone();
+        Self::new_with_initial_paths(
+            reservation_id,
+            route_context_id,
+            listener_port,
+            selected_path_ids,
+            certificate_der,
+            initial_active_path_ids,
+        )
+    }
+
+    /// Echo the complete reservation and the exact initial active subset separately.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed signal metadata or a noncanonical/unreserved initial subset.
+    pub fn new_with_initial_paths(
+        reservation_id: [u8; ID_BYTES],
+        route_context_id: [u8; ID_BYTES],
+        listener_port: u16,
+        selected_path_ids: Vec<u32>,
+        certificate_der: Vec<u8>,
+        initial_active_path_ids: Vec<u32>,
+    ) -> Result<Self, MptcpSessionFrameError> {
         let value = Self {
             reservation_id: reservation_id.to_vec(),
             route_context_id: route_context_id.to_vec(),
             listener_port: u32::from(listener_port),
             selected_path_ids,
             certificate_der,
+            initial_active_path_ids,
         };
         value.validate()?;
         Ok(value)
@@ -228,6 +294,7 @@ impl ExitMptcpSessionSignal {
             }
             previous_path_id = *path_id;
         }
+        validate_initial_paths(&self.initial_active_path_ids, &self.selected_path_ids)?;
         Ok(())
     }
 
@@ -255,11 +322,27 @@ impl ExitMptcpSessionSignal {
         &self.selected_path_ids
     }
 
+    /// Exact startup requirement, distinct from the complete retained reservation.
+    #[must_use]
+    pub fn initial_active_path_ids(&self) -> &[u32] {
+        &self.initial_active_path_ids
+    }
+
     /// Public route certificate whose SHA-256 digest is committed by the Exit reservation.
     #[must_use]
     pub fn certificate_der(&self) -> &[u8] {
         &self.certificate_der
     }
+}
+
+fn validate_initial_paths(initial: &[u32], reserved: &[u32]) -> Result<(), MptcpSessionFrameError> {
+    if !(MIN_MPTCP_PATHS..=reserved.len()).contains(&initial.len())
+        || initial.windows(2).any(|pair| pair[0] >= pair[1])
+        || initial.iter().any(|path| !reserved.contains(path))
+    {
+        return Err(MptcpSessionFrameError::Invalid);
+    }
+    Ok(())
 }
 
 /// Bounded MPTCP activation-frame error.
@@ -445,6 +528,45 @@ mod tests {
             .collect();
         MptcpSessionStartRequest::new(signed(ControlMessageType::ExitReservation, &exit), paths)
             .expect("correlated MPTCP activation proof")
+    }
+
+    #[test]
+    fn initial_subset_retains_all_proofs_and_rejects_missing_or_unreserved_paths() {
+        let original = correlated_start(&[1, 2, 3]);
+        let start = MptcpSessionStartRequest::new_with_initial_paths(
+            original.signed_exit_reservation.clone(),
+            original.paths.clone(),
+            vec![2, 3],
+        )
+        .expect("two initially active, one warm");
+        let encoded = encode_canonical(&start, MAX_CONTROL_MESSAGE_SIZE).expect("encode");
+        let decoded =
+            decode_canonical::<MptcpSessionStartRequest>(&encoded, MAX_CONTROL_MESSAGE_SIZE)
+                .expect("decode");
+        decoded
+            .validate()
+            .expect("complete proof set with initial subset");
+        assert_eq!(decoded.paths().len(), 3);
+        assert_eq!(decoded.initial_active_path_ids(), [2, 3]);
+        let signal = ExitMptcpSessionSignal::new_with_initial_paths(
+            [1; 16],
+            [2; 16],
+            443,
+            vec![1, 2, 3],
+            vec![0x30, 1],
+            vec![2, 3],
+        )
+        .expect("exact echoed subset");
+        assert_eq!(signal.selected_path_ids(), [1, 2, 3]);
+        assert_eq!(signal.initial_active_path_ids(), [2, 3]);
+        for initial in [vec![], vec![1], vec![1, 1], vec![3, 2], vec![2, 4]] {
+            let mut invalid = start.clone();
+            invalid.initial_active_path_ids = initial.clone();
+            assert!(invalid.validate().is_err());
+            let mut invalid = signal.clone();
+            invalid.initial_active_path_ids = initial;
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]

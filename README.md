@@ -17,7 +17,7 @@ passes: automatic selection chose the origin before peer body transfer, taking 2
 versus 2.55 seconds for explicit origin-only retrieval of the same cold object. This is a useful
 source choice, not a measured speedup. Both commands preserve fresh origin authorization and
 the same protected route with two parallel relay paths. Automatic successful peer selection
-still needs live evidence.
+has since passed the constrained-uplink comparison described below; it is not a general speedup.
 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
@@ -346,6 +346,12 @@ protected route, with no origin body. HTTPS source plans now admit a bounded bat
 providers into that same resource-leased downloader; independent original indexes and fresh
 origin authentication remain required. The three-index local exchange passes, but a real
 three-provider HTTPS network run is still pending.
+
+TCP routes now retain reserved warm paths separately from their initial MPTCP subflows. The
+Exit can advertise an extra path when actual per-subflow kernel observations show sustained
+loss, without first removing an initial path or restarting the application connection.
+Targeted runtime checks and the real two-subflow kernel observer pass; the new live two-to-three
+download proof is still pending. Backend path ceilings have not yet been removed.
 
 Configured Wi-Fi meshes now adjust new-neighbor admission instead of defaulting to eight and
 rejecting everything above thirty-two. `wifi_mesh.maximum_peers: 0` means no operator ceiling;

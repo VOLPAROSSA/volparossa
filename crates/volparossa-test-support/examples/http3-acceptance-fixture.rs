@@ -1,4 +1,5 @@
 //! Bounded real HTTP/3 fixture for the disposable A06/A07 KVM topology.
+//! The read-only `route-layout` mode derives public path tuples without creating any sockets.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +24,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tokio::time::{sleep, timeout};
+use volparossa_wireguard::{EndpointRole, interface_name, overlay_addresses};
 
 const TLS_SERVER_NAME: &str = "destination.volparossa.test";
 const H3_ALPN: &[u8] = b"h3";
@@ -106,10 +108,16 @@ fn server_cases(profile: Option<&str>) -> FixtureResult<&'static [AcceptanceCase
 
 #[tokio::main]
 async fn main() -> FixtureResult<()> {
-    install_crypto_provider()?;
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
+        Some("route-layout") => {
+            let context = argument(&mut arguments, "route context")?;
+            reject_extra(arguments)?;
+            println!("{}", route_layout(&context)?);
+            Ok(())
+        }
         Some("server") => {
+            install_crypto_provider()?;
             let listen = parse_socket(&argument(&mut arguments, "listen address")?)?;
             let certificate = absolute_path(argument(&mut arguments, "certificate path")?)?;
             let ready = absolute_path(argument(&mut arguments, "ready path")?)?;
@@ -121,6 +129,7 @@ async fn main() -> FixtureResult<()> {
             run_server(listen, &certificate, &ready, &coordination, run_id, cases).await
         }
         Some("client") => {
+            install_crypto_provider()?;
             let case = AcceptanceCase::parse(&argument(&mut arguments, "case")?)?;
             let bind = parse_socket(&argument(&mut arguments, "bind address")?)?;
             let remote = parse_socket(&argument(&mut arguments, "remote address")?)?;
@@ -130,8 +139,24 @@ async fn main() -> FixtureResult<()> {
             reject_extra(arguments)?;
             run_client(case, bind, remote, &certificate, run_id, &output).await
         }
-        _ => Err("usage: http3-acceptance-fixture {server|client} ...".into()),
+        _ => Err("usage: http3-acceptance-fixture {server|client} ... | route-layout HEX32".into()),
     }
+}
+
+fn route_layout(context: &str) -> FixtureResult<Value> {
+    let context_id = parse_run_id(context)?;
+    let mut paths = Vec::with_capacity(3);
+    for path_id in 1..=3 {
+        let addresses = overlay_addresses(context_id, path_id)?;
+        paths.push(json!({
+            "path_id": path_id,
+            "client_address": addresses.client.to_string(),
+            "exit_address": addresses.exit.to_string(),
+            "client_interface": interface_name(context_id, path_id, EndpointRole::Client)?,
+            "exit_interface": interface_name(context_id, path_id, EndpointRole::Exit)?,
+        }));
+    }
+    Ok(json!({"context": context, "paths": paths}))
 }
 
 fn install_crypto_provider() -> FixtureResult<()> {
@@ -652,6 +677,46 @@ fn inner_quic_stats(stats: &quinn::ConnectionStats) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_layout_uses_exact_product_derivation_without_external_state() {
+        let context = "0123456789abcdef0123456789abcdef";
+        let layout = route_layout(context).unwrap();
+        assert_eq!(layout["context"], context);
+        let paths = layout["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(route_layout(&context.to_ascii_uppercase()).is_err());
+        for (path, path_id) in paths.iter().zip(1..=3) {
+            let addresses = overlay_addresses(parse_run_id(context).unwrap(), path_id).unwrap();
+            assert_eq!(path.as_object().unwrap().len(), 5);
+            assert_eq!(path["path_id"], path_id);
+            assert_eq!(path["client_address"], addresses.client.to_string());
+            assert_eq!(path["exit_address"], addresses.exit.to_string());
+            assert_eq!(
+                path["client_interface"],
+                interface_name(
+                    parse_run_id(context).unwrap(),
+                    path_id,
+                    EndpointRole::Client
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                path["exit_interface"],
+                interface_name(parse_run_id(context).unwrap(), path_id, EndpointRole::Exit)
+                    .unwrap()
+            );
+        }
+        for invalid in [
+            "",
+            "00",
+            "00000000000000000000000000000000",
+            "070707070707070707070707070707AB",
+            "0707070707070707070707070707070/",
+        ] {
+            assert!(route_layout(invalid).is_err());
+        }
+    }
 
     #[test]
     fn mpquic_growth_profile_is_one_unpaused_32_mib_exchange_in_each_direction() {

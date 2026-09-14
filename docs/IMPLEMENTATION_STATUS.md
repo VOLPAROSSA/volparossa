@@ -2,7 +2,7 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-08
+Last updated: 2026-09-14
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 The proposal records the full idea and a researched HTTPS integration design: authenticated
@@ -566,6 +566,20 @@ The old two-provider/Range/reference cases remain unchanged. Four origin-fixture
 evidence checks, parent reconstruction compatibility, strict example Clippy and shell checks
 pass locally; this new three-provider HTTPS network result is still pending.
 
+The [first expanded `78f7125` provider run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34245717172)
+**fails before that new phase**, at the earlier ordinary-site evidence check. Both advertised
+site replicas contain the complete object, so the adaptive downloader legitimately uses only
+R4 for all 2,097,628 bytes / nine chunks, with the correct signed bundle hash and no origin body.
+R5 supplies only 1,696 captured response bytes of setup/metadata, not a claimed object share.
+The old checker incorrectly required both complete replicas to supply content. The correction
+requires a nonempty, unique subset of the authorized replicas, identical actual-source receipts,
+and unchanged hashes, exact peer-byte accounting, two WireGuard relay paths and privacy gates.
+The later cache-only read still requires zero provider traffic. Four focused checks and the
+retained raw site rebuild pass with this corrected checker; the old workflow remains failed.
+The separate disjoint-chunk two/three-provider proofs retain their actual multi-provider requirements.
+This run's earlier automatic HTTPS comparison chooses the origin, taking 6.34 seconds versus
+5.93 seconds origin-only; the previous faster-peer sample is not a universal prediction.
+
 ### Adaptive mesh-neighbor integration
 
 Wi-Fi configuration now uses zero as the default optional operator ceiling, replacing the
@@ -625,6 +639,28 @@ witness across lowering and verifies no allocation proportional to the ceiling. 
 and agent all-target/all-feature Clippy and formatting pass. This is authenticated local control
 transport evidence, not WAN throughput or 385 payload routes. The `d0251a27` provider VM above
 also passes with this production actor, but its small topology does not establish 385 WAN peers.
+
+### Warm MPTCP growth integration
+
+The complete reserved proof set now travels separately from the canonical initial-active
+subset in MPTCP session start and its exact echoed signal. Client and Exit initially join only
+that subset; the kernel's permitted room includes the already authorized warm paths. Every
+initial path remains available to other flows sharing the route.
+
+The production Exit samples its existing authenticated MPTCP/TLS flows once per second using
+`MPTCP_FULL_INFO`, without cloning descriptors or querying the privileged helper. Observations
+bind kernel subflow lifetime, exact route tuples, ACK/receive counters and actual retransmission
+deltas. Sustained loss can add one reserved SIGNAL endpoint; an extra probe may later retire
+when unhelpful, but only while every known live flow retains its initial established set.
+Unknown observations grant no extra admission or retirement. Kernel scheduling and reinjection
+are unchanged; transport ACK bytes are not presented as unique application throughput.
+
+The real disposable kernel test observes two subflows carrying a 65-MiB transfer, with stable
+identities, monotone counters and more than 512 KiB acknowledged on each. Twenty targeted agent
+tests and strict agent Clippy pass. The new `mptcp-growth` scenario must still prove one real
+download growing from two to three simultaneous data-carrying subflows with six WireGuard legs,
+the complete payload hash, normal disconnect and unchanged guest state. No live three-subflow
+growth, arbitrary path count or throughput improvement is claimed yet.
 
 ### Warm MPQUIC growth integration
 
@@ -711,6 +747,20 @@ The same-source [Quality run](https://github.com/VOLPAROSSA/volparossa/actions/r
 passes strict Clippy/workspace tests but fails its static harness check on a changed comment's
 literal wording. The obsolete comment grep is removed; executable ACK-versus-user-counter
 assertions remain in the benchmark checker test.
+
+The [diagnostic `78f7125` growth run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34245714141)
+also fails: an owned netem qdisc drops 1,510 packets, while ten native samples and 93 route-health
+observations still report zero loss. The route eventually replaces an initial path rather than
+keeping three active paths. Source inspection identifies the mismatch: xquic's `ctl_lost_count`
+tracks lost packets subsequently retransmitted, whereas these unreliable MASQUE datagrams are
+not retransmitted by that transport. The corrected mapping uses a separate 64-bit, path-lifetime
+detected-loss counter at the actual loss-declaration site. Its native regression invokes the
+real xquic detector: one unreliable datagram is lost with no repair queued, the old counter stays
+zero, and the new exported counter becomes one exactly once. Crossing 32 bits and saturation
+are covered. No growth threshold changes or live three-path success are claimed; the corrected
+network run is still required. The [same-source Quality run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34245544220)
+passed. GitHub's aggregate CodeQL findings gate remains open separately; this is not a release
+security clearance.
 
 ### Native publication/site cache-only reopen
 

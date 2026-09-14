@@ -878,6 +878,7 @@ struct PendingMptcpSessionStart {
     channels: Vec<request_response::ResponseChannel<DatapathRelayResponse>>,
     canonical_start: Vec<u8>,
     selected_path_ids: Vec<u32>,
+    initial_active_path_ids: Vec<u32>,
     route: PreparedProductionRelayRoute,
 }
 
@@ -6837,6 +6838,7 @@ impl DiscoveryRuntime {
                     channels: vec![channel],
                     canonical_start: request.client_signed_request().to_vec(),
                     selected_path_ids,
+                    initial_active_path_ids: start.initial_active_path_ids().to_vec(),
                     route,
                 }),
                 mpquic_session: None,
@@ -8204,6 +8206,7 @@ impl DiscoveryRuntime {
                 || signal.reservation_id() != mptcp.route.accepted.reservation_id()
                 || signal.route_context_id() != mptcp.route.accepted.route_context_id()
                 || signal.selected_path_ids() != mptcp.selected_path_ids
+                || signal.initial_active_path_ids() != mptcp.initial_active_path_ids
                 || !signal
                     .selected_path_ids()
                     .contains(&mptcp.route.accepted.path_id())
@@ -8908,6 +8911,7 @@ impl DiscoveryRuntime {
             channels,
             canonical_start: _,
             selected_path_ids: _,
+            initial_active_path_ids: _,
             route,
         } = mptcp;
         self.retire_production_relay_route(route_context_id, route)
@@ -10654,12 +10658,13 @@ impl DiscoveryRuntime {
             self.send_pending_mptcp_exit_unavailable(pending);
             return;
         };
-        let Ok(wire_signal) = ExitMptcpSessionSignal::new(
+        let Ok(wire_signal) = ExitMptcpSessionSignal::new_with_initial_paths(
             reservation_id,
             route_context_id,
             PRODUCTION_MPTCP_EXIT_PORT,
             selected_path_ids,
             certificate_der,
+            start.initial_active_path_ids().to_vec(),
         ) else {
             log_reservation_event(state, "MPTCP_SESSION_EXIT_SIGNAL_REJECTED").await;
             self.retire_production_exit_route(route_context_id, route)
