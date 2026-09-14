@@ -207,6 +207,22 @@ handoff to count a complete provider. Here `network_publication` means a confirm
 remote copy; bytes/chunks describe the retained object (zero for Missing), not wire upload.
 Neither receipt type authorizes HTTPS content, automatic placement or lost-copy repair.
 
+### Targeted public replica repair (development v4)
+
+Provider selector `version=4`, empty manifest ID, `operation=1` selects a targeted variant of
+the existing v3 one-chunk-credit exchange. The bounded request retains version/byte/chunk/hop
+limits and adds `7: exact original manifest ID` and `8: distinct missing chunk IDs`; incidental
+exclusions must be empty. Existing v2/v3 requests reject those new fields. Providers send only
+the requested original public manifest and requested chunks, retaining its signature/expiry and
+the existing hop limit. Every response requires fresh credit and is bounded by the original
+byte/time budget; unsupported versions never fall back to unsolicited uptake or direct dial.
+
+Receivers reject private-message targets, substituted manifests/chunks and renewed lifetimes.
+They union verified chunk references into the existing non-evicting journal before registering
+the result. Partial progress remains partial; a full original-object check is needed for complete
+custody. This protocol needs no original publisher private key and grants no authority to place
+new unsolicited objects on a peer. Generic discovery records do not expose the target IDs.
+
 ### Recipient-encrypted native message object (development v1)
 
 The same chunk protocol can carry a canonical protobuf ciphertext envelope: `1: version=1`,

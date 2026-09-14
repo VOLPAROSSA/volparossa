@@ -8,6 +8,13 @@ The user-requested [decentralized agents extension](DECENTRALIZED_AGENTS.md) add
 content whitelist/blacklist governance. It is not implemented by this destination allowlist.
 Its assessment rules, independent decision membership, conflict resolution and signed-activation
 migration are separate work; current trust anchors and enforcement remain in force meanwhile.
+The agreed [content-policy examples](DECENTRALIZED_AGENTS.md#agreed-content-policy-examples)
+distinguish prohibited illegal material/conduct, contextual assessment and allowed lawful use
+with optional advice. Destination authorization alone neither implements those judgments nor
+establishes the legality of every cached object or eliminates an exit operator's legal risk.
+The selected legal-policy baseline is Netherlands/EU plus applicable local exit restrictions;
+the latter may narrow but not broaden the common allowance. Jurisdiction-aware enforcement
+is not yet implemented by this destination manifest.
 
 ## Trust model
 
