@@ -432,14 +432,19 @@ def encode_dataset(tokenizer, torch, dataset):
     for split in result:
         for row in dataset[split]:
             messages = prompt_messages(row)
-            prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-            require(type(prompt) is list and 1 <= len(prompt) <= MAX_CONTEXT - MAX_NEW_TOKENS,
+            # Transformers 5.16.1 defaults to BatchEncoding; this worker deliberately
+            # consumes a flat token-ID list and constructs its own tensors/masks.
+            prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
+                                                   return_dict=False)
+            require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
+            require(1 <= len(prompt) <= MAX_CONTEXT - MAX_NEW_TOKENS,
                     "DOCUMENT_TOKEN_LIMIT_EXCEEDED")
             if split == "inference":
                 result[split].append(torch.tensor([prompt], dtype=torch.long, device="cpu"))
                 continue
             complete = tokenizer.apply_chat_template(messages + [{"role": "assistant", "content": row["answer"]}],
-                                                     tokenize=True, add_generation_prompt=False)
+                                                     tokenize=True, add_generation_prompt=False, return_dict=False)
+            require(type(complete) is list, "MODEL_TOKENIZER_RETURN_TYPE")
             require(complete[:len(prompt)] == prompt and len(prompt) < len(complete) <= MAX_CONTEXT,
                     "TRAINING_TOKEN_LIMIT_OR_TEMPLATE_INVALID")
             labels = [-100] * len(prompt) + complete[len(prompt):]

@@ -33,6 +33,7 @@ on:
           - content-mailbox
           - dns-cache
           - agent-training
+          - agent-artifact
   pull_request:
     branches:
       - main
@@ -106,6 +107,8 @@ jobs:
           python3 -B tests/integration/test-content-replication-capture.py
           sh -n tests/integration/agent-training-smoke.sh
           python3 -B tests/integration/agent-training-smoke.py self-test
+          sh -n tests/integration/agent-artifact-smoke.sh
+          python3 -B tests/integration/agent-artifact-smoke.py self-test
           python3 -B workers/volparossa-ml/test_provision.py
           sh -n tests/integration/dns-cache-smoke.sh
           python3 -B tests/integration/test-dns-cache-smoke.py
@@ -255,6 +258,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-artifact; then
+            report="$VOLPAROSSA_ALPHA_OUTPUT/agent-artifact-smoke.json"
+            test ! -f "$report" || jq '{report_kind,success,phase,observed_blocker,scope,cleanup,host_state}' "$report" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if test "$VOLPAROSSA_ALPHA_SCENARIO" = agent-training; then
             report="$VOLPAROSSA_ALPHA_OUTPUT/agent-training-smoke.json"
             if test -f "$report"; then
@@ -591,7 +599,7 @@ jobs:
           fi
 
       - name: Validate normative acceptance report before upload
-        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training'
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |
@@ -690,6 +698,20 @@ jobs:
           test "$TOPOLOGY_EXIT_CODE" = 0
           report="$VOLPAROSSA_ALPHA_OUTPUT/content-custody-smoke.json"
           python3 -B tests/integration/content-custody-smoke.py report "$report" "$GITHUB_SHA"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.before_sha256' "$report")"
+          test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
+            "$(jq -r '.host_state.after_sha256' "$report")"
+
+      - name: Require protected public adapter distribution and actual received-weight reuse
+        if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-artifact'
+        env:
+          TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          test "$TOPOLOGY_EXIT_CODE" = 0
+          report="$VOLPAROSSA_ALPHA_OUTPUT/agent-artifact-smoke.json"
+          python3 -B tests/integration/agent-artifact-smoke.py report "$report" "$GITHUB_SHA"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-before.json" | cut -d" " -f1)" = \
             "$(jq -r '.host_state.before_sha256' "$report")"
           test "$(sha256sum "$VOLPAROSSA_ALPHA_OUTPUT/host-state-after.json" | cut -d" " -f1)" = \
@@ -1124,7 +1146,7 @@ jobs:
           retention-days: 7
 
       - name: Require successful A01-A15 evidence
-        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training'
+        if: env.VOLPAROSSA_ALPHA_SCENARIO != 'reciprocity' && env.VOLPAROSSA_ALPHA_SCENARIO != 'local-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mixed-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mpquic-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'mptcp-growth' && env.VOLPAROSSA_ALPHA_SCENARIO != 'sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'download-sharing' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-mesh' && env.VOLPAROSSA_ALPHA_SCENARIO != 'wifi-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'uplink-link' && env.VOLPAROSSA_ALPHA_SCENARIO != 'crash-recovery' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-message' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-https' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-provider' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-custody' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-repair' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-replication' && env.VOLPAROSSA_ALPHA_SCENARIO != 'content-mailbox' && env.VOLPAROSSA_ALPHA_SCENARIO != 'dns-cache' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-training' && env.VOLPAROSSA_ALPHA_SCENARIO != 'agent-artifact'
         env:
           TOPOLOGY_EXIT_CODE: ${{ steps.topology.outputs.exit_code }}
         run: |

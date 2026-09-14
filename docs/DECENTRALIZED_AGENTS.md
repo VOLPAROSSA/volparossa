@@ -167,9 +167,15 @@ The next implementation connects the worker to ordinary signed native content:
 All paths above are examples; supply absolute paths/private output parents and the normal
 compute runtime/model/output arguments. `--execute` is required for computation; fetching
 does not activate an adapter. `--cache-only --reuse-cache` is an explicit offline option,
-not the default. Five focused Pack/CLI tests, four codec/native-chunk tests and ten worker
+not the default. Five focused Pack/CLI tests, four codec/native-chunk tests and eleven worker
 protocol/adapter-validation tests pass locally. These are not a live-model or two-node pass;
-the real protected-transfer/remote-use scenario remains to be executed. Native peer fetch
+the new `agent-artifact` guest scenario trains/publishes in one producer's actual namespace,
+restarts its durable contribution store after removing trainer files/key/cache, and requires
+a different Client to fetch both objects over protected MPTCP and execute the received adapter.
+The observer binds both jobs to distinct node service processes/namespaces and checks the
+actual read-only input inodes. The fixture deliberately shares a pre-provisioned read-only
+base/runtime; it does not prove base-model distribution. This scenario is still awaiting a
+passing live result. Native peer fetch
 does not yet implement general external-corpus ingestion or bias-aware source selection.
 
 ## Owner-first resource allocation

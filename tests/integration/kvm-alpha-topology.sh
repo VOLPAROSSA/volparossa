@@ -27,7 +27,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|dns-cache]'
 }
 
 print_plan() {
@@ -41,6 +41,18 @@ print_plan() {
             '  stop the original holder, then fetch by publisher/name into a fresh Client cache from the repaired receiver;' \
             '  enforce cross-node cache isolation, exact object hashes and unchanged guest host cleanup;' \
             '  no initial network placement, independent publisher-node offline or future availability claim.'
+        return
+    fi
+    if [ "$scenario" = agent-artifact ]; then
+        printf '%s\n' \
+            'VOLPAROSSA real public agent-artifact reuse plan:' \
+            '  explicitly provision a pinned CPU model/runtime in a private disposable guest directory;' \
+            '  train eight real LoRA updates in a distinct producer node and publish both objects through its own agent;' \
+            '  remove original trainer inputs/key/cache and restart its durable contribution service;' \
+            '  another Client uses a fresh protected MPTCP route/cache and explicitly infers with received readonly weights;' \
+            '  stop the producer and replay cache-only; bind training/inference to different actual node namespaces;' \
+            '  require exact hashes, actual isolated workers, complete boundary captures and unchanged guest cleanup;' \
+            '  no distributed optimization, base-model distribution, model-quality or full-alpha claim.'
         return
     fi
     if [ "$scenario" = content-custody ]; then
@@ -315,7 +327,7 @@ while [ "$#" -gt 0 ]; do
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
-                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
+                alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|dns-cache) scenario=$2; wifi_link=no; uplink_link=no ;;
                 *) usage >&2; exit 64 ;;
             esac
             shift
@@ -475,7 +487,7 @@ if [ "$scenario" = content-repair ]; then
     [ -x "$binary_directory/examples/content-acceptance-fixture" ] \
         || { printf '%s\n' 'content repair executable unavailable' >&2; exit 69; }
 fi
-if [ "$scenario" = content-custody ]; then
+if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
     for custody_fixture in content-custody-smoke.sh content-custody-smoke.py \
         content-provider-smoke.sh content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         if [ ! -f "$source_directory/tests/integration/$custody_fixture" ] \
@@ -487,6 +499,15 @@ if [ "$scenario" = content-custody ]; then
     for custody_tool in head base64; do
         command -v "$custody_tool" >/dev/null 2>&1 || exit 69
     done
+fi
+if [ "$scenario" = agent-artifact ]; then
+    for artifact_fixture in tests/integration/agent-artifact-smoke.sh tests/integration/agent-artifact-smoke.py \
+        tests/integration/agent-training-smoke.py workers/volparossa-ml/provision.py \
+        workers/volparossa-ml/requirements.lock workers/volparossa-ml/model-pins.json README.md; do
+        [ -f "$source_directory/$artifact_fixture" ] && [ ! -L "$source_directory/$artifact_fixture" ] \
+            || { printf '%s\n' 'public agent-artifact fixture unavailable' >&2; exit 69; }
+    done
+    command -v bwrap >/dev/null 2>&1 || exit 69
 fi
 if [ "$scenario" = content-mailbox ]; then
     for mailbox_fixture in content-mailbox-smoke.sh content-mailbox-smoke.py content-provider-smoke.sh \
@@ -1360,6 +1381,9 @@ cleanup() {
     if [ "$scenario" = content-custody ] && command -v content_custody_cleanup >/dev/null 2>&1; then
         content_custody_cleanup || original_status=1
     fi
+    if [ "$scenario" = agent-artifact ] && command -v agent_artifact_cleanup >/dev/null 2>&1; then
+        agent_artifact_cleanup || original_status=1
+    fi
     if [ "$scenario" = content-provider ] && command -v content_publication_cleanup >/dev/null 2>&1; then
         content_publication_cleanup || original_status=1
     fi
@@ -1616,6 +1640,8 @@ cleanup() {
         content_mailbox_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-custody ]; then
         content_custody_finalize_report "$original_status" || original_status=1
+    elif [ "$scenario" = agent-artifact ]; then
+        agent_artifact_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-provider ]; then
         content_provider_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-https ]; then
@@ -1740,12 +1766,16 @@ if [ "$scenario" = content-repair ]; then
     # shellcheck source=tests/integration/content-repair-smoke.sh
     . "$source_directory/tests/integration/content-repair-smoke.sh"
 fi
-if [ "$scenario" = content-custody ]; then
+if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
     # Utilities only: this does not execute the larger provider acceptance sequence.
     # shellcheck source=tests/integration/content-provider-smoke.sh
     . "$source_directory/tests/integration/content-provider-smoke.sh"
     # shellcheck source=tests/integration/content-custody-smoke.sh
     . "$source_directory/tests/integration/content-custody-smoke.sh"
+fi
+if [ "$scenario" = agent-artifact ]; then
+    # shellcheck source=tests/integration/agent-artifact-smoke.sh
+    . "$source_directory/tests/integration/agent-artifact-smoke.sh"
 fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
@@ -1769,7 +1799,7 @@ capture_host_state "$WORK/host-state-before.json" \
 install -o root -g root -m 0600 /etc/hosts "$WORK/hosts.before"
 HOSTS_BACKUP=$WORK/hosts.before
 if [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
-    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
+    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
     printf '%s\n' \
         '49.165.5.1 provider-a.volparossa.test provider-a.volparossa.test.' \
         '50.166.6.1 provider-b.volparossa.test provider-b.volparossa.test.' \
@@ -1829,10 +1859,20 @@ if [ "$scenario" = content-https ] || [ "$scenario" = content-provider ]; then
         "$binary_directory/examples/https-content-acceptance-fixture" \
         "$WORK/bin/examples/https-content-acceptance-fixture"
 fi
-if [ "$scenario" = content-custody ]; then
+if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
     for custody_script in content-custody-smoke.py content-provider-smoke.py content-provider-https-smoke.py content-network-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$custody_script" "$WORK/bin/$custody_script"
     done
+fi
+if [ "$scenario" = agent-artifact ]; then
+    for artifact_script in agent-artifact-smoke.py agent-training-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$artifact_script" "$WORK/bin/$artifact_script"
+    done
+    install -d -o root -g root -m 0555 "$WORK/bin/ml"
+    for artifact_pin in provision.py requirements.lock model-pins.json; do
+        install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
+    done
+    install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-artifact-README.md"
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
@@ -1865,6 +1905,8 @@ fi
 install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$WORK/client-fixtures"
 binary_directory=$WORK/bin
 mpquic_binary=$WORK/bin/volparossa-mpquic
+
+[ "$scenario" != agent-artifact ] || agent_artifact_prepare
 
 PHASE=network-topology
 for namespace in "$CLIENT" "$B1" "$B2" "$R0" "$R1" "$R2" "$R3" "$R4" "$R5" \
@@ -2054,7 +2096,7 @@ for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 rela
     install -d -o root -g "$AGENT_GID" -m 0750 "$WORK/runtime-$node"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0750 \
         "$WORK/runtime-$node/control"
-    if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; } \
+    if { { [ "$scenario" = content-message ] || [ "$scenario" = content-provider ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; } \
         && { [ "$node" = client ] \
             || [ "$node" = relay3 ] || [ "$node" = relay4 ] || [ "$node" = relay5 ]; }; } \
         || { { [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; } \
@@ -2112,7 +2154,7 @@ set --
 if [ "$scenario" = dns-cache ]; then
     set -- --dns-cache
 elif [ "$scenario" = content-provider ] || [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$scenario" = content-message ] \
-    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
+    || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
     set -- --content-providers
 fi
 "$binary_directory/examples/acceptance-policy-fixture" "$WORK" "$@"
@@ -2261,7 +2303,7 @@ write_config() {
             printf '  total_download_mbps: 100\n  contribution_download_ceiling_mbps: 1\n'
         fi
         [ "$wifi_link" != yes ] || wifi_link_config
-        [ "$scenario" != content-custody ] || content_custody_config
+        if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then content_custody_config; fi
         [ "$scenario" != content-repair ] || content_repair_config
         # Request an actual per-path reservation below every signed 32-Mbps Relay/Exit
         # advertisement. The native authorization chain binds this value to both service ledgers.
@@ -2644,7 +2686,7 @@ launch_agent() {
         esac
     fi
     set --
-    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-message ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; } && [ "$node" = client ]; then
+    if { [ "$scenario" = content-provider ] || [ "$scenario" = content-message ] || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; } && [ "$node" = client ]; then
         # The identical agent UID must not permit a fixture-local replica file shortcut.
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-provider-seed"
         set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed"
@@ -4237,7 +4279,7 @@ if [ "$scenario" != mixed-link ] && [ "$scenario" != crash-recovery ] \
     && [ "$scenario" != content ] && [ "$scenario" != content-message ] \
     && [ "$scenario" != content-https ] && [ "$scenario" != content-provider ] \
     && [ "$scenario" != content-replication ] && [ "$scenario" != content-repair ] && [ "$scenario" != content-mailbox ] \
-    && [ "$scenario" != content-custody ] && [ "$scenario" != dns-cache ]; then
+    && [ "$scenario" != content-custody ] && [ "$scenario" != agent-artifact ] && [ "$scenario" != dns-cache ]; then
 for node in client bootstrap1 bootstrap2 relay0 relay1 relay2 relay3 relay4 relay5 exit exit2; do
     "$binary_directory/volparossa" \
         --control-socket "$WORK/runtime-$node/control/agent.sock" status \
@@ -4802,13 +4844,13 @@ start_privacy_observers() {
         content-mailbox-send-privacy|content-mailbox-receive-privacy)
             [ "$scenario" = content-mailbox ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
-            [ "$scenario" = content-custody ] || return 1 ;;
+            [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
     privacy_content_flag=
     if [ "$scenario" = content-provider ] || [ "$privacy_prefix" = content-message-publication-privacy ] \
-        || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ]; then
+        || [ "$scenario" = content-mailbox ] || [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ]; then
         set -- --content-providers
         privacy_content_flag=--content-providers
     fi
@@ -5517,6 +5559,10 @@ if [ "$scenario" = content-provider ]; then
 fi
 if [ "$scenario" = content-mailbox ]; then
     content_mailbox_run
+    exit 0
+fi
+if [ "$scenario" = agent-artifact ]; then
+    agent_artifact_run
     exit 0
 fi
 if [ "$scenario" = content-custody ]; then

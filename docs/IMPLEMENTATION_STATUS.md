@@ -14,10 +14,19 @@ disposable-guest proof. The first model-runtime attempt on
 [`86d2d0f5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34858211717)
 stopped during wheel-metadata verification after the pinned downloads, before any training.
 The selector now distinguishes the wheel's own top-level metadata from nested vendored metadata;
-six provisioning tests pass, but a new guest result is required. B01 remains unchecked.
+six provisioning tests pass. The next guest attempt on
+[`a70194ab`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34859406185)
+passed provisioning and observed a genuinely isolated Python worker, but stopped before training:
+the pinned tokenizer returns a dictionary by default while the worker expected token IDs.
+Both calls now explicitly request flat IDs; type and token-budget errors are distinguished.
+The corrected worker and distinct-node adapter harness will be verified together. B01 remains unchecked.
 A new `content agent pack/fetch` candidate binds the exact adapter files to the original signed
 public dataset and fetches both through the existing protected content plane. Five CLI and four
-codec tests pass; the worker's ten protocol tests cover the explicit read-only input adapter.
+codec tests pass; the worker's eleven protocol tests cover the explicit read-only input adapter
+and pinned tokenizer return contract. The `agent-artifact` guest scenario now requires separate
+producer/consumer service processes and namespaces, real training, durable publication/restart,
+protected retrieval and execution of the exact received adapter, followed by cache-only reuse.
+It shares an explicitly provisioned read-only base/runtime; no base-distribution claim is made.
 These local tests do not prove cross-node use of a genuinely trained model: B02 remains unchecked.
 Cache-only retrieval is explicit and off by default. Autonomous training must select eligible
 sources independently of cache availability, fetching missing/fresh data rather than silently

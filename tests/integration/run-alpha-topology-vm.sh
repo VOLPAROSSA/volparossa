@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh and agent-training.'
 }
 
@@ -45,6 +45,13 @@ print_plan() {
             '  explicit private guest provisioning with a 3GiB budget; eight real LoRA optimizer updates;' \
             '  exact base/adapter hashes and reload, actual isolated worker namespaces and cleanup;' \
             '  no native MPQUIC, overlay topology, distributed training or better-answer claim.'
+    elif [ "$scenario" = agent-artifact ]; then
+        printf '%s\n' \
+            'Agent-artifact scenario: one producer node genuinely trains with pinned private guest model/runtime;' \
+            '  its own agent publishes the signed public dataset and adapter; original trainer files/key are removed;' \
+            '  restart the producer; a different Client fetches over protected MPTCP and explicitly reuses received weights;' \
+            '  exact object/parameter hashes, isolated inference, cache-only replay and cleanup;' \
+            '  no distributed optimization, base-model distribution, quality or full-alpha claim.'
     elif [ "$scenario" = dns-cache ]; then
         printf '%s\n' \
             'DNS-cache scenario: download only fresh bounded signed DNS wire data from literal dns.google HTTPS;' \
@@ -163,7 +170,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -418,6 +425,10 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-training-smoke.json", "agent-training-evidence.json",
               "agent-training-worker.json", "agent-training-isolation.json",
               "agent-training-provision.json", "agent-training-observer.stderr",
+              "agent-artifact-smoke.json", "agent-artifact-evidence.json",
+              "agent-artifact-training.json", "agent-artifact-inference.json",
+              "agent-artifact-provision.json", "agent-artifact-provision.err",
+              "agent-artifact-training.err", "agent-artifact-inference.err",
               "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
@@ -547,7 +558,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-artifact"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -574,7 +585,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -613,6 +624,9 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
+if [ "$scenario" = agent-artifact ]; then
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
+fi
 [ "$(./volparossa-mpquic --api-version)" = 7 ]
 test "$(. /etc/os-release; printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13
 test "$(dpkg --print-architecture)" = amd64
@@ -697,7 +711,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-artifact) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

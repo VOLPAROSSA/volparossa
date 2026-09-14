@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SOURCE = Path(__file__).with_name("worker.py")
@@ -56,6 +57,29 @@ def adapter_bytes(header_change=None, last_float=0.0):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_encoding_requests_flat_tokens_and_preserves_prompt_mask_and_length_limit(self):
+        class Tokenizer:
+            def apply_chat_template(self, _messages, *, tokenize, add_generation_prompt, return_dict=True):
+                assert tokenize
+                tokens = [1, 2] if add_generation_prompt else [1, 2, 3]
+                return {"input_ids": tokens} if return_dict else tokens
+
+        # Contract-only fixture, without importing a tokenizer/model backend.
+        backend = mock.Mock()
+        backend.tensor.side_effect = lambda value, **_kwargs: value
+        encoded = WORKER.encode_dataset(Tokenizer(), backend, dataset())
+        self.assertEqual(encoded["train"][0]["input_ids"], [[1, 2, 3]])
+        self.assertEqual(encoded["train"][0]["labels"], [[-100, -100, 3]])
+        self.assertEqual(encoded["heldout"][0]["labels"], [[-100, -100, 3]])
+        self.assertEqual(encoded["inference"], [[[1, 2]]])
+        wrong = mock.Mock()
+        wrong.apply_chat_template.return_value = {"input_ids": [1, 2]}
+        with self.assertRaisesRegex(WORKER.JobError, "MODEL_TOKENIZER_RETURN_TYPE"):
+            WORKER.encode_dataset(wrong, backend, dataset())
+        wrong.apply_chat_template.return_value = [1] * (WORKER.MAX_CONTEXT + 1)
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_TOKEN_LIMIT_EXCEEDED"):
+            WORKER.encode_dataset(wrong, backend, dataset())
+
     def test_request_schema_preserves_id_and_enforces_real_resource_caps(self):
         parsed = WORKER.validate_request(request())
         self.assertEqual(parsed["id"], "a" * 32)

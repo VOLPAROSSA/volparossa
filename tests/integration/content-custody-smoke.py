@@ -218,7 +218,7 @@ def validate_operation(result, keys, publication, layout, operation, complete):
     return bindings
 
 
-def validate_path(phase, peers, layout, name):
+def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
     selected, privacy = phase["selected_route"], phase["privacy"]
     paths, slots, providers = selected["paths"], selected["benchmark_slots"], layout["provider_nodes"]
     require(selected["transport"] == "mptcp" and len(paths) == len(slots) == 2
@@ -267,7 +267,8 @@ def validate_path(phase, peers, layout, name):
                     "selected custody provider lacks its actual application exchange")
         payload_bytes += application["response_payload_bytes"]
     if name == "fetch":
-        require(payload_bytes >= UNIQUE_BYTES, "normal provider retrieval did not carry the unique object bytes")
+        require(payload_minimum > 0 and payload_bytes >= payload_minimum,
+                "normal provider retrieval did not carry the unique object bytes")
     control = next(node for node in SHARED["PUBLIC_IPS"] if peers[node] == layout["control_relay_peer_id"])
     SHARED["validate_control"](phase["control_privacy"], control, providers, False,
                                require_contacts=name != "fetch")
