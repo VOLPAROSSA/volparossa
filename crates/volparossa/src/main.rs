@@ -1,5 +1,6 @@
 //! VOLPAROSSA user-facing command-line interface.
 
+mod compute;
 mod content;
 mod control;
 mod doctor;
@@ -56,6 +57,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Explicit, isolated public-data model inference and training (development backend).
+    Compute {
+        #[command(subcommand)]
+        command: compute::Command,
+    },
     /// Create a new encrypted permanent Ed25519 identity.
     Init {
         /// Exact identity file path; defaults below the state directory.
@@ -263,6 +269,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         } => initialize_identity(identity, passphrase_file.as_deref()),
         CliCommand::Identity { command } => maintain_identity_command(command).await,
         CliCommand::Content { command } => content::run(*command, &cli.control_socket).await,
+        CliCommand::Compute { command } => compute::run(command).await,
         CliCommand::Doctor { json } => run_doctor(&cli.config, json),
         CliCommand::Start => systemctl("start").await,
         CliCommand::Stop => systemctl("stop").await,

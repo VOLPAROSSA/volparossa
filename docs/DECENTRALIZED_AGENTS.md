@@ -72,6 +72,34 @@ or illegally redistribute copyrighted works to build the classifier's tests/trai
 
 ## Reuse and separation
 
+The user explicitly confirmed on 2026-09-14 that autonomous training should exploit the
+existing distributed cache. This is a **required integration**, not an automatic property of
+the current cache or of local adapter training. Cache model weights, compatible adapters,
+eligible training packages and evaluations once, then prefer work on nodes already holding
+the required chunks. Otherwise retrieve only the missing chunks through the protected content
+datapath; use the same spare-capacity sharing budget as ordinary cache traffic.
+
+Eligibility for serving an object is not permission to train on it. An automatic training
+job needs an explicit dataset identity, origin, redistribution/training rights, privacy class
+and compatible model revision; arbitrary cached browsing content, private messages or peer
+instructions are not default training inputs. Dataset selection, deduplication and diverse
+sampling must avoid rewarding peers for flooding the cache with copies of one source.
+Validate candidate updates against held-out data before activation, with bounded rollback or
+quarantine; signature/hash checks alone do not detect poisoned or low-quality models.
+
+The user additionally required on 2026-09-14 that the cache must **not define the available
+knowledge or training corpus**. Select eligible sources/examples for relevance, provenance,
+coverage and diversity before deciding how to acquire them. Prefer existing verified chunks
+when advantageous, but fetch missing/fresh chunks from other holders or the original approved
+publisher/origin. A cache miss is not a reason to silently substitute a more popular cached
+source. Preserve original authority, expiry, access rights, privacy and contribution budgets
+on fallback; do not invent arbitrary Internet egress or unlimited background crawling.
+Ordinary cache-only mode is an explicit offline/resource choice, not the autonomous-training
+default. A future selector must measure coverage and sample less-represented eligible sources;
+cache locality may influence execution placement, not whether a relevant source is considered.
+Origin fallback alone does not prove freedom from selection bias. This selector and generalized
+external-dataset ingestion are still required work, not implemented by the initial adapter codec.
+
 - Reuse content-addressed chunks, original signed manifests, protected peer retrieval and
   custody for public model weights, compatible updates and evaluation artifacts. Caching an
   artifact must not activate it. A signature proves provenance, not model correctness.
@@ -89,6 +117,78 @@ or illegally redistribute copyrighted works to build the classifier's tests/trai
   tool authority. External task effects require narrowly scoped user-authorized capabilities;
   another agent's output cannot grant them.
 
+### Initial executable backend (development candidate)
+
+The user approved an existing open model as a starting point: SmolLM2-135M-Instruct at
+revision `83212e1e2b3cfd6958f3707877bb878945dea8ee` (Apache-2.0). The explicit guest-only
+provisioner in `workers/volparossa-ml/` verifies every model asset and all 38 CPU Python
+wheels against exact sizes/SHA-256 pins. It preserves original license/model-card bytes and
+does not install on the development host or fetch dependencies at worker runtime.
+
+`volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
+supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
+isolation, exposing only the installed runtime, selected public dataset, pinned model and
+new private output. The fixed worker performs inference or rank-4 LoRA training, compares
+actual base/adapter tensors, saves safetensors, loads a fresh base plus saved adapter and
+evaluates again. Rust enforces the wall-clock deadline, bounded protocol, resource-pressure
+cancellation and external artifact hashes. There is no unsandboxed fallback, private-input
+training, automatic cache training, peer job execution or automatic policy activation yet.
+
+The initial resource boundary includes two CPU threads maximum, idle CPU/IO priority,
+per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
+RSS/output cancellation and an owner-cancellation input. Sampled RSS is **not** a hard cgroup
+memory cap, and this foreground CLI does not yet detect all interactive, thermal or battery
+conditions. Actual model execution and sandbox observations now pass the source-bound
+distinct-node smoke below: eight CPU optimizer updates change 230,400 LoRA parameters,
+the original base remains unchanged, and a fresh base/adapter reload is evaluated.
+B01 still needs measured owner-priority pause/resume/cancellation; improved answer quality, distributed
+training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
+legal or content-policy judgments.
+
+### Cache-backed adapter candidate
+
+The next implementation connects the worker to ordinary signed native content:
+
+1. Publish the explicit public training JSON with content type
+   `application/vnd.volparossa.agent-dataset.v1+json` using `content publish`.
+2. `content agent pack --directory JOB/adapter --training-report JOB/report.json
+   --dataset-manifest DATASET.manifest --publisher-key KEY --output ADAPTER.bundle`
+   binds the exact three files and the job's dataset hash to the verified dataset manifest.
+   Publish the resulting bundle as `application/vnd.volparossa.adapter.v1`.
+3. `content agent fetch --publisher-key KEY --name ADAPTER_NAME --dataset-name DATASET_NAME
+   --cache AGENT_CACHE --output NEW_PRIVATE_DIRECTORY` retrieves both objects through the
+   existing protected peer path, verifies their original publisher and exact dataset link,
+   and exports `adapter/`, `dataset.json` and `provenance.json`. Both publications must have
+   the explicitly trusted publisher. A changed dataset revision is refused, not silently
+   substituted for the one used to train the adapter.
+4. An explicit `compute run --adapter-root .../adapter --dataset .../dataset.json` can use
+   that adapter for inference or continued training. The fixed worker checks all 120 FP32
+   tensors, exact shapes, finite values, fixed LoRA configuration and base identity before
+   applying them. Peer-provided JSON never supplies runtime classes, scripts or operators.
+
+All paths above are examples; supply absolute paths/private output parents and the normal
+compute runtime/model/output arguments. `--execute` is required for computation; fetching
+does not activate an adapter. `--cache-only --reuse-cache` is an explicit offline option,
+not the default. Five focused Pack/CLI tests, four codec/native-chunk tests and eleven worker
+protocol/adapter-validation tests pass locally. Separately, the
+[`agent-artifact` guest run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881)
+on exact source `38814d30221c11ff73ef688f7a430c8b26fec3fe` now proves a live-model/two-node pass.
+It trains/publishes in one producer's actual namespace,
+restarts its durable contribution store after removing trainer files/key/cache, and requires
+a different Client to fetch both objects over protected MPTCP and execute the received adapter.
+The observer binds both jobs to distinct node service processes/namespaces and checks the
+actual read-only input inodes. The fixture deliberately shares a pre-provisioned read-only
+base/runtime; it does not prove base-model distribution. R4's eight optimizer updates are
+followed by its durable-cache restart, a distinct Client's protected retrieval of 943,733 adapter
+bytes and 1,005 dataset bytes with zero origin bytes, and actual use of the same 230,400 trained
+parameters through read-only received inodes. Cache-only reopening after provider stop,
+complete private/network cleanup and unchanged original guest-state hashes also pass.
+The exact-source checker independently reconstructs the retained raw evidence; artifact and
+hash details are recorded in [implementation status](IMPLEMENTATION_STATUS.md#current-candidate-functional-integration-in-progress).
+This completes B02's explicit transfer/reuse scope, not automatic model activation or improved
+answer quality. Native peer fetch
+does not yet implement general external-corpus ingestion or bias-aware source selection.
+
 ## Owner-first resource allocation
 
 Training and opportunistic model redistribution use only the node's available contribution
@@ -105,6 +205,12 @@ job. Preserve local-first work when it is faster or required by privacy. Expirin
 idempotent task IDs and bounded re-assignment handle disconnecting peers; validation/repair
 work must itself have a budget. Zero disturbance or additive speedup cannot be guaranteed
 without measurement on representative devices.
+
+Task size is not the same as a worker lease: large or long-running workflows should be split,
+checkpointed and resumed across multiple bounded steps. No final whole-workflow size or duration
+limit is implied by the first worker's four inference rows and 600-second lease. Per-device
+resource limits remain necessary. General workflow continuation and checkpoint scheduling are
+still unimplemented; no unlimited execution permission follows from accepting a large task.
 
 ## Private tasks and training data
 
@@ -178,7 +284,8 @@ host; removal means withdrawing execution/serving authority and deleting only lo
 artifacts under the owner's storage policy. Network-wide erasure of every copy is not promised.
 Validated formats still require resource isolation: even a syntactically valid model can
 consume excessive resources, as the [ONNX Runtime model-validation guidance](https://onnxruntime.ai/docs/)
-explicitly notes. No inference backend or model dependency has been selected or added yet.
+explicitly notes. The pinned development backend above is implemented; this is not approval
+to execute arbitrary peer-selected models or dependencies.
 
 ## Executable sequence and completion evidence
 
@@ -188,8 +295,13 @@ build larger connected slices, without claiming these unchecked requirements are
 
 - [ ] B01: isolated on-device execution and genuine bounded training; measured owner-priority
   pause/resume/cancellation, not a stub model or an unconstrained background process.
-- [ ] B02: transfer an original compatible trained artifact over the real protected content
+  Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; measured
+  owner-priority pause/resume/cancellation remains incomplete.
+- [x] B02: transfer an original compatible trained artifact over the real protected content
   network, validate it on another node and execute it there; restart/custody retains validity.
+  [Run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881), exact source
+  `38814d30221c11ff73ef688f7a430c8b26fec3fe`, proves this explicit public-adapter scope with a
+  pre-provisioned common base/runtime; automatic activation/distributed training are not included.
 - [ ] B03: decompose and distribute useful user jobs across independent nodes, collect verified
   results and recover from worker loss with bounded duplication and actual resource accounting.
 - [ ] B04: demonstrate private input, training-update and result handling against the stated
@@ -202,5 +314,6 @@ build larger connected slices, without claiming these unchecked requirements are
 - [ ] B07: detect an injected bad update/worker, quarantine it without a cascade of false bans,
   recover useful work and restore an accepted artifact under the same contribution budgets.
 
-These requirements add real remaining work. Existing A01--A15 and C01--C07 evidence does not
-prove any B checkpoint, and no new completion percentage or delivery-time guarantee follows.
+These requirements add real remaining work. Existing A01--A15 and C01--C07 evidence alone does
+not prove B checkpoints; B02 has its own exact-source run above. No new completion percentage
+or delivery-time guarantee follows.

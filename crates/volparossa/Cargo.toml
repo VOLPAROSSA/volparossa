@@ -13,6 +13,7 @@ publish = false
 anyhow.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 httparse = "=1.10.1"
 libc.workspace = true
@@ -23,6 +24,7 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true
 socket2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

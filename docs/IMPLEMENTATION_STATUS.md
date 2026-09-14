@@ -6,7 +6,35 @@ Last updated: 2026-09-14
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
-whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). This is recorded design work; no
+whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
+now includes pinned explicit provisioning, inference/LoRA training, saved-adapter reload and
+a Rust-supervised mandatory sandbox. Five narrow Rust supervisor tests and the Python
+protocol/provisioning tests pass. The first model-runtime attempt on
+[`86d2d0f5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34858211717)
+stopped during wheel-metadata verification after the pinned downloads, before any training.
+The selector now distinguishes the wheel's own top-level metadata from nested vendored metadata;
+six provisioning tests pass. The next guest attempt on
+[`a70194ab`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34859406185)
+passed provisioning and observed a genuinely isolated Python worker, but stopped before training:
+the pinned tokenizer returns a dictionary by default while the worker expected token IDs.
+Both calls now explicitly request flat IDs; type and token-budget errors are distinguished.
+The corrected worker and distinct-node adapter harness now pass together on
+[`38814d30`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881): eight real CPU
+optimizer updates change 230,400 LoRA parameters while the base weights stay unchanged.
+B01 remains unchecked because measured owner-priority pause/resume/cancellation is not covered by this proof.
+A new `content agent pack/fetch` candidate binds the exact adapter files to the original signed
+public dataset and fetches both through the existing protected content plane. Five CLI and four
+codec tests pass; the worker's eleven protocol tests cover the explicit read-only input adapter
+and pinned tokenizer return contract. The `agent-artifact` guest scenario now requires separate
+producer/consumer service processes and namespaces, real training, durable publication/restart,
+protected retrieval and execution of the exact received adapter, followed by cache-only reuse.
+That real scenario now passes, including exact-source raw reconstruction, unchanged guest-root
+state and full cleanup. B02's stated explicit artifact-transfer/reuse/restart scope is proven.
+It shares an explicitly provisioned read-only base/runtime; no base-distribution claim is made.
+Cache-only retrieval is explicit and off by default. Autonomous training must select eligible
+sources independently of cache availability, fetching missing/fresh data rather than silently
+substituting cached popular sources. Generalized source selection, external-corpus ingestion,
+bias measurement and peer execution remain integrations to build. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
@@ -36,6 +64,31 @@ build and general speedup remain unproved.
 
 Latest additional functional checkpoints (not a complete expanded-alpha pass):
 
+- [Autonomous replica repair on `cb2e6a67`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34864727782):
+  source `cb2e6a674211587cd335e8a712e57d489426e1b2`; a reopened partial holder grows from one
+  to three verified chunks on the same cache inode, then supplies a fresh Client after its
+  supplying peer stops. The Client reconstructs 786,432 bytes with zero origin bytes and
+  SHA-256 `1180e5fb930e654474965694e12accf46c7965fecdec1ec7c511a46702e06097`.
+  Eleven physical captures / eighty-six interface rows cover 60,724 frames with no drops,
+  forbidden or malformed packets; selected two-leg WireGuard paths carry data during repair
+  and retrieval. Cleanup is complete and original guest-state hashes match. Exact-source raw
+  reconstruction passes; artifact ZIP SHA-256
+  `b075d1f07db52b239baa9697fd8337475132927875bdddbc6d1a38c93bca5591`.
+  This proves the configured partial-holder repair/re-serving sequence, not automatic initial
+  placement, an independently offline original publisher node or permanent availability.
+- [Real training and distinct-node adapter reuse on `38814d30`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881):
+  source `38814d30221c11ff73ef688f7a430c8b26fec3fe`; R4 completes eight CPU optimizer updates,
+  publishes its signed dataset/adapter and restarts with its durable contribution cache after
+  original trainer inputs, adapter and publisher key are removed. A distinct Client retrieves
+  943,733 adapter bytes plus 1,005 dataset bytes through two carrying MPTCP/WireGuard relay
+  paths, with zero origin bytes, and executes the exact received 230,400 adapter parameters
+  from read-only input inodes in its own isolated worker. Cache-only reopening works after
+  provider serving stops. Six captures / twenty-eight interface rows have no drops or unexpected
+  outer packets; cleanup leaves zero owned objects and original guest-state hashes match.
+  Report and raw reconstruction pass; local artifact `.git/ci-evidence/34861750881/artifact/`,
+  ZIP SHA-256 `7019f524429c10cf17245008a7ba26f27bd3868d3138a48fd979b83d5b88910d`.
+  B02 is covered; automatic training/activation, owner-priority pause/resume/cancellation, model quality and
+  distribution of the explicitly shared base/runtime are not claimed.
 - [Public custody on `f590aa86`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34850149035):
   two independent configured providers accepted and freshly confirmed an original public object
   after both agents restarted with their persistent caches. The publisher source input/cache were
@@ -66,10 +119,18 @@ higher version and rejected invalid signatures/storage. Strict agent Clippy pass
 the previously identified lack of a durable floor for a fixed configured authority; it does not
 authorize trust-key rotation, resist replacement of all agent-owned state or implement AI governance.
 
+The first [automatic-repair VM on `ce2267a6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34854137170)
+reached autonomous one-to-three-chunk repair and a fresh 786,432-byte retrieval from the repaired
+receiver after the original supplier stopped. Nevertheless it **failed** physical-capture
+validation: control-port/ICMP and other-IP frames remain classified as forbidden. Complete
+captures with zero drops and unchanged guest-root cleanup do not waive that failure. The
+original failed evidence is retained; no network-proven repair pass is claimed from this run.
+
 Major requested functional work still outstanding:
 
-- Cooperative AI training/execution, model exchange, private distributed jobs and fully automatic
-  policy governance/self-checking (B01--B07); none is covered by the existing network/content passes.
+- Cooperative task distribution, owner-priority pause/resume/cancellation, private distributed jobs and fully
+  automatic training/policy governance/self-checking (remaining B01 and B03--B07). B02's explicit
+  trained-artifact transfer/reuse now passes the distinct-node checkpoint above.
 - Automatic holder selection and network-proven replica repair after a holder disappears.
   Explicit remote Deposit/Inspect and retained-copy retrieval now pass the source-bound custody
   VM above. A new receiver-owned repair worker reopens healthy partial public journals, discovers

@@ -22,12 +22,25 @@ has since passed the constrained-uplink comparison described below; it is not a 
 VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
 Its v1 VPN overlay is the foundation for direct local links and the planned content network.
 The newly requested [cooperative AI layer](docs/DECENTRALIZED_AGENTS.md) will add contributed
-training/computation and fully automatic content-policy governance. It is currently a design
-requirement, not an implemented distributed brain or a guarantee of private remote execution.
+training/computation and fully automatic content-policy governance. The first development
+candidate adds explicitly provisioned SmolLM2 CPU inference/adapter training in an isolated
+worker (`volparossa compute run`, preview by default). A new explicit `content agent pack/fetch`
+candidate binds an adapter to its signed public dataset and reuses protected content retrieval;
+`compute run --adapter-root ...` can request the received adapter in the isolated worker.
+[The distinct-node guest proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881)
+now passes on `38814d30`: eight real CPU training updates, protected adapter retrieval after
+original source removal/restart, and execution with the exact received weights on another node.
+The fixed base model/runtime are explicitly provisioned, not automatically distributed.
+Source selection must consider
+eligible uncached data too: cache locality optimizes retrieval, not the training corpus.
+Autonomous source selection/ingestion, peer execution and governance remain required work,
+not an implemented distributed brain or a guarantee of private remote execution.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
-retained copies. Local storage and real CLI-process tests pass; protected-network acceptance,
-automatic holder selection and repair remain pending.
+retained copies. The source-bound protected-network custody checkpoint passes after provider
+restart and original source removal. [The autonomous repair checkpoint on `cb2e6a67`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34864727782)
+also passes: a partial holder repairs missing chunks, then serves a fresh client after its
+supplying peer stops. Automatic initial holder selection and ongoing availability remain open.
 The normal low-latency Internet path is always:
 
 ```mermaid

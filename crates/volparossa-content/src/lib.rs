@@ -6,6 +6,7 @@
 //! The separate [`origin_https`] wrapper obtains narrowly scoped HTTPS resource authority
 //! through the consumer's own authenticated origin connection, not from a native signature.
 
+pub mod agent_artifact;
 pub mod mailbox;
 mod manifest;
 pub mod origin_https;

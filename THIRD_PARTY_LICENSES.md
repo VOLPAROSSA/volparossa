@@ -4,6 +4,35 @@ Original VOLPAROSSA source in this repository is licensed under GPL-3.0-only. De
 vendored components retain their own licenses. This file is a provenance record, not a substitute
 for the license text shipped by each upstream project.
 
+## Explicit development ML inputs
+
+The optional, guest-only `workers/volparossa-ml/provision.py` installer is not an automatic
+agent update channel. `model-pins.json` and `requirements.lock` pin 38 original CPython 3.13
+Linux amd64 CPU wheels and eight original model assets by exact download URL, byte size and
+SHA-256. Provisioning retains the original wheel archives and their license files, as well as
+the original model `LICENSE` and model card. No source distributions, CUDA packages, remote
+Python model code or pickle weight files are allowed. These inputs are not bundled in the
+current Debian package; a later distributable ML package still needs complete notice collection.
+
+| Component | Original source / revision | License/provenance scope |
+| --- | --- | --- |
+| SmolLM2-135M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/tree/83212e1e2b3cfd6958f3707877bb878945dea8ee), `83212e1e2b3cfd6958f3707877bb878945dea8ee` | Apache-2.0; unchanged model LICENSE SHA-256 `59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b` |
+| PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
+| Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
+| PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
+
+Original model weights are 269,060,552 bytes, SHA-256
+`5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c`.
+This is slightly larger than the current native content-object ceiling; the ceiling has **not**
+been silently raised. The initial trained rank-4 adapter fits a normal content object, while
+full-model distribution needs explicit compatible sharding/parts integration. No trained
+adapter or actual backend execution is claimed until the isolated guest smoke succeeds.
+
+The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux resource/priority
+tools as separate executables, not vendored copies. The sandbox argument vector is part of our
+source; [upstream Bubblewrap](https://github.com/containers/bubblewrap) explicitly makes its
+security policy the caller's responsibility. No development-host package installation occurs.
+
 ## Native MPQUIC audit state
 
 The native MPQUIC input was audited through 2026-08-14. Every upstream
