@@ -21,7 +21,7 @@ const SCOPE: &str =
     "current-source-heldout-only-not-independent-benchmark-or-general-answer-quality";
 const EPSILON: f64 = 1e-6;
 const FILES: [(&str, u64); 11] = [
-    ("selection.json", 64 * 1024),
+    ("selection.json", 256 * 1024),
     ("dataset.json", 1024 * 1024),
     ("dataset.manifest", 64 * 1024),
     ("source-provenance.json", 64 * 1024),

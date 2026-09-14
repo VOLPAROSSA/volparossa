@@ -2,7 +2,56 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
+
+Current cooperative-learning slice: version-2 `compute train-loop` enrollment now follows
+explicitly selected, signed public source catalogs. The runtime refreshes catalog metadata,
+retains stable source/revision progress, fetches newly selected exact datasets independently of
+cache availability, and binds the original catalog authorization and expiry to real cycle
+admission. The 92 focused compute tests and four signed-catalog/local-stream tests pass; the
+actual catalog-update/network/training fixture is ready, but its live result is not yet claimed. See
+[catalog usage and bounds](DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
+
+The prior [second-source run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
+completed two eight-update training cycles, four isolated zero-update inference jobs, both
+promotion gates and protected peer adoption. Its workflow remains **failed**: the evidence
+checker expected strings instead of the actual worker output objects, then expected a null
+`training` field that Rust omits. With those two narrow corrections, complete reconstruction of
+the unchanged original raw artifact passes. Checker SHA-256:
+`11ba86557ba67563f3b8387a78f3e2084ad8aeddc13fd2c91b527e71466d267c`;
+429,704-byte canonical reconstruction SHA-256:
+`36484d5caa8b67847769e2adead4059d9f5b771a7fe30f025be43a07b820e7fb`.
+The separately selected signed validation dataset is 641 bytes, obtained cold from R5; actual
+12-target-token losses are `0.839399 -> 0.656192 -> 0.588994`. Both cycles are approved; the four
+generated answers remain identical, so neither better answers nor a live rejection is proven.
+The final Client retrieves 943,733 adapter bytes and 1,005 dataset bytes through R4 after R5
+serving stops, then uses the exact received parameters. Ten captures / 78 interfaces / 28,567
+frames have no drops, malformed or forbidden/direct-exit traffic. Cleanup leaves zero owned
+objects; before/after guest-host hash is
+`bde4be393adbc2a3e0d380bd06ec8f897003648cee8dd3f7de191e188cea9250`.
+The corrected [run on `842e845b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901453523)
+now passes its workflow and exact-source raw reconstruction. It retains both real eight-update
+cycles, all four second-source inference jobs and protected adoption; all three original
+Ed25519 manifests independently verify. The measured 12-token losses are
+`0.839408 -> 0.656203 -> 0.589002`; both candidates are promoted, without a better-answer or
+live-rejection claim. Its 430,839-byte canonical reconstruction has SHA-256
+`c537beefec5f11a3183235f50c1aa90533d14ad048a78a8fcbb0c1086add67d4`.
+Ten captures / 79 interfaces / 27,656 frames contain no forbidden, direct-exit, malformed or
+dropped packets; both relay legs carry data. Cleanup leaves zero owned objects and matching
+guest-host hashes. B05 remains incomplete for its remaining cooperative-learning scope.
+
+Public-document execution is still unproven. On `b0c10425`, the retained startup diagnostic
+shows an active/running broker without its socket after 150 polls (17.612 s elapsed,
+17.399 s CPU), not a failed service. Before binding, that build synchronously hashes the full
+269,060,552-byte pinned model in unoptimized development code. `35fd9551` therefore optimizes
+only the pinned SHA-2 implementation in the development profile; it preserves the full hash
+verification and existing timeout. Its [actual rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901448083)
+observes both broker sockets ready in 0.454/0.464 seconds, but fails later before Python starts:
+the owner tokenizer reports `stderr_class=proc_mount`. The document fixture inherited the
+network service's masked mount view; the candidate now uses the existing net-only owner-launch
+pattern while preserving service protections and the actual worker sandbox. This correction
+still needs its own live run. The failed run retains complete cleanup and unchanged guest-host
+state; it is not a proven document workflow.
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic

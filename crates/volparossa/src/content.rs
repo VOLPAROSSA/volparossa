@@ -27,6 +27,7 @@ mod mailbox;
 mod named_download;
 mod private_message;
 mod site;
+pub(crate) mod source_catalog;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {

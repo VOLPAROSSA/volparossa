@@ -390,7 +390,89 @@ still preserves the previous approved adapter and remains eligible for bounded r
 Repeatedly selecting on this set makes it a validation/selection set, not a fresh independent
 test benchmark. Question matching does not detect semantic overlap or prove that a pretrained
 base/imported seed never saw the content. It does not establish general intelligence or global
-quality improvement. The upgraded disposable training-loop proof is pending; B05 stays open.
+quality improvement. The [run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
+completed both real training rounds, all four second-source inference jobs and protected adoption.
+Its workflow failed because the checker expected string outputs instead of worker result objects,
+and required a null field that Rust legitimately omits. Corrected reconstruction of the unchanged
+raw evidence passes; the historical workflow remains failed. The second-source comparison covers
+12 target tokens, with losses `0.839399 -> 0.656192 -> 0.588994`; all four generated answers are
+identical, so this does not demonstrate better answers. Both candidates were approved; that VM
+did not exercise rejection. The corrected [run on `842e845b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901453523)
+now passes, including exact-source raw reconstruction, independent original-signature checks,
+both real training rounds, four real validation workers, protected adoption and complete cleanup.
+Its 12-token losses are `0.839408 -> 0.656203 -> 0.589002`; both updates are approved. This still
+does not prove better answers, an independent benchmark or the rejection path. B05 stays open.
+
+### Signed public source catalogs
+
+The new version-2 training plan can enroll **catalog publishers**, without enumerating each
+dataset locally. The same ongoing loop discovers newly listed datasets and newer revisions,
+then uses its existing protected fetch, actual training, evaluation and optional signed sharing.
+Enrollment remains explicit; there is no mandatory central catalog or authority inferred from
+cache popularity. Multiple independently chosen publisher catalogs can be used.
+
+For example, replace the key below with an independently trusted publisher's Ed25519 public key:
+
+```json
+{
+  "version": 2,
+  "sources": [],
+  "catalogs": [
+    {"publisher_key": "<64 lowercase hexadecimal characters>", "name": "public-training-sources"}
+  ]
+}
+```
+
+Use this file with the normal `compute train-loop --plan ... --execute` command above.
+Version-1 fixed-source plans keep their existing behavior. Catalog entries also accept an
+optional `min_revision` and exact `manifest_id`; pinning an exact catalog ID deliberately
+prevents following a replacement. Nothing starts in preview mode.
+
+The publisher signs an ordinary native public file with content type
+`application/vnd.volparossa.agent-source-catalog.v1+json`, using the existing `content publish`
+and contribution service. Its JSON body has this profile:
+
+```json
+{
+  "version": 1,
+  "visibility": "public",
+  "purpose": "agent_training",
+  "dataset_profile": "application/vnd.volparossa.agent-dataset.v1+json",
+  "license": "GPL-3.0-only",
+  "sources": [
+    {"name": "public-dataset-a", "revision": 1, "manifest_id": "<exact dataset manifest ID>"}
+  ]
+}
+```
+
+Every listed dataset must be signed by that same enrolled publisher; a catalog cannot silently
+delegate trust to another key. Names, positive revisions and exact manifest IDs are bound to the
+original signed catalog. Actual datasets still require the supported public training profile
+and independent verification before model work. A publisher's license/permission assertion is
+not proof of legality, accuracy or quality, and arbitrary cached documents are not admitted.
+
+Each refresh asks for current name metadata without allowing an older cache hit to suppress the
+lookup. Unchanged valid publications remain acceptable. Rollbacks and equal-revision conflicts
+are rejected; this is observed-revision protection, not a globally newest-version guarantee.
+Dataset retrieval remains exact-ID and cache-first, with protected retrieval of missing data.
+
+The registry retains stable source positions and completed revision floors across refreshes and
+restart. Reordering a catalog cannot reassign old cycle receipts; a rejected but completed update
+does not silently retrain. Withdrawal or original expiry stops new admissions without deleting
+past results. A failed refresh can use the previous signed snapshot only until its original
+expiry. The per-cycle checkpoint retains the original catalog and selected row; the worker's
+deadline also respects that catalog's expiry. The separate validation source remains excluded.
+
+This first working cohort allows at most 16 catalogs and 128 remembered source identities in
+total, including fixed sources. A full registry reports capacity refusal instead of discarding
+history and accidentally repeating old work. It supports ongoing revisions, not an unlimited
+stream of new source names. Source selection remains round-robin, not a learned relevance or
+coverage model. Local signed-transfer, registry/restart and authorization/deadline checks pass.
+The disposable scenario publishes dataset B and catalog revision two only after the first real
+training worker starts, checks B is not cached, and requires the next cycle to discover/use B.
+It then reopens the actual coordinator without repeating completed work. Its pure fixture checks
+pass; the real network/model run is pending. General external-corpus
+ingestion, broad source discovery, defended aggregation and complete B05 remain open.
 
 ## Owner-first resource allocation
 
@@ -614,9 +696,15 @@ multi-package execution and receipt reuse after peer/route shutdown. Its [first 
 `974c6555`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34891322172) stopped before
 tokenizer/model execution because the Client UID could not traverse the guest source tree.
 The `4421b1a6` correction installs only the public helper and a read-only public README copy
-in the guest workspace, preserving source-tree restrictions. Local checks pass; the corrected
-[live proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
-The original failed run has complete cleanup and unchanged guest state.
+in the guest workspace, preserving source-tree restrictions. Subsequent broker-startup failures
+were traced to full pinned-model hashing in the unoptimized development build. The targeted
+SHA-2 build correction makes both brokers ready in under half a second in the
+[run on `35fd9551`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901448083), but that
+run then stops before Python at the tokenizer sandbox's proc mount. The owner CLI had entered
+the agent service's masked mount view. The candidate uses the same net-only owner-launch
+pattern as the working train-loop, retaining the service protections and fixed worker sandbox;
+its own live result is pending. These failed runs do not establish document execution and retain
+complete cleanup and unchanged guest state.
 Full B03 and confidential tasks remain open.
 
 ## Private tasks and training data

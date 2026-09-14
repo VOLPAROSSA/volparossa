@@ -576,7 +576,7 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     done
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py agent-train-loop-catalog.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
     done
 fi
@@ -2002,7 +2002,7 @@ if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_script in agent-train-loop-smoke.py content-replication-smoke.py content-replication-capture.py; do
+    for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
     done
 fi

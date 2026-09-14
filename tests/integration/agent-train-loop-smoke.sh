@@ -9,20 +9,28 @@ agent_train_loop_private() {
         -- python3 -B "$WORK/bin/agent-train-loop-smoke.py" "$@"
 }
 
+agent_train_loop_catalog() {
+    setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/agent-train-loop-catalog.py" "$@"
+}
+
 agent_train_loop_execute() {
     # Only enter the existing node network. `ip netns exec` creates a new
     # mount namespace and remounts /sys, which can hide the cgroup hierarchy
     # needed by the real owner's fail-closed spare-capacity admission probe.
     # The agent mount namespace is also unsuitable: it deliberately hides
     # these owner-controlled model, seed and output directories.
+    set --
+    [ "${loop_resume:-no}" != yes ] || set -- --resume
     exec nsenter --net="/run/netns/$R4" setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" \
         --groups="$custody_control_gid" --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-relay4/control/agent.sock" \
-        compute train-loop --plan "$artifact_user/loop-plan.json" --seed "$artifact_user/loop-seed.json" \
+        compute train-loop "$@" --plan "$artifact_user/loop-plan.json" --seed "$artifact_user/loop-seed.json" \
         --validation-source "$artifact_user/loop-validation-source.json" \
         --directory "$artifact_user/loop" --runtime-root "$artifact_user/provision/venv" \
         --model-root "$artifact_user/provision/model" --cache "$loop_cache" \
-        --max-cycles 2 --repeat-sources --steps 8 --threads 2 --max-seconds 600 --poll-seconds 1 \
+        --max-cycles 2 --steps 8 --threads 2 --max-seconds 600 --poll-seconds 1 \
         --publish-name disposable-loop-update --publication-key "$loop_publisher" \
         --identity "$artifact_user/loop-identity.key" --passphrase-file "$artifact_user/loop-passphrase" \
         --publish-cache "$artifact_user/loop-publish-cache" --execute
@@ -75,13 +83,13 @@ agent_train_loop_restart_source() {
     loop_source_before=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
     loop_cache_before=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
     systemctl restart "$loop_source_unit" || return 1
-    content_custody_status relay5 loop-restored 3 || return 1
+    content_custody_status relay5 loop-restored 4 || return 1
     loop_source_after=$(systemctl show --property=MainPID --value "$loop_source_unit") || return 1
     loop_cache_after=$(stat -Lc '%d:%i' "$WORK/state-relay5/custody-cache") || return 1
     [ "$loop_source_before" -gt 0 ] && [ "$loop_source_after" -gt 0 ] \
         && [ "$loop_source_before" != "$loop_source_after" ] && [ "$loop_cache_before" = "$loop_cache_after" ] || return 1
     jq -n --argjson before "$loop_source_before" --argjson after "$loop_source_after" --arg inode "$loop_cache_after" \
-        '{node:"relay5",pid_before:$before,pid_after:$after,cache_device_inode:$inode,same_cache:true,restored_publications:3}' \
+        '{node:"relay5",pid_before:$before,pid_after:$after,cache_device_inode:$inode,same_cache:true,restored_publications:4}' \
         >"$WORK/agent-artifact-relay5-restart.json"
 }
 
@@ -132,9 +140,18 @@ agent_train_loop_run() {
     agent_artifact_private originals "$artifact_user" >"$WORK/agent-artifact-originals.json" || fail TRAIN_LOOP_ORIGINALS_INVALID
     artifact_dataset_id=$(jq -er '.dataset_manifest_id' "$WORK/agent-artifact-originals.json")
     agent_train_loop_private setup "$artifact_user" "$artifact_publisher" "$artifact_dataset_id" || fail TRAIN_LOOP_ENROLLMENT_INVALID
+    agent_train_loop_catalog catalog-input "$artifact_user" "$artifact_publisher" 1 || fail TRAIN_LOOP_CATALOG_INPUT_FAILED
+    agent_artifact_cli relay5 content publish --contribute --input "$artifact_user/catalog-1.json" \
+        --name disposable-agent-source-catalog --revision 1 --content-type application/vnd.volparossa.agent-source-catalog.v1+json \
+        --identity "$artifact_user/identity.key" --passphrase-file "$artifact_user/passphrase" \
+        --cache "$artifact_user/catalog-1-cache" --manifest "$artifact_user/catalog-1.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-train-loop-catalog-1-publish.json" || fail TRAIN_LOOP_CATALOG_PUBLISH_FAILED
+    agent_train_loop_catalog original "$artifact_user" "$artifact_publisher" 1 \
+        >"$WORK/agent-train-loop-catalog-1-original.json" || fail TRAIN_LOOP_CATALOG_ORIGINAL_INVALID
     agent_train_loop_private drop-validation "$artifact_user" >"$WORK/agent-train-loop-validation-removed.json" \
         || fail TRAIN_LOOP_VALIDATION_SOURCE_REMOVAL_FAILED
-    agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail TRAIN_LOOP_SOURCE_REMOVAL_FAILED
+    # The explicitly generated fixture publisher retains its encrypted identity only until
+    # the late B/catalog2 publication below. There is no claim that it was already removed.
     agent_train_loop_restart_source || fail TRAIN_LOOP_SOURCE_REOPEN_FAILED
 
     # Existing encrypted owner identity and a real native store are explicit prerequisites.
@@ -181,9 +198,39 @@ agent_train_loop_run() {
         sleep 0.1; loop_poll=$((loop_poll + 1))
     done
     [ -f "$artifact_user/loop-first-worker.ready" ] || fail TRAIN_LOOP_FIRST_WORKER_TIMEOUT
-    content_replication_snapshot relay4 agent-train-loop-uptake-live || fail TRAIN_LOOP_SEED_PATHS_FAILED
-    stop_privacy_observers || fail TRAIN_LOOP_SEED_CAPTURE_INCOMPLETE
-    content_replication_disconnect relay4 agent-train-loop-uptake || fail TRAIN_LOOP_SEED_ROUTE_CLEANUP_FAILED
+    PHASE=agent-train-loop-late-catalog-publication
+    agent_train_loop_private resume-state "$artifact_user" >"$WORK/agent-train-loop-catalog-initial-state.json" \
+        || fail TRAIN_LOOP_CATALOG_INITIAL_STATE_INVALID
+    agent_train_loop_catalog new-source "$artifact_user" "$expected_commit" || fail TRAIN_LOOP_LATE_SOURCE_CREATION_FAILED
+    install -m 0600 "$artifact_user/catalog-late-source.json" "$WORK/agent-train-loop-catalog-late-source.json"
+    loop_next_sha=$(jq -er '.dataset.sha256' "$WORK/agent-train-loop-catalog-late-source.json")
+    loop_cold_attempt=0
+    while ! setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- python3 -B "$WORK/bin/agent-train-loop-catalog.py" cold "$loop_cache" "$loop_next_sha" \
+        >"$WORK/agent-train-loop-catalog-cold.json" 2>"$WORK/agent-train-loop-catalog-cold.err"; do
+        # An active agent transaction may briefly own the exclusive cache lock.
+        # No failed observation is accepted; the same exact absence proof must succeed.
+        loop_cold_attempt=$((loop_cold_attempt + 1))
+        [ "$loop_cold_attempt" -lt 20 ] || fail TRAIN_LOOP_LATE_SOURCE_COLD_PROOF_FAILED
+        sleep 0.1
+    done
+    agent_artifact_cli relay5 content publish --contribute --input "$artifact_user/dataset-next.json" \
+        --name disposable-agent-dataset-next --revision 1 --content-type application/vnd.volparossa.agent-dataset.v1+json \
+        --identity "$artifact_user/identity.key" --passphrase-file "$artifact_user/passphrase" \
+        --cache "$artifact_user/dataset-next-cache" --manifest "$artifact_user/dataset-next.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-train-loop-dataset-next-publish.json" || fail TRAIN_LOOP_LATE_DATASET_PUBLISH_FAILED
+    agent_train_loop_catalog catalog-input "$artifact_user" "$artifact_publisher" 2 || fail TRAIN_LOOP_CATALOG_UPDATE_INPUT_FAILED
+    agent_artifact_cli relay5 content publish --contribute --input "$artifact_user/catalog-2.json" \
+        --name disposable-agent-source-catalog --revision 2 --content-type application/vnd.volparossa.agent-source-catalog.v1+json \
+        --identity "$artifact_user/identity.key" --passphrase-file "$artifact_user/passphrase" \
+        --cache "$artifact_user/catalog-2-cache" --manifest "$artifact_user/catalog-2.pb" --lifetime-seconds 7200 \
+        >"$WORK/agent-train-loop-catalog-2-publish.json" || fail TRAIN_LOOP_CATALOG_UPDATE_PUBLISH_FAILED
+    agent_train_loop_catalog original "$artifact_user" "$artifact_publisher" 2 \
+        >"$WORK/agent-train-loop-catalog-2-original.json" || fail TRAIN_LOOP_CATALOG_UPDATE_ORIGINAL_INVALID
+    agent_artifact_private drop-source "$artifact_user" >"$WORK/agent-artifact-source-removed.json" || fail TRAIN_LOOP_SOURCE_REMOVAL_FAILED
+    agent_train_loop_private drop-catalog-inputs "$artifact_user" >"$WORK/agent-train-loop-catalog-inputs-removed.json" \
+        || fail TRAIN_LOOP_CATALOG_SOURCE_REMOVAL_FAILED
     PHASE=agent-train-loop-autonomous-cycles
     wait "$artifact_job_pid" || fail TRAIN_LOOP_COORDINATOR_FAILED
     artifact_job_pid=
@@ -192,21 +239,47 @@ agent_train_loop_run() {
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" last-json \
         "$WORK/agent-train-loop-stdout.jsonl" compute_train_loop >"$WORK/agent-train-loop-summary.json" || fail TRAIN_LOOP_SUMMARY_INVALID
     agent_train_loop_private collect "$artifact_user" >"$WORK/agent-train-loop-loop.json" || fail TRAIN_LOOP_ACTUAL_FILES_INVALID
+    # Reopen the actual durable coordinator, not a parsed substitute. No new source revision
+    # is published, and both source progress entries must survive without a third worker.
+    PHASE=agent-train-loop-catalog-resume
+    loop_resume=yes
+    agent_train_loop_execute >"$WORK/agent-train-loop-resume-stdout.jsonl" 2>"$WORK/agent-train-loop-resume.err" &
+    artifact_job_pid=$!
+    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" observe-resume \
+        "$artifact_job_pid" "$artifact_user" "$WORK/agent-train-loop-loop.json" \
+        >"$WORK/agent-train-loop-resume-observation.json" || fail TRAIN_LOOP_CATALOG_RESUME_INVALID
+    kill -TERM "$artifact_job_pid" || fail TRAIN_LOOP_RESUME_CANCEL_FAILED
+    wait "$artifact_job_pid" || fail TRAIN_LOOP_RESUME_FAILED
+    artifact_job_pid=
+    loop_resume=no
+    agent_train_loop_private resume-state "$artifact_user" >"$WORK/agent-train-loop-resume-state.json" \
+        || fail TRAIN_LOOP_RESUME_STATE_INVALID
+    python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" last-json \
+        "$WORK/agent-train-loop-resume-stdout.jsonl" compute_train_loop >"$WORK/agent-train-loop-resume-summary.json" \
+        || fail TRAIN_LOOP_RESUME_SUMMARY_INVALID
+    content_replication_snapshot relay4 agent-train-loop-uptake-live || fail TRAIN_LOOP_SEED_PATHS_FAILED
+    stop_privacy_observers || fail TRAIN_LOOP_SEED_CAPTURE_INCOMPLETE
+    content_replication_disconnect relay4 agent-train-loop-uptake || fail TRAIN_LOOP_SEED_ROUTE_CLEANUP_FAILED
     # Only approved candidates may have exact update receipts. Background
     # replication may also retain the already verified original seed/dataset;
     # account only for that exact allowed set, including zero approved updates.
     agent_train_loop_shared loop-shared false || fail TRAIN_LOOP_UPDATES_NOT_SHARED
     loop_latest=$(jq -r '.state.latest // "none"' "$WORK/agent-train-loop-loop.json")
     case $loop_latest in 1|2|none) ;; *) fail TRAIN_LOOP_LATEST_INVALID ;; esac
+    loop_dataset_sequence=$loop_latest
+    [ "$loop_dataset_sequence" != none ] || loop_dataset_sequence=2
+    loop_dataset_cycle=$(printf '%016x' "$loop_dataset_sequence")
+    loop_dataset_name=$(jq -er --argjson sequence "$loop_dataset_sequence" \
+        '.cycles[] | select(.sequence == $sequence) | .selection.dataset_name' "$WORK/agent-train-loop-loop.json")
     PHASE=agent-train-loop-explicit-original-dataset-contribution
     # Fixture-only explicit sharing of the already fetched original dataset. Approved
     # adapter publications above are automatic; this separate handoff is not claimed automatic.
     agent_artifact_cli relay4 content export --public-content \
-        --manifest "$artifact_user/loop/cycle-0000000000000002/dataset.manifest" --publisher-key "$artifact_publisher" \
+        --manifest "$artifact_user/loop/cycle-$loop_dataset_cycle/dataset.manifest" --publisher-key "$artifact_publisher" \
         --agent-cache "$loop_cache" --cache "$artifact_user/loop-dataset-export" \
         >"$WORK/agent-train-loop-dataset-export.json" || fail TRAIN_LOOP_DATASET_EXPORT_FAILED
     agent_artifact_cli relay4 content contribute \
-        --manifest "$artifact_user/loop/cycle-0000000000000002/dataset.manifest" --publisher-key "$artifact_publisher" \
+        --manifest "$artifact_user/loop/cycle-$loop_dataset_cycle/dataset.manifest" --publisher-key "$artifact_publisher" \
         --cache "$artifact_user/loop-dataset-export" >"$WORK/agent-train-loop-dataset-contribute.json" || fail TRAIN_LOOP_DATASET_CONTRIBUTION_FAILED
     agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
@@ -220,7 +293,7 @@ agent_train_loop_run() {
     [ ! -e "$artifact_cache" ] && [ ! -L "$artifact_cache" ] || fail TRAIN_LOOP_IMPORT_CACHE_NOT_NEW
     agent_artifact_cli client content agent fetch --publisher-key "$loop_publisher" \
         --dataset-publisher-key "$artifact_publisher" --name disposable-loop-update \
-        --dataset-name disposable-agent-dataset --min-revision "$loop_latest" --cache "$artifact_cache" --output "$artifact_user/received" \
+        --dataset-name "$loop_dataset_name" --min-revision "$loop_latest" --cache "$artifact_cache" --output "$artifact_user/received" \
         >"$WORK/agent-train-loop-fetch.json" 2>"$WORK/agent-train-loop-fetch.err" || fail TRAIN_LOOP_IMPORT_FAILED
     content_replication_snapshot client agent-train-loop-reserve-fetch-live || fail TRAIN_LOOP_IMPORT_PATHS_FAILED
     stop_privacy_observers || fail TRAIN_LOOP_IMPORT_CAPTURE_INCOMPLETE

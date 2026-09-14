@@ -16,12 +16,13 @@ use sha2::{Digest, Sha256};
 
 use super::super::private_directory;
 
-const JSON_LIMIT: u64 = 256 * 1024;
+// Up to sixteen bounded signed catalog snapshots and 128 stable source slots.
+const JSON_LIMIT: u64 = 4 * 1024 * 1024;
 const ENROLLMENT_LIMIT: u64 = 64 * 1024;
 const TREE_ENTRIES: usize = 32;
 const TREE_BYTES: u64 = 16 * 1024 * 1024;
 const CONTENT_FILES: [(&str, u64); 12] = [
-    ("selection.json", 64 * 1024),
+    ("selection.json", 256 * 1024),
     ("dataset.json", 1024 * 1024),
     ("dataset.manifest", 64 * 1024),
     ("source-provenance.json", 64 * 1024),

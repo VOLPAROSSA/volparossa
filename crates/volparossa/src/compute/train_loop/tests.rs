@@ -144,6 +144,59 @@ fn second_source_enrollment_pins_a_distinct_public_manifest_before_execution() {
 }
 
 #[test]
+fn catalog_only_enrollment_and_empty_wait_survive_resume_without_enrolling_cache() {
+    let (_root, args) = fixture();
+    let (old, _) = enrollment(&args).unwrap();
+    let catalog =
+        json!({"publisher_key":old.sources[0].publisher_key,"name":"eligible-public-sources"});
+    fs::write(
+        &args.plan,
+        serde_json::to_vec(&json!({"version":2,"sources":[],
+        "catalogs":[catalog]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let (plan, selection) = enrollment(&args).unwrap();
+    assert!(plan.sources.is_empty());
+    assert_eq!(selection["source_choice_uses_cache_inventory"], false);
+    assert_eq!(
+        selection["source_discovery"],
+        "signed-same-publisher-catalogs-v1"
+    );
+    let store = Store::open(&args.directory, &selection, false).unwrap();
+    let mut state = State::new(0);
+    state.catalog = Some(catalogs::Registry::new(&plan).unwrap());
+    recover(&store, &mut state, 0).unwrap();
+    assert!(state.select(&plan, false, 100).is_none());
+    let restored: State = serde_json::from_value(store.load_state().unwrap().unwrap()).unwrap();
+    restored
+        .catalog
+        .unwrap()
+        .validate(&plan, now().unwrap())
+        .unwrap();
+    assert!(!args.cache.exists());
+}
+
+#[test]
+fn newly_offered_exact_revision_is_selected_without_repeating_completed_pin() {
+    let (_root, args) = fixture();
+    let (mut plan, _) = enrollment(&args).unwrap();
+    plan.sources.truncate(1);
+    plan.sources[0].manifest_id = Some(hex::encode([7; 32]));
+    plan.sources[0].min_revision = Some(7);
+    let mut state = State::new(1);
+    state.sources[0].revision = Some(7);
+    assert_eq!(state.select(&plan, false, 100), None);
+    plan.sources[0].manifest_id = Some(hex::encode([8; 32]));
+    plan.sources[0].min_revision = Some(8);
+    assert_eq!(state.select(&plan, false, 100), Some(0));
+    assert_eq!(
+        required_revision(&plan.sources[0], &state.sources[0], false).unwrap(),
+        Some(8)
+    );
+}
+
+#[test]
 fn completed_training_survives_pending_evaluation_and_saved_decision_without_retraining() {
     let (_root, args) = fixture();
     let (plan, selected) = enrollment(&args).unwrap();
