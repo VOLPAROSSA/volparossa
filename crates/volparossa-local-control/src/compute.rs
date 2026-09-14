@@ -24,6 +24,38 @@ pub const MAX_REPORT_BYTES: usize = 32 * 1024;
 /// Longest admitted inference job lifetime, including loading and cleanup.
 pub const MAX_JOB_SECONDS: u64 = 600;
 
+/// Requester-selected operations on independently verified public contexts.
+/// This instruction is not part of the original publisher's signed dataset.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublicTask {
+    /// Apply the fixed version-one summary instruction separately to selected public contexts.
+    SummarizeContextsV1 {},
+    /// Apply one explicitly public requester question to each selected public context.
+    AnswerPublicQuestionV1 {
+        /// Exact requester-authored UTF-8 text, at most 512 bytes; never a command or path.
+        question: String,
+    },
+}
+
+impl PublicTask {
+    /// Exact versioned instruction used for deterministic public-dataset derivation.
+    ///
+    /// # Errors
+    /// Rejects empty/whitespace-only questions, NUL and more than 512 UTF-8 bytes.
+    pub fn question(&self) -> Result<&str, ProtocolError> {
+        match self {
+            Self::SummarizeContextsV1 {} => Ok("Summarize the provided public context."),
+            Self::AnswerPublicQuestionV1 { question } => {
+                if question.trim().is_empty() || question.len() > 512 || question.contains('\0') {
+                    return Err(ProtocolError::Invalid);
+                }
+                Ok(question)
+            }
+        }
+    }
+}
+
 /// A correlated request sent through the protected same-UID local broker socket.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +105,10 @@ pub struct JobBinding {
     pub row_indices: Vec<u16>,
     /// Original absolute expiry; retry cannot extend it.
     pub expires_unix_seconds: u64,
+    /// Optional requester-authored derivation, never publisher-authored question provenance.
+    /// Absence retains the original independent inference-row operation and encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<PublicTask>,
 }
 
 /// A bounded explicitly authorized public inference dataset, never private cache contents.
@@ -145,6 +181,18 @@ pub struct Capabilities {
     pub max_dataset_bytes: u64,
     /// Maximum independent Q/A rows in one task.
     pub max_rows: u16,
+    /// Supports the explicit version-one requester instruction derivation.
+    /// Older capability records default to false and cannot admit a derived task.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub task_derivation_v1: bool,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip predicate requires a reference"
+)]
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Correlated response; only Complete includes a validated actual worker report.
@@ -161,6 +209,10 @@ pub struct Response {
 
 /// Operation result, not a signed network receipt; the agent authenticates that envelope.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Single bounded RPC outcome retains its inline immutable job binding"
+)]
 #[serde(
     tag = "outcome",
     content = "value",
@@ -288,6 +340,10 @@ impl Request {
                 .windows(2)
                 .any(|pair| pair[0] >= pair[1])
             || binding.expires_unix_seconds == 0
+            || binding
+                .task
+                .as_ref()
+                .is_some_and(|task| task.question().is_err())
         {
             return Err(ProtocolError::Invalid);
         }
@@ -377,4 +433,99 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(
     stream.write_all(&bytes).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_public_tasks_bound_exact_requester_questions_and_reject_unknown_types() {
+        assert_eq!(
+            PublicTask::SummarizeContextsV1 {}.question().unwrap(),
+            "Summarize the provided public context."
+        );
+        for question in [
+            "A public question?".to_owned(),
+            "  Keep these spaces.  ".into(),
+            "é".repeat(256),
+        ] {
+            let task = PublicTask::AnswerPublicQuestionV1 {
+                question: question.clone(),
+            };
+            assert_eq!(task.question().unwrap(), question);
+            let bytes = serde_json::to_vec(&task).unwrap();
+            assert_eq!(serde_json::from_slice::<PublicTask>(&bytes).unwrap(), task);
+        }
+        for question in [
+            String::new(),
+            " \t\n".into(),
+            "bad\0question".into(),
+            "x".repeat(513),
+            "é".repeat(257),
+        ] {
+            assert!(
+                PublicTask::AnswerPublicQuestionV1 { question }
+                    .question()
+                    .is_err()
+            );
+        }
+        for json in [
+            r#"{"kind":"summarize_contexts_v2"}"#,
+            r#"{"kind":"summarize_contexts_v1","question":"unknown override"}"#,
+            r#"{"kind":"answer_public_question_v1","question":"a","question":"b"}"#,
+        ] {
+            assert!(serde_json::from_str::<PublicTask>(json).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_binding_bytes_are_unchanged_but_requester_task_changes_full_binding() {
+        let legacy = format!(
+            concat!(
+                "{{\"job_id\":\"{}\",\"dataset_manifest_id\":\"{}\",\"dataset_sha256\":\"{}\",",
+                "\"model_fingerprint\":\"{}\",\"row_indices\":[0,2],\"expires_unix_seconds\":1600}}"
+            ),
+            "1".repeat(32),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64)
+        );
+        let binding: JobBinding = serde_json::from_str(&legacy).unwrap();
+        assert!(binding.task.is_none());
+        assert_eq!(serde_json::to_string(&binding).unwrap(), legacy);
+        let mut changed = binding.clone();
+        changed.task = Some(PublicTask::SummarizeContextsV1 {});
+        assert_ne!(changed, binding);
+        assert_ne!(serde_json::to_string(&changed).unwrap(), legacy);
+        let mut request = Request {
+            version: VERSION,
+            request_id: "a".repeat(32),
+            requester_key: "b".repeat(64),
+            operation: Operation::Poll(changed.clone()),
+        };
+        request.validate(1000).unwrap();
+        changed.task = Some(PublicTask::AnswerPublicQuestionV1 {
+            question: "\0".into(),
+        });
+        request.operation = Operation::Cancel(changed);
+        assert!(request.validate(1000).is_err());
+    }
+
+    #[test]
+    fn absent_derivation_capability_defaults_false_and_omits_the_new_field() {
+        let original = serde_json::json!({
+            "model": {"model_id":"public-model","model_revision":"pinned","base_weights":{"bytes":1,"sha256":"a".repeat(64)},"adapter_files":null},
+            "model_fingerprint":"b".repeat(64),"accepting_work":true,"public_inference_only":true,
+            "runtime_slots":1,"max_threads":2,"max_job_seconds":600,"max_dataset_bytes":1048576,"max_rows":4
+        });
+        let mut capabilities: Capabilities = serde_json::from_value(original.clone()).unwrap();
+        assert!(!capabilities.task_derivation_v1);
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), original);
+        capabilities.task_derivation_v1 = true;
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap()["task_derivation_v1"],
+            true
+        );
+    }
 }

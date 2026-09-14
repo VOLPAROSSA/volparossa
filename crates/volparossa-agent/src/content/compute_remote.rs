@@ -86,7 +86,10 @@ impl ContentRuntime {
     }
 }
 
-fn validate_request(request: &compute::Request, signer: &SigningKey) -> Result<(), ContentError> {
+pub(super) fn validate_request(
+    request: &compute::Request,
+    signer: &SigningKey,
+) -> Result<(), ContentError> {
     request.validate(now()).map_err(|_| ContentError::Invalid)?;
     if request.requester_key != hex::encode(signer.verifying_key().as_bytes()) {
         return Err(ContentError::Invalid);
@@ -108,8 +111,7 @@ fn validate_request(request: &compute::Request, signer: &SigningKey) -> Result<(
         .map_err(|_| ContentError::Invalid)?;
         if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
             || source.expires() < submit.binding.expires_unix_seconds
-            || source
-                .derive(&submit.binding.row_indices)
+            || super::compute::derive_submission(&source, &submit.binding)
                 .map_err(|_| ContentError::Invalid)?
                 != submit.dataset_json
             || hex::encode(Sha256::digest(submit.dataset_json.as_bytes()))

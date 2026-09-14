@@ -67,7 +67,11 @@ struct Observed {
     clippy::too_many_lines,
     reason = "One bounded reconciliation round retains original handles, observations and replacement reports"
 )]
-pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+pub(super) async fn report_with_activity(
+    args: &Options,
+    socket: &Path,
+    activity: &tokio::sync::watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
     let (publication, source) = source(&args.source)?;
     let handles = load_handles(args, &source)?;
     let requested_rows: Vec<_> = handles
@@ -75,16 +79,13 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         .flat_map(|handle| handle.binding.row_indices.iter().copied())
         .collect();
     if !args.execute {
-        println!(
-            "{}",
+        return Ok(
             serde_json::json!({"operation":"compute_resume_plan","execute":false,
             "original_handles":handles,"maximum_retries_per_part":1,"new_output":args.output,
-            "requested_rows":requested_rows,"private_data_supported":false})
+            "requested_rows":requested_rows,"private_data_supported":false}),
         );
-        return Ok(());
     }
-    let cancellation = Cancellation::new()?;
-    let activity = cancellation.activity.clone();
+    let activity = activity.clone();
     super::super::private_directory(
         args.output
             .parent()
@@ -174,9 +175,15 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "requested_rows":requested_rows,"full_dataset_requested":requested_rows.len() == source.row_count(),
         "private_data_supported":false,"result_truthfulness_guaranteed":false});
     save_new(&args.output.join("result.json"), &report)?;
+    Ok(report)
+}
+
+pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    let cancellation = Cancellation::new()?;
+    let report = report_with_activity(args, socket, &cancellation.activity).await?;
     println!("{}", serde_json::to_string(&report)?);
     ensure!(
-        unfinished == 0,
+        !args.execute || report["complete"] == true,
         "compute_resume_incomplete_handles_retained"
     );
     Ok(())
@@ -201,14 +208,25 @@ pub(super) fn load_handles(
     );
     let mut handles = Vec::new();
     let mut covered = BTreeSet::new();
+    let mut task = None;
     for path in &args.handle {
         let handle: JobHandle = serde_json::from_slice(&read_file(path, 16 * 1024)?)?;
         parse_key(&handle.provider_key).map_err(anyhow::Error::msg)?;
         let rows = &handle.binding.row_indices;
+        if let Some(expected) = &task {
+            ensure!(
+                expected == &handle.binding.task,
+                "compute_resume_mixed_tasks"
+            );
+        } else {
+            task = Some(handle.binding.task.clone());
+        }
         ensure!(
             handle.version == 1
                 && handle.binding.dataset_manifest_id == hex::encode(source.manifest_id())
-                && handle.binding.dataset_sha256 == sha(source.derive(rows)?.as_bytes())
+                && handle.binding.dataset_sha256
+                    == sha(derive(source, rows, handle.binding.task.as_ref())?.as_bytes())
+                && (handle.binding.task.is_none() || handle.capabilities.task_derivation_v1)
                 && handle.binding.expires_unix_seconds <= source.expires()
                 && handle.binding.model_fingerprint == handle.capabilities.model_fingerprint
                 && handle.binding.model_fingerprint
@@ -288,18 +306,24 @@ async fn replacement(
             continue;
         };
         if !caps.accepting_work
+            || (original.binding.task.is_some() && !caps.task_derivation_v1)
             || caps.model_fingerprint != original.binding.model_fingerprint
             || usize::from(caps.max_rows) < original.binding.row_indices.len()
         {
             continue;
         }
-        let data = source.derive(&original.binding.row_indices)?;
+        let data = derive(
+            source,
+            &original.binding.row_indices,
+            original.binding.task.as_ref(),
+        )?;
         let binding = binding(
             source,
             original.binding.row_indices.clone(),
             &data,
             &caps,
             u64::from(args.max_seconds),
+            original.binding.task.clone(),
         )?;
         used.insert(provider.to_bytes());
         return Ok(Some(batch::Prepared {
@@ -421,11 +445,20 @@ mod tests {
             max_job_seconds: 600,
             max_dataset_bytes: 1024 * 1024,
             max_rows: 4,
+            task_derivation_v1: true,
         };
         let handle = JobHandle {
             version: 1,
             provider_key: hex::encode(key.verifying_key().as_bytes()),
-            binding: binding(&source, vec![1], &source.derive(&[1]).unwrap(), &caps, 600).unwrap(),
+            binding: binding(
+                &source,
+                vec![1],
+                &source.derive(&[1]).unwrap(),
+                &caps,
+                600,
+                None,
+            )
+            .unwrap(),
             capabilities: caps,
         };
         let path = root.path().join("handle.json");

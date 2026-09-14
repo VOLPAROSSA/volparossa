@@ -29,6 +29,7 @@ fn binding() -> JobBinding {
         model_fingerprint: "3".repeat(64),
         row_indices: vec![2],
         expires_unix_seconds: 1600,
+        task: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn broker(root: &Path) -> Broker {
             max_job_seconds: 600,
             max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
             max_rows: 4,
+            task_derivation_v1: true,
         },
         jobs: VecDeque::new(),
         budget: Budget::fixed_for_test(Decision::Run),
@@ -100,6 +102,52 @@ async fn pressure_admission_refuses_work_without_spawning_or_touching_job_files(
     broker.budget = Budget::fixed_for_test(Decision::Run);
     let caps = broker.handle(request(Operation::Capabilities), 1000).await;
     assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if caps.accepting_work));
+}
+
+#[tokio::test]
+async fn derived_task_requires_advertised_capability_and_exact_bound_inference_question() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    let caps = broker.handle(request(Operation::Capabilities), 1000).await;
+    assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if caps.task_derivation_v1));
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: data(),
+        publication: publication(),
+    };
+    submit.binding.task = Some(compute::PublicTask::AnswerPublicQuestionV1 {
+        question: "What is tested?".into(),
+    });
+    broker.capabilities.task_derivation_v1 = false;
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit.clone())), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Invalid)
+    ));
+    broker.capabilities.task_derivation_v1 = true;
+    submit.binding.task = Some(compute::PublicTask::SummarizeContextsV1 {});
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit.clone())), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Invalid)
+    ));
+    submit.binding.task = Some(compute::PublicTask::AnswerPublicQuestionV1 {
+        question: "What is tested?".into(),
+    });
+    // Exact public instructions pass cheap admission, but no absent runtime becomes a fake model result.
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit)), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Unavailable)
+    ));
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[tokio::test]
@@ -295,6 +343,20 @@ async fn owner_and_full_binding_gate_cancel_slot_and_cleanup_after_task_returns(
             .outcome,
         Outcome::Error(ErrorCode::Missing)
     ));
+    assert!(*broker.jobs[0].activity.borrow());
+    let mut changed_task = binding();
+    changed_task.task = Some(compute::PublicTask::AnswerPublicQuestionV1 {
+        question: "What is tested?".into(),
+    });
+    for operation in [
+        Operation::Poll(changed_task.clone()),
+        Operation::Cancel(changed_task),
+    ] {
+        assert!(matches!(
+            broker.handle(request(operation), 1000).await.outcome,
+            Outcome::Error(ErrorCode::Missing)
+        ));
+    }
     assert!(*broker.jobs[0].activity.borrow());
     let repeated = broker
         .handle(

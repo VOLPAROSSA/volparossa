@@ -49,6 +49,13 @@ An explicit `compute peer workflow` candidate now sequences multiple signed publ
 retains verified local results, and resumes unfinished work across separate bounded leases.
 This enlarges the overall job, not the resource allowance of any participating device;
 the current plan accepts up to 32 small datasets and is not a general task planner.
+The new [`compute peer task`](docs/DECENTRALIZED_AGENTS.md#source-bound-public-user-tasks)
+candidate retrieves a selected signed public source and distributes a summary request or an
+explicitly public user question across its contexts on independent peers. The publisher's
+original source and the requester's instruction remain separately bound. Results retain their
+source rows and worker receipts; resume reuses completed work. This first interface accepts
+the existing small public-dataset format, not arbitrary documents or private prompts; its
+live two-peer user-task proof remains pending.
 An explicit `compute train-cycle` now connects a chosen public dataset to local training and
 adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
 that same publisher's dataset through the protected network. It can continue training an
@@ -68,6 +75,8 @@ The next candidate, [`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuo
 connects repeated public training, optional peer warmstarts and signed update sharing. It can
 watch an explicit source plan until cancelled, while each worker keeps its own resource/deadline
 limits. Its continuous end-to-end VM proof is still pending; this is not a completed shared brain.
+The first loop run stopped before a worker was observed; cleanup passed. A reporting fix and
+durable-phase readiness diagnostics are being tested without weakening worker-isolation checks.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

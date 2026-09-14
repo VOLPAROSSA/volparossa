@@ -90,6 +90,17 @@ completed parts are reused, while pending work retains its original authorizatio
 only explicitly bounded new attempts. These are local receipt records, not independently
 portable execution attestations. Whole-job duration is not the per-worker 600-second lease.
 General task decomposition, live workflow/reassignment proof and private execution remain open.
+The new `compute peer task` frontend fetches one independently selected signed public dataset,
+then applies a fixed summary instruction or an explicitly public requester question to its
+original contexts through that coordinator. The immutable job binding includes the versioned
+task separately from the original publisher-signed dataset. Both agent boundaries verify exact
+derivation; peers without the advertised capability refuse it. The frontend retains the original
+source, chosen peers, handles and validated receipts, returning ordered per-context answers.
+Its current scope is two to four existing inference contexts, not arbitrary-document splitting,
+neural result synthesis, confidential prompts or the whole B03 criterion. The 48 focused CLI
+compute tests pass, alongside signed-source/agent-boundary and wire-codec checks, scoped strict
+Clippy and an actual no-network/no-output CLI preview. The new disposable two-peer task/resume
+scenario is being connected; these local tests are not a live model-execution claim.
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
 before new submission and reusing full validated local receipt fixtures after restart.
 Synthetic receipt fixtures prove coordinator/storage behavior, not remote model execution.
@@ -168,8 +179,17 @@ enabled signed adapter publication. Each worker retains spare-capacity checks an
 deadline; the watcher can run until cancelled. Exact enrollment/state and completed-file hashes
 support resume. Publication retry reuses the exact signed bytes, original expiry and verified
 handoff identity. Eight-cycle retention preserves current weights and unpublished updates.
-Focused coordinator/source/storage tests pass; the new `agent-train-loop` VM scenario has not
-yet supplied a live result. Its intended two cycles on an explicitly repeated source are not
+Focused coordinator/source/storage tests pass. The first
+[agent-train-loop run on `1b186ad5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34880750517)
+failed before an isolated worker was observed, with zero attempted/completed coordinator cycles.
+It retained complete cleanup, zero owned network objects and equal original guest-state hash
+`e8b0e220f663f6c2143457b23bc9ba995d66778d28253b7fcbcfde1ff25974c1`.
+A separate definite report-CLI path-type error is corrected. The observer now waits for a
+durable Running cycle and preserves seed/admission and guest-pressure diagnostics before cleanup,
+under the same first-worker deadline. The initial artifact does not distinguish late seed
+readiness from capacity waiting; the new probe must establish that rather than infer success.
+The original failed run remains failed; no live continuous-training result is claimed.
+Its intended two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
 See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;

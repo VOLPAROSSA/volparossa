@@ -71,6 +71,29 @@ impl VerifiedPublicDataset {
     /// # Errors
     /// Rejects empty, duplicate, unordered or absent indices and excessive serialized bytes.
     pub fn derive(&self, rows: &[u16]) -> Result<String, ComputeError> {
+        self.derive_selected(rows, None)
+    }
+
+    /// Replace only selected inference questions with one explicitly public requester instruction.
+    /// Source identity, training/heldout rows and selected context strings remain unchanged.
+    /// The new question is requester-authored, not authenticated as the publisher's question.
+    ///
+    /// # Errors
+    /// Rejects invalid row selection, empty/whitespace-only, NUL or over-512-byte questions,
+    /// and derived datasets larger than the existing object bound.
+    pub fn derive_question(&self, rows: &[u16], question: &str) -> Result<String, ComputeError> {
+        text(question, 512)?;
+        if question.trim().is_empty() {
+            return Err(ComputeError::Invalid);
+        }
+        self.derive_selected(rows, Some(question))
+    }
+
+    fn derive_selected(
+        &self,
+        rows: &[u16],
+        question: Option<&str>,
+    ) -> Result<String, ComputeError> {
         if rows.is_empty() || rows.len() > 4 || rows.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(ComputeError::Invalid);
         }
@@ -78,11 +101,16 @@ impl VerifiedPublicDataset {
         dataset.inference = rows
             .iter()
             .map(|index| {
-                self.dataset
+                let mut row = self
+                    .dataset
                     .inference
                     .get(usize::from(*index))
                     .cloned()
-                    .ok_or(ComputeError::Invalid)
+                    .ok_or(ComputeError::Invalid)?;
+                if let Some(question) = question {
+                    question.clone_into(&mut row.question);
+                }
+                Ok::<_, ComputeError>(row)
             })
             .collect::<Result<_, _>>()?;
         let json = serde_json::to_string(&dataset).map_err(|_| ComputeError::Invalid)?;

@@ -34,6 +34,7 @@ fn capabilities() -> Capabilities {
         max_job_seconds: 600,
         max_dataset_bytes: 1024 * 1024,
         max_rows: 4,
+        task_derivation_v1: true,
     }
 }
 
@@ -88,6 +89,7 @@ fn request(root: &Path, publisher: &SigningKey, requester: &SigningKey) -> Reque
                 model_fingerprint: capabilities().model_fingerprint,
                 row_indices: vec![1],
                 expires_unix_seconds: now() + 300,
+                task: None,
             },
             dataset_json: derived,
             publication: PublicDataset {
@@ -140,10 +142,91 @@ fn attachment(
         endpoint: ProviderEndpoint::new("provider.example", 18080).unwrap(),
         trusted_publishers: BTreeSet::from([publisher.verifying_key().to_bytes()]),
         model_fingerprint: capabilities().model_fingerprint,
+        task_derivation_v1: true,
         enabled: AtomicBool::new(true),
     });
     backend.registry.set(Arc::downgrade(registry)).unwrap();
     backend
+}
+
+#[tokio::test]
+async fn public_task_binds_original_context_and_exact_question_at_both_agent_boundaries() {
+    let root = tempfile::tempdir().unwrap();
+    let publisher = SigningKey::from_bytes(&[45; 32]);
+    let requester = SigningKey::from_bytes(&[46; 32]);
+    let original_request = request(root.path(), &publisher, &requester);
+    let service = Arc::new(Mutex::new(None));
+    let registry = Arc::new(Mutex::new(PublicationRegistry::new()));
+    let mut backend = attachment(
+        BrokerSocket {
+            path: root.path().join("missing.sock"),
+            device: 0,
+            inode: 0,
+            uid: nix::unistd::geteuid().as_raw(),
+        },
+        &service,
+        &registry,
+        &publisher,
+    );
+    for task in [
+        rpc::PublicTask::SummarizeContextsV1 {},
+        rpc::PublicTask::AnswerPublicQuestionV1 {
+            question: "What does the public sample describe?".into(),
+        },
+    ] {
+        let mut request = original_request.clone();
+        let Operation::Submit(submit) = &mut request.operation else {
+            panic!("submit")
+        };
+        let source = dataset::verify_source(
+            &hex::decode(&submit.publication.manifest_hex).unwrap(),
+            &publisher.verifying_key(),
+            &submit.publication.dataset_json,
+            now(),
+        )
+        .unwrap();
+        submit.binding.task = Some(task);
+        submit.dataset_json = derive_submission(&source, &submit.binding).unwrap();
+        submit.binding.dataset_sha256 = hex::encode(Sha256::digest(submit.dataset_json.as_bytes()));
+        backend
+            .validate(requester.verifying_key().as_bytes(), &request)
+            .unwrap();
+        super::super::compute_remote::validate_request(&request, &requester).unwrap();
+
+        let mut changed = request.clone();
+        let Operation::Submit(submit) = &mut changed.operation else {
+            panic!("submit")
+        };
+        let mut json: serde_json::Value = serde_json::from_str(&submit.dataset_json).unwrap();
+        json["inference"][0]["context"] = "Unpublished replacement text".into();
+        submit.dataset_json = json.to_string();
+        submit.binding.dataset_sha256 = hex::encode(Sha256::digest(submit.dataset_json.as_bytes()));
+        assert!(
+            backend
+                .validate(requester.verifying_key().as_bytes(), &changed)
+                .is_err()
+        );
+        assert!(super::super::compute_remote::validate_request(&changed, &requester).is_err());
+
+        let mut changed = request.clone();
+        let Operation::Submit(submit) = &mut changed.operation else {
+            panic!("submit")
+        };
+        submit.binding.task = None;
+        assert!(
+            backend
+                .validate(requester.verifying_key().as_bytes(), &changed)
+                .is_err()
+        );
+        assert!(super::super::compute_remote::validate_request(&changed, &requester).is_err());
+        Arc::get_mut(&mut backend).unwrap().task_derivation_v1 = false;
+        assert!(
+            backend
+                .validate(requester.verifying_key().as_bytes(), &request)
+                .is_err()
+        );
+        Arc::get_mut(&mut backend).unwrap().task_derivation_v1 = true;
+    }
 }
 
 #[tokio::test]

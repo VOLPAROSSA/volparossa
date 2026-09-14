@@ -114,7 +114,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "pause_extends_deadline": false,
                 "max_job_seconds": compute::MAX_JOB_SECONDS, "same_uid_only": true,
                 "remote_network_authentication": "required-agent-boundary",
-                "network_access": false, "remote_execution_proved": false
+                "network_access": false, "remote_execution_proved": false,
+                "task_derivation_v1": true
             })
         );
         return Ok(());
@@ -258,6 +259,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_job_seconds: compute::MAX_JOB_SECONDS,
         max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
         max_rows: 4,
+        task_derivation_v1: true,
     })
 }
 
@@ -333,6 +335,7 @@ impl Broker {
         }
         if sha(submit.dataset_json.as_bytes()) != submit.binding.dataset_sha256
             || dataset::validate(&submit.dataset_json, submit.binding.row_indices.len()).is_err()
+            || !self.accepts_task(submit)
         {
             return Outcome::Error(ErrorCode::Invalid);
         }
@@ -358,6 +361,29 @@ impl Broker {
             }
             Err(_) => Outcome::Error(ErrorCode::Unavailable),
         }
+    }
+
+    fn accepts_task(&self, submit: &Submit) -> bool {
+        let Some(task) = &submit.binding.task else {
+            return true;
+        };
+        if !self.capabilities.task_derivation_v1 {
+            return false;
+        }
+        let Ok(question) = task.question() else {
+            return false;
+        };
+        // The same-UID agent verifies signed-source/context derivation before forwarding.
+        // Independently ensure this fixed worker receives the exact bound requester instruction.
+        serde_json::from_str::<Value>(&submit.dataset_json).is_ok_and(|value| {
+            value
+                .get("inference")
+                .and_then(Value::as_array)
+                .is_some_and(|rows| {
+                    rows.iter()
+                        .all(|row| row["question"].as_str() == Some(question))
+                })
+        })
     }
 
     fn start(&self, requester: &str, submit: &Submit, time: u64) -> Result<Job> {

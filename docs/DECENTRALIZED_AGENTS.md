@@ -329,7 +329,7 @@ continuation step, not general task decomposition or unlimited execution permiss
 ## Current public peer-job candidate
 
 The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute/resume/workflow` commands. The broker must already have the
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task` commands. The broker must already have the
 pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
 off until explicitly executed. The agent attaches only a protected same-UID socket and an
 explicit allowlist of dataset publishers. It does not launch Python inside the hardened
@@ -425,6 +425,47 @@ proofs remain separate from the local coordinator tests.
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
 eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
+
+### Source-bound public user tasks
+
+`compute peer task` adds a requester instruction to the original public source, rather than
+requiring the publisher to have authored that exact question. It selects the source by trusted
+publisher/name and optional minimum revision/exact manifest ID, independently of cache inventory.
+Eligible cached bytes accelerate retrieval; a miss requests the same source over the protected
+network. Peers still require their existing publisher allowlist and explicitly advertise
+`task_derivation_v1`; unsupported peers refuse the new task.
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer task \
+  --publisher-key TRUSTED_DATASET_PUBLISHER_HEX --dataset-name public-notes \
+  --cache /absolute/agent-cache --reuse-cache \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --public-question 'What does this public context say about conserving capacity?' \
+  --directory /absolute/private-parent/task-001 --execute
+
+volparossa --control-socket /absolute/agent.sock compute peer task \
+  --directory /absolute/private-parent/task-001 --resume --execute
+```
+
+Omit `--execute` for a no-network/no-output-creation preview. Omit `--public-question` for
+the fixed instruction `Summarize the provided public context.` The question is explicitly public
+and visible to the workers; never put private text in it. Its exact bytes are bound separately
+in the signed requester job, never attributed to the original dataset publisher. Original
+context/source bytes remain unchanged and are verified at both agent boundaries.
+
+The current adapter accepts one existing signed public-dataset object with two to four inference
+contexts and two to four explicitly selected peers. It does not yet split arbitrary documents;
+each worker retains the existing 192-token prompt check without silent truncation. The user
+question allows at most 512 UTF-8 bytes. These are current input/worker limits, not a promise that
+the final whole-task interface will always have these limits.
+
+`result.json` contains ordered per-context answers with original manifest/context hashes and
+the responsible peer, job and validated report hash. It is not a further neural synthesis or
+proof that model answers are correct. Exact task/source/peer enrollment and completed local
+receipts survive resume, while partial work remains visibly incomplete. Those receipts are
+authenticated local observations, not independently portable execution attestations. The
+source signature does not authorize relabelling derived answers as publisher-authored content.
+The disposable two-peer user-task/resume proof is being connected; full B03 remains open.
 
 ## Private tasks and training data
 
