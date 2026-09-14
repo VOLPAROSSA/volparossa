@@ -348,6 +348,23 @@ def capture_resume(work):
           "original_handles_after": initial_handles(work), "captured_boottime_ns": boot_ns()})
 
 
+def source_manifest_id(source, published):
+    # Offline publication reports a local manifest path, not a manifest_id field.
+    # Bind jobs to the retained original signed bytes. The real CLI verifies the
+    # signature; this independent inspection checks the reported publisher/expiry.
+    encoded = bytes.fromhex(source["manifest_hex"])
+    digest = hashlib.sha256(encoded).hexdigest()
+    require(source["manifest"] == {"bytes": len(encoded), "sha256": digest}, "original manifest hash/length differs")
+    envelope = CUSTODY["fields"](encoded, 65536)
+    require(set(envelope) == {1, 2} and isinstance(envelope[2], bytes) and len(envelope[2]) == 64,
+            "original signed manifest envelope missing")
+    body = CUSTODY["fields"](envelope[1], 65536)
+    require(body[1] == 1 and body[2] == bytes.fromhex(published["publisher_key_hex"])
+            and len(body[2]) == 32 and body[4] == published["expires_unix_seconds"],
+            "offline publication publisher/expiry differs from signed bytes")
+    return digest
+
+
 def check_evidence(evidence, revision):
     require(evidence["success"] is True and evidence["source_revision"] == revision, "wrong source-bound job proof")
     require(evidence["provision"]["success"] is True and evidence["provision"]["installed_wheels"] == 38
@@ -355,13 +372,12 @@ def check_evidence(evidence, revision):
             and evidence["provision"]["training_performed"] is False, "unverified or repeated provision scope")
     check_overlap(evidence["observation"])
     original, publication = evidence["source"], evidence["publish"]
+    manifest_id = source_manifest_id(original, publication)
     require(original["explicit_public_source"] is True and json.loads(original["dataset_json"]) == original["dataset"]
             and original["dataset"]["source_revision"] == revision and len(original["dataset"]["inference"]) == 2
             and original["dataset"]["visibility"] == "public" and original["dataset"]["license"] == "GPL-3.0-only",
             "original explicit public source missing")
     require(hashlib.sha256(original["dataset_json"].encode()).hexdigest() == original["dataset_file"]["sha256"]
-            and hashlib.sha256(bytes.fromhex(original["manifest_hex"])).hexdigest() == original["manifest"]["sha256"]
-            and publication["manifest_id"] == original["manifest"]["sha256"]
             and publication["bytes"] == original["dataset_file"]["bytes"]
             and publication["operation"] == "offline_content_publish"
             and publication["network_publication"] is False, "original publication bytes differ")
@@ -370,7 +386,7 @@ def check_evidence(evidence, revision):
             and all(CUSTODY["peer_key"](peers[node]) == key for node, key in layout["provider_keys"].items())
             and layout["control_relay_peer_id"] not in {peers[node] for node in layout["provider_nodes"]}, "provider identity/lineage differs")
     require(result["operation"] == "compute_distribute" and result["complete"] is True and result["provider_count"] == 2
-            and result["dataset_manifest_id"] == publication["manifest_id"] and len(result["jobs"]) == 2,
+            and result["dataset_manifest_id"] == manifest_id and len(result["jobs"]) == 2,
             "actual distributed batch incomplete")
     require(all(result[x] is False for x in ("private_data_supported", "model_layer_sharding", "result_truthfulness_guaranteed")), "unsupported compute claim")
     rows, response_bytes = [], {}
@@ -388,7 +404,7 @@ def check_evidence(evidence, revision):
                 and caps["model_fingerprint"] == binding["model_fingerprint"], "job not bound to the selected fixed-model profile")
         require(handle["provider_key"] == layout["provider_keys"][node]
                 and handle["binding"] == binding and part["state"] == status["state"] == "complete"
-                and binding["row_indices"] == [index] and binding["dataset_manifest_id"] == publication["manifest_id"]
+                and binding["row_indices"] == [index] and binding["dataset_manifest_id"] == manifest_id
                 and binding["expires_unix_seconds"] <= publication["expires_unix_seconds"], "wrong original job binding")
         derived = derive(original["dataset"], binding["row_indices"])
         observation = next(w for w in evidence["observation"]["workers"] if w["node"] == node)
@@ -423,7 +439,7 @@ def check_evidence(evidence, revision):
     require(all(evidence["cleanup"].values()), "compute private cleanup incomplete")
 
 
-def build_evidence(work, revision):
+def read_evidence(work, revision):
     evidence = {name: read(work / f"agent-jobs-{name}.json") for name in ("source", "publish", "layout", "result", "observation", "provision")}
     evidence.update(success=True, source_revision=revision, peers=read(work / "a01-expected-peers.json"),
                     cleanup=read(work / "agent-jobs-private-cleanup.json"),
@@ -433,13 +449,17 @@ def build_evidence(work, revision):
                           "control_privacy": read(work / "content-provider-custody-fetch-control.json"),
                           "gates": read(work / "content-custody-fetch-gates.json")})
     check_evidence(evidence, revision)
-    write(work / "agent-jobs-evidence.json", evidence)
+    return evidence
 
 
-def check_loss_handle(handle, original, publication, node, layout):
+def build_evidence(work, revision):
+    write(work / "agent-jobs-evidence.json", read_evidence(work, revision))
+
+
+def check_loss_handle(handle, original, publication, manifest_id, node, layout):
     binding, caps = handle["binding"], handle["capabilities"]
     require(handle["provider_key"] == layout["provider_keys"][node]
-            and binding["dataset_manifest_id"] == publication["manifest_id"]
+            and binding["dataset_manifest_id"] == manifest_id
             and binding["dataset_sha256"] == hashlib.sha256(derive(original, binding["row_indices"]).encode()).hexdigest()
             and binding["expires_unix_seconds"] <= publication["expires_unix_seconds"]
             and re.fullmatch(r"[0-9a-f]{32}", binding["job_id"]), "replacement/original handle source differs")
@@ -478,13 +498,12 @@ def check_loss_evidence(evidence, revision):
             and evidence["provision"]["training_performed"] is False, "loss case did not reuse fixed provisioning")
     check_overlap(evidence["observation"])
     source, published = evidence["source"], evidence["publish"]
+    manifest_id = source_manifest_id(source, published)
     original = source["dataset"]
     require(source["explicit_public_source"] is True and json.loads(source["dataset_json"]) == original
             and original["visibility"] == "public" and original["license"] == "GPL-3.0-only"
             and original["source_revision"] == revision and len(original["inference"]) == 2
             and hashlib.sha256(source["dataset_json"].encode()).hexdigest() == source["dataset_file"]["sha256"]
-            and hashlib.sha256(bytes.fromhex(source["manifest_hex"])).hexdigest() == source["manifest"]["sha256"]
-            and published["manifest_id"] == source["manifest"]["sha256"]
             and published["bytes"] == source["dataset_file"]["bytes"]
             and published["operation"] == "offline_content_publish" and published["network_publication"] is False,
             "original signed public source bytes differ")
@@ -494,7 +513,7 @@ def check_loss_evidence(evidence, revision):
     require(a != b and all(CUSTODY["peer_key"](peers[n]) == layout["provider_keys"][n] for n in (a, b))
             and layout["control_relay_peer_id"] not in (peers[a], peers[b]), "worker provider lineage differs")
     for index, node in enumerate((a, b)):
-        check_loss_handle(originals[index], original, published, node, layout)
+        check_loss_handle(originals[index], original, published, manifest_id, node, layout)
         require(originals[index]["binding"]["row_indices"] == [index], "original rows overlap")
         observed = next(w for w in evidence["observation"]["workers"] if w["node"] == node)
         require(loss[("victim", "survivor")[index]] == observed
@@ -505,7 +524,7 @@ def check_loss_evidence(evidence, revision):
             and 0 < loss["signal_boottime_ns"] <= loss["exit_boottime_ns"], "actual selected worker death not observed")
     first, ready, resumed = evidence["result"], evidence["ready"], evidence["resume"]
     require(first["operation"] == "compute_distribute" and first["complete"] is False
-            and first["dataset_manifest_id"] == published["manifest_id"] and len(first["jobs"]) == 2
+            and first["dataset_manifest_id"] == manifest_id and len(first["jobs"]) == 2
             and first["outputs"][0] is None and first["outputs"][1] is not None, "loss falsely reported successful")
     for index, status in enumerate(evidence["statuses"]):
         part = next(x for x in first["jobs"] if x["handle"] == originals[index])
@@ -522,14 +541,14 @@ def check_loss_evidence(evidence, revision):
             and files["files"]["original-0.json"] == originals[0] and files["files"]["original-1.json"] == originals[1]
             and files["files"]["result.json"] == resumed, "original handles/output were overwritten")
     require(resumed["operation"] == "compute_resume" and resumed["complete"] is True
-            and resumed["dataset_manifest_id"] == published["manifest_id"] and resumed["requested_rows"] == [0, 1]
+            and resumed["dataset_manifest_id"] == manifest_id and resumed["requested_rows"] == [0, 1]
             and resumed["full_dataset_requested"] is True and resumed["maximum_retries_per_part"] == 1
             and all(resumed[k] is False for k in ("exactly_once_execution_guaranteed", "private_data_supported", "result_truthfulness_guaranteed"))
             and len(resumed["jobs"]) == len(resumed["outputs"]) == 2, "resumed result incomplete or overstated")
     prior = next(part for part in resumed["jobs"] if part["retried"] is False)
     retry = next(part for part in resumed["jobs"] if part["retried"] is True)
     handle = retry["handle"]
-    check_loss_handle(handle, original, published, b, layout)
+    check_loss_handle(handle, original, published, manifest_id, b, layout)
     require(prior == {"handle": originals[1], "state": "complete", "retried": False}
             and retry["original_handle"] == originals[0] and retry["original_state"] == "stopped"
             and retry["prior_terminal_receipt_received"] is True and retry["status"] == evidence["replacement_status"]
@@ -665,13 +684,18 @@ def self_test():
     model = {"model_id": "HuggingFaceTB/SmolLM2-135M-Instruct", "model_revision": TRAIN["MODEL_REVISION"],
              "base_weights": {"bytes": 269060552, "sha256": TRAIN["WEIGHT_HASH"]}, "adapter_files": None}
     profiles = dict(model=model, model_fingerprint="f" * 64, public_inference_only=True, runtime_slots=1, max_threads=2)
-    manifest_id = digest("synthetic-manifest")
+    # Synthetic canonical envelope fields, not a cryptographic validity claim.
+    publisher = "9" * 64
+    body = b"\x08\x01\x12\x20" + bytes.fromhex(publisher) + b"\x20\xb8\x17"
+    manifest = b"\x0a" + bytes([len(body)]) + body + b"\x12\x40" + bytes(64)
+    manifest_id = hashlib.sha256(manifest).hexdigest()
     fixture = {"success": True, "source_revision": "a" * 40, "layout": base["layout"], "peers": base["expected_peers"],
                "provision": dict(success=True, installed_wheels=38, download_bytes=523040250, training_performed=False),
                "source": {"dataset": value, "dataset_json": encoded, "dataset_file": {"bytes": len(encoded), "sha256": digest(encoded)},
-                          "manifest": {"sha256": manifest_id}, "manifest_hex": b"synthetic-manifest".hex(), "explicit_public_source": True},
+                          "manifest": {"bytes": len(manifest), "sha256": manifest_id}, "manifest_hex": manifest.hex(), "explicit_public_source": True},
                "publish": {"operation": "offline_content_publish", "network_publication": False,
-                           "manifest_id": manifest_id, "bytes": len(encoded), "expires_unix_seconds": 3000},
+                           "publisher_key_hex": publisher, "manifest": "/synthetic/manifest.pb", "cache": "/synthetic/cache",
+                           "chunks": 1, "bytes": len(encoded), "expires_unix_seconds": 3000},
                "result": dict(operation="compute_distribute", complete=True, provider_count=2, dataset_manifest_id=manifest_id,
                               private_data_supported=False, model_layer_sharding=False, result_truthfulness_guaranteed=False,
                               jobs=[], outputs=[]), "statuses": [], "cleanup": {"done": True},
@@ -700,8 +724,9 @@ def self_test():
             mounts={p: ["ro"] for p in ("/runtime", "/model", "/dataset.json")},
             effective_capabilities=0, host_home_visible=False, other_node_state_hidden=True,
             input_inodes={"model/model.safetensors": [1, 100], "runtime/pyvenv.cfg": [1, n+200], "dataset.json": [1, n+300]}))
+    require("manifest_id" not in fixture["publish"], "fixture invented an offline publication field")
     check_evidence(fixture, "a" * 40)
-    for kind in ("same_lock", "no_overlap", "altered_dataset", "reordered_result"):
+    for kind in ("same_lock", "no_overlap", "altered_dataset", "reordered_result", "manifest_hash", "signed_publisher", "signed_expiry"):
         bad = copy.deepcopy(fixture)
         if kind == "same_lock":
             bad["observation"]["workers"][1]["runtime_lock_inode"] = bad["observation"]["workers"][0]["runtime_lock_inode"]
@@ -709,8 +734,14 @@ def self_test():
             bad["observation"]["both_alive_before_and_after"] = False
         elif kind == "altered_dataset":
             bad["observation"]["workers"][0]["dataset_json"] += " "
-        else:
+        elif kind == "reordered_result":
             bad["result"]["outputs"].reverse()
+        elif kind == "manifest_hash":
+            bad["source"]["manifest"]["sha256"] = "0" * 64
+        elif kind == "signed_publisher":
+            bad["publish"]["publisher_key_hex"] = "0" * 64
+        else:
+            bad["publish"]["expires_unix_seconds"] += 1
         try:
             check_evidence(bad, "a" * 40)
         except ValueError:
@@ -754,7 +785,7 @@ def loss_self_test():
              "status": status, "retried": True, "prior_terminal_receipt_received": True}
     value["replacement_status"] = status
     value["retained_status"] = copy.deepcopy(value["statuses"][1])
-    value["resume"] = {"operation": "compute_resume", "complete": True, "dataset_manifest_id": value["publish"]["manifest_id"],
+    value["resume"] = {"operation": "compute_resume", "complete": True, "dataset_manifest_id": source_manifest_id(value["source"], value["publish"]),
                        "requested_rows": [0, 1], "full_dataset_requested": True, "maximum_retries_per_part": 1,
                        "exactly_once_execution_guaranteed": False, "private_data_supported": False, "result_truthfulness_guaranteed": False,
                        "jobs": [{"handle": original_handles[1], "state": "complete", "retried": False}, retry],
