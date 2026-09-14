@@ -168,8 +168,17 @@ enabled signed adapter publication. Each worker retains spare-capacity checks an
 deadline; the watcher can run until cancelled. Exact enrollment/state and completed-file hashes
 support resume. Publication retry reuses the exact signed bytes, original expiry and verified
 handoff identity. Eight-cycle retention preserves current weights and unpublished updates.
-Focused coordinator/source/storage tests pass; the new `agent-train-loop` VM scenario has not
-yet supplied a live result. Its intended two cycles on an explicitly repeated source are not
+Focused coordinator/source/storage tests pass, but both initial loop VM attempts remain failed:
+[`1b186ad5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34880750517) observed no worker,
+and [`a67729e1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34883408279) confirms that
+the seed import finishes at 14 seconds but no cycle is admitted within the 90-second first-worker
+window. Both retain complete cleanup, zero owned network objects and unchanged guest state.
+The report path-type bug is fixed. The second run's guest-root pressure samples are low, but
+do not establish what the owner CLI could read inside its mount namespace. The next fixture
+uses network-namespace-only entry, preserving the owner's cgroup/mount view, and records
+capacity diagnostics from that actual CLI view. It does not lower admission thresholds or
+claim the unresolved continuous-training proof has passed.
+Its intended two cycles on an explicitly repeated source are not
 fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
 See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
