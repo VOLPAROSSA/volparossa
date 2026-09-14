@@ -73,6 +73,18 @@ build and general speedup remain unproved.
 
 Latest additional functional checkpoints (not a complete expanded-alpha pass):
 
+- [Autonomous replica repair on `cb2e6a67`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34864727782):
+  source `cb2e6a674211587cd335e8a712e57d489426e1b2`; a reopened partial holder grows from one
+  to three verified chunks on the same cache inode, then supplies a fresh Client after its
+  supplying peer stops. The Client reconstructs 786,432 bytes with zero origin bytes and
+  SHA-256 `1180e5fb930e654474965694e12accf46c7965fecdec1ec7c511a46702e06097`.
+  Eleven physical captures / eighty-six interface rows cover 60,724 frames with no drops,
+  forbidden or malformed packets; selected two-leg WireGuard paths carry data during repair
+  and retrieval. Cleanup is complete and original guest-state hashes match. Exact-source raw
+  reconstruction passes; artifact ZIP SHA-256
+  `b075d1f07db52b239baa9697fd8337475132927875bdddbc6d1a38c93bca5591`.
+  This proves the configured partial-holder repair/re-serving sequence, not automatic initial
+  placement, an independently offline original publisher node or permanent availability.
 - [Real training and distinct-node adapter reuse on `38814d30`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881):
   source `38814d30221c11ff73ef688f7a430c8b26fec3fe`; R4 completes eight CPU optimizer updates,
   publishes its signed dataset/adapter and restarts with its durable contribution cache after
