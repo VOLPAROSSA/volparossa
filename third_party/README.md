@@ -21,9 +21,9 @@ directory. Only those exports receive the reviewed patches:
 
 | Target | Patch | SHA-256 |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch` | `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` |
+| mqvpn | `patches/volparossa-mqvpn.patch` | `4ce314d8eb539dc362359f7fb901b6a76c827126b3c7091ee9b04528f556dd34` |
 | mqvpn | `patches/volparossa-mqvpn-exit-paths.patch` | `da22508590dd066852344ac685cb1fc53dfdfaebaed16353ae53f8675f7e1427` |
-| xquic | `patches/volparossa-xquic.patch` | `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` |
+| xquic | `patches/volparossa-xquic.patch` | `52b1a30297fb4793067f00b6695dcdfdfba25d684ae45fdda37dc61bed6f13f9` |
 
 The builder runs `git apply --check` before applying each patch and refuses a
 hash mismatch. It compiles from source; unchecked prebuilt binaries are not

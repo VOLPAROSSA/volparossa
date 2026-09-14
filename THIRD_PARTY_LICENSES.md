@@ -51,8 +51,8 @@ legal advice.
 
 | Target | Patch and SHA-256 | Purpose and security effect |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch`; `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` | Requires a caller-supplied leaf-SPKI SHA-256 pin, propagates explicit path tuples and honest counters, accepts bounded in-memory server PEM identity through sealed anonymous Linux memfds, wipes copied secrets, honours `multipath=false`, bounds pre-H3 mqvpn admission, pins one exact UDP peer, and enforces one lifetime-affine CONNECT-IP claim with idempotent request/connection teardown and duplicate body/Datagram isolation. |
-| xquic | `patches/volparossa-xquic.patch`; `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` | Invokes the requested certificate callback for every handshake, creates paths with explicit local and remote tuples, labels ACKed transport bytes without claiming unique payload delivery, avoids zero-length null-pointer copies during initial ALPN, empty session-ticket setup, and bodiless stream FIN handling, and returns overflow-checked, `XQC_ALIGNMENT`-aligned large pool allocations. |
+| mqvpn | `patches/volparossa-mqvpn.patch`; `4ce314d8eb539dc362359f7fb901b6a76c827126b3c7091ee9b04528f556dd34` | Requires a caller-supplied leaf-SPKI SHA-256 pin, propagates explicit path tuples and honest counters, accepts bounded in-memory server PEM identity through sealed anonymous Linux memfds, wipes copied secrets, honours `multipath=false`, bounds pre-H3 mqvpn admission, pins one exact UDP peer, and enforces one lifetime-affine CONNECT-IP claim with idempotent request/connection teardown and duplicate body/Datagram isolation. |
+| xquic | `patches/volparossa-xquic.patch`; `52b1a30297fb4793067f00b6695dcdfdfba25d684ae45fdda37dc61bed6f13f9` | Invokes the requested certificate callback for every handshake, creates paths with explicit local and remote tuples, labels ACKed transport bytes without claiming unique payload delivery, exports actual loss declarations including unreliable DATAGRAMs separately from retransmission counters, avoids zero-length null-pointer copies during initial ALPN, empty session-ticket setup, and bodiless stream FIN handling, and returns overflow-checked, `XQC_ALIGNMENT`-aligned large pool allocations. |
 
 The mqvpn patch adds `src/spki_pin.c`, `src/spki_pin.h`,
 `src/server_hardening.c`, `src/server_hardening.h`,
@@ -291,7 +291,7 @@ fresh locked-tree exports on Debian 13 amd64 on 2026-08-26:
 
 - `verify-upstream.sh` accepted every locked commit, tree, tag, gitlink,
   origin, license, bundled file, and the mqvpn patch SHA-256
-  `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887`;
+  `4ce314d8eb539dc362359f7fb901b6a76c827126b3c7091ee9b04528f556dd34`;
   `git apply --check` also accepted the patch directly against mqvpn commit
   `607c0df921e2c23bae8bea21cb3c6f2acb2db275`.
 - The ordinary patched mqvpn/lwIP suite passed all 35 tests. Its raw QUIC/H3

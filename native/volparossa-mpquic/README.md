@@ -199,8 +199,15 @@ The two reviewed source patches are also content-addressed:
 
 | Target | Patch | SHA-256 |
 |---|---|---|
-| mqvpn | `patches/volparossa-mqvpn.patch` | `91885f49781c5fc38f9d1822c2b98ffec135fc939c769b678acccd7de48fa887` |
-| xquic | `patches/volparossa-xquic.patch` | `acdb5af1a3ba452cfd49b46c80e99e49774db43e1130d032808d4e538772353b` |
+| mqvpn | `patches/volparossa-mqvpn.patch` | `4ce314d8eb539dc362359f7fb901b6a76c827126b3c7091ee9b04528f556dd34` |
+| xquic | `patches/volparossa-xquic.patch` | `52b1a30297fb4793067f00b6695dcdfdfba25d684ae45fdda37dc61bed6f13f9` |
+
+Path loss exported to the API7 runtime is the saturating 64-bit count of actual xquic
+loss declarations, including unreliable DATAGRAMs. It is not the older retransmission
+counter, which can remain zero when those datagrams are dropped without repair.
+`volparossa_xquic_detected_loss` tests the actual detector and exported connection stats;
+ACKed transport bytes remain distinct from unique application bytes. This correction
+alone does not prove successful live adaptive path growth.
 
 Fetch source explicitly, then verify and build it:
 

@@ -448,7 +448,7 @@ index c79c535..44199d4 100644
 +                                       MQVPN_PATH_METRIC_ACKED_TRANSPORT |
 +                                       MQVPN_PATH_METRIC_XQUIC_STATE;
 +                out[i].srtt_us = pm->path_srtt;
-+                out[i].packets_lost = pm->path_lost_count;
++                out[i].packets_lost = pm->path_detected_lost_packets;
 +                out[i].congestion_window_bytes = pm->path_cwnd;
 +                out[i].bytes_in_flight = pm->path_bytes_in_flight;
 +                out[i].estimated_rate_bytes_per_sec = pm->path_est_bw;
