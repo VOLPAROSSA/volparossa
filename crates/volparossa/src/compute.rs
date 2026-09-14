@@ -7,6 +7,7 @@ mod sandbox;
 mod spare_capacity;
 mod supervise;
 mod train_cycle;
+mod train_loop;
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -31,6 +32,8 @@ pub(crate) enum Command {
     Run(Box<Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
     TrainCycle(Box<train_cycle::Options>),
+    /// Autonomously cycle through explicitly selected public sources using spare capacity.
+    TrainLoop(Box<train_loop::Options>),
     /// Explicit same-UID public-inference service using the fixed isolated worker.
     Serve(Box<broker::Serve>),
     /// Attach a local broker or perform a bounded protected peer job exchange.
@@ -105,6 +108,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let options = match command {
         Command::Run(options) => options,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
+        Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
         Command::Serve(options) => return broker::run(*options).await,
         Command::Peer { command } => return peer::run(*command, socket).await,
     };

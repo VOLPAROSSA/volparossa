@@ -21,7 +21,8 @@ Both calls now explicitly request flat IDs; type and token-budget errors are dis
 The corrected worker and distinct-node adapter harness now pass together on
 [`38814d30`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881): eight real CPU
 optimizer updates change 230,400 LoRA parameters while the base weights stay unchanged.
-B01 remains unchecked because measured owner-priority pause/resume/cancellation is not covered by this proof.
+That initial proof does not cover owner-priority pause/resume/cancellation. The later CPU-pressure
+proof below covers pause/resume; B01 remains unchecked for its remaining owner-triggered cancellation scope.
 A new `content agent pack/fetch` candidate binds the exact adapter files to the original signed
 public dataset and fetches both through the existing protected content plane. Five CLI and four
 codec tests pass; the worker's eleven protocol tests cover the explicit read-only input adapter
@@ -112,22 +113,85 @@ unexpired cached input can be used without provider availability, but this is no
 or autonomous unbiased source selection. The cycle supports an explicitly imported warmstart
 adapter, preserves selection/source/result provenance and does not auto-publish or activate
 outputs. Source expiry bounds execution as well as final packaging. Five focused named-content
-tests, one request-codec test and strict agent Clippy pass. The separate live cache/warmstart
-cycle proof remains pending: [the first run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873357867)
+tests, one request-codec test and strict agent Clippy pass. Historically,
+[the first run on `0d756a64`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34873357867)
 completed producer training but stopped before the receiving-client cycle when the new route
 selected a different control relay. The fixture had bound its provider links to the earlier
 probe's relay. That failed run retains full cleanup and unchanged guest state; it proves no
 warmstart cycle. B01 and B05 remain unchecked. Three focused training-cycle tests and
 five existing adapter-CLI tests pass with strict CLI Clippy. Their synthetic saved-report/adapter
-fixture proves source binding and packaging, not real training; that requires the guest run.
-The next owner-priority candidate adds a persistent private owner-control pipe to the actual
+fixture proves source binding and packaging, not real training.
+The corrected [live cache/warmstart run 34876251732](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876251732)
+passes on exact source `d12768e31c0351e15416f05a8b986905367cab66`. The real R0-to-R1 control-owner
+change occurs again and succeeds with exact fresh-owner route/capture bindings. After R4's
+eight training updates, a distinct Client retrieves 943,733 adapter bytes and 1,005 dataset
+bytes over protected paths. Both providers then stop; the Client performs eight further
+warmstart updates in 18,697 ms from its cached signed dataset and exact read-only received
+adapter. The 230,400-parameter hash changes from `cf147109c7a5b9ba717f4db1977134a7eadec15d6b4aeaecc95d5c283f7b8193`
+to `39437bfdfef3eb5558a0f634e0e1bfa0d303405e4e2ed0ae528ad00bca053109`; the base stays unchanged.
+The new 943,733-byte local bundle hashes to `a44e5feecbe21ee2b10a77af8108acd2d58348362df19d7b98418440ae7d6796`
+and is not automatically published. Six captures / 28 interface rows / 10,515 frames contain
+zero drops or forbidden tuples. R0/R2 carry both WireGuard legs (1,072/509 datagrams per leg),
+with six completed MPTCP/TLS streams. Cleanup leaves zero owned objects; original guest-root
+before/after hash is `a32b8ff350b2ab12a9f4a8174c9614a02aa4b0208147168d1d2b26a9bffc6696`.
+Exact-source report checking and complete raw reconstruction pass; local evidence is
+`.git/ci-evidence/34876251732/artifact/` and `review.json` alongside it.
+Artifact ZIP SHA-256: `197d53d41de09811c4e19af5c8e914fdb6c7725e19ad5f27e3fa713decca9cb3`;
+60,145-byte canonical reconstruction: `3f86a7017eebbcddc410398018bccde6eabd37159c53fa3c5e9a80a76285a5da`.
+This proves the explicit receiving-client cycle, not autonomous B05 or the whole alpha.
+Owner-priority control adds a persistent private owner-control pipe to the actual
 worker. `compute run` and `compute train-cycle` opt in with `--spare-capacity`; peer brokers
 always use it and refuse new work while sampled capacity is unavailable. CPU/I/O pressure
 pauses model work at an execution checkpoint and resumes after five seconds of observed quiet;
 insufficient effective host/cgroup memory cancels and reaps the worker. Pauses never extend
-the original deadline. Bounded control/ACK and real standard-library process tests pass, but
-measured pause/resume during actual model work still requires its separate disposable guest
-proof. Interactive-input, battery and thermal sensing are not implemented; B01 remains open.
+the original deadline. Bounded control/ACK and real standard-library process tests pass.
+The [actual owner-priority run 34876248467](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876248467)
+passes on the same exact `d12768e3` source, including original raw-bundle verification. Eight
+guest CPU contenders drive `some avg10` to 21.3. Worker PID 8832/start 24155 acknowledges
+pause sequence 2 at step zero/22,086 ms and resume sequence 3 at the same step/30,685 ms.
+It consumes zero CPU ticks during a measured 1.607-second pause interval, then resumes work
+and completes eight updates in 40,244 ms under the original 600-second deadline. Total
+acknowledged pause is 8,599 ms; the adapter changes and the base does not. All contenders and
+worker lifetimes end, model/job roots are removed and no owned objects remain. Original
+guest-root before/after SHA-256: `be264df0bda5656d3c2f1ba83c9add51953313006f0ccb54c4bd95d8f0cffbd9`.
+Local evidence: `.git/ci-evidence/34876248467/artifact/` and `review.json` alongside it;
+artifact ZIP SHA-256: `1f57f69bf4f0c730e11b7f95559871dfc0e36b4566fd69d8e9b9b769b2dd2d5a`;
+exact owner checker SHA-256: `87c977a7a23eabef281db45afcf8087cc6204d39385f6bb81a6d0df0d5047131`.
+This proves actual CPU-pressure pause/resume, not owner-triggered cancellation or I/O-pressure,
+interactive-input, battery or thermal behavior. B01 and B05 remain open. Exact-head Quality,
+all three CodeQL language analyses and the aggregate check pass; PR #122 integrates this
+candidate through merge `8561bfa41f1639b3b7a9f3a130f95000f8bad47b`, whose tree matches `d12768e3`.
+The next `compute train-loop` candidate connects that real cycle executor to a persistent,
+owner-enabled coordinator: cache-independent round-robin selection from explicit public
+sources, optional peer-imported initial weights, local successor warmstarts, and separately
+enabled signed adapter publication. Each worker retains spare-capacity checks and its original
+deadline; the watcher can run until cancelled. Exact enrollment/state and completed-file hashes
+support resume. Publication retry reuses the exact signed bytes, original expiry and verified
+handoff identity. Eight-cycle retention preserves current weights and unpublished updates.
+Focused coordinator/source/storage tests pass, but both initial loop VM attempts remain failed:
+[`1b186ad5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34880750517) observed no worker,
+and [`a67729e1`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34883408279) confirms that
+the seed import finishes at 14 seconds but no cycle is admitted within the 90-second first-worker
+window. Both retain complete cleanup, zero owned network objects and unchanged guest state.
+The report path-type bug is fixed. The second run's guest-root pressure samples are low, but
+do not establish what the owner CLI could read inside its mount namespace. The corrected fixture
+uses network-namespace-only entry, preserving the owner's cgroup/mount view, and records
+capacity diagnostics from that actual CLI view without lowering admission thresholds.
+The [subsequent run on `bf87973a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34885489099)
+completed both real eight-update cycles on distinct R4 workers (18.704 and 18.540 seconds),
+with unchanged base weights, exact predecessor adapter inodes and two signed automatic
+contributions. It then failed a fixture guard that expected only two replicas: the actual
+store also held the original dataset and seed, making four. The candidate now checks the two
+exact contributed update identities and accounts for only those known optional original
+replicas, including bytes/chunks; it does not accept an arbitrary minimum object count.
+After the explicit dataset handoff that source must also be accounted for. Final retrieval
+and inference by another client were not reached in that run and still require a new live
+pass. The original failure retains full cleanup and unchanged guest-host state. Its partial
+cycle proof is stored in `.git/ci-evidence/34885489099/partial-cycle-review.json`;
+exact-head Quality and all three CodeQL analyses passed.
+These two cycles on an explicitly repeated source are not
+fresh-corpus discovery, quality improvement, aggregation, private training or completed B05.
+See [usage and limitations](DECENTRALIZED_AGENTS.md#continuous-public-training-candidate).
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity
@@ -220,7 +284,7 @@ original failed evidence is retained; no network-proven repair pass is claimed f
 
 Major requested functional work still outstanding:
 
-- Cooperative task distribution, owner-priority pause/resume/cancellation, private distributed jobs and fully
+- General task decomposition, measured owner-triggered cancellation, private distributed jobs and fully
   automatic training/policy governance/self-checking (remaining B01 and B03--B07). B02's explicit
   trained-artifact transfer/reuse now passes the distinct-node checkpoint above.
 - Automatic holder selection and network-proven replica repair after a holder disappears.

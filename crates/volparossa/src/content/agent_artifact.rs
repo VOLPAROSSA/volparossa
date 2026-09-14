@@ -128,9 +128,13 @@ pub(crate) async fn fetch_training_source(
 
 #[derive(Debug, Args)]
 pub(crate) struct Fetch {
-    /// Independently trusted publisher of both the adapter and dataset.
+    /// Independently trusted publisher of the adapter.
     #[arg(long, value_parser = super::parse_publisher_key)]
     publisher_key: VerifyingKey,
+    /// Independently trusted dataset publisher; defaults to the adapter publisher.
+    /// Never inferred from an untrusted manifest or supplied adapter bytes.
+    #[arg(long, value_parser = super::parse_publisher_key)]
+    dataset_publisher_key: Option<VerifyingKey>,
     /// Exact publisher-local adapter name.
     #[arg(long, value_parser = super::parse_content_name)]
     name: String,
@@ -154,6 +158,14 @@ pub(crate) struct Fetch {
     output: PathBuf,
     #[command(flatten)]
     limits: Limits,
+}
+
+pub(crate) struct ImportSelection {
+    pub(crate) publisher_key: VerifyingKey,
+    pub(crate) dataset_publisher_key: VerifyingKey,
+    pub(crate) name: String,
+    pub(crate) dataset_name: String,
+    pub(crate) min_revision: Option<u64>,
 }
 
 pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
@@ -276,11 +288,44 @@ fn validate_training_files(report: &Value, files: &AdapterFiles) -> Result<()> {
 }
 
 impl Fetch {
-    fn query(&self, name: &str, reuse_cache: bool, parent: &Path) -> FetchName {
+    pub(crate) fn coordinator(
+        selection: ImportSelection,
+        cache: PathBuf,
+        reuse_cache: bool,
+        output: PathBuf,
+        limits: Limits,
+    ) -> Self {
+        Self {
+            publisher_key: selection.publisher_key,
+            dataset_publisher_key: Some(selection.dataset_publisher_key),
+            name: selection.name,
+            dataset_name: selection.dataset_name,
+            min_revision: selection.min_revision,
+            cache,
+            reuse_cache,
+            cache_only: false,
+            output,
+            limits,
+        }
+    }
+
+    fn dataset_publisher(&self) -> VerifyingKey {
+        self.dataset_publisher_key.unwrap_or(self.publisher_key)
+    }
+
+    fn query(&self, dataset: bool, reuse_cache: bool, parent: &Path) -> FetchName {
         FetchName {
-            publisher_key: self.publisher_key,
-            name: name.to_owned(),
-            min_revision: (name == self.name).then_some(self.min_revision).flatten(),
+            publisher_key: if dataset {
+                self.dataset_publisher()
+            } else {
+                self.publisher_key
+            },
+            name: if dataset {
+                self.dataset_name.clone()
+            } else {
+                self.name.clone()
+            },
+            min_revision: if dataset { None } else { self.min_revision },
             cache: self.cache.clone(),
             reuse_cache,
             cache_only: self.cache_only,
@@ -294,7 +339,7 @@ impl Fetch {
     }
 }
 
-async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
+pub(crate) async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     ensure_new_output(&args.output)?;
     let parent = output_parent(&args.output);
     private_directory(parent)?;
@@ -304,7 +349,7 @@ async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
         .prefix(".agent-import-")
         .tempdir_in(parent)?;
     let adapter = named_download::prepare(
-        &args.query(&args.name, args.reuse_cache, staging.path()),
+        &args.query(false, args.reuse_cache, staging.path()),
         socket,
         staging.path(),
     )
@@ -317,20 +362,12 @@ async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     let bundle =
         AdapterBundle::decode(read_download(adapter.as_file(), MAX_ADAPTER_BYTES as u64)?)?;
     let dataset = named_download::prepare(
-        &args.query(&args.dataset_name, true, staging.path()),
+        &args.query(true, true, staging.path()),
         socket,
         staging.path(),
     )
     .await?;
-    ensure!(
-        dataset.manifest().metadata().content_type == DATASET_CONTENT_TYPE
-            && dataset.manifest().length() <= MAX_DATASET,
-        "agent_artifact_dataset_type"
-    );
-    ensure!(
-        *dataset.manifest().manifest_id() == bundle.dataset_manifest_id(),
-        "agent_artifact_dataset_identity"
-    );
+    validate_dataset_binding(dataset.manifest(), &bundle, &args.dataset_publisher())?;
     let dataset_bytes = read_download(dataset.as_file(), MAX_DATASET)?;
     validate_public_dataset(&dataset_bytes)?;
     let adapter_root = staging.path().join("adapter");
@@ -347,6 +384,7 @@ async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     dataset.check_live()?;
     let report = serde_json::json!({
         "operation": "agent_artifact_fetch", "publisher": hex::encode(args.publisher_key.to_bytes()),
+        "dataset_publisher": hex::encode(args.dataset_publisher().to_bytes()),
         "adapter_manifest_id": hex::encode(adapter.manifest().manifest_id()),
         "dataset_manifest_id": hex::encode(dataset.manifest().manifest_id()),
         "adapter_receipt": adapter.report(), "dataset_receipt": dataset.report(),
@@ -373,6 +411,23 @@ async fn fetch(args: &Fetch, socket: &Path) -> Result<Value> {
     )?;
     File::open(parent)?.sync_all()?;
     Ok(report)
+}
+
+fn validate_dataset_binding(
+    dataset: &volparossa_content::VerifiedManifest,
+    bundle: &AdapterBundle,
+    publisher: &VerifyingKey,
+) -> Result<()> {
+    ensure!(
+        dataset.metadata().content_type == DATASET_CONTENT_TYPE && dataset.length() <= MAX_DATASET,
+        "agent_artifact_dataset_type"
+    );
+    ensure!(
+        dataset.publisher() == publisher.as_bytes()
+            && *dataset.manifest_id() == bundle.dataset_manifest_id(),
+        "agent_artifact_dataset_identity"
+    );
+    Ok(())
 }
 
 fn validate_public_dataset(bytes: &[u8]) -> Result<()> {
@@ -437,3 +492,145 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod publisher_tests {
+    use clap::Parser as _;
+    use ed25519_dalek::SigningKey;
+    use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity};
+
+    use super::*;
+
+    #[test]
+    fn independent_dataset_publisher_is_explicit_and_does_not_inherit_adapter_revision() {
+        let publisher = SigningKey::from_bytes(&[41; 32]).verifying_key();
+        let dataset_publisher = SigningKey::from_bytes(&[42; 32]).verifying_key();
+        let adapter_hex = hex::encode(publisher.as_bytes());
+        let dataset_hex = hex::encode(dataset_publisher.as_bytes());
+        for separate in [false, true] {
+            let mut command = vec![
+                "volparossa",
+                "content",
+                "agent",
+                "fetch",
+                "--publisher-key",
+                &adapter_hex,
+                "--name",
+                "same-local-name",
+                "--dataset-name",
+                "same-local-name",
+                "--min-revision",
+                "17",
+                "--cache",
+                "/agent/cache",
+                "--output",
+                "/owner/import",
+            ];
+            if separate {
+                command.extend(["--dataset-publisher-key", &dataset_hex]);
+            }
+            let crate::CliCommand::Content { command } =
+                crate::Cli::try_parse_from(command).unwrap().command
+            else {
+                panic!("content command");
+            };
+            let super::super::Command::Agent(Command::Fetch(args)) = *command else {
+                panic!("artifact fetch");
+            };
+            let adapter = args.query(false, false, Path::new("/owner"));
+            let dataset = args.query(true, true, Path::new("/owner"));
+            assert_eq!(adapter.publisher_key, publisher);
+            assert_eq!(adapter.min_revision, Some(17));
+            assert_eq!(
+                dataset.publisher_key,
+                if separate {
+                    dataset_publisher
+                } else {
+                    publisher
+                }
+            );
+            assert_eq!(dataset.min_revision, None);
+            assert!(!dataset.cache_only);
+        }
+        let args = Fetch::coordinator(
+            ImportSelection {
+                publisher_key: publisher,
+                dataset_publisher_key: dataset_publisher,
+                name: "adapter".into(),
+                dataset_name: "source".into(),
+                min_revision: Some(2),
+            },
+            PathBuf::from("/agent/cache"),
+            true,
+            PathBuf::from("/owner/import"),
+            Limits {
+                quota_bytes: MAX_DATASET,
+                max_entries: 16,
+                min_free_bytes: 0,
+            },
+        );
+        assert_eq!(args.dataset_publisher(), dataset_publisher);
+        assert!(!args.cache_only);
+    }
+
+    #[test]
+    fn a_separate_trusted_dataset_key_never_substitutes_a_different_signed_source() {
+        let root = tempfile::tempdir().unwrap();
+        let dataset_key = SigningKey::from_bytes(&[42; 32]);
+        let adapter_publisher = SigningKey::from_bytes(&[41; 32]).verifying_key();
+        let mut cache = ChunkStore::create(
+            &root.path().join("cache"),
+            CacheLimits {
+                max_bytes: 1024,
+                max_entries: 4,
+                min_free_bytes: 0,
+            },
+        )
+        .unwrap();
+        let now = now_seconds().unwrap();
+        let bytes = b"public signed identity fixture, not a training or model proof";
+        let mut signed = Vec::new();
+        for revision in [1, 2] {
+            signed.push(
+                volparossa_content::publish(
+                    &mut bytes.as_slice(),
+                    Publication {
+                        metadata: Metadata {
+                            name: "source".into(),
+                            revision,
+                            content_type: DATASET_CONTENT_TYPE.into(),
+                        },
+                        length: bytes.len() as u64,
+                        validity: Validity {
+                            created: now,
+                            expires: now + 300,
+                        },
+                    },
+                    &dataset_key,
+                    &mut cache,
+                )
+                .unwrap(),
+            );
+        }
+        let original = signed[0].verify(&dataset_key.verifying_key(), now).unwrap();
+        let different = signed[1].verify(&dataset_key.verifying_key(), now).unwrap();
+        let bundle = AdapterBundle::decode(
+            AdapterBundle::encode(
+                *original.manifest_id(),
+                AdapterFiles {
+                    config: b"opaque codec fixture".to_vec(),
+                    weights: b"not learned weights".to_vec(),
+                    readme: b"No model execution.".to_vec(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(signed[0].verify(&adapter_publisher, now).is_err());
+        validate_dataset_binding(&original, &bundle, &dataset_key.verifying_key()).unwrap();
+        assert!(validate_dataset_binding(&original, &bundle, &adapter_publisher).is_err());
+        assert!(
+            validate_dataset_binding(&different, &bundle, &dataset_key.verifying_key()).is_err()
+        );
+    }
+}
