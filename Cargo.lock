@@ -4934,6 +4934,7 @@ name = "volparossa-tcp-proxy"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "nix",
  "rcgen",
  "rustls",
  "rustls-pki-types",
