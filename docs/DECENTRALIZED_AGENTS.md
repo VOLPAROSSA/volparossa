@@ -239,6 +239,22 @@ continuation, distributed optimizer/model-layer execution, confidential private 
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
 who reported a result, not whether the result is true.
 
+`compute peer resume` now explicitly reopens supplied task handles against the same original
+signed public source, reconciles completed/running/missing/failed observations, and can retry
+unfinished parts once on independently supplied compatible peers. An ambiguous, unexpired lease
+is not reassigned; an expired unreachable lease stays labelled unconfirmed, not observed stopped.
+Original IDs/deadlines remain unchanged and replacement attempts get distinct saved handles.
+Results report which rows were requested, including when only part of the original dataset was
+resumed. This is bounded explicit recovery, not an automatic general workflow scheduler or an
+exactly-once execution guarantee. Its pure source/handle tests pass; live worker-loss/recovery
+proof is still pending. Terminal broker receipts receive a nonrenewable 60-second observation
+grace after observed completion, without extending any execution lease or the eight-record cap.
+
+The `agent-jobs` disposable guest runner exercises two independent CPU workers on separate nodes,
+with separate runtime-lock inodes and process-overlap observation, signed disjoint public input
+rows, protected network traffic and source-bound results. Only the verified base model bytes are
+shared in that fixture. The first run is pending; the runner itself is not a passing checkpoint.
+
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
 eligible origin, a peer or cache. These commands do not automatically choose a training corpus.

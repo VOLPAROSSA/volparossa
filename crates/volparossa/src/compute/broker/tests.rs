@@ -241,6 +241,7 @@ async fn owner_and_full_binding_gate_cancel_slot_and_cleanup_after_task_returns(
         },
         activity,
         execution: Some(execution),
+        terminal_retain_until: None,
         directory: Some(directory),
     });
     let caps = broker.handle(request(Operation::Capabilities), 1000).await;
@@ -372,6 +373,7 @@ async fn expired_owner_can_observe_cancel_while_task_is_still_being_reaped() {
         },
         activity,
         execution: Some(execution),
+        terminal_retain_until: None,
         directory: Some(directory),
     });
     for operation in [Operation::Poll(binding()), Operation::Cancel(binding())] {
@@ -397,9 +399,37 @@ async fn expired_owner_can_observe_cancel_while_task_is_still_being_reaped() {
     release.send(()).unwrap();
     tokio::task::yield_now().await;
     broker.refresh(1601).await;
+    let expected = broker.jobs[0].status.clone();
+    assert_eq!(expected.state, JobState::Cancelled);
+    assert_eq!(expected.binding, binding());
+    assert!(expected.report_json.is_none());
+    assert_eq!(broker.jobs[0].terminal_retain_until, Some(1661));
+    assert!(path.exists());
+    assert!(broker.available());
+    for operation in [Operation::Poll(binding()), Operation::Cancel(binding())] {
+        assert_eq!(
+            broker.handle(request(operation), 1660).await.outcome,
+            Outcome::Job(expected.clone())
+        );
+        assert_eq!(broker.jobs[0].terminal_retain_until, Some(1661));
+    }
     assert!(matches!(
         broker
-            .handle(request(Operation::Poll(binding())), 1601)
+            .handle(
+                request(Operation::Submit(Submit {
+                    binding: binding(),
+                    dataset_json: data(),
+                    publication: publication(),
+                })),
+                1660
+            )
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Expired)
+    ));
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Poll(binding())), 1661)
             .await
             .outcome,
         Outcome::Error(ErrorCode::Missing)

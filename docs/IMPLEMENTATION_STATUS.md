@@ -41,6 +41,10 @@ protected peer submit/poll/cancel exchanges, original-publication/subset verific
 concurrent disjoint-row dispatch. It saves task handles before admission and validates returned
 model/input/result bindings. Its real two-executor guest proof, automatic reassignment and
 general workflow continuation are still pending; B03 remains unchecked.
+Explicit `compute peer resume` now reconciles retained original handles and permits one bounded
+replacement attempt per unfinished part, without silently extending an old lease. Terminal
+receipts remain observable briefly after cleanup. Broker/peer tests and narrow strict Clippy
+pass; neither live recovery nor the new two-executor `agent-jobs` guest scenario has passed yet.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
 and contextual decision thresholds remain unimplemented. Existing byte-integrity

@@ -4,8 +4,8 @@
 //! The backend owns authorization, actual worker leases and cancellation. This module
 //! never opens sockets, chooses a dataset, executes code or grants tool permissions.
 
-mod protocol;
 pub mod dataset;
+mod protocol;
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 

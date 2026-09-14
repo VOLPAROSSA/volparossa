@@ -23,10 +23,10 @@ pub(crate) struct Options {
     execute: bool,
 }
 
-struct Prepared {
-    handle: JobHandle,
-    provider: VerifyingKey,
-    dataset_json: String,
+pub(super) struct Prepared {
+    pub(super) handle: JobHandle,
+    pub(super) provider: VerifyingKey,
+    pub(super) dataset_json: String,
 }
 
 #[allow(
@@ -167,7 +167,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn execute(
+pub(super) async fn execute(
     socket: &Path,
     work: &Prepared,
     publication: &rpc::PublicDataset,

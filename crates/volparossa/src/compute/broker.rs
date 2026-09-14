@@ -34,6 +34,7 @@ use volparossa_local_control::compute::{
 use super::{Mode, Options, execute, private_directory};
 
 const RETAINED_JOBS: usize = 8;
+const TERMINAL_GRACE_SECONDS: u64 = 60;
 const EXCHANGE_SECONDS: u64 = 3;
 
 #[derive(Debug, Args)]
@@ -63,6 +64,8 @@ struct Job {
     status: JobStatus,
     activity: watch::Sender<bool>,
     execution: Option<JoinHandle<Result<Value>>>,
+    // Receipt retention only: the original execution authorization is never extended.
+    terminal_retain_until: Option<u64>,
     // This exact newly created directory is retained until the worker has returned.
     // Its RAII cleanup never traverses an operator-supplied or pre-existing job directory.
     directory: Option<TempDir>,
@@ -104,6 +107,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "model_root": options.model_root, "adapter_root": options.adapter_root,
                 "work_root": options.work_root, "mode": "public_inference_only",
                 "runtime_slots": 1, "pending_queue": 0, "retained_jobs": RETAINED_JOBS,
+                "terminal_receipt_grace_seconds": TERMINAL_GRACE_SECONDS,
                 "max_job_seconds": compute::MAX_JOB_SECONDS, "same_uid_only": true,
                 "remote_network_authentication": "required-agent-boundary",
                 "network_access": false, "remote_execution_proved": false
@@ -390,6 +394,7 @@ impl Broker {
             },
             activity,
             execution: Some(execution),
+            terminal_retain_until: None,
             directory: Some(directory),
         })
     }
@@ -423,9 +428,15 @@ impl Broker {
             };
             let result = execution.await;
             finish_job(job, result, &self.capabilities);
+            job.terminal_retain_until = Some(
+                job.status
+                    .binding
+                    .expires_unix_seconds
+                    .max(time.saturating_add(TERMINAL_GRACE_SECONDS)),
+            );
         }
         self.jobs.retain(|job| {
-            job.execution.is_some() || job.status.binding.expires_unix_seconds > time
+            job.execution.is_some() || job.terminal_retain_until.is_some_and(|until| until > time)
         });
     }
 

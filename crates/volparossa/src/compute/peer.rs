@@ -1,6 +1,7 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+mod resume;
 
 use std::{
     fs,
@@ -35,6 +36,8 @@ pub(crate) enum Command {
     Cancel(Handle),
     /// Execute independent public questions concurrently across selected compatible peers.
     Distribute(batch::Options),
+    /// Reconcile retained public task handles and retry unfinished work on explicit peers.
+    Resume(resume::Options),
 }
 
 #[derive(Debug, Args)]
@@ -138,6 +141,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Poll(args) => poll_or_cancel(socket, &args, false).await?,
         Command::Cancel(args) => poll_or_cancel(socket, &args, true).await?,
         Command::Distribute(args) => return batch::run(&args, socket).await,
+        Command::Resume(args) => return resume::run(&args, socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
