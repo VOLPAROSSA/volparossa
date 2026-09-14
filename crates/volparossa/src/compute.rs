@@ -1,6 +1,7 @@
 //! Explicit public-data model jobs, isolated from the network agent and its identity.
 
 mod broker;
+mod device_capacity;
 mod document_plan;
 mod owner_control;
 mod peer;
@@ -29,6 +30,8 @@ const MAX_STREAM_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Read current owner-capacity signals without loading a model or changing device settings.
+    Capacity,
     /// Preview or explicitly run an isolated job on an already provisioned open model.
     Run(Box<Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
@@ -82,7 +85,7 @@ pub(crate) struct Options {
     /// Total wall-clock deadline, including loading and cancellation cleanup.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
-    /// Cooperatively pause under observed CPU/IO pressure; memory pressure still cancels.
+    /// Yield to observed CPU/IO, battery and thermal constraints; critical reserves cancel.
     #[arg(long)]
     spare_capacity: bool,
     /// Without this flag only the exact bounded job plan is printed.
@@ -109,6 +112,7 @@ struct WorkerRequest {
 
 pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let options = match command {
+        Command::Capacity => return spare_capacity::diagnostic(),
         Command::Run(options) => options,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
@@ -167,9 +171,11 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
     );
     let _lease = runtime_lease(&options.runtime_root)?;
     if options.spare_capacity {
+        let mut capacity = spare_capacity::Budget::new();
         ensure!(
-            spare_capacity::Budget::new().sample() != spare_capacity::Decision::Cancel,
-            "compute_memory_pressure"
+            capacity.sample() != spare_capacity::Decision::Cancel,
+            "{}",
+            capacity.cancellation_code()
         );
     } else {
         supervise::headroom()?;

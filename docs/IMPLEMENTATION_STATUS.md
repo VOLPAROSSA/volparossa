@@ -109,14 +109,24 @@ disposable cleanup and unchanged guest-host state. The candidate now allows at m
 read-only capability probes within 45 seconds, with immediate owner cancellation; no Submit
 is replayed. The fixture separately observes actual retained handles before its unchanged
 worker-overlap window. Eighteen targeted peer tests and the parser/snapshot checks pass;
-another live run is required. Completed full receipts can also be read after the original
+the corrective live result is recorded below. Completed full receipts can also be read after the original
 source expires; this never renews the source or authorizes unfinished work. These local tests
 are not a model-execution claim.
 The subsequent [run on `5f487a18`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34888010963)
 did execute both real peer workers and returned two source-bound answers. It failed afterward
 because the fixture treated two required empty lockfiles as nonempty data files; retained-result
 resume was not reached. `42761c28` checks those exact lockfiles separately without permitting
-arbitrary empty data files. Its corrective live proof is running; the older failure remains a failure.
+arbitrary empty data files. Its [corrective run 34889536964](https://github.com/VOLPAROSSA/volparossa/actions/runs/34889536964)
+on exact `42761c28c6a28c3f60baec7416524ca3f6896ebe` now passes the original report checker and
+complete original-raw reconstruction. It retrieves 721 source bytes over protected paths,
+executes two actual isolated workers, stops both brokers and the route, then resumes with
+zero new rounds. All 15 retained file hashes/inodes and ordered answers are unchanged.
+Cleanup leaves zero owned objects; guest-state before/after SHA-256 is
+`d6b7d769be7fffacd0b16832dc07d6cd44389423081a3cd452136eb520c86c87`.
+Local evidence is `.git/ci-evidence/34889536964/artifact/` with `review.json` alongside it;
+the canonical raw rebuild hashes to `3e34d7f5401548b8bc14c1110317ec6d0b646097f0958f363b15f49b074bd467`.
+The separate historical Quality job failed `unreadable_literal`; its source fix is included
+in `974c6555`, not a retroactive CI success. B03 remains unchecked.
 
 The new `compute peer document` candidate adds actual isolated-tokenizer planning for explicitly
 public UTF-8 owner input. Contiguous byte ranges cover the original without truncation; up to
@@ -127,8 +137,15 @@ replace invented training/held-out metadata. A final single-fragment package use
 The local tokenizer plan does not load model weights; remote inference remains real and bounded.
 All 63 focused CLI compute tests, seven dataset tests, three wire-codec tests and three
 agent-boundary tests pass, together with strict Clippy for the four changed crates and 21
-Python worker protocol tests, with no host model execution. The new multi-package/resume
-disposable VM proof is still pending.
+Python worker protocol tests, with no host model execution. The [first document VM
+34891322172](https://github.com/VOLPAROSSA/volparossa/actions/runs/34891322172) on
+`974c655520c8690b9e37d23f76361b729a2c9119` failed before tokenizer/model execution:
+the Client UID could not read its helper under `/home/vpci/source`, causing
+`DOCUMENT_PUBLIC_INPUT_FAILED`. Cleanup completed with zero owned objects and unchanged
+guest-state hashes. Correction `4421b1a6de2b0f69bf08873e1c5c9e7a3d419e52` installs only the
+public guest helper and an owner-readable, read-only README copy; it does not widen source-tree
+permissions. Parser, file and shell checks pass; the corrected exact-source
+[VM run 34893180542](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
 This is not confidential offload, source-cache discovery, automatic network replication,
 neural answer synthesis or completed B03. See [usage](DECENTRALIZED_AGENTS.md#public-document-tasks).
 Eight focused peer/workflow tests and strict CLI Clippy pass, including early cancellation
@@ -202,6 +219,24 @@ This proves actual CPU-pressure pause/resume, not owner-triggered cancellation o
 interactive-input, battery or thermal behavior. B01 and B05 remain open. Exact-head Quality,
 all three CodeQL language analyses and the aggregate check pass; PR #122 integrates this
 candidate through merge `8561bfa41f1639b3b7a9f3a130f95000f8bad47b`, whose tree matches `d12768e3`.
+
+The device-priority candidate extends the real ML admission/worker budget with read-only
+Linux sysfs system-battery and thermal observations, cached for at most one second. Charge
+at or below 20% pauses, at or below 5% cancels, including on AC/while charging. Thermal zones
+pause at 80°C and cancel at 90°C, or at lower relevant trip thresholds with a 5°C margin.
+A recognized inactive kernel trip placeholder is not a measured temperature or live limit;
+ignoring it retains the software thresholds, while malformed/unreadable observations remain unknown.
+Present but unknown data pauses; `not_exposed` makes no hardware-absence or physical-safety
+claim. `compute capacity` reports the current combined CPU/I/O/memory/device decision without
+model/network execution or device-setting changes. Train-loop worker admission, peer workers
+and explicit `--spare-capacity` jobs are connected; seed import and publication remain outside
+this ML device-budget gate. There is no logind or comprehensive interactive-activity detector.
+All 68 focused CLI compute tests and strict CLI Clippy pass; physical-device evidence remains open.
+The new `agent-owner-cancel` disposable fixture targets actual training followed by owner-only
+pidfd/SIGINT, a five-second CLI/observed-process cleanup bound, `compute_owner_busy`, no completed
+checkpoint and unchanged on-disk base/guest state. Its local parser/file/shell checks pass;
+the actual VM proof is pending. Neither this candidate nor its tests check off B01, B03 or B05.
+
 The next `compute train-loop` candidate connects that real cycle executor to a persistent,
 owner-enabled coordinator: cache-independent round-robin selection from explicit public
 sources, optional peer-imported initial weights, local successor warmstarts, and separately

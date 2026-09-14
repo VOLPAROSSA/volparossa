@@ -54,13 +54,18 @@ candidate retrieves a selected signed public source and distributes a summary re
 explicitly public user question across its contexts on independent peers. The publisher's
 original source and the requester's instruction remain separately bound. Results retain their
 source rows and worker receipts; resume reuses completed work. This first interface accepts
-the existing small public-dataset format, not arbitrary documents or private prompts; its
-live two-peer user-task proof remains pending.
+the existing small public-dataset format, not arbitrary documents or private prompts.
+The [scoped user-task VM on `42761c28`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34889536964)
+passes its original raw-evidence checks: two real workers, protected source retrieval and
+unchanged completed receipts after both brokers and the route stop. Its separate historical
+Quality failure is not relabelled as green; the literal-style fix is included in `974c6555`.
 A separate [`compute peer document`](docs/DECENTRALIZED_AGENTS.md#public-document-tasks)
 candidate now accepts explicitly public UTF-8 text. The pinned tokenizer splits the entire
 document into fitting prompts, native signed packages are processed on selected peers, and
 ordered source-range answers are retained across task rounds. It is not private offload or a
-final synthesized answer; the longer-document live network proof is still pending.
+final synthesized answer. The first document VM stopped before tokenizer execution on a
+guest source-path permission error; the staged public-helper/README correction is in
+`4421b1a6`, with its new live proof pending.
 An explicit `compute train-cycle` now connects a chosen public dataset to local training and
 adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
 that same publisher's dataset through the protected network. It can continue training an
@@ -74,8 +79,10 @@ jobs use `--spare-capacity`, and peer executors always enable it. Memory pressur
 pauses do not extend an individual worker's deadline. The [real CPU-pressure proof on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876248467)
 passes: the same worker pauses, resumes at the same step and completes eight updates.
 Both new proofs pass exact-source raw verification, preserve original guest-root state and
-leave no owned objects. Measured owner-triggered cancellation and battery/thermal/interactive
-activity integration remain unfinished; B01, autonomous B05 and the broader alpha remain open.
+leave no owned objects. A new candidate adds read-only exposed battery/thermal observations
+to the ML budget; `compute capacity` explains its current decision without model or network
+execution. Physical-device behavior and the new manual owner-cancellation VM remain unproven;
+interactive-activity integration, B01, autonomous B05 and the broader alpha remain open.
 [`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate)
 connects repeated public training, optional peer warmstarts and signed update sharing. It can
 watch an explicit source plan until cancelled, while each worker keeps its own resource/deadline

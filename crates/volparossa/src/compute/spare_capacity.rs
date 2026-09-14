@@ -1,7 +1,7 @@
-//! Read-only CPU/I/O/memory budget for explicitly authorized background work.
+//! Read-only owner capacity budget for explicitly authorized background work.
 //!
-//! These kernel samples do not observe all owner activity, battery state or thermal
-//! limits. A quiet sample is capacity evidence, not proof that the user is absent.
+//! Kernel pressure plus exposed battery/thermal samples do not observe all user activity.
+//! A quiet sample is a capacity hint, not proof of user absence or physical safety.
 
 use std::{
     fs::File,
@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::device_capacity::{DeviceBudget, DeviceObservation};
 use serde::Serialize;
 
 const MAX_FILE_BYTES: u64 = 16 * 1024;
@@ -18,7 +19,8 @@ const MIN_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const QUIET_TIME: Duration = Duration::from_secs(5);
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(1);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum Decision {
     Run,
     Pause,
@@ -31,6 +33,7 @@ pub(super) struct Observation {
     pub(super) io_some_avg10: Option<f64>,
     /// Minimum of host availability and every observed unified-cgroup parent cap.
     pub(super) memory_bytes: Option<u64>,
+    pub(super) device: DeviceObservation,
 }
 
 pub(super) struct Budget {
@@ -38,6 +41,7 @@ pub(super) struct Budget {
     decision: Decision,
     quiet_since: Option<Instant>,
     last_sample: Option<Instant>,
+    device: DeviceBudget,
     #[cfg(test)]
     fixed: Option<Decision>,
 }
@@ -49,6 +53,7 @@ impl Default for Budget {
             decision: Decision::Pause,
             quiet_since: None,
             last_sample: None,
+            device: DeviceBudget::default(),
             #[cfg(test)]
             fixed: None,
         }
@@ -73,6 +78,7 @@ impl Budget {
                 .ok()
                 .and_then(|text| pressure_average(&text)),
             memory_bytes: memory_headroom(),
+            device: self.device.sample(),
         };
         self.update(observation, Instant::now())
     }
@@ -96,16 +102,58 @@ impl Budget {
         self.observation
     }
 
+    pub(super) fn cancellation_code(&self) -> &'static str {
+        if self
+            .observation
+            .memory_bytes
+            .is_none_or(|bytes| bytes < MIN_MEMORY_BYTES)
+        {
+            "compute_memory_pressure"
+        } else {
+            "compute_device_reserve"
+        }
+    }
+
+    pub(super) fn constraint(&self) -> &'static str {
+        if self
+            .observation
+            .memory_bytes
+            .is_none_or(|bytes| bytes < MIN_MEMORY_BYTES)
+        {
+            "memory"
+        } else if self.observation.device.decision() != Decision::Run {
+            "device"
+        } else if self
+            .observation
+            .cpu_some_avg10
+            .is_none_or(|value| value >= 20.0)
+        {
+            "cpu"
+        } else if self
+            .observation
+            .io_some_avg10
+            .is_none_or(|value| value >= 10.0)
+        {
+            "io"
+        } else if self.decision == Decision::Pause {
+            "quiet_hold"
+        } else {
+            "none"
+        }
+    }
+
     fn update(&mut self, observation: Observation, now: Instant) -> Decision {
         let previous_sample = self.last_sample.replace(now);
         self.observation = observation;
         self.decision = if observation
             .memory_bytes
             .is_none_or(|bytes| bytes < MIN_MEMORY_BYTES)
+            || observation.device.decision() == Decision::Cancel
         {
             self.quiet_since = None;
             Decision::Cancel
-        } else if observation.cpu_some_avg10.is_none_or(|value| value >= 20.0)
+        } else if observation.device.decision() == Decision::Pause
+            || observation.cpu_some_avg10.is_none_or(|value| value >= 20.0)
             || observation.io_some_avg10.is_none_or(|value| value >= 10.0)
         {
             self.quiet_since = None;
@@ -129,6 +177,22 @@ impl Budget {
         };
         self.decision
     }
+}
+
+pub(super) fn diagnostic() -> anyhow::Result<()> {
+    let mut budget = Budget::new();
+    let decision = budget.sample();
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "version":1,"operation":"compute_capacity","decision":decision,
+            "constraint":budget.constraint(),"observation":budget.observation(),
+            "admission_hint_not_reservation":true,"device_settings_changed":false,
+            "model_execution":false,"network_execution":false,
+            "interactive_activity_observed":false,"physical_safety_guaranteed":false
+        }))?
+    );
+    Ok(())
 }
 
 fn system_text(path: &Path) -> Result<String, ErrorKind> {
@@ -266,13 +330,62 @@ fn cgroup_headroom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::device_capacity::{BatteryObservation, State, ThermalObservation};
 
     fn quiet() -> Observation {
         Observation {
             cpu_some_avg10: Some(0.0),
             io_some_avg10: Some(0.0),
             memory_bytes: Some(MIN_MEMORY_BYTES),
+            device: DeviceObservation {
+                battery: BatteryObservation {
+                    state: State::NotPresent,
+                    present_system_batteries: 0,
+                    minimum_percent: None,
+                    incomplete: false,
+                },
+                thermal: ThermalObservation {
+                    state: State::NotExposed,
+                    observed_zones: 0,
+                    maximum_millicelsius: None,
+                    incomplete: false,
+                },
+            },
         }
+    }
+
+    #[test]
+    fn device_reserve_overrides_quiet_cpu_and_recovery_observes_quiet_hold() {
+        let now = Instant::now();
+        let mut budget = Budget::new();
+        let mut observation = quiet();
+        observation.device.battery.state = State::Pause;
+        assert_eq!(budget.update(observation, now), Decision::Pause);
+        assert_eq!(budget.constraint(), "device");
+        observation.device.thermal.state = State::Cancel;
+        assert_eq!(budget.update(observation, now), Decision::Cancel);
+        assert_eq!(budget.cancellation_code(), "compute_device_reserve");
+        observation.memory_bytes = None;
+        assert_eq!(budget.update(observation, now), Decision::Cancel);
+        assert_eq!(budget.cancellation_code(), "compute_memory_pressure");
+        for tick in 1..=5 {
+            assert_eq!(
+                budget.update(quiet(), now + Duration::from_secs(tick)),
+                Decision::Pause
+            );
+            assert_eq!(budget.constraint(), "quiet_hold");
+        }
+        assert_eq!(
+            budget.update(quiet(), now + Duration::from_secs(6)),
+            Decision::Run
+        );
+        assert_eq!(budget.constraint(), "none");
+        observation = quiet();
+        observation.device = DeviceObservation::default();
+        assert_eq!(
+            budget.update(observation, now + Duration::from_secs(7)),
+            Decision::Pause
+        );
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub(super) async fn run(
     let controls = options.spare_capacity.then(Controls::default);
     let result = async {
         if let Some(controls) = &controls {
-            let action = pressure_action(budget.sample())?;
+            let action = pressure_action(&mut budget)?;
             input.extend(controls.issue(action, &request.id)?.context("compute_initial_control")?);
         }
         tokio::time::timeout(Duration::from_secs(1), stdin.write_all(&input))
@@ -90,7 +90,7 @@ pub(super) async fn run(
                         Err(error) => break Err(error),
                     }
                     if let Some(controls) = &controls {
-                        let action = pressure_action(budget.sample())?;
+                        let action = pressure_action(&mut budget)?;
                         if let Some(record) = controls.issue(action, &request.id)? {
                             tokio::time::timeout(Duration::from_secs(1),
                                 control_stdin.as_mut().context("compute_control_stdin")?.write_all(&record))
@@ -122,6 +122,8 @@ pub(super) async fn run(
         "spare_capacity": options.spare_capacity,
         "pressure_action": if options.spare_capacity { "cooperative-pause-resume-memory-cancel" } else { "cancel" },
         "last_capacity_observation": controls.as_ref().map(|_| budget.observation()),
+        "last_capacity_constraint": controls.as_ref().map(|_| budget.constraint()),
+        "device_capacity_policy": options.spare_capacity.then_some("battery-20-pause-5-cancel-thermal-trips-v1"),
         "pause_extends_deadline": false,
         "deadline_seconds": options.max_seconds,
         "child_reaped": true,
@@ -131,11 +133,11 @@ pub(super) async fn run(
     Ok(result)
 }
 
-fn pressure_action(decision: Decision) -> Result<Action> {
-    match decision {
+fn pressure_action(budget: &mut Budget) -> Result<Action> {
+    match budget.sample() {
         Decision::Run => Ok(Action::Resume),
         Decision::Pause => Ok(Action::Pause),
-        Decision::Cancel => bail!("compute_memory_pressure"),
+        Decision::Cancel => bail!("{}", budget.cancellation_code()),
     }
 }
 
