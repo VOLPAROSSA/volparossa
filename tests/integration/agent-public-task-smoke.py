@@ -82,7 +82,12 @@ def snapshot(root):
         if relative == "result.json":
             continue  # This one frontend result is intentionally replaced on resume.
         require(info.st_size <= 1048576, "retained task file too large")
-        result[relative] = {**JOBS["file_hash"](path, 1048576), "inode": [info.st_dev, info.st_ino]}
+        if relative in (".task.lock", "work/.workflow.lock"):
+            require(info.st_size == 0, "owned task lock unexpectedly contains data")
+            digest = {"bytes": 0, "sha256": hashlib.sha256(b"").hexdigest()}
+        else:
+            digest = JOBS["file_hash"](path, 1048576)
+        result[relative] = {**digest, "inode": [info.st_dev, info.st_ino]}
     require("task.json" in result and f"{ATTEMPT}/job-0.json" in result
             and f"{ATTEMPT}/job-1.json" in result and f"{ATTEMPT}/result.json" in result,
             "real source and completed attempt missing")
@@ -416,8 +421,20 @@ def self_test():
         (root / ATTEMPT).mkdir(parents=True, mode=0o700)
         for name in ("task.json", f"{ATTEMPT}/job-0.json", f"{ATTEMPT}/job-1.json", f"{ATTEMPT}/result.json", "result.json"):
             write(root / name, {"fixture": "parser-only"})
+        for name in (".task.lock", "work/.workflow.lock"):
+            (root / name).touch(mode=0o600)
         before = snapshot(root)
         require(before == snapshot(root), "unchanged real receipt file snapshot is unstable")
+        require(all(before[name]["bytes"] == 0 and before[name]["sha256"] == hashlib.sha256(b"").hexdigest()
+                    for name in (".task.lock", "work/.workflow.lock")), "empty owned locks were not preserved exactly")
+        (root / "empty.json").touch(mode=0o600)
+        try:
+            snapshot(root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("empty data file accepted as a task lock")
+        (root / "empty.json").unlink()
         require("result.json" not in before, "replaceable frontend output entered immutable receipt snapshot")
         alias = root / "alias.json"
         os.link(root / "task.json", alias)
