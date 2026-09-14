@@ -142,11 +142,12 @@ memory cap, and this foreground CLI does not yet detect all interactive, thermal
 conditions. Actual model execution and sandbox observations now pass the source-bound
 distinct-node smoke below: eight CPU optimizer updates change 230,400 LoRA parameters,
 the original base remains unchanged, and a fresh base/adapter reload is evaluated.
-B01 still needs measured owner-priority pause/resume/cancellation; improved answer quality, distributed
+B01 still needs measured owner-triggered cancellation; real CPU-pressure pause/resume now
+passes below. Improved answer quality, distributed
 training and the full brain remain separate work. A small development model is not sufficient evidence for reliable
 legal or content-policy judgments.
 
-The owner-priority candidate adds `--spare-capacity` to `compute run` and `compute train-cycle`;
+Owner-priority control adds `--spare-capacity` to `compute run` and `compute train-cycle`;
 `compute serve` uses the same mechanism by default. Fixed, sequenced private-pipe commands
 pause and resume at model/optimizer checkpoints, with acknowledgements from the execution
 thread. CPU `some avg10 >= 20` or I/O `some avg10 >= 10` pauses; five seconds of continuously
@@ -156,7 +157,15 @@ Existing RSS/output limits and the original wall-clock deadline continue while p
 broker advertises no free slot under observed pressure. These are coarse capacity observations,
 not universal owner-activity detection or a hard cgroup reservation. Native operations are not
 preempted mid-call; unacknowledged commands have a bounded timeout. Standard-library worker
-process/pipe and focused Rust tests pass; actual model-pressure evidence is still pending.
+process/pipe and focused Rust tests pass. The [actual owner-priority run](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876248467)
+passes on exact source `d12768e31c0351e15416f05a8b986905367cab66`, including raw verification:
+eight disposable-guest contenders produce CPU pressure; the same model worker acknowledges
+pause/resume at step zero, uses zero CPU ticks in a measured 1.607-second paused interval,
+then finishes eight updates within its original deadline. Total acknowledged pause is 8.599
+seconds. All contenders/worker are reaped, temporary roots are removed and original guest-root
+hashes match. This measures CPU-pressure handling, not all owner activity, owner-triggered
+cancellation, battery/thermal behavior or the entire B01 criterion. Exact artifact/checker/hash
+details are retained in [implementation status](IMPLEMENTATION_STATUS.md).
 
 ### Cache-backed adapter candidate
 
@@ -227,8 +236,71 @@ selected from cache. Training uses the existing isolated fixed worker, at most t
 cancels and awaits worker cleanup; incomplete files are retained rather than reported complete.
 Publish the bundle separately with the normal content command. There is no automatic adapter
 activation, source discovery, retraining loop, distributed gradient aggregation or policy change.
-The separate `agent-train-cycle` guest scenario is intended to prove actual warmstart updates
-from protected received cache after the supplying service stops; its live proof remains pending.
+The [actual `agent-train-cycle` run on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876251732)
+passes, including complete exact-source reconstruction from original raw evidence. A distinct
+Client fetches 943,733 adapter bytes and 1,005 dataset bytes through protected paths. After
+both providers stop, it performs eight warmstart updates using that cached dataset and the
+exact received read-only adapter; all 230,400 adapter parameters remain bound to the original
+dataset and the parameter hash changes, while the base stays unchanged. It produces a new
+local bundle without publishing or activating it. The real control-owner change from R0 to R1
+is rebound to its fresh exact routes and passes. Six captures / 28 interface rows / 10,515
+frames have zero drops or forbidden tuples, both selected relay paths carry data, and cleanup
+leaves zero owned objects with matching original guest-root hashes. The earlier `0d756a64`
+fixture failure remains historical failure, not a retrospectively passing run. B05 remains open:
+this is an explicitly chosen cycle, not autonomous training, defended aggregation or general
+source discovery. Full source/artifact/hash details are in [implementation status](IMPLEMENTATION_STATUS.md).
+
+### Continuous public training candidate
+
+`compute train-loop` connects the existing real cycle executor to an owner-enabled persistent
+coordinator. The plan is a version-1 JSON object with a `sources` array; each entry contains
+`publisher_key`, `name`, and optionally `min_revision` and an exact `manifest_id`. These are
+explicitly eligible public sources, not browsing history or a scan of whatever is cached.
+Round-robin selection and retry timing operate on that plan before cache lookup. Missing bytes
+are requested for the same selected source; this avoids cache availability deciding the corpus,
+but does not claim representative, unbiased or automatically discovered training data.
+
+```sh
+volparossa compute train-loop --plan /OWNER/public-sources.json \
+  --directory /OWNER/training-loop --cache /AGENT/existing-cache \
+  --runtime-root /OWNER/existing-runtime --model-root /OWNER/existing-model \
+  --steps 8 --execute
+```
+
+These are illustrative absolute paths: the private parent, pinned runtime/model and native
+agent cache must already exist. Nothing is installed or downloaded as executable code by this
+command. Without `--execute`, it only previews enrollment. Omit `--max-cycles` to keep watching
+until SIGINT/SIGTERM; that option limits new attempts in this invocation, not lifetime progress.
+`--resume` reopens the exact enrolled directory and continues from durable state. Subsequent
+cycles warmstart from the last completed local adapter. By default, a source must provide a
+newer revision after success; `--repeat-sources` explicitly permits training on unchanged data.
+
+An optional `--seed FILE` selects an initial protected peer import by `publisher_key`,
+`dataset_publisher_key`, `name`, `dataset_name`, and optional adapter `min_revision`. The two
+publisher keys are independently trusted; the dataset must match the exact original identity
+inside the adapter bundle. Alternatively, `--adapter-root` selects an existing local adapter.
+The coordinator cannot silently replace either source with an arbitrary peer's model.
+
+Automatic sharing is separately enabled with `--publish-name`, `--publication-key`, the existing
+encrypted `--identity`, private `--passphrase-file`, and an existing owner `--publish-cache`.
+Each completed bundle is signed once, never beyond its dataset's original expiry. Failed
+handoffs retry that exact manifest through `content contribute`; they do not re-sign it or
+renew its lease. Completed transfer receipts can be reconciled after a restart. This contributes
+the adapter, not automatically its source dataset: a receiver still needs the independently
+trusted dataset available from an authorized provider. CLI `content agent fetch` also
+accepts `--dataset-publisher-key` for this case; omission preserves same-publisher behavior.
+
+The overall watcher has no preset end time, but runs one bounded, spare-capacity worker at a
+time. Existing source expiry, CPU/thread, memory, per-worker deadline and cache limits remain.
+It retains at most eight cycle directories; the current warmstart and pending publications
+are never pruned to make room, so a full pending queue pauses further training. Interrupted
+workers are not marked complete. An initial peer import interrupted between atomic output
+publication and its state checkpoint is retained and refused on resume, not silently trusted.
+
+The separate `agent-train-loop` scenario is a candidate for two genuine cycles, automatic
+adapter publication and another node's protected import/use; no passing live result is claimed
+yet. This is not general task planning, model-quality improvement, private training, defended
+gradient/model aggregation, automatic peer-job activation or completed B05.
 
 ## Owner-first resource allocation
 
@@ -437,8 +509,9 @@ build larger connected slices, without claiming these unchecked requirements are
 
 - [ ] B01: isolated on-device execution and genuine bounded training; measured owner-priority
   pause/resume/cancellation, not a stub model or an unconstrained background process.
-  Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; measured
-  owner-priority pause/resume/cancellation remains incomplete.
+  Actual bounded CPU training and kernel-observed isolation pass on `38814d30`; real CPU-pressure
+  pause/resume passes on `d12768e3`. Measured owner-triggered cancellation and broader
+  interactive/battery/thermal handling remain incomplete.
 - [x] B02: transfer an original compatible trained artifact over the real protected content
   network, validate it on another node and execute it there; restart/custody retains validity.
   [Run 34861750881](https://github.com/VOLPAROSSA/volparossa/actions/runs/34861750881), exact source

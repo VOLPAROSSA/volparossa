@@ -29,48 +29,48 @@ use crate::content::{
 pub(crate) struct Options {
     /// Independently trusted publisher of the explicitly selected public dataset.
     #[arg(long, value_parser = crate::content::parse_publisher_key)]
-    publisher_key: VerifyingKey,
+    pub(super) publisher_key: VerifyingKey,
     /// Exact publisher-local dataset name, chosen independently of what happens to be cached.
     #[arg(long, value_parser = crate::content::parse_content_name)]
-    dataset_name: String,
+    pub(super) dataset_name: String,
     /// Optional exact signed identity; a mismatch never authorizes a different cached dataset.
     #[arg(long, value_parser = parse_manifest_id)]
-    dataset_manifest_id: Option<[u8; 32]>,
+    pub(super) dataset_manifest_id: Option<[u8; 32]>,
     /// Signed revision floor, not proof of the globally newest publication.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    min_revision: Option<u64>,
+    pub(super) min_revision: Option<u64>,
     /// Agent-owned native cache. A miss falls back to protected retrieval of this same source.
     #[arg(long)]
-    cache: PathBuf,
+    pub(super) cache: PathBuf,
     #[arg(long)]
-    reuse_cache: bool,
+    pub(super) reuse_cache: bool,
     /// Existing explicitly provisioned fixed Python runtime; never installed by this command.
     #[arg(long)]
-    runtime_root: PathBuf,
+    pub(super) runtime_root: PathBuf,
     /// Existing pinned base model; never downloaded by this command.
     #[arg(long)]
-    model_root: PathBuf,
+    pub(super) model_root: PathBuf,
     /// Optional explicitly imported compatible adapter. Fetch/import is a separate operation.
     #[arg(long)]
-    adapter_root: Option<PathBuf>,
+    pub(super) adapter_root: Option<PathBuf>,
     /// New private cycle directory. Failures retain partial evidence; nothing is overwritten.
     #[arg(long)]
-    output: PathBuf,
+    pub(super) output: PathBuf,
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=64))]
-    steps: u16,
+    pub(super) steps: u16,
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..=2))]
-    threads: u16,
+    pub(super) threads: u16,
     /// Training deadline, additionally bounded by source expiry; retrieval has its own 600s bound.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
-    max_seconds: u16,
+    pub(super) max_seconds: u16,
     /// Pause this explicitly authorized background cycle under CPU/IO pressure.
     #[arg(long)]
-    spare_capacity: bool,
+    pub(super) spare_capacity: bool,
     /// Explicitly authorize this one cycle. Default preview performs no retrieval or training.
     #[arg(long)]
-    execute: bool,
+    pub(super) execute: bool,
     #[command(flatten)]
-    limits: Limits,
+    pub(super) limits: Limits,
 }
 
 struct Activity {
@@ -80,12 +80,17 @@ struct Activity {
 
 impl Activity {
     fn new() -> Result<Self> {
-        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let (sender, idle) = watch::channel(true);
         let listener = tokio::spawn(async move {
-            if signal.recv().await.is_some() {
-                let _ = sender.send(false);
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
             }
+            let _ = sender.send(false);
         });
         Ok(Self { idle, listener })
     }
@@ -107,6 +112,23 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         );
         return Ok(());
     }
+    let activity = Activity::new()?;
+    let result = execute_cycle(args, socket, activity.idle.clone()).await?;
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+/// Execute one explicitly authorized cycle without owning signals or printing.
+/// The caller retains the activity sender through completion and must await this
+/// future through cancellation so the active model supervisor can reap its child.
+pub(super) async fn execute_cycle(
+    args: &Options,
+    socket: &Path,
+    mut activity: watch::Receiver<bool>,
+) -> Result<Value> {
+    ensure!(args.execute, "train_cycle_execute_required");
+    ensure_active(&activity, "train_cycle_cancelled_before_output")?;
+    let selection = selection(args)?;
     ensure!(
         !nix::unistd::geteuid().is_root(),
         "compute_unprivileged_user_required"
@@ -117,6 +139,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         private_directory(adapter)?;
     }
     private_directory(args.output.parent().context("train_cycle_output_parent")?)?;
+    ensure_active(&activity, "train_cycle_cancelled_before_output")?;
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&args.output)
@@ -125,7 +148,6 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &args.output.join("selection.json"),
         &serde_json::to_vec(&selection)?,
     )?;
-    let mut activity = Activity::new()?;
     let selected = TrainingSource {
         publisher_key: args.publisher_key,
         name: args.dataset_name.clone(),
@@ -135,29 +157,39 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         reuse_cache: args.reuse_cache,
         limits: args.limits.clone(),
     };
+    ensure_active(&activity, "train_cycle_cancelled_before_fetch")?;
     let download = tokio::select! {
         biased;
-        _ = activity.idle.changed() => bail!("train_cycle_cancelled_during_fetch_verified_cache_may_remain"),
+        () = cancelled(&mut activity) => bail!("train_cycle_cancelled_during_fetch_verified_cache_may_remain"),
         result = agent_artifact::fetch_training_source(&selected, socket, &args.output) => result?,
     };
     let verified = validate_source(args, &download, now()?)?;
     let source = persist_source(args, &download, &verified)?;
-    ensure!(
-        *activity.idle.borrow(),
-        "train_cycle_cancelled_before_training"
-    );
+    ensure_active(&activity, "train_cycle_cancelled_before_training")?;
     let options = worker_options(args, verified.expires(), now()?)?;
     options.validate()?;
     // Await the real supervisor through cancellation. Dropping its future would not be a
     // valid claim that a running training worker had been killed and reaped.
-    let report = execute(&options, activity.idle.clone()).await?;
-    ensure!(
-        *activity.idle.borrow(),
-        "train_cycle_cancelled_after_training_outputs_retained"
-    );
-    let result = complete(args, &download, &source, &report)?;
-    println!("{}", serde_json::to_string(&result)?);
+    let report = execute(&options, activity.clone()).await?;
+    ensure_active(
+        &activity,
+        "train_cycle_cancelled_after_training_outputs_retained",
+    )?;
+    complete(args, &download, &source, &report)
+}
+
+fn ensure_active(activity: &watch::Receiver<bool>, code: &'static str) -> Result<()> {
+    ensure!(*activity.borrow() && activity.has_changed().is_ok(), code);
     Ok(())
+}
+
+async fn cancelled(activity: &mut watch::Receiver<bool>) {
+    loop {
+        let active = *activity.borrow_and_update();
+        if !active || activity.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 fn selection(args: &Options) -> Result<Value> {
@@ -455,6 +487,45 @@ mod tests {
         assert!(!args.output.exists());
         assert!(!args.runtime_root.exists());
         assert!(!args.cache.exists());
+    }
+
+    #[tokio::test]
+    async fn callable_cycle_requires_execution_and_live_owner_before_creating_outputs() {
+        let (root, mut args, _download) = fixture();
+        let socket = root.path().join("no-agent.sock");
+        let (sender, activity) = watch::channel(true);
+        let error = execute_cycle(&args, &socket, activity.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "train_cycle_execute_required");
+        args.execute = true;
+        sender.send(false).unwrap();
+        let error = execute_cycle(&args, &socket, activity.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        sender.send(true).unwrap();
+        drop(sender);
+        let error = execute_cycle(&args, &socket, activity).await.unwrap_err();
+        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        assert!(!args.output.exists());
+        assert!(!args.runtime_root.exists());
+        assert!(!args.cache.exists());
+        assert!(!socket.exists());
+    }
+
+    #[tokio::test]
+    async fn external_owner_notifications_cancel_only_on_false_or_closed_channel() {
+        let (sender, mut activity) = watch::channel(true);
+        let waiting = tokio::spawn(async move { cancelled(&mut activity).await });
+        sender.send(true).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        sender.send(false).unwrap();
+        waiting.await.unwrap();
+        let (sender, mut activity) = watch::channel(true);
+        drop(sender);
+        cancelled(&mut activity).await;
     }
 
     #[test]

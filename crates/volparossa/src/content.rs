@@ -44,6 +44,8 @@ pub(crate) enum Command {
     Custody(custody::Command),
     /// Chunk and sign a local file; optionally contribute it through the configured agent.
     Publish(Publish),
+    /// Re-offer an existing signed public manifest and owned cache without signing again.
+    Contribute(Contribute),
     /// Show the public message-recipient key of an existing encrypted node identity.
     RecipientKey(private_message::Unlock),
     /// Encrypt and sign an explicit message into a local cache; use serve to distribute it.
@@ -290,6 +292,9 @@ pub(crate) struct Publish {
     /// Signed lifetime in seconds (at most 31 days); reading never extends validity.
     #[arg(long, default_value_t = 86_400, value_parser = clap::value_parser!(u64).range(1..=MAX_VALIDITY_SECONDS))]
     lifetime_seconds: u64,
+    /// Internal coordinator authorization bound; ordinary CLI keeps its lifetime semantics.
+    #[arg(skip)]
+    expires_not_after: Option<u64>,
     /// Existing encrypted identity file; defaults to the normal node identity path.
     #[arg(long)]
     identity: Option<PathBuf>,
@@ -298,6 +303,96 @@ pub(crate) struct Publish {
     passphrase_file: Option<PathBuf>,
     #[command(flatten)]
     limits: Limits,
+}
+
+/// Explicit owner configuration for an offline first publication of a trained bundle.
+/// The coordinator records that manifest before separately requesting contribution.
+pub(crate) struct TrainingPublication {
+    pub(crate) input: PathBuf,
+    pub(crate) cache: PathBuf,
+    pub(crate) reuse_cache: bool,
+    pub(crate) manifest: PathBuf,
+    pub(crate) name: String,
+    pub(crate) revision: u64,
+    pub(crate) lifetime_seconds: u64,
+    pub(crate) expires_not_after: u64,
+    pub(crate) identity: PathBuf,
+    pub(crate) passphrase_file: PathBuf,
+    pub(crate) limits: Limits,
+}
+
+impl Publish {
+    pub(crate) fn training_bundle(args: TrainingPublication) -> Self {
+        Self {
+            input: args.input,
+            cache: args.cache,
+            reuse_cache: args.reuse_cache,
+            contribute: false,
+            manifest: args.manifest,
+            name: args.name,
+            revision: args.revision,
+            content_type: volparossa_content::agent_artifact::ADAPTER_CONTENT_TYPE.to_owned(),
+            lifetime_seconds: args.lifetime_seconds,
+            expires_not_after: Some(args.expires_not_after),
+            identity: Some(args.identity),
+            passphrase_file: Some(args.passphrase_file),
+            limits: args.limits,
+        }
+    }
+
+    fn expiry(&self, now: u64) -> Result<u64> {
+        let relative = now
+            .checked_add(self.lifetime_seconds)
+            .context("content expiry overflows its timestamp")?;
+        let expires = self
+            .expires_not_after
+            .map_or(relative, |bound| relative.min(bound));
+        if expires <= now {
+            bail!("content publication authorization has expired");
+        }
+        Ok(expires)
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Contribute {
+    /// Original signed public manifest; never overwritten, renewed or signed again.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Independently trusted publisher, not adopted from the supplied manifest.
+    #[arg(long, value_parser = parse_publisher_key)]
+    publisher_key: VerifyingKey,
+    /// Existing complete cache owned by your account. No cache is implicitly created.
+    #[arg(long)]
+    cache: PathBuf,
+    /// Coordinator's immutable publication binding, checked on the same decoded envelope
+    /// handed to the agent. The ordinary CLI explicitly trusts its supplied manifest/key.
+    #[arg(skip)]
+    expected_manifest_id: Option<[u8; 32]>,
+    #[command(flatten)]
+    limits: Limits,
+}
+
+impl Contribute {
+    pub(crate) fn existing(
+        manifest: PathBuf,
+        publisher_key: VerifyingKey,
+        cache: PathBuf,
+        limits: Limits,
+    ) -> Self {
+        Self {
+            manifest,
+            publisher_key,
+            cache,
+            expected_manifest_id: None,
+            limits,
+        }
+    }
+
+    pub(crate) fn expect_manifest_id(mut self, id: [u8; 32]) -> Self {
+        self.expected_manifest_id = Some(id);
+        self
+    }
 }
 
 #[derive(Debug, Args)]
@@ -333,6 +428,11 @@ pub(crate) struct Limits {
 }
 
 impl Limits {
+    pub(crate) fn configuration(&self) -> serde_json::Value {
+        serde_json::json!({"quota_bytes":self.quota_bytes,"max_entries":self.max_entries,
+                          "min_free_bytes":self.min_free_bytes})
+    }
+
     fn cache_limits(&self) -> Result<CacheLimits> {
         Ok(CacheLimits {
             max_bytes: self.quota_bytes,
@@ -354,6 +454,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
         Command::Custody(args) => return custody::run(args, socket).await,
         Command::Publish(args) => publish_command(&args, socket).await?,
+        Command::Contribute(args) => contribute_existing(&args, socket).await?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,
         Command::PublishMessage(args) => private_message::publish_message(&args)?,
         Command::OpenMessage(args) => private_message::open_message(&args)?,
@@ -522,7 +623,7 @@ struct Published {
     verified: volparossa_content::VerifiedManifest,
 }
 
-async fn publish_command(args: &Publish, socket: &Path) -> Result<serde_json::Value> {
+pub(crate) async fn publish_command(args: &Publish, socket: &Path) -> Result<serde_json::Value> {
     // This synchronous stage releases the signing key and source store before any IPC.
     let mut published = publish(args)?;
     if args.contribute {
@@ -543,6 +644,38 @@ async fn publish_command(args: &Publish, socket: &Path) -> Result<serde_json::Va
     Ok(published.report)
 }
 
+pub(crate) async fn contribute_existing(
+    args: &Contribute,
+    socket: &Path,
+) -> Result<serde_json::Value> {
+    let bytes = verified_manifest_bytes(&args.manifest, &args.publisher_key)?;
+    let signed = SignedManifest::decode(&bytes)?;
+    let verified = signed.verify(&args.publisher_key, now_seconds()?)?;
+    if args
+        .expected_manifest_id
+        .is_some_and(|expected| &expected != verified.manifest_id())
+    {
+        bail!("content contribution differs from the pinned manifest identity");
+    }
+    // The existing handoff refuses private-message manifests, verifies all original
+    // bytes in the owned cache, and confirms durable serving before success.
+    let receipt = handoff::contribute(
+        &signed, &verified, &args.cache, args.limits.cache_limits()?, socket,
+    ).await.context("existing public contribution was not confirmed; original manifest and owned cache retained for retry")?;
+    Ok(serde_json::json!({
+        "operation":"content_contribute","network_publication":true,
+        "manifest":args.manifest,"manifest_id":hex::encode(verified.manifest_id()),
+        "publisher_key_hex":hex::encode(verified.publisher()),"cache":args.cache,
+        "name":verified.metadata().name,"revision":verified.metadata().revision,
+        "content_type":verified.metadata().content_type,
+        "bytes":verified.length(),"chunks":verified.chunks().len(),
+        "expires_unix_seconds":verified.validity().expires,
+        "serving":receipt.serving,"publications":receipt.publications,
+        "original_signature_reused":true,"private_keys_transferred":false,
+        "ownership_changed":false,"origin_authenticated":false
+    }))
+}
+
 fn publish(args: &Publish) -> Result<Published> {
     if args.contribute
         && args.content_type == volparossa_content::private_message::PRIVATE_MESSAGE_CONTENT_TYPE
@@ -553,9 +686,7 @@ fn publish(args: &Publish) -> Result<Published> {
     let mut input = open_regular(&args.input, MAX_OBJECT_BYTES)?;
     let length = input.metadata()?.len();
     let now = now_seconds()?;
-    let expires = now
-        .checked_add(args.lifetime_seconds)
-        .context("content expiry overflows its timestamp")?;
+    let expires = args.expiry(now)?;
     let signer = unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
     let expected_public = signer.verifying_key().to_bytes();
     let mut manifest_output = tempfile::NamedTempFile::new_in(output_parent(&args.manifest))?;
@@ -597,6 +728,10 @@ fn publish(args: &Publish) -> Result<Published> {
         "manifest": args.manifest,
         "cache": args.cache,
         "publisher_key_hex": hex::encode(expected_public),
+        "manifest_id": hex::encode(verified.manifest_id()),
+        "name": verified.metadata().name,
+        "revision": verified.metadata().revision,
+        "content_type": verified.metadata().content_type,
         "bytes": verified.length(),
         "chunks": verified.chunks().len(),
         "expires_unix_seconds": expires,
@@ -1195,6 +1330,7 @@ mod tests {
             revision: 1,
             content_type: "application/octet-stream".into(),
             lifetime_seconds: 300,
+            expires_not_after: None,
             identity: Some(identity_path.clone()),
             passphrase_file: Some(password_file),
             limits: limits(),
@@ -1442,5 +1578,293 @@ mod tests {
             ])
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod contribution_tests {
+    use super::*;
+    use clap::Parser as _;
+    use tokio::net::UnixListener;
+    use volparossa_content::{
+        VerifiedManifest, reassemble,
+        transfer::{TransferLimits, pull_from_peer},
+    };
+    use volparossa_local_control::{
+        CONTROL_PROTOCOL_VERSION, ContentReceipt, ContentTransferReady, ControlResponse,
+        ControlResult, control_request::Operation, control_response::Payload, read_request,
+        write_response,
+    };
+
+    const INNER: &str = "VOLPAROSSA_RECONTRIBUTE_PARENT_NETNS";
+
+    fn limits() -> Limits {
+        Limits {
+            quota_bytes: 1024 * 1024,
+            max_entries: 16,
+            min_free_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn contribute_cli_and_training_publication_require_explicit_existing_material() {
+        let key = hex::encode(SigningKey::from_bytes(&[43; 32]).verifying_key().as_bytes());
+        let base = [
+            "volparossa",
+            "content",
+            "contribute",
+            "--manifest",
+            "original.pb",
+            "--cache",
+            "owned-cache",
+        ];
+        assert!(crate::Cli::try_parse_from(base).is_err());
+        let parsed =
+            crate::Cli::try_parse_from(base.into_iter().chain(["--publisher-key", &key])).unwrap();
+        let crate::CliCommand::Content { command } = parsed.command else {
+            panic!("content");
+        };
+        assert!(matches!(*command, Command::Contribute(_)));
+        assert!(
+            crate::Cli::try_parse_from(base.into_iter().chain([
+                "--publisher-key",
+                &key,
+                "--identity",
+                "not-used.key"
+            ]))
+            .is_err()
+        );
+        let mut publication = Publish::training_bundle(TrainingPublication {
+            input: "/owner/adapter.bundle".into(),
+            cache: "/owner/cache".into(),
+            reuse_cache: true,
+            manifest: "/owner/original.pb".into(),
+            name: "trained-adapter".into(),
+            revision: 7,
+            lifetime_seconds: 300,
+            expires_not_after: 1050,
+            identity: "/owner/existing.key".into(),
+            passphrase_file: "/owner/passphrase".into(),
+            limits: limits(),
+        });
+        assert!(!publication.contribute);
+        assert_eq!(publication.expiry(1000).unwrap(), 1050);
+        assert_eq!(publication.expiry(1049).unwrap(), 1050);
+        assert!(publication.expiry(1050).is_err());
+        publication.expires_not_after = None;
+        assert_eq!(publication.expiry(1000).unwrap(), 1300);
+        assert_eq!(
+            publication.content_type,
+            volparossa_content::agent_artifact::ADAPTER_CONTENT_TYPE
+        );
+        assert!(publication.identity.is_some() && publication.passphrase_file.is_some());
+        assert_eq!(
+            publication.limits.configuration(),
+            serde_json::json!({
+            "quota_bytes":1_048_576,"max_entries":16,"min_free_bytes":0})
+        );
+    }
+
+    #[test]
+    fn contribute_existing_retries_exact_signed_publication() {
+        let current = fs::read_link("/proc/self/ns/net").unwrap();
+        if let Some(parent) = std::env::var_os(INNER) {
+            assert_ne!(current.as_os_str(), parent, "no host socket fallback");
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(retry_scenario());
+            return;
+        }
+        let result = std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/run-isolated-test.sh"
+        ))
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "content::contribution_tests::contribute_existing_retries_exact_signed_publication",
+            INNER,
+            "none",
+        ])
+        .output()
+        .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    async fn retry_scenario() {
+        let root = tempfile::tempdir().unwrap();
+        let publisher_identity = SigningKey::from_bytes(&[43; 32]);
+        let bytes = b"Explicit public retry fixture; no signing key file exists.";
+        let mut cache = ChunkStore::create(
+            &root.path().join("source"),
+            limits().cache_limits().unwrap(),
+        )
+        .unwrap();
+        let now = now_seconds().unwrap();
+        let signed = volparossa_content::publish(
+            &mut bytes.as_slice(),
+            Publication {
+                metadata: Metadata {
+                    name: "public-retry".into(),
+                    revision: 7,
+                    content_type: "application/octet-stream".into(),
+                },
+                length: bytes.len() as u64,
+                validity: Validity {
+                    created: now,
+                    expires: now + 300,
+                },
+            },
+            &publisher_identity,
+            &mut cache,
+        )
+        .unwrap();
+        let manifest = signed
+            .verify(&publisher_identity.verifying_key(), now)
+            .unwrap();
+        drop(cache);
+        let original = signed.encode();
+        fs::write(root.path().join("original.pb"), &original).unwrap();
+        let args = Contribute::existing(
+            root.path().join("original.pb"),
+            publisher_identity.verifying_key(),
+            root.path().join("source"),
+            limits(),
+        )
+        .expect_manifest_id(*manifest.manifest_id());
+        drop(publisher_identity);
+        // Actual bounded local RPC and chunk transfer, with simulated final service
+        // receipts. This is not a provider advertisement or overlay-network proof.
+        for (index, serving) in [false, true, true].into_iter().enumerate() {
+            let socket = root.path().join(format!("control-{index}.sock"));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let target = root.path().join(format!("destination-{index}"));
+            let ((), result) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    accept_contribution(listener, &original, &manifest, target, serving),
+                    contribute_existing(&args, &socket)
+                )
+            })
+            .await
+            .unwrap();
+            if serving {
+                let report = result.unwrap();
+                assert_eq!(report["manifest_id"], hex::encode(manifest.manifest_id()));
+                assert_eq!(report["expires_unix_seconds"], manifest.validity().expires);
+                assert_eq!(report["revision"], 7);
+                assert_eq!(report["original_signature_reused"], true);
+                assert_eq!(report["private_keys_transferred"], false);
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(fs::read(&args.manifest).unwrap(), original);
+        }
+        let missing = root.path().join("no-control.sock");
+        let wrong = Contribute::existing(
+            args.manifest.clone(),
+            SigningKey::from_bytes(&[44; 32]).verifying_key(),
+            args.cache.clone(),
+            limits(),
+        );
+        assert!(contribute_existing(&wrong, &missing).await.is_err());
+        let absent = Contribute::existing(
+            args.manifest.clone(),
+            args.publisher_key,
+            root.path().join("absent-cache"),
+            limits(),
+        );
+        assert!(contribute_existing(&absent, &missing).await.is_err());
+        assert!(!absent.cache.exists());
+        let different = Contribute::existing(
+            args.manifest.clone(),
+            args.publisher_key,
+            args.cache.clone(),
+            limits(),
+        )
+        .expect_manifest_id([0; 32]);
+        let error = contribute_existing(&different, &missing)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pinned manifest identity"));
+        assert_eq!(fs::read(&args.manifest).unwrap(), original);
+    }
+
+    async fn accept_contribution(
+        listener: UnixListener,
+        original: &[u8],
+        manifest: &VerifiedManifest,
+        target: PathBuf,
+        serving: bool,
+    ) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_request(&mut stream).await.unwrap();
+        let Some(Operation::ContentImport(import)) = request.operation else {
+            panic!("typed contribution");
+        };
+        assert_eq!(import.manifest, original);
+        assert_eq!(import.publisher_key, manifest.publisher());
+        assert!(
+            import.contribute
+                && import.allow_public_content
+                && import.cache.is_empty()
+                && import.limits.is_none()
+        );
+        let response = |diagnostic: &str, payload| ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: request.request_id.clone(),
+            result: ControlResult::Ok as i32,
+            diagnostic_code: diagnostic.into(),
+            payload: Some(payload),
+        };
+        write_response(
+            &mut stream,
+            &response(
+                "CONTENT_TRANSFER_READY",
+                Payload::ContentTransferReady(ContentTransferReady {
+                    manifest_id: manifest.manifest_id().to_vec(),
+                    bytes: manifest.length(),
+                    chunks: u32::try_from(manifest.chunks().len()).unwrap(),
+                    contribute: true,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        let mut cache = ChunkStore::create(&target, limits().cache_limits().unwrap()).unwrap();
+        let progress = pull_from_peer(&mut stream, manifest, &mut cache, TransferLimits::default())
+            .await
+            .unwrap();
+        assert_eq!(progress.bytes, manifest.length());
+        reassemble(
+            manifest,
+            &mut [&mut cache],
+            now_seconds().unwrap(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
+        drop(cache);
+        write_response(
+            &mut stream,
+            &response(
+                "CONTENT_OK",
+                Payload::Content(ContentReceipt {
+                    bytes: manifest.length(),
+                    chunks: u32::try_from(manifest.chunks().len()).unwrap(),
+                    serving,
+                    publications: 1,
+                    network_publication: true,
+                    ..ContentReceipt::default()
+                }),
+            ),
+        )
+        .await
+        .unwrap();
     }
 }

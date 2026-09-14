@@ -245,11 +245,7 @@ fn fetch_does_not_force_offline_cache_and_explicit_cache_only_requires_reopen() 
     };
     assert!(!options.cache_only);
     assert!(!options.reuse_cache);
-    assert!(
-        !options
-            .query(&options.name, false, Path::new("parent"))
-            .cache_only
-    );
+    assert!(!options.query(false, false, Path::new("parent")).cache_only);
     assert!(crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only"])).is_err());
     let parsed =
         crate::Cli::try_parse_from(base.into_iter().chain(["--cache-only", "--reuse-cache"]))

@@ -53,11 +53,21 @@ An explicit `compute train-cycle` now connects a chosen public dataset to local 
 adapter packaging in one command: use verified cache bytes when available, otherwise retrieve
 that same publisher's dataset through the protected network. It can continue training an
 explicitly imported adapter. Execution requires `--execute`; the resulting bundle is not
-automatically published or activated. Its separate live warmstart/cache-cycle proof is pending.
-Background execution now has a cooperative CPU/I/O pause/resume candidate: explicit local
+automatically published or activated. The [live cache/warmstart cycle on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876251732)
+passes: a separate Client fetches the signed adapter/dataset, then performs eight real updates
+from its cache after both providers stop. The received adapter stays read-only, its local
+successor changes, and the base remains unchanged; this is not autonomous training/publication.
+Background execution has cooperative CPU/I/O pause/resume: explicit local
 jobs use `--spare-capacity`, and peer executors always enable it. Memory pressure still cancels;
-pauses do not extend an individual worker's deadline. Actual model-under-pressure proof and
-battery/thermal/interactive-activity integration remain unfinished.
+pauses do not extend an individual worker's deadline. The [real CPU-pressure proof on `d12768e3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34876248467)
+passes: the same worker pauses, resumes at the same step and completes eight updates.
+Both new proofs pass exact-source raw verification, preserve original guest-root state and
+leave no owned objects. Measured owner-triggered cancellation and battery/thermal/interactive
+activity integration remain unfinished; B01, autonomous B05 and the broader alpha remain open.
+The next candidate, [`compute train-loop`](docs/DECENTRALIZED_AGENTS.md#continuous-public-training-candidate),
+connects repeated public training, optional peer warmstarts and signed update sharing. It can
+watch an explicit source plan until cancelled, while each worker keeps its own resource/deadline
+limits. Its continuous end-to-end VM proof is still pending; this is not a completed shared brain.
 The new explicit [public-custody commands](docs/OPERATIONS.md#depositing-a-public-copy-with-other-participants)
 deposit original signed publications with other configured participants and inspect their
 retained copies. The source-bound protected-network custody checkpoint passes after provider

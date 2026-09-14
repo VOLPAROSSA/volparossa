@@ -14,6 +14,7 @@ mode=preview
 scenario=alpha
 agent_jobs_loss=no
 agent_train_cycle=no
+agent_train_loop=no
 wifi_link=no
 uplink_link=no
 download_sharing=no
@@ -66,6 +67,15 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-artifact ]; then
+        if [ "$agent_train_loop" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA owner-enabled autonomous public train-loop plan:' \
+                '  R5 public seed/dataset, R4 protected import and two actual eight-update warmstart cycles;' \
+                '  automatically share two R4-owner-signed updates; explicitly re-offer unchanged original dataset;' \
+                '  another Client imports both over protected MPTCP and performs actual isolated inference;' \
+                '  same repeated source, exact worker/input/capture/cleanup evidence; no full B05 or alpha claim.'
+            return
+        fi
         if [ "$agent_train_cycle" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA explicit public train-cycle plan:' \
@@ -357,7 +367,9 @@ while [ "$#" -gt 0 ]; do
             download_sharing=no
             agent_jobs_loss=no
             agent_train_cycle=no
+            agent_train_loop=no
             case $2 in
+                agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -534,6 +546,11 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     done
     for custody_tool in head base64; do
         command -v "$custody_tool" >/dev/null 2>&1 || exit 69
+    done
+fi
+if [ "$agent_train_loop" = yes ]; then
+    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+        [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
     done
 fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
@@ -1425,7 +1442,9 @@ cleanup() {
     if [ "$scenario" = agent-jobs ] && command -v agent_jobs_cleanup >/dev/null 2>&1; then
         agent_jobs_cleanup || original_status=1
     fi
-    if [ "$scenario" = agent-artifact ] && command -v agent_artifact_cleanup >/dev/null 2>&1; then
+    if [ "$agent_train_loop" = yes ] && command -v agent_train_loop_cleanup >/dev/null 2>&1; then
+        agent_train_loop_cleanup || original_status=1
+    elif [ "$scenario" = agent-artifact ] && command -v agent_artifact_cleanup >/dev/null 2>&1; then
         agent_artifact_cleanup || original_status=1
     fi
     if [ "$scenario" = content-provider ] && command -v content_publication_cleanup >/dev/null 2>&1; then
@@ -1686,6 +1705,8 @@ cleanup() {
         content_custody_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = agent-jobs ]; then
         agent_jobs_finalize_report "$original_status" || original_status=1
+    elif [ "$agent_train_loop" = yes ]; then
+        agent_train_loop_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = agent-artifact ]; then
         agent_artifact_finalize_report "$original_status" || original_status=1
     elif [ "$scenario" = content-provider ]; then
@@ -1827,6 +1848,13 @@ if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
     . "$source_directory/tests/integration/agent-artifact-smoke.sh"
 fi
+if [ "$agent_train_loop" = yes ]; then
+    # Only shared exact R4/R5 network and packet-observer utilities.
+    # shellcheck source=tests/integration/content-replication-smoke.sh
+    . "$source_directory/tests/integration/content-replication-smoke.sh"
+    # shellcheck source=tests/integration/agent-train-loop-smoke.sh
+    . "$source_directory/tests/integration/agent-train-loop-smoke.sh"
+fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
     # shellcheck source=tests/integration/content-provider-smoke.sh
@@ -1927,6 +1955,11 @@ fi
 if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-smoke.py" "$WORK/bin/agent-jobs-smoke.py"
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
+fi
+if [ "$agent_train_loop" = yes ]; then
+    for loop_script in agent-train-loop-smoke.py content-replication-smoke.py content-replication-capture.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
+    done
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
@@ -2131,7 +2164,7 @@ CONTENT_ADAPTIVE_FILTER
 fi
 if [ "$scenario" = dns-cache ]; then
     dns_cache_extend_network
-elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
+elif [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
     content_replication_extend_network
 elif [ "$scenario" = mixed-link ]; then
     mixed_link_extend_network
@@ -2296,7 +2329,7 @@ write_config() {
         relay_capacity=10; exit_capacity=10
     fi
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
-    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ]; then
+    if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
         content_replication_configure_node
     fi
     [ "$scenario" != dns-cache ] || dns_cache_configure_node
@@ -2749,12 +2782,18 @@ launch_agent() {
             set -- "--property=InaccessiblePaths=$WORK/state-relay3 $WORK/state-relay4 $WORK/state-relay5 $WORK/content-provider-seed $WORK/agent-jobs-user"
         fi
     fi
-    if [ "$scenario" = content-replication ]; then
+    if [ "$scenario" = content-replication ] || [ "$agent_train_loop" = yes ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-replication-seed"
         case $node in
             client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed" ;;
             relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed" ;;
         esac
+        if [ "$agent_train_loop" = yes ]; then
+            case $node in
+                client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
+                relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
+            esac
+        fi
     fi
     if [ "$scenario" = content-repair ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$WORK/content-repair-seed"
@@ -5621,6 +5660,10 @@ if [ "$scenario" = content-mailbox ]; then
 fi
 if [ "$scenario" = agent-jobs ]; then
     agent_jobs_run
+    exit 0
+fi
+if [ "$agent_train_loop" = yes ]; then
+    agent_train_loop_run
     exit 0
 fi
 if [ "$scenario" = agent-artifact ]; then
