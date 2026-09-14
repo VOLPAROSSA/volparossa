@@ -6,7 +6,12 @@ Last updated: 2026-09-14
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic
-whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). This is recorded design work; no
+whitelist/blacklist governance](DECENTRALIZED_AGENTS.md). Its first local CPU-worker candidate
+now includes pinned explicit provisioning, inference/LoRA training, saved-adapter reload and
+a Rust-supervised mandatory sandbox. Five narrow Rust supervisor tests and the Python
+protocol/provisioning tests pass; actual training and sandbox execution await the dedicated
+disposable-guest proof. B01 remains unchecked. Cache-backed training and peer execution are
+explicit remaining integrations, not automatic consequences of having cached data. No
 distributed training, private AI execution or autonomous content-policy engine is implemented.
 Concrete prohibited/contextual/allowed content examples are now recorded in that design;
 the selected legal baseline is Netherlands/EU plus local exit restrictions, while its enforcement
@@ -65,6 +70,13 @@ separate-process 7-to-6 rollback refusal, equal-version hash conflict, idempoten
 higher version and rejected invalid signatures/storage. Strict agent Clippy passes. This closes
 the previously identified lack of a durable floor for a fixed configured authority; it does not
 authorize trust-key rotation, resist replacement of all agent-owned state or implement AI governance.
+
+The first [automatic-repair VM on `ce2267a6`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34854137170)
+reached autonomous one-to-three-chunk repair and a fresh 786,432-byte retrieval from the repaired
+receiver after the original supplier stopped. Nevertheless it **failed** physical-capture
+validation: control-port/ICMP and other-IP frames remain classified as forbidden. Complete
+captures with zero drops and unchanged guest-root cleanup do not waive that failure. The
+original failed evidence is retained; no network-proven repair pass is claimed from this run.
 
 Major requested functional work still outstanding:
 

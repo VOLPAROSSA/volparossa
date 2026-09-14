@@ -23,8 +23,8 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache]' \
-        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh and agent-training.'
 }
 
 print_plan() {
@@ -35,11 +35,17 @@ print_plan() {
         '  verify/copy pinned mqvpn/xquic when the selected scenario uses it;' \
         '  boot one temporary KVM-only qcow2 overlay with QEMU user networking;' \
         '  install Debian build/runtime packages and build only required test binaries;' \
-        '  run the selected production-helper proof as guest root;' \
+        '  run the selected proof in the guest (model jobs stay unprivileged);' \
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
-    if [ "$scenario" = dns-cache ]; then
+    if [ "$scenario" = agent-training ]; then
+        printf '%s\n' \
+            'Agent-training scenario: only the CLI, official CPU wheels and pinned SmolLM2 135M;' \
+            '  explicit private guest provisioning with a 3GiB budget; eight real LoRA optimizer updates;' \
+            '  exact base/adapter hashes and reload, actual isolated worker namespaces and cleanup;' \
+            '  no native MPQUIC, overlay topology, distributed training or better-answer claim.'
+    elif [ "$scenario" = dns-cache ]; then
         printf '%s\n' \
             'DNS-cache scenario: download only fresh bounded signed DNS wire data from literal dns.google HTTPS;' \
             '  validate built-in roots, then normal Client single-Relay protected DNS to two actual Exits;' \
@@ -157,7 +163,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -218,7 +224,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -409,6 +415,9 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
               "content-custody-smoke.json", "content-custody-evidence.json",
               "content-repair-smoke.json", "content-repair-evidence.json",
+              "agent-training-smoke.json", "agent-training-evidence.json",
+              "agent-training-worker.json", "agent-training-isolation.json",
+              "agent-training-provision.json", "agent-training-observer.stderr",
               "a14-evidence.json", "a15-evidence.json"}
 SAFE_NAMES.update(f"{kind}-{node}.{extension}" for node in NODES
                   for kind, extension in (("agent", "log"), ("helper", "log"),
@@ -538,7 +547,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -565,11 +574,19 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+if [ "$scenario" = agent-training ]; then
+    guest_phase agent-training
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-training-smoke.sh --execute --yes --expected-commit "$expected_commit"
+fi
 if [ "$scenario" = wifi-mesh ]; then
     guest_phase wifi-mesh-backend
     test "$(hostname)" = volparossa-alpha
@@ -680,7 +697,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \

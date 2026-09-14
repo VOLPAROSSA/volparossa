@@ -72,6 +72,21 @@ or illegally redistribute copyrighted works to build the classifier's tests/trai
 
 ## Reuse and separation
 
+The user explicitly confirmed on 2026-09-14 that autonomous training should exploit the
+existing distributed cache. This is a **required integration**, not an automatic property of
+the current cache or of local adapter training. Cache model weights, compatible adapters,
+eligible training packages and evaluations once, then prefer work on nodes already holding
+the required chunks. Otherwise retrieve only the missing chunks through the protected content
+datapath; use the same spare-capacity sharing budget as ordinary cache traffic.
+
+Eligibility for serving an object is not permission to train on it. An automatic training
+job needs an explicit dataset identity, origin, redistribution/training rights, privacy class
+and compatible model revision; arbitrary cached browsing content, private messages or peer
+instructions are not default training inputs. Dataset selection, deduplication and diverse
+sampling must avoid rewarding peers for flooding the cache with copies of one source.
+Validate candidate updates against held-out data before activation, with bounded rollback or
+quarantine; signature/hash checks alone do not detect poisoned or low-quality models.
+
 - Reuse content-addressed chunks, original signed manifests, protected peer retrieval and
   custody for public model weights, compatible updates and evaluation artifacts. Caching an
   artifact must not activate it. A signature proves provenance, not model correctness.
@@ -88,6 +103,32 @@ or illegally redistribute copyrighted works to build the classifier's tests/trai
   receive no helper privileges, node signing keys, home directory, browsing history or arbitrary
   tool authority. External task effects require narrowly scoped user-authorized capabilities;
   another agent's output cannot grant them.
+
+### Initial executable backend (development candidate)
+
+The user approved an existing open model as a starting point: SmolLM2-135M-Instruct at
+revision `83212e1e2b3cfd6958f3707877bb878945dea8ee` (Apache-2.0). The explicit guest-only
+provisioner in `workers/volparossa-ml/` verifies every model asset and all 38 CPU Python
+wheels against exact sizes/SHA-256 pins. It preserves original license/model-card bytes and
+does not install on the development host or fetch dependencies at worker runtime.
+
+`volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
+supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
+isolation, exposing only the installed runtime, selected public dataset, pinned model and
+new private output. The fixed worker performs inference or rank-4 LoRA training, compares
+actual base/adapter tensors, saves safetensors, loads a fresh base plus saved adapter and
+evaluates again. Rust enforces the wall-clock deadline, bounded protocol, resource-pressure
+cancellation and external artifact hashes. There is no unsandboxed fallback, private-input
+training, automatic cache training, peer job execution or automatic policy activation yet.
+
+The initial resource boundary includes two CPU threads maximum, idle CPU/IO priority,
+per-process address-space/CPU-time/file-size limits, bounded scratch space, sampled aggregate
+RSS/output cancellation and an owner-cancellation input. Sampled RSS is **not** a hard cgroup
+memory cap, and this foreground CLI does not yet detect all interactive, thermal or battery
+conditions. Actual model execution and sandbox observations must pass the disposable-guest
+smoke before claiming B01; improved answer quality, distributed training and the full brain
+remain separate work. A small development model is not sufficient evidence for reliable
+legal or content-policy judgments.
 
 ## Owner-first resource allocation
 
