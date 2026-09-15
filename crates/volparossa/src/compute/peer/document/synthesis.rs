@@ -194,6 +194,7 @@ pub(super) async fn advance(
             )
             .await?;
             let mut group_complete = true;
+            let mut pending_work = None;
             for (index, dataset) in prepared.datasets.iter().enumerate() {
                 let package = directory.join(format!("package-{index:04}"));
                 let expected = storage::expected(&package, &enrollment, &prepared, dataset, index)?;
@@ -204,6 +205,7 @@ pub(super) async fn advance(
                 } else {
                     None
                 };
+                let mut last_report = None;
                 if snapshot.as_ref().is_none_or(|s| s["complete"] != true)
                     && (args.follow.follow || rounds < u64::from(args.max_batches))
                     && !*cancelled.borrow()
@@ -229,6 +231,7 @@ pub(super) async fn advance(
                     .with_follow(args.follow.clone());
                     let report =
                         workflow::report_with_activity(&options, socket, cancelled).await?;
+                    super::save(&package, "last-workflow-report.json", &report, true)?;
                     rounds = rounds
                         .checked_add(
                             report["rounds_this_invocation"]
@@ -238,9 +241,14 @@ pub(super) async fn advance(
                         .context("compute_synthesis_round_overflow")?;
                     result["rounds_this_invocation"] = rounds.into();
                     snapshot = Some(workflow::task_snapshot_detailed(&work, &expected)?);
+                    last_report = Some(report);
                 }
                 let Some(snapshot) = snapshot.filter(|s| s["complete"] == true) else {
                     group_complete = false;
+                    pending_work = Some(json!({"package":index,
+                        "workflow_stopped":last_report.as_ref().map(|r| &r["stopped"]),
+                        "failure_code":last_report.as_ref().and_then(|r| r["packages"].as_array())
+                            .and_then(|p| p.iter().find_map(|p| p.get("failure_code")))}));
                     break;
                 };
                 let outputs = snapshot["outputs"]
@@ -290,6 +298,7 @@ pub(super) async fn advance(
                     &levels,
                     result,
                 );
+                result["synthesis"]["pending_work"] = json!(pending_work);
                 return Ok(());
             }
         }

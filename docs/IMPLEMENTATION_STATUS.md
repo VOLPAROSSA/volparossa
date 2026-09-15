@@ -11,8 +11,16 @@ it never presents that text as an original document excerpt or portable executio
 The same pinned tokenizer budgets every reduction prompt. Original source authority/expiry,
 all intermediate packages and full worker receipts are retained across resume. No parent is
 discarded to force convergence; non-shrinking reductions, wire truncation, cancellation and
-unfinished work remain incomplete. The live multi-level document scenario is not yet proven.
-This does not complete general task planning, private offload or B03.
+unfinished work remain incomplete. The [run on `342b8a80`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34911606997)
+failed before any synthesis worker was observed. Its summary reports ten fragment answers,
+but the exported worker evidence proves only the first two workers/four answers; the later
+retained-file export was not reached. The concrete cause is a missing v3 branch in the final
+`Options::validate` admission gate, before the broker starts a worker. That gate now applies
+the same strict, inference-only derived-data validator as the RPC boundary. Targeted admission
+and compute tests pass. Incomplete workflows retain fixed diagnostic categories without
+upstream text, and the fixture now exports bounded public partial evidence after its owner
+returns, before cleanup; this never satisfies the success gates. The corrected live multi-level
+scenario remains unproven. General task planning, private offload and B03 remain incomplete.
 See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
 
 Current publication-retry correction: a finite training loop no longer stops immediately

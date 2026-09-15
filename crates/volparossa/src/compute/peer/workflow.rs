@@ -500,6 +500,41 @@ fn stored_source(
     Ok((source, verified))
 }
 
+// Persist only a fixed local category, never a provider exception, prompt or filesystem path.
+fn failure_code(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "compute_distribute_capability_probe_unavailable" => "capability_unavailable",
+        "compute_distribute_capability_probe_timeout" => "capability_timeout",
+        "compute_distribute_peer_busy" => "peer_busy",
+        "compute_distribute_cancelled_before_submit" => "owner_cancelled_before_submit",
+        "compute_distribute_incompatible_models" | "compute_peer_profile" => "incompatible_model",
+        "compute_peer_document_not_supported" | "compute_peer_task_not_supported" => {
+            "unsupported_profile"
+        }
+        "compute_peer_job_rejected" => "job_rejected",
+        "compute_peer_source_expired" => "source_expired",
+        _ => "execution_or_verification_failed",
+    }
+}
+
+fn round_failure(result: &Result<serde_json::Value>) -> Option<&'static str> {
+    match result {
+        Err(error) => Some(failure_code(error)),
+        Ok(report) if report["complete"] == true => None,
+        Ok(report) => Some(
+            if report["jobs"]
+                .as_array()
+                .is_some_and(|jobs| jobs.iter().any(|job| job["state"] == "unconfirmed"))
+            {
+                // This says nothing about whether a remote worker started or stopped.
+                "jobs_unconfirmed"
+            } else {
+                "jobs_incomplete"
+            },
+        ),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep one bounded admission/reconciliation window and its retained progress together"
@@ -532,6 +567,7 @@ async fn advance(
         let (source_args, verified) =
             stored_source(&directory, package, enrollment.verified_at_unix_seconds)?;
         let mut progress = load_progress(&directory, &source_args, &verified, enrollment)?;
+        let mut package_failure = None;
         if !progress.complete()
             && args.execute
             && rounds < args.max_batches
@@ -580,6 +616,7 @@ async fn advance(
                     .await
                 };
                 progress = load_progress(&directory, &source_args, &verified, enrollment)?;
+                package_failure = round_failure(&result);
                 let result_failed = match result {
                     Err(error)
                         if args.follow.follow
@@ -607,9 +644,13 @@ async fn advance(
             }));
         }
         completed += usize::from(progress.complete());
-        packages.push(serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
+        let mut package_report = serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
             "complete":progress.complete(),"attempts":progress.attempts,"outputs":progress.outputs()?,
-            "pending_handles":progress.pending(),"task":package.task}));
+            "pending_handles":progress.pending(),"task":package.task});
+        if let Some(code) = package_failure {
+            package_report["failure_code"] = code.into();
+        }
+        packages.push(package_report);
     }
     let complete = completed == enrollment.packages.len();
     if complete {
@@ -828,6 +869,45 @@ mod tests {
     use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity, publish};
 
     use super::*;
+
+    #[test]
+    fn failed_round_diagnostics_never_persist_upstream_text() {
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("compute_peer_job_rejected")),
+            "job_rejected"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!(
+                "compute_distribute_capability_probe_timeout"
+            )),
+            "capability_timeout"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("private prompt or /private/path")),
+            "execution_or_verification_failed"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("compute_peer_job_rejected: injected text")),
+            "execution_or_verification_failed"
+        );
+        // An unconfirmed Submit is an Ok(partial report), not a terminal RPC error.
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":false,"jobs":[{
+                "state":"unconfirmed","error":"private upstream exception"
+            }]}))),
+            Some("jobs_unconfirmed")
+        );
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":false,"jobs":[{
+                "state":"running","error":"private upstream exception"
+            }]}))),
+            Some("jobs_incomplete")
+        );
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":true}))),
+            None
+        );
+    }
 
     struct Fixture {
         root: tempfile::TempDir,

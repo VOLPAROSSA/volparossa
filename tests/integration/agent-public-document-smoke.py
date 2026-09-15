@@ -120,11 +120,46 @@ def observe(work, pid):
     raise ValueError("document did not retain real peer handles within admission deadline")
 
 
-def snapshot(root, package_only=False):
+def partial_public_paths(root):
+    """Fixed coordinator outputs only; do not descend into keys, models or native caches."""
+    group = r"synthesis/level-[0-9]{2}-group-[0-9]{4}/"
+    package = r"(?:" + group + r")?package-[0-9]{4}/"
+    directories = re.compile(r"(?:synthesis|" + group[:-1] + r"|(?:" + group + r")?tokenizer(?:-attempt-[0-9]{4})?"
+        r"|" + package[:-1] + r"(?:/work(?:/package-0000(?:/attempt-[0-9]{4})?)?)?)")
+    root_files = {"source.txt", "source.manifest", "planner-input.json", "document-plan.json",
+                  "tokenizer-report.json", "document.json", "result.json", ".task.lock"}
+    group_files = {"group.json", "parents.json", "planner-input.json", "document-plan.json", "tokenizer-report.json"}
+    regular = re.compile(r"(?:" + package + r"(?:dataset\.json|dataset\.manifest|workflow-plan\.json|last-workflow-report\.json|work/(?:workflow\.json|result\.json|\.workflow\.lock"
+        r"|package-0000/(?:dataset\.json|manifest\.bin|attempt-[0-9]{4}/(?:result\.json|(?:job|original|observation|retry)-[0-9]{1,2}\.json|receipt-[0-9a-f]{32}\.json))))"
+        r"|(?:" + group + r")?tokenizer(?:-attempt-[0-9]{4})?/(?:report\.json|document-plan\.json))")
+    count = 0
+    owner = root.lstat().st_uid
+    for directory, children, files in os.walk(root, topdown=True, followlinks=False):
+        count += len(children) + len(files)
+        require(count <= 2048, "unbounded document fixture tree")
+        kept = []
+        for name in sorted(children):
+            path = Path(directory) / name
+            if directories.fullmatch(path.relative_to(root).as_posix()):
+                info = path.lstat()
+                require(stat.S_ISDIR(info.st_mode) and not path.is_symlink() and info.st_uid == owner
+                        and stat.S_IMODE(info.st_mode) == 0o700, "unsafe partial document directory")
+                kept.append(name)
+        children[:] = kept
+        for name in sorted(files):
+            path = Path(directory) / name
+            relative = path.relative_to(root).as_posix()
+            match = re.fullmatch(group + r"([^/]+)", relative)
+            if relative in root_files or regular.fullmatch(relative) or (match and match[1] in group_files):
+                yield path
+
+
+def snapshot(root, package_only=False, partial=False):
     info = root.lstat()
     require(stat.S_ISDIR(info.st_mode) and not root.is_symlink(), "wrong retained document root")
     result, total = {}, 0
-    for count, path in enumerate(root.rglob("*")):
+    paths = partial_public_paths(root) if partial else root.rglob("*")
+    for count, path in enumerate(paths):
         require(count < 2048, "unbounded document fixture tree")
         relative = path.relative_to(root).as_posix()
         if not package_only and (relative == "publication-cache" or relative.startswith("publication-cache/")
@@ -136,18 +171,19 @@ def snapshot(root, package_only=False):
             continue
         require(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and stat.S_IMODE(item.st_mode) == 0o600,
                 "unsafe retained document file")
-        if not package_only and relative == "result.json":
+        if not partial and not package_only and relative == "result.json":
             continue  # Only the root invocation summary is intentionally replaced.
         require(item.st_size <= 16 * 1048576, "oversized retained document file")
         raw = path.read_bytes()
         require(len(raw) == item.st_size, "retained file changed while reading")
-        require(raw or path.name in (".task.lock", ".workflow.lock"), "empty retained result is not an owned lock")
+        require(partial or raw or path.name in (".task.lock", ".workflow.lock"), "empty retained result is not an owned lock")
         total += len(raw)
         require(total <= MAX_EXPORT, "document evidence exceeds explicit bound")
         result[relative] = {"bytes": len(raw), "sha256": sha(raw), "inode": [item.st_dev, item.st_ino]}
-    require(f"{ATTEMPT}/job-0.json" in result if package_only else "document.json" in result,
-            "actual document execution files absent")
-    require(not any("attempt-0001" in name for name in result), "unexpected duplicate worker attempt")
+    if not partial:
+        require(f"{ATTEMPT}/job-0.json" in result if package_only else "document.json" in result,
+                "actual document execution files absent")
+        require(not any("attempt-0001" in name for name in result), "unexpected duplicate worker attempt")
     return result
 
 
@@ -174,6 +210,33 @@ def collect(work):
     raw = {name: (root / name).read_bytes().hex() for name in retained}
     write(work / "agent-public-document-files.json", {
         "snapshot": retained, "raw": raw, "observed_monotonic_ns": time.monotonic_ns()})
+
+
+def partial_files(root, revision, reason, owner_status):
+    require(re.fullmatch(r"[0-9a-f]{40}", revision) and reason in (
+        "synthesis_observer_failed", "synthesis_owner_failed") and type(owner_status) is int
+        and 0 <= owner_status <= 255, "invalid fixed partial-document context")
+    retained = snapshot(root, partial=True)
+    raw = {}
+    for name, identity in retained.items():
+        content = (root / name).read_bytes()
+        require(len(content) == identity["bytes"] and sha(content) == identity["sha256"],
+                "partial document bytes changed after snapshot")
+        raw[name] = content.hex()
+    value = {"version": 1, "source_revision": revision, "partial": True, "success": False,
+        "reason": reason, "owner_returned": True, "owner_exit_status": owner_status,
+        "snapshot": retained, "raw": raw, "observed_monotonic_ns": time.monotonic_ns(),
+        "scope": "public_coordinator_files_after_owner_return_not_complete_execution_evidence",
+        "model_runtime_keys_cache_exported": False, "remote_workers_stopped_claimed": False}
+    require(len(json.dumps(value, indent=2, allow_nan=False).encode()) + 1 <= MAX_EXPORT,
+            "encoded partial document evidence exceeds explicit bound")
+    return value
+
+
+def partial(work, revision, reason, owner_status):
+    JOBS["guest_work"](work)
+    write(work / "agent-public-document-partial-files.json",
+          partial_files(root_path(work), revision, reason, owner_status))
 
 
 def stopped(work, resumed=False):
@@ -444,12 +507,15 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     value = read(found, MAX_EXPORT) if found.is_file() else None
     host = read(work / "a15-evidence.json") if (work / "a15-evidence.json").is_file() else {}
     synthesis = value is not None and value["result"]["joining"] == "hierarchical_peer_synthesis"
+    partial_path = work / "agent-public-document-partial-files.json"
+    partial_identity = JOBS["file_hash"](partial_path, MAX_EXPORT) if partial_path.is_file() else None
     write(work / "agent-public-document-smoke.json", {
         "report_kind": "volparossa-public-document", "source_revision": revision, "scope": SYNTHESIS_SCOPE if synthesis else SCOPE,
         "success": status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
         "phase": phase, "observed_blocker": None if blocker == "NONE" else blocker, "runner_exit_status": status,
         "answer_quality_proven": False, "neural_synthesis_claimed": synthesis, "full_b03_claimed": False, "full_alpha_claimed": False,
-        "evidence": value, "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host})
+        "evidence": value, "partial_files": partial_identity,
+        "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host})
 
 
 def report(value, revision):
@@ -643,6 +709,61 @@ def self_test():
         else:
             raise AssertionError("hardlinked retained input accepted")
     print("document parser and real owned-file snapshot checks passed; no model or network executed")
+    partial_self_test()
+
+
+def partial_self_test():
+    # Actual file capture of synthetic protocol bytes, expressly not execution proof.
+    fixture = contract_fixture()
+    with tempfile.TemporaryDirectory(prefix="document-partial-test-") as directory:
+        root = Path(directory)
+        expected = {}
+        for name, data in fixture["files"]["raw"].items():
+            expected[name] = bytes.fromhex(data)
+        group = "synthesis/level-01-group-0000/"
+        for name, data in list(expected.items()):
+            if name.startswith("package-0000/"):
+                expected[group + name] = data
+        expected[group + "group.json"] = b'{"version":1}'
+        expected[group + "parents.json"] = b'[{"text":"Synthetic public parent output"}]'
+        expected[group + "planner-input.json"] = b'{"visibility":"public","synthesis":true}'
+        expected["result.json"] = b'{"complete":false}'
+        expected[group + "package-0000/work/package-0000/attempt-0000/observation-0.json"] = b'{"state":"failed"}'
+        expected[group + "package-0000/last-workflow-report.json"] = b'{"complete":false,"failure_code":"COMPUTE_RPC_UNCONFIRMED"}'
+        expected[group + "tokenizer-attempt-0001/report.json"] = b""
+        for name, data in expected.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600)
+        for path in root.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o700)
+        for name in ("identity.key", "passphrase", "publication-cache/private-chunk", group + "publication-cache/private-chunk"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"NEVER_EXPORT_PRIVATE_BYTES")
+            path.chmod(0o600)
+        # A forbidden directory must never even be traversed by the public collector.
+        (root / "model").symlink_to(root / "publication-cache", target_is_directory=True)
+        value = partial_files(root, "a" * 40, "synthesis_observer_failed", 1)
+        require(value["partial"] is True and value["success"] is False and value["owner_exit_status"] == 1
+                and value["remote_workers_stopped_claimed"] is False, "partial snapshot claims completed execution")
+        require(set(value["raw"]) == set(expected), "partial public manifests/handles/receipts lost or private files included")
+        for name, data in expected.items():
+            require(bytes.fromhex(value["raw"][name]) == data and value["snapshot"][name]["sha256"] == sha(data),
+                    "partial snapshot changed actual retained bytes")
+        require(b"NEVER_EXPORT_PRIVATE_BYTES".hex() not in json.dumps(value), "private bytes escaped public snapshot")
+        source = root / "source.manifest"
+        source.unlink()
+        source.symlink_to(root / "identity.key")
+        try:
+            partial_files(root, "a" * 40, "synthesis_owner_failed", 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("partial snapshot followed a substituted public-path symlink")
+    print("partial public snapshot and private exclusion checks passed; failure never relabelled PASS")
 
 
 def main(args):
@@ -665,6 +786,11 @@ def main(args):
         return first(work)
     if command == "collect":
         return collect(work)
+    if command == "partial":
+        try:
+            return partial(work, args[2], args[3], int(args[4]))
+        except (OSError, ValueError, KeyError, TypeError):
+            raise SystemExit("DOCUMENT_PARTIAL_SNAPSHOT_UNAVAILABLE") from None
     if command in ("stopped", "resumed"):
         return stopped(work, command == "resumed")
     if command == "evidence":

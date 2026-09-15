@@ -74,11 +74,30 @@ agent_public_document_run() {
         --max-batches 32 --max-seconds 600 --execute \
         >"$WORK/agent-public-document-result.json" 2>"$WORK/agent-public-document-result.err" &
     jobs_batch_pid=$!
+    document_observer_status=0
     python3 -B "$source_directory/tests/integration/agent-document-synthesis.py" observe "$WORK" "$jobs_batch_pid" \
         >"$WORK/agent-public-document-synthesis-observer.log" 2>"$WORK/agent-public-document-synthesis-observer.err" \
-        || fail DOCUMENT_ACTUAL_SYNTHESIS_WORKERS_NOT_OBSERVED
-    wait "$jobs_batch_pid" || fail DOCUMENT_REMAINING_PACKAGES_OR_SYNTHESIS_INCOMPLETE
+        || document_observer_status=$?
+    if [ "$document_observer_status" -ne 0 ] && kill -0 "$jobs_batch_pid" 2>/dev/null; then
+        # Preserve the existing owner cancellation/deadline instead of dropping its future.
+        kill -INT "$jobs_batch_pid" 2>/dev/null || true
+    fi
+    document_owner_status=0
+    wait "$jobs_batch_pid" || document_owner_status=$?
     jobs_batch_pid=
+    if [ "$document_observer_status" -ne 0 ] || [ "$document_owner_status" -ne 0 ]; then
+        document_partial_reason=synthesis_owner_failed
+        [ "$document_observer_status" -eq 0 ] || document_partial_reason=synthesis_observer_failed
+        # This is expressly PARTIAL, after owner return and before private cleanup.
+        # It never satisfies collect/evidence gates or changes the original failure.
+        if ! python3 -B "$document_script" partial "$WORK" "$expected_commit" \
+            "$document_partial_reason" "$document_owner_status" \
+            2>"$WORK/agent-public-document-partial-files.err"; then
+            printf '%s\n' 'DOCUMENT_PARTIAL_SNAPSHOT_UNAVAILABLE' >"$WORK/agent-public-document-partial-files.log"
+        fi
+        [ "$document_observer_status" -eq 0 ] || fail DOCUMENT_ACTUAL_SYNTHESIS_WORKERS_NOT_OBSERVED
+        fail DOCUMENT_REMAINING_PACKAGES_OR_SYNTHESIS_INCOMPLETE
+    fi
     python3 -B "$document_script" collect "$WORK" || fail DOCUMENT_RETAINED_FILES_INVALID
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail DOCUMENT_ROUTE_CLEANUP_FAILED

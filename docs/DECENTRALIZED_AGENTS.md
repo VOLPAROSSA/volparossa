@@ -868,8 +868,14 @@ that fail to shrink, or exceed 16 levels, stop incomplete without discarding sou
 
 The extended disposable document scenario must demonstrate at least two real reduction levels,
 exact parent coverage and signed provenance, one real final answer, and offline completed
-resume with unchanged receipts. Its live result is pending. General autonomous planning,
-confidential offload and full B03 remain open.
+resume with unchanged receipts. Its first live attempt on `342b8a80` failed: the final local
+preworker admission gate omitted v3, even though the RPC boundary already supported it.
+The corrected gate strictly validates v3 inference and still refuses derived training.
+Incomplete synthesis also retains `last-workflow-report.json` with fixed failure categories;
+an unconfirmed job is not treated as a stopped worker. The fixture exports only explicitly
+public partial files on failure, never relabelling them as complete execution evidence.
+The corrected live result remains pending. General autonomous planning, confidential offload
+and full B03 remain open.
 
 ## Private tasks and training data
 
