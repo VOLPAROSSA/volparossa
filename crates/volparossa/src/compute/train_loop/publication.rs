@@ -1,5 +1,10 @@
 //! Durable publication retry for already completed, owner-authorized public training.
 
+use std::{future::Future, time::Duration};
+
+use serde::Serialize;
+use tokio::time::Instant;
+
 use super::{
     Context, Cycle, Options, Path, Phase, Result, SignedManifest, Snapshot, State, Store, Value,
     VerifyingKey, active, content, ensure, json, now, read_file, watch,
@@ -14,6 +19,65 @@ struct Binding<'a> {
     source_expires: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DrainOutcome {
+    Complete,
+    Expired,
+    Cancelled,
+    Deadline,
+}
+
+fn settled(state: &State) -> Option<DrainOutcome> {
+    if state
+        .cycles
+        .iter()
+        .any(|cycle| matches!(cycle.phase, Phase::Trained | Phase::PublishPending))
+    {
+        None
+    } else if state
+        .cycles
+        .iter()
+        .any(|cycle| cycle.phase == Phase::PublicationExpired)
+    {
+        Some(DrainOutcome::Expired)
+    } else {
+        Some(DrainOutcome::Complete)
+    }
+}
+
+/// One fixed post-cycle window for the entire retained set, never more model execution.
+pub(super) async fn drain(
+    args: &Options,
+    socket: &Path,
+    store: &Store,
+    state: &mut State,
+    activity: &watch::Receiver<bool>,
+) -> Result<DrainOutcome> {
+    let deadline = Instant::now() + Duration::from_secs(u64::from(args.max_seconds));
+    loop {
+        if let Some(outcome) = settled(state) {
+            return Ok(outcome);
+        }
+        if !active(activity) {
+            return Ok(DrainOutcome::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Ok(DrainOutcome::Deadline);
+        }
+        pending_until(args, socket, store, state, activity, Some(deadline)).await?;
+        if let Some(outcome) = settled(state) {
+            return Ok(outcome);
+        }
+        let mut receiver = activity.clone();
+        tokio::select! {
+            biased;
+            _ = receiver.changed() => {},
+            () = tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(250))) => {},
+        }
+    }
+}
+
 pub(super) async fn pending(
     args: &Options,
     socket: &Path,
@@ -21,18 +85,31 @@ pub(super) async fn pending(
     state: &mut State,
     activity: &watch::Receiver<bool>,
 ) -> Result<()> {
+    pending_until(args, socket, store, state, activity, None).await
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep durable publication preparation before every bounded handoff and terminal state save"
+)]
+async fn pending_until(
+    args: &Options,
+    socket: &Path,
+    store: &Store,
+    state: &mut State,
+    activity: &watch::Receiver<bool>,
+    deadline: Option<Instant>,
+) -> Result<()> {
     let Some(name) = &args.publish_name else {
         return Ok(());
     };
     let mut prepared = Vec::new();
     let mut changed = false;
     for (index, cycle) in state.cycles.iter_mut().enumerate() {
-        if !active(activity) {
+        if !active(activity) || deadline.is_some_and(|limit| Instant::now() >= limit) {
             break;
         }
-        if !matches!(cycle.phase, Phase::Trained | Phase::PublishPending)
-            || cycle.next_publication_attempt > now()?
-        {
+        if !retry_due(cycle, store, now()?)? {
             continue;
         }
         let previous = serde_json::to_value(&*cycle)?;
@@ -47,7 +124,7 @@ pub(super) async fn pending(
     }
     changed = false;
     for (index, verified) in prepared {
-        if !active(activity) {
+        if !active(activity) || deadline.is_some_and(|limit| Instant::now() >= limit) {
             break;
         }
         let cycle = &mut state.cycles[index];
@@ -60,25 +137,43 @@ pub(super) async fn pending(
             args.limits.clone(),
         )
         .expect_manifest_id(*verified.manifest_id());
-        let mut receiver = activity.clone();
-        let receipt = tokio::select! {
-            biased;
-            _ = receiver.changed() => None,
-            result = content::contribute_existing(&request, socket) => Some(result)
+        let expiry_deadline = Instant::now()
+            + Duration::from_secs(verified.validity().expires.saturating_sub(now()?));
+        let handoff_deadline = deadline.map_or(expiry_deadline, |limit| limit.min(expiry_deadline));
+        // All identities above have been fsynced. Only this affine IPC transfer is droppable;
+        // dropping it closes its socket, not a model worker or detached local publication.
+        let receipt = handoff(
+            activity,
+            handoff_deadline,
+            content::contribute_existing(&request, socket),
+        )
+        .await;
+        let reason = match receipt {
+            Handoff::Received(Ok(mut receipt)) => {
+                validate_receipt(&receipt, &verified)?;
+                let observed = now()?;
+                ensure!(
+                    observed >= verified.validity().created
+                        && observed < verified.validity().expires,
+                    "train_loop_receipt_expired"
+                );
+                // Local recovery evidence, not a portable signed remote attestation.
+                receipt["coordinator_verified_at_unix_seconds"] = observed.into();
+                store.write_cycle_json(cycle.sequence, "contribution.json", &receipt)?;
+                cycle.phase = Phase::Complete;
+                None
+            }
+            Handoff::Received(Err(error)) => Some(failure_reason(&error)),
+            Handoff::Cancelled => Some("owner_cancelled"),
+            Handoff::Deadline => Some("deadline"),
         };
-        if let Some(Ok(mut receipt)) = receipt {
-            validate_receipt(&receipt, &verified)?;
-            let observed = now()?;
-            ensure!(
-                observed >= verified.validity().created && observed < verified.validity().expires,
-                "train_loop_receipt_expired"
-            );
-            // Local recovery evidence, not a portable signed remote attestation.
-            receipt["coordinator_verified_at_unix_seconds"] = observed.into();
-            store.write_cycle_json(cycle.sequence, "contribution.json", &receipt)?;
-            cycle.phase = Phase::Complete;
-        } else {
-            defer(cycle, args.poll_seconds)?;
+        if let Some(reason) = reason {
+            eprintln!("compute loop_event=publication_handoff_deferred reason={reason}");
+            if now()? >= verified.validity().expires {
+                cycle.phase = Phase::PublicationExpired;
+            } else {
+                defer(cycle, args.poll_seconds)?;
+            }
         }
         changed = true;
     }
@@ -86,6 +181,86 @@ pub(super) async fn pending(
         store.save_state(&serde_json::to_value(state)?)?;
     }
     Ok(())
+}
+
+fn retry_due(cycle: &Cycle, store: &Store, at: u64) -> Result<bool> {
+    if !matches!(cycle.phase, Phase::Trained | Phase::PublishPending) {
+        return Ok(false);
+    }
+    if cycle.next_publication_attempt <= at {
+        return Ok(true);
+    }
+    // Expiry retirement must not wait for a later retry slot. prepare() still independently
+    // verifies the original envelope/binding before changing its durable phase.
+    let expires = if let Some(publication) = &cycle.publication {
+        publication["expires"]
+            .as_u64()
+            .context("train_loop_publication_expiry")?
+    } else {
+        store.read_cycle_json(cycle.sequence, "result.json")?["source_expires_unix_seconds"]
+            .as_u64()
+            .context("train_loop_source_expiry")?
+    };
+    Ok(expires <= at)
+}
+
+enum Handoff {
+    Received(Result<Value>),
+    Cancelled,
+    Deadline,
+}
+
+async fn handoff(
+    activity: &watch::Receiver<bool>,
+    deadline: Instant,
+    transfer: impl Future<Output = Result<Value>>,
+) -> Handoff {
+    let mut receiver = activity.clone();
+    tokio::select! {
+        biased;
+        () = async {
+            while active(&receiver) {
+                if receiver.changed().await.is_err() { break; }
+            }
+        } => Handoff::Cancelled,
+        () = tokio::time::sleep_until(deadline) => Handoff::Deadline,
+        result = transfer => Handoff::Received(result),
+    }
+}
+
+// Never persist a formatted upstream exception, path, publisher name or payload. These
+// complete fixed rejection strings are produced by the existing typed control response.
+fn failure_reason(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        if cause.is::<tokio::time::error::Elapsed>() {
+            return "timeout";
+        }
+        if let Some(content) = cause.downcast_ref::<volparossa_content::Error>() {
+            return match content {
+                volparossa_content::Error::Io(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    "cache_busy"
+                }
+                volparossa_content::Error::Quota => "cache_quota",
+                volparossa_content::Error::Expired => "expired",
+                _ => "content_invalid",
+            };
+        }
+        if cause.is::<volparossa_content::transfer::TransferError>() {
+            return "transfer";
+        }
+        if cause.is::<std::io::Error>() {
+            return "io";
+        }
+    }
+    match error.root_cause().to_string().as_str() {
+        "agent rejected request: CONTENT_BUSY (InvalidState)" => "agent_busy",
+        "agent rejected request: CONTENT_UNAVAILABLE (Unavailable)" => "agent_unavailable",
+        "agent rejected request: CONTENT_POLICY (Policy)" => "agent_policy",
+        "agent rejected request: CONTENT_INVALID (InvalidRequest)" => "agent_invalid",
+        _ => "unconfirmed",
+    }
 }
 
 async fn prepare(
@@ -292,6 +467,91 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf};
     use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity};
+
+    #[tokio::test]
+    async fn all_handoffs_share_one_deadline_and_drop_only_the_transfer() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        struct TransferOwner(Arc<AtomicBool>);
+        impl Drop for TransferOwner {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let (_owner, activity) = watch::channel(true);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let first = handoff(&activity, deadline, async {
+            Err(anyhow::anyhow!(
+                "agent rejected request: CONTENT_BUSY (InvalidState)"
+            ))
+        })
+        .await;
+        assert!(matches!(first, Handoff::Received(Err(_))));
+        let closed = Arc::new(AtomicBool::new(false));
+        let transfer_owner = TransferOwner(Arc::clone(&closed));
+        let transfer = async move {
+            let _owner = transfer_owner;
+            std::future::pending().await
+        };
+        assert!(matches!(
+            handoff(&activity, deadline, transfer).await,
+            Handoff::Deadline
+        ));
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(matches!(
+            handoff(&activity, deadline, async {
+                panic!("a later item must not receive a fresh transfer window")
+            })
+            .await,
+            Handoff::Deadline
+        ));
+        let (_owner, cancelled) = watch::channel(false);
+        assert!(matches!(
+            handoff(
+                &cancelled,
+                Instant::now() + Duration::from_secs(60),
+                async { panic!("cancelled owner cannot start another handoff") }
+            )
+            .await,
+            Handoff::Cancelled
+        ));
+    }
+
+    #[test]
+    fn expired_publications_are_not_complete_and_failure_reasons_are_fixed() {
+        let mut state = State::new(1);
+        assert_eq!(settled(&state), Some(DrainOutcome::Complete));
+        state.cycles.push(Cycle {
+            sequence: 1,
+            source: 0,
+            phase: Phase::PublicationExpired,
+            snapshot: None,
+            training: None,
+            publication: None,
+            next_publication_attempt: 0,
+        });
+        assert_eq!(settled(&state), Some(DrainOutcome::Expired));
+        state.cycles[0].phase = Phase::PublishPending;
+        assert_eq!(settled(&state), None);
+        let secret = "/private/key-and-publisher-name";
+        assert_eq!(failure_reason(&anyhow::anyhow!(secret)), "unconfirmed");
+        let io = anyhow::Error::new(std::io::Error::other(secret)).context("private source");
+        assert_eq!(failure_reason(&io), "io");
+        let busy = anyhow::Error::new(volparossa_content::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            secret,
+        )));
+        assert_eq!(failure_reason(&busy), "cache_busy");
+        let rejected =
+            anyhow::anyhow!("agent rejected request: CONTENT_BUSY (InvalidState)").context(secret);
+        assert_eq!(failure_reason(&rejected), "agent_busy");
+        let spoof =
+            anyhow::anyhow!("agent rejected request: CONTENT_BUSY (InvalidState): {secret}");
+        assert_eq!(failure_reason(&spoof), "unconfirmed");
+    }
 
     struct Fixture {
         root: tempfile::TempDir,

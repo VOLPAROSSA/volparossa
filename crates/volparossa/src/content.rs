@@ -25,8 +25,10 @@ mod handoff;
 mod https_download;
 mod mailbox;
 mod named_download;
+pub(crate) mod peer_update;
 mod private_message;
 mod site;
+pub(crate) mod source_catalog;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {

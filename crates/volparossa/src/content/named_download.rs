@@ -88,7 +88,7 @@ pub(super) async fn prepare(
 ) -> Result<VerifiedNamedDownload> {
     timeout(
         Duration::from_secs(600),
-        download(args, socket, private_parent, None),
+        download(args, socket, private_parent, None, false),
     )
     .await
     .context("named download deadline exceeded; verified agent cache chunks may remain")?
@@ -123,10 +123,26 @@ pub(super) async fn prepare_bounded(
 ) -> Result<VerifiedNamedDownload> {
     timeout(
         Duration::from_secs(600),
-        download(args, socket, private_parent, Some(requirement)),
+        download(args, socket, private_parent, Some(requirement), true),
     )
     .await
     .context("bounded named download deadline exceeded; verified agent cache chunks may remain")?
+}
+
+/// Refresh authenticated name metadata while retaining bounded, verified chunk reuse.
+/// This observes available providers, not a globally latest publication oracle.
+pub(super) async fn prepare_bounded_refresh(
+    args: &FetchName,
+    socket: &Path,
+    private_parent: &Path,
+    requirement: &Requirement,
+) -> Result<VerifiedNamedDownload> {
+    timeout(
+        Duration::from_secs(600),
+        download(args, socket, private_parent, Some(requirement), false),
+    )
+    .await
+    .context("bounded named refresh deadline exceeded; verified agent cache chunks may remain")?
 }
 
 async fn download(
@@ -134,6 +150,7 @@ async fn download(
     socket: &Path,
     private_parent: &Path,
     requirement: Option<&Requirement>,
+    prefer_cached: bool,
 ) -> Result<VerifiedNamedDownload> {
     let query = NameQuery::new(
         args.publisher_key.to_bytes(),
@@ -151,7 +168,7 @@ async fn download(
         expected_content_type: requirement.map(|value| value.content_type.to_owned()),
         max_object_bytes: requirement.map(|value| value.maximum_bytes),
         expected_manifest_id: requirement.and_then(|value| value.manifest_id.map(|id| id.to_vec())),
-        prefer_cached: requirement.is_some(),
+        prefer_cached,
     };
     let (mut stream, request_id, response) =
         crate::control::begin_request(socket, Operation::ContentFetchName(request)).await?;

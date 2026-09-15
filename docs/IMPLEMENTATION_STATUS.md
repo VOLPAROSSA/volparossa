@@ -2,7 +2,148 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
+
+Current public-document synthesis candidate: `compute peer document --synthesize` chains
+real peer inference over the checked fragment answers until one answer remains. A separate
+inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;
+it never presents that text as an original document excerpt or portable execution attestation.
+The same pinned tokenizer budgets every reduction prompt. Original source authority/expiry,
+all intermediate packages and full worker receipts are retained across resume. No parent is
+discarded to force convergence; non-shrinking reductions, wire truncation, cancellation and
+unfinished work remain incomplete. The [run on `342b8a80`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34911606997)
+failed before any synthesis worker was observed. Its summary reports ten fragment answers,
+but the exported worker evidence proves only the first two workers/four answers; the later
+retained-file export was not reached. The concrete cause is a missing v3 branch in the final
+`Options::validate` admission gate, before the broker starts a worker. That gate now applies
+the same strict, inference-only derived-data validator as the RPC boundary. Targeted admission
+and compute tests pass. Incomplete workflows retain fixed diagnostic categories without
+upstream text, and the fixture now exports bounded public partial evidence after its owner
+returns, before cleanup; this never satisfies the success gates. The corrected live multi-level
+scenario remains unproven. General task planning, private offload and B03 remain incomplete.
+See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
+
+Current publication-retry correction: a finite training loop no longer stops immediately
+after the first handoff once its cycle budget is exhausted. It drains already approved
+publications within one shared final `max_seconds` window, without new training, retaining
+original identities, source expiry and owner cancellation. Expiry, timeout and pending work
+remain explicit. All 34 focused training-loop tests pass. The peer-learning fixture still
+requires the actual contribution receipt. The [new run on `6a782752`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34908647293)
+reached the bounded 600-second deadline after 600 explicit `agent_policy` rejections, leaving
+one publication pending. The learner's Client fixture has no enabled relay/contribution service;
+the production publication guard therefore rejects it before accepting the body. The original
+catalog cycles, protected peer import, comparison, adoption, eight further updates and validation
+have retained raw evidence, but republication and the later independent named-import gate still
+do not pass. Cleanup removed all owned objects and preserved guest-host state. Neither this run
+nor the failed `08457e1e` run below is relabelled as successful.
+
+The fixture correction places the learner on R3, whose real `provider-c` contribution
+service is enabled. Its own agent, cache and five model workers use R3's namespace; three
+temporary neighbor links permit selection of two protected relay paths to R4. R3's existing
+Exit-facing link permits only its separate TCP18080 serving role, never consumer traffic.
+After learning, its service and agent stop and the temporary links are removed before the
+original independent Client named-import gate. The [run on `68314466`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34912575899)
+completed the five real peer-learning workers, approved one cycle and published it with
+`pending_publications: 0`. The full run remains **failed** at the physical capture gate, before
+the independent Client named import. All 962 rejected headers were fixed UDP41000-to-41000
+attempts to known fixture peers on a dummy `underlay`, not TCP18080 content transfers. The
+corrected classifier records only those exact phase/interface/source/destination/port tuples
+as `underlay_control_attempt_packets`; this proves neither delivery nor authentication and
+does not count as WireGuard or content bytes. Direct-exit, direct content and unknown-tuple
+rejection remain unchanged. Focused positive and negative capture checks pass; the new combined
+live scenario remains pending. Cleanup removed all owned objects and preserved guest-host
+state. No product publication or privacy guard was relaxed, and the original run stays failed.
+
+Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
+accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
+receipts and original leases remain unchanged; eligible failed rows prefer another available
+compatible enrolled peer. Owner cancellation, original source expiry and retained-attempt limits
+stop continuation. All 27 focused peer tests pass, including incomplete-cancellation exit status
+and default manual behavior. The [run on `8f49986e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34907950110)
+and reconstruction of its unchanged original raw evidence pass: one owner command survived
+worker loss, retained the other worker's completed result, and automatically moved only failed
+row 0 to a new worker. The replacement appeared 18.821 seconds after loss. Six captures across
+28 interfaces show no direct client-to-exit or forbidden traffic; all owned objects were removed
+and the guest-host state stayed unchanged. No general planning, private offload, answer synthesis
+or completed B03 is established by that run.
+See [automatic continuation](DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
+
+Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly
+enrolled signed adapter channels, resolves their exact datasets only against independently
+selected sources, and locally compares an imported update against the actual current adapter
+with two real inference calls on the pinned validation source. Only a measured improvement is
+adopted. The next local training cycle uses those exact imported files, retains separate foreign
+and local lineage, and still needs the normal local promotion gates before publication. The
+96 preceding focused compute tests, nine peer-related tests (including original import and
+lineage checks), and strict CLI Clippy pass. The [combined run on `08457e1e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34906223498)
+reached actual peer import, two comparison inferences, adoption, an eight-update local training
+cycle and two further validation inferences. It **failed** the final peer-learning check: the
+new local publication remained `publish_pending` after the one-cycle invocation ended. The
+original catalog's later independent Client import was not reached, so its earlier failure is
+not claimed fixed. Cleanup completed with unchanged guest-host state. Completed cross-node
+learning and republication remain unproven.
+See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
+
+The preceding version-2 `compute train-loop` enrollment now follows
+explicitly selected, signed public source catalogs. The runtime refreshes catalog metadata,
+retains stable source/revision progress, fetches newly selected exact datasets independently of
+cache availability, and binds the original catalog authorization and expiry to real cycle
+admission. The [live run on `50d53733`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903399004)
+completed both real eight-update cycles, four validation inferences, catalog expansion to the
+new uncached dataset and a zero-attempt restart. It then **failed** during independent Client
+import with `CONTENT_UNAVAILABLE`; the full scenario is not proven. Both original catalogs,
+the new dataset, validation source and both published updates independently pass signature
+verification. Cleanup completed with unchanged guest-host state. The new combined proof retains
+this original gate and adds fixed, non-sensitive provider failure categories to distinguish the
+next failure; cache/registry contention is a hypothesis, not an established cause. See
+[catalog usage and bounds](DECENTRALIZED_AGENTS.md#signed-public-source-catalogs).
+
+The prior [second-source run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
+completed two eight-update training cycles, four isolated zero-update inference jobs, both
+promotion gates and protected peer adoption. Its workflow remains **failed**: the evidence
+checker expected strings instead of the actual worker output objects, then expected a null
+`training` field that Rust omits. With those two narrow corrections, complete reconstruction of
+the unchanged original raw artifact passes. Checker SHA-256:
+`11ba86557ba67563f3b8387a78f3e2084ad8aeddc13fd2c91b527e71466d267c`;
+429,704-byte canonical reconstruction SHA-256:
+`36484d5caa8b67847769e2adead4059d9f5b771a7fe30f025be43a07b820e7fb`.
+The separately selected signed validation dataset is 641 bytes, obtained cold from R5; actual
+12-target-token losses are `0.839399 -> 0.656192 -> 0.588994`. Both cycles are approved; the four
+generated answers remain identical, so neither better answers nor a live rejection is proven.
+The final Client retrieves 943,733 adapter bytes and 1,005 dataset bytes through R4 after R5
+serving stops, then uses the exact received parameters. Ten captures / 78 interfaces / 28,567
+frames have no drops, malformed or forbidden/direct-exit traffic. Cleanup leaves zero owned
+objects; before/after guest-host hash is
+`bde4be393adbc2a3e0d380bd06ec8f897003648cee8dd3f7de191e188cea9250`.
+The corrected [run on `842e845b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901453523)
+now passes its workflow and exact-source raw reconstruction. It retains both real eight-update
+cycles, all four second-source inference jobs and protected adoption; all three original
+Ed25519 manifests independently verify. The measured 12-token losses are
+`0.839408 -> 0.656203 -> 0.589002`; both candidates are promoted, without a better-answer or
+live-rejection claim. Its 430,839-byte canonical reconstruction has SHA-256
+`c537beefec5f11a3183235f50c1aa90533d14ad048a78a8fcbb0c1086add67d4`.
+Ten captures / 79 interfaces / 27,656 frames contain no forbidden, direct-exit, malformed or
+dropped packets; both relay legs carry data. Cleanup leaves zero owned objects and matching
+guest-host hashes. B05 remains incomplete for its remaining cooperative-learning scope.
+
+Public-document execution now has scoped live proof. On the earlier `b0c10425`, the startup diagnostic
+shows an active/running broker without its socket after 150 polls (17.612 s elapsed,
+17.399 s CPU), not a failed service. Before binding, that build synchronously hashes the full
+269,060,552-byte pinned model in unoptimized development code. `35fd9551` therefore optimizes
+only the pinned SHA-2 implementation in the development profile; it preserves the full hash
+verification and existing timeout. Its [actual rerun](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901448083)
+observes both broker sockets ready in 0.454/0.464 seconds, but fails later before Python starts:
+the owner tokenizer reports `stderr_class=proc_mount`. The document fixture inherited the
+network service's masked mount view; the candidate now uses the existing net-only owner-launch
+pattern while preserving service protections and the actual worker sandbox. The corrected
+[run on `1bd44d11`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903185520)
+passes its workflow and exact-source raw reconstruction: 5,120 original bytes become nine
+byte-covering portions in three signed task packages, with five real peer-job receipts and
+overlapping workers on two nodes. After both brokers and their worker families stop, a resume
+completes from unchanged retained files with zero new rounds. Four original Ed25519 manifests
+verify; six captures / 28 interfaces / 45,450 frames contain no forbidden/direct traffic or
+drops. Cleanup leaves zero owned objects and unchanged guest-host state. PR #125 is merged;
+this is public document execution, not private distributed inference or general reasoning.
 
 New user-requested scope: [distributed content caching, publishing and offline delivery](CONTENT_NETWORK_PROPOSAL.md).
 Additional scope requested on 2026-09-14: [cooperative trained agents and fully automatic

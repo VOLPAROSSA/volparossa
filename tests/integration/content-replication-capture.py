@@ -63,6 +63,21 @@ MAX_FRAME_BYTES = 65_589  # Ethernet + IPv6 header + maximum non-jumbo IPv6 payl
 MAX_SECONDS = 1800
 DRAIN_SECONDS = 3
 MAX_HEADER_SAMPLES = 32
+LEARNER_IP = "48.164.4.1"
+LEARNER_PROVIDER_COUNTERS = ("learner_provider_request_packets", "learner_provider_response_packets",
+                             "learner_provider_response_payload_bytes")
+# add_public_underlay() installs a dummy interface with a default but no peer.
+# These are the exact missing public /32 routes in the peer-learning topology,
+# including either alternative R1/R2 data relay. Discovery may attempt its fixed
+# UDP listener there; these headers prove neither delivery nor authentication.
+LEARNER_UNROUTED_CONTROL = {
+    "relay3": {"49.165.5.1", "50.166.6.1", "51.167.7.1"},
+    "relay4": {"48.164.4.1", "50.166.6.1", "51.167.7.1"},
+    "exit": {"40.156.1.1", "41.157.2.1", "51.167.7.1"},
+    "relay0": {"44.160.1.1", "45.161.2.1"},
+    "relay1": {"42.158.0.1", "45.161.2.1", "51.167.7.1"},
+    "relay2": {"42.158.0.1", "44.160.1.1", "51.167.7.1"},
+}
 
 
 def fixture_mdns_addresses():
@@ -135,8 +150,26 @@ FIXTURE_ADDRESS_LABELS.update({"224.0.0.251": "mdns.multicast", "224.0.0.22": "i
                                "0.0.0.0": "unspecified.v4"})
 
 
-def exact_control_pair(node, iface, source, destination):
-    local, remote = EXACT_CONTROL_LINKS.get((node, iface), ((), ()))
+def peer_learning_links():
+    """Only the three late R3 client legs; old capture phases retain their old maps."""
+    controls = dict(EXACT_CONTROL_LINKS)
+    mdns = dict(MDNS_INTERFACE_ADDRESSES)
+    mdns["relay3", "underlay"] = {LEARNER_IP}
+    for index, segment in enumerate((110, 112, 114)):
+        first, second = f"10.241.{segment}.1", f"10.241.{segment}.2"
+        local, remote = {LEARNER_IP, first}, {PUBLIC[f"relay{index}"], second}
+        controls["relay3", f"lr{index}"] = local, remote
+        controls[f"relay{index}", f"r{index}l"] = remote, local
+        mdns["relay3", f"lr{index}"] = {first, second}
+        mdns[f"relay{index}", f"r{index}l"] = {first, second}
+    return controls, mdns
+
+
+LEARNER_CONTROL_LINKS, LEARNER_MDNS_ADDRESSES = peer_learning_links()
+
+
+def exact_control_pair(node, iface, source, destination, links=None):
+    local, remote = (EXACT_CONTROL_LINKS if links is None else links).get((node, iface), ((), ()))
     return ((source in local and destination in remote)
             or (source in remote and destination in local))
 
@@ -156,9 +189,9 @@ def quoted_udp(payload):
     return (socket.inet_ntoa(quote[12:16]), sport, socket.inet_ntoa(quote[16:20]), dport)
 
 
-def exact_control_port_unreachable(node, iface, source, destination, payload):
+def exact_control_port_unreachable(node, iface, source, destination, payload, links=None):
     if len(payload) < 8 or payload[:2] != b"\x03\x03" \
-            or not exact_control_pair(node, iface, source, destination):
+            or not exact_control_pair(node, iface, source, destination, links):
         return False
     quoted = quoted_udp(payload)
     if quoted is None:
@@ -223,8 +256,9 @@ def exact_repair_wireguard_unreachable(layout, node, iface, source, destination,
 
 def exact_repair_mdns_membership(layout, node, iface, source, destination, payload, frame):
     """Only the observed single-group IGMPv3 mDNS join on an assigned fixture link."""
-    return (layout["phase"] == "repair-uptake"
-            and source in MDNS_INTERFACE_ADDRESSES.get((node, iface), ())
+    addresses = LEARNER_MDNS_ADDRESSES if layout["phase"] == "peer-learning" else MDNS_INTERFACE_ADDRESSES
+    return (layout["phase"] in ("repair-uptake", "peer-learning")
+            and source in addresses.get((node, iface), ())
             and destination == "224.0.0.22" and len(payload) == 16
             and payload[:2] == b"\x22\x00" and payload[4:12] == b"\x00\x00\x00\x01\x04\x00\x00\x00"
             and payload[12:] == socket.inet_aton("224.0.0.251")
@@ -234,12 +268,12 @@ def exact_repair_mdns_membership(layout, node, iface, source, destination, paylo
 
 
 def validate_layout(layout):
-    if not isinstance(layout, dict) or layout.get("phase") not in ("uptake", "repair-uptake", "reserve-fetch"):
+    if not isinstance(layout, dict) or layout.get("phase") not in ("uptake", "repair-uptake", "reserve-fetch", "peer-learning"):
         raise ValueError("invalid replication capture phase")
     expected = (("relay4", "relay5") if layout["phase"] in ("uptake", "repair-uptake")
-                else ("client", "relay4"))
+                else ("relay3", "relay4") if layout["phase"] == "peer-learning" else ("client", "relay4"))
     for field, node in (("client", expected[0]), ("provider", expected[1]), ("exit", "exit")):
-        if layout.get(field) != {"node": node, "ip": PUBLIC[node]}:
+        if layout.get(field) != {"node": node, "ip": LEARNER_IP if node == "relay3" else PUBLIC[node]}:
             raise ValueError("substituted replication capture endpoint")
     relays = layout.get("relays")
     # Autonomous repair has not selected its route when capture starts. Record all three
@@ -271,6 +305,9 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
     if not isinstance(iface, str) or not iface:
         raise ValueError("missing physical capture interface")
     client, exit_ip, provider = (layout[name]["ip"] for name in ("client", "exit", "provider"))
+    learning = layout["phase"] == "peer-learning"
+    controls = LEARNER_CONTROL_LINKS if learning else EXACT_CONTROL_LINKS
+    mdns_addresses = LEARNER_MDNS_ADDRESSES if learning else MDNS_INTERFACE_ADDRESSES
     pair = {src, dst}
     source, destination = ipaddress.ip_address(src), ipaddress.ip_address(dst)
     if source.version != destination.version:
@@ -285,6 +322,16 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
                 and sport != 0 and dport == 5353:
             return {"mdns_packets": 1, "control_packets": 1}
         return {"forbidden_packets": 1}
+    # R3 also contributes provider-c. This is incoming Exit-originated serving on
+    # its old endpoint link, never its consumer dataplane or a direct WG/control leg.
+    # Keep these bytes separate from the R4 fetch whose protected path is proven below.
+    if learning and pair == {client, exit_ip}:
+        if protocol == socket.IPPROTO_TCP and (node, iface) in (("relay3", "r3x"), ("exit", "xr3")):
+            if (src, dst) == (exit_ip, client) and sport != 0 and dport == 18080:
+                return {"learner_provider_request_packets": 1}
+            if (src, dst) == (client, exit_ip) and sport == 18080 and dport != 0:
+                return {"learner_provider_response_packets": 1, "learner_provider_response_payload_bytes": len(payload)}
+        return {"forbidden_packets": 1, "direct_client_exit_packets": 1}
     # Only this uptake fixture's independent local owner socket; never an Exit/provider
     # bypass. The exact bound tuple, interface, payload shape and phase are mandatory.
     if layout["phase"] == "uptake" and protocol == socket.IPPROTO_UDP \
@@ -292,13 +339,19 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
             and (src, sport, dst, dport) == ("10.241.90.1", 19004, "10.241.90.2", 19004) \
             and len(payload) == 1200 and payload[:8] == b"VPC04OWN":
         return {"owner_fixture_packets": 1, "owner_fixture_payload_bytes": len(payload)}
-    if protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
+    if not learning and protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
             and src in CONTROL_PEERS and dst in CONTROL_PEERS and src != dst:
         return {"control_packets": 1}
+    if learning and iface == "underlay" and protocol == socket.IPPROTO_UDP \
+            and sport == dport == 41000 and src == (LEARNER_IP if node == "relay3" else PUBLIC.get(node)) \
+            and dst in LEARNER_UNROUTED_CONTROL.get(node, ()):
+        # Socket attempts only. Never count as connected/authenticated control,
+        # a WireGuard leg, provider payload, or a successful direct content fetch.
+        return {"control_packets": 1, "underlay_control_attempt_packets": 1}
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport != 0 \
-            and 41000 in (sport, dport) and exact_control_pair(node, iface, src, dst):
+            and 41000 in (sport, dport) and exact_control_pair(node, iface, src, dst, controls):
         return {"control_packets": 1}
-    if protocol == socket.IPPROTO_ICMP and exact_control_port_unreachable(node, iface, src, dst, payload):
+    if protocol == socket.IPPROTO_ICMP and exact_control_port_unreachable(node, iface, src, dst, payload, controls):
         return {"control_packets": 1, "control_port_unreachable_packets": 1}
     if protocol == socket.IPPROTO_ICMP and exact_repair_wireguard_unreachable(
             layout, node, iface, src, dst, payload):
@@ -311,10 +364,11 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
         return {"control_packets": 1, "mdns_membership_packets": 1}
     # Pinned libp2p-mdns uses a separate ephemeral-port send socket, not source5353.
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport == 5353 \
-            and dst == "224.0.0.251" and src in MDNS_INTERFACE_ADDRESSES.get((node, iface), ()):
+            and dst == "224.0.0.251" and src in mdns_addresses.get((node, iface), ()):
         return {"mdns_packets": 1, "control_packets": 1}
     if protocol == socket.IPPROTO_TCP and pair == {exit_ip, provider} and node in (
-            layout["exit"]["node"], layout["provider"]["node"]):
+            layout["exit"]["node"], layout["provider"]["node"]) \
+            and (not learning or (node, iface) in (("exit", "xr4"), ("relay4", "r4x"))):
         if src == exit_ip and dst == provider and dport == 18080 and sport != 0:
             return {"provider_request_packets": 1}
         if src == provider and dst == exit_ip and sport == 18080 and dport != 0:
@@ -330,6 +384,12 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
                 leg = "exit_leg"
             if leg is None or len(payload) < 4:
                 continue
+            if learning:
+                index = relay[-1]
+                endpoints = (("relay3", "lr" + index), (relay, "r" + index + "l")) if leg == "client_leg" \
+                    else ((relay, "r" + index + "x"), ("exit", "xr" + index))
+                if (node, iface) not in endpoints:
+                    continue
             shape = wireguard_shape(payload, len(payload))
             if shape == "handshake":
                 return {"wireguard_handshake_packets": 1}
@@ -575,6 +635,9 @@ def capture(layout, output, ready, role, interfaces):
                   observed_frames=0, packet_socket_drops=0, truncated=False, complete=False,
                   forbidden_header_samples=[], forbidden_header_sample_overflow_packets=0,
                   **dict.fromkeys((*COUNTERS, *DIAGNOSTIC_COUNTERS), 0))
+    if layout["phase"] == "peer-learning":
+        record.update(dict.fromkeys(LEARNER_PROVIDER_COUNTERS, 0))
+        record["underlay_control_attempt_packets"] = 0
     for relay in layout["relays"]:
         for leg in ("client_leg", "exit_leg"):
             record[f"{relay}_{leg}_wireguard_data_datagrams"] = 0

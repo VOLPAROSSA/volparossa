@@ -391,7 +391,7 @@ fn recompute(store: &Store, sequence: u64) -> Result<Record> {
         ("validation/candidate/report.json", 16 * 1024),
         ("training-report.json", 32 * 1024),
         ("result.json", 64 * 1024),
-        ("selection.json", 64 * 1024),
+        ("selection.json", 256 * 1024),
     ] {
         files.insert(
             name.into(),
@@ -518,7 +518,7 @@ fn validate_adapter(cycle: &Path, report: &Value, name: &str) -> Result<()> {
     let training: Value =
         serde_json::from_slice(&read_owned(&cycle.join("training-report.json"), 32 * 1024)?)?;
     let selected: Value =
-        serde_json::from_slice(&read_owned(&cycle.join("selection.json"), 64 * 1024)?)?;
+        serde_json::from_slice(&read_owned(&cycle.join("selection.json"), 256 * 1024)?)?;
     if name == "baseline" {
         if let Some(original) = training.get("input_adapter") {
             ensure!(

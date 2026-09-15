@@ -13,6 +13,7 @@ umask 077
 mode=preview
 scenario=alpha
 agent_jobs_loss=no
+agent_jobs_follow=no
 agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
@@ -32,7 +33,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -70,6 +71,16 @@ print_plan() {
                 '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
             return
         fi
+        if [ "$agent_jobs_follow" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA automatic public peer-job continuation plan:' \
+                '  one workflow --follow uses the pinned guest model and two protected peer workers;' \
+                '  observe overlapping real workers and terminate one exact guest worker via pidfd;' \
+                '  preserve the completed result and original handles while automatically retrying failed rows;' \
+                '  observe a new worker on the surviving peer without a manual resume command;' \
+                '  retain original leases, owner cancellation and complete disposable cleanup.'
+            return
+        fi
         if [ "$agent_jobs_loss" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA explicit public peer worker-loss/reassignment plan:' \
@@ -93,10 +104,10 @@ print_plan() {
         if [ "$agent_train_loop" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA owner-enabled autonomous public train-loop plan:' \
-                '  R5 public seed/dataset, R4 protected import and two actual eight-update warmstart cycles;' \
-                '  automatically share two R4-owner-signed updates; explicitly re-offer unchanged original dataset;' \
-                '  another Client imports both over protected MPTCP and performs actual isolated inference;' \
-                '  same repeated source, exact worker/input/capture/cleanup evidence; no full B05 or alpha claim.'
+                '  signed R5 catalog refresh discovers a later source; R4 runs two actual warmstart cycles and both quality gates;' \
+                '  share only approved R4 updates; explicitly re-offer original training and validation datasets before R5 stops;' \
+                '  a fresh Client must discover, compare, adopt and further train from actual received peer weights without a seed;' \
+                '  retain separate ordinary import/inference proof and complete process/network cleanup; no full B05 or alpha claim.'
             return
         fi
         if [ "$agent_train_cycle" = yes ]; then
@@ -389,6 +400,7 @@ while [ "$#" -gt 0 ]; do
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             download_sharing=no
             agent_jobs_loss=no
+            agent_jobs_follow=no
             agent_public_task=no
             agent_public_document=no
             agent_train_cycle=no
@@ -397,6 +409,7 @@ while [ "$#" -gt 0 ]; do
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
+                agent-jobs-follow) scenario=agent-jobs; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -576,7 +589,7 @@ if [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$
     done
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
+    for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.sh agent-peer-learning-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
     done
 fi
@@ -590,7 +603,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
 if [ "$scenario" = agent-jobs ]; then
-    for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py; do
+    for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py agent-jobs-follow-smoke.sh agent-jobs-follow-smoke.py; do
         [ -f "$source_directory/tests/integration/$jobs_fixture" ] && [ ! -L "$source_directory/tests/integration/$jobs_fixture" ] || exit 69
     done
 fi
@@ -600,7 +613,7 @@ if [ "$agent_public_task" = yes ]; then
     done
 fi
 if [ "$agent_public_document" = yes ]; then
-    for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py; do
+    for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
     done
 fi
@@ -1880,6 +1893,10 @@ fi
 if [ "$scenario" = agent-jobs ]; then
     # shellcheck source=tests/integration/agent-jobs-smoke.sh
     . "$source_directory/tests/integration/agent-jobs-smoke.sh"
+    if [ "$agent_jobs_follow" = yes ]; then
+        # shellcheck source=tests/integration/agent-jobs-follow-smoke.sh
+        . "$source_directory/tests/integration/agent-jobs-follow-smoke.sh"
+    fi
 fi
 if [ "$agent_public_task" = yes ]; then
     # shellcheck source=tests/integration/agent-public-task-smoke.sh
@@ -1899,6 +1916,8 @@ if [ "$agent_train_loop" = yes ]; then
     . "$source_directory/tests/integration/content-replication-smoke.sh"
     # shellcheck source=tests/integration/agent-train-loop-smoke.sh
     . "$source_directory/tests/integration/agent-train-loop-smoke.sh"
+    # shellcheck source=tests/integration/agent-peer-learning-smoke.sh
+    . "$source_directory/tests/integration/agent-peer-learning-smoke.sh"
 fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
@@ -1999,10 +2018,13 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
 fi
 if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-smoke.py" "$WORK/bin/agent-jobs-smoke.py"
+    if [ "$agent_jobs_follow" = yes ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-follow-smoke.py" "$WORK/bin/agent-jobs-follow-smoke.py"
+    fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
 if [ "$agent_train_loop" = yes ]; then
-    for loop_script in agent-train-loop-smoke.py content-replication-smoke.py content-replication-capture.py; do
+    for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
     done
 fi
@@ -2376,6 +2398,14 @@ write_config() {
     [ "$scenario" != mixed-link ] || mixed_link_configure_node
     if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
         content_replication_configure_node
+    fi
+    if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
+        # R3 later consumes through real relay paths and contributes through its existing
+        # provider-c endpoint. Client remains the separate final named-import consumer.
+        client_role=true
+        bootstrap_one="/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER"
+        bootstrap_two="/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
+        bootstrap_three="/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER"
     fi
     [ "$scenario" != dns-cache ] || dns_cache_configure_node
     if [ "$wifi_link" = yes ]; then
@@ -2836,6 +2866,7 @@ launch_agent() {
         if [ "$agent_train_loop" = yes ]; then
             case $node in
                 client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
+                relay3) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
                 relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
             esac
         fi

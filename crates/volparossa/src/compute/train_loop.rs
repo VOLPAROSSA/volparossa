@@ -1,7 +1,10 @@
 //! Owner-enabled continuous public training, independent source selection and durable sharing.
 //! Every execution remains bounded; there is no hidden model download or private-cache intake.
 
+mod catalogs;
 mod evaluation;
+mod peer_evaluation;
+mod peer_updates;
 mod publication;
 mod seed;
 mod storage;
@@ -36,7 +39,7 @@ const RETAINED_CYCLES: usize = 8;
 
 #[derive(Debug, Args)]
 pub(crate) struct Options {
-    /// Version-1 JSON public-source list, selected independently of cache inventory.
+    /// Public source plan: v1 fixed datasets, or v2 datasets and trusted publisher catalogs.
     #[arg(long)]
     plan: PathBuf,
     /// New private persistent loop directory, or its exact existing directory with --resume.
@@ -58,6 +61,9 @@ pub(crate) struct Options {
     /// JSON with independently trusted adapter/dataset publishers and names for an initial peer update.
     #[arg(long, conflicts_with = "adapter_root")]
     seed: Option<PathBuf>,
+    /// Explicit public peer-adapter channels; adoption requires a pinned validation source.
+    #[arg(long)]
+    peer_updates: Option<PathBuf>,
     /// Optional exact signed validation-only public source, selected before any training.
     #[arg(long)]
     validation_source: Option<PathBuf>,
@@ -68,7 +74,8 @@ pub(crate) struct Options {
     /// Original wall deadline per worker, never enlarged by pauses or subsequent cycles.
     #[arg(long, default_value_t=600, value_parser=clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
-    /// Stop after this many new cycle attempts; omitted keeps watching until owner cancellation.
+    /// Limit new cycle attempts, then drain publications for at most one max-seconds window.
+    /// Omitted keeps watching until owner cancellation.
     #[arg(long, value_parser=clap::value_parser!(u16).range(1..=256))]
     max_cycles: Option<u16>,
     #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u16).range(1..=3600))]
@@ -99,14 +106,16 @@ pub(crate) struct Options {
     limits: Limits,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plan {
     version: u32,
     sources: Vec<Source>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    catalogs: Vec<Source>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Source {
     publisher_key: String,
@@ -185,6 +194,10 @@ struct State {
     seed: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     validation: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<catalogs::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_updates: Option<peer_updates::Registry>,
 }
 
 impl State {
@@ -202,6 +215,8 @@ impl State {
             garbage: Vec::new(),
             seed: None,
             validation: None,
+            catalog: None,
+            peer_updates: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -210,9 +225,16 @@ impl State {
             .find(|index| {
                 let progress = &self.sources[*index];
                 progress.next_attempt <= time
+                    && self.catalog.as_ref().is_none_or(|registry| {
+                        registry.eligible(registry.static_count(), *index, time)
+                    })
                     && (repeat
                         || progress.revision.is_none()
-                        || plan.sources[*index].manifest_id.is_none())
+                        || plan.sources[*index].manifest_id.is_none()
+                        || plan.sources[*index]
+                            .min_revision
+                            .zip(progress.revision)
+                            .is_some_and(|(offered, completed)| offered > completed))
                     && (repeat || progress.revision != Some(u64::MAX))
             })
     }
@@ -251,7 +273,12 @@ fn now() -> Result<u64> {
 fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     let plan: Plan = serde_json::from_slice(&read_file(&args.plan, 64 * 1024)?)?;
     ensure!(
-        plan.version == 1 && (1..=MAX_SOURCES).contains(&plan.sources.len()),
+        (plan.version == 1
+            && plan.catalogs.is_empty()
+            && (1..=MAX_SOURCES).contains(&plan.sources.len()))
+            || (plan.version == 2
+                && (1..=16).contains(&plan.catalogs.len())
+                && plan.sources.len() < MAX_SOURCES),
         "train_loop_sources"
     );
     let mut distinct = BTreeSet::new();
@@ -263,6 +290,18 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
             source.min_revision != Some(0)
                 && distinct.insert((key.to_bytes(), source.name.clone())),
             "train_loop_duplicate_source"
+        );
+    }
+    let mut feeds = BTreeSet::new();
+    for catalog in &plan.catalogs {
+        let key = catalog.key()?;
+        catalog.manifest()?;
+        content::parse_content_name(&catalog.name).map_err(anyhow::Error::msg)?;
+        ensure!(
+            catalog.min_revision != Some(0)
+                && feeds.insert((key.to_bytes(), catalog.name.clone()))
+                && !distinct.contains(&(key.to_bytes(), catalog.name.clone())),
+            "train_loop_catalog_identity"
         );
     }
     for path in [
@@ -293,6 +332,18 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         "first_publication_revision":args.first_publication_revision,"seed":seed::selection(args)?,"source_choice_uses_cache_inventory":false,
         "quality_policy":"source-heldout-loss-v1",
         "private_data_supported":false,"code_or_model_downloads":false,"automatic_model_quality_claimed":false});
+    if !plan.catalogs.is_empty() {
+        selection["catalogs"] = serde_json::to_value(&plan.catalogs)?;
+        selection["source_discovery"] = json!("signed-same-publisher-catalogs-v1");
+        selection["maximum_remembered_sources"] = json!(MAX_SOURCES);
+    }
+    if let Some(peers) = peer_updates::selection(args)? {
+        ensure!(
+            args.validation_source.is_some(),
+            "train_loop_peer_validation_required"
+        );
+        selection["peer_updates"] = peers;
+    }
     if let Some(validation) = validation::selection(args)? {
         for source in &plan.sources {
             ensure!(
@@ -308,6 +359,7 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     Ok((plan, selection))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let (plan, selection) = enrollment(args)?;
     if !args.execute {
@@ -336,7 +388,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_else(|| State::new(plan.sources.len()));
-    recover(&store, &mut state, plan.sources.len())?;
+    let mut pool = restore_source_pool(&plan, &mut state)?;
+    recover(&store, &mut state, pool.sources.len())?;
     let activity = Activity::new()?;
     prepare_inputs(
         args,
@@ -347,6 +400,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         &activity.receiver,
     )
     .await?;
+    peer_updates::restore(args, &store, &mut state, &selection)?;
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -357,21 +411,30 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     }
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
+    let mut publication_drain = None;
     while active(&activity.receiver) {
-        publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
         if args
             .max_cycles
             .is_some_and(|maximum| attempts >= u64::from(maximum))
         {
+            publication_drain = Some(
+                publication::drain(args, socket, &store, &mut state, &activity.receiver).await?,
+            );
             break;
         }
+        publication::pending(args, socket, &store, &mut state, &activity.receiver).await?;
         if budget.sample() == Decision::Run {
-            if let Some(source) = state.select(&plan, args.repeat_sources, now()?) {
+            if refresh_catalogs(args, socket, &plan, &store, &mut state, &activity.receiver).await?
+            {
+                pool = source_pool(&plan, &state);
+            }
+            peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
+            if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
                     attempt(
                         args,
                         socket,
-                        &plan,
+                        &pool,
                         &store,
                         &mut state,
                         source,
@@ -395,10 +458,69 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "promoted_cycles":state.promoted,"rejected_cycles":state.rejected,"latest_approved_sequence":state.latest,
         "quality_policy":selection["quality_policy"],"independent_quality_benchmark":false,
         "attempts_this_invocation":attempts,"owner_cancelled":!active(&activity.receiver),
+        "catalog_source_discovery":state.catalog.is_some(),"remembered_sources":state.sources.len(),
+        "peer_update_channels_enabled":state.peer_updates.is_some(),
         "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
+        "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
     );
     Ok(())
+}
+
+fn restore_source_pool(base: &Plan, state: &mut State) -> Result<Plan> {
+    if state.catalog.is_none() && !base.catalogs.is_empty() {
+        ensure!(
+            state.next_sequence == 1 && state.cycles.is_empty(),
+            "train_loop_missing_catalog_state"
+        );
+        state.catalog = Some(catalogs::Registry::new(base)?);
+    }
+    ensure!(
+        state.catalog.is_some() != base.catalogs.is_empty(),
+        "train_loop_unrequested_catalog_state"
+    );
+    if let Some(registry) = &state.catalog {
+        registry.validate(base, now()?)?;
+    }
+    Ok(source_pool(base, state))
+}
+
+fn source_pool(base: &Plan, state: &State) -> Plan {
+    Plan {
+        version: base.version,
+        sources: state
+            .catalog
+            .as_ref()
+            .map_or_else(|| base.sources.clone(), |registry| registry.sources(base)),
+        catalogs: base.catalogs.clone(),
+    }
+}
+
+async fn refresh_catalogs(
+    args: &Options,
+    socket: &Path,
+    base: &Plan,
+    store: &Store,
+    state: &mut State,
+    activity: &watch::Receiver<bool>,
+) -> Result<bool> {
+    let Some(registry) = state.catalog.as_mut() else {
+        return Ok(false);
+    };
+    if !registry
+        .refresh_one(args, socket, base, store, activity)
+        .await?
+    {
+        return Ok(false);
+    }
+    let count = registry.sources(base).len();
+    ensure!(
+        count >= state.sources.len() && count <= MAX_SOURCES,
+        "train_loop_catalog_slot_count"
+    );
+    state.sources.resize_with(count, SourceProgress::default);
+    store.save_state(&serde_json::to_value(state)?)?;
+    Ok(true)
 }
 
 async fn prepare_inputs(
@@ -421,7 +543,7 @@ fn recover(store: &Store, state: &mut State, count: usize) -> Result<()> {
             && state.completed < state.next_sequence
             && (state.latest.is_some() == (state.promoted > 0))
             && state.sources.len() == count
-            && state.cursor < count
+            && ((count == 0 && state.cursor == 0) || state.cursor < count)
             && state.cycles.len() <= RETAINED_CYCLES
             && state.garbage.len() <= RETAINED_CYCLES,
         "train_loop_state"
@@ -540,24 +662,20 @@ async fn attempt(
     let source = &plan.sources[index];
     let sequence = state.next_sequence;
     let minimum = required_revision(source, &state.sources[index], args.repeat_sources)?;
-    let adapter = if let Some(previous) = state.latest {
-        let cycle = state
-            .cycles
-            .iter()
-            .find(|cycle| cycle.sequence == previous)
-            .context("train_loop_latest_missing")?;
-        store.validate_snapshot(
-            previous,
-            cycle
-                .snapshot
-                .as_ref()
-                .context("train_loop_latest_snapshot")?,
-        )?;
-        Some(store.cycle_path(previous)?.join("training/adapter"))
-    } else {
-        seed::adapter(args, state)?
-    };
-    let options = cycle_options(args, source, store.cycle_path(sequence)?, minimum, adapter)?;
+    let current = current_adapter(args, store, state)?;
+    let mut options = cycle_options(
+        args,
+        source,
+        store.cycle_path(sequence)?,
+        minimum,
+        current.adapter_root,
+    )?;
+    if current.origin["kind"] == "peer_update" {
+        options.peer_predecessor = Some(current.origin);
+    }
+    if let Some(registry) = &state.catalog {
+        options.source_catalog = registry.proof_for(plan, index);
+    }
     state.next_sequence = sequence
         .checked_add(1)
         .context("train_loop_sequence_exhausted")?;
@@ -612,6 +730,53 @@ async fn attempt(
     Ok(())
 }
 
+struct CurrentAdapter {
+    adapter_root: Option<PathBuf>,
+    origin: Value,
+}
+
+fn current_adapter(args: &Options, store: &Store, state: &State) -> Result<CurrentAdapter> {
+    if let Some(registry) = &state.peer_updates {
+        if let Some(peer) = peer_updates::active(args, registry, state.latest)? {
+            return Ok(CurrentAdapter {
+                adapter_root: Some(peer.adapter_root),
+                origin: peer.origin,
+            });
+        }
+    }
+    if let Some(previous) = state.latest {
+        let cycle = state
+            .cycles
+            .iter()
+            .find(|cycle| cycle.sequence == previous)
+            .context("train_loop_latest_missing")?;
+        store.validate_snapshot(
+            previous,
+            cycle
+                .snapshot
+                .as_ref()
+                .context("train_loop_latest_snapshot")?,
+        )?;
+        Ok(CurrentAdapter {
+            adapter_root: Some(store.cycle_path(previous)?.join("training/adapter")),
+            origin: json!({"kind":"local_cycle","sequence":previous}),
+        })
+    } else {
+        let adapter_root = seed::adapter(args, state)?;
+        let kind = if state.seed.is_some() {
+            "seed_import"
+        } else if adapter_root.is_some() {
+            "configured_adapter"
+        } else {
+            "pinned_base"
+        };
+        Ok(CurrentAdapter {
+            adapter_root,
+            origin: json!({"kind":kind}),
+        })
+    }
+}
+
 fn cycle_options(
     args: &Options,
     source: &Source,
@@ -623,6 +788,8 @@ fn cycle_options(
         publisher_key: source.key()?,
         dataset_name: source.name.clone(),
         dataset_manifest_id: source.manifest()?,
+        source_catalog: None,
+        peer_predecessor: None,
         min_revision: minimum,
         cache: args.cache.clone(),
         reuse_cache: true,
@@ -758,6 +925,9 @@ fn select_successor(
     };
     if decision.approved {
         state.latest = Some(cycle.sequence);
+        if let Some(registry) = &mut state.peer_updates {
+            peer_updates::clear_active(registry);
+        }
     }
     state.completed = completed;
     state.promoted = promoted;

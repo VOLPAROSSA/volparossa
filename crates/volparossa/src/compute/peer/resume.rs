@@ -26,6 +26,8 @@ pub(crate) struct Options {
     /// Preview source/handle bindings only unless explicitly enabled.
     #[arg(long)]
     execute: bool,
+    #[arg(skip)]
+    prefer_other_provider: bool,
 }
 
 impl Options {
@@ -43,7 +45,13 @@ impl Options {
             output,
             max_seconds,
             execute: true,
+            prefer_other_provider: false,
         }
+    }
+
+    pub(super) fn prefer_other_provider(mut self, enabled: bool) -> Self {
+        self.prefer_other_provider = enabled;
+        self
     }
 }
 
@@ -227,7 +235,7 @@ pub(super) fn load_handles(
                 && handle.binding.dataset_sha256
                     == sha(derive(source, rows, handle.binding.task.as_ref())?.as_bytes())
                 && (handle.binding.task.is_none() || handle.capabilities.task_derivation_v1)
-                && (!source.is_document() || handle.capabilities.document_inference_v2)
+                && supports_source(source, &handle.capabilities)
                 && handle.binding.expires_unix_seconds <= source.expires()
                 && handle.binding.model_fingerprint == handle.capabilities.model_fingerprint
                 && handle.binding.model_fingerprint
@@ -299,7 +307,7 @@ async fn replacement(
     original: &JobHandle,
     used: &mut BTreeSet<[u8; 32]>,
 ) -> Result<Option<batch::Prepared>> {
-    for provider in &args.replacement_provider_key {
+    for provider in replacement_order(args, original) {
         if used.contains(&provider.to_bytes()) {
             continue;
         }
@@ -308,7 +316,7 @@ async fn replacement(
         };
         if !caps.accepting_work
             || (original.binding.task.is_some() && !caps.task_derivation_v1)
-            || (source.is_document() && !caps.document_inference_v2)
+            || !supports_source(source, &caps)
             || caps.model_fingerprint != original.binding.model_fingerprint
             || usize::from(caps.max_rows) < original.binding.row_indices.len()
         {
@@ -340,6 +348,16 @@ async fn replacement(
         }));
     }
     Ok(None)
+}
+
+fn replacement_order<'a>(args: &'a Options, original: &JobHandle) -> Vec<&'a VerifyingKey> {
+    let mut providers: Vec<_> = args.replacement_provider_key.iter().collect();
+    if args.prefer_other_provider {
+        // Stable ordering keeps owner preference among alternative compatible peers. The
+        // original remains a fallback; availability and retry_allowed still decide admission.
+        providers.sort_by_key(|provider| hex::encode(provider.as_bytes()) == original.provider_key);
+    }
+    providers
 }
 
 fn append_outputs(
@@ -388,6 +406,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Reuse one signed source and original handle for binding and replacement-order checks"
+    )]
     fn persisted_handles_retain_exact_signed_source_and_reject_overlapping_work() {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -449,6 +471,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         };
         let handle = JobHandle {
             version: 1,
@@ -477,9 +500,23 @@ mod tests {
             output: root.path().join("output"),
             max_seconds: 600,
             execute: false,
+            prefer_other_provider: false,
         };
         let loaded = load_handles(&args, &source).unwrap();
         assert_eq!(loaded[0].binding, handle.binding);
+        let alternative = ed25519_dalek::SigningKey::from_bytes(&[32; 32]).verifying_key();
+        args.replacement_provider_key = vec![key.verifying_key(), alternative];
+        assert_eq!(replacement_order(&args, &handle)[0], &key.verifying_key());
+        args.prefer_other_provider = true;
+        assert_eq!(
+            replacement_order(&args, &handle),
+            vec![&alternative, &key.verifying_key()]
+        );
+        args.replacement_provider_key = vec![key.verifying_key()];
+        assert_eq!(
+            replacement_order(&args, &handle),
+            vec![&key.verifying_key()]
+        );
         args.handle.push(path);
         assert!(load_handles(&args, &source).is_err());
         args.handle.pop();

@@ -235,44 +235,7 @@ impl Options {
                 MAX_DATASET_BYTES
             },
         )?;
-        let public: Value = serde_json::from_slice(&dataset).context("compute_dataset_json")?;
-        if self.mode == Mode::PlanDocument {
-            ensure!(self.adapter_root.is_none(), "compute_document_plan_adapter");
-            document_plan::validate_input(&public)?;
-        } else if public["version"] == 2 {
-            ensure!(
-                self.mode == Mode::Infer,
-                "compute_document_training_not_supported"
-            );
-            let rows = public["inference"]
-                .as_array()
-                .context("compute_document_rows")?
-                .len();
-            volparossa_content::provider::compute::dataset::validate_document_json(
-                std::str::from_utf8(&dataset)?,
-                rows,
-            )?;
-        } else {
-            ensure!(
-                public.get("version") == Some(&Value::from(1)),
-                "compute_dataset_version"
-            );
-            ensure!(
-                public.get("visibility").and_then(Value::as_str) == Some("public"),
-                "compute_public_data_required"
-            );
-            ensure!(
-                public.get("license").and_then(Value::as_str) == Some("GPL-3.0-only"),
-                "compute_dataset_license"
-            );
-            ensure!(
-                public
-                    .get("source_revision")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| is_hex(s, 40)),
-                "compute_dataset_revision"
-            );
-        }
+        validate_dataset(self.mode, self.adapter_root.is_some(), &dataset)?;
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",
@@ -288,6 +251,55 @@ impl Options {
         Ok(())
     }
 }
+
+// Shared by direct execution and Broker::start before a worker is created. Inference-only
+// profiles must pass their strict validator here as well as at the signed RPC boundary.
+fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    let public: Value = serde_json::from_slice(dataset).context("compute_dataset_json")?;
+    if mode == Mode::PlanDocument {
+        ensure!(!has_adapter, "compute_document_plan_adapter");
+        document_plan::validate_input(&public)?;
+    } else if public["version"] == 2 || public["version"] == 3 {
+        ensure!(
+            mode == Mode::Infer,
+            "compute_document_training_not_supported"
+        );
+        let rows = public["inference"]
+            .as_array()
+            .context("compute_document_rows")?
+            .len();
+        let text = std::str::from_utf8(dataset)?;
+        if public["version"] == 3 {
+            volparossa_content::provider::compute::dataset::validate_derived_json(text, rows)?;
+        } else {
+            volparossa_content::provider::compute::dataset::validate_document_json(text, rows)?;
+        }
+    } else {
+        ensure!(
+            public.get("version") == Some(&Value::from(1)),
+            "compute_dataset_version"
+        );
+        ensure!(
+            public.get("visibility").and_then(Value::as_str) == Some("public"),
+            "compute_public_data_required"
+        );
+        ensure!(
+            public.get("license").and_then(Value::as_str) == Some("GPL-3.0-only"),
+            "compute_dataset_license"
+        );
+        ensure!(
+            public
+                .get("source_revision")
+                .and_then(Value::as_str)
+                .is_some_and(|s| is_hex(s, 40)),
+            "compute_dataset_revision"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod admission_tests;
 
 fn private_directory(path: &Path) -> Result<()> {
     ensure!(path.is_absolute(), "compute_path_absolute");

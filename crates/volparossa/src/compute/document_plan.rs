@@ -18,6 +18,8 @@ pub(super) struct Input {
     pub(super) license: String,
     pub(super) document: String,
     pub(super) question: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) synthesis: bool,
 }
 
 impl Input {
@@ -70,6 +72,8 @@ pub(super) struct Plan {
     pub(super) model_revision: String,
     pub(super) tokenizer_sha256: String,
     pub(super) prompt_limit: u16,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) synthesis: bool,
     pub(super) parts: Vec<Part>,
 }
 
@@ -84,7 +88,8 @@ impl Plan {
                 && self.model_id == MODEL_ID
                 && self.model_revision == MODEL_REVISION
                 && self.tokenizer_sha256 == TOKENIZER_SHA256
-                && self.prompt_limit == 192,
+                && self.prompt_limit == 192
+                && self.synthesis == input.synthesis,
             "compute_document_plan_source_or_tokenizer"
         );
         ensure!(
@@ -127,6 +132,7 @@ mod tests {
             license: "CC0-1.0".into(),
             document: "één\nwereld".into(),
             question: "What does it say?".into(),
+            synthesis: false,
         };
         let mut plan = Plan {
             version: 1,
@@ -137,6 +143,7 @@ mod tests {
             model_revision: MODEL_REVISION.into(),
             tokenizer_sha256: TOKENIZER_SHA256.into(),
             prompt_limit: 192,
+            synthesis: false,
             parts: vec![
                 Part {
                     start: 0,
@@ -168,6 +175,33 @@ mod tests {
         assert!(plan.validate(&input).is_err());
         plan.parts[1].end += 1;
         plan.question_sha256 = "0".repeat(64);
+        assert!(plan.validate(&input).is_err());
+    }
+
+    #[test]
+    fn synthesis_prompt_profile_is_bound_and_legacy_json_stays_unchanged() {
+        let legacy = serde_json::json!({"version":1,"visibility":"public","license":"CC0-1.0",
+            "document":"Public generated notes.","question":"What is stated?"});
+        let mut input: Input = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!input.synthesis);
+        assert_eq!(serde_json::to_value(&input).unwrap(), legacy);
+        let legacy_plan = serde_json::json!({"version":1,
+            "source_sha256":hex::encode(Sha256::digest(input.document.as_bytes())),
+            "source_bytes":input.document.len(),
+            "question_sha256":hex::encode(Sha256::digest(input.question.as_bytes())),
+            "model_id":MODEL_ID,"model_revision":MODEL_REVISION,
+            "tokenizer_sha256":TOKENIZER_SHA256,"prompt_limit":192,
+            "parts":[{"start":0,"end":input.document.len(),"prompt_tokens":30}]});
+        let mut plan: Plan = serde_json::from_value(legacy_plan.clone()).unwrap();
+        plan.validate(&input).unwrap(); // Synthetic counts, not a tokenizer-execution proof.
+        assert_eq!(serde_json::to_value(&plan).unwrap(), legacy_plan);
+        input.synthesis = true;
+        assert!(plan.validate(&input).is_err());
+        plan.synthesis = true;
+        plan.validate(&input).unwrap();
+        assert_eq!(serde_json::to_value(&input).unwrap()["synthesis"], true);
+        assert_eq!(serde_json::to_value(&plan).unwrap()["synthesis"], true);
+        input.synthesis = false;
         assert!(plan.validate(&input).is_err());
     }
 }

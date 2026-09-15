@@ -6,7 +6,12 @@
 //! or private messages. Document excerpts are assertions signed by their source publisher,
 //! not cryptographic range proofs of unavailable original bytes.
 
+mod derived;
 mod document;
+pub use derived::{
+    DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
+    validate_derived_json,
+};
 pub use document::{
     DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, validate_document_json,
 };
@@ -59,6 +64,7 @@ pub struct VerifiedPublicDataset {
 enum Profile {
     Repository(Dataset),
     Document(DocumentDataset),
+    Derived(DerivedDataset),
 }
 
 impl VerifiedPublicDataset {
@@ -77,12 +83,18 @@ impl VerifiedPublicDataset {
         match &self.dataset {
             Profile::Repository(dataset) => dataset.inference.len(),
             Profile::Document(dataset) => dataset.inference.len(),
+            Profile::Derived(dataset) => dataset.inference.len(),
         }
     }
 
     /// Whether this source is a public document package, which must never be used for training.
     pub fn is_document(&self) -> bool {
-        matches!(self.dataset, Profile::Document(_))
+        matches!(self.dataset, Profile::Document(_) | Profile::Derived(_))
+    }
+
+    /// Model-generated public synthesis inputs, not original excerpts or execution attestations.
+    pub fn is_derived(&self) -> bool {
+        matches!(self.dataset, Profile::Derived(_))
     }
 
     /// Deterministically serialize the selected original rows in increasing index order.
@@ -137,6 +149,7 @@ impl VerifiedPublicDataset {
                 serde_json::to_string(&dataset).map_err(|_| ComputeError::Invalid)?
             }
             Profile::Document(original) => original.derive_selected(rows, question)?,
+            Profile::Derived(original) => original.derive_selected(rows, question)?,
         };
         if json.len() > MAX_DATASET_BYTES {
             return Err(ComputeError::Invalid);
@@ -164,7 +177,7 @@ pub fn verify_source(
         .map_err(|_| ComputeError::Authentication)?;
     if !matches!(
         manifest.metadata().content_type.as_str(),
-        CONTENT_TYPE | DOCUMENT_CONTENT_TYPE
+        CONTENT_TYPE | DOCUMENT_CONTENT_TYPE | DERIVED_CONTENT_TYPE
     ) || manifest.length() != original_json.len() as u64
         || manifest.object_sha256() != &<[u8; 32]>::from(Sha256::digest(original_json.as_bytes()))
     {
@@ -182,7 +195,12 @@ pub fn verify_source(
     {
         return Err(ComputeError::Authentication);
     }
-    let dataset = if manifest.metadata().content_type == DOCUMENT_CONTENT_TYPE {
+    let dataset = if manifest.metadata().content_type == DERIVED_CONTENT_TYPE {
+        let derived: DerivedDataset =
+            serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        derived.verify_source(publisher, now, manifest.validity().expires)?;
+        Profile::Derived(derived)
+    } else if manifest.metadata().content_type == DOCUMENT_CONTENT_TYPE {
         let document: DocumentDataset =
             serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
         document.verify_source(publisher, now, manifest.validity().expires)?;

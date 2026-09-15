@@ -204,6 +204,7 @@ async fn pull_inner(
     let elapsed = observed_at.elapsed();
     if timed_out {
         content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
+        content_event(context, "CONTENT_PROVIDER_TRANSFER_DEADLINE").await;
     }
     let same_route = RecentProviderScope::for_route(context, policy).await == scope;
     record_batch(
@@ -541,8 +542,9 @@ async fn attempt(
         return Err(ContentError::Unavailable);
     }
     flow.shutdown();
-    if pulled.is_err() {
+    if let Err(error) = &pulled {
         content_event(context, "CONTENT_PROVIDER_TRANSFER_FAILED").await;
+        content_event(context, super::provider_error_code(error)).await;
     }
     if pulled.is_ok() {
         return Ok(Attempt::Complete);

@@ -37,6 +37,12 @@ pub(crate) struct Options {
     /// Optional exact signed identity; a mismatch never authorizes a different cached dataset.
     #[arg(long, value_parser = parse_manifest_id)]
     pub(super) dataset_manifest_id: Option<[u8; 32]>,
+    /// Internal signed-catalog authorization from the enrolled training coordinator.
+    #[arg(skip)]
+    pub(super) source_catalog: Option<Value>,
+    /// Locally approved peer warmstart, supplied only by the owning coordinator.
+    #[arg(skip)]
+    pub(super) peer_predecessor: Option<Value>,
     /// Signed revision floor, not proof of the globally newest publication.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub(super) min_revision: Option<u64>,
@@ -183,7 +189,10 @@ pub(super) async fn execute_cycle_guarded(
     }
     let source = persist_source(args, &download, &verified)?;
     ensure_active(&activity, "train_cycle_cancelled_before_training")?;
-    let options = worker_options(args, verified.expires(), now()?)?;
+    let authority_expires = catalog_expiry(args, now()?)?.map_or(verified.expires(), |expires| {
+        expires.min(verified.expires())
+    });
+    let options = worker_options(args, authority_expires, now()?)?;
     options.validate()?;
     // Await the real supervisor through cancellation. Dropping its future would not be a
     // valid claim that a running training worker had been killed and reaped.
@@ -261,7 +270,7 @@ fn normalized_question(text: &str) -> String {
         .to_lowercase()
 }
 
-fn guard_overlap(training_bytes: &[u8], validation_bytes: &[u8]) -> Result<()> {
+pub(super) fn guard_overlap(training_bytes: &[u8], validation_bytes: &[u8]) -> Result<()> {
     let training = guard_dataset(training_bytes)?;
     let validation = guard_dataset(validation_bytes)?;
     ensure!(
@@ -333,8 +342,7 @@ fn selection(args: &Options) -> Result<Value> {
             "train_cycle_output_overlap"
         );
     }
-    Ok(
-        serde_json::json!({"version":1,"publisher_key":hex::encode(args.publisher_key.as_bytes()),
+    let mut selected = serde_json::json!({"version":1,"publisher_key":hex::encode(args.publisher_key.as_bytes()),
         "dataset_name":args.dataset_name,"expected_dataset_manifest_id":args.dataset_manifest_id.map(hex::encode),
         "minimum_revision":args.min_revision,"cache":args.cache,"reuse_cache":args.reuse_cache,
         "cache_only":false,"prefer_cached":true,"cache_miss_selects_different_source":false,
@@ -342,8 +350,93 @@ fn selection(args: &Options) -> Result<Value> {
         "output":args.output,"steps":args.steps,"threads":args.threads,"maximum_training_seconds":args.max_seconds,
         "spare_capacity":args.spare_capacity,
         "maximum_fetch_seconds":600,"private_data_supported":false,"automatic_source_discovery":false,
-        "code_or_model_downloads":false,"automatic_publication":false,"globally_latest_version_claimed":false}),
-    )
+        "code_or_model_downloads":false,"automatic_publication":false,"globally_latest_version_claimed":false});
+    if let Some(proof) = &args.source_catalog {
+        catalog_expiry(args, now()?)?;
+        selected["source_catalog"] = proof.clone();
+        selected["automatic_source_discovery"] = true.into();
+        selected["source_discovery_scope"] = "enrolled-same-publisher-catalog".into();
+    }
+    if let Some(origin) = &args.peer_predecessor {
+        ensure!(
+            origin["kind"] == "peer_update" && args.adapter_root.is_some(),
+            "train_cycle_peer_predecessor"
+        );
+        selected["peer_predecessor"] = origin.clone();
+    }
+    Ok(selected)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogProof {
+    version: u32,
+    catalog_publisher_key: String,
+    catalog_name: String,
+    catalog_manifest_id: String,
+    catalog_revision: u64,
+    catalog_expires_unix_seconds: u64,
+    verified_at_unix_seconds: u64,
+    signed_manifest_hex: String,
+    catalog_body: String,
+    selected_source: CatalogSource,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogSource {
+    publisher_key: String,
+    name: String,
+    min_revision: u64,
+    manifest_id: String,
+}
+
+/// Recheck the original catalog authorization at admission and after source retrieval.
+/// A cached dataset does not renew that lease or authorize a different source.
+fn catalog_expiry(args: &Options, time: u64) -> Result<Option<u64>> {
+    let Some(value) = &args.source_catalog else {
+        return Ok(None);
+    };
+    let proof: CatalogProof = serde_json::from_value(value.clone())?;
+    let expected_publisher = hex::encode(args.publisher_key.as_bytes());
+    ensure!(
+        proof.version == 1
+            && proof.catalog_publisher_key == expected_publisher
+            && proof.selected_source.publisher_key == expected_publisher
+            && proof.selected_source.name == args.dataset_name
+            && Some(proof.selected_source.manifest_id.clone())
+                == args.dataset_manifest_id.map(hex::encode)
+            && proof.selected_source.min_revision > 0
+            && args
+                .min_revision
+                .is_none_or(|floor| proof.selected_source.min_revision >= floor)
+            && proof.verified_at_unix_seconds <= time
+            && proof.catalog_body.len() <= crate::content::source_catalog::MAX_BYTES
+            && proof.signed_manifest_hex.len() <= 128 * 1024,
+        "train_cycle_catalog_selection"
+    );
+    let signed = hex::decode(&proof.signed_manifest_hex)?;
+    let catalog = SignedManifest::decode(&signed)?.verify(&args.publisher_key, time)?;
+    ensure!(
+        catalog.metadata().name == proof.catalog_name
+            && catalog.metadata().revision == proof.catalog_revision
+            && hex::encode(catalog.manifest_id()) == proof.catalog_manifest_id
+            && catalog.validity().expires == proof.catalog_expires_unix_seconds,
+        "train_cycle_catalog_identity"
+    );
+    let entries = crate::content::source_catalog::verify(
+        &signed,
+        proof.catalog_body.as_bytes(),
+        &args.publisher_key,
+        time,
+    )?;
+    ensure!(
+        entries.iter().any(|entry| entry.name == args.dataset_name
+            && entry.revision == proof.selected_source.min_revision
+            && Some(entry.manifest_id) == args.dataset_manifest_id),
+        "train_cycle_catalog_source_missing"
+    );
+    Ok(Some(catalog.validity().expires))
 }
 
 fn validate_source(
@@ -361,6 +454,10 @@ fn validate_source(
             && args
                 .min_revision
                 .is_none_or(|minimum| manifest.metadata().revision >= minimum)
+            && args.source_catalog.as_ref().is_none_or(|proof| {
+                proof["selected_source"]["min_revision"].as_u64()
+                    == Some(manifest.metadata().revision)
+            })
             && download.expires == manifest.validity().expires,
         "train_cycle_selected_source_mismatch"
     );
@@ -686,6 +783,106 @@ mod tests {
             expires: at + 1200,
         };
         (root, args, download)
+    }
+
+    fn catalog_fixture() -> (tempfile::TempDir, Options, u64) {
+        let (root, mut args, download) = fixture();
+        let time = now().unwrap();
+        let dataset = SignedManifest::decode(&download.signed_manifest)
+            .unwrap()
+            .verify(&args.publisher_key, time)
+            .unwrap();
+        args.dataset_manifest_id = Some(*dataset.manifest_id());
+        args.min_revision = Some(dataset.metadata().revision);
+        let body = serde_json::json!({"version":1,"visibility":"public","purpose":"agent_training",
+            "dataset_profile":volparossa_content::provider::compute::dataset::CONTENT_TYPE,
+            "license":"GPL-3.0-only","sources":[{"name":args.dataset_name,
+                "revision":dataset.metadata().revision,"manifest_id":hex::encode(dataset.manifest_id())}]}).to_string();
+        let mut cache = ChunkStore::create(
+            &root.path().join("catalog-cache"),
+            CacheLimits {
+                max_bytes: 1024 * 1024,
+                max_entries: 8,
+                min_free_bytes: 0,
+            },
+        )
+        .unwrap();
+        let publication = volparossa_content::publish(
+            &mut body.as_bytes(),
+            Publication {
+                metadata: Metadata {
+                    name: "chosen-catalog".into(),
+                    revision: 3,
+                    content_type: crate::content::source_catalog::CONTENT_TYPE.into(),
+                },
+                length: body.len() as u64,
+                validity: Validity {
+                    created: time,
+                    expires: time + 60,
+                },
+            },
+            &ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
+            &mut cache,
+        )
+        .unwrap();
+        let catalog = publication.verify(&args.publisher_key, time).unwrap();
+        args.source_catalog = Some(serde_json::json!({"version":1,
+            "catalog_publisher_key":hex::encode(args.publisher_key.as_bytes()),"catalog_name":"chosen-catalog",
+            "catalog_manifest_id":hex::encode(catalog.manifest_id()),"catalog_revision":3,
+            "catalog_expires_unix_seconds":time+60,"verified_at_unix_seconds":time,
+            "signed_manifest_hex":hex::encode(publication.encode()),"catalog_body":body,
+            "selected_source":{"publisher_key":hex::encode(args.publisher_key.as_bytes()),
+                "name":args.dataset_name,"min_revision":args.min_revision,
+                "manifest_id":hex::encode(dataset.manifest_id())}}));
+        (root, args, time)
+    }
+
+    #[test]
+    fn catalog_authorization_pins_selected_source_and_limits_actual_worker_deadline() {
+        let (_root, args, time) = catalog_fixture();
+        assert_eq!(catalog_expiry(&args, time).unwrap(), Some(time + 60));
+        let expiry = catalog_expiry(&args, time + 10).unwrap().unwrap();
+        assert_eq!(
+            worker_options(&args, expiry, time + 10)
+                .unwrap()
+                .max_seconds,
+            50
+        );
+        assert!(catalog_expiry(&args, time + 60).is_err());
+        let selected = selection(&args).unwrap();
+        assert_eq!(selected["automatic_source_discovery"], true);
+        assert_eq!(selected["source_catalog"], args.source_catalog.unwrap());
+        assert!(!args.output.exists());
+    }
+
+    #[test]
+    fn catalog_proof_cannot_substitute_publisher_body_row_or_original_expiry() {
+        let (_root, mut args, time) = catalog_fixture();
+        let original = args.source_catalog.clone().unwrap();
+        for (field, value) in [
+            ("catalog_publisher_key", serde_json::json!("00".repeat(32))),
+            ("catalog_name", serde_json::json!("another-catalog")),
+            ("catalog_manifest_id", serde_json::json!("12".repeat(32))),
+            ("catalog_revision", serde_json::json!(4)),
+            (
+                "catalog_expires_unix_seconds",
+                serde_json::json!(time + 600),
+            ),
+            ("verified_at_unix_seconds", serde_json::json!(time + 1)),
+            ("catalog_body", serde_json::json!("{}")),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            args.source_catalog = Some(changed);
+            assert!(catalog_expiry(&args, time).is_err(), "{field}");
+        }
+        let mut changed = original.clone();
+        changed["selected_source"]["name"] = "another-dataset".into();
+        args.source_catalog = Some(changed);
+        assert!(catalog_expiry(&args, time).is_err());
+        args.source_catalog = Some(original);
+        args.dataset_manifest_id = None;
+        assert!(catalog_expiry(&args, time).is_err());
     }
 
     #[tokio::test]

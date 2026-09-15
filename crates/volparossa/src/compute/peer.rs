@@ -2,6 +2,7 @@
 
 mod batch;
 mod document;
+mod follow;
 mod readiness;
 mod resume;
 mod task;
@@ -267,6 +268,17 @@ async fn poll_or_cancel(socket: &Path, args: &Handle, cancel: bool) -> Result<se
     )?)?)
 }
 
+fn supports_source(
+    source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
+    caps: &rpc::Capabilities,
+) -> bool {
+    if source.is_derived() {
+        caps.derived_inference_v3
+    } else {
+        !source.is_document() || caps.document_inference_v2
+    }
+}
+
 fn binding(
     source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
     rows: Vec<u16>,
@@ -280,7 +292,7 @@ fn binding(
         "compute_peer_task_not_supported"
     );
     ensure!(
-        !source.is_document() || caps.document_inference_v2,
+        supports_source(source, caps),
         "compute_peer_document_not_supported"
     );
     if let Some(task) = &task {

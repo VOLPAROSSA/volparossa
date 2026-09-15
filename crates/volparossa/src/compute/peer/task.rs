@@ -50,9 +50,11 @@ pub(crate) struct Options {
     directory: PathBuf,
     #[arg(long)]
     resume: bool,
-    /// Worker rounds this invocation; every individual lease remains separately bounded.
+    /// Worker rounds per invocation, or per continuation window with --follow.
     #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
+    #[command(flatten)]
+    follow: super::follow::Options,
     #[arg(long, default_value_t=600, value_parser=clap::value_parser!(u16).range(1..=600))]
     max_seconds: u16,
     /// Default is a preview without output creation, network traffic or remote execution.
@@ -141,7 +143,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "{}",
             json!({"operation":"compute_public_task_plan","execute":false,"selection":selected,
             "resume":args.resume,"new_directory":args.directory,"network_retrieval":false,
-            "remote_execution":false,"private_data_supported":false,
+            "remote_execution":false,"private_data_supported":false,"follow":args.follow.follow,
             "source_choice_uses_cache_inventory":false,"question_authored_by_requester":true})
         );
         return Ok(());
@@ -183,7 +185,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         args.max_seconds,
         true,
     )
-    .expect_task(expected.clone());
+    .expect_task(expected.clone())
+    .with_follow(args.follow.clone());
     // Await the real executor and its cancellation/reconciliation. Never drop a live
     // remote execution future and pretend its worker has stopped.
     let work = workflow::report_with_activity(&options, socket, &cancellation.activity).await?;
@@ -639,6 +642,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         };
         let attempt = fixture.root.path().join("work/package-0000/attempt-0000");
         fs::DirBuilder::new().mode(0o700).create(&attempt).unwrap();

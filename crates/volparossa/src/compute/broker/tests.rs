@@ -72,6 +72,7 @@ fn broker(root: &Path) -> Broker {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         },
         jobs: VecDeque::new(),
         budget: Budget::fixed_for_test(Decision::Run),
@@ -212,8 +213,7 @@ async fn strict_rpc_roundtrip_rejects_extra_fields_oversize_and_wrong_correlatio
     );
 }
 
-#[tokio::test]
-async fn document_profile_requires_explicit_capability_before_any_worker_admission() {
+fn signed_document_fixture() -> (String, String, String) {
     use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity, publish};
 
     let source_root = tempfile::tempdir().unwrap();
@@ -246,8 +246,18 @@ async fn document_profile_requires_explicit_capability_before_any_worker_admissi
         &mut cache,
     )
     .unwrap();
+    (
+        context.into(),
+        hex::encode(signed.encode()),
+        hex::encode(publisher.verifying_key().as_bytes()),
+    )
+}
+
+#[tokio::test]
+async fn document_profile_requires_explicit_capability_before_any_worker_admission() {
+    let (context, manifest, _) = signed_document_fixture();
     let document = serde_json::json!({"version":2,"visibility":"public","license":"CC0-1.0",
-        "source_manifest_hex":hex::encode(signed.encode()),"inference":[{
+        "source_manifest_hex":manifest,"inference":[{
             "question":"What is tested?","context":context,"start":0,"end":context.len()}]})
     .to_string();
     let root = tempfile::tempdir().unwrap();
@@ -271,6 +281,60 @@ async fn document_profile_requires_explicit_capability_before_any_worker_admissi
     ));
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     broker.capabilities.document_inference_v2 = true;
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit)), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Unavailable)
+    ));
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn synthesis_requires_its_own_capability_and_exact_generated_context_before_any_worker() {
+    let (original, manifest, provider) = signed_document_fixture();
+    let text = "Generated summary, not an original-source quotation.";
+    let derived = serde_json::json!({"version":3,"visibility":"public","license":"CC0-1.0",
+        "source_manifest_hex":manifest,"level":1,
+        "claim_scope":volparossa_content::provider::compute::dataset::DERIVED_CLAIM_SCOPE,
+        "inference":[{"question":"What is tested?","context":format!("{text}\n"),"inputs":[{
+            "text":text,"provider_key":provider,"job_id":"1".repeat(32),"report_sha256":"2".repeat(64),
+            "package_manifest_id":"3".repeat(64),"model_fingerprint":"4".repeat(64),
+            "output_index":0,"parent_index":0,"source_start":0,"source_end":original.len(),
+            "piece_start":0,"piece_end":text.len()+1}]}]});
+    let json = derived.to_string();
+    dataset::validate(&json, 1).unwrap();
+    assert!(dataset::validate(&json, 2).is_err());
+    let mut changed = derived.clone();
+    changed["inference"][0]["context"] = "Invented context".into();
+    assert!(dataset::validate(&changed.to_string(), 1).is_err());
+    changed = derived;
+    changed["train"] = serde_json::json!([]);
+    assert!(dataset::validate(&changed.to_string(), 1).is_err());
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.capabilities.document_inference_v2 = true;
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: json.clone(),
+        publication: publication(),
+    };
+    submit.binding.dataset_sha256 = sha(json.as_bytes());
+    submit.publication.dataset_json = json;
+    assert!(!broker.capabilities.derived_inference_v3);
+    assert!(matches!(
+        broker
+            .handle(request(Operation::Submit(submit.clone())), 1000)
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Invalid)
+    ));
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    broker.capabilities.derived_inference_v3 = true;
+    // Only the fixed Infer path is admitted. Its deliberately absent runtime must
+    // remain unavailable; this protocol test never invents a model result.
     assert!(matches!(
         broker
             .handle(request(Operation::Submit(submit)), 1000)

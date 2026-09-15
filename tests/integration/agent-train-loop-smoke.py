@@ -6,6 +6,7 @@ Pure checker fixtures are not training/network evidence. Model execution is gues
 """
 
 import copy
+import fcntl
 import hashlib
 import json
 import math
@@ -22,6 +23,7 @@ import time
 HERE = Path(__file__).resolve().parent
 ART = runpy.run_path(str(HERE / "agent-artifact-smoke.py"))
 REP = runpy.run_path(str(HERE / "content-replication-smoke.py"))
+CATALOG = runpy.run_path(str(HERE / "agent-train-loop-catalog.py"))
 TRAIN = ART["TRAIN"]
 read, write, require, file_hash = (ART[key] for key in ("read", "write", "require", "file_hash"))
 FILES = ("README.md", "adapter_config.json", "adapter_model.safetensors")
@@ -32,23 +34,26 @@ VALIDATION_FILES = ("validation/dataset.json", "validation/dataset.manifest", "v
                     "validation/baseline/report.json", "validation/candidate/report.json", "baseline-report.json",
                     "candidate-report.json", "validation.json")
 POLICY = "source-and-second-source-loss-v1"
-SCOPE = ("R5 publishes a public training dataset/seed and a separately named, pinned validation-only public dataset; "
-         "R4 retrieves all three over protected MPTCP and runs two owner-enabled eight-update cycles on the explicitly "
-         "repeated training source. Each cycle also runs real sequential predecessor/candidate inference on exactly the "
+SCOPE = ("R5 publishes public dataset A/seed, a separately pinned validation source and signed catalog1 listing A; "
+         "R4 enrolls only the trusted catalog name, not training dataset names. After actual worker1 starts, "
+         "R5 publishes genuinely new dataset B and catalog2 listing A+B; B is absent from R4's checked cache "
+         "and is discovered/fetched through protected MPTCP for worker2 without --repeat-sources. "
+         "The real coordinator is reopened and cancelled with both source progress entries retained and no new worker. "
+         "Each cycle also runs real sequential predecessor/candidate inference on exactly the "
          "same second-source bytes. Only candidates improving both measured heldout losses by more than 1e-6 replace "
          "the predecessor and are automatically contributed. Cycle two uses the latest approved adapter "
          "or the original seed. When an update is approved, Main Client imports the latest approved update and original "
          "separately signed dataset through protected MPTCP and performs inference; otherwise no new adapter is adopted "
          "or imported. Current normalized training-question overlap is rejected; shared explicitly provisioned "
          "base/runtime and a repeatedly used second-source selection set, not an independent benchmark, historical "
-         "decontamination, general quality improvement, fresh corpus discovery, joint optimization, full B05 or full alpha")
+         "decontamination, general quality improvement, unrestricted web crawling, joint optimization, full B05 or full alpha")
 
 
 def setup(path, publisher, manifest):
     root = ART["private_root"](path)
     require(TRAIN["HASH"].fullmatch(publisher) and TRAIN["HASH"].fullmatch(manifest), "invalid selected source")
-    write(root / "loop-plan.json", {"version": 1, "sources": [{"publisher_key": publisher,
-          "name": "disposable-agent-dataset", "min_revision": 1, "manifest_id": manifest}]})
+    write(root / "loop-plan.json", {"version": 2, "sources": [], "catalogs": [{"publisher_key": publisher,
+          "name": "disposable-agent-source-catalog", "min_revision": 1}]})
     write(root / "loop-seed.json", {"publisher_key": publisher, "dataset_publisher_key": publisher,
           "name": "disposable-agent-adapter", "dataset_name": "disposable-agent-dataset", "min_revision": 1})
     (root / "loop-passphrase").write_bytes(os.urandom(32).hex().encode() + b"\n")
@@ -94,6 +99,76 @@ def drop_validation(path):
             target.unlink()
     return dict(validation_source_bytes_removed=True, validation_manifest_original_removed=True,
                 validation_publisher_cache_removed=True, selected_public_source_metadata_retained=True)
+
+
+def drop_catalog_inputs(path):
+    root = ART["private_root"](path)
+    names = ("dataset-next.json", "dataset-next.pb", "dataset-next-cache",
+             "catalog-1.json", "catalog-1.pb", "catalog-1-cache",
+             "catalog-2.json", "catalog-2.pb", "catalog-2-cache")
+    for name in names:
+        target = root / name
+        info = target.lstat()
+        require(info.st_uid == os.getuid() and not stat.S_ISLNK(info.st_mode), "owned catalog input changed")
+        if name.endswith("-cache"):
+            require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700, "wrong catalog source cache")
+            shutil.rmtree(target)
+        else:
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "wrong catalog input file")
+            target.unlink()
+    return dict(late_source_inputs_removed=True, catalog_inputs_removed=True, publisher_caches_removed=True,
+                original_authority_not_resigned=True)
+
+
+def stable_resume_state(before, after):
+    for key in ("version", "next_sequence", "cursor", "completed", "promoted", "rejected", "latest", "sources", "cycles",
+                "garbage", "seed", "validation"):
+        require(after[key] == before[key], "reopened coordinator changed completed source or result state")
+    initial, resumed = before["catalog"], after["catalog"]
+    require(initial["static_count"] == resumed["static_count"] == 0
+            and initial["slots"] == resumed["slots"] and len(initial["feeds"]) == len(resumed["feeds"]) == 1,
+            "reopened coordinator lost stable discovered source slots")
+    old, new = initial["feeds"][0], resumed["feeds"][0]
+    require(old["enrolled"] == new["enrolled"] and new["next_refresh"] >= old["next_refresh"], "catalog enrollment or retry floor changed")
+    for key in ("revision", "manifest_id", "expires", "signed_manifest_hex", "body"):
+        require(old["snapshot"][key] == new["snapshot"][key], "resume substituted another catalog publication")
+
+
+def observe_resume(pid, path, before_path):
+    TRAIN["guest_guard"](root=True)
+    root = Path(path)
+    before = read(before_path, 4 * 1024 ** 2)
+    owner = root.stat().st_uid
+    require(owner > 0 and root.name == "agent-artifact-user", "wrong owner resume root")
+    expected = TRAIN["identity"](pid)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        require(TRAIN["alive"](expected), "reopened coordinator exited before observation")
+        if Path(f"/proc/{pid}").stat().st_uid == owner:
+            state_file = root / "loop/state.json"
+            actual = read(state_file, 4 * 1024 ** 2)
+            stable_resume_state(before["state"], actual)
+            family = TRAIN["descendants"](pid)
+            require(family == [expected], "resume started an unexpected child instead of retaining completed results")
+            descriptor = os.open(root / "loop/.coordinator.lock", os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = False
+                except BlockingIOError:
+                    locked = True
+            finally:
+                os.close(descriptor)
+            metadata = state_file.stat()
+            log = Path(before_path).parent / "agent-train-loop-resume.err"
+            ready = log.is_file() and b"compute loop_event=catalog_refreshed source_count=2\n" in log.read_bytes()[:65536]
+            if locked and ready and metadata.st_mtime_ns > before["state_file"]["mtime_ns"]:
+                return dict(version=1, cli=expected, coordinator_lock_held=True, state_rewritten_after_reopen=True,
+                            state_before_mtime_ns=before["state_file"]["mtime_ns"], observed_state_mtime_ns=metadata.st_mtime_ns,
+                            exact_completed_state_retained=True, catalog_refreshed_after_reopen=True,
+                            observed_processes=family, model_child_observed=False)
+        time.sleep(0.1)
+    raise ValueError("durable coordinator reopen was not observed within the fixture bound")
 
 
 def readiness_state(root, sequence):
@@ -247,10 +322,9 @@ def observe_loop(pid, path, namespace, service_pid):
         evidence = publish_observation(raw, output, sequence, exact, previous)
         owner = output.stat()
         observations.append(evidence)
-        if sequence == 1:
-            ready = root / "loop-first-worker.ready"
-            ready.touch(mode=0o600)
-            os.chown(ready, owner.st_uid, owner.st_gid)
+        ready = root / ("loop-first-worker.ready" if sequence == 1 else "loop-second-worker.ready")
+        ready.touch(mode=0o600)
+        os.chown(ready, owner.st_uid, owner.st_gid)
         deadline = time.monotonic() + 605
         while TRAIN["alive"](evidence["worker"]):
             require(time.monotonic() < deadline, "observed worker exceeded original wall deadline")
@@ -362,8 +436,11 @@ def collect(path):
                     "rejected candidate acquired publication files")
         cycles.append(dict(sequence=sequence, training=trained, isolation=read(root / f"loop-{sequence}-isolation.json"),
                            raw_isolation=read(root / f"loop-{sequence}-isolation.raw.json"),
+                           raw_isolation_file=file_hash(root / f"loop-{sequence}-isolation.raw.json", 262144),
                            result=read(cycle / "result.json"), provenance=read(cycle / "source-provenance.json"),
                            selection=read(cycle / "selection.json"), adapter_files=files, manifest=manifest, bundle=bundle,
+                           selection_hex=(cycle / "selection.json").read_bytes().hex(),
+                           provenance_hex=(cycle / "source-provenance.json").read_bytes().hex(),
                            dataset=file_hash(cycle / "dataset.json", 1048576),
                            report=file_hash(cycle / "training-report.json", 65536),
                            report_hex=(cycle / "training-report.json").read_bytes().hex(),
@@ -378,7 +455,9 @@ def collect(path):
                            publication_hex=publication.read_bytes().hex() if evaluation["approved"] else None,
                            contribution=read(contributed) if evaluation["approved"] else None,
                            rejected_publication_files_absent=not evaluation["approved"]))
-    return dict(state=read(loop / "state.json"), enrollment=read(loop / "enrollment.json"),
+    state_file = (loop / "state.json").stat()
+    return dict(state=read(loop / "state.json", 4 * 1024 ** 2), enrollment=read(loop / "enrollment.json"),
+                state_file=dict(device=state_file.st_dev, inode=state_file.st_ino, mtime_ns=state_file.st_mtime_ns),
                 validation_input=export_files(loop / "validation-input", ("dataset.json", "dataset.manifest", "provenance.json")),
                 seed=read(loop / "seed-input/provenance.json"), cycles=cycles,
                 seed_files={name: file_hash(loop / "seed-input/adapter" / name, 2 * 1024 ** 2) for name in FILES},
@@ -553,14 +632,157 @@ def check_validation(cycle):
     return expected
 
 
+def training_source(evidence, sequence):
+    if sequence == 1 or "catalogs" not in evidence:
+        return dict(name="disposable-agent-dataset", manifest_id=evidence["originals"]["dataset_manifest_id"],
+                    dataset=evidence["originals"]["dataset"], expires=evidence["dataset_publish"]["expires_unix_seconds"])
+    require(sequence == 2, "unknown discovered training sequence")
+    source = evidence["catalogs"]["updated"]["dataset_next"]
+    return dict(name=source["name"], manifest_id=source["manifest"]["sha256"], dataset=source["body"],
+                expires=source["expires_unix_seconds"])
+
+
+def catalog_records(work):
+    names = {"initial":"catalog-1-original", "updated":"catalog-2-original",
+             "publish_initial":"catalog-1-publish", "publish_updated":"catalog-2-publish",
+             "dataset_publish":"dataset-next-publish", "late_source":"catalog-late-source",
+             "cold":"catalog-cold", "inputs_removed":"catalog-inputs-removed",
+             "initial_state":"catalog-initial-state", "resume_observation":"resume-observation",
+             "resume_state":"resume-state", "resume_summary":"resume-summary"}
+    return {key:read(work / f"agent-train-loop-{name}.json", 4 * 1024 ** 2) for key,name in names.items()}
+
+
+def check_publication(receipt, original, publisher):
+    require(receipt["network_publication"] is True and receipt["publisher_key_hex"] == publisher
+            and receipt["manifest_id"] == original["manifest"]["sha256"]
+            and receipt["name"] == original["name"] and receipt["revision"] == original["revision"]
+            and receipt["bytes"] == original["body"]["bytes"] and receipt["chunks"] == 1
+            and receipt["expires_unix_seconds"] == original["expires_unix_seconds"],
+            "original catalog or late dataset was not actually contributed with its original identity")
+
+
+def check_provider_receipt(receipt, manifest_id, body, peer, peer_bytes):
+    require(receipt["manifest_id"] == manifest_id and receipt["sha256"] == body["sha256"]
+            and receipt["bytes"] == body["bytes"] and receipt["chunks"] == 1
+            and receipt["peer_bytes"] == peer_bytes
+            and receipt["providers_used"] == (1 if peer_bytes else 0)
+            and receipt["provider_peer_ids"] == ([peer] if peer_bytes else [])
+            and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0,
+            "source receipt changed original object, protected provider or actual transferred byte count")
+
+
+def check_registry(registry, original, publisher):
+    catalog = original["catalog"]
+    enrollment = dict(publisher_key=publisher, name=CATALOG["CATALOG_NAME"], min_revision=1, manifest_id=None)
+    require(registry["version"] == 1 and registry["static_count"] == registry["cursor"] == 0
+            and len(registry["feeds"]) == 1 and len(registry["slots"]) == original["catalog_revision"],
+            "wrong actual stable catalog registry")
+    feed = registry["feeds"][0]
+    snapshot = feed["snapshot"]
+    require(feed["enrolled"] == enrollment and snapshot["revision"] == catalog["revision"]
+            and snapshot["manifest_id"] == catalog["manifest"]["sha256"]
+            and snapshot["expires"] == catalog["expires_unix_seconds"]
+            and snapshot["signed_manifest_hex"] == catalog["manifest_hex"]
+            and snapshot["body"].encode().hex() == catalog["body_hex"]
+            and catalog["created_unix_seconds"] <= snapshot["verified_at"] < snapshot["expires"]
+            and feed["next_refresh"] >= snapshot["verified_at"], "saved feed changed original signed catalog or validity")
+    for slot, row in zip(registry["slots"], catalog["sources"]):
+        selected = dict(publisher_key=publisher, name=row["name"], min_revision=row["revision"], manifest_id=row["manifest_id"])
+        require(slot == dict(feed=0, source=selected, active=True, expires=catalog["expires_unix_seconds"],
+                             last_seen_catalog_revision=catalog["revision"]), "stable slot changed original catalog row")
+    return snapshot
+
+
+def check_catalogs(evidence):
+    discovery, loop = evidence["catalogs"], evidence["loop"]
+    publisher, peer = evidence["dataset_publish"]["publisher_key_hex"], evidence["peers"]["relay5"]
+    for name in ("initial", "updated"):
+        CATALOG["check_original"](discovery[name], publisher)
+    first, second = (discovery[name]["catalog"] for name in ("initial", "updated"))
+    late = discovery["updated"]["dataset_next"]
+    require(first["revision"] == 1 and second["revision"] == 2 and first["sources"] == second["sources"][:1]
+            and first["sources"][0]["manifest_id"] == evidence["originals"]["dataset_manifest_id"]
+            and late["manifest"]["sha256"] != evidence["originals"]["dataset_manifest_id"]
+            and late["body"] != evidence["originals"]["dataset"]
+            and first["created_unix_seconds"] <= discovery["late_source"]["created_unix_seconds"]
+            <= discovery["cold"]["observed_unix_seconds"] <= late["created_unix_seconds"] <= second["created_unix_seconds"],
+            "new dataset existed before worker1 or catalog update replaced the initial source")
+    CATALOG["check_late"](discovery["late_source"], discovery["updated"], discovery["cold"])
+    require(discovery["late_source"]["first_worker"] == loop["cycles"][0]["raw_isolation"]["worker"]
+            and discovery["late_source"]["first_worker_isolation"] == loop["cycles"][0]["raw_isolation_file"]
+            and discovery["late_source"]["source_revision"] == evidence["source_revision"],
+            "late source was not bound to the actual first training worker")
+    for receipt, original in (("publish_initial", first), ("publish_updated", second), ("dataset_publish", late)):
+        check_publication(discovery[receipt], original, publisher)
+    initial = discovery["initial_state"]
+    require(initial["completed"] == 0 and initial["next_sequence"] == 2
+            and len(initial["cycles"]) == len(initial["sources"]) == 1
+            and initial["cycles"][0]["source"] == 0 and initial["cycles"][0]["phase"] == "running"
+            and initial["sources"][0]["revision"] is None, "first catalog snapshot was not taken during first actual training")
+    for state, original in ((initial, discovery["initial"]), (loop["state"], discovery["updated"])):
+        snapshot = check_registry(state["catalog"], original, publisher)
+        check_provider_receipt(snapshot["receipt"], original["catalog"]["manifest"]["sha256"],
+                               original["catalog"]["body"], peer, original["catalog"]["body"]["bytes"])
+    require(len(loop["state"]["sources"]) == 2 and all(row["revision"] == 1 for row in loop["state"]["sources"])
+            and [cycle["source"] for cycle in loop["state"]["cycles"]] == [0, 1],
+            "completed source progress repeated A or lost discovered B")
+    for number, cycle in enumerate(loop["cycles"], 1):
+        original = discovery["initial" if number == 1 else "updated"]["catalog"]
+        selected = training_source(evidence, number)
+        source = dict(publisher_key=publisher, name=selected["name"], min_revision=1, manifest_id=selected["manifest_id"])
+        proof = cycle["selection"]["source_catalog"]
+        expected = dict(version=1, catalog_publisher_key=publisher, catalog_name=CATALOG["CATALOG_NAME"],
+            catalog_manifest_id=original["manifest"]["sha256"], catalog_revision=number,
+            catalog_expires_unix_seconds=original["expires_unix_seconds"], verified_at_unix_seconds=proof["verified_at_unix_seconds"],
+            signed_manifest_hex=original["manifest_hex"], catalog_body=bytes.fromhex(original["body_hex"]).decode(), selected_source=source)
+        require(proof == expected and original["created_unix_seconds"] <= proof["verified_at_unix_seconds"]
+                <= cycle["provenance"]["verified_at_unix_seconds"] < original["expires_unix_seconds"]
+                and cycle["selection"]["dataset_name"] == cycle["provenance"]["dataset_name"] == selected["name"]
+                and cycle["selection"]["publisher_key"] == cycle["provenance"]["publisher_key"] == publisher
+                and cycle["selection"]["expected_dataset_manifest_id"] == selected["manifest_id"]
+                and cycle["selection"]["minimum_revision"] == 1
+                and cycle["selection"]["automatic_source_discovery"] is True
+                and cycle["selection"]["cache_miss_selects_different_source"] is False,
+                "cycle substituted the exact publisher-signed discovered source or expiry")
+        for name, field in (("selection.json", "selection"), ("source-provenance.json", "provenance")):
+            raw = bytes.fromhex(cycle[field + "_hex"])
+            require(json.loads(raw) == cycle[field] and file_digest(raw) == cycle["content_files"][name],
+                    "cycle changed actual immutable selection/provenance bytes")
+        receipt = cycle["provenance"]["source_receipt"]
+        check_provider_receipt(receipt, selected["manifest_id"], selected["dataset"], peer,
+                               selected["dataset"]["bytes"] if number == 2 else 0)
+    stable_resume_state(loop["state"], discovery["resume_state"])
+    summary, observation = discovery["resume_summary"], discovery["resume_observation"]
+    require(summary["operation"] == "compute_train_loop" and summary["owner_cancelled"] is True
+            and summary["attempts_this_invocation"] == summary["pending_publications"] == 0
+            and summary["completed_cycles"] == 2 and summary["promoted_cycles"] == loop["state"]["promoted"]
+            and summary["rejected_cycles"] == loop["state"]["rejected"]
+            and summary["latest_approved_sequence"] == loop["state"]["latest"], "resume retrained completed source revisions")
+    require(observation["version"] == 1 and observation["coordinator_lock_held"] is True
+            and observation["state_rewritten_after_reopen"] is True and observation["exact_completed_state_retained"] is True
+            and observation["catalog_refreshed_after_reopen"] is True and observation["model_child_observed"] is False
+            and observation["observed_processes"] == [observation["cli"]]
+            and observation["observed_state_mtime_ns"] > observation["state_before_mtime_ns"] == loop["state_file"]["mtime_ns"],
+            "no actual durable coordinator reopen/cancellation observation")
+    require(all(discovery["inputs_removed"].values()), "original publisher's late-source/catalog inputs remain")
+
+
 def check_chain(evidence):
     loop, original = evidence["loop"], evidence["originals"]
     plan, state = loop["enrollment"], loop["state"]
     source, owner = evidence["dataset_publish"]["publisher_key_hex"], evidence["owner_key"]["identity_public_key_hex"]
     require(source != owner, "dataset and trained-update publishers are not independent")
-    require(plan["repeat_sources"] is True and plan["source_choice_uses_cache_inventory"] is False
-            and plan["sources"] == [{"publisher_key": source, "name": "disposable-agent-dataset", "min_revision": 1,
-                                    "manifest_id": original["dataset_manifest_id"]}], "wrong explicitly repeated source plan")
+    require(plan["source_choice_uses_cache_inventory"] is False, "source selection was based on cache availability")
+    if "catalogs" in evidence:
+        require(plan["repeat_sources"] is False and plan["sources"] == []
+                and plan["catalogs"] == [dict(publisher_key=source, name=CATALOG["CATALOG_NAME"], min_revision=1, manifest_id=None)]
+                and plan["source_discovery"] == "signed-same-publisher-catalogs-v1"
+                and plan["maximum_remembered_sources"] == 128, "datasets were pre-enrolled instead of discovered through the trusted catalog")
+    else:
+        # Retained pure legacy gate fixtures only. Actual VM evidence requires check_catalogs.
+        require(plan["repeat_sources"] is True and plan["sources"] == [{"publisher_key": source,
+                "name":"disposable-agent-dataset", "min_revision":1, "manifest_id":original["dataset_manifest_id"]}],
+                "wrong explicitly repeated source plan")
     require(plan["publication_key"] == owner and plan["publish_name"] == "disposable-loop-update"
             and plan["quality_policy"] == POLICY, "wrong enrolled update publisher or selection policy")
     require(state["version"] == 2 and state["completed"] == 2 and state["next_sequence"] == 3
@@ -573,17 +795,18 @@ def check_chain(evidence):
     previous = evidence["training"]
     previous_files = original["adapter_files"]
     latest, approved = None, []
-    expiry = evidence["dataset_publish"]["expires_unix_seconds"]
     for index, cycle in enumerate(loop["cycles"], 1):
+        selected = training_source(evidence, index)
+        expiry = selected["expires"]
         trained, result, provenance = cycle["training"], cycle["result"], cycle["provenance"]
         saved = state["cycles"][index - 1]
         require(cycle["sequence"] == saved["sequence"] == index, "wrong durable cycle sequence")
         require(result["operation"] == "compute_train_cycle" and result["complete"] is True
                 and result["updates_completed"] == 8 and result["input_adapter_applied"] is True, "actual cycle result missing")
         require(result["dataset_manifest_id"] == provenance["dataset_manifest_id"] == cycle["manifest"]["sha256"]
-                == original["dataset_manifest_id"] == result["bundle"]["dataset_manifest_id"], "cycle changed original signed dataset")
+                == selected["manifest_id"] == result["bundle"]["dataset_manifest_id"], "cycle changed original signed dataset")
         require(result["source_expires_unix_seconds"] == provenance["expires_unix_seconds"] == expiry
-                and cycle["dataset"] == original["dataset"], "dataset expiry or bytes changed")
+                and cycle["dataset"] == selected["dataset"], "dataset expiry or bytes changed")
         require(trained["input_adapter"]["files"] == previous_files
                 and trained["input_adapter"]["applied_parameters"] == trained["adapter_before"] == previous["adapter_after"]
                 and trained["base_before"] == trained["base_after"] == previous["base_after"], "cycle lost exact previous warmstart")
@@ -623,13 +846,14 @@ def check_chain(evidence):
                 "all candidates rejected but a new imported model is claimed")
         return
     fetched = evidence["fetch"]
+    selected = training_source(evidence, latest)
     require(fetched["publisher"] == owner and fetched["dataset_publisher"] == source
             and fetched["adapter_manifest_id"] == loop["cycles"][latest - 1]["publication"]["sha256"]
-            and fetched["dataset_manifest_id"] == original["dataset_manifest_id"]
+            and fetched["dataset_manifest_id"] == selected["manifest_id"]
             and fetched["cache_only"] is False and fetched["model_activated"] is False,
             "different node did not import independently signed update/dataset")
     require(evidence["received"]["adapter_files"] == previous_files
-            and evidence["received"]["dataset"] == original["dataset"], "received update bytes differ")
+            and evidence["received"]["dataset"] == selected["dataset"], "received update bytes differ")
     infer = evidence["inference"]
     require(infer["status"] == "ok" and infer["mode"] == "infer" and infer["updates_completed"] == 0
             and infer["input_adapter"]["files"] == previous_files
@@ -650,12 +874,13 @@ def adoption(loop):
 
 def check_evidence(evidence, revision):
     require(evidence["source_revision"] == revision, "wrong source revision")
+    check_catalogs(evidence)
     check_chain(evidence)
     check_second_source(evidence)
     loop = evidence["loop"]
     for name, mandatory in (("loop-shared", False), ("loop-all-shared", True)):
         shared_updates(loop, evidence["originals"], evidence["owner_key"]["identity_public_key_hex"],
-                       evidence["sharing_status"][name], mandatory)
+                       evidence["sharing_status"][name], mandatory, evidence["catalogs"])
     TRAIN["check_worker"](evidence["training"], revision)
     TRAIN["check_isolation"](evidence["training_isolation"])
     require(evidence["training_isolation"]["node_lineage"]["node"] == "relay5", "seed did not originate on R5")
@@ -742,18 +967,21 @@ def check_evidence(evidence, revision):
                     and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0, "final object bypassed protected R4")
     REP["validate_phase"](evidence["phases"]["uptake"], "uptake", peers,
                           evidence["originals"]["adapter_bundle"]["bytes"] + evidence["originals"]["dataset"]["bytes"]
-                          + evidence["validation_original"]["dataset"]["bytes"])
+                          + evidence["validation_original"]["dataset"]["bytes"]
+                          + training_source(evidence, 2)["dataset"]["bytes"]
+                          + sum(evidence["catalogs"][name]["catalog"]["body"]["bytes"] for name in ("initial", "updated")))
+    selected = training_source(evidence, latest if latest is not None else 2)
     if latest is not None:
         REP["validate_phase"](evidence["phases"]["reserve-fetch"], "reserve-fetch", peers,
-                              loop["cycles"][latest - 1]["bundle"]["bytes"] + evidence["originals"]["dataset"]["bytes"])
+                              loop["cycles"][latest - 1]["bundle"]["bytes"] + selected["dataset"]["bytes"])
     else:
         require(set(evidence["phases"]) == {"uptake"}, "all candidates rejected but an import path is claimed")
     require(evidence["dataset_export"]["manifest_id"] == evidence["dataset_contribute"]["manifest_id"]
-            == evidence["originals"]["dataset_manifest_id"]
+            == selected["manifest_id"]
             and evidence["dataset_export"]["public_content"] is True
             and evidence["dataset_contribute"]["publisher_key_hex"] == evidence["dataset_publish"]["publisher_key_hex"],
             "shared original dataset was resigned or substituted")
-    require(evidence["dataset_contribute"]["expires_unix_seconds"] == evidence["dataset_publish"]["expires_unix_seconds"], "shared dataset expiry extended")
+    require(evidence["dataset_contribute"]["expires_unix_seconds"] == selected["expires"], "shared dataset expiry extended")
     require(evidence["source_stop"]["serving"] is False and evidence["source_stop"]["publications"] == 0,
             "original source provider still serves during independent import")
     require(all(evidence["source_removed"][field] is True for field in
@@ -762,7 +990,7 @@ def check_evidence(evidence, revision):
     require(evidence["source_restart"]["pid_before"] == evidence["training_isolation"]["node_lineage"]["service"]["pid"]
             and evidence["source_restart"]["pid_before"] != evidence["source_restart"]["pid_after"]
             and evidence["source_restart"]["same_cache"] is True
-            and evidence["source_restart"]["restored_publications"] == 3, "original provider restart/reopen missing")
+            and evidence["source_restart"]["restored_publications"] == 4, "original provider restart/reopen missing")
     require(evidence["provision"]["success"] is True and evidence["provision"]["training_performed"] is False,
             "explicit verified guest provisioning missing")
     require(all(evidence["cleanup"].values()) and all(evidence["content_isolation"].values()), "owned cleanup or cross-node storage isolation missing")
@@ -806,6 +1034,14 @@ def check_second_source(evidence):
             and original["dataset"]["sha256"] != evidence["originals"]["dataset"]["sha256"]
             and all(normalize(row["question"]) not in questions for row in training["train"]),
             "fixture reused training source or leaked current training questions into second-source rows")
+    next_source = evidence["catalogs"]["updated"]["dataset_next"]
+    next_data = json.loads(bytes.fromhex(next_source["body_hex"]))
+    require(next_data["source_revision"] == evidence["source_revision"]
+            and next_source["manifest"]["sha256"] != original["manifest"]["sha256"]
+            and next_source["body"]["sha256"] != original["dataset"]["sha256"]
+            and next_data["train"] != training["train"]
+            and all(normalize(row["question"]) not in questions for row in next_data["train"]),
+            "late training source reused A or current validation questions")
     receipt = provenance["source_receipt"]
     require(receipt["manifest_id"] == provenance["manifest_id"] and receipt["sha256"] == original["dataset"]["sha256"]
             and receipt["bytes"] == receipt["peer_bytes"] == original["dataset"]["bytes"]
@@ -825,7 +1061,7 @@ def file_digest(data):
     return dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
 
 
-def shared_updates(loop, original, owner, status, require_dataset):
+def shared_updates(loop, original, owner, status, require_dataset, catalogs=None):
     """Exact contributed updates plus accounted optional original replicas.
 
     Status is aggregate storage accounting, not an inventory API. Approved
@@ -871,6 +1107,17 @@ def shared_updates(loop, original, owner, status, require_dataset):
                 and receipt["sha256"] == original[original_field]["sha256"]
                 and receipt["chunks"] == (1 if kind == "dataset" else 4), "unknown original replica used to explain storage")
         extras.append((receipt["manifest_id"], receipt["bytes"], receipt["chunks"]))
+    required_dataset = original["dataset_manifest_id"]
+    if catalogs is not None:
+        publisher = catalogs["initial"]["publisher_key"]
+        for name in ("initial", "updated"):
+            CATALOG["check_original"](catalogs[name], publisher)
+            original_catalog = catalogs[name]["catalog"]
+            extras.append((original_catalog["manifest"]["sha256"], original_catalog["body"]["bytes"], 1))
+        new_source = catalogs["updated"]["dataset_next"]
+        extras.append((new_source["manifest"]["sha256"], new_source["body"]["bytes"], 1))
+        if loop["state"]["latest"] != 1:
+            required_dataset = new_source["manifest"]["sha256"]
     if loop.get("validation_input") is not None:
         source = json.loads(exported(loop["validation_input"]["provenance.json"]))
         receipt = source["source_receipt"]
@@ -881,9 +1128,9 @@ def shared_updates(loop, original, owner, status, require_dataset):
         extras.append((receipt["manifest_id"], receipt["bytes"], receipt["chunks"]))
     require(len(set(required_ids + [entry[0] for entry in extras])) == len(required_ids) + len(extras), "original and trained publication identities overlap")
     for mask in range(1 << len(extras)):
-        if require_dataset and not mask & 1:
-            continue
         selected = [item for index, item in enumerate(extras) if mask & (1 << index)]
+        if require_dataset and required_dataset not in [item[0] for item in selected]:
+            continue
         count = len(required_ids) + len(selected)
         if (status["publications"] == status["replica_publications"] == count
                 and status["replica_bytes"] == required_bytes + sum(item[1] for item in selected)
@@ -899,13 +1146,14 @@ def shared(work, label, require_dataset):
     require(label in ("loop-shared", "loop-all-shared"), "invalid sharing guard label")
     return shared_updates(read(work / "agent-train-loop-loop.json", 1048576), read(work / "agent-artifact-originals.json"),
                           read(work / "agent-train-loop-owner-key.json")["identity_public_key_hex"],
-                          read(work / f"content-custody-relay4-{label}.json"), require_dataset)
+                          read(work / f"content-custody-relay4-{label}.json"), require_dataset, catalog_records(work))
 
 
 def evidence(work, revision):
     names = ("loop", "summary", "owner-key", "adoption", "initial-fetch", "dataset-export", "dataset-contribute", "source-stop",
              "validation-original", "validation-publish", "validation-removed", "content-isolation", "cleanup")
     result = {name.replace("-", "_"): read(work / f"agent-train-loop-{name}.json", 1048576) for name in names}
+    result["catalogs"] = catalog_records(work)
     for name in ("training", "training-isolation", "originals", "dataset-publish", "adapter-publish", "source-removed", "provision"):
         result[name.replace("-", "_")] = read(work / f"agent-artifact-{name}.json")
     latest = result["loop"]["state"]["latest"]
@@ -923,7 +1171,7 @@ def evidence(work, revision):
     for name, mandatory in (("loop-shared", False), ("loop-all-shared", True)):
         observed = read(work / f"agent-train-loop-{name}-inventory.json")
         require(observed == shared_updates(result["loop"], result["originals"], result["owner_key"]["identity_public_key_hex"],
-                                            result["sharing_status"][name], mandatory), "saved sharing accounting differs")
+                                            result["sharing_status"][name], mandatory, result["catalogs"]), "saved sharing accounting differs")
     result["phases"] = {name: dict(route=read(work / f"agent-train-loop-{name}-live-selection.json"),
                                    layout=read(work / f"agent-train-loop-{name}-layout.json"),
                                    captures={role: read(work / f"agent-train-loop-{name}-{role}.json") for role in REP["ROLES"]})
@@ -956,6 +1204,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
           success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and raw is not None,
           evidence=raw, phase=phase, observed_blocker=None if blocker == "NONE" else blocker, scope=SCOPE,
           quality_policy=POLICY, independent_evaluation_claimed=False, general_quality_improvement_claimed=False,
+          enrolled_catalog_discovery_claimed=raw is not None,
           fresh_corpus_discovery_claimed=False, shared_base_distribution_claimed=False, full_b05_claimed=False, full_alpha_claimed=False,
           cleanup=dict(complete=complete, remaining_owned_objects=remaining), host_state=host))
 
@@ -963,6 +1212,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
 def report(value, revision):
     require(value["report_kind"] == "volparossa-public-agent-train-loop" and value["source_revision"] == revision
             and value["success"] is True and value["scope"] == SCOPE
+            and value["enrolled_catalog_discovery_claimed"] is True
             and value["quality_policy"] == POLICY, "incomplete source-bound loop report")
     require(value["cleanup"] == dict(complete=True, remaining_owned_objects=0)
             and value["host_state"]["unchanged"] is True
@@ -1025,7 +1275,30 @@ def synthetic_validation(cycle, publisher, approved):
     return record
 
 
-def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True, True)):
+def synthetic_catalogs(publisher, original):
+    # Original native envelope layout with synthetic signatures; no authenticity/ML claim.
+    wire = runpy.run_path(str(HERE / "test-content-custody-smoke.py"))["wire"]
+    def publication(raw, name, revision, content_type, created):
+        payload = wire({1:name.encode(), 2:revision, 3:content_type.encode(), 4:len(raw),
+                        5:wire({1:hashlib.sha256(raw).digest(), 2:len(raw)}), 6:hashlib.sha256(raw).digest()})
+        encoded = wire({1:wire({1:1, 2:bytes.fromhex(publisher), 3:created, 4:900, 5:b"n" * 32, 6:1,
+                               7:hashlib.sha256(payload).digest(), 8:payload}), 2:b"s" * 64})
+        return CATALOG["publication"](raw, encoded, publisher, name, revision, content_type)
+    next_source = publication(b'{"public":"synthetic later source"}', "disposable-agent-dataset-next", 1,
+                              CATALOG["DATASET_TYPE"], 200)
+    rows = [dict(name="disposable-agent-dataset", revision=1, manifest_id=original["dataset_manifest_id"]),
+            dict(name=next_source["name"], revision=1, manifest_id=next_source["manifest"]["sha256"])]
+    result = {}
+    for revision, name in ((1, "initial"), (2, "updated")):
+        raw = json.dumps(CATALOG["catalog_body"](rows[:revision])).encode()
+        catalog = dict(publication(raw, CATALOG["CATALOG_NAME"], revision, CATALOG["CATALOG_TYPE"], 100 * revision),
+                       sources=rows[:revision])
+        result[name] = dict(version=1, publisher_key=publisher, catalog_revision=revision, catalog=catalog,
+                            dataset_next=None if revision == 1 else next_source)
+    return result
+
+
+def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True, True), catalog_mode=False):
     # Parser-only file/metric fixtures, never model execution or network evidence.
     def digest(number, size=100):
         return dict(bytes=size, sha256=f"{number:064x}")
@@ -1042,8 +1315,17 @@ def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True,
                       publication_key=owner, publish_name="disposable-loop-update", quality_policy=POLICY)
     state = dict(version=2, completed=2, latest=None, promoted=0, rejected=0, next_sequence=3, cycles=[], garbage=[])
     loop = dict(enrollment=enrollment, state=state, seed_files=original["adapter_files"], seed_dataset=original["dataset"], cycles=[])
+    catalogs = synthetic_catalogs(source, original) if catalog_mode else None
+    if catalogs is not None:
+        enrollment.update(repeat_sources=False, sources=[],
+            catalogs=[dict(publisher_key=source, name=CATALOG["CATALOG_NAME"], min_revision=1, manifest_id=None)],
+            source_discovery="signed-same-publisher-catalogs-v1", maximum_remembered_sources=128)
     previous, previous_files = training, original["adapter_files"]
     for sequence, locally_approved in enumerate(decisions, 1):
+        selected = original["dataset_manifest_id"], original["dataset"]
+        if catalogs is not None and sequence == 2:
+            late = catalogs["updated"]["dataset_next"]
+            selected = late["manifest"]["sha256"], late["body"]
         approved = locally_approved and second_decisions[sequence - 1]
         candidate_loss = losses[sequence - 1] if losses is not None else 1.5 if locally_approved else 2.5
         files = adapters(100 * sequence)
@@ -1062,14 +1344,14 @@ def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True,
         raw_report = json.dumps(trained).encode()
         bundle, publication, report_hash = digest(60 + sequence), digest(70 + sequence), file_digest(raw_report)
         result = dict(operation="compute_train_cycle", complete=True, updates_completed=8, input_adapter_applied=True,
-                      dataset_manifest_id=original["dataset_manifest_id"], source_expires_unix_seconds=900,
+                      dataset_manifest_id=selected[0], source_expires_unix_seconds=900,
                       training_report_sha256=report_hash["sha256"],
-                      bundle=dict(dataset_manifest_id=original["dataset_manifest_id"], sha256=bundle["sha256"]))
+                      bundle=dict(dataset_manifest_id=selected[0], sha256=bundle["sha256"]))
         contribution = dict(manifest_id=publication["sha256"], publisher_key_hex=owner, network_publication=True,
                             serving=True, bytes=bundle["bytes"], expires_unix_seconds=899)
         cycle = dict(sequence=sequence, training=trained, result=result,
-                     provenance=dict(dataset_manifest_id=original["dataset_manifest_id"], expires_unix_seconds=900),
-                     manifest=dict(sha256=original["dataset_manifest_id"], bytes=100), dataset=original["dataset"], adapter_files=files,
+                     provenance=dict(dataset_manifest_id=selected[0], expires_unix_seconds=900),
+                     manifest=dict(sha256=selected[0], bytes=100), dataset=selected[1], adapter_files=files,
                      report=report_hash, report_hex=raw_report.hex(), bundle=bundle,
                      publication=publication if approved else None, publication_hex="ab" if approved else None,
                      contribution=contribution if approved else None, rejected_publication_files_absent=not approved)
@@ -1083,7 +1365,7 @@ def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True,
             scope="source-and-pinned-second-source-selection-only-not-independent-test-benchmark", epsilon=1e-6,
             sequence=sequence, predecessor=state["latest"],
             baseline_kind="configured_adapter" if state["latest"] is None else "approved_predecessor", approved=approved,
-            source_manifest_id=original["dataset_manifest_id"], source_publisher_key=source, source_revision="a" * 40,
+            source_manifest_id=selected[0], source_publisher_key=source, source_revision="a" * 40,
             files=identities, model_id=trained["model"]["id"], model_revision=TRAIN["MODEL_REVISION"],
             base_model=trained["model"]["files"]["model.safetensors"], base_parameters=base,
             input_adapter={key:trained["input_adapter"][key] for key in ("files", "applied_parameters")},
@@ -1119,6 +1401,12 @@ def synthetic_chain(decisions=(True, True), losses=None, second_decisions=(True,
                                 outputs=previous["outputs"]))
     if state["latest"] is None:
         value.update(fetch=None, received=None, inference=None)
+    if catalogs is not None:
+        value["catalogs"] = catalogs
+        if state["latest"] is not None:
+            chosen = training_source(value, state["latest"])
+            value["fetch"]["dataset_manifest_id"] = chosen["manifest_id"]
+            value["received"]["dataset"] = chosen["dataset"]
     return value
 
 
@@ -1197,6 +1485,91 @@ def self_test():
     validation_outputs_test()
     observation_file_test()
     shared_updates_test()
+    catalog_chain_test()
+
+
+def catalog_chain_test():
+    # Exercise the new complete metadata path using synthetic process/model records only.
+    value = synthetic_chain(catalog_mode=True)
+    loop, catalogs = value["loop"], value["catalogs"]
+    publisher = value["dataset_publish"]["publisher_key_hex"]
+    value.update(peers=dict(relay5="synthetic-r5-peer"), source_revision="a" * 40)
+    state = loop["state"]
+    def receipt(original, received):
+        return dict(manifest_id=original["manifest"]["sha256"], **original["body"], chunks=1, peer_bytes=received,
+                    providers_used=1 if received else 0, provider_peer_ids=[value["peers"]["relay5"]] if received else [],
+                    origin_body_bytes=0, origin_range_requests=0)
+    def registry(original):
+        catalog = original["catalog"]
+        return dict(version=1, static_count=0, cursor=0, feeds=[dict(enrolled=loop["enrollment"]["catalogs"][0],
+            next_refresh=catalog["created_unix_seconds"] + 2,
+            snapshot=dict(revision=catalog["revision"], manifest_id=catalog["manifest"]["sha256"], expires=900,
+                verified_at=catalog["created_unix_seconds"] + 1, signed_manifest_hex=catalog["manifest_hex"],
+                body=bytes.fromhex(catalog["body_hex"]).decode(), receipt=receipt(catalog, catalog["body"]["bytes"])))],
+            slots=[dict(feed=0, source=dict(publisher_key=publisher, name=row["name"], min_revision=1, manifest_id=row["manifest_id"]),
+                        active=True, expires=900, last_seen_catalog_revision=catalog["revision"]) for row in catalog["sources"]])
+    state.update(cursor=0, sources=[dict(revision=1, next_attempt=101), dict(revision=1, next_attempt=201)],
+                 seed={}, validation={}, catalog=registry(catalogs["updated"]))
+    for sequence, cycle in enumerate(loop["cycles"], 1):
+        selected = training_source(value, sequence)
+        cat = catalogs["initial" if sequence == 1 else "updated"]["catalog"]
+        proof = dict(version=1, catalog_publisher_key=publisher, catalog_name=CATALOG["CATALOG_NAME"],
+            catalog_manifest_id=cat["manifest"]["sha256"], catalog_revision=sequence, catalog_expires_unix_seconds=900,
+            verified_at_unix_seconds=100 * sequence + 1, signed_manifest_hex=cat["manifest_hex"],
+            catalog_body=bytes.fromhex(cat["body_hex"]).decode(), selected_source=state["catalog"]["slots"][sequence - 1]["source"])
+        cycle["selection"] = dict(source_catalog=proof, dataset_name=selected["name"], publisher_key=publisher,
+            expected_dataset_manifest_id=selected["manifest_id"], minimum_revision=1,
+            automatic_source_discovery=True, cache_miss_selects_different_source=False)
+        cycle["provenance"].update(dataset_name=selected["name"], publisher_key=publisher,
+            verified_at_unix_seconds=100 * sequence + 2,
+            source_receipt=receipt(dict(manifest=dict(sha256=selected["manifest_id"]), body=selected["dataset"]),
+                                   selected["dataset"]["bytes"] if sequence == 2 else 0))
+        for filename, field in (("selection.json", "selection"), ("source-provenance.json", "provenance")):
+            raw = json.dumps(cycle[field]).encode()
+            cycle[field + "_hex"] = raw.hex()
+            cycle["content_files"][filename] = file_digest(raw)
+        cycle["evaluation"]["validation"] = synthetic_validation(cycle, publisher, True)
+        raw = json.dumps(cycle["evaluation"]).encode()
+        cycle.update(evaluation_hex=raw.hex(), evaluation_file=file_digest(raw),
+            raw_isolation=dict(worker=dict(pid=sequence, start_ticks=sequence)), raw_isolation_file=file_digest(b"synthetic observation"))
+        state["cycles"][sequence - 1].update(source=sequence - 1,
+            snapshot=dict(cycle["content_files"], **{"evaluation.json":cycle["evaluation_file"]}, **identities(cycle["validation"]["files"])))
+    initial = copy.deepcopy(state)
+    initial.update(completed=0, next_sequence=2, sources=[dict(revision=None, next_attempt=101)],
+                   cycles=[dict(source=0, phase="running")], catalog=registry(catalogs["initial"]))
+    catalogs.update(initial_state=initial, resume_state=copy.deepcopy(state),
+        resume_summary=dict(value["summary"], attempts_this_invocation=0, owner_cancelled=True),
+        resume_observation=dict(version=1, cli=dict(pid=20, start_ticks=30), coordinator_lock_held=True,
+            state_rewritten_after_reopen=True, exact_completed_state_retained=True, catalog_refreshed_after_reopen=True,
+            model_child_observed=False, observed_processes=[dict(pid=20, start_ticks=30)],
+            state_before_mtime_ns=10, observed_state_mtime_ns=11), inputs_removed=dict(all_owned_inputs_removed=True))
+    loop["state_file"] = dict(mtime_ns=10)
+    late = catalogs["updated"]["dataset_next"]
+    catalogs["late_source"] = dict(version=1, first_worker_alive=True, first_worker_ready=file_digest(b""),
+        first_worker=loop["cycles"][0]["raw_isolation"]["worker"], first_worker_isolation=loop["cycles"][0]["raw_isolation_file"],
+        dataset=late["body"], created_boottime_ns=190, created_unix_seconds=199, source_revision=value["source_revision"])
+    catalogs["cold"] = dict(version=1, dataset_sha256=late["body"]["sha256"], observed_boottime_ns=195,
+        observed_unix_seconds=199, target_index_absent=True, target_file_absent=True, nonblocking_lock_acquired=True, payload_read=False)
+    for key, original in (("publish_initial", catalogs["initial"]["catalog"]),
+                          ("publish_updated", catalogs["updated"]["catalog"]), ("dataset_publish", late)):
+        catalogs[key] = dict(network_publication=True, publisher_key_hex=publisher, manifest_id=original["manifest"]["sha256"],
+            name=original["name"], revision=original["revision"], bytes=original["body"]["bytes"], chunks=1, expires_unix_seconds=900)
+    check_chain(value)
+    check_catalogs(value)
+    for path, replacement in ((("catalogs", "resume_state", "sources", 0, "revision"), None),
+                              (("catalogs", "cold", "target_index_absent"), False),
+                              (("loop", "cycles", 1, "selection", "source_catalog", "catalog_revision"), 1)):
+        changed = copy.deepcopy(value)
+        target = changed
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        try:
+            check_catalogs(changed)
+        except ValueError:
+            continue
+        raise AssertionError("invalid late-source/resume binding accepted")
+    print("agent-train-loop catalog A-to-B/native metadata/resume bindings + 3 rejections PASS; synthetic only")
 
 
 def validation_outputs_test():
@@ -1406,6 +1779,12 @@ def main():
         print(json.dumps(validation_original(*args[1:])))
     elif len(args) == 2 and args[0] == "drop-validation":
         print(json.dumps(drop_validation(args[1])))
+    elif len(args) == 2 and args[0] == "drop-catalog-inputs":
+        print(json.dumps(drop_catalog_inputs(args[1])))
+    elif len(args) == 2 and args[0] == "resume-state":
+        print(json.dumps(read(ART["private_root"](args[1]) / "loop/state.json", 4 * 1024 ** 2)))
+    elif len(args) == 4 and args[0] == "observe-resume":
+        print(json.dumps(observe_resume(int(args[1]), args[2], Path(args[3]))))
     elif len(args) == 5 and args[0] == "observe-loop":
         observe_loop(int(args[1]), args[2], Path(args[3]), int(args[4]))
     elif len(args) == 2 and args[0] == "collect":

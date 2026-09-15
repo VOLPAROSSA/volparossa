@@ -316,6 +316,15 @@ the adapter, not automatically its source dataset: a receiver still needs the in
 trusted dataset available from an authorized provider. CLI `content agent fetch` also
 accepts `--dataset-publisher-key` for this case; omission preserves same-publisher behavior.
 
+After reaching `--max-cycles`, the coordinator makes no new training attempts but gives its
+already approved pending publications one final retry window of `--max-seconds`. All network
+handoffs share that single monotone deadline and retain their earlier original source/manifest
+expiry; the deadline is not restarted per item. Local preparation and durable identity writes
+finish before a handoff can be interrupted. The final `publication_drain` value distinguishes
+completion, cancellation, deadline and expiry; retained expired publications are not labelled
+successfully shared. A timed-out publication stays pending for explicit later resume. This
+does not enlarge any worker lease or authorize more training.
+
 The overall watcher has no preset end time, but runs one bounded, spare-capacity worker at a
 time. Existing source expiry, CPU/thread, memory, per-worker deadline and cache limits remain.
 It retains at most eight cycle directories; the current warmstart and pending publications
@@ -390,7 +399,157 @@ still preserves the previous approved adapter and remains eligible for bounded r
 Repeatedly selecting on this set makes it a validation/selection set, not a fresh independent
 test benchmark. Question matching does not detect semantic overlap or prove that a pretrained
 base/imported seed never saw the content. It does not establish general intelligence or global
-quality improvement. The upgraded disposable training-loop proof is pending; B05 stays open.
+quality improvement. The [run on `57fa30f7`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34899111394)
+completed both real training rounds, all four second-source inference jobs and protected adoption.
+Its workflow failed because the checker expected string outputs instead of worker result objects,
+and required a null field that Rust legitimately omits. Corrected reconstruction of the unchanged
+raw evidence passes; the historical workflow remains failed. The second-source comparison covers
+12 target tokens, with losses `0.839399 -> 0.656192 -> 0.588994`; all four generated answers are
+identical, so this does not demonstrate better answers. Both candidates were approved; that VM
+did not exercise rejection. The corrected [run on `842e845b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901453523)
+now passes, including exact-source raw reconstruction, independent original-signature checks,
+both real training rounds, four real validation workers, protected adoption and complete cleanup.
+Its 12-token losses are `0.839408 -> 0.656203 -> 0.589002`; both updates are approved. This still
+does not prove better answers, an independent benchmark or the rejection path. B05 stays open.
+
+### Signed public source catalogs
+
+The new version-2 training plan can enroll **catalog publishers**, without enumerating each
+dataset locally. The same ongoing loop discovers newly listed datasets and newer revisions,
+then uses its existing protected fetch, actual training, evaluation and optional signed sharing.
+Enrollment remains explicit; there is no mandatory central catalog or authority inferred from
+cache popularity. Multiple independently chosen publisher catalogs can be used.
+
+For example, replace the key below with an independently trusted publisher's Ed25519 public key:
+
+```json
+{
+  "version": 2,
+  "sources": [],
+  "catalogs": [
+    {"publisher_key": "<64 lowercase hexadecimal characters>", "name": "public-training-sources"}
+  ]
+}
+```
+
+Use this file with the normal `compute train-loop --plan ... --execute` command above.
+Version-1 fixed-source plans keep their existing behavior. Catalog entries also accept an
+optional `min_revision` and exact `manifest_id`; pinning an exact catalog ID deliberately
+prevents following a replacement. Nothing starts in preview mode.
+
+The publisher signs an ordinary native public file with content type
+`application/vnd.volparossa.agent-source-catalog.v1+json`, using the existing `content publish`
+and contribution service. Its JSON body has this profile:
+
+```json
+{
+  "version": 1,
+  "visibility": "public",
+  "purpose": "agent_training",
+  "dataset_profile": "application/vnd.volparossa.agent-dataset.v1+json",
+  "license": "GPL-3.0-only",
+  "sources": [
+    {"name": "public-dataset-a", "revision": 1, "manifest_id": "<exact dataset manifest ID>"}
+  ]
+}
+```
+
+Every listed dataset must be signed by that same enrolled publisher; a catalog cannot silently
+delegate trust to another key. Names, positive revisions and exact manifest IDs are bound to the
+original signed catalog. Actual datasets still require the supported public training profile
+and independent verification before model work. A publisher's license/permission assertion is
+not proof of legality, accuracy or quality, and arbitrary cached documents are not admitted.
+
+Each refresh asks for current name metadata without allowing an older cache hit to suppress the
+lookup. Unchanged valid publications remain acceptable. Rollbacks and equal-revision conflicts
+are rejected; this is observed-revision protection, not a globally newest-version guarantee.
+Dataset retrieval remains exact-ID and cache-first, with protected retrieval of missing data.
+
+The registry retains stable source positions and completed revision floors across refreshes and
+restart. Reordering a catalog cannot reassign old cycle receipts; a rejected but completed update
+does not silently retrain. Withdrawal or original expiry stops new admissions without deleting
+past results. A failed refresh can use the previous signed snapshot only until its original
+expiry. The per-cycle checkpoint retains the original catalog and selected row; the worker's
+deadline also respects that catalog's expiry. The separate validation source remains excluded.
+
+This first working cohort allows at most 16 catalogs and 128 remembered source identities in
+total, including fixed sources. A full registry reports capacity refusal instead of discarding
+history and accidentally repeating old work. It supports ongoing revisions, not an unlimited
+stream of new source names. Source selection remains round-robin, not a learned relevance or
+coverage model. Local signed-transfer, registry/restart and authorization/deadline checks pass.
+The disposable scenario publishes dataset B and catalog revision two only after the first real
+training worker starts, checks B is not cached, and requires the next cycle to discover/use B.
+It then reopens the actual coordinator without repeating completed work. The
+[run on `50d53733`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903399004)
+performs both real training cycles, all four validation jobs, cold acquisition of dataset B and
+the zero-attempt restart, but fails at the later independent Client import with
+`CONTENT_UNAVAILABLE`. Original signatures verify and cleanup preserves guest-host state;
+the full scenario remains failed. General external-corpus ingestion, broad source discovery,
+defended aggregation and complete B05 remain open.
+
+### Learning from peer updates
+
+The new optional `--peer-updates /absolute/path/peer-channels.json` lets an ongoing local
+training loop consider compatible adapters published by explicitly chosen peers. It requires
+the independently pinned `--validation-source` described above. The channel file is owner-private
+JSON, for example:
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {"publisher_key": "<64 lowercase hexadecimal characters>", "name": "public-agent-updates", "min_revision": 1}
+  ]
+}
+```
+
+The coordinator discovers a signed adapter revision through the existing protected content
+plane. Its bundled dataset ID must resolve to exactly one **independently selected** training
+source, either a fixed plan entry or a currently eligible enrolled catalog entry, with exact
+manifest ID and revision. An unknown dataset stays pending; the adapter publisher cannot add
+new dataset authorities merely by referencing them. Missing authorized bytes remain fetchable
+from peers rather than being replaced with something convenient in the cache.
+
+Import retains the original signed adapter and dataset, exact extracted files and retrieval
+receipts. The local worker then runs two isolated, zero-update inference jobs on the same pinned
+validation bytes: the actual current adapter/base and the candidate. Adoption requires equal
+target counts and a loss reduction greater than `1e-6`; a publisher's quality claim is not used.
+Declared training/validation question overlap is rejected before comparison. The usual owner
+priority, resource bounds, cancellation and original source-expiry limits still apply.
+
+A successful peer comparison changes the selected warmstart, **not** the local completed-cycle
+counter. The next real local training job applies those exact imported weights. Its checkpoint
+binds the foreign publication, comparison and input-file identities separately from any previous
+local cycle. A new local successor must still pass both ordinary promotion gates before it can
+replace that warmstart and be shared under the local publisher's identity. Rejected local work
+does not silently replace the accepted peer adapter.
+
+One candidate is processed at a time, with at most 16 enrolled channels and eight retained peer
+rounds. Retention preserves the active imported weights and only reclaims the coordinator's
+recognized inactive files. Completed comparisons and original identities are checked on reopen;
+finished work is not counted as fresh training. These are explicit development resource bounds,
+not a claim that the whole network must contain only 16 peers or eight agents.
+
+The runtime and focused import/lineage checks pass locally. The additional disposable scenario
+requires a separate node to fetch, compare, adopt and actually continue training
+after the original dataset service stops. The [first run on `08457e1e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34906223498)
+performed the peer comparison, adoption, eight local training updates and validation, but its
+final check failed because the local successor was still awaiting publication when the
+one-cycle invocation ended. The [bounded-drain run on `6a782752`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34908647293)
+exposed the underlying handoff refusal: the fixture's Client learner has contribution/relay
+service disabled and receives `agent_policy`, so its valid signed publication remains pending
+through the final 600-second window. All five learner workers completed, but no actual
+publication receipt was obtained; the later independent named-import gate was not reached.
+The corrected fixture uses R3's existing authorized `provider-c` contribution service, with
+its own agent/cache and actual learner workers in R3's namespace. It consumes through two
+selected protected relay paths to R4; its separate Exit-facing TCP18080 link only serves
+content. R3's agent and temporary neighbor links are removed before the original independent
+Client import gate. This correction has focused local checks, not yet a passing combined
+live proof; production policy checks are unchanged. Full cross-node continued learning and republication therefore
+remain a development candidate. This is selection and reuse of compatible adapters,
+not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
+planning or a complete continuously self-improving brain. Reusing a small validation set also
+does not establish general quality, diversity, or immunity to malicious updates.
 
 ## Owner-first resource allocation
 
@@ -419,7 +578,7 @@ continuation step, not general task decomposition or unlimited execution permiss
 ## Current public peer-job candidate
 
 The development CLI now has an explicit `compute serve` broker and `compute peer
-attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task` commands. The broker must already have the
+attach/capabilities/submit/poll/cancel/distribute/resume/workflow/task/document` commands. The broker must already have the
 pinned runtime/model (and optional verified adapter), uses one isolated worker slot, and is
 off until explicitly executed. The agent attaches only a protected same-UID socket and an
 explicit allowlist of dataset publishers. It does not launch Python inside the hardened
@@ -438,10 +597,11 @@ questions across explicitly selected compatible peers, sends the tasks concurren
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
 poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
-checkpoint. Automatic peer selection/reassignment, general multi-step
-continuation, distributed optimizer/model-layer execution, confidential private tasks and
+checkpoint. General automatic peer selection, task planning,
+distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
-who reported a result, not whether the result is true.
+who reported a result, not whether the result is true. Explicit recovery and the new
+owner-enabled continuation candidate are described below.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry
@@ -515,6 +675,41 @@ proofs remain separate from the local coordinator tests.
 Both `compute peer submit` and `distribute` preview without network I/O unless `--execute` is
 present. An explicit submit consumes a preselected signed dataset, whether obtained from an
 eligible origin, a peer or cache. These commands do not automatically choose a training corpus.
+
+### Automatic continuation of enrolled work
+
+Add `--follow` to `compute peer workflow`, `task` or `document` to continue the same enrolled
+public work without issuing a manual `--resume` after every bounded round:
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer workflow \
+  --plan /absolute/plan.json --directory /absolute/private-parent/workflow-001 \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --max-batches 1 --follow --execute
+```
+
+With this option, `--max-batches` bounds each continuation window rather than the entire owner
+invocation. `--follow-poll-seconds` controls the wait between windows (default 5, range 1–60).
+Completed results stay unchanged. When the original retry rules permit replacement, unfinished
+rows first try another compatible, available enrolled peer, retaining the original peer as a
+fallback. Busy/unavailable peers can be reconsidered after waiting; malformed sources,
+incompatible models and storage/verification errors are not converted into endless retries.
+
+The owner retains one workflow lock and cancellation path throughout. Each actual worker keeps
+its own unchanged lease; following never renews an original handle or duplicates ambiguous work
+under an unexpired lease. The invocation stops on completion, owner cancellation, original source
+expiry or the existing 128-retained-attempts-per-package boundary. Cancellation keeps partial
+results and reports incomplete work with a nonzero status. Without `--follow`, the previous
+bounded-invocation behavior is unchanged; without `--execute`, neither mode dispatches jobs.
+
+The 27 focused peer tests pass, including continuation counters, cancellation, option parsing,
+alternate-peer ordering and exact completed-receipt reuse. The [live `agent-jobs-follow` run on
+`8f49986e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34907950110) and its original raw
+reconstruction pass: one owner command survives real worker loss and starts a replacement on
+another peer. The completed peer result is unchanged, only the failed row is replaced, and the
+disposable network cleans up fully with unchanged guest-host state.
+This is continuation of explicit public tasks, not a general planner, private inference,
+exactly-once execution, neural answer synthesis or a completed B03 checkpoint.
 
 ### Source-bound public user tasks
 
@@ -604,9 +799,10 @@ It contains no invented training examples, held-out answers or repository revisi
 
 Current enrollment accepts at most 1 MiB of input, 16,384 segments and two to four explicit
 peers. Individual prompts/answers, resource budgets and worker leases remain bounded.
-`--max-batches` limits new rounds per invocation (1–32), not completed lifetime progress.
-`result.json` preserves ordered range answers and exact source/context/job/provider/report
-identities; it is not neural synthesis, answer-quality proof or an independently portable
+`--max-batches` limits new rounds per invocation (1–32), or per continuation window with
+`--follow`, not completed lifetime progress.
+Without `--synthesize`, `result.json` preserves ordered range answers and exact
+source/context/job/provider/report identities; it is not neural synthesis, answer-quality proof or an independently portable
 execution attestation. An unfinished invocation returns a nonzero status but retains complete
 receipts. Resume never reassigns completed work or silently renews expired source permissions.
 The new `agent-public-document` disposable scenario targets real tokenizer splitting,
@@ -614,10 +810,72 @@ multi-package execution and receipt reuse after peer/route shutdown. Its [first 
 `974c6555`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34891322172) stopped before
 tokenizer/model execution because the Client UID could not traverse the guest source tree.
 The `4421b1a6` correction installs only the public helper and a read-only public README copy
-in the guest workspace, preserving source-tree restrictions. Local checks pass; the corrected
-[live proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/34893180542) is pending.
-The original failed run has complete cleanup and unchanged guest state.
+in the guest workspace, preserving source-tree restrictions. Subsequent broker-startup failures
+were traced to full pinned-model hashing in the unoptimized development build. The targeted
+SHA-2 build correction makes both brokers ready in under half a second in the
+[run on `35fd9551`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901448083), but that
+run then stops before Python at the tokenizer sandbox's proc mount. The owner CLI had entered
+the agent service's masked mount view. The candidate uses the same net-only owner-launch
+pattern as the working train-loop, retaining the service protections and fixed worker sandbox.
+The [subsequent run on `1bd44d11`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903185520)
+and its original raw reconstruction pass: all 5,120 source bytes, nine tokenizer-selected parts,
+three signed packages and five real peer-job receipts. Both workers overlap, and after brokers
+stop the complete result resumes without new work or changed receipts. Captures and cleanup
+pass with unchanged guest-host state. That run proves ordered fragment answers, not synthesis;
+the earlier failed runs remain failed.
 Full B03 and confidential tasks remain open.
+
+### Synthesizing one public answer
+
+Add `--synthesize` to the initial document command to enroll a hierarchy of actual peer
+inference, rather than stop at separate fragment answers. The original document and question
+remain explicitly public. After all fragments complete, the coordinator retains the exact
+generated answers, groups them in source order, and uses the same isolated pinned tokenizer
+to plan fitting synthesis prompts. Their outputs form the next level until one answer remains.
+Every prompt still fits 192 input tokens; every worker keeps its existing resource and lease
+limits. Large frontiers use groups of at most 64 parent outputs, not an enlarged model context.
+
+```sh
+# Initial command: use the public document options above, adding --synthesize.
+# When unfinished levels need new tokenization/publications, explicitly supply these again:
+volparossa --control-socket /absolute/agent.sock compute peer document \
+  --directory /absolute/private-parent/document-001 --resume \
+  --runtime-root /absolute/existing-runtime --model-root /absolute/existing-model \
+  --identity /absolute/existing-identity --passphrase-file /absolute/private-passphrase \
+  --max-batches 32 --follow --execute
+```
+
+The enrollment remembers synthesis; `--resume` cannot change the source, question, license,
+publisher or chosen peers. Completed levels reuse exact retained inputs, plans, native
+publications and checked worker receipts. A completely finished resume needs none of the four
+provisioning/identity options and does not contact peers, run the tokenizer, or reopen keys.
+An unlocked signing key is never retained across peer awaits. Original source expiry limits
+new work; historical complete receipts remain readable without extending that permission.
+
+Peers must explicitly advertise `derived_inference_v3`. These inference-only packages contain
+the original publisher's signed source manifest, exact pieces of generated parent answers and
+their package/job/provider/report lineage. They are **not original text excerpts**, training
+data or independently portable executor attestations: the coordinator checked locally retained
+authenticated RPC statuses and signs that limited assertion. A parent model's answer may be
+wrong. Encryption protects transport, not inputs from the selected executing peer.
+
+The result retains original `answers`, all intermediate level records and, on completion,
+`synthesized_answer`. Completion means the actual inference chain finished, not that the final
+answer is correct or semantically exhaustive. The worker's 64-token generation boundary is
+reported explicitly. Wire-truncated or empty parent outputs are not silently used; reductions
+that fail to shrink, or exceed 16 levels, stop incomplete without discarding source inputs.
+`--follow` continues bounded task windows, not unlimited per-device execution.
+
+The extended disposable document scenario must demonstrate at least two real reduction levels,
+exact parent coverage and signed provenance, one real final answer, and offline completed
+resume with unchanged receipts. Its first live attempt on `342b8a80` failed: the final local
+preworker admission gate omitted v3, even though the RPC boundary already supported it.
+The corrected gate strictly validates v3 inference and still refuses derived training.
+Incomplete synthesis also retains `last-workflow-report.json` with fixed failure categories;
+an unconfirmed job is not treated as a stopped worker. The fixture exports only explicitly
+public partial files on failure, never relabelling them as complete execution evidence.
+The corrected live result remains pending. General autonomous planning, confidential offload
+and full B03 remain open.
 
 ## Private tasks and training data
 

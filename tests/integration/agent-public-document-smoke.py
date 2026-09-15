@@ -16,6 +16,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 JOBS = runpy.run_path(str(HERE / "agent-jobs-smoke.py"))
+SYNTHESIS = runpy.run_path(str(HERE / "agent-document-synthesis.py"))
 TRAIN, CUSTODY = JOBS["TRAIN"], JOBS["CUSTODY"]
 read, write, require = JOBS["read"], JOBS["write"], JOBS["require"]
 QUESTION = "Summarize the provided public context."
@@ -29,6 +30,7 @@ SCOPE = ("explicit public README excerpt, actual pinned tokenizer with byte-comp
          "two simultaneous isolated peer workers over protected paths, bounded package resume and unchanged "
          "completed receipts after brokers/route stop; not protected source retrieval, answer correctness, "
          "neural synthesis, private offload or full B03")
+SYNTHESIS_SCOPE = SCOPE.replace("neural synthesis, ", "") + "; additionally real multi-level peer synthesis, not semantic completeness"
 
 
 def sha(raw):
@@ -118,14 +120,50 @@ def observe(work, pid):
     raise ValueError("document did not retain real peer handles within admission deadline")
 
 
-def snapshot(root, package_only=False):
+def partial_public_paths(root):
+    """Fixed coordinator outputs only; do not descend into keys, models or native caches."""
+    group = r"synthesis/level-[0-9]{2}-group-[0-9]{4}/"
+    package = r"(?:" + group + r")?package-[0-9]{4}/"
+    directories = re.compile(r"(?:synthesis|" + group[:-1] + r"|(?:" + group + r")?tokenizer(?:-attempt-[0-9]{4})?"
+        r"|" + package[:-1] + r"(?:/work(?:/package-0000(?:/attempt-[0-9]{4})?)?)?)")
+    root_files = {"source.txt", "source.manifest", "planner-input.json", "document-plan.json",
+                  "tokenizer-report.json", "document.json", "result.json", ".task.lock"}
+    group_files = {"group.json", "parents.json", "planner-input.json", "document-plan.json", "tokenizer-report.json"}
+    regular = re.compile(r"(?:" + package + r"(?:dataset\.json|dataset\.manifest|workflow-plan\.json|last-workflow-report\.json|work/(?:workflow\.json|result\.json|\.workflow\.lock"
+        r"|package-0000/(?:dataset\.json|manifest\.bin|attempt-[0-9]{4}/(?:result\.json|(?:job|original|observation|retry)-[0-9]{1,2}\.json|receipt-[0-9a-f]{32}\.json))))"
+        r"|(?:" + group + r")?tokenizer(?:-attempt-[0-9]{4})?/(?:report\.json|document-plan\.json))")
+    count = 0
+    owner = root.lstat().st_uid
+    for directory, children, files in os.walk(root, topdown=True, followlinks=False):
+        count += len(children) + len(files)
+        require(count <= 2048, "unbounded document fixture tree")
+        kept = []
+        for name in sorted(children):
+            path = Path(directory) / name
+            if directories.fullmatch(path.relative_to(root).as_posix()):
+                info = path.lstat()
+                require(stat.S_ISDIR(info.st_mode) and not path.is_symlink() and info.st_uid == owner
+                        and stat.S_IMODE(info.st_mode) == 0o700, "unsafe partial document directory")
+                kept.append(name)
+        children[:] = kept
+        for name in sorted(files):
+            path = Path(directory) / name
+            relative = path.relative_to(root).as_posix()
+            match = re.fullmatch(group + r"([^/]+)", relative)
+            if relative in root_files or regular.fullmatch(relative) or (match and match[1] in group_files):
+                yield path
+
+
+def snapshot(root, package_only=False, partial=False):
     info = root.lstat()
     require(stat.S_ISDIR(info.st_mode) and not root.is_symlink(), "wrong retained document root")
     result, total = {}, 0
-    for count, path in enumerate(root.rglob("*")):
+    paths = partial_public_paths(root) if partial else root.rglob("*")
+    for count, path in enumerate(paths):
         require(count < 2048, "unbounded document fixture tree")
         relative = path.relative_to(root).as_posix()
-        if not package_only and (relative == "publication-cache" or relative.startswith("publication-cache/")):
+        if not package_only and (relative == "publication-cache" or relative.startswith("publication-cache/")
+                or re.match(r"synthesis/level-[0-9]{2}-group-[0-9]{4}/publication-cache(?:/|$)", relative)):
             continue  # Native cache is not the completed-receipt state under test.
         item = path.lstat()
         require(item.st_uid == info.st_uid and not path.is_symlink(), "retained file owner/symlink differs")
@@ -133,18 +171,19 @@ def snapshot(root, package_only=False):
             continue
         require(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and stat.S_IMODE(item.st_mode) == 0o600,
                 "unsafe retained document file")
-        if not package_only and relative == "result.json":
+        if not partial and not package_only and relative == "result.json":
             continue  # Only the root invocation summary is intentionally replaced.
         require(item.st_size <= 16 * 1048576, "oversized retained document file")
         raw = path.read_bytes()
         require(len(raw) == item.st_size, "retained file changed while reading")
-        require(raw or path.name in (".task.lock", ".workflow.lock"), "empty retained result is not an owned lock")
+        require(partial or raw or path.name in (".task.lock", ".workflow.lock"), "empty retained result is not an owned lock")
         total += len(raw)
         require(total <= MAX_EXPORT, "document evidence exceeds explicit bound")
         result[relative] = {"bytes": len(raw), "sha256": sha(raw), "inode": [item.st_dev, item.st_ino]}
-    require(f"{ATTEMPT}/job-0.json" in result if package_only else "document.json" in result,
-            "actual document execution files absent")
-    require(not any("attempt-0001" in name for name in result), "unexpected duplicate worker attempt")
+    if not partial:
+        require(f"{ATTEMPT}/job-0.json" in result if package_only else "document.json" in result,
+                "actual document execution files absent")
+        require(not any("attempt-0001" in name for name in result), "unexpected duplicate worker attempt")
     return result
 
 
@@ -173,8 +212,36 @@ def collect(work):
         "snapshot": retained, "raw": raw, "observed_monotonic_ns": time.monotonic_ns()})
 
 
+def partial_files(root, revision, reason, owner_status):
+    require(re.fullmatch(r"[0-9a-f]{40}", revision) and reason in (
+        "synthesis_observer_failed", "synthesis_owner_failed") and type(owner_status) is int
+        and 0 <= owner_status <= 255, "invalid fixed partial-document context")
+    retained = snapshot(root, partial=True)
+    raw = {}
+    for name, identity in retained.items():
+        content = (root / name).read_bytes()
+        require(len(content) == identity["bytes"] and sha(content) == identity["sha256"],
+                "partial document bytes changed after snapshot")
+        raw[name] = content.hex()
+    value = {"version": 1, "source_revision": revision, "partial": True, "success": False,
+        "reason": reason, "owner_returned": True, "owner_exit_status": owner_status,
+        "snapshot": retained, "raw": raw, "observed_monotonic_ns": time.monotonic_ns(),
+        "scope": "public_coordinator_files_after_owner_return_not_complete_execution_evidence",
+        "model_runtime_keys_cache_exported": False, "remote_workers_stopped_claimed": False}
+    require(len(json.dumps(value, indent=2, allow_nan=False).encode()) + 1 <= MAX_EXPORT,
+            "encoded partial document evidence exceeds explicit bound")
+    return value
+
+
+def partial(work, revision, reason, owner_status):
+    JOBS["guest_work"](work)
+    write(work / "agent-public-document-partial-files.json",
+          partial_files(root_path(work), revision, reason, owner_status))
+
+
 def stopped(work, resumed=False):
     JOBS["guest_work"](work)
+    synthesis_cleanup = SYNTHESIS["assert_stopped"](work)
     workers = read(work / "agent-jobs-observation.json")["workers"]
     for worker in workers:
         require(not JOBS["alive"](worker["broker"])
@@ -184,16 +251,18 @@ def stopped(work, resumed=False):
         require(state in ("inactive", "failed"), "executor unit is still active")
     value = {"brokers": [w["broker"] for w in workers], "all_owned_processes_ended": True,
              "observed_monotonic_ns": time.monotonic_ns()}
+    value.update(synthesis_cleanup)
     if resumed:
         value["snapshot"] = snapshot(root_path(work))
     write(work / f"agent-public-document-{'resumed' if resumed else 'stopped'}.json", value)
 
 
-def check_plan(plan, source):
+def check_plan(plan, source, synthesis=False):
     require(plan["version"] == 1 and plan["source_bytes"] == len(source) and plan["source_sha256"] == sha(source)
             and plan["question_sha256"] == sha(QUESTION.encode()) and plan["model_id"] == MODEL
             and plan["model_revision"] == TRAIN["MODEL_REVISION"] and plan["tokenizer_sha256"] == TOKENIZER
-            and plan["prompt_limit"] == 192 and 4 < len(plan["parts"]) <= 128, "wrong actual tokenizer plan")
+            and plan["prompt_limit"] == 192 and plan.get("synthesis", False) is synthesis
+            and (1 if synthesis else 5) <= len(plan["parts"]) <= 128, "wrong actual tokenizer plan")
     next_byte = 0
     for part in plan["parts"]:
         start, end = part["start"], part["end"]
@@ -228,7 +297,10 @@ def check_supervisor(report):
             "real worker lacks bounded isolation/cleanup accounting")
 
 
-def check_result(result, enrollment, plan, answers, complete, rounds):
+def check_result(result, enrollment, plan, answers, complete, rounds, synthesis=False):
+    joining = "hierarchical_peer_synthesis" if synthesis else "ordered_source_ranges_not_neural_synthesis"
+    if enrollment.get("synthesize", False) and not complete:
+        joining = "awaiting_fragments_before_peer_synthesis"
     require(result["operation"] == "compute_public_document" and result["version"] == 1
             and result["complete"] is complete and result["rounds_this_invocation"] == rounds and result["interrupted"] is False
             and result["source_manifest_id"] == enrollment["source_manifest_id"]
@@ -236,7 +308,7 @@ def check_result(result, enrollment, plan, answers, complete, rounds):
             and result["public_question"] == QUESTION and result["license"] == "GPL-3.0-only"
             and result["total_parts"] == len(plan["parts"]) and result["answers"] == answers,
             "document invocation changed source, range order or actual result")
-    require(result["joining"] == "ordered_source_ranges_not_neural_synthesis"
+    require(result["joining"] == joining
             and result["content_cache"] == "local_native_signed_publications_not_automatic_network_contribution"
             and all(result[k] is False for k in ("source_selection_uses_cache_inventory", "private_data_supported",
                                                  "model_answer_correctness_proven", "full_b03_claimed")), "document scope overstated")
@@ -261,6 +333,8 @@ def check_evidence(value, revision):
                 "saved original bytes differ from real file snapshot")
     load = lambda name: json.loads(raw[name])
     enrollment, plan = load("document.json"), load("document-plan.json")
+    synthesis = enrollment.get("synthesize", False)
+    require(type(synthesis) is bool, "invalid enrolled synthesis flag")
     source = raw["source.txt"]
     require(4096 <= len(source) <= 6144 and value["input"]["excerpt_hex"] == source.hex()
             and value["input"]["excerpt_sha256"] == sha(source), "original public README excerpt differs")
@@ -294,7 +368,7 @@ def check_evidence(value, revision):
             and value["input"]["owner_model_inode"] != value["input"]["peer_model_inode"]
             and all(w["input_inodes"]["model/model.safetensors"] == value["input"]["peer_model_inode"] for w in workers.values()),
             "Client tokenizer and real peer model copies were confused")
-    answers, job_ids, response_bytes = [], set(), {node: 0 for node in workers}
+    answers, leaf_parents, job_ids, response_bytes = [], [], set(), {node: 0 for node in workers}
     require(len(enrollment["packages"]) == (len(plan["parts"]) + 3) // 4, "missing document package")
     for index, package in enumerate(enrollment["packages"]):
         prefix = f"package-{index:04}"
@@ -370,12 +444,20 @@ def check_evidence(value, revision):
                     "context_sha256": sha(source[planpart["start"]:planpart["end"]]), "package_manifest_id": manifest_id,
                     "text": output["text"], "provider_key": handle["provider_key"], "job_id": binding["job_id"],
                     "report_sha256": status["report_sha256"]})
+                if synthesis:
+                    leaf_parents.append((position, SYNTHESIS["answer"](report["outputs"][local], handle, status,
+                        manifest_id, planpart["start"], planpart["end"], local)))
             seen.extend(selected)
         require(sorted(seen) == list(range(len(rows))), "document rows duplicated or omitted")
     answers.sort(key=lambda item: item["source_part"])
+    synthesis_rounds = 0
+    if synthesis:
+        leaf_parents.sort(key=lambda item: item[0])
+        synthesis_rounds = SYNTHESIS["check"](value, raw, enrollment, [parent for _, parent in leaf_parents],
+            response_bytes, job_ids, {"plan": check_plan, "manifest": manifest, "supervisor": check_supervisor})
     check_result(value["first"], enrollment, plan, answers[:4], False, 1)
-    check_result(value["result"], enrollment, plan, answers, True, len(enrollment["packages"]) - 1)
-    check_result(value["resume"], enrollment, plan, answers, True, 0)
+    check_result(value["result"], enrollment, plan, answers, True, len(enrollment["packages"]) - 1 + synthesis_rounds, synthesis)
+    check_result(value["resume"], enrollment, plan, answers, True, 0, synthesis)
     first_snapshot = {name.removeprefix("package-0000/"): item for name, item in files["snapshot"].items()
                       if name.startswith("package-0000/")}
     require(value["first_files"]["snapshot"] == first_snapshot and value["resumed"]["snapshot"] == files["snapshot"],
@@ -411,6 +493,11 @@ def evidence(work, revision):
               "privacy": {role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in CUSTODY["ROLES"]},
               "control_privacy": read(work / "content-provider-custody-fetch-control.json"),
               "gates": read(work / "content-custody-fetch-gates.json")})
+    observed = work / "agent-public-document-synthesis-observation.json"
+    require(value["result"]["joining"] == "hierarchical_peer_synthesis" and observed.is_file(),
+            "this source's opt-in scenario did not finish actual hierarchical synthesis")
+    if observed.is_file():
+        value["synthesis_observation"] = read(observed, MAX_EXPORT)
     check_evidence(value, revision)
     return value
 
@@ -419,22 +506,29 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     found = work / "agent-public-document-evidence.json"
     value = read(found, MAX_EXPORT) if found.is_file() else None
     host = read(work / "a15-evidence.json") if (work / "a15-evidence.json").is_file() else {}
+    synthesis = value is not None and value["result"]["joining"] == "hierarchical_peer_synthesis"
+    partial_path = work / "agent-public-document-partial-files.json"
+    partial_identity = JOBS["file_hash"](partial_path, MAX_EXPORT) if partial_path.is_file() else None
     write(work / "agent-public-document-smoke.json", {
-        "report_kind": "volparossa-public-document", "source_revision": revision, "scope": SCOPE,
+        "report_kind": "volparossa-public-document", "source_revision": revision, "scope": SYNTHESIS_SCOPE if synthesis else SCOPE,
         "success": status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
         "phase": phase, "observed_blocker": None if blocker == "NONE" else blocker, "runner_exit_status": status,
-        "answer_quality_proven": False, "neural_synthesis_claimed": False, "full_b03_claimed": False, "full_alpha_claimed": False,
-        "evidence": value, "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host})
+        "answer_quality_proven": False, "neural_synthesis_claimed": synthesis, "full_b03_claimed": False, "full_alpha_claimed": False,
+        "evidence": value, "partial_files": partial_identity,
+        "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host})
 
 
 def report(value, revision):
+    synthesis = value.get("neural_synthesis_claimed") is True
     require(value["report_kind"] == "volparossa-public-document" and value["source_revision"] == revision
-            and value["scope"] == SCOPE and value["success"] is True and value["runner_exit_status"] == 0,
+            and value["scope"] == (SYNTHESIS_SCOPE if synthesis else SCOPE) and value["success"] is True and value["runner_exit_status"] == 0,
             "incomplete source-bound document report")
     require(value["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and value["host_state"]["unchanged"] is True
             and value["host_state"]["before_sha256"] == value["host_state"]["after_sha256"], "host/owned cleanup differs")
-    require(all(value[k] is False for k in ("answer_quality_proven", "neural_synthesis_claimed", "full_b03_claimed", "full_alpha_claimed")),
+    require(all(value[k] is False for k in ("answer_quality_proven", "full_b03_claimed", "full_alpha_claimed"))
+            and value["neural_synthesis_claimed"] is synthesis
+            and (value["evidence"]["result"]["joining"] == "hierarchical_peer_synthesis") is synthesis,
             "document scope overstated")
     check_evidence(value["evidence"], revision)
 
@@ -615,6 +709,61 @@ def self_test():
         else:
             raise AssertionError("hardlinked retained input accepted")
     print("document parser and real owned-file snapshot checks passed; no model or network executed")
+    partial_self_test()
+
+
+def partial_self_test():
+    # Actual file capture of synthetic protocol bytes, expressly not execution proof.
+    fixture = contract_fixture()
+    with tempfile.TemporaryDirectory(prefix="document-partial-test-") as directory:
+        root = Path(directory)
+        expected = {}
+        for name, data in fixture["files"]["raw"].items():
+            expected[name] = bytes.fromhex(data)
+        group = "synthesis/level-01-group-0000/"
+        for name, data in list(expected.items()):
+            if name.startswith("package-0000/"):
+                expected[group + name] = data
+        expected[group + "group.json"] = b'{"version":1}'
+        expected[group + "parents.json"] = b'[{"text":"Synthetic public parent output"}]'
+        expected[group + "planner-input.json"] = b'{"visibility":"public","synthesis":true}'
+        expected["result.json"] = b'{"complete":false}'
+        expected[group + "package-0000/work/package-0000/attempt-0000/observation-0.json"] = b'{"state":"failed"}'
+        expected[group + "package-0000/last-workflow-report.json"] = b'{"complete":false,"failure_code":"COMPUTE_RPC_UNCONFIRMED"}'
+        expected[group + "tokenizer-attempt-0001/report.json"] = b""
+        for name, data in expected.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600)
+        for path in root.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o700)
+        for name in ("identity.key", "passphrase", "publication-cache/private-chunk", group + "publication-cache/private-chunk"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"NEVER_EXPORT_PRIVATE_BYTES")
+            path.chmod(0o600)
+        # A forbidden directory must never even be traversed by the public collector.
+        (root / "model").symlink_to(root / "publication-cache", target_is_directory=True)
+        value = partial_files(root, "a" * 40, "synthesis_observer_failed", 1)
+        require(value["partial"] is True and value["success"] is False and value["owner_exit_status"] == 1
+                and value["remote_workers_stopped_claimed"] is False, "partial snapshot claims completed execution")
+        require(set(value["raw"]) == set(expected), "partial public manifests/handles/receipts lost or private files included")
+        for name, data in expected.items():
+            require(bytes.fromhex(value["raw"][name]) == data and value["snapshot"][name]["sha256"] == sha(data),
+                    "partial snapshot changed actual retained bytes")
+        require(b"NEVER_EXPORT_PRIVATE_BYTES".hex() not in json.dumps(value), "private bytes escaped public snapshot")
+        source = root / "source.manifest"
+        source.unlink()
+        source.symlink_to(root / "identity.key")
+        try:
+            partial_files(root, "a" * 40, "synthesis_owner_failed", 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("partial snapshot followed a substituted public-path symlink")
+    print("partial public snapshot and private exclusion checks passed; failure never relabelled PASS")
 
 
 def main(args):
@@ -637,6 +786,11 @@ def main(args):
         return first(work)
     if command == "collect":
         return collect(work)
+    if command == "partial":
+        try:
+            return partial(work, args[2], args[3], int(args[4]))
+        except (OSError, ValueError, KeyError, TypeError):
+            raise SystemExit("DOCUMENT_PARTIAL_SNAPSHOT_UNAVAILABLE") from None
     if command in ("stopped", "resumed"):
         return stopped(work, command == "resumed")
     if command == "evidence":

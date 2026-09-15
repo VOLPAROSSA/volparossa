@@ -102,6 +102,17 @@ def adapter_config():
             "target_modules": ["q_proj", "v_proj"], **WORKER.ADAPTER_DEFAULTS}
 
 
+def derived_dataset(text="Generated café."):
+    # Structural provenance fixture; no signed model-execution attestation is claimed.
+    item = dict(text=text, provider_key="d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                job_id="1" * 32, report_sha256="2" * 64, package_manifest_id="3" * 64,
+                model_fingerprint="4" * 64, output_index=0, parent_index=0, source_start=0, source_end=20,
+                piece_start=0, piece_end=len((text + "\n").encode()))
+    return dict(version=3, visibility="public", license="CC0-1.0", source_manifest_hex="ab" * 64,
+                level=1, claim_scope=WORKER.DERIVED_CLAIM_SCOPE,
+                inference=[dict(question="What is the combined answer?", context=text + "\n", inputs=[item])])
+
+
 def adapter_bytes(header_change=None, last_float=0.0):
     # Synthetic safetensors parser fixture, not trained weights or execution evidence.
     header, offset = {"__metadata__": {"format": "pt"}}, 0
@@ -117,6 +128,80 @@ def adapter_bytes(header_change=None, last_float=0.0):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_derived_v3_is_inference_only_and_preserves_exact_generated_pieces(self):
+        value = derived_dataset("é")
+        before = json.dumps(value).encode()
+        self.assertEqual(WORKER.validate_dataset(value, "infer"), value)
+        self.assertEqual(json.dumps(value).encode(), before)
+        # The separator belongs to the virtual text BEFORE slicing. A newline-only
+        # second piece is valid and never receives an invented extra separator.
+        row = value["inference"][0]
+        row["inputs"] = [dict(row["inputs"][0], piece_end=2), dict(row["inputs"][0], piece_start=2)]
+        self.assertEqual(WORKER.validate_dataset(value, "infer"), value)
+        for license_value in WORKER.PUBLIC_LICENSES:
+            WORKER.validate_dataset(dict(value, license=license_value), "infer")
+        with self.assertRaisesRegex(WORKER.JobError, "DERIVED_PROFILE_INFERENCE_ONLY"):
+            WORKER.validate_dataset(value, "train")
+        for changes in ({"visibility": "private"}, {"level": 0}, {"level": 17}, {"level": True},
+                        {"claim_scope": "source_quotation"}, {"heldout": []}, {"source_revision": "a" * 40},
+                        {"inference": []}, {"source_manifest_hex": "abc"}, {"source_manifest_hex": "AB"},
+                        {"license": "unknown"}, {"source_manifest_hex": "ab" * 65537}):
+            with self.subTest(changes=list(changes)), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(dict(value, **changes), "infer")
+        for changes in ({"piece_start": 1}, {"piece_end": 4}, {"piece_end": 0}, {"piece_end": True},
+                        {"source_start": 20}, {"source_end": 1048577}, {"parent_index": 2 ** 32},
+                        {"output_index": 65536}, {"provider_key": "0" * 64}, {"job_id": "A" * 32},
+                        {"report_sha256": "0" * 64}, {"text": ""}, {"text": "x\0y"}, {"text": "é" * 513},
+                        {"extra": 1}):
+            bad = derived_dataset("é")
+            bad["inference"][0]["inputs"][0].update(changes)
+            with self.subTest(changes=list(changes)), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(bad, "infer")
+        for changes in ({"context": "é"}, {"context": "é\n\n"}, {"question": " "},
+                        {"inputs": []}, {"inputs": [derived_dataset()["inference"][0]["inputs"][0]] * 65}):
+            bad = derived_dataset("é")
+            bad["inference"][0].update(changes)
+            with self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(bad, "infer")
+
+    def test_synthesis_planning_and_encoding_use_the_same_fixed_prompt_and_bounds(self):
+        class Tokenizer:
+            def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, return_dict):
+                assert tokenize and add_generation_prompt and not return_dict
+                assert messages[0] == WORKER.prompt_messages(dict(question="", context=""), synthesis=True)[0]
+                return [1] * (8 + sum(len(row["content"].encode()) for row in messages) // 4)
+
+        # Tokenizer/backend doubles prove exact branch/template/ranges, not real counts.
+        source = derived_dataset("Public generated café. " * 35)
+        row = source["inference"][0]
+        planning = dict(version=1, visibility="public", license=source["license"], synthesis=True,
+                        document=row["context"], question=row["question"])
+        WORKER.validate_dataset(planning, "plan_document")
+        tokenizer, session, backend = Tokenizer(), mock.Mock(), mock.Mock()
+        backend.tensor.side_effect = lambda value, **_kwargs: value
+        plan = WORKER.plan_document(tokenizer, planning, session)
+        self.assertTrue(plan["synthesis"])
+        self.assertGreater(len(plan["parts"]), 1)
+        original, reconstructed = row["context"].encode(), bytearray()
+        for part in plan["parts"]:
+            single = copy.deepcopy(source)
+            piece = original[part["start"]:part["end"]]
+            single["inference"][0]["context"] = piece.decode()
+            single["inference"][0]["inputs"][0].update(piece_start=part["start"], piece_end=part["end"])
+            before = json.dumps(single).encode()
+            samples = WORKER.encode_dataset(tokenizer, backend, WORKER.validate_dataset(single, "infer"))
+            self.assertEqual(samples["train"], [])
+            self.assertEqual(samples["heldout"], [])
+            self.assertEqual(len(samples["inference"][0][0]), part["prompt_tokens"])
+            self.assertLessEqual(part["prompt_tokens"], 192)
+            self.assertEqual(before, json.dumps(single).encode())
+            reconstructed.extend(piece)
+        self.assertEqual(bytes(reconstructed), original)
+        self.assertNotEqual(WORKER.prompt_messages(row), WORKER.prompt_messages(row, synthesis=True))
+        for invalid in (1, "true", None, [], {}):
+            with self.assertRaisesRegex(WORKER.JobError, "INVALID_DOCUMENT_SYNTHESIS_PROFILE"):
+                WORKER.validate_dataset(dict(planning, synthesis=invalid), "plan_document")
+
     def test_document_and_v2_profiles_are_public_bounded_and_inference_only(self):
         document = dict(version=1, visibility="public", license="CC-BY-4.0", document="A public café.\n", question="What is stated?")
         self.assertEqual(WORKER.validate_dataset(document, "plan_document"), document)
@@ -156,6 +241,9 @@ class WorkerProtocolTests(unittest.TestCase):
         tokenizer, session = Tokenizer(), mock.Mock()
         source = dict(version=1, visibility="public", license="GPL-3.0-only", document=("Public café 文🙂.\n" * 200), question="What is stated?")
         plan = WORKER.plan_document(tokenizer, source, session)
+        self.assertNotIn("synthesis", plan)
+        explicit_legacy = WORKER.plan_document(tokenizer, dict(source, synthesis=False), session)
+        self.assertEqual(explicit_legacy, plan)
         encoded = source["document"].encode()
         self.assertGreater(len(plan["parts"]), 1)
         self.assertEqual(plan["source_sha256"], hashlib.sha256(encoded).hexdigest())

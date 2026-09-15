@@ -28,14 +28,14 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use socket2::SockRef;
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, watch},
+    sync::{Mutex, RwLock, watch},
     task::{JoinHandle, JoinSet},
     time::{interval, timeout},
 };
 use volparossa_content::provider::{
-    ProviderEndpoint, PublicationRegistry, SignedProviderOffer, serve_publication,
+    ProviderEndpoint, ProviderError, PublicationRegistry, SignedProviderOffer, serve_publication,
 };
-use volparossa_content::transfer::TransferLimits;
+use volparossa_content::transfer::{TransferError, TransferLimits};
 use volparossa_content::{CacheLimits, ChunkStore, SignedManifest, Validity, VerifiedManifest};
 #[cfg(test)]
 use volparossa_content::{provider::pull_publication_with_progress, transfer::TransferProgress};
@@ -50,6 +50,7 @@ use zeroize::Zeroizing;
 use crate::{
     control::ControlContext,
     discovery::{ContentDiscoveryError as DiscoveryError, DiscoveryControlHandle},
+    state::AgentState,
     unix_millis,
 };
 
@@ -113,6 +114,7 @@ struct ServingLoop {
     discovery: DiscoveryControlHandle,
     stop: watch::Receiver<bool>,
     automatic: bool,
+    events: Option<Arc<RwLock<AgentState>>>,
 }
 
 impl ContentRuntime {
@@ -250,6 +252,7 @@ impl ContentRuntime {
             discovery: context.discovery.clone(),
             stop: receiver,
             automatic: options.automatic,
+            events: Some(Arc::clone(&context.state)),
         };
         let listener_stopped = stop.clone();
         let task = tokio::spawn(async move {
@@ -291,6 +294,7 @@ impl ContentRuntime {
             discovery,
             stop,
             automatic: false,
+            events: None,
         })
         .await;
     }
@@ -305,6 +309,7 @@ impl ContentRuntime {
             discovery,
             mut stop,
             automatic,
+            events,
         } = server;
         let mut sessions = JoinSet::new();
         let mut refresh = interval(Duration::from_secs(60));
@@ -337,17 +342,22 @@ impl ContentRuntime {
                     }
                     let registry = Arc::clone(&registry);
                     let tls = tls.clone();
+                    let events = events.clone();
                     sessions.spawn(async move {
                         let Ok(mut stream) = tls.accept(stream).await else { return; };
                         // Snapshot at most 64 explicit registrations; never hold the metadata
                         // lock while a background receiver waits before requesting a chunk.
                         // Cache handles retain their own exclusive ownership checks.
                         let registry = {
-                            let Ok(current) = registry.try_lock() else { return; };
+                            let Ok(current) = registry.try_lock() else {
+                                provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_BUSY").await;
+                                return;
+                            };
                             current.clone()
                         };
-                        if serve_publication(&mut stream, &registry, TransferLimits::default()).await.is_ok() {
-                            let _ = tls::finish(&mut stream).await;
+                        match serve_publication(&mut stream, &registry, TransferLimits::default()).await {
+                            Ok(_) => { let _ = tls::finish(&mut stream).await; }
+                            Err(error) => provider_event(events.as_ref(), provider_error_code(&error)).await,
                         }
                     });
                 }
@@ -751,6 +761,47 @@ async fn content_event(context: &ControlContext, code: &'static str) {
     );
 }
 
+async fn provider_event(state: Option<&Arc<RwLock<AgentState>>>, code: &'static str) {
+    if let Some(state) = state {
+        state.write().await.log(
+            volparossa_local_control::LogLevel::Info,
+            code,
+            unix_millis(),
+        );
+    }
+}
+
+// Closed categories only: never format an error containing a path, chunk ID or peer input.
+fn provider_error_code(error: &ProviderError) -> &'static str {
+    match error {
+        ProviderError::Content(error) | ProviderError::Transfer(TransferError::Content(error)) => {
+            use volparossa_content::Error;
+            match error {
+                Error::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    "CONTENT_PROVIDER_CACHE_BUSY"
+                }
+                Error::Io(_) => "CONTENT_PROVIDER_CACHE_IO",
+                Error::InvalidStore => "CONTENT_PROVIDER_CACHE_INVALID",
+                Error::Integrity(_) => "CONTENT_PROVIDER_CHUNK_INTEGRITY",
+                Error::MissingChunk(_) => "CONTENT_PROVIDER_CHUNK_MISSING",
+                Error::Quota => "CONTENT_PROVIDER_CACHE_QUOTA",
+                Error::Expired => "CONTENT_PROVIDER_CONTENT_EXPIRED",
+                _ => "CONTENT_PROVIDER_CONTENT_INVALID",
+            }
+        }
+        ProviderError::Missing => "CONTENT_PROVIDER_SELECTOR_MISSING",
+        ProviderError::Unavailable => "CONTENT_PROVIDER_SELECTOR_UNAVAILABLE",
+        ProviderError::Io(_) => "CONTENT_PROVIDER_SELECTOR_IO",
+        ProviderError::Timeout => "CONTENT_PROVIDER_SELECTOR_TIMEOUT",
+        ProviderError::Protocol => "CONTENT_PROVIDER_SELECTOR_PROTOCOL",
+        ProviderError::Transfer(TransferError::Io(_)) => "CONTENT_PROVIDER_CHUNK_IO",
+        ProviderError::Transfer(TransferError::Timeout) => "CONTENT_PROVIDER_CHUNK_TIMEOUT",
+        ProviderError::Transfer(TransferError::Protocol) => "CONTENT_PROVIDER_CHUNK_PROTOCOL",
+        ProviderError::Transfer(TransferError::Limit) => "CONTENT_PROVIDER_CHUNK_LIMIT",
+        _ => "CONTENT_PROVIDER_REJECTED",
+    }
+}
+
 fn serving_receipt(registry: &PublicationRegistry) -> Result<ContentReceipt, ContentError> {
     Ok(ContentReceipt {
         serving: true,
@@ -813,4 +864,41 @@ fn complete(manifest: &VerifiedManifest, store: &mut ChunkStore) -> Result<bool,
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod provider_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_categories_preserve_stage_and_never_expose_error_payload() {
+        let secret = "/private/cache/secret-object-and-hostname";
+        let cases = [
+            (
+                ProviderError::Content(volparossa_content::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    secret,
+                ))),
+                "CONTENT_PROVIDER_CACHE_BUSY",
+            ),
+            (
+                ProviderError::Unavailable,
+                "CONTENT_PROVIDER_SELECTOR_UNAVAILABLE",
+            ),
+            (ProviderError::Missing, "CONTENT_PROVIDER_SELECTOR_MISSING"),
+            (
+                ProviderError::Transfer(TransferError::Io(std::io::Error::other(secret))),
+                "CONTENT_PROVIDER_CHUNK_IO",
+            ),
+            (
+                ProviderError::Io(std::io::Error::other(secret)),
+                "CONTENT_PROVIDER_SELECTOR_IO",
+            ),
+        ];
+        for (error, expected) in cases {
+            let code = provider_error_code(&error);
+            assert_eq!(code, expected);
+            assert!(!code.contains(secret));
+        }
+    }
 }

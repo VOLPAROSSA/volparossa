@@ -30,7 +30,7 @@ pub(crate) struct Options {
     /// Two to four explicit peers at enrollment; stored unchanged for subsequent invocations.
     #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
     provider_key: Vec<VerifyingKey>,
-    /// Maximum new bounded rounds this invocation, not an overall job lifetime in seconds.
+    /// New rounds per invocation, or per continuation window with --follow; not a worker lease.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
     /// Per-executor lease; every later round is a distinct explicitly authorized attempt.
@@ -39,6 +39,8 @@ pub(crate) struct Options {
     /// Preview only unless explicitly enabled; no subprocess recursion or model downloads.
     #[arg(long)]
     execute: bool,
+    #[command(flatten)]
+    follow: follow::Options,
     #[arg(skip)]
     expected_task: Option<ExpectedTask>,
 }
@@ -72,12 +74,18 @@ impl Options {
             max_batches,
             max_seconds,
             execute,
+            follow: follow::Options::default(),
             expected_task: None,
         }
     }
 
     pub(super) fn expect_task(mut self, expected: ExpectedTask) -> Self {
         self.expected_task = Some(expected);
+        self
+    }
+
+    pub(super) fn with_follow(mut self, options: follow::Options) -> Self {
+        self.follow = options;
         self
     }
 }
@@ -168,6 +176,10 @@ impl Progress {
     }
 
     fn outputs(&self) -> Result<Vec<serde_json::Value>> {
+        self.output_rows(false)
+    }
+
+    fn output_rows(&self, detailed: bool) -> Result<Vec<serde_json::Value>> {
         let mut outputs = Vec::new();
         for part in self.parts.values() {
             if let Some(status) = part
@@ -185,11 +197,17 @@ impl Progress {
                     .as_array()
                     .context("compute_workflow_outputs")?;
                 for (index, row) in part.handle.binding.row_indices.iter().enumerate() {
-                    outputs.push(
-                        serde_json::json!({"sample_index":row,"text":rows[index]["text"],
+                    let mut output = serde_json::json!({"sample_index":row,"text":rows[index]["text"],
                         "provider_key":part.handle.provider_key,"job_id":part.handle.binding.job_id,
-                        "report_sha256":status.report_sha256}),
-                    );
+                        "report_sha256":status.report_sha256});
+                    if detailed {
+                        output["output_index"] = index.into();
+                        output["model_fingerprint"] =
+                            part.handle.binding.model_fingerprint.clone().into();
+                        output["generated_tokens"] = rows[index]["generated_tokens"].clone();
+                        output["text_truncated"] = rows[index]["text_truncated"].clone();
+                    }
+                    outputs.push(output);
                 }
             }
         }
@@ -243,7 +261,7 @@ pub(super) async fn report_with_activity(
                 "package_count":enrollment.packages.len(),"total_rows":enrollment.packages.iter().map(|value|value.rows).sum::<usize>(),
                 "maximum_rounds_this_invocation":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,
                 "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory,
-                "pending_failure":false}),
+                "pending_failure":false,"follow":args.follow.follow}),
             );
         }
     };
@@ -251,7 +269,10 @@ pub(super) async fn report_with_activity(
     if let Some(expected) = &args.expected_task {
         validate_expected_task(&enrollment, expected)?;
     }
-    let result = advance(args, socket, &enrollment, cancelled).await;
+    let result = follow::run(&args.follow, cancelled, || {
+        advance(args, socket, &enrollment, cancelled)
+    })
+    .await;
     drop(lock);
     result
 }
@@ -359,6 +380,22 @@ pub(super) fn task_snapshot(
     directory: &Path,
     expected: &ExpectedTask,
 ) -> Result<serde_json::Value> {
+    snapshot(directory, expected, false)
+}
+
+/// Full checked worker output metadata, without changing the established public snapshot shape.
+pub(super) fn task_snapshot_detailed(
+    directory: &Path,
+    expected: &ExpectedTask,
+) -> Result<serde_json::Value> {
+    snapshot(directory, expected, true)
+}
+
+fn snapshot(
+    directory: &Path,
+    expected: &ExpectedTask,
+    detailed: bool,
+) -> Result<serde_json::Value> {
     super::super::private_directory(directory)?;
     let _lock = lock_directory(directory)?;
     let enrollment: Enrollment = serde_json::from_slice(&read_file(
@@ -374,7 +411,7 @@ pub(super) fn task_snapshot(
     let progress = load_progress(&directory, &source, &verified, &enrollment)?;
     Ok(
         serde_json::json!({"dataset_manifest_id":package.manifest_id,"task":package.task,
-        "complete":progress.complete(),"outputs":progress.outputs()?}),
+        "complete":progress.complete(),"outputs":progress.output_rows(detailed)?}),
     )
 }
 
@@ -463,6 +500,45 @@ fn stored_source(
     Ok((source, verified))
 }
 
+// Persist only a fixed local category, never a provider exception, prompt or filesystem path.
+fn failure_code(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "compute_distribute_capability_probe_unavailable" => "capability_unavailable",
+        "compute_distribute_capability_probe_timeout" => "capability_timeout",
+        "compute_distribute_peer_busy" => "peer_busy",
+        "compute_distribute_cancelled_before_submit" => "owner_cancelled_before_submit",
+        "compute_distribute_incompatible_models" | "compute_peer_profile" => "incompatible_model",
+        "compute_peer_document_not_supported" | "compute_peer_task_not_supported" => {
+            "unsupported_profile"
+        }
+        "compute_peer_job_rejected" => "job_rejected",
+        "compute_peer_source_expired" => "source_expired",
+        _ => "execution_or_verification_failed",
+    }
+}
+
+fn round_failure(result: &Result<serde_json::Value>) -> Option<&'static str> {
+    match result {
+        Err(error) => Some(failure_code(error)),
+        Ok(report) if report["complete"] == true => None,
+        Ok(report) => Some(
+            if report["jobs"]
+                .as_array()
+                .is_some_and(|jobs| jobs.iter().any(|job| job["state"] == "unconfirmed"))
+            {
+                // This says nothing about whether a remote worker started or stopped.
+                "jobs_unconfirmed"
+            } else {
+                "jobs_incomplete"
+            },
+        ),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep one bounded admission/reconciliation window and its retained progress together"
+)]
 async fn advance(
     args: &Options,
     socket: &Path,
@@ -483,6 +559,7 @@ async fn advance(
         "preview"
     };
     let mut failed = false;
+    let mut pending_expiry = None;
     for (index, package) in enrollment.packages.iter().enumerate() {
         let directory = args.directory.join(format!("package-{index:04}"));
         // Historical authentication allows already verified completed work to survive source
@@ -490,6 +567,7 @@ async fn advance(
         let (source_args, verified) =
             stored_source(&directory, package, enrollment.verified_at_unix_seconds)?;
         let mut progress = load_progress(&directory, &source_args, &verified, enrollment)?;
+        let mut package_failure = None;
         if !progress.complete()
             && args.execute
             && rounds < args.max_batches
@@ -498,6 +576,9 @@ async fn advance(
         {
             if verified.expires() <= now()? {
                 stopped = "source_expired_new_signed_package_required";
+                failed = true;
+            } else if args.follow.follow && progress.attempts >= MAX_ATTEMPTS {
+                stopped = "attempt_storage_bound";
                 failed = true;
             } else {
                 ensure!(
@@ -527,14 +608,27 @@ async fn advance(
                             providers.clone(),
                             output,
                             args.max_seconds,
-                        ),
+                        )
+                        .prefer_other_provider(args.follow.follow),
                         socket,
                         cancelled,
                     )
                     .await
                 };
                 progress = load_progress(&directory, &source_args, &verified, enrollment)?;
-                if result.is_err() || !progress.complete() {
+                package_failure = round_failure(&result);
+                let result_failed = match result {
+                    Err(error)
+                        if args.follow.follow
+                            && !*cancelled.borrow()
+                            && verified.expires() > now()?
+                            && !follow::transient_preflight(&error) =>
+                    {
+                        return Err(error);
+                    }
+                    result => result.is_err(),
+                };
+                if result_failed || !progress.complete() {
                     stopped = if progress.attempts == 0 {
                         "initial_admission_failed_no_work_submitted"
                     } else {
@@ -544,10 +638,19 @@ async fn advance(
                 }
             }
         }
+        if !progress.complete() {
+            pending_expiry = Some(pending_expiry.map_or(verified.expires(), |expiry: u64| {
+                expiry.min(verified.expires())
+            }));
+        }
         completed += usize::from(progress.complete());
-        packages.push(serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
+        let mut package_report = serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
             "complete":progress.complete(),"attempts":progress.attempts,"outputs":progress.outputs()?,
-            "pending_handles":progress.pending(),"task":package.task}));
+            "pending_handles":progress.pending(),"task":package.task});
+        if let Some(code) = package_failure {
+            package_report["failure_code"] = code.into();
+        }
+        packages.push(package_report);
     }
     let complete = completed == enrollment.packages.len();
     if complete {
@@ -555,15 +658,18 @@ async fn advance(
     } else if *cancelled.borrow() {
         stopped = "interrupted_handles_retained";
     }
-    Ok(
-        serde_json::json!({"version":1,"operation":"compute_workflow","execute":args.execute,
+    let mut report = serde_json::json!({"version":1,"operation":"compute_workflow","execute":args.execute,
         "complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
         "rounds_this_invocation":rounds,"maximum_seconds_per_worker":args.max_seconds,"stopped":stopped,
         "packages":packages,"receipt_scope":"locally_retained_authenticated_rpc_status",
         "private_data_supported":false,"automatic_source_discovery":false,"general_task_planning":false,
         "exactly_once_execution_guaranteed":false,"result_truthfulness_guaranteed":false,
-        "pending_failure":failed}),
-    )
+        "pending_failure":failed});
+    if args.follow.follow {
+        report["maximum_rounds_per_window"] = serde_json::json!(args.max_batches);
+        report["source_admission_expires_unix_seconds"] = serde_json::json!(pending_expiry);
+    }
+    Ok(report)
 }
 
 fn attempt_directories(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -764,6 +870,45 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn failed_round_diagnostics_never_persist_upstream_text() {
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("compute_peer_job_rejected")),
+            "job_rejected"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!(
+                "compute_distribute_capability_probe_timeout"
+            )),
+            "capability_timeout"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("private prompt or /private/path")),
+            "execution_or_verification_failed"
+        );
+        assert_eq!(
+            failure_code(&anyhow::anyhow!("compute_peer_job_rejected: injected text")),
+            "execution_or_verification_failed"
+        );
+        // An unconfirmed Submit is an Ok(partial report), not a terminal RPC error.
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":false,"jobs":[{
+                "state":"unconfirmed","error":"private upstream exception"
+            }]}))),
+            Some("jobs_unconfirmed")
+        );
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":false,"jobs":[{
+                "state":"running","error":"private upstream exception"
+            }]}))),
+            Some("jobs_incomplete")
+        );
+        assert_eq!(
+            round_failure(&Ok(serde_json::json!({"complete":true}))),
+            None
+        );
+    }
+
     struct Fixture {
         root: tempfile::TempDir,
         options: Options,
@@ -830,6 +975,7 @@ mod tests {
             max_batches: 1,
             max_seconds: 600,
             execute: true,
+            follow: follow::Options::default(),
             expected_task: None,
         };
         let (enrollment, sources) = prepare(&options).unwrap();
@@ -974,6 +1120,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {
@@ -1137,6 +1284,15 @@ mod tests {
             assert!(retained.complete());
             assert!(retained.pending().is_empty());
             assert_eq!(retained.outputs().unwrap().len(), 2);
+            let ordinary = retained.outputs().unwrap();
+            let detailed = retained.output_rows(true).unwrap();
+            for (plain, full) in ordinary.iter().zip(&detailed) {
+                assert!(plain.get("model_fingerprint").is_none());
+                assert!(full["model_fingerprint"].is_string());
+                assert_eq!(plain["text"], full["text"]);
+                assert_eq!(plain["report_sha256"], full["report_sha256"]);
+                assert_eq!(full["output_index"], 0);
+            }
         }
         fixture.options.resume = true;
         fixture.options.plan = None;
@@ -1146,6 +1302,14 @@ mod tests {
         run(&fixture.options, &fixture.root.path().join("no-agent.sock"))
             .await
             .unwrap();
+        fixture.options.follow.follow = true;
+        let followed = report(&fixture.options, &fixture.root.path().join("no-agent.sock"))
+            .await
+            .unwrap();
+        assert_eq!(followed["complete"], true);
+        assert_eq!(followed["follow_windows"], 1);
+        assert_eq!(followed["rounds_this_invocation"], 0);
+        assert_eq!(followed["follow_waits"], 0);
         for package in 0..3 {
             assert!(
                 !fixture
@@ -1192,6 +1356,40 @@ mod tests {
     #[test]
     fn cli_has_explicit_resume_and_independent_round_budget() {
         use clap::Parser;
+        for period in ["1", "60"] {
+            assert!(
+                crate::Cli::try_parse_from([
+                    "volparossa",
+                    "compute",
+                    "peer",
+                    "workflow",
+                    "--resume",
+                    "--directory",
+                    "/private/workflow",
+                    "--follow",
+                    "--follow-poll-seconds",
+                    period,
+                ])
+                .is_ok()
+            );
+        }
+        for period in ["0", "61"] {
+            assert!(
+                crate::Cli::try_parse_from([
+                    "volparossa",
+                    "compute",
+                    "peer",
+                    "workflow",
+                    "--resume",
+                    "--directory",
+                    "/private/workflow",
+                    "--follow",
+                    "--follow-poll-seconds",
+                    period,
+                ])
+                .is_err()
+            );
+        }
         assert!(
             crate::Cli::try_parse_from([
                 "volparossa",

@@ -77,18 +77,7 @@ impl DocumentDataset {
     }
 
     fn source_manifest(&self) -> Result<SignedManifest, ComputeError> {
-        let encoded = &self.source_manifest_hex;
-        if encoded.is_empty()
-            || encoded.len() > MAX_MANIFEST_BYTES * 2
-            || encoded.len() % 2 != 0
-            || !encoded
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(ComputeError::Invalid);
-        }
-        let bytes = hex::decode(encoded).map_err(|_| ComputeError::Invalid)?;
-        SignedManifest::decode(&bytes).map_err(|_| ComputeError::Invalid)
+        decode_source_manifest(&self.source_manifest_hex)
     }
 
     pub(super) fn verify_source(
@@ -135,6 +124,20 @@ impl DocumentDataset {
             .collect::<Result<_, _>>()?;
         serde_json::to_string(&dataset).map_err(|_| ComputeError::Invalid)
     }
+}
+
+pub(super) fn decode_source_manifest(encoded: &str) -> Result<SignedManifest, ComputeError> {
+    if encoded.is_empty()
+        || encoded.len() > MAX_MANIFEST_BYTES * 2
+        || encoded.len() % 2 != 0
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ComputeError::Invalid);
+    }
+    let bytes = hex::decode(encoded).map_err(|_| ComputeError::Invalid)?;
+    SignedManifest::decode(&bytes).map_err(|_| ComputeError::Invalid)
 }
 
 /// Cheap strict broker admission for the inference-only profile; not source-publisher trust.
