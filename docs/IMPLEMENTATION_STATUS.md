@@ -37,13 +37,22 @@ have retained raw evidence, but republication and the later independent named-im
 do not pass. Cleanup removed all owned objects and preserved guest-host state. Neither this run
 nor the failed `08457e1e` run below is relabelled as successful.
 
-The next fixture correction places the learner on R3, whose real `provider-c` contribution
+The fixture correction places the learner on R3, whose real `provider-c` contribution
 service is enabled. Its own agent, cache and five model workers use R3's namespace; three
 temporary neighbor links permit selection of two protected relay paths to R4. R3's existing
 Exit-facing link permits only its separate TCP18080 serving role, never consumer traffic.
 After learning, its service and agent stop and the temporary links are removed before the
-original independent Client named-import gate. Focused fixture/parser checks pass; the combined
-live scenario remains pending. No product publication or privacy guard was relaxed.
+original independent Client named-import gate. The [run on `68314466`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34912575899)
+completed the five real peer-learning workers, approved one cycle and published it with
+`pending_publications: 0`. The full run remains **failed** at the physical capture gate, before
+the independent Client named import. All 962 rejected headers were fixed UDP41000-to-41000
+attempts to known fixture peers on a dummy `underlay`, not TCP18080 content transfers. The
+corrected classifier records only those exact phase/interface/source/destination/port tuples
+as `underlay_control_attempt_packets`; this proves neither delivery nor authentication and
+does not count as WireGuard or content bytes. Direct-exit, direct content and unknown-tuple
+rejection remain unchanged. Focused positive and negative capture checks pass; the new combined
+live scenario remains pending. Cleanup removed all owned objects and preserved guest-host
+state. No product publication or privacy guard was relaxed, and the original run stays failed.
 
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed

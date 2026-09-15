@@ -66,6 +66,18 @@ MAX_HEADER_SAMPLES = 32
 LEARNER_IP = "48.164.4.1"
 LEARNER_PROVIDER_COUNTERS = ("learner_provider_request_packets", "learner_provider_response_packets",
                              "learner_provider_response_payload_bytes")
+# add_public_underlay() installs a dummy interface with a default but no peer.
+# These are the exact missing public /32 routes in the peer-learning topology,
+# including either alternative R1/R2 data relay. Discovery may attempt its fixed
+# UDP listener there; these headers prove neither delivery nor authentication.
+LEARNER_UNROUTED_CONTROL = {
+    "relay3": {"49.165.5.1", "50.166.6.1", "51.167.7.1"},
+    "relay4": {"48.164.4.1", "50.166.6.1", "51.167.7.1"},
+    "exit": {"40.156.1.1", "41.157.2.1", "51.167.7.1"},
+    "relay0": {"44.160.1.1", "45.161.2.1"},
+    "relay1": {"42.158.0.1", "45.161.2.1", "51.167.7.1"},
+    "relay2": {"42.158.0.1", "44.160.1.1", "51.167.7.1"},
+}
 
 
 def fixture_mdns_addresses():
@@ -330,6 +342,12 @@ def classify(layout, role, protocol, src, sport, dst, dport, payload, iface, *, 
     if not learning and protocol == socket.IPPROTO_UDP and 41000 in (sport, dport) \
             and src in CONTROL_PEERS and dst in CONTROL_PEERS and src != dst:
         return {"control_packets": 1}
+    if learning and iface == "underlay" and protocol == socket.IPPROTO_UDP \
+            and sport == dport == 41000 and src == (LEARNER_IP if node == "relay3" else PUBLIC.get(node)) \
+            and dst in LEARNER_UNROUTED_CONTROL.get(node, ()):
+        # Socket attempts only. Never count as connected/authenticated control,
+        # a WireGuard leg, provider payload, or a successful direct content fetch.
+        return {"control_packets": 1, "underlay_control_attempt_packets": 1}
     if protocol == socket.IPPROTO_UDP and sport != 0 and dport != 0 \
             and 41000 in (sport, dport) and exact_control_pair(node, iface, src, dst, controls):
         return {"control_packets": 1}
@@ -619,6 +637,7 @@ def capture(layout, output, ready, role, interfaces):
                   **dict.fromkeys((*COUNTERS, *DIAGNOSTIC_COUNTERS), 0))
     if layout["phase"] == "peer-learning":
         record.update(dict.fromkeys(LEARNER_PROVIDER_COUNTERS, 0))
+        record["underlay_control_attempt_packets"] = 0
     for relay in layout["relays"]:
         for leg in ("client_leg", "exit_leg"):
             record[f"{relay}_{leg}_wireguard_data_datagrams"] = 0

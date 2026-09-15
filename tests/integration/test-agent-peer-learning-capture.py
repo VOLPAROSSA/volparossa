@@ -45,6 +45,48 @@ def phase(control="relay1"):
 
 
 class LearnerCapture(unittest.TestCase):
+    def test_dummy_underlay_records_only_exact_outbound_control_socket_attempts(self):
+        for node, destinations in CAP["LEARNER_UNROUTED_CONTROL"].items():
+            current = layout()
+            if node == "relay1":
+                current["relays"] = {key: CAP["PUBLIC"][key] for key in ("relay0", "relay1")}
+            current = CAP["validate_layout"](current)
+            source = CAP["LEARNER_IP"] if node == "relay3" else CAP["PUBLIC"][node]
+            for destination in destinations:
+                # A synthetic header fixture, not an authenticated QUIC message.
+                result = packet(current, node, "underlay", source, destination,
+                                sport=41000, dport=41000, payload=b"opaque-control")
+                self.assertEqual(result, {"control_packets": 1, "underlay_control_attempt_packets": 1})
+                self.assertFalse(any("wireguard" in key or "provider" in key for key in result))
+
+    def test_dummy_control_attempt_never_authorizes_content_or_another_route(self):
+        current = layout()
+        source, destination = CAP["LEARNER_IP"], CAP["PUBLIC"]["relay4"]
+        baseline = dict(iface="underlay", source=source, destination=destination,
+                        protocol=socket.IPPROTO_UDP, sport=41000, dport=41000, payload=b"opaque-control")
+        mutations = (
+            {"iface": "lr0"}, {"iface": "r3x"}, {"iface": "wrong0"},
+            {"source": destination, "destination": source}, {"source": CAP["PUBLIC"]["relay5"]},
+            {"destination": "203.0.113.1"}, {"destination": "10.241.110.2"},
+            {"destination": CAP["PUBLIC"]["relay0"]}, {"destination": source},
+            {"sport": 41001}, {"dport": 41001}, {"sport": 0}, {"dport": 18080},
+            {"protocol": socket.IPPROTO_TCP}, {"protocol": socket.IPPROTO_TCP, "dport": 18080},
+            {"source": "2001:db8::3", "destination": "2001:db8::4"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                result = packet(current, "relay3", **dict(baseline, **mutation))
+                self.assertEqual(result.get("forbidden_packets"), 1)
+                self.assertNotIn("underlay_control_attempt_packets", result)
+        for node, origin, target in (("relay3", source, CAP["PUBLIC"]["exit"]),
+                                     ("exit", CAP["PUBLIC"]["exit"], source)):
+            result = packet(current, node, "underlay", origin, target, sport=41000, dport=41000)
+            self.assertEqual(result, {"forbidden_packets": 1, "direct_client_exit_packets": 1})
+        # Existing phases keep their prior behavior; this new counter is phase-local.
+        old = BASE["fixture"]()["phases"]["reserve-fetch"]["layout"]
+        result = packet(old, "relay4", "underlay", destination, source, sport=41000, dport=41000)
+        self.assertEqual(result, {"control_packets": 1})
+
     def test_exact_selected_wireguard_legs_never_direct_or_wrong_interface(self):
         current = CAP["validate_layout"](layout())
         learner, exit_ip = current["client"]["ip"], current["exit"]["ip"]
