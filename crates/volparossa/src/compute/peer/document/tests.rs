@@ -8,6 +8,62 @@ struct Command {
 }
 
 #[tokio::test]
+async fn automatic_peer_preview_is_networkless_and_cannot_reselect_on_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("automatic-document");
+    let key = hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[95; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let words = vec![
+        "document",
+        "--directory",
+        directory.to_str().unwrap(),
+        "--input",
+        "/missing/public.txt",
+        "--public-content",
+        "--public-question",
+        "Summarize this public text.",
+        "--license",
+        "CC0-1.0",
+        "--runtime-root",
+        "/missing/runtime",
+        "--model-root",
+        "/missing/model",
+        "--identity",
+        "/missing/identity",
+        "--passphrase-file",
+        "/missing/passphrase",
+        "--publisher-key",
+        &key,
+        "--discover-peers",
+    ];
+    let args = Command::try_parse_from(&words).unwrap().options;
+    assert!(args.provider_key.is_empty());
+    run(&args, &root.path().join("absent.sock")).await.unwrap();
+    assert!(!directory.exists());
+    let mut enrollment = words.clone();
+    enrollment.extend(["--enroll-only", "--execute"]);
+    assert!(
+        Command::try_parse_from(enrollment)
+            .unwrap()
+            .options
+            .enroll_only
+    );
+    for extra in [
+        vec!["--provider-key", &key],
+        vec!["--resume"],
+        vec!["--max-peers", "5"],
+        vec!["--enroll-only"],
+    ] {
+        let mut invalid = words.clone();
+        invalid.extend(extra);
+        assert!(Command::try_parse_from(invalid).is_err());
+    }
+}
+
+#[tokio::test]
 async fn preview_never_loads_source_model_or_network_and_permission_precedes_creation() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("new-document");
@@ -37,6 +93,9 @@ async fn preview_never_loads_source_model_or_network_and_permission_precedes_cre
 fn resume_retains_inputs_and_lease_and_batch_budgets_stay_separate() {
     let args = ["document", "--directory", "/absent/document", "--resume"];
     assert!(!Command::try_parse_from(args).unwrap().options.follow.follow);
+    let mut enrollment = args.to_vec();
+    enrollment.extend(["--enroll-only", "--execute"]);
+    assert!(Command::try_parse_from(enrollment).is_err());
     for field in ["--input", "--public-question", "--license", "--synthesize"] {
         let mut changed = args.to_vec();
         changed.extend([field, "changed"]);

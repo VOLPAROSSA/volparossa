@@ -306,7 +306,7 @@ impl Attachment {
             return Err(ComputeError::Authentication);
         }
         let binding = match &request.operation {
-            Operation::Capabilities => return Ok(()),
+            Operation::Capabilities | Operation::Eligibility(_) => return Ok(()),
             Operation::Submit(submit) => {
                 if submit.binding.task.is_some() && !self.task_derivation_v1 {
                     return Err(ComputeError::Invalid);
@@ -369,11 +369,19 @@ impl ComputeBackend for Attachment {
             if bytes.is_empty() || bytes.len() > rpc::MAX_REQUEST_BYTES {
                 return Err(ComputeError::Invalid);
             }
-            let request: Request =
+            let mut request: Request =
                 serde_json::from_slice(&bytes).map_err(|_| ComputeError::Invalid)?;
             self.validate(&requester, &request)?;
             self.active().await?;
-            let response = self.socket.exchange(&request).await?;
+            let eligibility = match &request.operation {
+                Operation::Eligibility(query) => Some(query.clone()),
+                _ => None,
+            };
+            // Publisher authority belongs to this attachment, never to the local model broker.
+            if eligibility.is_some() {
+                request.operation = Operation::Capabilities;
+            }
+            let mut response = self.socket.exchange(&request).await?;
             self.active().await?;
             if let Outcome::Capabilities(capabilities) = &response.outcome {
                 validate_capabilities(capabilities)?;
@@ -384,6 +392,21 @@ impl ComputeBackend for Attachment {
                 {
                     return Err(ComputeError::Authentication);
                 }
+            }
+            if let Some(query) = eligibility {
+                let Outcome::Capabilities(capabilities) = response.outcome else {
+                    return Err(ComputeError::Invalid);
+                };
+                let trusted = query.publisher_keys.iter().all(|key| {
+                    hex::decode(key)
+                        .ok()
+                        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                        .is_some_and(|key| self.trusted_publishers.contains(&key))
+                });
+                response.outcome = Outcome::Eligibility(rpc::Eligibility {
+                    eligible: trusted && query.matches(&capabilities),
+                    capabilities,
+                });
             }
             let response = serde_json::to_vec(&response).map_err(|_| ComputeError::Invalid)?;
             if response.len() > rpc::MAX_RESPONSE_BYTES {
@@ -416,7 +439,7 @@ async fn inspect_capabilities(
     Ok(capabilities)
 }
 
-fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeError> {
+pub(super) fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeError> {
     if !caps.public_inference_only
         || caps.runtime_slots != 1
         || !(1..=2).contains(&caps.max_threads)

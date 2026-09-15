@@ -5018,6 +5018,8 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
             [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || return 1 ;;
+        content-custody-executor-discovery-privacy)
+            [ "$scenario" = agent-jobs ] && [ "$agent_public_document" = yes ] || return 1 ;;
         *) return 1 ;;
     esac
     set --

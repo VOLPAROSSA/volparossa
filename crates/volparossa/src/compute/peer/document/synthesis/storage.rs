@@ -399,6 +399,7 @@ pub(super) fn expected(
         rows: dataset.inference.len(),
         task: rpc::PublicTask::AnswerPublicQuestionV1 { question },
         provider_keys: enrollment.provider_keys.clone(),
+        model_fingerprint: enrollment.model_fingerprint.clone(),
         selected_at_unix_seconds: at,
     })
 }

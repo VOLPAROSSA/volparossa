@@ -4,7 +4,19 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-15
 
-Current public-document synthesis candidate: `compute peer document --synthesize` chains
+Current executor-discovery candidate: `compute peer workflow`, `task` and `document` accept
+`--discover-peers` in place of manually supplied provider keys. Authenticated, protected probes
+check actual broker availability, supported inference profiles and permission for the explicitly
+selected public-source publishers. The coordinator selects two through four compatible peers
+with one exact model fingerprint and durably pins that selection before submitting work.
+Resume reuses the original selection; a fresh capability check cannot silently change its model.
+Discovery contains no prompt or source body and does not admit a worker. Source choice remains
+independent of cache availability. `document --enroll-only --execute` explicitly separates this
+preparation from later execution. Focused checks pass; live automatic-selection proof is pending.
+This is not general task planning, a resource lease, dynamic mid-task pool growth or quality-based
+model selection. See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
+
+Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate
 inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;
 it never presents that text as an original document excerpt or portable execution attestation.
@@ -19,8 +31,18 @@ retained-file export was not reached. The concrete cause is a missing v3 branch 
 the same strict, inference-only derived-data validator as the RPC boundary. Targeted admission
 and compute tests pass. Incomplete workflows retain fixed diagnostic categories without
 upstream text, and the fixture now exports bounded public partial evidence after its owner
-returns, before cleanup; this never satisfies the success gates. The corrected live multi-level
-scenario remains unproven. General task planning, private offload and B03 remain incomplete.
+returns, before cleanup; this never satisfies the success gates. The corrected
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914382572)
+and full reconstruction of its unchanged original evidence **pass**: 5,120 public-source bytes
+produce ten fragment answers, then four real synthesis levels (`10 -> 5 -> 3 -> 2 -> 1`),
+with eight observed v3 workers and nine independently verified publication signatures.
+The final answer has 50 generated tokens and 256 UTF-8 bytes, without wire truncation.
+Completed resume after the brokers stop creates no new jobs and leaves retained receipts intact.
+Six captures / 28 interfaces / 73,953 frames show no forbidden or direct-exit traffic or drops;
+cleanup leaves zero owned objects and unchanged guest-host state. Canonical raw-evidence SHA-256:
+`d4968cbbf0f4d13e363dfc87a5c3d2d69069001a5a3883659a7ead6f8dd701ca`.
+This proves the inference chain, not answer quality. The original `342b8a80` run stays failed.
+General task planning, private offload and B03 remain incomplete.
 See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
 
 Current publication-retry correction: a finite training loop no longer stops immediately
@@ -50,9 +72,19 @@ attempts to known fixture peers on a dummy `underlay`, not TCP18080 content tran
 corrected classifier records only those exact phase/interface/source/destination/port tuples
 as `underlay_control_attempt_packets`; this proves neither delivery nor authentication and
 does not count as WireGuard or content bytes. Direct-exit, direct content and unknown-tuple
-rejection remain unchanged. Focused positive and negative capture checks pass; the new combined
-live scenario remains pending. Cleanup removed all owned objects and preserved guest-host
-state. No product publication or privacy guard was relaxed, and the original run stays failed.
+rejection remain unchanged. The corrected combined
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914384494)
+and full original raw reconstruction **pass**, including catalog growth to an uncached source,
+both real training rounds and their second-source comparisons, protected R3 import/adoption,
+eight further updates, validation and actual successor publication with no pending handoff.
+The separate original Client named-import gate now also passes with actual received-parameter
+inference. The loop's ten captures / 79 interfaces and the learner's five captures / 41 interfaces
+contain no forbidden or direct-exit traffic or drops. Cleanup leaves zero owned objects and
+unchanged guest-host state. Canonical loop-evidence SHA-256:
+`d03fb608d6f6d32f38af189195cad6163ccacf958d9223f5779acfae963112c2`.
+No product publication or privacy guard was relaxed, and the original `68314466` run stays failed.
+This establishes scoped cross-node continued learning and sharing, not general quality,
+defended aggregation or full B05.
 
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
@@ -80,8 +112,8 @@ reached actual peer import, two comparison inferences, adoption, an eight-update
 cycle and two further validation inferences. It **failed** the final peer-learning check: the
 new local publication remained `publish_pending` after the one-cycle invocation ended. The
 original catalog's later independent Client import was not reached, so its earlier failure is
-not claimed fixed. Cleanup completed with unchanged guest-host state. Completed cross-node
-learning and republication remain unproven.
+not claimed fixed by that run. Cleanup completed with unchanged guest-host state. The later
+`998b79ed` run above supplies the completed cross-node learning and republication proof.
 See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
 
 The preceding version-2 `compute train-loop` enrollment now follows

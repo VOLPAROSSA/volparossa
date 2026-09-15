@@ -99,6 +99,7 @@ fn parser_only_plan(input: &Input) -> Plan {
 
 fn replay_options(root: &Path) -> Options {
     Options {
+        discovery: crate::compute::peer::discovery::Options::default(),
         directory: root.into(),
         resume: true,
         synthesize: false,
@@ -118,6 +119,7 @@ fn replay_options(root: &Path) -> Options {
         max_seconds: 600,
         threads: 2,
         execute: true,
+        enroll_only: false,
     }
 }
 

@@ -254,13 +254,21 @@ def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
             and all(privacy[node]["internet_destination_outer_packets"] == 0 for node in ROLES[1:4]),
             "Client/Relay/Exit privacy boundary violated")
     for node in relays:
-        require(privacy[node]["client_leg_wireguard_data_datagrams"] > (0 if name == "inspect" else 16)
-                and privacy[node]["exit_leg_wireguard_data_datagrams"] > (0 if name == "inspect" else 16),
+        require(privacy[node]["client_leg_wireguard_data_datagrams"] > (0 if name in ("inspect", "executor-discovery") else 16)
+                and privacy[node]["exit_leg_wireguard_data_datagrams"] > (0 if name in ("inspect", "executor-discovery") else 16),
                 "selected WireGuard legs did not carry actual protected data")
     payload_bytes = 0
     for node, application in privacy["exit"]["provider_application"].items():
         if node not in providers:
-            require(all(value == 0 for value in application.values()), "unselected provider carried application data")
+            if name == "executor-discovery":
+                # Explicit pre-job eligibility queries may contact ordinary content peers
+                # which are not subsequently selected. This exception is never an inference gate.
+                require(set(application) == {"request_packets", "response_packets", "response_payload_bytes"}
+                        and all(type(value) is int and value >= 0 for value in application.values())
+                        and (application["request_packets"] > 0 or all(value == 0 for value in application.values())),
+                        "invalid pre-job provider query counters")
+            else:
+                require(all(value == 0 for value in application.values()), "unselected provider carried application data")
         elif name != "fetch":
             require(application["request_packets"] > (16 if name == "deposit" else 0)
                     and application["response_packets"] > 0 and application["response_payload_bytes"] > 0,
@@ -273,7 +281,7 @@ def validate_path(phase, peers, layout, name, payload_minimum=UNIQUE_BYTES):
     SHARED["validate_control"](phase["control_privacy"], control, providers, False,
                                require_contacts=name != "fetch")
     require(phase["gates"]["event_baseline_unix_ms"] > 0
-            and phase["gates"]["exit_mptcp_tls_completed"] >= dict(deposit=4, inspect=2, fetch=1)[name],
+            and phase["gates"]["exit_mptcp_tls_completed"] >= {"deposit": 4, "inspect": 2, "fetch": 1, "executor-discovery": 2}[name],
             "fresh production MPTCP/TLS completions missing")
 
 

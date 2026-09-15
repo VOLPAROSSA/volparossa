@@ -24,6 +24,8 @@ pub(crate) struct Options {
     execute: bool,
     #[arg(skip)]
     task: Option<rpc::PublicTask>,
+    #[arg(skip)]
+    model_fingerprint: Option<String>,
 }
 
 impl Options {
@@ -41,7 +43,13 @@ impl Options {
             max_seconds,
             execute: true,
             task,
+            model_fingerprint: None,
         }
+    }
+
+    pub(super) fn with_model_fingerprint(mut self, fingerprint: Option<String>) -> Self {
+        self.model_fingerprint = fingerprint;
+        self
     }
 }
 
@@ -113,7 +121,7 @@ pub(super) async fn report_with_activity(
         "compute_distribute_cancelled_before_submit"
     );
     let mut prepared = Vec::new();
-    let mut fingerprint = None;
+    let mut fingerprint = args.model_fingerprint.clone();
     for (index, rows) in assignments.into_iter().enumerate() {
         let caps = profiles[index]
             .take()

@@ -663,6 +663,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         | Payload::ComputeReady(_) => {
             anyhow::bail!("unexpected content stream handoff outside an explicit transfer")
         }
+        Payload::ComputeDiscovered(_) => {
+            anyhow::bail!("unexpected executor selection outside an explicit compute workflow")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({

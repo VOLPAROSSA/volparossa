@@ -4,6 +4,7 @@
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
 mod compute;
+mod compute_discovery;
 mod compute_remote;
 mod contribution;
 mod custody;

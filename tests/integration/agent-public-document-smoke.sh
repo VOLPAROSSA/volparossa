@@ -24,7 +24,7 @@ agent_public_document_run() {
     document_script=$source_directory/tests/integration/agent-public-document-smoke.py
     document_attempt=$document_root/package-0000/work/package-0000/attempt-0000
     PHASE=agent-public-document-owner-tokenizer
-    printf '%s\n' 'Disposable guest: copy the pinned runtime/model into the Client-owned compute-source; tokenize an explicit public README excerpt, execute signed ranges on two isolated peers, then remove every owned copy during normal cleanup.'
+    printf '%s\n' 'Disposable guest: copy the pinned runtime/model into the Client-owned compute-source; discover suitable public executors over the protected route, retain their identities/model, tokenize an explicit public README excerpt and execute fragments plus synthesis on two isolated peers; remove every owned copy during normal cleanup.'
     # The unprivileged Client cannot traverse /home/vpci/source. Install only this
     # public helper beside its already staged dependencies, never chmod the source.
     install -o root -g root -m 0555 "$document_script" "$WORK/bin/agent-public-document-smoke.py"
@@ -44,13 +44,23 @@ agent_public_document_run() {
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/agent-public-document-smoke.py" prepare "$WORK" >"$WORK/agent-public-document-input.json" \
         || fail DOCUMENT_PUBLIC_INPUT_FAILED
-    content_custody_phase_start fetch
+    PHASE=agent-public-document-executor-discovery
+    content_custody_phase_start executor-discovery
+    python3 -B "$document_script" enrollment-start "$WORK" || fail DOCUMENT_ENROLLMENT_START_UNAVAILABLE
     agent_public_document_cli compute peer document --input "$jobs_source/document-input.txt" \
         --public-content --license GPL-3.0-only --public-question 'Summarize the provided public context.' \
         --runtime-root "$jobs_source/document-runtime" --model-root "$jobs_source/document-model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
-        --publisher-key "$jobs_publisher" --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \
-        --directory "$document_root" --synthesize --max-batches 1 --max-seconds 600 --execute \
+        --publisher-key "$jobs_publisher" --discover-peers \
+        --directory "$document_root" --synthesize --enroll-only --max-seconds 600 --execute \
+        >"$WORK/agent-public-document-enrollment.json" 2>"$WORK/agent-public-document-enrollment.err" \
+        || fail DOCUMENT_EXECUTOR_ENROLLMENT_FAILED
+    python3 -B "$document_script" enrolled "$WORK" || fail DOCUMENT_ENROLLMENT_STARTED_UNEXPECTED_JOBS
+    content_custody_phase_finish 2
+    PHASE=agent-public-document-fragment-execution
+    content_custody_phase_start fetch
+    agent_public_document_cli compute peer document --directory "$document_root" --resume \
+        --max-batches 1 --max-seconds 600 --execute \
         >"$WORK/agent-public-document-first.json" 2>"$WORK/agent-public-document-first.err" &
     jobs_batch_pid=$!
     python3 -B "$document_script" observe "$WORK" "$jobs_batch_pid" \
