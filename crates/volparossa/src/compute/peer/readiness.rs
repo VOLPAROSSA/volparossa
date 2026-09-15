@@ -7,6 +7,10 @@ use ed25519_dalek::VerifyingKey;
 use tokio::{sync::watch, time::timeout};
 use volparossa_local_control::compute::Capabilities;
 
+// At two seconds between probes, a 24th attempt cannot start before the
+// unchanged 45-second deadline. Fast Busy replies must not shorten that window.
+const MAX_PROBES: usize = 24;
+
 pub(super) async fn capabilities(
     socket: &Path,
     provider: &VerifyingKey,
@@ -16,7 +20,7 @@ pub(super) async fn capabilities(
     // only this read-only phase; never replay Submit or replace an uncertain job.
     probe(
         activity,
-        4,
+        MAX_PROBES,
         Duration::from_secs(45),
         Duration::from_secs(2),
         || async {
@@ -88,6 +92,26 @@ mod tests {
         .unwrap();
         assert_eq!(result, 17);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn busy_peer_can_recover_after_the_former_four_probe_limit() {
+        let (_owner, activity) = watch::channel(false);
+        let calls = AtomicUsize::new(0);
+        let result = probe(
+            activity,
+            MAX_PROBES,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                async move { Ok((index >= 6).then_some(17)) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 17);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     #[tokio::test]

@@ -31,6 +31,7 @@ SCOPE = ("explicit public README excerpt, actual pinned tokenizer with byte-comp
          "completed receipts after brokers/route stop; not protected source retrieval, answer correctness, "
          "neural synthesis, private offload or full B03")
 SYNTHESIS_SCOPE = SCOPE.replace("neural synthesis, ", "") + "; additionally real multi-level peer synthesis, not semantic completeness"
+DISCOVERY_SCOPE = SYNTHESIS_SCOPE + "; automatically discovered eligible executors with immutable model and peer selection, not a capacity reservation"
 
 
 def sha(raw):
@@ -39,6 +40,58 @@ def sha(raw):
 
 def root_path(work):
     return work / "state-client/compute-source/public-document"
+
+
+def selected_providers(enrollment, layout, discovered=False):
+    expected = [layout["provider_keys"][node] for node in layout["provider_nodes"]]
+    selected = enrollment["provider_keys"]
+    require(len(expected) == len(selected) == 2 and len(set(selected)) == 2 and set(selected) == set(expected),
+            "document selected another executor pool")
+    if discovered:
+        fingerprint = enrollment.get("model_fingerprint")
+        require(isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+                and fingerprint != "0" * 64, "automatic executor selection has no frozen model")
+    else:
+        require(selected == expected, "legacy explicit provider order changed")
+    return selected
+
+
+def check_workflow_selection(raw, prefix, enrollment):
+    workflow = json.loads(raw[prefix + "/work/workflow.json"])
+    require(workflow["provider_keys"] == enrollment["provider_keys"]
+            and workflow.get("model_fingerprint") == enrollment["model_fingerprint"],
+            "child workflow changed the enrolled executor/model selection")
+
+
+def enrollment_start(work):
+    JOBS["guest_work"](work)
+    write(work / "agent-public-document-enrollment-start.json", {"started_monotonic_ns": time.monotonic_ns()})
+
+
+def enrolled(work):
+    JOBS["guest_work"](work)
+    root = root_path(work)
+    enrollment = read(root / "document.json")
+    selected_providers(enrollment, read(work / "agent-jobs-layout.json"), True)
+    result = read(work / "agent-public-document-enrollment.json")
+    check_enrollment_result(result, enrollment)
+    require(not (root / "synthesis").exists()
+            and all(not (root / f"package-{index:04}/work").exists() for index in range(len(enrollment["packages"])))
+            and not any(re.search(r"/(?:job-[0-9]+\.json|attempt-[0-9]+/)", path.relative_to(root).as_posix())
+                        for path in partial_public_paths(root)), "enrollment-only admitted remote jobs")
+    write(work / "agent-public-document-enrollment-observed.json", {
+        "enrollment": JOBS["file_hash"](root / "document.json", 1048576),
+        "retained_files": snapshot(root, partial=True),
+        "no_job_handles": True, "no_workflow_execution_directories": True,
+        "owner_returned": True, "observed_monotonic_ns": time.monotonic_ns()})
+
+
+def check_enrollment_result(result, enrollment):
+    require(result == {"operation": "compute_document_enrolled", "execution_started": False,
+            "task_complete": False, "source_manifest_id": enrollment["source_manifest_id"],
+            "provider_keys": enrollment["provider_keys"], "model_fingerprint": enrollment["model_fingerprint"],
+            "package_count": len(enrollment["packages"]), "private_data_supported": False},
+            "executor enrollment claimed work or changed the selected peers/model")
 
 
 def source_excerpt(raw):
@@ -94,26 +147,33 @@ def observe(work, pid):
     owner = JOBS["identity"](pid)
     started = time.monotonic_ns()
     root = root_path(work)
-    # Local real-tokenizer execution has its own original 600-second deadline.
-    # The 90-second admission budget starts only once signed document enrollment
-    # exists, not while the planner is legitimately loading/tokenizing.
-    while not (root / "document.json").is_file():
-        require(JOBS["alive"](owner) and time.monotonic_ns() - started < 610_000_000_000,
-                "real tokenizer/enrollment did not finish within its existing deadline")
-        time.sleep(0.05)
-    admitted = time.monotonic_ns()
+    # Discovery and the real tokenizer already returned without submitting jobs.
+    # This original 90-second window covers only the first retained peer handles.
+    prior = read(work / "agent-public-document-enrollment-observed.json")
+    enrollment = read(root / "document.json")
+    require(prior["owner_returned"] is True and prior["observed_monotonic_ns"] < started,
+            "execution overlapped unfinished enrollment")
+    selected = selected_providers(enrollment, read(work / "agent-jobs-layout.json"), True)
+    selection = {"method": "protected_provider_eligibility_discovery", "provider_keys": selected,
+                 "model_fingerprint": enrollment["model_fingerprint"],
+                 "enrollment": JOBS["file_hash"](root / "document.json", 1048576)}
     for _ in range(1800):
         try:
             paths = [root / "package-0000" / ATTEMPT / f"job-{n}.json" for n in (0, 1)]
             handles = [read(path) for path in paths]
             require(all(h["binding"]["task"] == TASK and h["capabilities"]["task_derivation_v1"] is True
                         for h in handles), "initial handles have another public task")
+            require([h["provider_key"] for h in handles] == selected
+                    and all(h["binding"]["model_fingerprint"] == h["capabilities"]["model_fingerprint"]
+                            == selection["model_fingerprint"] for h in handles),
+                    "initial handles changed the automatically enrolled peers/model")
         except (OSError, ValueError, KeyError):
             require(JOBS["alive"](owner), "document ended before actual peer admission")
             time.sleep(0.05)
             continue
         write(work / "agent-public-document-admission.json", {
-            "planner_started_monotonic_ns": started, "enrollment_observed_monotonic_ns": admitted,
+            "execution_started_monotonic_ns": started, "executor_selection": selection,
+            "enrollment_observed_monotonic_ns": prior["observed_monotonic_ns"],
             "handles_observed_monotonic_ns": time.monotonic_ns(),
             "handles": [JOBS["file_hash"](path, 16384) for path in paths]})
         return JOBS["observe"](work)
@@ -319,7 +379,7 @@ def check_result(result, enrollment, plan, answers, complete, rounds, synthesis=
                 "package summary differs from actual completion")
 
 
-def check_evidence(value, revision):
+def check_evidence(value, revision, discovered=False):
     require(value["success"] is True and value["source_revision"] == revision, "wrong document source revision")
     provision = value["provision"]
     require(provision["success"] is True and provision["installed_wheels"] == 38
@@ -342,11 +402,29 @@ def check_evidence(value, revision):
     require(load("planner-input.json") == {"version": 1, "visibility": "public", "license": "GPL-3.0-only",
             "document": source.decode(), "question": QUESTION}, "actual planner did not receive the exact public source")
     layout, peers = value["layout"], value["peers"]
+    selected = selected_providers(enrollment, layout, discovered)
     require(enrollment["version"] == 1 and enrollment["source_sha256"] == sha(source)
             and enrollment["source_bytes"] == len(source) and enrollment["plan_sha256"] == sha(raw["document-plan.json"])
             and enrollment["license"] == "GPL-3.0-only" and enrollment["public_question"] == QUESTION
-            and enrollment["provider_keys"] == [layout["provider_keys"][n] for n in layout["provider_nodes"]]
             and enrollment["publisher_key"] == value["publish"]["publisher_key_hex"], "original enrollment changed")
+    if discovered:
+        require(value.get("automatic_executor_selection") is True,
+                "automatic executor execution was not recorded")
+        selection = value["admission"]["executor_selection"]
+        require(selection == {"method": "protected_provider_eligibility_discovery", "provider_keys": selected,
+                "model_fingerprint": enrollment["model_fingerprint"],
+                "enrollment": {"bytes": len(raw["document.json"]), "sha256": sha(raw["document.json"])}},
+                "original automatically selected executor record changed")
+        check_enrollment_result(value["enrollment"], enrollment)
+        observed = value["enrollment_observed"]
+        require(observed["enrollment"] == selection["enrollment"] and observed["owner_returned"] is True
+                and observed["no_job_handles"] is True and observed["no_workflow_execution_directories"] is True
+                and 0 < observed["observed_monotonic_ns"] - value["enrollment_start"]["started_monotonic_ns"] < 1_320_000_000_000,
+                "discovery/enrollment phase lacks pre-job boundary evidence")
+        require("document.json" in observed["retained_files"]
+                and all("/work/" not in name and not name.startswith("synthesis/")
+                        and item == files["snapshot"].get(name) for name, item in observed["retained_files"].items()),
+                "pre-job enrollment files changed or already contained remote execution")
     source_id = manifest(raw["source.manifest"], source, enrollment, "document-source", "text/plain")
     require(source_id == enrollment["source_manifest_id"], "source signed manifest changed")
     planner = load("tokenizer-report.json")
@@ -372,6 +450,8 @@ def check_evidence(value, revision):
     require(len(enrollment["packages"]) == (len(plan["parts"]) + 3) // 4, "missing document package")
     for index, package in enumerate(enrollment["packages"]):
         prefix = f"package-{index:04}"
+        if discovered:
+            check_workflow_selection(raw, prefix, enrollment)
         data = load(f"{prefix}/dataset.json")
         rows = plan["parts"][index * 4:index * 4 + 4]
         expected_rows = [{"question": QUESTION, "context": source[p["start"]:p["end"]].decode(),
@@ -408,8 +488,11 @@ def check_evidence(value, revision):
                     and caps["model"]["adapter_files"] is None and caps["model_fingerprint"] == binding["model_fingerprint"]
                     and caps["public_inference_only"] is True and caps["runtime_slots"] == 1 and caps["max_threads"] == 2,
                     "peer used a different fixed model")
+            if discovered:
+                require(binding["model_fingerprint"] == enrollment["model_fingerprint"],
+                        "actual fragment worker changed the automatically selected model")
             selected = binding["row_indices"]
-            provider_index = layout["provider_nodes"].index(node)
+            provider_index = enrollment["provider_keys"].index(handle["provider_key"])
             require(selected == list(range(provider_index, len(rows), min(2, len(rows))))
                     and load(f"{attempt}/job-{provider_index}.json") == handle, "wrong exact retained handle/row assignment")
             derived = copy.deepcopy(data)
@@ -454,7 +537,8 @@ def check_evidence(value, revision):
     if synthesis:
         leaf_parents.sort(key=lambda item: item[0])
         synthesis_rounds = SYNTHESIS["check"](value, raw, enrollment, [parent for _, parent in leaf_parents],
-            response_bytes, job_ids, {"plan": check_plan, "manifest": manifest, "supervisor": check_supervisor})
+            response_bytes, job_ids, {"plan": check_plan, "manifest": manifest, "supervisor": check_supervisor,
+                                     "discovered": discovered, "workflow_selection": check_workflow_selection})
     check_result(value["first"], enrollment, plan, answers[:4], False, 1)
     check_result(value["result"], enrollment, plan, answers, True, len(enrollment["packages"]) - 1 + synthesis_rounds, synthesis)
     check_result(value["resume"], enrollment, plan, answers, True, 0, synthesis)
@@ -468,13 +552,25 @@ def check_evidence(value, revision):
             and files["observed_monotonic_ns"] < value["stopped"]["observed_monotonic_ns"] < value["resumed"]["observed_monotonic_ns"],
             "completed resume used running executors or wrong process identities")
     admission = value["admission"]
-    require(0 < admission["enrollment_observed_monotonic_ns"] - admission["planner_started_monotonic_ns"] < 610_000_000_000
-            and 0 <= admission["handles_observed_monotonic_ns"] - admission["enrollment_observed_monotonic_ns"] < 90_000_000_000
-            and admission["handles_observed_monotonic_ns"] < value["observation"]["first_monotonic_ns"], "real admission timing missing")
+    if discovered:
+        require(admission["enrollment_observed_monotonic_ns"] == value["enrollment_observed"]["observed_monotonic_ns"]
+                and admission["execution_started_monotonic_ns"] > admission["enrollment_observed_monotonic_ns"]
+                and 0 <= admission["handles_observed_monotonic_ns"] - admission["execution_started_monotonic_ns"] < 90_000_000_000,
+                "actual executor admission changed the pre-job phase or exceeded its original window")
+    else:
+        require(0 < admission["enrollment_observed_monotonic_ns"] - admission["planner_started_monotonic_ns"] < 610_000_000_000
+                and 0 <= admission["handles_observed_monotonic_ns"] - admission["enrollment_observed_monotonic_ns"] < 90_000_000_000,
+                "real admission timing missing")
+    require(admission["handles_observed_monotonic_ns"] < value["observation"]["first_monotonic_ns"], "worker observation preceded actual handles")
     for index in (0, 1):
         item = files["snapshot"][f"package-0000/{ATTEMPT}/job-{index}.json"]
         require(admission["handles"][index] == {k: item[k] for k in ("bytes", "sha256")}, "initial handle was replaced")
     CUSTODY["validate_path"](value["path"], peers, layout, "inspect")
+    if discovered:
+        CUSTODY["validate_path"](value["discovery_path"], peers, layout, "executor-discovery")
+        require(value["discovery_path"]["gates"]["exit_mptcp_tls_completed"] >= 2
+                and value["discovery_path"]["gates"]["event_baseline_unix_ms"] < value["path"]["gates"]["event_baseline_unix_ms"],
+                "discovery and executor traffic were not independently captured in order")
     for node, size in response_bytes.items():
         application = value["path"]["privacy"]["exit"]["provider_application"][node]
         require(application["request_packets"] > 0 and application["response_payload_bytes"] >= size,
@@ -484,21 +580,26 @@ def check_evidence(value, revision):
 
 def evidence(work, revision):
     value = {name.replace("-", "_"): read(work / f"agent-public-document-{name}.json", MAX_EXPORT)
-             for name in ("input", "first", "first-files", "files", "result", "resume", "stopped", "resumed", "admission")}
+             for name in ("input", "first", "first-files", "files", "result", "resume", "stopped", "resumed", "admission",
+                          "enrollment", "enrollment-start", "enrollment-observed")}
     value.update({name: read(work / f"agent-jobs-{name}.json") for name in ("provision", "publish", "layout", "observation")})
-    value.update(success=True, source_revision=revision, peers=read(work / "a01-expected-peers.json"),
+    value.update(success=True, automatic_executor_selection=True, source_revision=revision, peers=read(work / "a01-expected-peers.json"),
         cleanup=read(work / "agent-jobs-private-cleanup.json"),
         statuses=[read(work / f"agent-jobs-status-{n}.json") for n in (0, 1)],
         path={"selected_route": read(work / "content-custody-fetch-live-selection.json"),
               "privacy": {role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in CUSTODY["ROLES"]},
               "control_privacy": read(work / "content-provider-custody-fetch-control.json"),
               "gates": read(work / "content-custody-fetch-gates.json")})
+    value["discovery_path"] = {"selected_route": read(work / "content-custody-executor-discovery-live-selection.json"),
+        "privacy": {role: read(work / f"content-custody-executor-discovery-privacy-{role}.json") for role in CUSTODY["ROLES"]},
+        "control_privacy": read(work / "content-provider-custody-executor-discovery-control.json"),
+        "gates": read(work / "content-custody-executor-discovery-gates.json")}
     observed = work / "agent-public-document-synthesis-observation.json"
     require(value["result"]["joining"] == "hierarchical_peer_synthesis" and observed.is_file(),
             "this source's opt-in scenario did not finish actual hierarchical synthesis")
     if observed.is_file():
         value["synthesis_observation"] = read(observed, MAX_EXPORT)
-    check_evidence(value, revision)
+    check_evidence(value, revision, discovered=True)
     return value
 
 
@@ -507,13 +608,16 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
     value = read(found, MAX_EXPORT) if found.is_file() else None
     host = read(work / "a15-evidence.json") if (work / "a15-evidence.json").is_file() else {}
     synthesis = value is not None and value["result"]["joining"] == "hierarchical_peer_synthesis"
+    discovered = value is not None and value.get("automatic_executor_selection") is True
     partial_path = work / "agent-public-document-partial-files.json"
     partial_identity = JOBS["file_hash"](partial_path, MAX_EXPORT) if partial_path.is_file() else None
     write(work / "agent-public-document-smoke.json", {
-        "report_kind": "volparossa-public-document", "source_revision": revision, "scope": SYNTHESIS_SCOPE if synthesis else SCOPE,
+        "report_kind": "volparossa-public-document", "source_revision": revision,
+        "scope": DISCOVERY_SCOPE if discovered and synthesis else SYNTHESIS_SCOPE if synthesis else SCOPE,
         "success": status == 0 and complete and remaining == 0 and host.get("unchanged") is True and value is not None,
         "phase": phase, "observed_blocker": None if blocker == "NONE" else blocker, "runner_exit_status": status,
         "answer_quality_proven": False, "neural_synthesis_claimed": synthesis, "full_b03_claimed": False, "full_alpha_claimed": False,
+        "automatic_executor_selection_claimed": discovered,
         "evidence": value, "partial_files": partial_identity,
         "cleanup": {"complete": complete, "remaining_owned_objects": remaining}, "host_state": host})
 
@@ -521,7 +625,8 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
 def report(value, revision):
     synthesis = value.get("neural_synthesis_claimed") is True
     require(value["report_kind"] == "volparossa-public-document" and value["source_revision"] == revision
-            and value["scope"] == (SYNTHESIS_SCOPE if synthesis else SCOPE) and value["success"] is True and value["runner_exit_status"] == 0,
+            and value["scope"] == DISCOVERY_SCOPE and synthesis and value.get("automatic_executor_selection_claimed") is True
+            and value["success"] is True and value["runner_exit_status"] == 0,
             "incomplete source-bound document report")
     require(value["cleanup"] == {"complete": True, "remaining_owned_objects": 0}
             and value["host_state"]["unchanged"] is True
@@ -530,7 +635,7 @@ def report(value, revision):
             and value["neural_synthesis_claimed"] is synthesis
             and (value["evidence"]["result"]["joining"] == "hierarchical_peer_synthesis") is synthesis,
             "document scope overstated")
-    check_evidence(value["evidence"], revision)
+    check_evidence(value["evidence"], revision, discovered=True)
 
 
 def contract_fixture():
@@ -640,6 +745,55 @@ def contract_fixture():
     return value
 
 
+def discovery_contract_fixture(original, fingerprint=None):
+    """Synthetic selection/parser input only, never an actual discovery or model proof."""
+    value = copy.deepcopy(original)
+    raw = {name: bytes.fromhex(body) for name, body in value["files"]["raw"].items()}
+    enrollment = json.loads(raw["document.json"])
+    first = json.loads(raw[f"package-0000/{ATTEMPT}/job-0.json"])
+    enrollment["model_fingerprint"] = fingerprint or first["capabilities"]["model_fingerprint"]
+    encode = lambda body: json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    raw["document.json"] = encode(enrollment)
+    for name in list(raw):
+        ending = "/work/package-0000/dataset.json"
+        if name.endswith(ending):
+            raw[name.removesuffix(ending) + "/work/workflow.json"] = encode({
+                "provider_keys": enrollment["provider_keys"], "model_fingerprint": enrollment["model_fingerprint"]})
+    old = value["files"]["snapshot"]
+    value["files"]["raw"] = {name: body.hex() for name, body in raw.items()}
+    value["files"]["snapshot"] = {name: {"bytes": len(body), "sha256": sha(body),
+        "inode": old.get(name, {}).get("inode", [1, index + 10000])} for index, (name, body) in enumerate(raw.items())}
+    value["first_files"]["snapshot"] = {name.removeprefix("package-0000/"): item
+        for name, item in value["files"]["snapshot"].items() if name.startswith("package-0000/")}
+    value["resumed"]["snapshot"] = copy.deepcopy(value["files"]["snapshot"])
+    value["automatic_executor_selection"] = True
+    value["admission"]["execution_started_monotonic_ns"] = 200
+    value["admission"]["executor_selection"] = {
+        "method": "protected_provider_eligibility_discovery", "provider_keys": enrollment["provider_keys"],
+        "model_fingerprint": enrollment["model_fingerprint"],
+        "enrollment": {"bytes": len(raw["document.json"]), "sha256": sha(raw["document.json"])}}
+    value["enrollment"] = {"operation": "compute_document_enrolled", "execution_started": False,
+        "task_complete": False, "source_manifest_id": enrollment["source_manifest_id"],
+        "provider_keys": enrollment["provider_keys"], "model_fingerprint": enrollment["model_fingerprint"],
+        "package_count": len(enrollment["packages"]), "private_data_supported": False}
+    value["enrollment_start"] = {"started_monotonic_ns": 1}
+    value["enrollment_observed"] = {"enrollment": value["admission"]["executor_selection"]["enrollment"],
+        "retained_files": {name: copy.deepcopy(item) for name, item in value["files"]["snapshot"].items()
+                           if "/work/" not in name and not name.startswith("synthesis/")},
+        "owner_returned": True, "no_job_handles": True, "no_workflow_execution_directories": True,
+        "observed_monotonic_ns": value["admission"]["enrollment_observed_monotonic_ns"]}
+    # Physical node order must not overwrite the independently enrolled key order.
+    value["layout"]["provider_nodes"].reverse()
+    pairs = value["path"]["control_privacy"]["content_control_pairs"]
+    pairs["cp0"], pairs["cp1"] = pairs["cp1"], pairs["cp0"]
+    value["discovery_path"] = copy.deepcopy(value["path"])
+    value["discovery_path"]["gates"] = {"event_baseline_unix_ms": 500, "exit_mptcp_tls_completed": 2}
+    third = next(node for node in CUSTODY["CANDIDATES"] if node not in value["layout"]["provider_nodes"])
+    value["discovery_path"]["privacy"]["exit"]["provider_application"][third] = {
+        "request_packets": 2, "response_packets": 2, "response_payload_bytes": 128}
+    return value
+
+
 def self_test():
     # Synthetic ranges check the evidence parser only, never the real tokenizer.
     source = ("é public context.\n" * 300).encode()
@@ -662,6 +816,22 @@ def self_test():
     require(source_excerpt((HERE.parent.parent / "README.md").read_bytes()), "actual public fixture source unavailable")
     fixture = contract_fixture()
     check_evidence(fixture, "a"*40)
+    discovered = discovery_contract_fixture(fixture)
+    check_evidence(discovered, "a"*40, discovered=True)
+    invalid_selection = [discovery_contract_fixture(fixture, "c" * 64)] + [copy.deepcopy(discovered) for _ in range(5)]
+    invalid_selection[1]["admission"]["executor_selection"]["provider_keys"] = ["1" * 64] * 2
+    invalid_selection[2]["automatic_executor_selection"] = False
+    invalid_selection[3]["enrollment"]["execution_started"] = True
+    invalid_selection[4]["enrollment_observed"]["no_job_handles"] = False
+    invalid_selection[5]["path"]["privacy"]["exit"]["provider_application"] = copy.deepcopy(
+        discovered["discovery_path"]["privacy"]["exit"]["provider_application"])
+    for invalid in invalid_selection:
+        try:
+            check_evidence(invalid, "a"*40, discovered=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing or changed automatic executor selection accepted")
     for mutate in (lambda v: v["result"]["answers"][0].update(text="unbound text"),
                    lambda v: v["resume"].update(rounds_this_invocation=1),
                    lambda v: v["observation"].update(both_alive_before_and_after=False),
@@ -780,6 +950,10 @@ def main(args):
     work = Path(args[1])
     if command == "prepare":
         return prepare(work)
+    if command == "enrollment-start":
+        return enrollment_start(work)
+    if command == "enrolled":
+        return enrolled(work)
     if command == "observe":
         return observe(work, int(args[2]))
     if command == "first":

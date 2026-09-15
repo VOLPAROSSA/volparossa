@@ -176,6 +176,8 @@ def check(value, raw, enrollment, parents, response_bytes, job_ids, api):
                         and raw[package + "/work/package-0000/manifest.bin"] == raw[package + "/dataset.manifest"],
                         "workflow received a different signed synthesis input")
                 batch = load(package + "/" + ATTEMPT + "/result.json")
+                if api.get("discovered", False):
+                    api["workflow_selection"](raw, package, enrollment)
                 task = {"kind": "answer_public_question_v1", "question": enrollment["public_question"]}
                 count = min(2, len(package_rows))
                 require(batch["operation"] == "compute_distribute" and batch["complete"] is True
@@ -190,7 +192,7 @@ def check(value, raw, enrollment, parents, response_bytes, job_ids, api):
                     require(node is not None and caps.get("derived_inference_v3") is True and caps["task_derivation_v1"] is True
                             and binding["task"] == task and binding["dataset_manifest_id"] == manifest_id
                             and binding["expires_unix_seconds"] <= enrollment["expires_at_unix_seconds"], "wrong synthesis peer/capability/lease")
-                    slot = layout["provider_nodes"].index(node)
+                    slot = enrollment["provider_keys"].index(handle["provider_key"])
                     selected = binding["row_indices"]
                     require(selected == list(range(slot, len(package_rows), count)) and selected
                             and binding["job_id"] not in job_ids and re.fullmatch(r"[0-9a-f]{32}", binding["job_id"]),
@@ -201,6 +203,9 @@ def check(value, raw, enrollment, parents, response_bytes, job_ids, api):
                     require(caps["model"] == expected_model and caps["model_fingerprint"] == binding["model_fingerprint"]
                             and caps["public_inference_only"] is True and caps["runtime_slots"] == 1 and caps["max_threads"] == 2,
                             "synthesis model identity changed")
+                    if api.get("discovered", False):
+                        require(binding["model_fingerprint"] == enrollment["model_fingerprint"],
+                                "actual synthesis worker changed the automatically selected model")
                     derived = copy.deepcopy(data)
                     derived["inference"] = [package_rows[n] for n in selected]
                     derived_raw = encoded(derived)

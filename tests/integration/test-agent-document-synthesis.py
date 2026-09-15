@@ -164,6 +164,15 @@ def fixture():
 def main():
     original, raw = fixture()
     DOC["check_evidence"](original, "a" * 40)
+    discovered = DOC["discovery_contract_fixture"](original)
+    DOC["check_evidence"](discovered, "a" * 40, discovered=True)
+    wrong_model = DOC["discovery_contract_fixture"](original, "c" * 64)
+    try:
+        DOC["check_evidence"](wrong_model, "a" * 40, discovered=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("synthesis accepted another automatically enrolled model")
     mutations = [
         lambda value: value["result"]["synthesis"]["levels"].pop(),
         lambda value: value["result"]["synthesized_answer"].update(text="invented final answer"),

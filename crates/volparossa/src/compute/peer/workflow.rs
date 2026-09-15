@@ -28,8 +28,10 @@ pub(crate) struct Options {
     #[arg(long)]
     resume: bool,
     /// Two to four explicit peers at enrollment; stored unchanged for subsequent invocations.
-    #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, value_parser = parse_key, required_unless_present_any = ["resume", "discover_peers"], conflicts_with_all = ["resume", "discover_peers"])]
     provider_key: Vec<VerifyingKey>,
+    #[command(flatten)]
+    discovery: discovery::Options,
     /// New rounds per invocation, or per continuation window with --follow; not a worker lease.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
@@ -43,6 +45,8 @@ pub(crate) struct Options {
     follow: follow::Options,
     #[arg(skip)]
     expected_task: Option<ExpectedTask>,
+    #[arg(skip)]
+    expected_model_fingerprint: Option<String>,
 }
 
 /// Exact frontend selection, checked under the workflow lock before any dispatch.
@@ -54,6 +58,7 @@ pub(super) struct ExpectedTask {
     pub(super) rows: usize,
     pub(super) task: rpc::PublicTask,
     pub(super) provider_keys: Vec<String>,
+    pub(super) model_fingerprint: Option<String>,
     pub(super) selected_at_unix_seconds: u64,
 }
 
@@ -71,15 +76,19 @@ impl Options {
             plan,
             directory,
             provider_key: provider_keys,
+            discovery: discovery::Options::default(),
             max_batches,
             max_seconds,
             execute,
             follow: follow::Options::default(),
             expected_task: None,
+            expected_model_fingerprint: None,
         }
     }
 
     pub(super) fn expect_task(mut self, expected: ExpectedTask) -> Self {
+        self.expected_model_fingerprint
+            .clone_from(&expected.model_fingerprint);
         self.expected_task = Some(expected);
         self
     }
@@ -113,6 +122,8 @@ struct Enrollment {
     version: u32,
     verified_at_unix_seconds: u64,
     provider_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_fingerprint: Option<String>,
     packages: Vec<Package>,
 }
 
@@ -248,7 +259,36 @@ pub(super) async fn report_with_activity(
         )?)?;
         (enrollment, lock)
     } else {
-        let (enrollment, sources) = prepare(args)?;
+        let (mut enrollment, sources) = prepare(args)?;
+        if args.discovery.discover_peers && args.execute {
+            let versions = sources
+                .iter()
+                .map(|source| {
+                    serde_json::from_str::<serde_json::Value>(&source.dataset_json)
+                        .map(|value| value["version"].as_u64().unwrap_or(0))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let query = args.discovery.query(
+                enrollment
+                    .packages
+                    .iter()
+                    .map(|package| package.publisher_key.clone()),
+                enrollment
+                    .packages
+                    .iter()
+                    .any(|package| package.task.is_some()),
+                versions.contains(&2),
+                versions.contains(&3),
+            )?;
+            let selected = args.discovery.select(socket, query, cancelled).await?;
+            enrollment.provider_keys = selected
+                .providers
+                .iter()
+                .map(|key| hex::encode(key.as_bytes()))
+                .collect();
+            enrollment.model_fingerprint = Some(selected.model_fingerprint);
+            validate_enrollment(&enrollment)?;
+        }
         if let Some(expected) = &args.expected_task {
             validate_expected_task(&enrollment, expected)?;
         }
@@ -261,6 +301,7 @@ pub(super) async fn report_with_activity(
                 "package_count":enrollment.packages.len(),"total_rows":enrollment.packages.iter().map(|value|value.rows).sum::<usize>(),
                 "maximum_rounds_this_invocation":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,
                 "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory,
+                "discover_peers":args.discovery.discover_peers,
                 "pending_failure":false,"follow":args.follow.follow}),
             );
         }
@@ -320,9 +361,18 @@ fn prepare(args: &Options) -> Result<(Enrollment, Vec<rpc::PublicDataset>)> {
             .iter()
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
+        model_fingerprint: args.expected_model_fingerprint.clone(),
         packages,
     };
-    validate_enrollment(&enrollment)?;
+    if args.discovery.discover_peers {
+        ensure!(
+            args.provider_key.is_empty(),
+            "compute_discovery_conflicting_providers"
+        );
+        validate_packages(&enrollment.packages)?;
+    } else {
+        validate_enrollment(&enrollment)?;
+    }
     Ok((enrollment, sources))
 }
 
@@ -343,8 +393,15 @@ fn validate_enrollment(enrollment: &Enrollment) -> Result<()> {
     for key in &enrollment.provider_keys {
         parse_key(key).map_err(anyhow::Error::msg)?;
     }
+    if let Some(fingerprint) = &enrollment.model_fingerprint {
+        discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
+    }
+    validate_packages(&enrollment.packages)
+}
+
+fn validate_packages(packages: &[Package]) -> Result<()> {
     let mut ids = BTreeSet::new();
-    for package in &enrollment.packages {
+    for package in packages {
         if let Some(task) = &package.task {
             task.question()?;
         }
@@ -360,6 +417,7 @@ fn validate_expected_task(enrollment: &Enrollment, expected: &ExpectedTask) -> R
     ensure!(
         enrollment.packages.len() == 1
             && enrollment.provider_keys == expected.provider_keys
+            && enrollment.model_fingerprint == expected.model_fingerprint
             && enrollment.verified_at_unix_seconds >= expected.selected_at_unix_seconds,
         "compute_task_workflow_selection"
     );
@@ -595,7 +653,8 @@ async fn advance(
                             output,
                             args.max_seconds,
                             package.task.clone(),
-                        ),
+                        )
+                        .with_model_fingerprint(enrollment.model_fingerprint.clone()),
                         socket,
                         cancelled,
                     )
@@ -723,6 +782,10 @@ fn checked_handle(
         .context("compute_workflow_handle_package")?;
     ensure!(
         enrollment.provider_keys.contains(&handle.provider_key)
+            && enrollment
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|expected| expected == &handle.binding.model_fingerprint)
             && handle.binding.task == package.task
             && handle.binding.job_id.len() == 32
             && handle
@@ -972,11 +1035,13 @@ mod tests {
             directory: root.path().join("workflow"),
             resume: false,
             provider_key: vec![publisher.verifying_key(), peer.verifying_key()],
+            discovery: discovery::Options::default(),
             max_batches: 1,
             max_seconds: 600,
             execute: true,
             follow: follow::Options::default(),
             expected_task: None,
+            expected_model_fingerprint: None,
         };
         let (enrollment, sources) = prepare(&options).unwrap();
         persist_enrollment(&options.directory, &enrollment, &sources).unwrap();

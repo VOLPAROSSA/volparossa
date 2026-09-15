@@ -544,9 +544,13 @@ The corrected fixture uses R3's existing authorized `provider-c` contribution se
 its own agent/cache and actual learner workers in R3's namespace. It consumes through two
 selected protected relay paths to R4; its separate Exit-facing TCP18080 link only serves
 content. R3's agent and temporary neighbor links are removed before the original independent
-Client import gate. This correction has focused local checks, not yet a passing combined
-live proof; production policy checks are unchanged. Full cross-node continued learning and republication therefore
-remain a development candidate. This is selection and reuse of compatible adapters,
+Client import gate. The corrected combined
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914384494)
+passes, including full reconstruction of the unchanged original evidence: actual R3 import,
+comparison/adoption, eight further updates, validation and successor republication, followed
+by independent Client named import and inference. Both training-catalog rounds and the separately
+pinned validation comparisons also complete; capture and cleanup gates pass. Production policy
+checks are unchanged, and earlier failed runs remain failed. This is selection and reuse of compatible adapters,
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
@@ -597,11 +601,42 @@ questions across explicitly selected compatible peers, sends the tasks concurren
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
 poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
-checkpoint. General automatic peer selection, task planning,
+checkpoint. Initial automatic executor selection for enrolled workflows is described below; general task planning,
 distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
 who reported a result, not whether the result is true. Explicit recovery and the new
 owner-enabled continuation candidate are described below.
+
+### Automatic executor selection
+
+For a new `compute peer workflow`, `task` or `document`, use `--discover-peers` instead of
+explicit `--provider-key` arguments. Source publishers and public-input authorization remain
+explicit. Discovery exchanges only publisher eligibility and required model/profile metadata,
+not prompts, content bodies or arbitrary remote commands. It uses signed provider offers and
+authenticated TLS over the existing protected relay paths, not direct peer dataplane connections.
+
+The receiving node checks its publisher allowlist and actual attached broker capabilities.
+The coordinator chooses the largest compatible observed group, retaining two through four
+distinct peers with the same exact model fingerprint. `--model-fingerprint` optionally requires
+a particular model; `--max-peers 2..4` limits this job's enrolled pool, not the size of the network.
+Without an explicit model pin this is compatibility selection, not a claim to choose the smartest
+model or fastest workers. Generic content providers without an eligible broker are not executors.
+
+The original peer keys and model fingerprint are saved before any task submission. Fresh
+pre-submit capabilities and retained job bindings must match that fingerprint. Discovery observes
+availability; it does not reserve capacity, and a peer may become busy or leave afterward.
+Resume retains the enrolled group and model, including across synthesis levels, rather than
+silently selecting replacements from the whole network. Existing bounded recovery within the
+enrolled pool still applies. Dynamic mid-task pool expansion remains future work.
+
+A preview without `--execute` remains networkless. For documents,
+`--enroll-only --execute` performs discovery, public-document preparation and durable enrollment,
+but submits no inference jobs. Continue with the ordinary `document --resume --execute` command.
+This is useful when preparation and execution need separate scheduling or observation;
+without `--enroll-only`, a new document command proceeds directly to execution.
+
+Focused local protocol and CLI checks pass. The disposable automatic-discovery scenario is
+pending; earlier live document proofs used explicitly selected peers.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry
@@ -874,8 +909,13 @@ The corrected gate strictly validates v3 inference and still refuses derived tra
 Incomplete synthesis also retains `last-workflow-report.json` with fixed failure categories;
 an unconfirmed job is not treated as a stopped worker. The fixture exports only explicitly
 public partial files on failure, never relabelling them as complete execution evidence.
-The corrected live result remains pending. General autonomous planning, confidential offload
-and full B03 remain open.
+The corrected [run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914382572)
+and unchanged original raw reconstruction pass: ten fragments from 5,120 public-source bytes
+are reduced through `10 -> 5 -> 3 -> 2 -> 1`, with eight actual v3 workers and a final
+50-token answer. All nine publication signatures verify; offline completed resume preserves
+receipts without new work. Both protected relay legs, privacy captures and complete cleanup
+pass. This proves multi-level execution, not answer quality. General autonomous planning,
+confidential offload and full B03 remain open.
 
 ## Private tasks and training data
 

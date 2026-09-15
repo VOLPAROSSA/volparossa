@@ -300,6 +300,17 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
             request_id,
             context.content.compute_attach(&request, context).await,
         ),
+        control_request::Operation::ComputeDiscover(request) => {
+            match Box::pin(context.content.compute_discover(&request, context)).await {
+                Ok(discovered) => response(
+                    request_id,
+                    ControlResult::Ok,
+                    "COMPUTE_DISCOVERED",
+                    control_response::Payload::ComputeDiscovered(discovered),
+                ),
+                Err(error) => content_response(request_id, Err(error)),
+            }
+        }
         control_request::Operation::MailboxServe(request) => content_response(
             request_id,
             context.content.mailbox_serve(request, context).await,

@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use volparossa_content::{SignedManifest, provider::compute::dataset::VerifiedPublicDataset};
 
 use super::{
-    Args, Cancellation, Deserialize, Path, PathBuf, Result, Serialize, VerifyingKey, ensure, fs,
-    now, parse_key, read_file, rpc, sha, workflow,
+    Args, Cancellation, Deserialize, Path, PathBuf, Result, Serialize, VerifyingKey, discovery,
+    ensure, fs, now, parse_key, read_file, rpc, sha, workflow,
 };
 use crate::{
     compute::private_directory,
@@ -43,8 +43,10 @@ pub(crate) struct Options {
     #[arg(long, conflicts_with = "resume")]
     public_question: Option<String>,
     /// Two to four explicit independently known workers, retained unchanged on resume.
-    #[arg(long, value_parser=parse_key, required_unless_present="resume", conflicts_with="resume")]
+    #[arg(long, value_parser=parse_key, required_unless_present_any=["resume", "discover_peers"], conflicts_with_all=["resume", "discover_peers"])]
     provider_key: Vec<VerifyingKey>,
+    #[command(flatten)]
+    discovery: discovery::Options,
     /// New private task directory, or the exact existing directory with --resume.
     #[arg(long)]
     directory: PathBuf,
@@ -75,6 +77,8 @@ struct Enrollment {
     minimum_revision: Option<u64>,
     task: rpc::PublicTask,
     provider_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_fingerprint: Option<String>,
 }
 
 fn selection(args: &Options) -> Result<Enrollment> {
@@ -98,8 +102,17 @@ fn selection(args: &Options) -> Result<Enrollment> {
             .iter()
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
+        model_fingerprint: None,
     };
-    validate_selection(&selected)?;
+    if args.discovery.discover_peers {
+        ensure!(
+            args.provider_key.is_empty(),
+            "compute_discovery_conflicting_providers"
+        );
+        validate_source_selection(&selected)?;
+    } else {
+        validate_selection(&selected)?;
+    }
     Ok(selected)
 }
 
@@ -112,16 +125,23 @@ fn validate_selection(selected: &Enrollment) -> Result<()> {
             && (2..=4).contains(&selected.provider_keys.len()),
         "compute_task_selection"
     );
-    parse_key(&selected.publisher_key).map_err(anyhow::Error::msg)?;
-    content::parse_content_name(&selected.dataset_name).map_err(anyhow::Error::msg)?;
-    selected.task.question()?;
-    if let Some(id) = &selected.expected_manifest_id {
-        parse_manifest(id).map_err(anyhow::Error::msg)?;
+    if let Some(fingerprint) = &selected.model_fingerprint {
+        discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
     }
     let mut peers = BTreeSet::new();
     for key in &selected.provider_keys {
         let key = parse_key(key).map_err(anyhow::Error::msg)?;
         ensure!(peers.insert(key.to_bytes()), "compute_task_duplicate_peer");
+    }
+    validate_source_selection(selected)
+}
+
+fn validate_source_selection(selected: &Enrollment) -> Result<()> {
+    parse_key(&selected.publisher_key).map_err(anyhow::Error::msg)?;
+    content::parse_content_name(&selected.dataset_name).map_err(anyhow::Error::msg)?;
+    selected.task.question()?;
+    if let Some(id) = &selected.expected_manifest_id {
+        parse_manifest(id).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
@@ -131,18 +151,21 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         args.directory.is_absolute(),
         "compute_task_absolute_directory"
     );
-    let selected = if args.resume {
+    let mut selected = if args.resume {
         private_directory(&args.directory)?;
         serde_json::from_slice(&read_file(&args.directory.join("task.json"), 64 * 1024)?)?
     } else {
         selection(args)?
     };
-    validate_selection(&selected)?;
+    if args.resume || !args.discovery.discover_peers {
+        validate_selection(&selected)?;
+    }
     if !args.execute {
         println!(
             "{}",
             json!({"operation":"compute_public_task_plan","execute":false,"selection":selected,
             "resume":args.resume,"new_directory":args.directory,"network_retrieval":false,
+            "discover_peers":args.discovery.discover_peers,
             "remote_execution":false,"private_data_supported":false,"follow":args.follow.follow,
             "source_choice_uses_cache_inventory":false,"question_authored_by_requester":true})
         );
@@ -153,6 +176,22 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "compute_unprivileged_user_required"
     );
     let cancellation = Cancellation::new()?;
+    if !args.resume && args.discovery.discover_peers {
+        let query = args
+            .discovery
+            .query([selected.publisher_key.clone()], true, false, false)?;
+        let peers = args
+            .discovery
+            .select(socket, query, &cancellation.activity)
+            .await?;
+        selected.provider_keys = peers
+            .providers
+            .iter()
+            .map(|key| hex::encode(key.as_bytes()))
+            .collect();
+        selected.model_fingerprint = Some(peers.model_fingerprint);
+        validate_selection(&selected)?;
+    }
     let _lock = open_directory(&args.directory, args.resume)?;
     if !args.resume {
         write_json(&args.directory.join("task.json"), &selected, false)?;
@@ -439,6 +478,7 @@ fn expected_work(
         rows: verified.row_count(),
         task: selected.task.clone(),
         provider_keys: selected.provider_keys.clone(),
+        model_fingerprint: selected.model_fingerprint.clone(),
         selected_at_unix_seconds: selected.selected_at_unix_seconds,
     })
 }
@@ -584,6 +624,7 @@ mod tests {
                 .iter()
                 .map(|key| hex::encode(key.verifying_key().as_bytes()))
                 .collect(),
+            model_fingerprint: None,
         };
         write_bytes(&root.path().join("dataset.json"), json.as_bytes(), false).unwrap();
         write_bytes(
