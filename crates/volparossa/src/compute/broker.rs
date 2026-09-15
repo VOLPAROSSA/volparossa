@@ -116,7 +116,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "remote_network_authentication": "required-agent-boundary",
                 "network_access": false, "remote_execution_proved": false,
                 "task_derivation_v1": true,
-                "document_inference_v2": true
+                "document_inference_v2": true,
+                "derived_inference_v3": true
             })
         );
         return Ok(());
@@ -262,6 +263,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_rows: 4,
         task_derivation_v1: true,
         document_inference_v2: true,
+        derived_inference_v3: true,
     })
 }
 
@@ -369,6 +371,12 @@ impl Broker {
         if !self.capabilities.document_inference_v2
             && serde_json::from_str::<Value>(&submit.dataset_json)
                 .is_ok_and(|value| value["version"] == 2)
+        {
+            return false;
+        }
+        if !self.capabilities.derived_inference_v3
+            && serde_json::from_str::<Value>(&submit.dataset_json)
+                .is_ok_and(|value| value["version"] == 3)
         {
             return false;
         }

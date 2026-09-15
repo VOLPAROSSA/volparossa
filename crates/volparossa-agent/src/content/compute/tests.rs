@@ -1,5 +1,7 @@
 //! Real signed provider framing and protected Unix I/O; no model execution is simulated.
 
+mod derived;
+
 use super::*;
 use ed25519_dalek::SigningKey;
 use std::{os::unix::fs::PermissionsExt as _, time::Duration};
@@ -36,6 +38,7 @@ fn capabilities() -> Capabilities {
         max_rows: 4,
         task_derivation_v1: true,
         document_inference_v2: false,
+        derived_inference_v3: false,
     }
 }
 
@@ -145,6 +148,7 @@ fn attachment(
         model_fingerprint: capabilities().model_fingerprint,
         task_derivation_v1: true,
         document_inference_v2: false,
+        derived_inference_v3: false,
         enabled: AtomicBool::new(true),
     });
     backend.registry.set(Arc::downgrade(registry)).unwrap();

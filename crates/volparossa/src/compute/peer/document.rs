@@ -1,6 +1,7 @@
 //! Owner-authorized public documents, split by the real tokenizer and resumed from full receipts.
 
 mod storage;
+mod synthesis;
 #[cfg(test)]
 mod tests;
 
@@ -28,12 +29,19 @@ const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent explicit CLI permission and execution switches"
+)]
 pub(crate) struct Options {
     /// New private task directory; existing exact source/results are used with --resume.
     #[arg(long)]
     directory: PathBuf,
     #[arg(long)]
     resume: bool,
+    /// Combine all fragment answers through further peer inference; retains every intermediate receipt.
+    #[arg(long, conflicts_with = "resume")]
+    synthesize: bool,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
     input: Option<PathBuf>,
@@ -47,14 +55,14 @@ pub(crate) struct Options {
           value_parser = ["GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"])]
     license: Option<String>,
     /// Already provisioned local tokenizer runtime. No automatic installation/download.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present = "resume")]
     runtime_root: Option<PathBuf>,
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present = "resume")]
     model_root: Option<PathBuf>,
     /// Existing encrypted publisher identity; must match --publisher-key.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present = "resume")]
     identity: Option<PathBuf>,
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present = "resume")]
     passphrase_file: Option<PathBuf>,
     #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
     publisher_key: Option<VerifyingKey>,
@@ -99,6 +107,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "{}",
             json!({"operation":"compute_document_plan", "execute":false,
             "input":args.input,"directory":args.directory,"resume":args.resume,
+            "synthesize":args.synthesize,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
             "maximum_document_bytes":MAX_DOCUMENT_BYTES,"private_data_supported":false,
             "tokenizer_execution":false,"network_execution":false})
@@ -118,7 +127,14 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     if !args.resume {
         prepare(args, &cancellation.activity).await?;
     }
-    let result = advance(args, socket, &cancellation.activity).await?;
+    let mut result = advance(args, socket, &cancellation.activity).await?;
+    if result["synthesis_requested"] == true {
+        if result["complete"] == true {
+            synthesis::advance(args, socket, &cancellation.activity, &mut result).await?;
+        } else {
+            result["joining"] = "awaiting_fragments_before_peer_synthesis".into();
+        }
+    }
     save(&args.directory, "result.json", &result, true)?;
     println!("{}", serde_json::to_string(&result)?);
     ensure!(
@@ -146,6 +162,7 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
     );
     let input = Input {
         version: 1,
+        synthesis: false,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
         document: String::from_utf8(super::super::read_file(
@@ -168,6 +185,60 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
         false,
     )?;
     save(&args.directory, "planner-input.json", &input, false)?;
+    let plan = tokenize(args, &args.directory, &input, cancelled).await?;
+    ensure!(
+        !*cancelled.borrow(),
+        "compute_document_cancelled_before_publication"
+    );
+    let signer =
+        crate::content::unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
+    ensure!(
+        Some(signer.verifying_key()) == args.publisher_key,
+        "compute_document_publisher_identity"
+    );
+    let enrollment = storage::publish(
+        &args.directory,
+        &input,
+        &plan,
+        &signer,
+        &args.provider_key,
+        now()?,
+        args.lifetime_seconds,
+        cancelled,
+        args.synthesize,
+    )?;
+    drop(signer); // No identity/private key is retained during any peer exchange.
+    save(&args.directory, "document.json", &enrollment, false)
+}
+
+async fn tokenize(
+    args: &Options,
+    directory: &Path,
+    input: &Input,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<Plan> {
+    // A stopped tokenizer leaves its work intact. Only a complete plan is reused; a
+    // new bounded worker gets a new directory, never overwrites an interrupted one.
+    let mut output = directory.join("tokenizer");
+    for attempt in 0..32 {
+        if output.join("document-plan.json").try_exists()? {
+            let plan: Plan = serde_json::from_slice(&read_file(
+                &output.join("document-plan.json"),
+                MAX_SAVED_BYTES,
+            )?)?;
+            plan.validate(input)?;
+            return Ok(plan);
+        }
+        if !storage::present(&output)? {
+            break;
+        }
+        ensure!(attempt < 31, "compute_document_tokenizer_attempt_limit");
+        output = directory.join(format!("tokenizer-attempt-{:04}", attempt + 1));
+    }
+    ensure!(
+        !*cancelled.borrow(),
+        "compute_document_cancelled_before_planning"
+    );
     let options = super::super::Options {
         mode: Mode::PlanDocument,
         runtime_root: args
@@ -176,8 +247,8 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
             .context("compute_document_runtime")?,
         model_root: args.model_root.clone().context("compute_document_model")?,
         adapter_root: None,
-        dataset: args.directory.join("planner-input.json"),
-        output: args.directory.join("tokenizer"),
+        dataset: directory.join("planner-input.json"),
+        output: output.clone(),
         steps: 1,
         threads: args.threads,
         max_seconds: args.max_seconds,
@@ -198,34 +269,13 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
     let report = super::super::execute(&options, idle).await;
     bridge.abort();
     let report = report?;
-    save(&args.directory, "tokenizer-report.json", &report, false)?;
+    save(directory, "tokenizer-report.json", &report, true)?;
     let plan: Plan = serde_json::from_slice(&read_file(
-        &args.directory.join("tokenizer/document-plan.json"),
+        &output.join("document-plan.json"),
         MAX_SAVED_BYTES,
     )?)?;
-    plan.validate(&input)?;
-    ensure!(
-        !*cancelled.borrow(),
-        "compute_document_cancelled_before_publication"
-    );
-    let signer =
-        crate::content::unlock_signer(args.identity.as_deref(), args.passphrase_file.as_deref())?;
-    ensure!(
-        Some(signer.verifying_key()) == args.publisher_key,
-        "compute_document_publisher_identity"
-    );
-    let enrollment = storage::publish(
-        &args.directory,
-        &input,
-        &plan,
-        &signer,
-        &args.provider_key,
-        now()?,
-        args.lifetime_seconds,
-        cancelled,
-    )?;
-    drop(signer); // No identity/private key is retained during any peer exchange.
-    save(&args.directory, "document.json", &enrollment, false)
+    plan.validate(input)?;
+    Ok(plan)
 }
 
 async fn advance(
@@ -305,6 +355,7 @@ async fn advance(
         "total_parts":plan.parts.len(),"packages":packages,"answers":answers,"rounds_this_invocation":rounds,
         "interrupted":*cancelled.borrow(),"follow":args.follow.follow,
         "joining":"ordered_source_ranges_not_neural_synthesis",
+        "synthesis_requested":enrollment.synthesize,
         "source_selection_uses_cache_inventory":false,"private_data_supported":false,
         "content_cache":"local_native_signed_publications_not_automatic_network_contribution",
         "model_answer_correctness_proven":false,"full_b03_claimed":false}),

@@ -192,6 +192,10 @@ pub struct Capabilities {
     /// Supports publisher-signed inference-only document excerpts (dataset version two).
     #[serde(default, skip_serializing_if = "is_false")]
     pub document_inference_v2: bool,
+    /// Supports explicitly model-generated inference-only synthesis inputs (dataset version three).
+    /// This is not an attestation of the parent workers or permission to train on their answers.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub derived_inference_v3: bool,
 }
 
 #[allow(
@@ -529,6 +533,7 @@ mod tests {
         let mut capabilities: Capabilities = serde_json::from_value(original.clone()).unwrap();
         assert!(!capabilities.task_derivation_v1);
         assert!(!capabilities.document_inference_v2);
+        assert!(!capabilities.derived_inference_v3);
         assert_eq!(serde_json::to_value(&capabilities).unwrap(), original);
         capabilities.task_derivation_v1 = true;
         assert_eq!(
@@ -538,6 +543,11 @@ mod tests {
         capabilities.document_inference_v2 = true;
         assert_eq!(
             serde_json::to_value(&capabilities).unwrap()["document_inference_v2"],
+            true
+        );
+        capabilities.derived_inference_v3 = true;
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap()["derived_inference_v3"],
             true
         );
     }

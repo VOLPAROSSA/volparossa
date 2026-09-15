@@ -26,13 +26,15 @@ use super::{save, task, workflow};
 #[serde(deny_unknown_fields)]
 pub(super) struct Enrollment {
     version: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) synthesize: bool,
     pub(super) source_manifest_id: String,
     source_sha256: String,
     source_bytes: u64,
-    publisher_key: String,
+    pub(super) publisher_key: String,
     pub(super) provider_keys: Vec<String>,
-    selected_at_unix_seconds: u64,
-    expires_at_unix_seconds: u64,
+    pub(super) selected_at_unix_seconds: u64,
+    pub(super) expires_at_unix_seconds: u64,
     license: String,
     public_question: String,
     plan_sha256: String,
@@ -69,7 +71,7 @@ fn workflow_plan(root: &Path, publisher: &str, input: &Input) -> Value {
         "publisher_key":publisher,"task":instruction(input)}]})
 }
 
-fn publish_object(
+pub(super) fn publish_object(
     bytes: &[u8],
     name: String,
     content_type: &str,
@@ -195,6 +197,7 @@ pub(super) fn publish(
     at: u64,
     lifetime: u64,
     cancelled: &watch::Receiver<bool>,
+    synthesize: bool,
 ) -> Result<Enrollment> {
     let validity = admission(root, input, plan, providers, at, lifetime, cancelled)?;
     let mut cache = ChunkStore::create(
@@ -255,6 +258,7 @@ pub(super) fn publish(
     }
     Ok(Enrollment {
         version: 1,
+        synthesize,
         source_manifest_id: sha(&source_bytes),
         source_sha256: plan.source_sha256.clone(),
         source_bytes: plan.source_bytes,

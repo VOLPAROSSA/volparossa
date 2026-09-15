@@ -4,22 +4,43 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-15
 
+Current public-document synthesis candidate: `compute peer document --synthesize` chains
+real peer inference over the checked fragment answers until one answer remains. A separate
+inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;
+it never presents that text as an original document excerpt or portable execution attestation.
+The same pinned tokenizer budgets every reduction prompt. Original source authority/expiry,
+all intermediate packages and full worker receipts are retained across resume. No parent is
+discarded to force convergence; non-shrinking reductions, wire truncation, cancellation and
+unfinished work remain incomplete. The live multi-level document scenario is not yet proven.
+This does not complete general task planning, private offload or B03.
+See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
+
 Current publication-retry correction: a finite training loop no longer stops immediately
 after the first handoff once its cycle budget is exhausted. It drains already approved
 publications within one shared final `max_seconds` window, without new training, retaining
 original identities, source expiry and owner cancellation. Expiry, timeout and pending work
 remain explicit. All 34 focused training-loop tests pass. The peer-learning fixture still
-requires the actual contribution receipt; the failed `08457e1e` run below remains failed
-until a new functional run establishes recovery.
+requires the actual contribution receipt. The [new run on `6a782752`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34908647293)
+reached the bounded 600-second deadline after 600 explicit `agent_policy` rejections, leaving
+one publication pending. The learner's Client fixture has no enabled relay/contribution service;
+the production publication guard therefore rejects it before accepting the body. The original
+catalog cycles, protected peer import, comparison, adoption, eight further updates and validation
+have retained raw evidence, but republication and the later independent named-import gate still
+do not pass. Cleanup removed all owned objects and preserved guest-host state. Neither this run
+nor the failed `08457e1e` run below is relabelled as successful.
 
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
 receipts and original leases remain unchanged; eligible failed rows prefer another available
 compatible enrolled peer. Owner cancellation, original source expiry and retained-attempt limits
 stop continuation. All 27 focused peer tests pass, including incomplete-cancellation exit status
-and default manual behavior. The new `agent-jobs-follow` disposable scenario targets real worker
-loss and automatic recovery under one owner command; its live result is pending. No general
-planning, private offload, answer synthesis or completed B03 is claimed.
+and default manual behavior. The [run on `8f49986e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34907950110)
+and reconstruction of its unchanged original raw evidence pass: one owner command survived
+worker loss, retained the other worker's completed result, and automatically moved only failed
+row 0 to a new worker. The replacement appeared 18.821 seconds after loss. Six captures across
+28 interfaces show no direct client-to-exit or forbidden traffic; all owned objects were removed
+and the guest-host state stayed unchanged. No general planning, private offload, answer synthesis
+or completed B03 is established by that run.
 See [automatic continuation](DECENTRALIZED_AGENTS.md#automatic-continuation-of-enrolled-work).
 
 Current cooperative-learning slice: `compute train-loop --peer-updates` follows explicitly

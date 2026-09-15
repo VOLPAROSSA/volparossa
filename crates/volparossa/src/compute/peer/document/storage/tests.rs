@@ -23,6 +23,7 @@ fn fixture() -> Fixture {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let input = Input {
         version: 1,
+        synthesis: false,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
         document: "één\ntwo\nthree\nfour\nfive\n".into(),
@@ -66,6 +67,7 @@ fn fixture() -> Fixture {
         now().unwrap() - 1000,
         600,
         &cancelled,
+        false,
     )
     .unwrap();
     save(root.path(), "document.json", &enrollment, false).unwrap();
@@ -157,7 +159,8 @@ fn native_document_roundtrip_covers_every_part_and_preserves_original_expired_id
             &providers,
             enrollment.selected_at_unix_seconds,
             600,
-            &cancelled
+            &cancelled,
+            false
         )
         .is_err()
     );

@@ -37,12 +37,7 @@ async fn preview_never_loads_source_model_or_network_and_permission_precedes_cre
 fn resume_retains_inputs_and_lease_and_batch_budgets_stay_separate() {
     let args = ["document", "--directory", "/absent/document", "--resume"];
     assert!(!Command::try_parse_from(args).unwrap().options.follow.follow);
-    for field in [
-        "--input",
-        "--public-question",
-        "--license",
-        "--runtime-root",
-    ] {
+    for field in ["--input", "--public-question", "--license", "--synthesize"] {
         let mut changed = args.to_vec();
         changed.extend([field, "changed"]);
         assert!(Command::try_parse_from(changed).is_err());

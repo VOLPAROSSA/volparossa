@@ -613,7 +613,7 @@ if [ "$agent_public_task" = yes ]; then
     done
 fi
 if [ "$agent_public_document" = yes ]; then
-    for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py; do
+    for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
     done
 fi

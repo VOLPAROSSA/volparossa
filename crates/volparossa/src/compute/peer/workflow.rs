@@ -176,6 +176,10 @@ impl Progress {
     }
 
     fn outputs(&self) -> Result<Vec<serde_json::Value>> {
+        self.output_rows(false)
+    }
+
+    fn output_rows(&self, detailed: bool) -> Result<Vec<serde_json::Value>> {
         let mut outputs = Vec::new();
         for part in self.parts.values() {
             if let Some(status) = part
@@ -193,11 +197,17 @@ impl Progress {
                     .as_array()
                     .context("compute_workflow_outputs")?;
                 for (index, row) in part.handle.binding.row_indices.iter().enumerate() {
-                    outputs.push(
-                        serde_json::json!({"sample_index":row,"text":rows[index]["text"],
+                    let mut output = serde_json::json!({"sample_index":row,"text":rows[index]["text"],
                         "provider_key":part.handle.provider_key,"job_id":part.handle.binding.job_id,
-                        "report_sha256":status.report_sha256}),
-                    );
+                        "report_sha256":status.report_sha256});
+                    if detailed {
+                        output["output_index"] = index.into();
+                        output["model_fingerprint"] =
+                            part.handle.binding.model_fingerprint.clone().into();
+                        output["generated_tokens"] = rows[index]["generated_tokens"].clone();
+                        output["text_truncated"] = rows[index]["text_truncated"].clone();
+                    }
+                    outputs.push(output);
                 }
             }
         }
@@ -370,6 +380,22 @@ pub(super) fn task_snapshot(
     directory: &Path,
     expected: &ExpectedTask,
 ) -> Result<serde_json::Value> {
+    snapshot(directory, expected, false)
+}
+
+/// Full checked worker output metadata, without changing the established public snapshot shape.
+pub(super) fn task_snapshot_detailed(
+    directory: &Path,
+    expected: &ExpectedTask,
+) -> Result<serde_json::Value> {
+    snapshot(directory, expected, true)
+}
+
+fn snapshot(
+    directory: &Path,
+    expected: &ExpectedTask,
+    detailed: bool,
+) -> Result<serde_json::Value> {
     super::super::private_directory(directory)?;
     let _lock = lock_directory(directory)?;
     let enrollment: Enrollment = serde_json::from_slice(&read_file(
@@ -385,7 +411,7 @@ pub(super) fn task_snapshot(
     let progress = load_progress(&directory, &source, &verified, &enrollment)?;
     Ok(
         serde_json::json!({"dataset_manifest_id":package.manifest_id,"task":package.task,
-        "complete":progress.complete(),"outputs":progress.outputs()?}),
+        "complete":progress.complete(),"outputs":progress.output_rows(detailed)?}),
     )
 }
 
@@ -1014,6 +1040,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {
@@ -1177,6 +1204,15 @@ mod tests {
             assert!(retained.complete());
             assert!(retained.pending().is_empty());
             assert_eq!(retained.outputs().unwrap().len(), 2);
+            let ordinary = retained.outputs().unwrap();
+            let detailed = retained.output_rows(true).unwrap();
+            for (plain, full) in ordinary.iter().zip(&detailed) {
+                assert!(plain.get("model_fingerprint").is_none());
+                assert!(full["model_fingerprint"].is_string());
+                assert_eq!(plain["text"], full["text"]);
+                assert_eq!(plain["report_sha256"], full["report_sha256"]);
+                assert_eq!(full["output_index"], 0);
+            }
         }
         fixture.options.resume = true;
         fixture.options.plan = None;

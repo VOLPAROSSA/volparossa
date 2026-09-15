@@ -60,6 +60,7 @@ print_plan() {
         printf '%s\n' \
             'Agent-public-document: pinned isolated tokenizer splits an explicitly public document without truncation;' \
             '  sign original source and exact byte ranges; execute one package on two protected peer workers;' \
+            '  synthesize one answer through at least two real peer-inference reduction levels, preserving all inputs;' \
             '  resume remaining bounded packages and then completed receipts with brokers and route stopped;' \
             '  actual source/range/result/capture evidence and cleanup, not private documents or answer quality.'
     elif [ "$scenario" = agent-public-task ]; then

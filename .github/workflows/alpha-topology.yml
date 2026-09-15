@@ -135,6 +135,7 @@ jobs:
           python3 -B tests/integration/agent-public-task-smoke.py self-test
           sh -n tests/integration/agent-public-document-smoke.sh
           python3 -B tests/integration/agent-public-document-smoke.py self-test
+          python3 -B tests/integration/agent-document-synthesis.py self-test
           python3 -B workers/volparossa-ml/test_provision.py
           sh -n tests/integration/dns-cache-smoke.sh
           python3 -B tests/integration/test-dns-cache-smoke.py

@@ -642,6 +642,7 @@ mod tests {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            derived_inference_v3: false,
         };
         let attempt = fixture.root.path().join("work/package-0000/attempt-0000");
         fs::DirBuilder::new().mode(0o700).create(&attempt).unwrap();

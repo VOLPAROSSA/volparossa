@@ -38,6 +38,10 @@ pub(super) fn validate(json: &str, rows: usize) -> Result<()> {
         volparossa_content::provider::compute::dataset::validate_document_json(json, rows)?;
         return Ok(());
     }
+    if header["version"] == 3 {
+        volparossa_content::provider::compute::dataset::validate_derived_json(json, rows)?;
+        return Ok(());
+    }
     let dataset: Dataset = serde_json::from_str(json)?;
     ensure!(
         dataset.version == 1

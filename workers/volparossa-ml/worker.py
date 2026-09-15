@@ -32,6 +32,7 @@ MAX_DOCUMENT_REQUEST = 8 * 1048576
 MAX_DOCUMENT_PARTS = 16384
 MAX_DOCUMENT_PLAN = 16 * 1048576
 PUBLIC_LICENSES = {"GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"}
+DERIVED_CLAIM_SCOPE = "coordinator_verified_local_rpc_status_not_portable_execution_attestation"
 MAX_LINE = 16384
 MAX_CONTROL_LINE = 1024
 MAX_CONTROLS = 128
@@ -157,6 +158,8 @@ def validate_dataset(dataset, mode):
         return validate_document(dataset)
     if type(dataset) is dict and dataset.get("version") == 2:
         return validate_document_inference(dataset, mode)
+    if type(dataset) is dict and dataset.get("version") == 3:
+        return validate_derived_inference(dataset, mode)
     fields = {"version", "visibility", "license", "source_revision", "train", "heldout", "inference"}
     require(type(dataset) is dict and dataset.keys() == fields, "INVALID_DATASET_FIELDS")
     require(type(dataset["version"]) is int and dataset["version"] == VERSION
@@ -195,8 +198,10 @@ def public_license(value):
 
 
 def validate_document(dataset):
-    require(type(dataset) is dict and dataset.keys() == {"version", "visibility", "license", "document", "question"},
+    fields = {"version", "visibility", "license", "document", "question"}
+    require(type(dataset) is dict and fields <= dataset.keys() <= fields | {"synthesis"},
             "INVALID_DOCUMENT_FIELDS")
+    require(type(dataset.get("synthesis", False)) is bool, "INVALID_DOCUMENT_SYNTHESIS_PROFILE")
     require(type(dataset["version"]) is int and dataset["version"] == 1
             and dataset["visibility"] == "public" and public_license(dataset["license"]), "DOCUMENT_NOT_EXPLICIT_PUBLIC")
     public_text(dataset["document"], MAX_DATASET, "INVALID_DOCUMENT_TEXT")
@@ -224,6 +229,57 @@ def validate_document_inference(dataset, mode):
                 and bounded_integer(row["end"], 1, MAX_DATASET) and row["start"] >= previous_end
                 and row["end"] - row["start"] == len(context), "INVALID_DOCUMENT_RANGE")
         previous_end = row["end"]
+    return dataset
+
+
+def validate_derived_inference(dataset, mode):
+    require(mode == "infer", "DERIVED_PROFILE_INFERENCE_ONLY")
+    require(dataset.keys() == {"version", "visibility", "license", "source_manifest_hex", "level", "claim_scope", "inference"},
+            "INVALID_DERIVED_PROFILE_FIELDS")
+    require(type(dataset["version"]) is int and dataset["version"] == 3
+            and dataset["visibility"] == "public" and public_license(dataset["license"])
+            and dataset["claim_scope"] == DERIVED_CLAIM_SCOPE and bounded_integer(dataset["level"], 1, 16),
+            "DERIVED_NOT_EXPLICIT_PUBLIC")
+    manifest = dataset["source_manifest_hex"]
+    # As for v2, native signatures/Ed25519 validity are authenticated by the
+    # Rust agent. This fixed worker checks bounded structure, not invented crypto.
+    require(type(manifest) is str and 2 <= len(manifest) <= 2 * 65536 and len(manifest) % 2 == 0
+            and re.fullmatch(r"[0-9a-f]+", manifest), "INVALID_DOCUMENT_MANIFEST")
+    rows = dataset["inference"]
+    require(type(rows) is list and 1 <= len(rows) <= 4, "INVALID_DATASET_SIZE")
+    input_fields = {"text", "provider_key", "job_id", "report_sha256", "package_manifest_id", "model_fingerprint",
+                    "output_index", "parent_index", "source_start", "source_end", "piece_start", "piece_end"}
+    for row in rows:
+        require(type(row) is dict and row.keys() == {"question", "context", "inputs"}, "INVALID_DERIVED_QUESTION")
+        public_text(row["question"], 512, "INVALID_SAMPLE_TEXT")
+        require(row["question"].strip(), "INVALID_SAMPLE_TEXT")
+        context = public_text(row["context"], 4096, "INVALID_SAMPLE_TEXT")
+        inputs = row["inputs"]
+        require(type(inputs) is list and 1 <= len(inputs) <= 64, "INVALID_DERIVED_INPUTS")
+        assembled = bytearray()
+        for item in inputs:
+            require(type(item) is dict and item.keys() == input_fields, "INVALID_DERIVED_INPUT_FIELDS")
+            raw = public_text(item["text"], 1024, "INVALID_DERIVED_TEXT") + b"\n"
+            for field, length in (("provider_key", 64), ("job_id", 32), ("report_sha256", 64),
+                                  ("package_manifest_id", 64), ("model_fingerprint", 64)):
+                value = item[field]
+                require(type(value) is str and re.fullmatch(r"[0-9a-f]{" + str(length) + r"}", value)
+                        and value != "0" * length, "INVALID_DERIVED_IDENTITY")
+            require(bounded_integer(item["output_index"], 0, 65535)
+                    and bounded_integer(item["parent_index"], 0, 2 ** 32 - 1)
+                    and bounded_integer(item["source_start"], 0, MAX_DATASET - 1)
+                    and bounded_integer(item["source_end"], item["source_start"] + 1, MAX_DATASET)
+                    and bounded_integer(item["piece_start"], 0, len(raw) - 1)
+                    and bounded_integer(item["piece_end"], item["piece_start"] + 1, len(raw)),
+                    "INVALID_DERIVED_RANGE")
+            piece = raw[item["piece_start"]:item["piece_end"]]
+            try:
+                piece.decode("utf-8")
+            except UnicodeError as error:
+                raise JobError("INVALID_DERIVED_UTF8_RANGE") from error
+            assembled.extend(piece)
+            require(len(assembled) <= 4096, "INVALID_DERIVED_CONTEXT_BOUND")
+        require(bytes(assembled) == context, "DERIVED_CONTEXT_CHANGED")
     return dataset
 
 
@@ -295,9 +351,14 @@ def prepare_files(request):
     if request["mode"] == "plan_document":
         identity.update(version=1, document_sha256=hashlib.sha256(dataset["document"].encode()).hexdigest(),
                         document_bytes=len(dataset["document"].encode()))
+        if dataset.get("synthesis", False):
+            identity["synthesis"] = True
     elif dataset["version"] == 2:
         identity.update(version=2, source_manifest_sha256=hashlib.sha256(bytes.fromhex(dataset["source_manifest_hex"])).hexdigest(),
                         inference_examples=len(dataset["inference"]))
+    elif dataset["version"] == 3:
+        identity.update(version=3, source_manifest_sha256=hashlib.sha256(bytes.fromhex(dataset["source_manifest_hex"])).hexdigest(),
+                        level=dataset["level"], inference_examples=len(dataset["inference"]))
     else:
         identity.update(source_revision=dataset["source_revision"], training_examples=len(dataset["train"]),
                         heldout_examples=len(dataset["heldout"]), inference_examples=len(dataset["inference"]))
@@ -598,15 +659,19 @@ def load_model(transformers, torch, model_root):
     return model
 
 
-def prompt_messages(row):
+def prompt_messages(row, synthesis=False):
+    if synthesis:
+        return [{"role": "system", "content": "Synthesize these generated answers to the question. "
+                 "They are not source quotations. Preserve uncertainty; do not invent facts."},
+                {"role": "user", "content": "Answers:\n" + row["context"] + "\nQuestion:\n" + row["question"]}]
     return [{"role": "system", "content": "Answer the question using only the supplied public documentation. "
              "If it does not contain the answer, say you do not know."},
             {"role": "user", "content": "Documentation:\n" + row["context"] + "\nQuestion:\n" + row["question"]}]
 
 
-def prompt_tokens(tokenizer, row):
+def prompt_tokens(tokenizer, row, synthesis=False):
     # Exactly the same whole prompt is counted by planning and actual inference.
-    prompt = tokenizer.apply_chat_template(prompt_messages(row), tokenize=True, add_generation_prompt=True,
+    prompt = tokenizer.apply_chat_template(prompt_messages(row, synthesis), tokenize=True, add_generation_prompt=True,
                                            return_dict=False)
     require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
     return prompt
@@ -614,9 +679,10 @@ def prompt_tokens(tokenizer, row):
 
 def plan_document(tokenizer, dataset, session):
     text, question = dataset["document"], dataset["question"]
+    synthesis = dataset.get("synthesis", False)
     limit = MAX_CONTEXT - MAX_NEW_TOKENS
     session.check()
-    require(1 <= len(prompt_tokens(tokenizer, {"question": question, "context": ""})) <= limit,
+    require(1 <= len(prompt_tokens(tokenizer, {"question": question, "context": ""}, synthesis)) <= limit,
             "DOCUMENT_QUESTION_TOKEN_LIMIT_EXCEEDED")
     parts, offset, start = [], 0, 0
     while start < len(text):
@@ -634,7 +700,7 @@ def plan_document(tokenizer, dataset, session):
             if len(context.encode("utf-8")) > 4096:
                 high = length - 1
                 continue
-            count = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+            count = len(prompt_tokens(tokenizer, {"question": question, "context": context}, synthesis))
             if 1 <= count <= limit:
                 valid_end, valid_tokens = start + length, count
                 low = length + 1
@@ -645,31 +711,35 @@ def plan_document(tokenizer, dataset, session):
         # a one-character fallback keeps that detail from creating an empty part.
         if valid_end == start:
             context = text[start:start + 1]
-            valid_tokens = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+            valid_tokens = len(prompt_tokens(tokenizer, {"question": question, "context": context}, synthesis))
             require(1 <= valid_tokens <= limit, "DOCUMENT_CHARACTER_DOES_NOT_FIT")
             valid_end = start + 1
         context = text[start:valid_end]
-        count = len(prompt_tokens(tokenizer, {"question": question, "context": context}))
+        count = len(prompt_tokens(tokenizer, {"question": question, "context": context}, synthesis))
         require(count == valid_tokens and 1 <= count <= limit, "DOCUMENT_TOKENIZATION_CHANGED")
         end = offset + len(context.encode("utf-8"))
         parts.append({"start": offset, "end": end, "prompt_tokens": count})
         offset, start = end, valid_end
     raw = text.encode("utf-8")
     require(offset == len(raw), "DOCUMENT_COVERAGE_INVALID")
-    return {"version": 1, "source_sha256": hashlib.sha256(raw).hexdigest(), "source_bytes": len(raw),
+    result = {"version": 1, "source_sha256": hashlib.sha256(raw).hexdigest(), "source_bytes": len(raw),
             "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(), "model_id": MODEL_ID,
             "model_revision": MODEL_REVISION, "tokenizer_sha256": MODEL_HASHES["tokenizer.json"],
             "prompt_limit": limit, "parts": parts}
+    if synthesis:
+        result["synthesis"] = True
+    return result
 
 
 def encode_dataset(tokenizer, torch, dataset):
     result = {"train": [], "heldout": [], "inference": []}
+    synthesis = dataset["version"] == 3
     for split in result:
         for row in dataset.get(split, []):
-            messages = prompt_messages(row)
+            messages = prompt_messages(row, synthesis)
             # Transformers 5.16.1 defaults to BatchEncoding; this worker deliberately
             # consumes a flat token-ID list and constructs its own tensors/masks.
-            prompt = prompt_tokens(tokenizer, row)
+            prompt = prompt_tokens(tokenizer, row, synthesis)
             require(1 <= len(prompt) <= MAX_CONTEXT - MAX_NEW_TOKENS,
                     "DOCUMENT_TOKEN_LIMIT_EXCEEDED")
             if split == "inference":

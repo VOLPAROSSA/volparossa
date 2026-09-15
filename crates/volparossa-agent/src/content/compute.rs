@@ -60,6 +60,7 @@ pub(super) struct Attachment {
     model_fingerprint: String,
     task_derivation_v1: bool,
     document_inference_v2: bool,
+    derived_inference_v3: bool,
     enabled: AtomicBool,
 }
 
@@ -137,6 +138,7 @@ impl ContentRuntime {
             model_fingerprint: capabilities.model_fingerprint,
             task_derivation_v1: capabilities.task_derivation_v1,
             document_inference_v2: capabilities.document_inference_v2,
+            derived_inference_v3: capabilities.derived_inference_v3,
             enabled: AtomicBool::new(true),
         });
         let service = Arc::new(ComputeService::new(
@@ -328,7 +330,8 @@ impl Attachment {
                     now(),
                 )?;
                 if hex::encode(source.manifest_id()) != submit.binding.dataset_manifest_id
-                    || (source.is_document() && !self.document_inference_v2)
+                    || (source.is_derived() && !self.derived_inference_v3)
+                    || (source.is_document() && !source.is_derived() && !self.document_inference_v2)
                     || submit.binding.expires_unix_seconds > source.expires()
                     || derive_submission(&source, &submit.binding)? != submit.dataset_json
                     || hex::encode(Sha256::digest(submit.dataset_json.as_bytes()))
@@ -377,6 +380,7 @@ impl ComputeBackend for Attachment {
                 if capabilities.model_fingerprint != self.model_fingerprint
                     || capabilities.task_derivation_v1 != self.task_derivation_v1
                     || capabilities.document_inference_v2 != self.document_inference_v2
+                    || capabilities.derived_inference_v3 != self.derived_inference_v3
                 {
                     return Err(ComputeError::Authentication);
                 }

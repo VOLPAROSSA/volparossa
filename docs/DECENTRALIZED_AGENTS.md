@@ -535,7 +535,13 @@ requires a separate node to fetch, compare, adopt and actually continue training
 after the original dataset service stops. The [first run on `08457e1e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34906223498)
 performed the peer comparison, adoption, eight local training updates and validation, but its
 final check failed because the local successor was still awaiting publication when the
-one-cycle invocation ended. Full cross-node continued learning and republication therefore
+one-cycle invocation ended. The [bounded-drain run on `6a782752`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34908647293)
+exposed the underlying handoff refusal: the fixture's Client learner has contribution/relay
+service disabled and receives `agent_policy`, so its valid signed publication remains pending
+through the final 600-second window. All five learner workers completed, but no actual
+publication receipt was obtained; the later independent named-import gate was not reached.
+The fixture needs a genuinely configured, reachable contributing learner, not a weaker product
+policy check. Full cross-node continued learning and republication therefore
 remain a development candidate. This is selection and reuse of compatible adapters,
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also
@@ -693,9 +699,11 @@ results and reports incomplete work with a nonzero status. Without `--follow`, t
 bounded-invocation behavior is unchanged; without `--execute`, neither mode dispatches jobs.
 
 The 27 focused peer tests pass, including continuation counters, cancellation, option parsing,
-alternate-peer ordering and exact completed-receipt reuse. The `agent-jobs-follow` disposable
-fixture targets one command surviving a real worker loss and starting a replacement on another
-peer, with original handles and complete network cleanup retained. Its live result is pending.
+alternate-peer ordering and exact completed-receipt reuse. The [live `agent-jobs-follow` run on
+`8f49986e`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34907950110) and its original raw
+reconstruction pass: one owner command survives real worker loss and starts a replacement on
+another peer. The completed peer result is unchanged, only the failed row is replaced, and the
+disposable network cleans up fully with unchanged guest-host state.
 This is continuation of explicit public tasks, not a general planner, private inference,
 exactly-once execution, neural answer synthesis or a completed B03 checkpoint.
 
@@ -789,8 +797,8 @@ Current enrollment accepts at most 1 MiB of input, 16,384 segments and two to fo
 peers. Individual prompts/answers, resource budgets and worker leases remain bounded.
 `--max-batches` limits new rounds per invocation (1–32), or per continuation window with
 `--follow`, not completed lifetime progress.
-`result.json` preserves ordered range answers and exact source/context/job/provider/report
-identities; it is not neural synthesis, answer-quality proof or an independently portable
+Without `--synthesize`, `result.json` preserves ordered range answers and exact
+source/context/job/provider/report identities; it is not neural synthesis, answer-quality proof or an independently portable
 execution attestation. An unfinished invocation returns a nonzero status but retains complete
 receipts. Resume never reassigns completed work or silently renews expired source permissions.
 The new `agent-public-document` disposable scenario targets real tokenizer splitting,
@@ -804,10 +812,60 @@ SHA-2 build correction makes both brokers ready in under half a second in the
 [run on `35fd9551`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34901448083), but that
 run then stops before Python at the tokenizer sandbox's proc mount. The owner CLI had entered
 the agent service's masked mount view. The candidate uses the same net-only owner-launch
-pattern as the working train-loop, retaining the service protections and fixed worker sandbox;
-its own live result is pending. These failed runs do not establish document execution and retain
-complete cleanup and unchanged guest state.
+pattern as the working train-loop, retaining the service protections and fixed worker sandbox.
+The [subsequent run on `1bd44d11`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34903185520)
+and its original raw reconstruction pass: all 5,120 source bytes, nine tokenizer-selected parts,
+three signed packages and five real peer-job receipts. Both workers overlap, and after brokers
+stop the complete result resumes without new work or changed receipts. Captures and cleanup
+pass with unchanged guest-host state. That run proves ordered fragment answers, not synthesis;
+the earlier failed runs remain failed.
 Full B03 and confidential tasks remain open.
+
+### Synthesizing one public answer
+
+Add `--synthesize` to the initial document command to enroll a hierarchy of actual peer
+inference, rather than stop at separate fragment answers. The original document and question
+remain explicitly public. After all fragments complete, the coordinator retains the exact
+generated answers, groups them in source order, and uses the same isolated pinned tokenizer
+to plan fitting synthesis prompts. Their outputs form the next level until one answer remains.
+Every prompt still fits 192 input tokens; every worker keeps its existing resource and lease
+limits. Large frontiers use groups of at most 64 parent outputs, not an enlarged model context.
+
+```sh
+# Initial command: use the public document options above, adding --synthesize.
+# When unfinished levels need new tokenization/publications, explicitly supply these again:
+volparossa --control-socket /absolute/agent.sock compute peer document \
+  --directory /absolute/private-parent/document-001 --resume \
+  --runtime-root /absolute/existing-runtime --model-root /absolute/existing-model \
+  --identity /absolute/existing-identity --passphrase-file /absolute/private-passphrase \
+  --max-batches 32 --follow --execute
+```
+
+The enrollment remembers synthesis; `--resume` cannot change the source, question, license,
+publisher or chosen peers. Completed levels reuse exact retained inputs, plans, native
+publications and checked worker receipts. A completely finished resume needs none of the four
+provisioning/identity options and does not contact peers, run the tokenizer, or reopen keys.
+An unlocked signing key is never retained across peer awaits. Original source expiry limits
+new work; historical complete receipts remain readable without extending that permission.
+
+Peers must explicitly advertise `derived_inference_v3`. These inference-only packages contain
+the original publisher's signed source manifest, exact pieces of generated parent answers and
+their package/job/provider/report lineage. They are **not original text excerpts**, training
+data or independently portable executor attestations: the coordinator checked locally retained
+authenticated RPC statuses and signs that limited assertion. A parent model's answer may be
+wrong. Encryption protects transport, not inputs from the selected executing peer.
+
+The result retains original `answers`, all intermediate level records and, on completion,
+`synthesized_answer`. Completion means the actual inference chain finished, not that the final
+answer is correct or semantically exhaustive. The worker's 64-token generation boundary is
+reported explicitly. Wire-truncated or empty parent outputs are not silently used; reductions
+that fail to shrink, or exceed 16 levels, stop incomplete without discarding source inputs.
+`--follow` continues bounded task windows, not unlimited per-device execution.
+
+The extended disposable document scenario must demonstrate at least two real reduction levels,
+exact parent coverage and signed provenance, one real final answer, and offline completed
+resume with unchanged receipts. Its live result is pending. General autonomous planning,
+confidential offload and full B03 remain open.
 
 ## Private tasks and training data
 
