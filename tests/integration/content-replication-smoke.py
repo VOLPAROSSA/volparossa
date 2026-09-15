@@ -276,7 +276,7 @@ def validate_capture(capture, layout, node):
             and capture["direct_provider_packets"] == 0,
             "incomplete physical capture or forbidden direct/plain traffic")
     statistics = capture["interface_statistics"]
-    require(set(statistics) == set(capture["interfaces"]) == PHYSICAL_INTERFACES[node]
+    require(set(statistics) == set(capture["interfaces"]) == physical_interfaces(layout, node)
             and len(statistics) == len(capture["interfaces"])
             and all(re.fullmatch(r"underlay|[a-z][a-z0-9]{1,5}", interface)
                     and not interface.startswith("vp") and interface != "lo" for interface in statistics)
@@ -286,6 +286,17 @@ def validate_capture(capture, layout, node):
                     and row["packet_socket_packets"] == row["observed_frames"]
                     and 4194304 <= row["receive_buffer_bytes"] <= 8388608 for row in statistics.values()),
             "physical packet intake not stopped and drained exactly")
+
+
+def physical_interfaces(layout, node):
+    """Late learner links exist only during this additional R3 phase, not Client fetch."""
+    if layout["phase"] != "peer-learning":
+        return PHYSICAL_INTERFACES[node]
+    if node == "relay3":
+        return {"underlay", "r3c", "r3b1", "r3b2", "r3x", "lr0", "lr1", "lr2"}
+    if node in RELAY_NODES:
+        return PHYSICAL_INTERFACES[node] | {"r" + node[-1] + "l"}
+    return PHYSICAL_INTERFACES[node]
 
 
 def validate_phase(phase, name, peers, minimum_bytes=None):
@@ -303,6 +314,11 @@ def validate_phase(phase, name, peers, minimum_bytes=None):
                 layout["provider"]["node"] if role == "provider" else
                 relays[0] if role == "relay-a" else relays[1] if role == "relay-b" else role)
         validate_capture(capture, layout, node)
+        if name == "peer-learning":
+            counters = [capture[key] for key in CAPTURE["LEARNER_PROVIDER_COUNTERS"]]
+            require(all(type(count) is int and count >= 0 for count in counters)
+                    and (role in ("receiver", "exit") or counters == [0, 0, 0]),
+                    "learner serving was confused with protected R4 fetch or escaped its exact endpoint leg")
     for slot, relay in zip(("relay-a", "relay-b"), relays):
         require(captures[slot]["client_leg_wireguard_data_datagrams"] > 16
                 and captures[slot]["exit_leg_wireguard_data_datagrams"] > 16

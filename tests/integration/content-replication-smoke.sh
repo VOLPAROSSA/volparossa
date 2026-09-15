@@ -275,6 +275,10 @@ content_replication_capture() {
         cr_client=relay4; cr_client_ip=49.165.5.1; cr_client_ns=$R4
         cr_provider=relay5; cr_provider_ip=50.166.6.1; cr_provider_ns=$R5
         cr_selection=$WORK/content-replication-warm-selection.json
+    elif [ "$cr_phase" = peer-learning ]; then
+        cr_client=relay3; cr_client_ip=48.164.4.1; cr_client_ns=$R3
+        cr_provider=relay4; cr_provider_ip=49.165.5.1; cr_provider_ns=$R4
+        cr_selection=$WORK/agent-peer-learning-transfer-selection.json
     else
         [ "$cr_phase" = reserve-fetch ] || return 1
         cr_client=client; cr_client_ip=43.159.1.1; cr_client_ns=$CLIENT

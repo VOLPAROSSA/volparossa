@@ -2399,6 +2399,14 @@ write_config() {
     if [ "$scenario" = content-replication ] || [ "$scenario" = content-repair ] || [ "$agent_train_loop" = yes ]; then
         content_replication_configure_node
     fi
+    if [ "$agent_train_loop" = yes ] && [ "$node" = relay3 ]; then
+        # R3 later consumes through real relay paths and contributes through its existing
+        # provider-c endpoint. Client remains the separate final named-import consumer.
+        client_role=true
+        bootstrap_one="/ip4/42.158.0.1/udp/41000/quic-v1/p2p/$R0_PEER"
+        bootstrap_two="/ip4/45.161.2.1/udp/41000/quic-v1/p2p/$R2_PEER"
+        bootstrap_three="/ip4/44.160.1.1/udp/41000/quic-v1/p2p/$R1_PEER"
+    fi
     [ "$scenario" != dns-cache ] || dns_cache_configure_node
     if [ "$wifi_link" = yes ]; then
         # Only the absent, not-yet-started Ethernet/WAN contacts remain configured. Neither
@@ -2858,6 +2866,7 @@ launch_agent() {
         if [ "$agent_train_loop" = yes ]; then
             case $node in
                 client) set -- "--property=InaccessiblePaths=$WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
+                relay3) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay4 $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
                 relay4) set -- "--property=InaccessiblePaths=$WORK/state-client $WORK/state-relay5 $WORK/content-replication-seed $artifact_user" ;;
             esac
         fi

@@ -540,8 +540,12 @@ exposed the underlying handoff refusal: the fixture's Client learner has contrib
 service disabled and receives `agent_policy`, so its valid signed publication remains pending
 through the final 600-second window. All five learner workers completed, but no actual
 publication receipt was obtained; the later independent named-import gate was not reached.
-The fixture needs a genuinely configured, reachable contributing learner, not a weaker product
-policy check. Full cross-node continued learning and republication therefore
+The corrected fixture uses R3's existing authorized `provider-c` contribution service, with
+its own agent/cache and actual learner workers in R3's namespace. It consumes through two
+selected protected relay paths to R4; its separate Exit-facing TCP18080 link only serves
+content. R3's agent and temporary neighbor links are removed before the original independent
+Client import gate. This correction has focused local checks, not yet a passing combined
+live proof; production policy checks are unchanged. Full cross-node continued learning and republication therefore
 remain a development candidate. This is selection and reuse of compatible adapters,
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also

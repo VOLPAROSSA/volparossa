@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import runpy
 import stat
 import sys
@@ -22,7 +23,7 @@ MAX_EXPORT = 32 * 1024 ** 2
 ROUND = "peer-update-0000000000000001"
 CYCLE = "cycle-0000000000000001"
 STAGES = ("peer-baseline", "peer-candidate", "training", "validation-baseline", "validation-candidate")
-SCOPE = ("A distinct Client discovers an explicitly trusted R4 adapter without a seed or copied adapter, "
+SCOPE = ("A distinct R3 consumer/contributor discovers an explicitly trusted R4 adapter without a seed or copied adapter, "
          "compares pinned-base and received weights on the same explicitly selected public validation set, "
          "adopts only the measured improvement and performs eight real updates from those received weights. "
          "Both local successor gates precede any own publication. Original R5 content service is stopped. "
@@ -32,6 +33,49 @@ SCOPE = ("A distinct Client discovers an explicitly trusted R4 adapter without a
 
 def digest(raw):
     return dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+
+
+def configuration(path):
+    """Read only the fixed fixture's consent/bind fields, never export raw configuration."""
+    path = Path(path)
+    info = path.lstat()
+    require(path.is_absolute() and path.name == "config-relay3.yaml" and stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 16384,
+            "unexpected learner configuration")
+    text = path.read_text(encoding="ascii")
+    expected = {
+        "roles": {"client": "true", "relay": "true", "exit": "false"},
+        "sharing": {"enabled": "true", "interface": "r3x"},
+        "download_sharing": {"enabled": "true", "interface": "r3x"},
+        "content_contribution": {"enabled": "true", "bind_address": '"48.164.4.1:18080"',
+            "advertised_hostname": "provider-c.volparossa.test",
+            "cache": json.dumps(str(path.parent / "state-relay3/custody-cache"))},
+    }
+    for section, fields in expected.items():
+        blocks = re.findall(r"(?m)^" + section + r":\n((?:[ \t].*\n)+)", text)
+        require(len(blocks) == 1, "missing or duplicate learner consent section")
+        for field, value in fields.items():
+            actual = re.findall(r"(?m)^  " + field + r": (.*)$", blocks[0])
+            require(actual == [value], "learner consent or fixed endpoint changed")
+    return dict(learner="relay3", client_enabled=True, relay_enabled=True, exit_enabled=False,
+                contribution_enabled=True, sharing_enabled=True, download_sharing_enabled=True,
+                bind_address="48.164.4.1:18080", advertised_hostname="provider-c.volparossa.test",
+                contribution_cache="state-relay3/custody-cache")
+
+
+def check_participation(value):
+    require(value["configuration"] == dict(learner="relay3", client_enabled=True, relay_enabled=True,
+                exit_enabled=False, contribution_enabled=True, sharing_enabled=True, download_sharing_enabled=True,
+                bind_address="48.164.4.1:18080", advertised_hostname="provider-c.volparossa.test",
+                contribution_cache="state-relay3/custody-cache"), "actual learner contribution configuration missing")
+    require(value["network"] == dict(learner="relay3", identity_readable=True,
+                other_node_stores_inaccessible=True, publisher_private_root_inaccessible=True,
+                links=["lr0:r0l", "lr1:r1l", "lr2:r2l"], segments=[110, 112, 114],
+                exit_link_serving_only=True), "actual learner isolation or owned link scope changed")
+    require(value["service_before"]["serving"] is True and value["service_before"]["replication_enabled"] is True
+            and value["service_stop"]["serving"] is False, "learner serving lifecycle missing")
+    require(value["network_cleanup"] == dict(learner="relay3", agent_stopped=True, owned_link_pairs_absent=3,
+                serving_filter_removed=True, prior_topology_restored=True), "learner temporary topology remains")
 
 
 def setup(path, publisher):
@@ -86,7 +130,7 @@ def observe(pid, path, namespace, service):
             time.sleep(0.05)
         raw = root / f"peer-{label}-isolation.raw.json"
         ART["observe"](pid, raw, root / "provision", dataset, root / "private-canary",
-                       "training", "client", namespace, service)
+                       "training", "relay3", namespace, service)
         evidence = read(raw)
         worker = Path(f"/proc/{evidence['worker']['pid']}")
         actual, expected = (worker / "root/output").stat(), output.stat()
@@ -173,9 +217,9 @@ def check_observations(values, selected):
                 and value["adapter_exact_inodes"] == ({} if cold else dict.fromkeys(FILES, True)),
                 "actual expected input/output mounts missing")
         current = raw["node_lineage"]
-        require(current["node"] == "client" and current["network_namespace"] != selected["provider_lineage"]["network_namespace"]
+        require(current["node"] == "relay3" and current["network_namespace"] != selected["provider_lineage"]["network_namespace"]
                 and current["cli_namespace"] == current["service_namespace"] == current["network_namespace"]
-                and (lineage is None or current == lineage), "peer learning not on the distinct Client")
+                and (lineage is None or current == lineage), "peer learning not on the distinct R3 contributor")
         lineage = current
         workers.add((raw["worker"]["pid"], raw["worker"]["start_ticks"]))
     require(len(workers) == 5, "model worker identity reused between stages")
@@ -183,6 +227,7 @@ def check_observations(values, selected):
 
 def check(value, revision):
     require(value["source_revision"] == revision, "wrong peer-learning source snapshot")
+    check_participation(value)
     selected, retained, peers = value["selected"], value["retained"], value["peers"]
     require(selected["seed_configured"] is False and selected["adapter_copied"] is False, "fixture injected a seed")
     provider = value["provider_loop"]
@@ -302,7 +347,7 @@ def check(value, revision):
     TRAIN["check_worker"](trained, revision)
     require(trained["input_adapter"] == reports["candidate"]["input_adapter"]
             and trained["adapter_before"] == selected["provider_parameters"]
-            and trained["adapter_after"] != trained["adapter_before"], "Client did not actually train from adopted peer weights")
+            and trained["adapter_after"] != trained["adapter_before"], "R3 did not actually train from adopted peer weights")
     selection = load(CYCLE + "/selection.json")
     origin = selection["peer_predecessor"]
     require(origin["kind"] == "peer_update" and origin["import_sequence"] == 1
@@ -334,19 +379,19 @@ def check(value, revision):
         require(contribution["network_publication"] is True and contribution["serving"] is True
                 and contribution["publisher_key_hex"] == value["owner_key"]["identity_public_key_hex"]
                 and contribution["manifest_id"] == identity(CYCLE + "/publication.pb")["sha256"]
-                and contribution["bytes"] == identity(CYCLE + "/adapter.bundle")["bytes"], "approved Client successor was not actually contributed")
+                and contribution["bytes"] == identity(CYCLE + "/adapter.bundle")["bytes"], "approved R3 successor was not actually contributed")
     else:
         require(all(CYCLE + "/" + name not in files for name in ("publication.pb", "publication.json", "contribution.json"))
-                and state["cycles"][0]["publication"] is None, "rejected Client successor was published")
+                and state["cycles"][0]["publication"] is None, "rejected R3 successor was published")
     require(value["summary"]["attempts_this_invocation"] == value["summary"]["completed_cycles"] == 1
             and value["summary"]["pending_publications"] == 0 and value["summary"]["owner_cancelled"] is False
             and value["summary"]["publication_drain"] == "complete"
             and value["summary"]["publication_drain_seconds"] == 600,
-            "Client did not finish one real automatic cycle and its bounded publication drain")
+            "R3 did not finish one real automatic cycle and its bounded publication drain")
     require(retained["base_after"] == {"bytes":269060552, "sha256":TRAIN["WEIGHT_HASH"]}, "base model changed")
     check_observations(retained["observations"], selected)
     require(value["source_stop"]["serving"] is False, "original R5 source still serving")
-    REP["validate_phase"](value["phase"], "reserve-fetch", peers, total)
+    REP["validate_phase"](value["phase"], "peer-learning", peers, total)
 
 
 def evidence(work, revision):
@@ -358,6 +403,11 @@ def evidence(work, revision):
         provider_owner_key=read(work / "agent-train-loop-owner-key.json"),
         initial_fetch=read(work / "agent-peer-learning-initial-fetch.json"),
         owner_key=read(work / "agent-peer-learning-owner-key.json"),
+        configuration=read(work / "agent-peer-learning-configuration.json"),
+        network=read(work / "agent-peer-learning-network.json"),
+        service_before=read(work / "agent-peer-learning-service-before.json"),
+        service_stop=read(work / "agent-peer-learning-service-stop.json"),
+        network_cleanup=read(work / "agent-peer-learning-network-cleanup.json"),
         summary=read(work / "agent-peer-learning-summary.json"), source_stop=read(work / "agent-train-loop-source-stop.json"),
         phase=dict(route=read(work / "agent-peer-learning-transfer-live-selection.json"),
             layout=read(work / "agent-peer-learning-transfer-layout.json"),
@@ -419,6 +469,27 @@ def self_test():
             raise AssertionError("invalid comparison accepted")
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        config = root / "config-relay3.yaml"
+        fixture = ('roles:\n  client: true\n  relay: true\n  exit: false\n'
+                   'sharing:\n  enabled: true\n  interface: r3x\n'
+                   'download_sharing:\n  enabled: true\n  interface: r3x\n'
+                   'content_contribution:\n  enabled: true\n  bind_address: "48.164.4.1:18080"\n'
+                   '  advertised_hostname: provider-c.volparossa.test\n'
+                   f'  cache: {json.dumps(str(root / "state-relay3/custody-cache"))}\n')
+        config.write_text(fixture)
+        config.chmod(0o600)
+        require(configuration(config)["contribution_enabled"] is True, "explicit combined-role fixture rejected")
+        for before, after in (("client: true", "client: false"), ("relay: true", "relay: false"),
+                              ("exit: false", "exit: true"), ("enabled: true", "enabled: false"),
+                              ("48.164.4.1:18080", "43.159.1.1:18080")):
+            config.write_text(fixture.replace(before, after))
+            try:
+                configuration(config)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("wrong learner consent or bind accepted")
+        config.unlink()
         write(root / "state.json", {"version":2})
         (root / ".coordinator.lock").touch(mode=0o600)
         tree = collect_tree(root)
@@ -437,6 +508,7 @@ def main(args):
     command = args[0]
     if command == "self-test": self_test()
     elif command == "setup": print(json.dumps(setup(args[1], args[2])))
+    elif command == "configuration": print(json.dumps(configuration(args[1])))
     elif command == "observe": observe(int(args[1]), args[2], args[3], int(args[4]))
     elif command == "collect": print(json.dumps(collect(args[1])))
     elif command == "cleanup": print(json.dumps(cleanup(args[1])))

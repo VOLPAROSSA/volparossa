@@ -29,6 +29,14 @@ have retained raw evidence, but republication and the later independent named-im
 do not pass. Cleanup removed all owned objects and preserved guest-host state. Neither this run
 nor the failed `08457e1e` run below is relabelled as successful.
 
+The next fixture correction places the learner on R3, whose real `provider-c` contribution
+service is enabled. Its own agent, cache and five model workers use R3's namespace; three
+temporary neighbor links permit selection of two protected relay paths to R4. R3's existing
+Exit-facing link permits only its separate TCP18080 serving role, never consumer traffic.
+After learning, its service and agent stop and the temporary links are removed before the
+original independent Client named-import gate. Focused fixture/parser checks pass; the combined
+live scenario remains pending. No product publication or privacy guard was relaxed.
+
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
 receipts and original leases remain unchanged; eligible failed rows prefer another available
