@@ -49,10 +49,17 @@ pub(crate) struct Options {
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
-    /// Version-one plan of 2–32 explicitly public local documents to compare together.
+    /// Plan of 2–32 explicitly public documents: v1 local files, v2 local or exact native publications.
     /// Their exact bytes and labels form an owner-published compilation, not third-party attestations.
     #[arg(long, conflicts_with_all = ["input", "resume"])]
     source_plan: Option<PathBuf>,
+    /// Agent-owned source cache for v2 native publications; cache misses fetch the same selected source.
+    #[arg(long, requires = "source_plan", conflicts_with = "resume")]
+    source_cache: Option<PathBuf>,
+    #[arg(long, requires = "source_cache", conflicts_with = "resume")]
+    reuse_source_cache: bool,
+    #[command(flatten)]
+    source_limits: crate::content::Limits,
     /// Explicit permission to disclose this document and question to the selected peers.
     #[arg(long, conflicts_with = "resume")]
     public_content: bool,
@@ -119,7 +126,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         println!(
             "{}",
             json!({"operation":"compute_document_plan", "execute":false,
-            "input":args.input,"source_plan":args.source_plan,"directory":args.directory,"resume":args.resume,
+            "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
+            "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
@@ -171,12 +179,16 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One enrollment boundary binds acquired sources, tokenizer results and original signed validity before dispatch"
+)]
 async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
     ensure!(
         args.public_content,
         "compute_document_public_permission_required"
     );
-    let (document, collection) = selected_input(args)?;
+    let (document, collection, network) = selected_input(args, socket, cancelled).await?;
     let input = Input {
         version: 1,
         synthesis: false,
@@ -222,15 +234,12 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         !*cancelled.borrow(),
         "compute_document_cancelled_before_planning"
     );
-    task::write_bytes(
-        &args.directory.join("source.txt"),
-        input.document.as_bytes(),
-        false,
+    retain_selected_sources(
+        &args.directory,
+        &input,
+        collection.as_ref(),
+        network.as_ref(),
     )?;
-    if let Some(collection) = &collection {
-        save(&args.directory, "collection.json", collection, false)?;
-    }
-    save(&args.directory, "planner-input.json", &input, false)?;
     let plan = tokenize(args, &args.directory, &input, cancelled).await?;
     ensure!(
         !*cancelled.borrow(),
@@ -242,14 +251,26 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         Some(signer.verifying_key()) == args.publisher_key,
         "compute_document_publisher_identity"
     );
+    let at = now()?;
+    let lifetime = source_lifetime(args.lifetime_seconds, at, network.as_ref())?;
+    if let Some(proofs) = &network {
+        proofs.validate(
+            collection
+                .as_ref()
+                .context("compute_collection_missing_ledger")?,
+            &input.document,
+            at,
+            at + lifetime,
+        )?;
+    }
     let mut enrollment = storage::publish(
         &args.directory,
         &input,
         &plan,
         &signer,
         providers,
-        now()?,
-        args.lifetime_seconds,
+        at,
+        lifetime,
         cancelled,
         args.synthesize,
     )?;
@@ -260,22 +281,89 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         .as_ref()
         .map(collection::Ledger::sha256)
         .transpose()?;
+    enrollment.native_source_proofs_sha256 = network
+        .as_ref()
+        .map(collection::network::Proofs::sha256)
+        .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
 }
 
-fn selected_input(args: &Options) -> Result<(String, Option<collection::Ledger>)> {
+fn retain_selected_sources(
+    directory: &Path,
+    input: &Input,
+    collection: Option<&collection::Ledger>,
+    network: Option<&collection::network::Proofs>,
+) -> Result<()> {
+    task::write_bytes(
+        &directory.join("source.txt"),
+        input.document.as_bytes(),
+        false,
+    )?;
+    if let Some(collection) = collection {
+        save(directory, "collection.json", collection, false)?;
+    }
+    if let Some(network) = network {
+        ensure!(
+            serde_json::to_vec(network)?.len() <= 128 * 1024,
+            "compute_collection_source_proofs_size"
+        );
+        save(directory, "native-source-proofs.json", network, false)?;
+    }
+    save(directory, "planner-input.json", input, false)
+}
+
+type SelectedInput = (
+    String,
+    Option<collection::Ledger>,
+    Option<collection::network::Proofs>,
+);
+
+async fn selected_input(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<SelectedInput> {
     match (&args.input, &args.source_plan) {
         (Some(path), None) => Ok((
             String::from_utf8(super::super::read_file(path, MAX_DOCUMENT_BYTES as u64)?)?,
             None,
+            None,
         )),
         (None, Some(path)) => {
-            let prepared = collection::prepare(path)?;
-            Ok((prepared.document, Some(prepared.ledger)))
+            let prepared = collection::acquire(
+                path,
+                collection::Acquisition {
+                    socket,
+                    directory: &args.directory,
+                    cache: args.source_cache.as_deref(),
+                    reuse_cache: args.reuse_source_cache,
+                    limits: &args.source_limits,
+                    cancelled,
+                },
+            )
+            .await?;
+            Ok((prepared.document, Some(prepared.ledger), prepared.network))
         }
         _ => anyhow::bail!("compute_document_exactly_one_source_selection"),
     }
+}
+
+fn source_lifetime(
+    requested: u64,
+    at: u64,
+    sources: Option<&collection::network::Proofs>,
+) -> Result<u64> {
+    let expiry = sources.and_then(|proofs| proofs.sources.iter().map(|proof| proof.expires).min());
+    let remaining = expiry
+        .map(|expiry| {
+            expiry
+                .checked_sub(at)
+                .filter(|left| *left > 0)
+                .context("compute_collection_source_expired")
+        })
+        .transpose()?;
+    Ok(remaining.map_or(requested, |remaining| requested.min(remaining)))
 }
 
 /// Citations here are deterministic input-byte lineage, never a claim that generated
@@ -291,6 +379,15 @@ fn attach_collection(root: &Path, result: &mut Value) -> Result<()> {
         "original_publishers_authenticated":false,"common_license":input.license,
         "source_files_needed_for_resume":false,"semantic_citations_proven":false
     });
+    if let Some(proofs) = storage::load_native_sources(root, &enrollment, &input, &ledger)? {
+        result["source_collection"]["native_publications"] = serde_json::to_value(&proofs)?;
+        result["source_collection"]["publication_signatures_verified"] = true.into();
+        result["source_collection"]["source_selection_uses_cache_inventory"] = false.into();
+        result["source_collection"]["source_proofs_sha256"] =
+            enrollment.native_source_proofs_sha256.clone().into();
+        result["source_collection"]["compilation_expires_unix_seconds"] =
+            enrollment.expires_at_unix_seconds.into();
+    }
     for answer in result["answers"]
         .as_array_mut()
         .context("compute_document_answers")?

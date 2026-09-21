@@ -98,6 +98,11 @@ fn parser_only_plan(input: &Input) -> Plan {
 }
 
 fn replay_options(root: &Path) -> Options {
+    #[derive(clap::Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        limits: crate::content::Limits,
+    }
     Options {
         discovery: crate::compute::peer::discovery::Options::default(),
         directory: root.into(),
@@ -106,6 +111,9 @@ fn replay_options(root: &Path) -> Options {
         synthesize: false,
         input: None,
         source_plan: None,
+        source_cache: None,
+        reuse_source_cache: false,
+        source_limits: <Defaults as clap::Parser>::parse_from(["limits"]).limits,
         public_content: false,
         public_question: None,
         license: None,

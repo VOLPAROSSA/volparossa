@@ -118,6 +118,72 @@ struct JobHandle {
     capabilities: rpc::Capabilities,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RpcPhase {
+    Capabilities,
+    Eligibility,
+    Submit,
+    Poll,
+    Cancel,
+}
+
+impl RpcPhase {
+    fn of(operation: &rpc::Operation) -> Self {
+        match operation {
+            rpc::Operation::Capabilities => Self::Capabilities,
+            rpc::Operation::Eligibility(_) => Self::Eligibility,
+            rpc::Operation::Submit(_) => Self::Submit,
+            rpc::Operation::Poll(_) => Self::Poll,
+            rpc::Operation::Cancel(_) => Self::Cancel,
+        }
+    }
+}
+
+/// Fixed evidence only: exchange failure does not identify a network cause or prove rejection.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "category", rename_all = "snake_case")]
+enum RpcDiagnostic {
+    ExchangeUnconfirmed {
+        phase: RpcPhase,
+    },
+    BrokerRejected {
+        phase: RpcPhase,
+        code: rpc::ErrorCode,
+    },
+    ReceiptValidation {
+        phase: RpcPhase,
+    },
+}
+
+#[derive(Debug)]
+struct PeerRpcFailure {
+    diagnostic: RpcDiagnostic,
+    error: anyhow::Error,
+}
+
+impl std::fmt::Display for PeerRpcFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for PeerRpcFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+fn rpc_failure(error: anyhow::Error, diagnostic: RpcDiagnostic) -> anyhow::Error {
+    PeerRpcFailure { diagnostic, error }.into()
+}
+
+fn rpc_diagnostic(error: &anyhow::Error) -> Option<&RpcDiagnostic> {
+    error
+        .downcast_ref::<PeerRpcFailure>()
+        .map(|failure| &failure.diagnostic)
+}
+
 /// Register synchronously before preparatory RPCs, so Ctrl-C cannot be lost while
 /// capabilities or existing job observations are in flight. Dropping only stops this
 /// signal listener; each executor still uses the explicit Cancel/reap protocol.
@@ -251,7 +317,7 @@ async fn submit(socket: &Path, args: &Submit) -> Result<serde_json::Value> {
         }),
     )
     .await?;
-    let status = job(outcome, &handle)?;
+    let status = job_in_phase(outcome, &handle, RpcPhase::Submit)?;
     Ok(serde_json::to_value(status)?)
 }
 
@@ -264,9 +330,11 @@ async fn poll_or_cancel(socket: &Path, args: &Handle, cancel: bool) -> Result<se
     } else {
         rpc::Operation::Poll(handle.binding.clone())
     };
-    Ok(serde_json::to_value(job(
+    let phase = RpcPhase::of(&operation);
+    Ok(serde_json::to_value(job_in_phase(
         exchange(socket, &provider, operation).await?,
         &handle,
+        phase,
     )?)?)
 }
 
@@ -359,7 +427,8 @@ async fn exchange(
     provider: &VerifyingKey,
     operation: rpc::Operation,
 ) -> Result<rpc::Outcome> {
-    timeout(Duration::from_secs(150), async {
+    let phase = RpcPhase::of(&operation);
+    let result = timeout(Duration::from_secs(150), async {
         let (mut stream, id, response) = crate::control::begin_request(
             socket,
             Operation::ComputeRemote(ComputeRemoteRequest {
@@ -396,7 +465,22 @@ async fn exchange(
         Ok(result.outcome)
     })
     .await
-    .context("compute_peer_exchange_timeout")?
+    .context("compute_peer_exchange_timeout")
+    .and_then(std::convert::identity);
+    result.map_err(|error| rpc_failure(error, RpcDiagnostic::ExchangeUnconfirmed { phase }))
+}
+
+/// Only call after the complete authenticated, correlated exchange, not for retained JSON.
+fn job_in_phase(
+    outcome: rpc::Outcome,
+    handle: &JobHandle,
+    phase: RpcPhase,
+) -> Result<rpc::JobStatus> {
+    let diagnostic = match &outcome {
+        rpc::Outcome::Error(code) => RpcDiagnostic::BrokerRejected { phase, code: *code },
+        _ => RpcDiagnostic::ReceiptValidation { phase },
+    };
+    job(outcome, handle).map_err(|error| rpc_failure(error, diagnostic))
 }
 
 fn job(outcome: rpc::Outcome, handle: &JobHandle) -> Result<rpc::JobStatus> {

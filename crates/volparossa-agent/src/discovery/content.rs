@@ -404,6 +404,9 @@ impl DiscoveryRuntime {
                                 ContentDiscoveryError::Invalidated => {
                                     "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED"
                                 }
+                                ContentDiscoveryError::Unavailable => {
+                                    "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE"
+                                }
                                 _ => "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED",
                             });
                             self.content.event("CONTENT_DISCOVERY_RESPONSE_REJECTED");

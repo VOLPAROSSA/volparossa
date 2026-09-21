@@ -208,9 +208,14 @@ prove execution, not answer quality, general intelligence or universally better 
 
 Public work now has verified cross-package peer scheduling: a free worker can take work from
 another signed package while a slower worker continues. A new **source collection** candidate
-adds comparisons across explicitly public local documents, preserving exact source-byte
-provenance through the existing peer-execution and synthesis pipeline. Its live proof is pending;
-source ranges are not proof that generated statements are true.
+adds comparisons across explicitly public local documents and selected signed network publications,
+reusing cached bytes and fetching missing sources without changing the selection. It preserves source-byte
+provenance through the existing peer-execution and synthesis pipeline. The local-source proof
+passes. The first native-network-source run verified cache reuse and protected retrieval,
+but stalled when both executors filled their retained-job history. After a targeted fix, the
+next run stopped on an unconfirmed peer submission; this combined workflow is not yet verified.
+A diagnostic run then failed earlier, while resolving the first cache provider's address.
+Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
 Public work can be split across selected peers, with retained results and bounded recovery
