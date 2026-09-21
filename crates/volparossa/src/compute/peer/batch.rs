@@ -54,6 +54,17 @@ pub(super) async fn report_ready_with_activity(
     ready_queue::report(args, socket, activity).await
 }
 
+/// One owner schedules multiple independent sources against one shared provider lease table.
+/// Reservations include current unexpired work outside this admission window.
+pub(super) async fn report_ready_many_with_activity(
+    args: &[ReadyOptions],
+    reservations: &[ReadyPending],
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<Vec<Result<serde_json::Value>>> {
+    ready_queue::cohort::report(args, reservations, socket, activity).await
+}
+
 pub(super) fn verify_ready_plan(
     attempt: &Path,
     source_args: &Source,

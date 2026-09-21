@@ -16,6 +16,7 @@ agent_jobs_loss=no
 agent_jobs_follow=no
 agent_jobs_peer_recovery=no
 agent_jobs_ready_queue=no
+agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
@@ -36,7 +37,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -72,6 +73,16 @@ print_plan() {
                 '  stop brokers and disconnect the route, then resume exact retained receipts without new work;' \
                 '  require real worker/input/result/capture evidence and complete guest cleanup;' \
                 '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
+            return
+        fi
+        if [ "$agent_jobs_package_queue" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA fair public multi-package queue plan:' \
+                '  enroll two separately signed two-row packages with one shared two-broker slot table;' \
+                '  pidfd-pause exact A0; require B0 complete, then A1 complete, then actual B1 execution;' \
+                '  observe original A0 Running before SIGCONT, without extending any source or worker lease;' \
+                '  require four exact source-specific results and unchanged completed stopped-broker resume;' \
+                '  fixture-only pause, protected captures and full cleanup; no private-AI or quality claim.'
             return
         fi
         if [ "$agent_jobs_ready_queue" = yes ]; then
@@ -436,6 +447,7 @@ while [ "$#" -gt 0 ]; do
             agent_jobs_follow=no
             agent_jobs_peer_recovery=no
             agent_jobs_ready_queue=no
+            agent_jobs_package_queue=no
             agent_public_task=no
             agent_public_document=no
             agent_train_cycle=no
@@ -449,6 +461,7 @@ while [ "$#" -gt 0 ]; do
                 agent-jobs-follow) scenario=agent-jobs; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-peer-recovery) scenario=agent-jobs; agent_jobs_peer_recovery=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-ready-queue) scenario=agent-jobs; agent_jobs_ready_queue=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
+                agent-jobs-package-queue) scenario=agent-jobs; agent_jobs_package_queue=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -659,6 +672,11 @@ fi
 if [ "$agent_jobs_peer_recovery" = yes ]; then
     for recovery_fixture in agent-jobs-peer-recovery-smoke.sh agent-jobs-peer-recovery-smoke.py; do
         [ -f "$source_directory/tests/integration/$recovery_fixture" ] && [ ! -L "$source_directory/tests/integration/$recovery_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_jobs_package_queue" = yes ]; then
+    for package_fixture in agent-jobs-package-queue-smoke.sh agent-jobs-package-queue-smoke.py agent-jobs-ready-queue-smoke.py; do
+        [ -f "$source_directory/tests/integration/$package_fixture" ] && [ ! -L "$source_directory/tests/integration/$package_fixture" ] || exit 69
     done
 fi
 if [ "$agent_jobs_ready_queue" = yes ]; then
@@ -1959,6 +1977,10 @@ if [ "$scenario" = agent-jobs ]; then
         # shellcheck source=tests/integration/agent-jobs-ready-queue-smoke.sh
         . "$source_directory/tests/integration/agent-jobs-ready-queue-smoke.sh"
     fi
+    if [ "$agent_jobs_package_queue" = yes ]; then
+        # shellcheck source=tests/integration/agent-jobs-package-queue-smoke.sh
+        . "$source_directory/tests/integration/agent-jobs-package-queue-smoke.sh"
+    fi
 fi
 if [ "$agent_public_task" = yes ]; then
     # shellcheck source=tests/integration/agent-public-task-smoke.sh
@@ -2090,7 +2112,10 @@ if [ "$scenario" = agent-jobs ]; then
     if [ "$agent_jobs_peer_recovery" = yes ]; then
         install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" "$WORK/bin/agent-jobs-peer-recovery-smoke.py"
     fi
-    if [ "$agent_jobs_ready_queue" = yes ]; then
+    if [ "$agent_jobs_package_queue" = yes ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-package-queue-smoke.py" "$WORK/bin/agent-jobs-package-queue-smoke.py"
+    fi
+    if [ "$agent_jobs_ready_queue" = yes ] || [ "$agent_jobs_package_queue" = yes ]; then
         install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-ready-queue-smoke.py" "$WORK/bin/agent-jobs-ready-queue-smoke.py"
     fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"

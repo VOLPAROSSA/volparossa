@@ -774,11 +774,26 @@ ordinary stopped/expired-job admission checks.
 
 Old enrollments without a scheduling field retain the previous grouped-batch behavior.
 `--batch-barrier` selects it explicitly for a new enrollment; resume cannot change the recorded
-mode. Standalone `distribute` is unchanged. This queue currently operates **within one signed
-source package**: the outer document-package and synthesis-level loops remain sequential.
-The focused coordinator tests cover refill/lease/persistence logic, not real-model speedup.
-The separate `agent-jobs-ready-queue` VM proof requires an actual free peer to execute another
-row while an original worker remains running; that live proof is pending.
+mode. Standalone `distribute` is unchanged. The [single-package disposable proof on
+`4b907e08`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35603301387) passes with reviewed
+original evidence: a free peer executes another real row while the original worker is paused
+under its unchanged lease. Four ordered results remain intact, completed resume needs no broker
+or new round, and protected-path/cleanup checks pass. That controlled pause proves refill, not
+comparative speedup or answer quality.
+
+The next executable candidate shares those provider slots **across signed source packages**.
+Each admitted package contributes ready rows in round-robin order; it does not start a separate
+coordinator racing other packages for the same broker. Unconfirmed and still-running jobs reserve
+their slots, including jobs outside the current admission window. Sources, authorizations, tasks,
+models, expiry, handles and results retain their own original bindings. `--max-batches` still limits
+package attempts per window; it is not multiplied by the number of packages. Eligible failed-row
+retries retain stopped/expired-job admission and run after the shared fresh-row loop drains.
+
+Document and synthesis frontends use cohorts of at most 32 source packages with this shared
+queue. Larger cohorts and actual synthesis dependencies remain sequential; this is not an
+unbounded global task planner. The `agent-jobs-package-queue` disposable proof separately requires
+two original signed packages, source-aware refill on a real free peer while another source's worker
+is paused, unchanged originals and zero-work completed resume. Its live proof is still pending.
 
 Previously completed parts are reconstructed from full input/model/handle-bound receipts saved
 after authenticated RPC validation, not from an unchecked `complete` flag. These private local

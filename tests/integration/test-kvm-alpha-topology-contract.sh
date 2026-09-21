@@ -34,6 +34,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario dns-cache | grep -Fi 'DNS-cache' >/dev/null
     "$script" --preview --scenario agent-artifact-quarantine | grep -Fi 'quarantine' >/dev/null
     "$script" --preview --scenario agent-jobs-ready-queue | grep -Fi 'queue' >/dev/null
+    "$script" --preview --scenario agent-jobs-package-queue | grep -Fi 'package' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?

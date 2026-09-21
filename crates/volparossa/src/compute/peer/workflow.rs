@@ -1,6 +1,10 @@
 //! Explicit finite public work enrollment, not autonomous planning or model-layer sharding.
 //! Each invocation advances a bounded number of ordinary distribute/reconcile rounds.
 
+mod cohort;
+
+pub(super) use cohort::report_group_with_activity;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -798,6 +802,16 @@ async fn advance(
     enrollment: &Enrollment,
     cancelled: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<serde_json::Value> {
+    if args.execute
+        && enrollment.scheduling == Scheduling::ReadyRowsV1
+        && enrollment.packages.len() > 1
+    {
+        return Ok(
+            cohort::advance(&[(args, enrollment)], args.max_batches, socket, cancelled)
+                .await?
+                .remove(0),
+        );
+    }
     let providers: Vec<_> = enrollment
         .provider_keys
         .iter()
@@ -1715,6 +1729,100 @@ mod tests {
         duplicate.binding.job_id = "ab".repeat(16);
         save_new(&next.join("job-0.json"), &duplicate).unwrap();
         assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_package_owner_reopens_completed_originals_without_a_broker_or_new_attempt() {
+        let mut fixture = fixture(2);
+        fixture.enrollment.scheduling = Scheduling::ReadyRowsV1;
+        for package in 0..2 {
+            let (_, source, original) = handles(&fixture, package);
+            let directory = fixture
+                .options
+                .directory
+                .join(format!("package-{package:04}/attempt-0000"));
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+            let mut plan = ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![0, 1],
+                &[],
+            );
+            plan.dataset_sha256
+                .clone_from(&fixture.enrollment.packages[package].dataset_sha256);
+            save_new(&directory.join("queue-plan.json"), &plan).unwrap();
+            for (row, handle) in original.iter().enumerate() {
+                save_new(&directory.join(format!("job-{row}.json")), handle).unwrap();
+                batch::save_status(&directory, handle, &synthetic_status(handle)).unwrap();
+            }
+        }
+        let (_owner, cancelled) = tokio::sync::watch::channel(false);
+        let report = advance(
+            &fixture.options,
+            &fixture.root.path().join("missing-agent.sock"),
+            &fixture.enrollment,
+            &cancelled,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["rounds_this_invocation"], 0);
+        assert_eq!(report["completed_packages"], 2);
+        assert_eq!(
+            report["package_scheduling"],
+            "shared_provider_round_robin_v1"
+        );
+        for package in 0..2 {
+            assert_eq!(
+                report["packages"][package]["outputs"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert!(
+                !fixture
+                    .options
+                    .directory
+                    .join(format!("package-{package:04}/attempt-0001"))
+                    .exists()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_shared_window_never_admits_or_forgets_unsent_packages() {
+        let mut fixture = fixture(2);
+        fixture.enrollment.scheduling = Scheduling::ReadyRowsV1;
+        let (_owner, cancelled) = tokio::sync::watch::channel(true);
+        let report = advance(
+            &fixture.options,
+            &fixture.root.path().join("missing-agent.sock"),
+            &fixture.enrollment,
+            &cancelled,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report["complete"], false);
+        assert_eq!(report["rounds_this_invocation"], 0);
+        assert_eq!(report["stopped"], "interrupted_handles_retained");
+        for package in 0..2 {
+            assert_eq!(
+                report["packages"][package]["ready_rows"],
+                serde_json::json!([0, 1])
+            );
+            assert!(
+                !fixture
+                    .options
+                    .directory
+                    .join(format!("package-{package:04}/attempt-0000"))
+                    .exists()
+            );
+        }
     }
 
     #[test]

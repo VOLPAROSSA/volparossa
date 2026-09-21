@@ -4,7 +4,7 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
-Current ready-queue candidate: new `compute peer workflow`, `task` and `document` enrollments
+Verified single-package ready queue: new `compute peer workflow`, `task` and `document` enrollments
 use `ready_rows_v1`. Within one signed source package, a free compatible peer receives the
 next never-submitted row without waiting for other peers' running rows. Immutable queue plans
 and exact per-row handles precede submissions; completed receipts are saved before slot reuse.
@@ -14,9 +14,30 @@ Retained histories without a scheduling field keep their grouped-batch contract;
 is an explicit enrollment-only compatibility option. All 138 focused CLI compute tests and strict
 all-target CLI Clippy pass without loading a model. The `agent-jobs-ready-queue` disposable scenario
 is wired through the guest, outer runner and CI; its pure positive/negative checker, script syntax,
-YAML and existing non-mutating scenario contracts pass. These do not substitute for the live proof;
-its real fast-peer/slow-peer overlap is not yet proven. Cross-package scheduling, general task
-planning, comparative throughput and full B03 remain incomplete.
+YAML and existing non-mutating scenario contracts pass. The [live run on
+`4b907e08`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35603301387) and reconstruction of
+its unchanged original upload now **pass**: a free executor starts another real row while the
+original worker is deliberately paused under the same owner and unexpired lease. Four ordered
+results survive in one attempt; completed resume with both brokers stopped performs zero rounds
+and changes no retained files. Six capture records cover 33,178 frames, with no capture drops or
+forbidden direct client-to-exit packets. Private/network cleanup and unchanged host-state checks
+pass. The pause is disposable-fixture orchestration, not product scheduling behavior. This is
+execution/retention evidence, not measured speedup, answer quality or full B03.
+
+Current cross-package candidate: several independently signed packages now share one bounded
+provider registry and source-aware round-robin queue. New rows from another admitted package
+can use a freed peer without waiting for the first package to finish. Original source/model/expiry,
+per-package plans, handles and receipts remain separate; uncertain leases reserve capacity even
+outside the current admission window. The document and synthesis frontends use the same queue in
+groups of at most 32 packages, within the explicit per-window package-attempt budget. Larger groups
+and dependent synthesis stages remain sequential; eligible failed-row retries still use the existing
+stopped/expired-job path after the fresh-row queue drains. The `agent-jobs-package-queue` disposable
+scenario requires real A0/B0/A1/B1 execution across two signed packages, overlap with the original
+paused worker, original receipts, no-work completed resume and full cleanup. Its live proof is
+pending. All 147 focused CLI compute tests and strict all-target CLI Clippy pass without loading
+a model; the new fixture's pure positive/12-negative parser checks, shell syntax and non-mutating
+topology contracts pass. These do not replace the pending live proof. General task planning,
+comparative throughput and full B03 remain incomplete.
 
 The corrected executor-discovery checkpoints on `8a21d43d` now **pass**: the
 [document/synthesis run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600666064)
@@ -124,7 +145,13 @@ The [first quarantine run on `8a21d43d`](https://github.com/VOLPAROSSA/volpaross
 failed before constructing/publishing the invalid candidate: its setup guard incorrectly required
 the source-tree location although that command runs from the copied guest `WORK/bin`. The fix
 binds that copy to its exact private fixture root while retaining dedicated-VM, KVM and non-root
-checks. Positive/negative layout checks pass; the original failed run proves no quarantine.
+checks. The [follow-up on `3240e278`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35602912581)
+also failed before invalid-candidate construction: the copy was accepted, but its fixture-directory
+check incorrectly omitted the real `client-fixtures/` parent. Commit `bae0d736` corrects that exact
+layout and derives the positive layout regression from the original shell assignment instead of
+duplicating an assumed path. Positive/negative layout checks pass. Both original failures retain
+complete cleanup and unchanged-host evidence, but neither proves quarantine; the corrected live
+run remains pending.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

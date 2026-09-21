@@ -193,6 +193,24 @@ pub(super) async fn advance(
                 cancelled,
             )
             .await?;
+            let grouped = enrollment.scheduling == workflow::Scheduling::ReadyRowsV1;
+            if grouped {
+                rounds = rounds
+                    .checked_add(
+                        advance_group_packages(
+                            args,
+                            socket,
+                            cancelled,
+                            &directory,
+                            &enrollment,
+                            &prepared,
+                            rounds,
+                        )
+                        .await?,
+                    )
+                    .context("compute_synthesis_round_overflow")?;
+                result["rounds_this_invocation"] = rounds.into();
+            }
             let mut group_complete = true;
             let mut pending_work = None;
             for (index, dataset) in prepared.datasets.iter().enumerate() {
@@ -207,6 +225,7 @@ pub(super) async fn advance(
                 };
                 let mut last_report = None;
                 if snapshot.as_ref().is_none_or(|s| s["complete"] != true)
+                    && !grouped
                     && (args.follow.follow || rounds < u64::from(args.max_batches))
                     && !*cancelled.borrow()
                 {
@@ -319,6 +338,80 @@ pub(super) async fn advance(
     }
     unfinished("hierarchy_budget_no_inputs_discarded", &levels, result);
     Ok(())
+}
+
+async fn advance_group_packages(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    directory: &Path,
+    enrollment: &document_storage::Enrollment,
+    prepared: &storage::Prepared,
+    prior_rounds: u64,
+) -> Result<u64> {
+    let providers = enrollment
+        .provider_keys
+        .iter()
+        .map(|key| parse_key(key).map_err(anyhow::Error::msg))
+        .collect::<Result<Vec<_>>>()?;
+    let mut rounds = 0;
+    for (group, datasets) in prepared.datasets.chunks(32).enumerate() {
+        let used = prior_rounds
+            .checked_add(rounds)
+            .context("compute_synthesis_round_overflow")?;
+        if *cancelled.borrow() || (!args.follow.follow && used >= u64::from(args.max_batches)) {
+            break;
+        }
+        let budget = if args.follow.follow {
+            args.max_batches
+        } else {
+            args.max_batches - u16::try_from(used)?
+        };
+        let options = datasets
+            .iter()
+            .enumerate()
+            .map(|(offset, dataset)| {
+                let index = group * 32 + offset;
+                let package = directory.join(format!("package-{index:04}"));
+                let expected = storage::expected(&package, enrollment, prepared, dataset, index)?;
+                let work = package.join("work");
+                let established = document_storage::present(&work)?;
+                Ok(workflow::Options::task(
+                    (!established).then(|| package.join("workflow-plan.json")),
+                    work,
+                    providers.clone(),
+                    budget,
+                    args.max_seconds,
+                    true,
+                )
+                .expect_task(expected)
+                .with_follow(args.follow.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let report =
+            workflow::report_group_with_activity(&options, budget, &args.follow, socket, cancelled)
+                .await?;
+        rounds = rounds
+            .checked_add(
+                report["rounds_this_invocation"]
+                    .as_u64()
+                    .context("compute_synthesis_rounds")?,
+            )
+            .context("compute_synthesis_round_overflow")?;
+        for (offset, saved) in report["workflows"]
+            .as_array()
+            .context("compute_synthesis_workflows")?
+            .iter()
+            .enumerate()
+        {
+            let package = directory.join(format!("package-{:04}", group * 32 + offset));
+            super::save(&package, "last-workflow-report.json", saved, true)?;
+        }
+        if report["complete"] != true {
+            break;
+        }
+    }
+    Ok(rounds)
 }
 
 #[cfg(test)]

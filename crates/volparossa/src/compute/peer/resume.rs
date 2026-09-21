@@ -32,6 +32,8 @@ pub(crate) struct Options {
     replacement_discovery: Option<executors::Authorization>,
     #[arg(skip)]
     retained_stopped: Vec<(JobHandle, rpc::JobStatus)>,
+    #[arg(skip)]
+    held_providers: BTreeSet<String>,
 }
 
 impl Options {
@@ -52,11 +54,18 @@ impl Options {
             prefer_other_provider: false,
             replacement_discovery: None,
             retained_stopped: Vec::new(),
+            held_providers: BTreeSet::new(),
         }
     }
 
     pub(super) fn prefer_other_provider(mut self, enabled: bool) -> Self {
         self.prefer_other_provider = enabled;
+        self
+    }
+
+    /// The shared owner has already validated these other packages' unexpired leases.
+    pub(super) fn exclude_held_providers(mut self, providers: BTreeSet<String>) -> Self {
+        self.held_providers = providers;
         self
     }
 
@@ -163,7 +172,20 @@ pub(super) async fn report_with_activity(
             "handle":observed.handle,"state":observed.state,"status":observed.status}),
         )?;
     }
-    let mut used = BTreeSet::new();
+    // One package may retain multiple original rows on a previously reused provider.
+    // A fresh accepting-work capability cannot release another row's unresolved lease.
+    // Seed the same exclusion set used by both configured and discovered replacements;
+    // a terminal/missing observation releases only its own original, not its siblings.
+    let mut used = original_reservations(
+        observations.iter().map(|observed| {
+            (
+                observed.handle.provider_key.as_str(),
+                observed.state,
+                observed.handle.binding.expires_unix_seconds,
+            )
+        }),
+        now()?,
+    )?;
     let mut jobs = Vec::new();
     let mut outputs = Vec::new();
     let mut planned = Vec::new();
@@ -451,6 +473,23 @@ fn retry_allowed(state: Observation, expiry: u64, time: u64) -> bool {
     }
 }
 
+fn original_reservations<'a>(
+    observations: impl IntoIterator<Item = (&'a str, Observation, u64)>,
+    time: u64,
+) -> Result<BTreeSet<[u8; 32]>> {
+    observations
+        .into_iter()
+        .filter(|(_, state, expiry)| {
+            *expiry > time && matches!(state, Observation::Running | Observation::Unconfirmed)
+        })
+        .map(|(provider, _, _)| {
+            parse_key(provider)
+                .map(|key| key.to_bytes())
+                .map_err(anyhow::Error::msg)
+        })
+        .collect()
+}
+
 async fn replacement(
     socket: &Path,
     args: &Options,
@@ -468,7 +507,12 @@ async fn replacement(
         if *activity.borrow() {
             return Ok(None);
         }
-        if used.contains(&provider.to_bytes()) || !probed.insert(provider.to_bytes()) {
+        if args
+            .held_providers
+            .contains(&hex::encode(provider.to_bytes()))
+            || used.contains(&provider.to_bytes())
+            || !probed.insert(provider.to_bytes())
+        {
             continue;
         }
         let mut cancellation = activity.clone();
@@ -568,6 +612,34 @@ mod tests {
         assert!(retry_allowed(Observation::Unconfirmed, 100, 100));
         assert!(retry_allowed(Observation::Stopped, 100, 99));
         assert!(retry_allowed(Observation::Missing, 100, 99));
+    }
+
+    #[test]
+    fn own_unexpired_originals_reserve_providers_but_terminal_proof_releases_them() {
+        let held = ed25519_dalek::SigningKey::from_bytes(&[41; 32]).verifying_key();
+        let free = ed25519_dalek::SigningKey::from_bytes(&[42; 32]).verifying_key();
+        let held_hex = hex::encode(held.as_bytes());
+        let free_hex = hex::encode(free.as_bytes());
+        for state in [Observation::Running, Observation::Unconfirmed] {
+            let reservations = original_reservations(
+                [
+                    (held_hex.as_str(), state, 100),
+                    // Another row on this provider stopped; its sibling still holds it.
+                    (held_hex.as_str(), Observation::Stopped, 100),
+                    (free_hex.as_str(), Observation::Complete, 100),
+                    (free_hex.as_str(), Observation::Stopped, 100),
+                    (free_hex.as_str(), Observation::Missing, 100),
+                ],
+                99,
+            )
+            .unwrap();
+            assert_eq!(reservations, BTreeSet::from([held.to_bytes()]));
+            assert!(
+                original_reservations([(held_hex.as_str(), state, 100)], 100)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -685,6 +757,7 @@ mod tests {
             prefer_other_provider: false,
             replacement_discovery: None,
             retained_stopped: Vec::new(),
+            held_providers: BTreeSet::new(),
         };
         let loaded = load_handles(&args, &source).unwrap();
         assert_eq!(loaded[0].binding, handle.binding);

@@ -333,7 +333,21 @@ async fn advance(
         .collect::<Result<Vec<_>>>()?;
     let mut packages = Vec::new();
     let mut answers = Vec::new();
-    let mut rounds = 0_u64;
+    let grouped = enrollment.scheduling == workflow::Scheduling::ReadyRowsV1;
+    let mut rounds = if grouped {
+        advance_groups(
+            args,
+            socket,
+            cancelled,
+            &enrollment,
+            &input,
+            &plan,
+            &providers,
+        )
+        .await?
+    } else {
+        0
+    };
     let mut stopped = false;
     for (index, package) in enrollment.packages.iter().enumerate() {
         let root = args.directory.join(format!("package-{index:04}"));
@@ -347,6 +361,7 @@ async fn advance(
             None
         };
         if snapshot.as_ref().is_none_or(|s| s["complete"] != true)
+            && !grouped
             && (args.follow.follow || rounds < u64::from(args.max_batches))
             && !stopped
             && !*cancelled.borrow()
@@ -402,4 +417,69 @@ async fn advance(
         "content_cache":"local_native_signed_publications_not_automatic_network_contribution",
         "model_answer_correctness_proven":false,"full_b03_claimed":false}),
     )
+}
+
+/// A bounded set of signed packages shares one provider registry rather than each
+/// starting an independent coordinator that races for the same broker slots.
+async fn advance_groups(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    enrollment: &storage::Enrollment,
+    input: &Input,
+    plan: &Plan,
+    providers: &[VerifyingKey],
+) -> Result<u64> {
+    let mut rounds = 0_u64;
+    for (group, packages) in enrollment.packages.chunks(32).enumerate() {
+        if *cancelled.borrow() || (!args.follow.follow && rounds >= u64::from(args.max_batches)) {
+            break;
+        }
+        let budget = if args.follow.follow {
+            args.max_batches
+        } else {
+            args.max_batches - u16::try_from(rounds)?
+        };
+        let options = packages
+            .iter()
+            .enumerate()
+            .map(|(offset, package)| {
+                let root = args
+                    .directory
+                    .join(format!("package-{:04}", group * 32 + offset));
+                private_directory(&root)?;
+                let expected = storage::expected(&root, enrollment, package, input, plan)?;
+                let work = root.join("work");
+                let established = storage::present(&work)?;
+                Ok(workflow::Options::task(
+                    (!established).then(|| root.join("workflow-plan.json")),
+                    work,
+                    providers.to_vec(),
+                    budget,
+                    args.max_seconds,
+                    true,
+                )
+                .expect_task(expected)
+                .with_follow(args.follow.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let report =
+            workflow::report_group_with_activity(&options, budget, &args.follow, socket, cancelled)
+                .await?;
+        rounds = rounds
+            .checked_add(
+                report["rounds_this_invocation"]
+                    .as_u64()
+                    .context("compute_document_rounds")?,
+            )
+            .context("compute_document_round_overflow")?;
+        ensure!(
+            args.follow.follow || rounds <= u64::from(args.max_batches),
+            "compute_document_invocation_budget"
+        );
+        if report["complete"] != true {
+            break;
+        }
+    }
+    Ok(rounds)
 }
