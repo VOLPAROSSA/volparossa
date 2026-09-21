@@ -229,8 +229,9 @@ about the intent, context and consequences—not just whether a specific prohibi
 
 This framework should guide agents' behavior and training, their mutual checks, and the automatic
 maintenance of the whitelist and blacklist, including situations that have not been specified
-in advance. Concrete rules make decisions enforceable and reviewable; the principles guide how
-those rules are interpreted, extended and corrected rather than being replaced by them.
+in advance. The direction is **principles → contextual reasoning → decisions**, not examples
+turned into a fixed rulebook. Concrete decisions make the outcome enforceable and reviewable;
+the underlying principles remain the basis for interpreting, extending and correcting it.
 
 The Latin terms connect a modern network with an enduring ethical vocabulary. They are presented
 as broadly understandable principles, not a religious membership test or a score of a person's
@@ -247,7 +248,7 @@ examples of their application, not exhaustive definitions.
 | **Temperantia — Temperance / Moderation** | **Gula — Gluttony** | Respect resource limits and the owner's needs; usefulness matters more than endless consumption or growth. |
 | **Castitas — Chastity** | **Luxuria — Lust** | In the project's broader application: respect consent, dignity and personal boundaries; reject exploitation. |
 
-### From principles to concrete policy
+### Principles first, decisions second
 
 The same principles inform two different layers:
 
@@ -260,11 +261,10 @@ Abstract principles are not a guarantee against loopholes or misinterpretation. 
 governance therefore also needs explicit reasoning, mutual review, conflict resolution and
 correction. Appealing to a virtue does not override the agreed legal, privacy or content boundaries.
 
-The agreed policy direction prohibits illegal content and conduct such as fraud, unauthorized
-piracy and child sexual abuse material. Lawful reporting, prevention and critical discussion
-are not the prohibited conduct itself. Lawful adult pornography, gambling and harmful patterns
-of social-media use require contextual assessment; no blanket verdict has been agreed.
-Ordinary lawful shopping and social-media use remain allowed, with optional constructive advice.
+The whitelist and blacklist are intended to record the **results of that reasoning**, not to
+replace it. Earlier examples illustrate intended applications; they are neither the source of
+the principles nor an exhaustive catalogue that agents should memorize and match against.
+New cases and reconsidered decisions must be assessed from the same underlying framework.
 
 The selected baseline is **Netherlands/EU, plus applicable local exit restrictions**. Fully
 automatic assessment, mutual checking, conflict resolution and authorized policy activation
@@ -276,7 +276,7 @@ classifier for everything behind a hostname. The complete governance and agent �
 are not yet implemented. Filtering cannot guarantee a perfectly clean cache, eliminate legal
 risk, or justify breaking private encryption.
 
-[Agreed categories and automatic-governance design →](docs/DECENTRALIZED_AGENTS.md#agreed-content-policy-examples) ·
+[Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
 [Current whitelist enforcement →](docs/WHITELIST.md)
 
 ## Development status
