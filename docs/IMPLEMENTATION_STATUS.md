@@ -79,6 +79,13 @@ The retained files do not establish why that attempt ended. No pressure injectio
 mount verification was reached, so this does not prove or refute the mount correction.
 All 117 original files remain unchanged; private/network cleanup and identical host state pass.
 Initial concurrency, C while the same B remains paused, and full receipt/offline proof remain open.
+Those two early observer failures now export a separate bounded failure snapshot before the
+unchanged failure/cleanup path. It retains original job/state/receipt bytes, including retries,
+with file identities and observed concurrent changes. The record explicitly denies success,
+quiescence and coherent-snapshot proof; success checks still reject replacement attempts.
+Only the prepared public README fixture tree is included, never model/runtime/key/cache
+directories. Pure diagnostic controls and shell checks pass; the original attempt's cause still
+requires a new live observation, not an inference from this added diagnostic code.
 The combined candidate keeps that single dynamic queue while integrating the 360M profile and
 actual generation-end contract. Source and derived frontiers retain the enrolled profile;
 terminal empty, wire-truncated, token-limited or generation-unknown answers cannot create new

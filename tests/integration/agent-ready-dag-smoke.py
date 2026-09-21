@@ -216,6 +216,128 @@ def collect(work, phase):
     write(record(work, phase+"-files"), dict(snapshot=saved, raw=raw))
 
 
+def failure_snapshot(root):
+    """Best-effort live diagnostic, never accepted by the successful proof checker.
+
+    Unlike snapshot(), this retains retry attempts. Descriptor-relative traversal
+    never follows links; per-file and directory before/after metadata expose
+    observed concurrent changes, but do not prove a coherent or quiescent tree.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    descriptor = os.open(root, flags | os.O_DIRECTORY)
+    info = os.fstat(descriptor)
+    saved, raw_files, directories = {}, {}, {}
+    count, total = 0, 0
+
+    def stamp(value):
+        return dict(inode=[value.st_dev, value.st_ino], uid=value.st_uid,
+            mode=stat.S_IMODE(value.st_mode), bytes=value.st_size,
+            links=value.st_nlink, mtime_ns=value.st_mtime_ns, ctime_ns=value.st_ctime_ns)
+
+    def owned_directory(value):
+        require(stat.S_ISDIR(value.st_mode) and value.st_uid == info.st_uid
+            and value.st_uid != 0 and stat.S_IMODE(value.st_mode) == 0o700,
+            "unsafe ready-DAG diagnostic directory")
+
+    def visit(fd, prefix):
+        nonlocal count, total
+        before = os.fstat(fd); owned_directory(before)
+        names = sorted(os.listdir(fd))
+        count += len(names)
+        require(count <= 2048, "unbounded ready-DAG diagnostic tree")
+        for name in names:
+            relative = f"{prefix}/{name}" if prefix else name
+            try:
+                item = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                saved[relative] = dict(observed_changed=True, unavailable="disappeared_before_open")
+                continue
+            if stat.S_ISDIR(item.st_mode):
+                owned_directory(item)
+                if re.fullmatch(r"node-000[0-4]/(?:synthesis/level-[0-9]{2}-group-[0-9]{4}/)?publication-cache", relative):
+                    continue
+                require(re.fullmatch(r"node-000[0-4](?:/(?:synthesis|level-[0-9]{2}-group-[0-9]{4}|"
+                    r"package-[0-9]{4}|work|attempt-[0-9]{4}|tokenizer(?:-attempt-[0-9]{4})?))*", relative)
+                    and relative.count("/") <= 12, "unexpected ready-DAG diagnostic directory")
+                child = os.open(name, flags | os.O_DIRECTORY, dir_fd=fd)
+                try:
+                    require(stamp(os.fstat(child)) == stamp(item), "changed diagnostic directory before open")
+                    visit(child, relative)
+                finally:
+                    os.close(child)
+                continue
+            require(stat.S_ISREG(item.st_mode) and item.st_uid == info.st_uid
+                and item.st_nlink == 1 and stat.S_IMODE(item.st_mode) == 0o600
+                and item.st_size <= 16*1048576
+                and (name.endswith(".json") or name in ("source.txt", "source.manifest", "dataset.manifest",
+                    "manifest.bin", ".task.lock", ".workflow.lock")), "unsafe ready-DAG diagnostic file")
+            child = os.open(name, flags, dir_fd=fd)
+            try:
+                opened = os.fstat(child)
+                require(stamp(opened) == stamp(item) and opened.st_nlink == 1,
+                    "changed diagnostic file before open")
+                with os.fdopen(os.dup(child), "rb") as stream:
+                    raw = stream.read(16*1048576+1)
+                after = os.fstat(child)
+                total += len(raw)
+                require(len(raw) <= 16*1048576 and total <= 32*1048576,
+                    "oversized ready-DAG diagnostic evidence")
+                changed = stamp(after) != stamp(opened) or len(raw) != opened.st_size
+                try:
+                    current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    changed = changed or stamp(current) != stamp(after)
+                except FileNotFoundError:
+                    changed = True
+                require(raw or changed or name in (".task.lock", ".workflow.lock"),
+                    "empty ready-DAG diagnostic file")
+                saved[relative] = dict(bytes=len(raw), sha256=sha(raw), before=stamp(opened),
+                    after=stamp(after), observed_changed=changed)
+                raw_files[relative] = raw.hex()
+            finally:
+                os.close(child)
+        after = os.fstat(fd)
+        directories[prefix or "."] = dict(before=stamp(before), after=stamp(after),
+            observed_changed=stamp(before) != stamp(after) or names != sorted(os.listdir(fd)))
+
+    try:
+        owned_directory(info)
+        # An exact fixture plan is required even for diagnostic-only raw export.
+        # No other dataset directory, runtime, model, key or cache is traversed.
+        visit(descriptor, "")
+        require("graph-plan.json" in raw_files and json.loads(bytes.fromhex(raw_files["graph-plan.json"])) == PLAN,
+            "diagnostic graph is not the explicit public README fixture")
+    finally:
+        os.close(descriptor)
+    return dict(schema_version=1, report_kind="volparossa-ready-dag-failure-files",
+        diagnostic_only=True, success=False, coherent_snapshot_proven=False, quiescence_proven=False,
+        retries_allowed_for_diagnostics_only=True, raw_bytes=total, entries_seen=count,
+        observed_concurrent_changes=any(v["observed_changed"] for v in (*saved.values(), *directories.values())),
+        snapshot=saved, directories=directories, raw=raw_files)
+
+
+def collect_failure(work, phase):
+    JOBS["guest_work"](work)
+    require(phase in ("pause", "observe-ready"), "wrong ready-DAG failure diagnostic phase")
+    public = read(record(work, "input"))
+    source = work/"bin/ready-dag-source-README.md"
+    info = source.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o222
+        and info.st_nlink == 1 and info.st_size <= 16*1048576,
+        "failure diagnostic README is not a bounded root-installed source")
+    original = source.read_bytes()
+    excerpt = bytes.fromhex(public["excerpt_hex"])
+    require(public["source"] == "README.md" and public["plan"] == PLAN
+        and public["original_repository_sha256"] == sha(original)
+        and 124 <= len(excerpt) <= 128 and original.startswith(excerpt)
+        and public["excerpt_sha256"] == sha(excerpt) and public["excerpt_bytes"] == len(excerpt),
+        "failure diagnostic source is not the prepared public README excerpt")
+    value = failure_snapshot(root_path(work))
+    value.update(failed_observer=phase, public_input_sha256=sha(excerpt), monotonic_ns=time.monotonic_ns())
+    require(len(json.dumps(value, indent=2).encode())+1 <= 64*1048576,
+        "serialized ready-DAG failure diagnostic exceeded report bound")
+    write(record(work, "failure-files"), value)
+
+
 def active_workers(work, brokers, seen):
     root = root_path(work); layout = read(work / "agent-jobs-layout.json")
     paths = sorted(root.glob("node-????/package-????/work/package-0000/attempt-0000/job-?.json"))
@@ -660,7 +782,84 @@ def report(value,revision):
     check(value["evidence"],revision)
 
 
+def failure_snapshot_self_test():
+    import contextlib
+    import tempfile
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="ready-dag-diagnostic-") as directory:
+        root = Path(directory)
+        write(root/"graph-plan.json", PLAN)
+        write(root/"graph.json", dict(fixture="inert"))
+        attempt = root/"node-0000/package-0000/work/package-0000/attempt-0001"
+        attempt.mkdir(parents=True)
+        for path in (attempt, *attempt.parents):
+            if path == root.parent:
+                break
+            path.chmod(0o700)
+        target = attempt/"job-0.json"
+        write(target, dict(job_id="inert", state="unconfirmed"))
+        receipt = attempt/"receipt-0.json"
+        write(receipt, dict(status="failed", reason="inert retained diagnostic"))
+        result = failure_snapshot(root)
+        assert result["diagnostic_only"] and not result["success"]
+        assert not result["coherent_snapshot_proven"] and not result["quiescence_proven"]
+        assert not result["observed_concurrent_changes"]
+        assert result["raw"][target.relative_to(root).as_posix()] == target.read_bytes().hex()
+        assert result["raw"][receipt.relative_to(root).as_posix()] == receipt.read_bytes().hex()
+        try:
+            snapshot(root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("success snapshot accepted a diagnostic retry")
+
+        # A real in-place mutation after read must be visible, without claiming
+        # that unchanged files form an atomic snapshot of the running workflow.
+        original_fdopen = os.fdopen
+        target_inode = target.stat().st_ino
+        @contextlib.contextmanager
+        def mutating_fdopen(fd, mode):
+            with original_fdopen(fd, mode) as stream:
+                class Reader:
+                    def read(self, maximum):
+                        value = stream.read(maximum)
+                        if os.fstat(stream.fileno()).st_ino == target_inode:
+                            with target.open("ab") as output:
+                                output.write(b" ")
+                        return value
+                yield Reader()
+        with patch.object(os, "fdopen", mutating_fdopen):
+            changed = failure_snapshot(root)
+        assert changed["observed_concurrent_changes"]
+        assert changed["snapshot"][target.relative_to(root).as_posix()]["observed_changed"]
+        assert not changed["coherent_snapshot_proven"]
+
+        def rejected():
+            try:
+                failure_snapshot(root)
+            except (ValueError, OSError):
+                return
+            raise AssertionError("unsafe ready-DAG diagnostic accepted")
+        target.chmod(0o644); rejected(); target.chmod(0o600)
+        attempt.chmod(0o755); rejected(); attempt.chmod(0o700)
+        target.rename(attempt/"unexpected.bin"); rejected(); (attempt/"unexpected.bin").rename(target)
+        link = attempt/"linked.json"
+        link.symlink_to(target); rejected(); link.unlink()
+        os.link(target, link); rejected(); link.unlink()
+        invalid = root/"unrelated-dataset"
+        invalid.mkdir(mode=0o700); rejected(); invalid.rmdir()
+        oversized = attempt/"oversized.json"
+        with oversized.open("wb") as stream:
+            stream.truncate(16*1048576+1)
+        oversized.chmod(0o600); rejected(); oversized.unlink()
+        (root/"graph-plan.json").write_text('{"version":1,"nodes":[]}')
+        rejected()
+    print("ready-DAG diagnostic retry/receipt retention, concurrent-change detection and seven unsafe controls PASS")
+
+
 def self_test():
+    failure_snapshot_self_test()
     # Inert summary/identity controls only. No model, namespace, network or signal.
     startup=(b"compute owner_ack phase=resumed sequence=1 step=0 elapsed_ms=0\n"
         b"compute phase=resumed\ncompute phase=preparing\ncompute phase=baseline\n")
@@ -804,6 +1003,7 @@ def main(args):
     elif command=="cleanup-worker":continue_worker(Path(args[1]),True)
     elif command=="observe-rest":observe_rest(Path(args[1]))
     elif command=="collect":collect(Path(args[1]),args[2])
+    elif command=="collect-failure":collect_failure(Path(args[1]),args[2])
     elif command=="remove-inputs":remove_inputs(Path(args[1]))
     elif command=="stopped":stopped(Path(args[1]))
     elif command=="resumed":stopped(Path(args[1]),True)

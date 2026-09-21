@@ -42,11 +42,19 @@ agent_ready_dag_run() {
     jobs_batch_pid=$!
     python3 -B "$dag_script" pause "$WORK" "$jobs_batch_pid" \
         >"$WORK/agent-ready-dag-observer.log" 2>"$WORK/agent-ready-dag-observer.err" \
-        || fail READY_DAG_INITIAL_WORKERS_NOT_OBSERVED
+        || {
+            python3 -B "$dag_script" collect-failure "$WORK" pause \
+                2>"$WORK/agent-ready-dag-failure-files.err" || true
+            fail READY_DAG_INITIAL_WORKERS_NOT_OBSERVED
+        }
     PHASE=agent-ready-dag-c-before-paused-b
     python3 -B "$dag_script" observe-ready "$WORK" \
         >>"$WORK/agent-ready-dag-observer.log" 2>>"$WORK/agent-ready-dag-observer.err" \
-        || fail READY_DAG_C_DID_NOT_FINISH_BEFORE_B
+        || {
+            python3 -B "$dag_script" collect-failure "$WORK" observe-ready \
+                2>"$WORK/agent-ready-dag-failure-files.err" || true
+            fail READY_DAG_C_DID_NOT_FINISH_BEFORE_B
+        }
     agent_jobs_cli client compute peer poll \
         --handle "$dag_root/node-0001/package-0000/work/package-0000/attempt-0000/job-0.json" \
         >"$WORK/agent-ready-dag-running-status.json" 2>"$WORK/agent-ready-dag-running-status.err" \
