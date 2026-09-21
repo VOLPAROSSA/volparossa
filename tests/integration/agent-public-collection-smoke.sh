@@ -24,6 +24,7 @@ agent_public_collection_check() {
 
 agent_public_collection_native_sources() {
     PHASE=agent-public-collection-native-publications
+    agent_public_collection_source_boundary before
     printf '%s\n' 'Disposable guest only: create a separate encrypted public-source signer inside the owned job root; sign two literal excerpts for 7200s, deposit them on two real peers, warm only the first in a distinct consumer cache, and let source-plan v2 retrieve the second through its protected path.'
     agent_jobs_cli client init --identity "$jobs_source/collection-native-identity.key" \
         --passphrase-file "$jobs_source/passphrase" >"$WORK/agent-public-collection-network-init.log" \
@@ -44,23 +45,36 @@ agent_public_collection_native_sources() {
     for collection_native_index in 1 2; do
         collection_native_provider=$jobs_key_a
         [ "$collection_native_index" != 2 ] || collection_native_provider=$jobs_key_b
+        collection_native_status=0
         agent_jobs_cli client content custody deposit --manifest "$jobs_source/collection-native-$collection_native_index.pb" \
             --identity "$jobs_source/collection-native-identity.key" --passphrase-file "$jobs_source/passphrase" \
             --cache "$jobs_source/collection-native-cache" --provider-key "$collection_native_provider" \
             >"$WORK/agent-public-collection-network-deposit-$collection_native_index.json" \
-            2>"$WORK/agent-public-collection-network-deposit-$collection_native_index.err" || fail COLLECTION_NATIVE_DEPOSIT_FAILED
+            2>"$WORK/agent-public-collection-network-deposit-$collection_native_index.err" || collection_native_status=$?
+        agent_public_collection_source_boundary "deposit-$collection_native_index"
+        [ "$collection_native_status" -eq 0 ] || fail COLLECTION_NATIVE_DEPOSIT_FAILED
     done
     PHASE=agent-public-collection-native-warm-source-one
     if [ -e "$jobs_source/collection-source-cache" ] || [ -L "$jobs_source/collection-source-cache" ]; then
         fail COLLECTION_CONSUMER_CACHE_NOT_NEW
     fi
     collection_native_publisher=$(jq -er '.publisher_key_hex' "$WORK/agent-public-collection-network-publish-1.json")
+    collection_native_status=0
     agent_jobs_cli client content fetch-name --publisher-key "$collection_native_publisher" \
         --name disposable-collection-source-1 --min-revision 1 --cache "$jobs_source/collection-source-cache" \
         --local-output "$jobs_source/collection-warmed-1.txt" \
         >"$WORK/agent-public-collection-network-warm.json" 2>"$WORK/agent-public-collection-network-warm.err" \
-        || fail COLLECTION_NATIVE_WARMUP_FAILED
+        || collection_native_status=$?
+    agent_public_collection_source_boundary warm
+    [ "$collection_native_status" -eq 0 ] || fail COLLECTION_NATIVE_WARMUP_FAILED
     agent_public_collection_check cache-before "$WORK" || fail COLLECTION_NATIVE_WARM_COLD_SPLIT_FAILED
+}
+
+agent_public_collection_source_boundary() {
+    # Capture early discovery before failure cleanup; diagnostics never grant success.
+    # Each fixed stage has its own exclusive output, no extra long-lived sampler.
+    agent_public_collection_check source-boundaries "$WORK" "$1" \
+        2>"$WORK/agent-public-collection-source-boundaries-$1.err" || true
 }
 
 agent_public_collection_run() {
