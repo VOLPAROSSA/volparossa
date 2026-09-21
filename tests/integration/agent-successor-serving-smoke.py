@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import runpy
-import shutil
 import stat
 import sys
 import tempfile
@@ -25,7 +24,7 @@ KIND = "volparossa-selected-learning-to-peer-serving"
 SCOPE = ("one explicit public source, one real eight-update local train-loop and its source-heldout "
          "approval; the same idle broker copies the selected adapter and executes a protected peer job "
          "with exact learned weights while preserving its earlier base-model receipt. Public source-cache "
-         "provisioning and the learner's statically enabled Client role are explicit fixture setup; "
+         "provisioning by same-owner, inode-preserving relocation and the learner's statically enabled Client role are explicit fixture setup; "
          "its exact source is checked through its own cache-only API, not learner-side network discovery. An injected invalid "
          "selection must not replace the approved copy. Not independent quality, automatic global model "
          "adoption, distributed optimization, expiry/restart proof, full B05 or full alpha.")
@@ -75,6 +74,44 @@ def source(path, revision):
     write(path / "dataset.json", ART["dataset"](revision, (HERE / "agent-jobs-README.md").read_text()))
 
 
+def cache_directory_identity(path):
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_mode & 0o077 == 0,
+            "cache relocation requires a private directory, never a symlink")
+    return dict(device=info.st_dev, inode=info.st_ino, uid=info.st_uid, gid=info.st_gid)
+
+
+def relocate_cache(source, destination):
+    before = cache_directory_identity(source)
+    parent = cache_directory_identity(destination.parent)
+    require(before["device"] == parent["device"] and before["uid"] == parent["uid"]
+            and before["gid"] == parent["gid"], "cache relocation requires the same filesystem and owner")
+    require(not os.path.lexists(destination), "refusing to replace an existing cache destination")
+    # This guest fixture owns both private locations; no product operation is using
+    # either path during provisioning. Never copy or rewrite the inode-bound marker.
+    os.rename(source, destination)
+    after = cache_directory_identity(destination)
+    require(before == after and not os.path.lexists(source), "cache relocation changed its original identity")
+    return before, after
+
+
+def check_cache_provision(cache, publication, dataset):
+    before, after = cache["source_cache_identity"], cache["relocated_cache_identity"]
+    require(set(before) == set(after) == {"device", "inode", "uid", "gid"}
+            and all(type(value) is int and value >= 0 for identity in (before, after) for value in identity.values())
+            and before["inode"] > 0 and before["uid"] > 0 and before == after,
+            "public cache directory identity or ownership changed")
+    require(cache["explicit_fixture_relocation"] is True
+            and cache["relocation_method"] == "same-filesystem-rename"
+            and cache["source_cache_absent"] is True
+            and cache["learner_network_retrieval_claimed"] is False
+            and bool(cache["source_cache_files"])
+            and cache["source_cache_files"] == cache["relocated_cache_files"]
+            and cache["dataset"] == dataset and cache["manifest_id"] == publication["manifest_id"]
+            and cache["original_expiry"] == publication["expires_unix_seconds"],
+            "explicit original cached-source relocation differs")
+
+
 def seed(work):
     JOBS["guest_work"](work)
     layout, learner, original = roots(work)
@@ -83,20 +120,23 @@ def seed(work):
     require(fetched.read_bytes() == (original / "dataset.json").read_bytes(), "fetched public source differs")
     cache = work / "state-client/compute-source/successor-cache"
     before = tree(cache)
-    shutil.copytree(cache, learner / "source-cache", copy_function=shutil.copy2)
     owner = learner.stat()
     require(owner.st_uid == cache.stat().st_uid != 0, "learner public cache owner differs")
-    for path in [learner / "source-cache", *(learner / "source-cache").rglob("*")]:
-        os.chown(path, owner.st_uid, owner.st_gid, follow_symlinks=False)
-    require(tree(learner / "source-cache") == before, "explicit public cache copy differs")
+    original_identity, relocated_identity = relocate_cache(cache, learner / "source-cache")
+    relocated_files = tree(learner / "source-cache")
+    require(relocated_files == before, "explicit public cache relocation changed original files")
     write(learner / "plan.json", dict(version=1, sources=[dict(
         publisher_key=layout["provider_keys"][layout["provider_nodes"][1]], name=publication["name"],
         min_revision=1, manifest_id=publication["manifest_id"])]))
     # This is provisioning evidence only. Product verifies the original signed bytes again.
-    write(learner / "source-cache-provision.json", dict(explicit_fixture_copy=True,
-        learner_network_retrieval_claimed=False, source_cache_files=before,
-        copied_cache_files=tree(learner / "source-cache"), dataset=digest(fetched.read_bytes()),
-        manifest_id=publication["manifest_id"], original_expiry=publication["expires_unix_seconds"]))
+    provision = dict(explicit_fixture_relocation=True, relocation_method="same-filesystem-rename",
+        learner_network_retrieval_claimed=False, source_cache_absent=not os.path.lexists(cache),
+        source_cache_identity=original_identity, relocated_cache_identity=relocated_identity,
+        source_cache_files=before, relocated_cache_files=relocated_files,
+        dataset=digest(fetched.read_bytes()), manifest_id=publication["manifest_id"],
+        original_expiry=publication["expires_unix_seconds"])
+    check_cache_provision(provision, publication, digest(fetched.read_bytes()))
+    write(learner / "source-cache-provision.json", provision)
     for name in ("plan.json", "source-cache-provision.json"):
         os.chown(learner / name, owner.st_uid, owner.st_gid)
 
@@ -284,6 +324,13 @@ def capture_loop(work):
     current = read(learner / "serving/current.json")
     files = {str(p.relative_to(cycle)): file_hash(p, 4 * 1024 * 1024)
              for p in cycle.rglob("*") if p.is_file()}
+    provision = read(learner / "source-cache-provision.json")
+    retained_cache = dict(identity=cache_directory_identity(learner / "source-cache"),
+        owner_marker=file_hash(learner / "source-cache/.volparossa-owner-v1", 60),
+        original_location_absent=not os.path.lexists(work / "state-client/compute-source/successor-cache"))
+    require(retained_cache["identity"] == provision["relocated_cache_identity"]
+            and retained_cache["owner_marker"] == provision["source_cache_files"][".volparossa-owner-v1"]
+            and retained_cache["original_location_absent"], "trained source cache lost original directory/marker identity")
     names = ("selection.json", "evaluation.json", "result.json", "source-provenance.json", "training-report.json")
     value = dict(state=state, enrollment=read(learner / "loop/enrollment.json"),
         current=current, current_hex=(learner / "serving/current.json").read_bytes().hex(),
@@ -292,7 +339,7 @@ def capture_loop(work):
         dataset_json=(cycle / "dataset.json").read_text(), manifest_hex=(cycle / "dataset.manifest").read_bytes().hex(),
         original_dataset_json=(original / "dataset.json").read_text(),
         original_manifest_hex=(original / "manifest.pb").read_bytes().hex(),
-        cache_provision=read(learner / "source-cache-provision.json"))
+        cache_provision=provision, retained_cache=retained_cache)
     write(record(work, "loop"), value)
 
 
@@ -468,11 +515,12 @@ def check_evidence(value, revision):
     require(state["latest"] == state["completed"] == state["promoted"] == 1 and state["rejected"] == 0
             and len(state["cycles"]) == 1 and state["cycles"][0]["phase"] == "complete", "selected durable loop state differs")
     cache = loop["cache_provision"]
-    require(cache["explicit_fixture_copy"] is True and cache["learner_network_retrieval_claimed"] is False
-            and cache["source_cache_files"] == cache["copied_cache_files"] and cache["dataset"] == digest(raw)
-            and cache["manifest_id"] == publication["manifest_id"] and cache["original_expiry"] == body[4]
+    check_cache_provision(cache, publication, digest(raw))
+    require(loop["retained_cache"] == dict(identity=cache["relocated_cache_identity"],
+                owner_marker=cache["source_cache_files"][".volparossa-owner-v1"], original_location_absent=True)
+            and cache["original_expiry"] == body[4]
             and records["source-provenance.json"]["source_receipt"]["peer_bytes"] == 0,
-            "explicit original cached-source provisioning differs")
+            "relocated source authority differs or learner fetched from network")
     layout = value["layout"]
     learner = layout["provider_nodes"][0]
     admission = value["learner-admission"]
@@ -587,6 +635,60 @@ def self_test():
     publication = dict(manifest_id="a" * 64, publisher_key_hex="b" * 64,
                        name="disposable-successor-training", revision=1, expires_unix_seconds=200)
     dataset = digest(b"Explicit public inert test data.")
+    cache_identity = dict(device=7, inode=123, uid=1000, gid=1000)
+    cache_files = {".volparossa-owner-v1": digest(b"Inert marker, not real cache authority.")}
+    cache = dict(explicit_fixture_relocation=True, relocation_method="same-filesystem-rename",
+        source_cache_absent=True, learner_network_retrieval_claimed=False,
+        source_cache_identity=cache_identity, relocated_cache_identity=dict(cache_identity),
+        source_cache_files=cache_files, relocated_cache_files=copy.deepcopy(cache_files),
+        dataset=dataset, manifest_id=publication["manifest_id"], original_expiry=200)
+    check_cache_provision(cache, publication, dataset)
+    for change in (dict(explicit_fixture_relocation=False), dict(relocation_method="copy"),
+                   dict(source_cache_absent=False), dict(learner_network_retrieval_claimed=True),
+                   dict(relocated_cache_identity=dict(cache_identity, inode=124)),
+                   dict(relocated_cache_identity=dict(cache_identity, device=8)),
+                   dict(relocated_cache_identity=dict(cache_identity, uid=1001)),
+                   dict(relocated_cache_files={".volparossa-owner-v1": digest(b"rewritten marker")}),
+                   dict(dataset=digest(b"changed source")), dict(manifest_id="c" * 64), dict(original_expiry=201)):
+        try:
+            check_cache_provision(dict(cache, **change), publication, dataset)
+        except ValueError:
+            continue
+        raise AssertionError("changed cache relocation proof accepted")
+    with tempfile.TemporaryDirectory(prefix="volparossa-successor-relocation-inert-") as directory:
+        root = Path(directory)
+        source_cache, learner = root / "source", root / "learner"
+        source_cache.mkdir(mode=0o700); learner.mkdir(mode=0o700)
+        marker = b"Inert bytes: no real cache/model or execution evidence."
+        (source_cache / ".volparossa-owner-v1").write_bytes(marker)
+        marker_inode = inode(source_cache / ".volparossa-owner-v1")
+        original_identity = cache_directory_identity(source_cache)
+        destination = learner / "cache"
+        before, after = relocate_cache(source_cache, destination)
+        assert before == after == original_identity and not source_cache.exists()
+        assert (destination / ".volparossa-owner-v1").read_bytes() == marker
+        assert inode(destination / ".volparossa-owner-v1") == marker_inode
+        # Existing directories and dangling links must never be replaced, even empty.
+        source_cache.mkdir(mode=0o700)
+        empty = learner / "existing-empty"; empty.mkdir(mode=0o700)
+        dangling = learner / "dangling"; dangling.symlink_to(learner / "absent")
+        for existing in (destination, empty, dangling):
+            prior = existing.lstat().st_ino
+            try:
+                relocate_cache(source_cache, existing)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("existing relocation target replaced")
+            assert source_cache.is_dir() and existing.lstat().st_ino == prior
+        linked_source = root / "source-link"; linked_source.symlink_to(source_cache)
+        try:
+            relocate_cache(linked_source, learner / "never-created")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("symlink cache source accepted")
+        assert not (learner / "never-created").exists()
     receipt = dict(operation="named_content_download", cache_only=True, local_delivery=True,
         manifest_id=publication["manifest_id"], publisher_key=publication["publisher_key_hex"],
         name=publication["name"], revision=1, publication_expires_unix_seconds=200, **dataset,
@@ -687,7 +789,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("invalid transition contract accepted")
-    print("learning-serving static roles/cache-only, bounded diagnostics, readiness and transition controls passed; no model or network executed")
+    print("learning-serving inode-preserving relocation, static roles/cache-only, bounded diagnostics, readiness and transition controls passed; no model or network executed")
 
 
 def main():

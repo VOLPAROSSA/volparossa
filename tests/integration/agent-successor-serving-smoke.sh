@@ -88,7 +88,7 @@ agent_successor_serving_run() {
         --min-revision 1 --cache "$jobs_source/successor-cache" --local-output "$jobs_source/successor-source.json" \
         >"$WORK/agent-successor-serving-source-fetch.json" \
         2>"$WORK/agent-successor-serving-source-fetch.err" || fail SUCCESSOR_SOURCE_FETCH_FAILED
-    # Explicit public fixture provisioning, not a claim that the learner fetched over its own route.
+    # Same-owner inode-preserving cache relocation, not learner-side network retrieval.
     python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" seed "$WORK" || fail SUCCESSOR_CACHE_PROVISION_FAILED
     PHASE=agent-successor-serving-local-source
     agent_jobs_cli "$provider_node_a" role show >"$WORK/agent-successor-serving-learner-roles.log" \

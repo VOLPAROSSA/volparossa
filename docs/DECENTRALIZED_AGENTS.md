@@ -641,6 +641,11 @@ named-content API, even with its complete pre-provisioned cache. The corrected f
 that learner with client and relay roles, checks its own cache-only retrieval and then uses the
 same training-loop/approval/serving path. Product access checks stay unchanged. This remains
 explicit public fixture provisioning, not autonomous source discovery or a verified transition.
+That role-corrected run reaches preflight but rejects the copied cache's inode-bound ownership
+marker before any training begins. The next fixture uses the store's supported same-owner,
+same-filesystem directory relocation instead, preserving the exact marker, cache bytes and
+directory identity. Cache-only admission must then verify the original source and expiry;
+no ownership-marker repair or product-validation bypass is used.
 
 ## Owner-first resource allocation
 

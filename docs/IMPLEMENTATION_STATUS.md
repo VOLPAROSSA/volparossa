@@ -46,6 +46,20 @@ network acquisition. Training, approval and same-broker adapted inference still 
 Pure fixture checks and shell syntax/ShellCheck pass. Failure cleanup now retains only bounded
 fixed-file identities and cycle-state categories, not source text or arbitrary error chains.
 
+The [role-corrected run on
+`41911695`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35642406080) reaches the new
+cache-only preflight with the correct learner roles, but returns `CONTENT_INVALID` before
+training. No cycle is started. The fixture had copied the complete cache, including the owner
+marker bound to its original directory's device, inode and UID; reopening the different copied
+directory is correctly rejected. The fixture correction relocates the closed, same-owner cache
+without changing its directory identity or bytes, an operation already supported by the store.
+It never rewrites the marker or relaxes the product cache validation. The failed run's original
+cleanup records prove removal of its observed workers/private stores and unchanged host state;
+training, approval and activation remain unproved until a successful new run.
+The four existing cache-reopen tests pass, including rename/reopen and copied-marker rejection;
+the fixture's pure relocation checks, shell syntax and ShellCheck also pass. No model was run
+by these checks.
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same
