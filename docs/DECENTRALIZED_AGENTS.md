@@ -24,6 +24,29 @@ no numerical virtue score or automatic "good person/bad person" classification i
 Describing or critically discussing a vice is distinct from facilitating harmful conduct;
 naming a principle is not yet a reproducible classifier or an implemented policy rule.
 
+### Principles guide rules, not the other way around
+
+The user clarified on 2026-09-21 that these Latin concepts were chosen as a higher-level ethical
+framework, not as decorative labels for an exhaustive list of literal prohibitions. Enumerating
+thousands of rules can leave gaps; literal compliance can also undermine the reason a rule
+exists. The intended agent reasoning must consider purpose, context and consequences in new
+situations, rather than treating an unlisted case or a verbal loophole as sufficient permission.
+
+This applies both to agent behavior/training and to automatic whitelist/blacklist maintenance.
+Concrete content decisions are still required, but are applications of the principles, not their
+complete definition. The examples below clarify agreed boundaries without claiming to enumerate
+every possible case. Independent assessments should explain the relevant principles, the
+observed evidence, competing interpretations and why a proposed decision serves their purpose;
+mutual checking must test that reasoning, not merely count matching labels. Uncertainty and
+conflicting interpretations remain explicit inputs to automatic reconsideration.
+
+The framework does not grant agents permission to waive agreed legal or privacy constraints,
+invent personal moral scores or silently reverse an explicitly agreed content boundary. Nor does
+an abstract vocabulary itself prevent deception, bias or conflicting judgments. Consistent
+interpretation, evidence-bound decisions and correction remain implementation requirements;
+this clarification changes the design description, not the active destination whitelist or the
+completion status of the automatic governance system.
+
 ## Agreed content-policy examples
 
 The intended distinctions are concrete, not a blanket ban on every activity described as a

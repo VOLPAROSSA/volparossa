@@ -221,10 +221,21 @@ and cancellation; broader device-activity integration remains incomplete.
 
 **Modern technology, an enduring vocabulary for cooperation.**
 
-VOLPAROSSA's chosen Latin virtues and vices provide a shared language for responsible behavior.
-They are presented as broadly understandable ethical principles, not a religious membership
-test or a score of a person's moral worth. The English names below are translations; the
-practical interpretations describe how the project intends to apply them.
+VOLPAROSSA uses seven Latin virtues and seven opposing vices as an **overarching ethical
+framework**, not merely as names for a long checklist of rules. An exhaustive list can miss
+unforeseen situations; an agent might also satisfy a rule's literal wording while defeating
+its purpose. The principles are intended to keep that underlying purpose in view: **reason
+about the intent, context and consequences—not just whether a specific prohibition is listed.**
+
+This framework should guide agents' behavior and training, their mutual checks, and the automatic
+maintenance of the whitelist and blacklist, including situations that have not been specified
+in advance. Concrete rules make decisions enforceable and reviewable; the principles guide how
+those rules are interpreted, extended and corrected rather than being replaced by them.
+
+The Latin terms connect a modern network with an enduring ethical vocabulary. They are presented
+as broadly understandable principles, not a religious membership test or a score of a person's
+moral worth. The English names below are translations; the practical interpretations are
+examples of their application, not exhaustive definitions.
 
 | Virtue — positive principle | Sin / vice — risk to resist | Practical interpretation for agents |
 | --- | --- | --- |
@@ -241,8 +252,13 @@ practical interpretations describe how the project intends to apply them.
 The same principles inform two different layers:
 
 - **Agent behavior and training:** honesty, care, restraint, cooperation and non-exploitation.
-- **Content policy:** concrete, versioned whitelist/blacklist rules with a defined subject,
-  evidence and scope—not a ban triggered by the mere mention of a vice.
+- **Content policy:** principle-guided assessment translated into concrete, versioned
+  whitelist/blacklist decisions with a defined subject, evidence and scope—not a ban triggered
+  by the mere mention of a vice or permission merely because no exact prohibition was listed.
+
+Abstract principles are not a guarantee against loopholes or misinterpretation. The intended
+governance therefore also needs explicit reasoning, mutual review, conflict resolution and
+correction. Appealing to a virtue does not override the agreed legal, privacy or content boundaries.
 
 The agreed policy direction prohibits illegal content and conduct such as fraud, unauthorized
 piracy and child sexual abuse material. Lawful reporting, prevention and critical discussion
