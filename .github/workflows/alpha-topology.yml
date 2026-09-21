@@ -129,6 +129,7 @@ jobs:
           python3 -B tests/integration/agent-artifact-smoke.py self-test
           python3 -B tests/integration/agent-artifact-smoke.py cycle-self-test
           sh -n tests/integration/agent-jobs-smoke.sh
+          python3 -B tests/integration/test-agent-jobs-export.py
           python3 -B tests/integration/agent-jobs-smoke.py self-test
           python3 -B tests/integration/agent-jobs-smoke.py loss-self-test
           sh -n tests/integration/agent-jobs-follow-smoke.sh

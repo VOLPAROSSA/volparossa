@@ -23,6 +23,17 @@ timing. Temporary startup readiness remains a hypothesis, not a proven cause. Cl
 with zero owned objects and unchanged guest-host state. Exact-head Quality and CodeQL passed; they do not turn the live run
 green. Live automatic-selection proof remains pending.
 
+The [follow-up document run on `66b70e3d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597171441)
+also **failed**, this time at the post-run evidence check. The guest completed automatic
+enrollment, document execution and four synthesis levels, with cleanup and unchanged host
+state reported. Independent replay of the unchanged uploaded artifact cannot verify the
+discovery path: eight original discovery-capture files were not exported. Embedded summaries
+do not replace those originals. The finalizer now exports both bounded executor-discovery
+JSON prefixes alongside the existing execution evidence; a local export regression exercises
+the actual shell function, checks byte retention and private permissions, and excludes symlinks
+and unrelated private files. The historical run remains failed; complete live evidence from
+the corrected source is still required.
+
 Discovery now retries temporary unavailable/busy observations with fresh offers and nonces,
 within one original 150-second deadline. Fixed diagnostic categories separate query, probe,
 readiness and final-check failures without storing publisher identities or task bodies.

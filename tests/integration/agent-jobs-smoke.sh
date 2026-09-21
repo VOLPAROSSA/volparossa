@@ -266,6 +266,8 @@ agent_jobs_finalize_report() {
     jobs_status=$1
     for jobs_log in "$WORK"/agent-jobs-*.json "$WORK"/agent-jobs-*.err "$WORK"/agent-jobs-*.log \
         "$WORK"/content-custody-fetch-*.json "$WORK"/content-provider-custody-fetch-*.json \
+        "$WORK"/content-custody-executor-discovery-*.json \
+        "$WORK"/content-provider-custody-executor-discovery-*.json \
         "$WORK"/content-provider-control-*.json; do
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
