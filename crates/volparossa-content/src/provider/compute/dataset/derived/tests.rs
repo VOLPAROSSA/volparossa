@@ -63,6 +63,7 @@ fn dataset(source: &[u8]) -> DerivedDataset {
         source_manifest_hex: hex::encode(source),
         level: 1,
         claim_scope: DERIVED_CLAIM_SCOPE.into(),
+        model_profile: ModelProfile::default(),
         inference: vec![DerivedQuestion {
             question: "What do the public answers establish?".into(),
             context: "Één\n".into(),
@@ -108,6 +109,73 @@ fn native_derived_authentication_and_singleton_subset_preserve_explicit_lineage(
         actual.inference[0].inputs[1].source_start
     );
     assert_ne!(actual.inference[0].context, "Original");
+}
+
+#[test]
+fn omitted_default_profile_preserves_legacy_canonical_bytes() {
+    let signer = SigningKey::from_bytes(&[25; 32]);
+    let source = signed("Original public source text.", "text/plain", &signer, 2000);
+    let original = dataset(&source);
+    let encoded = serde_json::to_string(&original).unwrap();
+    assert!(!encoded.contains("model_profile"));
+    let decoded: DerivedDataset = serde_json::from_str(&encoded).unwrap();
+    assert!(decoded.model_profile.is_default());
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+    let explicit = encoded.replacen(
+        "\"version\":3",
+        "\"version\":3,\"model_profile\":\"smollm2-135m-v1\"",
+        1,
+    );
+    assert_eq!(
+        serde_json::from_str::<DerivedDataset>(&explicit).unwrap(),
+        original
+    );
+    assert_eq!(
+        serde_json::to_string(&serde_json::from_str::<DerivedDataset>(&explicit).unwrap()).unwrap(),
+        encoded
+    );
+    for value in [
+        json!("smollm2-360m"),
+        json!("unrestricted"),
+        json!(null),
+        json!(true),
+    ] {
+        let mut invalid = serde_json::to_value(&original).unwrap();
+        invalid["model_profile"] = value;
+        assert!(serde_json::from_value::<DerivedDataset>(invalid).is_err());
+    }
+}
+
+#[test]
+fn larger_profile_binds_parent_bound_without_changing_signed_package_capacity() {
+    let signer = SigningKey::from_bytes(&[25; 32]);
+    let source = signed("Original public source text.", "text/plain", &signer, 2000);
+    let mut original = dataset(&source);
+    original.model_profile = ModelProfile::Smol360;
+    let row = &mut original.inference[0];
+    row.inputs.truncate(1);
+    row.inputs[0].text = "é".repeat(2048);
+    row.inputs[0].piece_end = 4096;
+    row.context.clone_from(&row.inputs[0].text);
+    original.inference = vec![original.inference[0].clone(); 4];
+    original.validate_shape().unwrap();
+    let encoded = serde_json::to_string(&original).unwrap();
+    assert!(encoded.contains("\"model_profile\":\"smollm2-360m-v1\""));
+    let package = signed(&encoded, DERIVED_CONTENT_TYPE, &signer, 1900);
+    let verified = verify_source(&package, &signer.verifying_key(), &encoded, 1100).unwrap();
+    assert_eq!(verified.row_count(), 4);
+    let selected = verified.derive(&[3]).unwrap();
+    let subset: DerivedDataset = serde_json::from_str(&selected).unwrap();
+    assert_eq!(subset.model_profile, ModelProfile::Smol360);
+    assert_eq!(subset.inference, vec![original.inference[3].clone()]);
+    assert_eq!(subset.source_manifest_hex, original.source_manifest_hex);
+    assert_eq!(subset.claim_scope, original.claim_scope);
+    validate_derived_json(&selected, 1).unwrap();
+    original.model_profile = ModelProfile::default();
+    assert!(original.validate_shape().is_err());
+    original.model_profile = ModelProfile::Smol360;
+    original.inference[0].inputs[0].text.push('x');
+    assert!(original.validate_shape().is_err());
 }
 
 #[test]

@@ -2,16 +2,16 @@
 
 use super::*;
 
-struct Fixture {
-    _root: tempfile::TempDir,
-    listener: UnixListener,
-    service: Arc<Mutex<Option<Service>>>,
-    backend: Arc<Attachment>,
-    request: Request,
-    requester: SigningKey,
+pub(super) struct Fixture {
+    pub(super) root: tempfile::TempDir,
+    pub(super) listener: UnixListener,
+    pub(super) service: Arc<Mutex<Option<Service>>>,
+    pub(super) backend: Arc<Attachment>,
+    pub(super) request: Request,
+    pub(super) requester: SigningKey,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.path().join("broker.sock");
@@ -48,13 +48,14 @@ fn fixture() -> Fixture {
         operation: Operation::Eligibility(rpc::EligibilityQuery {
             publisher_keys: vec![hex::encode(publisher.verifying_key().as_bytes())],
             model_fingerprint: Some(capabilities().model_fingerprint),
+            model_profile: None,
             require_task_derivation_v1: true,
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
         }),
     };
     Fixture {
-        _root: root,
+        root,
         listener,
         service,
         backend,
@@ -96,7 +97,7 @@ async fn serve_capability_hints(
 #[tokio::test]
 async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment() {
     let Fixture {
-        _root,
+        root: _root,
         listener,
         service,
         backend,
@@ -115,6 +116,12 @@ async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment
     cases.push((query, false)); // Trusting one publisher cannot authorize the other.
     let mut query = original_query.clone();
     query.model_fingerprint = Some("b".repeat(64));
+    cases.push((query, false));
+    let mut query = original_query.clone();
+    query.model_profile = Some("smollm2-135m-v1".into());
+    cases.push((query, true));
+    let mut query = original_query.clone();
+    query.model_profile = Some("smollm2-360m-v1".into());
     cases.push((query, false));
     let mut query = original_query.clone();
     query.require_document_inference_v2 = true;
@@ -181,7 +188,7 @@ async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment
 #[tokio::test]
 async fn eligibility_rejects_malformed_query_and_foreign_requester_before_broker_io() {
     let Fixture {
-        _root,
+        root: _root,
         listener: _listener,
         service,
         backend,

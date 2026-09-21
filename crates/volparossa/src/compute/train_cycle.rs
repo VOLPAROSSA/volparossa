@@ -502,6 +502,7 @@ fn worker_options(args: &Options, expires: u64, time: u64) -> Result<super::Opti
         .filter(|remaining| *remaining > 0)
         .context("train_cycle_source_expired")?;
     Ok(super::Options {
+        model_profile: super::ModelProfile::default(),
         mode: Mode::Train,
         runtime_root: args.runtime_root.clone(),
         model_root: args.model_root.clone(),

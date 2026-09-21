@@ -23,7 +23,7 @@ use tokio::{
     time::timeout,
 };
 use volparossa_content::{
-    agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION},
+    model_profile::ModelProfile,
     provider::{
         ProviderEndpoint, PublicationRegistry,
         compute::{ComputeBackend, ComputeError, ComputeFuture, ComputeService, dataset},
@@ -50,6 +50,10 @@ struct BrokerSocket {
 }
 
 /// The service and its snapshots may retain this backend, but never their own strong owner.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent broker protocol features are immutable attachment pins"
+)]
 pub(super) struct Attachment {
     socket: BrokerSocket,
     service: Weak<Mutex<Option<Service>>>,
@@ -61,6 +65,7 @@ pub(super) struct Attachment {
     task_derivation_v1: bool,
     document_inference_v2: bool,
     derived_inference_v3: bool,
+    successor_activation_v1: bool,
     enabled: AtomicBool,
 }
 
@@ -139,6 +144,7 @@ impl ContentRuntime {
             task_derivation_v1: capabilities.task_derivation_v1,
             document_inference_v2: capabilities.document_inference_v2,
             derived_inference_v3: capabilities.derived_inference_v3,
+            successor_activation_v1: capabilities.successor_activation_v1,
             enabled: AtomicBool::new(true),
         });
         let service = Arc::new(ComputeService::new(
@@ -343,10 +349,50 @@ impl Attachment {
             }
             Operation::Poll(binding) | Operation::Cancel(binding) => binding,
         };
-        if binding.model_fingerprint != self.model_fingerprint {
+        // Opt-in only changes which frozen model a new request may name. The request is
+        // never rebound here; the owned broker decides exact current-model admission and
+        // retains the complete original binding for historical Poll/Cancel requests.
+        if !self.successor_activation_v1 && binding.model_fingerprint != self.model_fingerprint {
             return Err(ComputeError::Authentication);
         }
         Ok(())
+    }
+
+    fn validate_broker_response(
+        &self,
+        request: &Request,
+        response: &Response,
+    ) -> Result<(), ComputeError> {
+        if response.version != rpc::VERSION || response.request_id != request.request_id {
+            return Err(ComputeError::Authentication);
+        }
+        match (&request.operation, &response.outcome) {
+            (_, Outcome::Error(_)) => Ok(()),
+            (Operation::Capabilities, Outcome::Capabilities(capabilities)) => {
+                validate_capabilities(capabilities)?;
+                if (!self.successor_activation_v1
+                    && capabilities.model_fingerprint != self.model_fingerprint)
+                    || capabilities.successor_activation_v1 != self.successor_activation_v1
+                    || capabilities.task_derivation_v1 != self.task_derivation_v1
+                    || capabilities.document_inference_v2 != self.document_inference_v2
+                    || capabilities.derived_inference_v3 != self.derived_inference_v3
+                {
+                    return Err(ComputeError::Authentication);
+                }
+                Ok(())
+            }
+            (Operation::Submit(submit), Outcome::Job(status))
+                if status.binding == submit.binding =>
+            {
+                Ok(())
+            }
+            (Operation::Poll(binding) | Operation::Cancel(binding), Outcome::Job(status))
+                if &status.binding == binding =>
+            {
+                Ok(())
+            }
+            _ => Err(ComputeError::Authentication),
+        }
     }
 }
 
@@ -383,16 +429,7 @@ impl ComputeBackend for Attachment {
             }
             let mut response = self.socket.exchange(&request).await?;
             self.active().await?;
-            if let Outcome::Capabilities(capabilities) = &response.outcome {
-                validate_capabilities(capabilities)?;
-                if capabilities.model_fingerprint != self.model_fingerprint
-                    || capabilities.task_derivation_v1 != self.task_derivation_v1
-                    || capabilities.document_inference_v2 != self.document_inference_v2
-                    || capabilities.derived_inference_v3 != self.derived_inference_v3
-                {
-                    return Err(ComputeError::Authentication);
-                }
-            }
+            self.validate_broker_response(&request, &response)?;
             if let Some(query) = eligibility {
                 let Outcome::Capabilities(capabilities) = response.outcome else {
                     return Err(ComputeError::Invalid);
@@ -440,16 +477,21 @@ async fn inspect_capabilities(
 }
 
 pub(super) fn validate_capabilities(caps: &Capabilities) -> Result<(), ComputeError> {
+    let profile = ModelProfile::from_identity(
+        &caps.model.model_id,
+        &caps.model.model_revision,
+        caps.model.base_weights.bytes,
+        &caps.model.base_weights.sha256,
+    )
+    .ok_or(ComputeError::Authentication)?;
     if !caps.public_inference_only
         || caps.runtime_slots != 1
         || !(1..=2).contains(&caps.max_threads)
         || !(1..=600).contains(&caps.max_job_seconds)
         || !(1..=1024 * 1024).contains(&caps.max_dataset_bytes)
-        || !(1..=4).contains(&caps.max_rows)
-        || caps.model.model_id != MODEL_ID
-        || caps.model.model_revision != MODEL_REVISION
-        || caps.model.base_weights.bytes != 269_060_552
-        || caps.model.base_weights.sha256 != hex::encode(BASE_MODEL_SHA256)
+        || !(1..=profile.spec().max_rows).contains(&caps.max_rows)
+        || (!profile.is_default()
+            && (caps.model.adapter_files.is_some() || caps.successor_activation_v1))
         || caps.model_fingerprint
             != hex::encode(Sha256::digest(
                 serde_json::to_vec(&caps.model).map_err(|_| ComputeError::Invalid)?,

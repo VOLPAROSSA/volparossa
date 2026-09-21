@@ -153,6 +153,33 @@ provisioner in `workers/volparossa-ml/` verifies every model asset and all 38 CP
 wheels against exact sizes/SHA-256 pins. It preserves original license/model-card bytes and
 does not install on the development host or fetch dependencies at worker runtime.
 
+An explicit second profile, `smollm2-360m-v1`, pins SmolLM2-360M-Instruct at
+`a10cc1512eabd3dde888204e902eca88bddb4951`. It supports inference, source tokenization and
+task planning, not training or the incompatible 135M adapters. It uses the same pinned CPU
+runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSES.md).
+
+| Explicit profile | Ordinary prompt | Generated answer | Escaped answer bytes | Rows per worker |
+| --- | ---: | ---: | ---: | ---: |
+| `smollm2-135m-v1` (default) | 192 tokens | 64 tokens | 1,024 | 4 |
+| `smollm2-360m-v1` | 1,024 tokens | 256 tokens | 4,096 | 1 |
+
+Select the same `--model-profile` when explicitly provisioning the model, starting its
+`compute serve` broker, and enrolling a new `compute peer document` task. `compute run`
+also accepts it. Discovery filters for the chosen base profile; manual enrollment checks the
+actual peers and pins their common complete model fingerprint before tokenization or publication.
+Resume uses the original profile and fingerprint, not a newly supplied CLI choice. Signed
+packages may still contain four rows, but the ready queue dispatches singleton 360M jobs.
+Legacy batch-barrier enrollment is not supported for that profile.
+
+Synthesis retains complete parent text and the matching profile rather than silently applying
+135M limits. A token-limited or wire-truncated output cannot become a completed answer or new
+dependency. The task-question planner keeps its separate 512-prompt / 384-total-generated-token
+budget and four-attempt limit; selecting a model does not enlarge that planner budget, the
+600-second worker deadline, two-thread bound, or 3-GiB sampled RSS cancellation limit.
+The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
+wheels; no model or runtime is installed on the development host. Full 360M peer execution,
+resource behavior and useful/source-faithful answers remain pending the disposable VM proof.
+
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
 isolation, exposing only the installed runtime, selected public dataset, pinned model and
@@ -582,6 +609,81 @@ checks are unchanged, and earlier failed runs remain failed. This is selection a
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
+
+### Using approved successors for new peer jobs
+
+For the supported 135M training/adapter profile, pass the same existing private `--serving-directory` to
+`compute train-loop` and `compute serve`. Both must use the **same existing runtime directory**;
+the training and inference workers retain its single-worker lock. Enabling this option does
+not start a broker, attach it to a network agent, trust another publisher or download a model.
+For example, add it to the training command above and start the broker separately:
+
+```sh
+volparossa compute serve --socket /OWNER/broker.sock \
+  --runtime-root /OWNER/existing-runtime --model-root /OWNER/existing-model \
+  --work-root /OWNER/existing-job-directory \
+  --serving-directory /OWNER/existing-serving-directory --execute
+```
+
+These illustrative directories must already be private and separate from the training-loop,
+model and cache directories. The broker's `--adapter-root` cannot be combined with this mode.
+The inference-only 360M profile rejects `--serving-directory`; its weights cannot accept 135M adapters.
+Attach its protected socket and independently selected dataset publishers through the existing
+`compute peer attach` workflow. Without `--serving-directory`, the broker's fixed-model
+behavior is unchanged; the protocol advertises successor activation only for an opted-in broker.
+
+The producer exports only the current selected **approved** local successor or approved peer
+update, after rechecking its retained evaluation and exact adapter bytes. Merely caching an
+adapter, completing a rejected training cycle or receiving a publisher's quality claim cannot
+activate it. The selection retains the original minimum dataset, catalog, validation and/or
+import expiry applicable to that selection; neither publication nor restart extends it.
+The small benchmark's approval is not a claim of general answer quality or poison resistance.
+
+An idle executor with spare capacity makes its own checked copy of the three fixed adapter
+files before advertising the new model fingerprint. The producer retains at most two publication
+copies; its pruning cannot erase weights used by an active inference. Active jobs finish with
+their original model, source, requester and lease. New jobs must name the currently advertised
+model and end no later than its approval expiry; historical polling/cancellation keeps the
+complete original binding. Old receipts are not relabelled as output from the new model.
+Already enrolled workflows also retain their original model requirement: changing a broker
+does not silently migrate their remaining rows to a different model. Such work still needs a
+compatible executor; this option is not cross-model workflow migration.
+
+Before any successor exists, a successfully checked empty directory permits the pinned base
+model. An expired or invalid selection does not silently restore the base model, including on
+broker restart. A bad new selection cannot overwrite an already copied valid one; its original
+expiry still stops new work. The broker's existing storage budget includes its adapter copies
+and retained job reservations. This connects local selection to new public peer jobs; it does
+not add private offload, defended aggregation or network-policy authority.
+
+Focused filesystem, broker lifecycle, protocol and agent-attachment checks pass. The real
+trained-adapter transition followed by protected peer inference now passes the corrected run below.
+The first disposable run stopped at base admission: the broker explicitly reported that it
+was not accepting work, but the fixture attempted submission immediately. No training or
+adapted inference ran. The fixture now waits boundedly for real readiness and corrects its
+cleanup-boolean parsing; this neither bypasses spare-capacity decisions nor changes any job lease.
+The second run completes actual base-model peer inference and the public-source fetch, but its
+training-loop cycle fails before worker observation; the retained output omits the specific
+cycle error. Inspection finds that the fixture's relay-only learner cannot use the ordinary
+named-content API, even with its complete pre-provisioned cache. The corrected fixture starts
+that learner with client and relay roles, checks its own cache-only retrieval and then uses the
+same training-loop/approval/serving path. Product access checks stay unchanged. This remains
+explicit public fixture provisioning, not autonomous source discovery; that failed run proves no transition.
+That role-corrected run reaches preflight but rejects the copied cache's inode-bound ownership
+marker before any training begins. The next fixture uses the store's supported same-owner,
+same-filesystem directory relocation instead, preserving the exact marker, cache bytes and
+directory identity. Cache-only admission must then verify the original source and expiry;
+no ownership-marker repair or product-validation bypass is used.
+
+The [corrected `4718cb1c` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35645297213)
+passes, including reconstruction of all 151 original files. Eight actual optimizer updates
+produce the exact adapter parameters applied to a subsequent job by the same broker, through
+its independent retained copy. Original base-model receipts remain unchanged. Local approval
+uses only four held-out target tokens and does not establish general model quality. The
+learner reads the explicitly provisioned cache locally; a separate client demonstrates protected
+source retrieval. Invalid new selection metadata is refused, both protected relay legs and
+cleanup pass, and the development milestone is merged through PR #146. Restart/expiry practice,
+global adoption and full B05 are still open.
 
 ## Owner-first resource allocation
 
@@ -1272,7 +1374,7 @@ inference, rather than stop at separate fragment answers. The original document 
 remain explicitly public. After all fragments complete, the coordinator retains the exact
 generated answers, groups them in source order, and uses the same isolated pinned tokenizer
 to plan fitting synthesis prompts. Their outputs form the next level until one answer remains.
-Every prompt still fits 192 input tokens; every worker keeps its existing resource and lease
+Every prompt fits its enrolled profile (192 or 1,024 input tokens); every worker keeps its resource and lease
 limits. Large frontiers use groups of at most 64 parent outputs, not an enlarged model context.
 
 ```sh
@@ -1300,10 +1402,20 @@ authenticated RPC statuses and signs that limited assertion. A parent model's an
 wrong. Encryption protects transport, not inputs from the selected executing peer.
 
 The result retains original `answers`, all intermediate level records and, on completion,
-`synthesized_answer`. Completion means the actual inference chain finished, not that the final
-answer is correct or semantically exhaustive. The worker's 64-token generation boundary is
-reported explicitly. Wire-truncated or empty parent outputs are not silently used; reductions
-that fail to shrink, or exceed 16 levels, stop incomplete without discarding source inputs.
+`synthesized_answer`. New worker outputs include a versioned `generation` object with the
+actual `stop_reason` (`eos` or `token_limit`) and `max_new_tokens`. Non-default outputs also
+carry their exact `model_profile`; limits are derived from that known profile. EOS on the last permitted
+token is still EOS; token count alone cannot distinguish the two. `text_truncated` independently
+reports whether the wire-text cap removed text. A terminal job receipt remains terminal even
+when its answer is unusable: no automatic resubmission or renewed lease is authorized.
+
+The answer path distinguishes execution completion from finished output. New reductions and
+dependencies do not consume token-limited, wire-truncated, empty or generation-unknown answers.
+Historical receipts without termination metadata remain readable and unchanged, including
+exact retained parent/result files; they are not retroactively certified as EOS output. A new
+presentation can therefore report unfinished/unknown output for historically complete execution.
+EOS establishes only model termination, not correctness, relevance or semantic exhaustiveness.
+Reductions that fail to shrink, or exceed 16 levels, stop incomplete without discarding inputs.
 `--follow` continues bounded task windows, not unlimited per-device execution.
 
 The extended disposable document scenario must demonstrate at least two real reduction levels,

@@ -308,6 +308,7 @@ impl Progress {
                     let mut output = serde_json::json!({"sample_index":row,"text":rows[index]["text"],
                         "provider_key":part.handle.provider_key,"job_id":part.handle.binding.job_id,
                         "report_sha256":status.report_sha256});
+                    batch::output::retain(&rows[index], &mut output)?;
                     if detailed {
                         output["output_index"] = index.into();
                         output["model_fingerprint"] =
@@ -577,9 +578,12 @@ fn snapshot(
     let (source, verified) =
         stored_source(&directory, package, enrollment.verified_at_unix_seconds)?;
     let progress = load_progress(&directory, &source, &verified, &enrollment)?;
+    let outputs = progress.output_rows(detailed)?;
+    let answer_complete = progress.complete() && batch::output::all_complete(&outputs)?;
     Ok(
         serde_json::json!({"dataset_manifest_id":package.manifest_id,"task":package.task,
-        "complete":progress.complete(),"outputs":progress.output_rows(detailed)?}),
+        "complete":progress.complete(),"execution_complete":progress.complete(),
+        "answer_complete":answer_complete,"outputs":outputs}),
     )
 }
 
@@ -956,8 +960,11 @@ async fn advance(
             }));
         }
         completed += usize::from(progress.complete());
+        let outputs = progress.outputs()?;
+        let answer_complete = progress.complete() && batch::output::all_complete(&outputs)?;
         let mut package_report = serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
-            "complete":progress.complete(),"attempts":progress.attempts,"outputs":progress.outputs()?,
+            "complete":progress.complete(),"execution_complete":progress.complete(),"answer_complete":answer_complete,
+            "attempts":progress.attempts,"outputs":outputs,
             "pending_handles":progress.pending(),"task":package.task});
         if enrollment.scheduling == Scheduling::ReadyRowsV1 {
             package_report["ready_rows"] = serde_json::json!(progress.ready_rows()?);
@@ -968,12 +975,17 @@ async fn advance(
         packages.push(package_report);
     }
     let complete = completed == enrollment.packages.len();
+    let answer_complete = complete
+        && packages
+            .iter()
+            .all(|package| package["answer_complete"] == true);
     if complete {
         stopped = "complete";
     } else if *cancelled.borrow() {
         stopped = "interrupted_handles_retained";
     }
     let mut report = serde_json::json!({"version":1,"operation":"compute_workflow","execute":args.execute,
+        "execution_complete":complete,"answer_complete":answer_complete,
         "scheduling":enrollment.scheduling,"complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
         "rounds_this_invocation":rounds,"maximum_seconds_per_worker":args.max_seconds,"stopped":stopped,
         "packages":packages,"receipt_scope":"locally_retained_authenticated_rpc_status",
@@ -1508,6 +1520,7 @@ mod tests {
             task_derivation_v1: true,
             document_inference_v2: false,
             derived_inference_v3: false,
+            successor_activation_v1: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {
@@ -1547,6 +1560,53 @@ mod tests {
             report_sha256: Some(sha(report.as_bytes())),
             report_json: Some(report),
             error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn token_limited_terminal_receipts_are_not_resubmitted_even_with_follow() {
+        let mut fixture = fixture(1);
+        let (_, _, handles) = handles(&fixture, 0);
+        let directory = fixture.options.directory.join("package-0000");
+        let attempt = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&attempt).unwrap();
+        let mut originals = Vec::new();
+        for (index, handle) in handles.iter().enumerate() {
+            save_new(&attempt.join(format!("job-{index}.json")), handle).unwrap();
+            let mut status = synthetic_status(handle);
+            let mut report: serde_json::Value =
+                serde_json::from_str(status.report_json.as_deref().unwrap()).unwrap();
+            report["outputs"][0]["generated_tokens"] = 64.into();
+            report["outputs"][0]["text_truncated"] = false.into();
+            report["outputs"][0]["generation"] =
+                serde_json::json!({"version":1,"stop_reason":"token_limit","max_new_tokens":64});
+            let raw = report.to_string();
+            status.report_sha256 = Some(sha(raw.as_bytes()));
+            status.report_json = Some(raw);
+            batch::save_status(&attempt, handle, &status).unwrap();
+            let path = attempt.join(format!("receipt-{}.json", handle.binding.job_id));
+            originals.push((path.clone(), fs::read(path).unwrap()));
+        }
+        fixture.options.resume = true;
+        fixture.options.follow.follow = true;
+        let report = report(&fixture.options, &fixture.root.path().join("no-agent.sock"))
+            .await
+            .unwrap();
+        assert_eq!(report["complete"], true);
+        assert_eq!(report["execution_complete"], true);
+        assert_eq!(report["answer_complete"], false);
+        assert_eq!(report["rounds_this_invocation"], 0);
+        assert_eq!(
+            report["packages"][0]["pending_handles"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            report["packages"][0]["outputs"][0]["generation"]["stop_reason"],
+            "token_limit"
+        );
+        assert!(!directory.join("attempt-0001").exists());
+        for (path, original) in originals {
+            assert_eq!(fs::read(path).unwrap(), original);
         }
     }
 

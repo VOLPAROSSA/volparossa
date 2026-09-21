@@ -64,6 +64,9 @@ fn package(root: &Path, index: usize) -> Package {
     let mut caps = super::super::tests::handle(21, 1, at + 600).capabilities;
     caps.model.model_id = volparossa_content::agent_artifact::MODEL_ID.into();
     caps.model.model_revision = volparossa_content::agent_artifact::MODEL_REVISION.into();
+    caps.model.base_weights.bytes = volparossa_content::ModelProfile::default()
+        .spec()
+        .weights_bytes;
     caps.model.base_weights.sha256 =
         hex::encode(volparossa_content::agent_artifact::BASE_MODEL_SHA256);
     caps.model_fingerprint = sha(&serde_json::to_vec(&caps.model).unwrap());
@@ -179,6 +182,7 @@ async fn package_receipt_is_yielded_while_other_exact_handle_future_is_alive() {
     let (_owner, activity) = watch::channel(false);
     let mut driver = ReadyCohort::new(&[], Path::new("unused-no-network"), &activity).unwrap();
     let mut senders = Vec::new();
+    let mut original_handles = Vec::new();
     for index in 0..2 {
         let mut package = package(root.path(), index);
         let caps = super::super::tests::handle(21, 1, now().unwrap() + 600).capabilities;
@@ -207,6 +211,7 @@ async fn package_receipt_is_yielded_while_other_exact_handle_future_is_alive() {
             .leases
             .observe(&handle, None, now().unwrap())
             .unwrap();
+        original_handles.push(handle.clone());
         package.rows.clear();
         package.inflight = 1;
         let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
@@ -247,6 +252,27 @@ async fn package_receipt_is_yielded_while_other_exact_handle_future_is_alive() {
         completed
             .join(format!("receipt-{}.json", hex::encode([2; 16])))
             .exists()
+    );
+    // A newly ready child's admission failure is yielded without draining the
+    // unrelated original future. Missing source is intentional: no transport/model.
+    assert_eq!(
+        driver.append(vec![options(root.path(), 2)]).await.unwrap(),
+        vec![2]
+    );
+    let (child, result) = timeout(Duration::from_secs(1), driver.next_completed())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(child, 2);
+    assert!(result.is_err());
+    assert_eq!(driver.tasks.len(), 1);
+    assert!(!senders[0].is_closed());
+    let original = &original_handles[0];
+    assert_eq!(
+        serde_json::to_vec(&driver.leases.held[&original.provider_key][&original.binding.job_id])
+            .unwrap(),
+        serde_json::to_vec(original).unwrap()
     );
     senders.remove(0).send(()).unwrap();
     assert_eq!(driver.next_completed().await.unwrap().unwrap().0, 0);

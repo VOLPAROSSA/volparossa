@@ -509,7 +509,8 @@ def check_package(raw,prefix,data,manifest_id,enrollment,layout,executed,respons
             and actual["model"]["files"]["model.safetensors"]==caps["model"]["base_weights"],"real inference report missing")
         DOC["check_supervisor"](actual)
         output=actual["outputs"][0]
-        require(batch["outputs"][row]==dict(sample_index=row,provider_key=handle["provider_key"],job_id=identifier,text=output["text"]),"joined answer differs")
+        require(batch["outputs"][row]==dict(sample_index=row,provider_key=handle["provider_key"],job_id=identifier,text=output["text"],
+            **SYNTH["generation_fields"](output)),"joined answer differs")
         context=data["inference"][row]
         start=context["start"] if level==0 else min(i["source_start"] for i in context["inputs"])
         end=context["end"] if level==0 else max(i["source_end"] for i in context["inputs"])
@@ -696,15 +697,20 @@ def check(value,revision,network=False):
             answers.append(dict(source_part=index*4+row,start=part["start"],end=part["end"],
                 context_sha256=sha(source[part["start"]:part["end"]]),package_manifest_id=manifest,
                 **{key:answer[key] for key in ("text","provider_key","job_id","report_sha256")},
+                **SYNTH["generation_fields"](answer,annotated=True),
                 source_provenance=provenance(ledger,part["start"],part["end"])))
         parents.extend(produced)
     result,resume=value["result"],value["resume"]
-    require(result["answers"]==resume["answers"]==answers,"fragment output/source provenance differs")
+    require(result["answers"]==resume["answers"]==answers
+        and all(r["version"]==2 and r["execution_complete"] is True and r["answer_complete"] is True
+            and r["complete"] is True and r["semantic_completeness_proven"] is False for r in (result,resume)),
+        "fragment output/source provenance differs")
     levels=result["synthesis"]["levels"]
     require(2<=len(levels)<=16,"no actual multi-level synthesis")
     rounds=len(enrollment["packages"])
     for number,level in enumerate(levels,1):
-        require(level["level"]==number and level["complete"] is True and level["parents"]==len(parents)
+        require(level["level"]==number and level["complete"] is True
+            and level["execution_complete"] is True and level["answer_complete"] is True and level["parents"]==len(parents)
             and len(parents)>1 and len(level["groups"])==(len(parents)+63)//64,"synthesis skipped parent level")
         following=[]
         for group_index,group in enumerate(level["groups"]):
@@ -728,7 +734,7 @@ def check(value,revision,network=False):
                     f"derived-l{number:02d}-g{group_index:04d}-p{p:04d}",SYNTH["PROFILE"])
                 following.extend(check_package(raw,package_prefix,data,manifest,enrollment,layout,executed,response_bytes,number));rounds+=1
         require(level["outputs"]==len(following)<len(parents) and level["answers"]==following
-            and level["generation_limit_reached"] is any(a["generated_tokens"]==64 for a in following)
+            and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a) for a in following)
             and load(f"synthesis/level-{number:02d}-result.json")==level,"synthesis changed exact results or failed reduction")
         parents=following
     require(len(parents)==1,"final synthesis did not reduce to one answer")

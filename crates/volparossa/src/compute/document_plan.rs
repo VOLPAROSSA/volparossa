@@ -1,9 +1,11 @@
 //! Exact byte coverage from the isolated, pinned tokenizer; never a host-side approximation.
 
+use super::ModelProfile;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use volparossa_content::agent_artifact::{MODEL_ID, MODEL_REVISION};
 
 pub(super) const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
@@ -14,6 +16,8 @@ const TOKENIZER_SHA256: &str = "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
     pub(super) version: u32,
+    #[serde(default, skip_serializing_if = "ModelProfile::is_default")]
+    pub(super) model_profile: ModelProfile,
     pub(super) visibility: String,
     pub(super) license: String,
     pub(super) document: String,
@@ -80,15 +84,16 @@ pub(super) struct Plan {
 impl Plan {
     pub(super) fn validate(&self, input: &Input) -> Result<()> {
         input.validate()?;
+        let profile = input.model_profile.spec();
         ensure!(
             self.version == 1
                 && self.source_bytes == input.document.len() as u64
                 && self.source_sha256 == hex::encode(Sha256::digest(input.document.as_bytes()))
                 && self.question_sha256 == hex::encode(Sha256::digest(input.question.as_bytes()))
-                && self.model_id == MODEL_ID
-                && self.model_revision == MODEL_REVISION
+                && self.model_id == profile.model_id
+                && self.model_revision == profile.revision
                 && self.tokenizer_sha256 == TOKENIZER_SHA256
-                && self.prompt_limit == 192
+                && self.prompt_limit == profile.prompt_tokens
                 && self.synthesis == input.synthesis,
             "compute_document_plan_source_or_tokenizer"
         );
@@ -128,6 +133,7 @@ mod tests {
     fn exact_unicode_coverage_refuses_gaps_overlaps_truncation_and_changed_task() {
         let input = Input {
             version: 1,
+            model_profile: ModelProfile::default(),
             visibility: "public".into(),
             license: "CC0-1.0".into(),
             document: "één\nwereld".into(),

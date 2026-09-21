@@ -206,6 +206,14 @@ trained a successor and published that successor for reuse. Public document frag
 been combined into one answer through four real peer-inference levels. These scoped results
 prove execution, not answer quality, general intelligence or universally better updates.
 
+**Learning into live service** now has a real disposable-network proof: an explicitly enabled training loop
+can publish its approved selection to a running peer executor. The executor changes models
+between jobs; existing jobs and receipts keep their original identity, and approval expiry is
+not renewed. The same executor served a base-model job, then a new protected peer job with the
+exact locally trained and approved adapter. This proves the 135M execution chain, not general
+answer quality or automatic network-wide adoption.
+[Use approved successors for new peer jobs →](docs/DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs)
+
 Public work now has verified cross-package peer scheduling: a free worker can take work from
 another signed package while a slower worker continues. **Source collections** now
 add comparisons across explicitly public local documents and selected signed network publications,
@@ -230,10 +238,17 @@ completed real model-and-peer execution, but the generated texts were unrelated 
 that is not useful task decomposition. The current candidate supplies an exact bounded public
 source excerpt, records how much of the source was read, and rejects non-question output.
 Up to four generations share the same token budget and deadline, charging rejected attempts
-too. It never repairs text or supplies replacement questions. Its real model-and-peer execution
-and offline resume now pass, but content review still finds a repeated main question, invented
-facts and answers cut off by the token limit. Useful, source-faithful decomposition remains
-unfinished. The model does not choose task count or shape.
+too. It never repairs text or supplies replacement questions. Real model-and-peer execution
+now passes, but content review still finds a repeated main question, invented facts and answers
+cut off by the token limit. The updated answer path retains the model's actual stop reason
+and prevents unfinished outputs from becoming completed answers or new dependencies; its
+focused checks pass, with live execution of the updated contract still pending.
+Useful, source-faithful decomposition remains unfinished. The model does not choose task count or shape.
+An explicit `smollm2-360m-v1` profile now connects the larger pinned model to planning,
+peer selection, inference and synthesis, with a larger per-answer budget. The existing 135M
+training/adapters remain separate. Its first VM run executes real 360M planning but stops at a
+fixture command error before peer execution; that command is corrected. The complete peer
+workflow and answer-quality review remain pending. A larger model alone is not proof of better answers.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

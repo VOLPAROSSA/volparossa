@@ -26,6 +26,10 @@ import zipfile
 HERE = Path(__file__).resolve().parent
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
+DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
+LARGE_MODEL_PROFILE = "smollm2-360m-v1"
+PROFILES = {DEFAULT_MODEL_PROFILE: (MODEL_ID, REVISION),
+            LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951")}
 RESERVE_BYTES = 64 * 1024 * 1024
 ALLOWED_HOSTS = frozenset({
     "files.pythonhosted.org", "download.pytorch.org", "download-r2.pytorch.org",
@@ -58,11 +62,18 @@ class OfficialRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
-def load_pins():
+def load_pins(model_profile=DEFAULT_MODEL_PROFILE):
+    require(model_profile in PROFILES, "unsupported model profile")
+    model_id, revision = PROFILES[model_profile]
     pins = json.loads((HERE / "model-pins.json").read_text())
+    if model_profile == LARGE_MODEL_PROFILE:
+        additional = json.loads((HERE / "model-pins-360m.json").read_text())
+        require("wheels" not in additional and "source_revisions" not in additional,
+                "model profile must preserve the original runtime lock")
+        pins.update(additional)
     require(pins["format_version"] == 1
             and pins["platform"] == "cpython-3.13-linux-x86_64"
-            and pins["model_id"] == MODEL_ID and pins["revision"] == REVISION,
+            and pins["model_id"] == model_id and pins["revision"] == revision,
             "unsupported provisioning pin format/model")
     require(len(pins["files"]) == 8 and len(pins["wheels"]) == 38,
             "unexpected artifact set")
@@ -73,14 +84,20 @@ def load_pins():
             require(re.fullmatch(r"[A-Za-z0-9_.+\-]+", name) and name not in names,
                     "invalid/duplicate artifact filename")
             names.add(name)
-            require(type(item["bytes"]) is int and 0 < item["bytes"] < 300_000_000,
+            maximum = 723674912 if model_profile == LARGE_MODEL_PROFILE and name == "model.safetensors" else 299_999_999
+            require(type(item["bytes"]) is int and 0 < item["bytes"] <= maximum,
                     "invalid artifact size")
             require(re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "invalid SHA256")
             official_url(item["url"])
             require(urllib.parse.unquote(urllib.parse.urlsplit(item["url"]).path)
                     .endswith("/" + name), "artifact URL/filename mismatch")
     for item in pins["files"]:
-        require(item["url"] == f"https://huggingface.co/{MODEL_ID}/resolve/{REVISION}/{item['path']}",
+        expected_url = f"https://huggingface.co/{model_id}/resolve/{revision}/{item['path']}"
+        if model_profile == LARGE_MODEL_PROFILE and item["path"] == "LICENSE":
+            expected_url = f"https://huggingface.co/{MODEL_ID}/resolve/{REVISION}/LICENSE"
+            require(item["bytes"] == 10172 and item["sha256"] == "59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b"
+                    and pins.get("license_provenance"), "separate Apache license provenance missing")
+        require(item["url"] == expected_url,
                 "model URL is not revision-pinned")
     for item in pins["wheels"]:
         require(item["path"].endswith(".whl"), "source distributions are forbidden")
@@ -243,7 +260,9 @@ def execute(args, pins):
         temporary = root / "tmp"
         for directory in (model, wheels, temporary, root / "cache"):
             directory.mkdir(mode=0o700)
-        (root / "model-pins.json").write_bytes((HERE / "model-pins.json").read_bytes())
+        pin_bytes = ((HERE / "model-pins.json").read_bytes() if pins["model_id"] == MODEL_ID else
+                     (json.dumps(pins, indent=2) + "\n").encode())
+        (root / "model-pins.json").write_bytes(pin_bytes)
         (root / "requirements.lock").write_bytes((HERE / "requirements.lock").read_bytes())
         deadline = time.monotonic() + args.timeout_seconds
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), OfficialRedirect())
@@ -284,13 +303,15 @@ def execute(args, pins):
         report = {
             "format_version": 1, "success": True, "guest": guest_kind,
             "runtime_root": str(runtime), "model_root": str(model),
-            "model_id": MODEL_ID, "revision": REVISION,
+            "model_id": pins["model_id"], "revision": pins["revision"],
             "download_bytes": total, "wheel_expanded_bytes": expanded,
             "budget_bytes": args.budget_bytes, "installed_wheels": len(pins["wheels"]),
             "model_pins_sha256": hashlib.sha256((root / "model-pins.json").read_bytes()).hexdigest(),
             "requirements_sha256": hashlib.sha256((root / "requirements.lock").read_bytes()).hexdigest(),
             "training_performed": False, "runtime_autofetch_enabled": False,
         }
+        if pins["model_id"] != MODEL_ID:
+            report["model_profile"] = LARGE_MODEL_PROFILE
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report), flush=True)
     except BaseException:
@@ -310,19 +331,22 @@ def main(argv=None):
     parser.add_argument("--root", help="new private absolute guest directory; must not exist")
     parser.add_argument("--budget-bytes", type=int, help="maximum downloads plus expanded runtime")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--model-profile", choices=PROFILES, default=DEFAULT_MODEL_PROFILE)
     args = parser.parse_args(argv)
     try:
         require(1 <= args.timeout_seconds <= 3600, "timeout must be 1..3600 seconds")
-        pins = load_pins()
+        pins = load_pins(args.model_profile)
         plan = {
             "mode": "execute" if args.execute else "preview", "root": args.root,
-            "model_id": MODEL_ID, "revision": REVISION, "wheel_count": len(pins["wheels"]),
+            "model_id": pins["model_id"], "revision": pins["revision"], "wheel_count": len(pins["wheels"]),
             "download_bytes": download_total(pins), "budget_bytes": args.budget_bytes,
             "disk_budget_includes": "retained downloads + verified wheel expansion + 64MiB reserve",
             "changes": "new private root only: venv/, model/, wheels/, tmp/, cache/, pin files and report",
             "host_install": False, "training": False,
             "execute_requires": "--execute --yes --disposable-guest --root NEW_PATH --budget-bytes N; disposable KVM/QEMU or GitHub-hosted CI",
         }
+        if args.model_profile != DEFAULT_MODEL_PROFILE:
+            plan["model_profile"] = args.model_profile
         print(json.dumps(plan, indent=2), flush=True)
         if args.execute:
             execute(args, pins)

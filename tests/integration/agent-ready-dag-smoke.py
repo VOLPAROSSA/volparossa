@@ -16,7 +16,10 @@ GRAPH = runpy.run_path(str(HERE / "agent-task-graph-smoke.py"))
 READY = runpy.run_path(str(HERE / "agent-jobs-ready-queue-smoke.py"))
 COLL, DOC, JOBS, SYNTH, CUSTODY = (GRAPH[k] for k in ("COLL", "DOC", "JOBS", "SYNTH", "CUSTODY"))
 read, write, require, sha, encoded = (GRAPH[k] for k in ("read", "write", "require", "sha", "encoded"))
-ATTEMPT, MODEL, MODEL_ID = (GRAPH[k] for k in ("ATTEMPT", "MODEL", "MODEL_ID"))
+ATTEMPT = GRAPH["ATTEMPT"]
+MODEL_PROFILE = "smollm2-360m-v1"
+SELECTED_MODEL = JOBS["TRAIN"]["inference_profile"](MODEL_PROFILE)
+MODEL, MODEL_ID = SELECTED_MODEL["fingerprint"], SELECTED_MODEL["model"]
 HANDLE = GRAPH["HANDLE"]
 PREFIX = "agent-ready-dag"
 KIND = "volparossa-public-ready-dependency-queue"
@@ -32,6 +35,7 @@ SCOPE = ("One literal public README excerpt and an explicit five-node DAG: A and
     "retains its original live lease while A finishes and real C workers execute and complete on the "
     "freed broker under the same owner. Then B continues and D/E finish. All executed jobs, original "
     "signed inputs, retained receipts, protected paths and original-free offline resume are checked. "
+    "The explicit pinned 360M profile must finish every answer with real EOS, not a token-limit stop. "
     "Not automatic planning, answer quality, semantic completeness, private offload, external actions, "
     "full B03 or full alpha. The CPU floor is an explicitly recorded fixture stimulus, not a measurement "
     "of actual CPU load. Exact unmount restores real PSI and the normal owner quiet hold before Resume.")
@@ -153,7 +157,7 @@ def prepare(work):
     own = (source / "ready-dag-model/model.safetensors").stat()
     peer = (work / "agent-jobs-user/provision/model/model.safetensors").stat()
     require((own.st_dev, own.st_ino) != (peer.st_dev, peer.st_ino)
-        and JOBS["file_hash"](source / "ready-dag-model/model.safetensors", 269060552) == MODEL_ID["base_weights"],
+        and JOBS["file_hash"](source / "ready-dag-model/model.safetensors", MODEL_ID["base_weights"]["bytes"]) == MODEL_ID["base_weights"],
         "owner tokenizer model is not independent pinned copy")
     print(json.dumps(dict(source="README.md", original_repository_sha256=sha(original), plan=PLAN,
         excerpt_hex=selected.hex(), excerpt_sha256=sha(selected), excerpt_bytes=len(selected),
@@ -471,9 +475,11 @@ def check_startup(value):
 
 
 def check_summary(value,authority,answers,rounds):
-    require(value["version"]==1 and value["operation"]=="compute_public_task_graph" and value["complete"] is True
+    require(value["version"]==2 and value["operation"]=="compute_public_task_graph" and value["complete"] is True
+        and value["execution_complete"] is True and value["answer_complete"] is True
+        and value["semantic_completeness_proven"] is False
         and value["plan"]==PLAN and value["plan_sha256"]==sha(encoded(PLAN)) and value["nodes"]==[
-            dict(node,complete=True,status="complete",answer=answers[node["id"]]) for node in PLAN["nodes"]]
+            dict(node,complete=True,execution_complete=True,status="complete",answer_status="eos",answer=answers[node["id"]]) for node in PLAN["nodes"]]
         and value["output"]==answers["e"] and value["source_manifest_id"]==authority["source_manifest_id"]
         and value["source_expires_unix_seconds"]==authority["expires_at_unix_seconds"]
         and value["provider_keys"]==authority["provider_keys"] and value["rounds_this_invocation"]==rounds
@@ -482,11 +488,25 @@ def check_summary(value,authority,answers,rounds):
             "model_answer_correctness_proven","full_b03_claimed")),"ready-DAG completion identity/receipt/scope changed")
 
 
+def check_provision(provision):
+    pin_root=HERE/"ml" if (HERE/"ml").is_dir() else HERE.parent.parent/"workers/volparossa-ml"
+    pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
+    weights=next(item for item in pins["files"] if item["path"]=="model.safetensors")
+    require(pins["model_id"]==MODEL_ID["model_id"] and pins["revision"]==MODEL_ID["model_revision"]
+        and {key:weights[key] for key in ("bytes","sha256")}==MODEL_ID["base_weights"],"selected provision pins changed")
+    require(provision["success"] is True and provision["installed_wheels"]==len(pins["wheels"])==38
+        and provision["model_profile"]==MODEL_PROFILE and provision["model_id"]==MODEL_ID["model_id"]
+        and provision["revision"]==MODEL_ID["model_revision"]
+        and provision["download_bytes"]==sum(item["bytes"] for item in pins["files"]+pins["wheels"])==977655758
+        and provision["model_pins_sha256"]==sha((json.dumps(pins,indent=2)+"\n").encode())
+        and provision["requirements_sha256"]==sha((pin_root/"requirements.lock").read_bytes())
+        and provision["budget_bytes"]==3*1024**3 and provision["runtime_autofetch_enabled"] is False
+        and provision["training_performed"] is False,"unverified selected-model provision")
+
+
 def check(value,revision):
     require(value["source_revision"]==revision,"wrong ready-DAG revision")
-    provision=value["provision"]
-    require(provision["success"] is True and provision["installed_wheels"]==38 and provision["download_bytes"]==523040250
-        and provision["training_performed"] is False,"unverified pinned guest provision")
+    check_provision(value["provision"])
     raw={n:bytes.fromhex(v) for n,v in value["result-files"]["raw"].items()};saved=value["result-files"]["snapshot"]
     require(set(raw)==set(saved) and sum(map(len,raw.values()))<=32*1048576
         and all(saved[n]["bytes"]==len(b) and saved[n]["sha256"]==sha(b) for n,b in raw.items()),"retained graph raw hashes differ")
@@ -505,13 +525,14 @@ def check(value,revision):
         and all(w["input_inodes"]["model/model.safetensors"]==original["peer_model_inode"] for w in workers.values()),"actual peer/model lineage differs")
     authority=load("node-0000/document.json");manifest=raw["node-0000/source.manifest"]
     source_id=GRAPH["manifest"](manifest,source,authority,"document-source","text/plain")
-    require(source_id==authority["source_manifest_id"] and authority["expires_at_unix_seconds"]-authority["selected_at_unix_seconds"]==7200,
+    require(source_id==authority["source_manifest_id"] and authority["model_fingerprint"]==MODEL
+        and authority["expires_at_unix_seconds"]-authority["selected_at_unix_seconds"]==7200,
         "source validity renewed")
     DOC["selected_providers"](authority,layout)
     executed,response_bytes,answers={},dict.fromkeys(workers,0),{};rounds=0
     for index in (0,1):
         prefix=f"node-{index:04d}/";enrollment=load(prefix+"document.json");question=PLAN["nodes"][index]["question"]
-        plan=GRAPH["planner"](raw,prefix,source,question)
+        plan=GRAPH["planner"](raw,prefix,source,question,model_profile=MODEL_PROFILE)
         require(len(plan["parts"])==1 and raw[prefix+"source.txt"]==source and raw[prefix+"source.manifest"]==manifest
             and enrollment["version"]==1 and enrollment["scheduling"]=="ready_rows_v1" and enrollment["synthesize"] is True
             and enrollment["source_sha256"]==sha(source) and enrollment["source_bytes"]==len(source)
@@ -524,19 +545,24 @@ def check(value,revision):
         package=prefix+"package-0000"
         identity=GRAPH["manifest"](raw[package+"/dataset.manifest"],raw[package+"/dataset.json"],authority,"document-package-0000",DOC["PROFILE"])
         require(enrollment["packages"]==[dict(manifest_id=identity,dataset_sha256=sha(encoded(data)),first_part=0,rows=1)],"source package mapping differs")
-        produced=GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,index,0,True)
+        produced=GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,index,0,True,model_profile=MODEL_PROFILE)
         answers[PLAN["nodes"][index]["id"]]=produced[0];rounds+=1
         result=load(prefix+"result.json")
-        require(result["complete"] is True and result["synthesized_answer"]==produced[0] and result["synthesis"]["levels"]==[],"source answer replaced")
+        require(result["version"]==2 and result["complete"] is True and result["execution_complete"] is True
+            and result["answer_complete"] is True and result["semantic_completeness_proven"] is False
+            and result["synthesized_answer"]==produced[0] and result["synthesis"]["levels"]==[],"source answer replaced")
     for index in (2,3,4):
         node=PLAN["nodes"][index];question=node["question"];prefix=f"node-{index:04d}";result=load(prefix+"/result.json")
         parents=[answers[name] for name in node["depends_on"]]
-        require(raw[prefix+"/source.manifest"]==manifest and result["operation"]=="compute_graph_dependency"
+        require(raw[prefix+"/source.manifest"]==manifest and result["version"]==2 and result["operation"]=="compute_graph_dependency"
+            and result["execution_complete"] is True and result["answer_complete"] is True
+            and result["semantic_completeness_proven"] is False
             and result["public_question"]==question and result["source_manifest_id"]==source_id
             and result["graph_node"]==dict(node,plan_sha256=sha(encoded(PLAN))),"dependent task/source changed")
         levels=result["synthesis"]["levels"];require(1<=len(levels)<=16,"dependency skipped its own instruction")
         for number,level in enumerate(levels,1):
-            require(level["level"]==number and level["complete"] is True and level["parents"]==len(parents)
+            require(level["level"]==number and level["complete"] is True
+                and level["execution_complete"] is True and level["answer_complete"] is True and level["parents"]==len(parents)
                 and len(level["groups"])==(len(parents)+63)//64,"reduction lost parents")
             following=[]
             for group_index,group in enumerate(level["groups"]):
@@ -548,18 +574,19 @@ def check(value,revision):
                     and authority["selected_at_unix_seconds"]<=stored["created_at_unix_seconds"]<authority["expires_at_unix_seconds"],
                     "derived exact parent receipts/expiry changed")
                 combined,rows=SYNTH["expected_rows"](previous,load(group_prefix+"/document-plan.json")["parts"],question,group_index*64)
-                GRAPH["planner"](raw,group_prefix+"/",combined,question,True)
+                GRAPH["planner"](raw,group_prefix+"/",combined,question,True,model_profile=MODEL_PROFILE)
                 require(group==dict(group=group_index,parents=len(previous),complete=True,parts=len(rows),input_sha256=sha(combined)),"group accounting changed")
                 for p in range((len(rows)+3)//4):
                     package=group_prefix+f"/package-{p:04d}"
                     data=dict(version=3,visibility="public",license="GPL-3.0-only",source_manifest_hex=manifest.hex(),
-                        level=number,claim_scope=SYNTH["CLAIM"],inference=rows[p*4:p*4+4])
+                        level=number,claim_scope=SYNTH["CLAIM"],model_profile=MODEL_PROFILE,inference=rows[p*4:p*4+4])
                     selected=dict(authority,selected_at_unix_seconds=stored["created_at_unix_seconds"])
                     identity=GRAPH["manifest"](raw[package+"/dataset.manifest"],raw[package+"/dataset.json"],selected,
                         f"derived-l{number:02d}-g{group_index:04d}-p{p:04d}",SYNTH["PROFILE"])
-                    following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,index,number,True));rounds+=1
+                    following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,index,number,True,model_profile=MODEL_PROFILE));rounds+=1
             require(level["outputs"]==len(following) and (number==1 or len(following)<len(parents))
-                and level["answers"]==following and level["generation_limit_reached"] is any(a["generated_tokens"]==64 for a in following)
+                and level["answers"]==following and level["generation_limit_reached"] is any(
+                    SYNTH["generation_limited"](a,model_profile=MODEL_PROFILE) for a in following)
                 and load(prefix+f"/synthesis/level-{number:02d}-result.json")==level,"derived level output changed")
             parents=following
         require(len(parents)==1 and result["complete"] is True and result["synthesized_answer"]==parents[0]
@@ -666,17 +693,41 @@ def self_test():
         else:raise AssertionError("uncorrelated cooperative ACK accepted")
     authority=dict(source_manifest_id="a"*64,expires_at_unix_seconds=7200,provider_keys=["b"*64,"c"*64])
     answers={n["id"]:dict(job_id=str(i)*32) for i,n in enumerate(PLAN["nodes"],1)}
-    value=dict(version=1,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
-        plan_sha256=sha(encoded(PLAN)),nodes=[dict(n,complete=True,status="complete",answer=answers[n["id"]]) for n in PLAN["nodes"]],
+    value=dict(version=2,operation="compute_public_task_graph",complete=True,execution_complete=True,answer_complete=True,
+        semantic_completeness_proven=False,plan=copy.deepcopy(PLAN),
+        plan_sha256=sha(encoded(PLAN)),nodes=[dict(n,complete=True,execution_complete=True,status="complete",answer_status="eos",answer=answers[n["id"]]) for n in PLAN["nodes"]],
         output=answers["e"],source_manifest_id=authority["source_manifest_id"],source_expires_unix_seconds=7200,
         provider_keys=authority["provider_keys"],rounds_this_invocation=5,scheduling="shared_ready_dependency_queue_v1",interrupted=False,
         private_data_supported=False,automatic_task_planning=False,external_actions_supported=False,model_answer_correctness_proven=False,full_b03_claimed=False)
     check_summary(value,authority,answers,5)
     for changes in (dict(scheduling="shared_source_queue_then_ordered_dependency_frontiers"),dict(rounds_this_invocation=0),
-                    dict(output=answers["c"]),dict(complete=False),dict(automatic_task_planning=True),dict(source_expires_unix_seconds=7201)):
+                    dict(output=answers["c"]),dict(complete=False),dict(automatic_task_planning=True),dict(source_expires_unix_seconds=7201),
+                    dict(version=1),dict(execution_complete=False),dict(answer_complete=False),dict(semantic_completeness_proven=True)):
         try:check_summary(dict(value,**changes),authority,answers,5)
         except ValueError:pass
         else:raise AssertionError("wrong ready-DAG result accepted")
+    pin_root=HERE.parent.parent/"workers/volparossa-ml"
+    pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
+    provision=dict(success=True,installed_wheels=38,model_profile=MODEL_PROFILE,model_id=MODEL_ID["model_id"],
+        revision=MODEL_ID["model_revision"],download_bytes=977655758,budget_bytes=3*1024**3,
+        model_pins_sha256=sha((json.dumps(pins,indent=2)+"\n").encode()),
+        requirements_sha256=sha((pin_root/"requirements.lock").read_bytes()),
+        runtime_autofetch_enabled=False,training_performed=False)
+    check_provision(provision)
+    for changed in (dict(model_profile="smollm2-135m-v1"),dict(download_bytes=523040250),
+                    dict(model_pins_sha256="0"*64),dict(budget_bytes=4*1024**3)):
+        try:check_provision(dict(provision,**changed))
+        except ValueError:pass
+        else:raise AssertionError("wrong-profile or unpinned provision accepted")
+    generation=dict(version=1,stop_reason="eos",max_new_tokens=256,model_profile=MODEL_PROFILE)
+    output=dict(text="Inert complete answer.",generated_tokens=256,text_truncated=False,generation=generation)
+    assert SYNTH["generation_fields"](output,annotated=True,model_profile=MODEL_PROFILE)["answer_status"]=="eos"
+    assert not SYNTH["generation_limited"](output,model_profile=MODEL_PROFILE)
+    for changed in (dict(generation=dict(generation,stop_reason="token_limit")),dict(text_truncated=True),
+                    dict(generation=dict(version=1,stop_reason="eos",max_new_tokens=64)),dict(text="")):
+        try:SYNTH["generation_fields"](dict(output,**changed),annotated=True,model_profile=MODEL_PROFILE)
+        except ValueError:pass
+        else:raise AssertionError("incomplete or wrong-profile dependency answer accepted")
     assert HANDLE.fullmatch(f"node-0004/synthesis/level-01-group-0000/package-0000/{ATTEMPT}/job-0.json")
     # Synthetic metadata exercises the actual ordering/lease validator, not process proof.
     owner=dict(pid=100,start_ticks=1)
@@ -739,7 +790,7 @@ def self_test():
     try:check_pressure(flow,{"node-0001/receipt-b.json":encoded(dict(status=dict(report_json=json.dumps(worker_report))))})
     except ValueError:pass
     else:raise AssertionError("worker result omitted observed pause")
-    print("ready-DAG startup/cooperative ACK, schema/identity and ordering controls PASS (33 negatives); no model, network or signal executed")
+    print("ready-DAG startup/cooperative ACK, selected-profile/EOS, schema/identity and ordering controls PASS; no model, network or signal executed")
 
 
 def main(args):

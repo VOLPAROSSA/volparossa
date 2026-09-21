@@ -27,7 +27,11 @@ agent_jobs_prepare() {
     jobs_units=
     jobs_batch_pid=
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_root"
-    agent_jobs_private prepare "$jobs_root" >"$WORK/agent-jobs-provision.log" \
+    set -- "$jobs_root"
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then
+        set -- "$@" smollm2-360m-v1
+    fi
+    agent_jobs_private prepare "$@" >"$WORK/agent-jobs-provision.log" \
         2>"$WORK/agent-jobs-provision.err" || fail JOBS_PROVISION_FAILED
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"
 }
@@ -63,6 +67,14 @@ agent_jobs_broker() {
     done
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
+    set --
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then
+        set -- --model-profile smollm2-360m-v1
+    fi
+    if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
+        set -- "$@" --serving-directory "$jobs_private/serving"
+    fi
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
@@ -76,7 +88,7 @@ agent_jobs_broker() {
         --property="StandardError=append:$WORK/agent-jobs-$jobs_node-broker.err" \
         -- "$binary_directory/volparossa" compute serve \
         --runtime-root "$jobs_private/runtime" --model-root "$jobs_root/provision/model" \
-        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || {
+        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" "$@" --execute || {
             agent_jobs_broker_startup start_failed || true
             return 1
         }
@@ -164,6 +176,9 @@ agent_jobs_stop() {
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" cleanup-workers "$WORK" || return 1
+    fi
     [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }
 
@@ -241,6 +256,10 @@ agent_jobs_run() {
     fi
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_run
+        return
+    fi
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_run
         return
     fi
     if [ "${agent_task_graph:-no}" = yes ]; then
@@ -352,6 +371,10 @@ agent_jobs_finalize_report() {
     fi
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_finalize_report "$jobs_status"
         return
     fi
     if [ "${agent_task_graph:-no}" = yes ]; then

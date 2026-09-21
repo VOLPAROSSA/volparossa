@@ -199,6 +199,10 @@ pub struct Capabilities {
     /// This is not an attestation of the parent workers or permission to train on their answers.
     #[serde(default, skip_serializing_if = "is_false")]
     pub derived_inference_v3: bool,
+    /// This owner broker may activate validated local successors for new jobs.
+    /// Existing job bindings stay immutable and pollable through the same broker.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub successor_activation_v1: bool,
 }
 
 /// A content-free suitability query, not publisher authority or a capacity reservation.
@@ -209,6 +213,9 @@ pub struct EligibilityQuery {
     pub publisher_keys: Vec<String>,
     /// Optional exact frozen model fingerprint; absence does not select a model by itself.
     pub model_fingerprint: Option<String>,
+    /// Optional recognized base profile, independent of an approved adapter fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_profile: Option<String>,
     /// Require the existing explicit public-question derivation profile.
     pub require_task_derivation_v1: bool,
     /// Require signed original public-document inference.
@@ -228,6 +235,10 @@ impl EligibilityQuery {
                 .model_fingerprint
                 .as_ref()
                 .is_some_and(|value| !nonzero_hex(value, 64))
+            || self
+                .model_profile
+                .as_deref()
+                .is_some_and(|profile| profile_model_id(profile).is_none())
         {
             return Err(ProtocolError::Invalid);
         }
@@ -257,9 +268,20 @@ impl EligibilityQuery {
                 .model_fingerprint
                 .as_ref()
                 .is_none_or(|expected| expected == &capabilities.model_fingerprint)
+            && self.model_profile.as_deref().is_none_or(|profile| {
+                profile_model_id(profile) == Some(capabilities.model.model_id.as_str())
+            })
             && (!self.require_task_derivation_v1 || capabilities.task_derivation_v1)
             && (!self.require_document_inference_v2 || capabilities.document_inference_v2)
             && (!self.require_derived_inference_v3 || capabilities.derived_inference_v3)
+    }
+}
+
+fn profile_model_id(profile: &str) -> Option<&'static str> {
+    match profile {
+        "smollm2-135m-v1" => Some("HuggingFaceTB/SmolLM2-135M-Instruct"),
+        "smollm2-360m-v1" => Some("HuggingFaceTB/SmolLM2-360M-Instruct"),
+        _ => None,
     }
 }
 
@@ -545,6 +567,7 @@ mod tests {
                     .as_bytes(),
             )],
             model_fingerprint: None,
+            model_profile: None,
             require_task_derivation_v1: false,
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
@@ -596,9 +619,39 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_matches_only_current_capacity_and_requested_profiles() {
-        let mut query = eligibility_query();
-        let mut caps = Capabilities {
+    fn eligibility_base_profile_is_optional_exact_and_legacy_encoding_stays_unchanged() {
+        let original = eligibility_query();
+        let encoded = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            encoded,
+            format!(
+                "{{\"publisher_keys\":[\"{}\"],\"model_fingerprint\":null,\"require_task_derivation_v1\":false,\"require_document_inference_v2\":false,\"require_derived_inference_v3\":false}}",
+                original.publisher_keys[0]
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<EligibilityQuery>(&encoded).unwrap(),
+            original
+        );
+        for profile in ["smollm2-135m-v1", "smollm2-360m-v1"] {
+            let mut query = original.clone();
+            query.model_profile = Some(profile.into());
+            query.validate().unwrap();
+            assert_eq!(
+                serde_json::from_slice::<EligibilityQuery>(&serde_json::to_vec(&query).unwrap())
+                    .unwrap(),
+                query
+            );
+        }
+        for profile in ["", "smollm2-360m", "SMOLLM2-135M-V1", "smollm2-360m-v1 "] {
+            let mut query = original.clone();
+            query.model_profile = Some(profile.into());
+            assert!(query.validate().is_err());
+        }
+    }
+
+    fn capabilities() -> Capabilities {
+        Capabilities {
             model: ModelIdentity {
                 model_id: "fixture".into(),
                 model_revision: "pinned".into(),
@@ -619,7 +672,40 @@ mod tests {
             task_derivation_v1: false,
             document_inference_v2: false,
             derived_inference_v3: false,
-        };
+            successor_activation_v1: false,
+        }
+    }
+
+    #[test]
+    fn successor_activation_is_opt_in_and_legacy_capability_bytes_omit_it() {
+        let caps = capabilities();
+        let legacy = serde_json::to_string(&caps).unwrap();
+        assert!(!legacy.contains("successor_activation_v1"));
+        let decoded: Capabilities = serde_json::from_str(&legacy).unwrap();
+        assert!(!decoded.successor_activation_v1);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+        let mut enabled = caps;
+        enabled.successor_activation_v1 = true;
+        let encoded = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(encoded["successor_activation_v1"], true);
+        assert_eq!(
+            serde_json::from_value::<Capabilities>(encoded.clone()).unwrap(),
+            enabled
+        );
+        let mut invalid = encoded.clone();
+        invalid["successor_activation_v1"] = "true".into();
+        assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
+        for forbidden in ["model_path", "command", "url"] {
+            let mut invalid = encoded.clone();
+            invalid[forbidden] = "not authorized".into();
+            assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn eligibility_matches_only_current_capacity_and_requested_profiles() {
+        let mut query = eligibility_query();
+        let mut caps = capabilities();
         assert!(query.matches(&caps));
         query.require_task_derivation_v1 = true;
         assert!(!query.matches(&caps));
@@ -636,6 +722,18 @@ mod tests {
         query.model_fingerprint = Some("c".repeat(64));
         assert!(!query.matches(&caps));
         query.model_fingerprint = Some(caps.model_fingerprint.clone());
+        assert!(query.matches(&caps));
+        query.model_profile = Some("smollm2-135m-v1".into());
+        assert!(!query.matches(&caps));
+        caps.model.model_id = "HuggingFaceTB/SmolLM2-135M-Instruct".into();
+        assert!(query.matches(&caps));
+        query.model_profile = Some("smollm2-360m-v1".into());
+        assert!(!query.matches(&caps));
+        caps.model.model_id = "HuggingFaceTB/SmolLM2-360M-Instruct".into();
+        assert!(query.matches(&caps));
+        query.model_profile = Some("unrecognized".into());
+        assert!(!query.matches(&caps));
+        query.model_profile = None;
         assert!(query.matches(&caps));
         caps.accepting_work = false;
         assert!(!query.matches(&caps));

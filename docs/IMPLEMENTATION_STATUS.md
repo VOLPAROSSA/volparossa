@@ -58,6 +58,16 @@ uses those same observed bytes; diagnostics do not permit a previously forbidden
 Existing failure export retains this record even without a pressure plan. Pure parser, record,
 size-limit and rejection checks pass alongside the existing helper controls; live diagnosis and
 the required dependency-ready proof remain pending.
+The combined candidate keeps that single dynamic queue while integrating the 360M profile and
+actual generation-end contract. Source and derived frontiers retain the enrolled profile;
+terminal empty, wire-truncated, token-limited or generation-unknown answers cannot create new
+dependencies or a busy follow loop. Unrelated admitted work retains its original lease until
+completion/drain. The updated five-node fixture selects 360M explicitly without changing its
+source, questions, dependency graph, pressure guard or original-worker proof. Its live result
+is still pending; the diagnostic run on `750420e2` tests the preceding 135M snapshot only.
+The combined tree passes 235 focused CLI compute tests, 53 pure worker protocol tests, strict
+CLI Clippy and the targeted ready-DAG/model-planning/successor fixture, shell and KVM-contract
+checks. These do not execute the integrated model/peer workflow or establish answer quality.
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated
@@ -141,6 +151,124 @@ text cap, not generation completeness. These are unresolved usefulness/completen
 not a verified source-faithful answer or a complete task decomposition.
 Seventeen focused Rust tests, forty-two pure worker protocol tests, the updated fixture's
 pure controls, shell checks and strict CLI Clippy pass for this source-grounded change.
+
+The current answer-path correction adds actual token-level `generation` termination metadata:
+`eos` or `token_limit`, with a version and the unchanged 64-token profile bound. An EOS at the
+last permitted token remains EOS, not an inferred token-limit stop. New local inference and
+training reports require this contract; old receipts without it remain generation-unknown.
+Terminal job execution stays terminal, with no implicit resubmission or lease extension.
+Public task/document results distinguish execution completion from usable output, and new
+dependency/synthesis work requires nonempty, non-wire-truncated EOS output. Retained historical
+report/parent/result bytes stay unchanged rather than acquiring invented metadata. EOS alone
+does not prove correct, relevant or semantically complete answers. The 212 focused CLI compute
+tests, 47 pure worker protocol tests and seven targeted pure fixture checks pass. These checks
+do not execute a model; the updated termination contract still needs live execution. No new
+model-quality or complete-alpha claim is made.
+
+The next executable candidate adds explicit `smollm2-360m-v1` selection across guest-only
+provisioning, the isolated worker, broker capabilities, discovery/manual peer enrollment,
+task/document planning, resumed receipts and derived synthesis. It pins the original 360M
+revision and complete assets, permits one ordinary inference row with a 1,024-token prompt,
+256 generated tokens and 4,096 escaped output bytes, and refuses 135M adapters/training.
+The 135M default, historical encodings and training path remain unchanged. New enrollment
+pins a common exact model fingerprint even with manual peers; resume cannot substitute a
+different profile. Signed four-row packages are dispatched as singleton jobs. Complete parent
+answers are retained with the matching profile; no shortened parent or smaller-model fallback
+is introduced. Existing CPU/RSS/deadline limits and separate task-planner budgets stay fixed.
+Compilation, strict Clippy for the four changed crates, 215 CLI compute tests, eleven focused
+content/control/agent profile tests, 53 pure worker tests, seven provisioning tests, the
+targeted pure integration helpers and shell/KVM-contract checks pass. They are local evidence
+only, not model execution. The updated disposable
+`agent-model-planning` [run on `c67e4906`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35648922086)
+executes the pinned 360M planner and enrolls its actual two questions, but fails before peer
+execution: the fixture supplies both `--resume` and `--model-profile`, which the CLI correctly
+rejects. Resume must retain the enrolled profile, not select it again. The fixture now omits
+that redundant flag on peer execution, as it already did for completed offline replay. The
+first generated question still exactly repeats the original user question; the second asks
+about risks and benefits of decentralized user-operated networks and their mitigation. These
+texts do not establish useful decomposition. The complete 360M peer workflow, offline replay
+and answer-quality review remain pending; no performance, full B03 or alpha claim is made.
+Source-exact review of all 125 unchanged original files verifies pinned provision, the actual
+isolated planner, 37 generated tokens in two question-boundary completions, signed-source
+lineage and exact enrollment. Worker/private/network cleanup and identical host bytes pass.
+The run admits zero peer jobs; its sixteen captured packets are not a complete datapath proof.
+
+Verified 135M learning-to-serving slice: an explicit shared `--serving-directory` connects the
+training loop's selected approved local/peer successor to an already running peer-inference
+broker. Publication binds the original approval, exact three adapter files, runtime and expiry;
+idle-only activation copies those bytes into broker-owned bounded storage. Active work and old
+receipts keep their original bindings. The agent attachment follows changing model fingerprints
+only with an explicit broker capability, while preserving its socket, base-model and task-profile
+checks. Static brokers retain their prior behavior. Expired/corrupt selections cannot become
+base-model admission after restart; a retained valid copy stops at its original expiry.
+Thirty-three focused storage, selection, broker, protocol and attachment checks plus strict
+all-target CLI/agent/local-control Clippy pass; the actual trained-model/protected-peer-job
+transition now has the source-exact VM proof below. This is not a B03/B05 completion or evidence
+of general model improvement. The 360M inference-only profile rejects a successor-serving
+directory and does not activate the incompatible 135M adapters.
+See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
+
+The [first learning-to-serving run on
+`98ce45bf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35636907319) fails before
+base-model inference or training. Its 115 unchanged original files show
+`accepting_work=false`, followed by an immediate `compute_peer_busy` refusal before any job
+handle or Submit RPC. The exact capacity constraint is not recorded. The fixture also parses
+the runner's cleanup flag as `yes` instead of `true`; its original report therefore remains
+failed despite independently recorded zero remaining objects and identical host-state hashes.
+The correction waits within a fixed bound for the actual expected broker/model to admit work
+and parses the runner's boolean without relaxing capacity, ownership or cleanup checks.
+Training, activation and adapted peer inference still require a successful new execution.
+
+The [readiness-corrected run on
+`de3922b3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35639387212) verifies actual
+base-model peer inference and a 1,005-byte public-source fetch. It then records an unsuccessful
+training-loop cycle before any training worker is observed. The missing `/proc` entry belongs
+to the loop owner, not an identified training worker. Its 125 unchanged original files contain
+no training report or specific cycle error, so they do not prove a worker crash, memory failure
+or expired lease. Cleanup and unchanged host-state checks pass; the failed run lacks the final
+selection records needed for full protected-path reconstruction.
+
+Source inspection identifies a blocking fixture mismatch: its selected learner is relay-only,
+but named-source retrieval requires the client role even for a complete local cache hit. The
+correction enables client capability in that disposable learner's startup configuration, keeps
+relay service enabled and validates its exact pre-provisioned source through the ordinary
+cache-only API before training. It does not bypass the download ACL or claim learner-side
+network acquisition. Training, approval and same-broker adapted inference still need live proof.
+Pure fixture checks and shell syntax/ShellCheck pass. Failure cleanup now retains only bounded
+fixed-file identities and cycle-state categories, not source text or arbitrary error chains.
+
+The [role-corrected run on
+`41911695`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35642406080) reaches the new
+cache-only preflight with the correct learner roles, but returns `CONTENT_INVALID` before
+training. No cycle is started. The fixture had copied the complete cache, including the owner
+marker bound to its original directory's device, inode and UID; reopening the different copied
+directory is correctly rejected. The fixture correction relocates the closed, same-owner cache
+without changing its directory identity or bytes, an operation already supported by the store.
+It never rewrites the marker or relaxes the product cache validation. The failed run's original
+cleanup records prove removal of its observed workers/private stores and unchanged host state;
+training, approval and activation remain unproved until a successful new run.
+The four existing cache-reopen tests pass, including rename/reopen and copied-marker rejection;
+the fixture's pure relocation checks, shell syntax and ShellCheck also pass. No model was run
+by these checks.
+
+The [corrected run on `4718cb1c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35645297213)
+and independent reconstruction of all 151 unchanged original files **pass**. The same broker
+first serves a real base-model job, then follows eight actual training updates and local
+approval to serve a new job using exactly those trained parameters from its own retained copy.
+The original base-job receipt stays unchanged; invalid new selection metadata does not replace
+the approved copy. Local held-out loss falls from 2.0890 to 1.2442 on only four target tokens:
+this is not general answer-quality evidence. The fixture's same-filesystem cache relocation
+retains inode, ownership marker and file hashes; the learner's source read is explicitly local,
+not autonomous network acquisition. Full protected-path reconstruction, 28,968 captured frames
+with zero drops/direct client-exit packets, worker/private/network cleanup and identical host
+hashes pass. Quality/CodeQL pass, and PR #146 was normally merged as `c1e231d4`, whose tree is
+identical to the tested head. Global model adoption, restart/expiry practice and full B05 remain open.
+Integration of that milestone with the new 360M candidate retains old-model idempotent receipts,
+limits dynamic successor activation to 135M, and keeps both disposable scenarios available.
+The combined tree passes 226 CLI compute tests, four agent successor checks, twelve local-control
+compute checks, strict targeted Clippy and the merged fixture's pure/static checks. The new
+360M peer execution remains pending after the fixture CLI rejection described above; those
+checks do not extend the historical 135M VM proof to it.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

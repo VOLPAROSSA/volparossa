@@ -292,6 +292,30 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             }
         }
     }
+    if matches!(request.mode, Mode::Infer | Mode::Train) {
+        let outputs = value["outputs"]
+            .as_array()
+            .context("compute_result_outputs")?;
+        ensure!(
+            (1..=usize::from(request.model_profile.spec().max_rows)).contains(&outputs.len()),
+            "compute_result_output_count"
+        );
+        for (index, output) in outputs.iter().enumerate() {
+            ensure!(
+                output["sample_index"] == index
+                    && output["text"].as_str().is_some_and(
+                        |text| text.len() <= request.model_profile.spec().max_output_bytes
+                    )
+                    && output["text_truncated"].is_boolean(),
+                "compute_result_output_shape"
+            );
+            ensure!(
+                super::inference_output::Generation::from_output(output, true)?
+                    .is_some_and(|generation| generation.model_profile == request.model_profile),
+                "compute_result_generation_profile"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -789,6 +813,43 @@ mod tests {
 
     fn failure_reply(code: &str) -> Value {
         serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
+    }
+
+    #[test]
+    fn fresh_inference_and_training_require_generation_metadata_but_keep_limited_jobs_terminal() {
+        // Inert result-contract inputs, not model execution or answer-quality evidence.
+        for mode in [Mode::Infer, Mode::Train] {
+            let request = WorkerRequest {
+                version: 1,
+                id: "abc".into(),
+                mode,
+                model_profile: super::super::ModelProfile::default(),
+                model_root: "/model",
+                dataset_path: "/dataset.json",
+                output_root: "/output",
+                adapter_root: None,
+                steps: 1,
+                threads: 1,
+                max_seconds: 60,
+                owner_control: false,
+            };
+            let mut reply = serde_json::json!({"status":"ok","mode":mode,"device":"cpu",
+                "updates_completed":u8::from(mode==Mode::Train),"base_weights_unchanged":true,
+                "adapter_weights_changed":true,"checkpoint_reloaded":true,
+                "outputs":[{"sample_index":0,"text":"Inert partial response",
+                    "generated_tokens":64,"text_truncated":false,
+                    "generation":{"version":1,"stop_reason":"token_limit","max_new_tokens":64}}]});
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]["generation"]["stop_reason"] = "eos".into();
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]["text_truncated"] = true.into();
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_ok());
+            reply["outputs"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("generation");
+            assert!(check_result(&reply, &request, ExitStatus::from_raw(0)).is_err());
+        }
     }
 
     #[test]

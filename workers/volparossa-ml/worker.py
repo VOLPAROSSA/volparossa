@@ -70,6 +70,26 @@ MODEL_HASHES = {
     "tokenizer.json": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
     "tokenizer_config.json": "4ec77d44f62efeb38d7e044a1db318f6a939438425312dfa333b8382dbad98df",
 }
+DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
+LARGE_MODEL_PROFILE = "smollm2-360m-v1"
+MODEL_CONFIG = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": 576,
+                "num_hidden_layers": 30, "num_attention_heads": 9, "num_key_value_heads": 3,
+                "intermediate_size": 1536, "vocab_size": 49152, "max_position_embeddings": 8192,
+                "tie_word_embeddings": True}
+MODEL_PROFILES = {
+    DEFAULT_MODEL_PROFILE: dict(id=MODEL_ID, revision=MODEL_REVISION, files=MODEL_FILES,
+        hashes=MODEL_HASHES, config=MODEL_CONFIG, prompt_tokens=192, new_tokens=64, wire_bytes=1024, max_rows=4),
+    LARGE_MODEL_PROFILE: dict(id="HuggingFaceTB/SmolLM2-360M-Instruct",
+        revision="a10cc1512eabd3dde888204e902eca88bddb4951",
+        files={**MODEL_FILES, "README.md": 7304, "config.json": 846, "model.safetensors": 723674912},
+        hashes={**MODEL_HASHES,
+            "README.md": "6b88794416ac9da8f254ebb0bec228967a2bdd0badf9a2853863928b25facd95",
+            "config.json": "224f72354f10d617a359cc82ad15a3c96e866b9b2ffadb81997eeea9e88e22ee",
+            "model.safetensors": "e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e"},
+        config={**MODEL_CONFIG, "hidden_size": 960, "num_hidden_layers": 32, "num_attention_heads": 15,
+            "num_key_value_heads": 5, "intermediate_size": 2560},
+        prompt_tokens=1024, new_tokens=256, wire_bytes=4096, max_rows=1),
+}
 ADAPTER_FILES = {"adapter_config.json": 16384, "adapter_model.safetensors": 2 * 1024 * 1024,
                  "README.md": 16384}
 # Admission only: these inert defaults are never passed to a backend constructor.
@@ -102,6 +122,11 @@ def require(condition, code):
         raise JobError(code)
 
 
+def model_profile(name=DEFAULT_MODEL_PROFILE):
+    require(type(name) is str and name in MODEL_PROFILES, "UNSUPPORTED_MODEL_PROFILE")
+    return MODEL_PROFILES[name]
+
+
 def no_duplicate_keys(pairs):
     result = {}
     for key, value in pairs:
@@ -127,12 +152,16 @@ def bounded_integer(value, low, high):
 
 def validate_request(value):
     required = {"version", "id", "mode", "model_root", "dataset_path", "output_root"}
-    optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control"}
+    optional = {"steps", "threads", "max_seconds", "adapter_root", "owner_control", "model_profile"}
     require(type(value) is dict and required <= value.keys()
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
     require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks"), "INVALID_JOB_MODE")
+    profile_name = value.get("model_profile", DEFAULT_MODEL_PROFILE)
+    model_profile(profile_name)
+    require(profile_name == DEFAULT_MODEL_PROFILE or (value["mode"] != "train" and "adapter_root" not in value),
+            "MODEL_PROFILE_INFERENCE_ONLY")
     require(value["mode"] != "plan_document" or "adapter_root" not in value, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED")
     require(value["mode"] != "plan_tasks" or "adapter_root" not in value, "TASK_PLAN_ADAPTER_UNSUPPORTED")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
@@ -161,15 +190,17 @@ def validate_sample(sample, answered):
     return sample
 
 
-def validate_dataset(dataset, mode):
+def validate_dataset(dataset, mode, profile_name=DEFAULT_MODEL_PROFILE):
+    profile = model_profile(profile_name)
+    require(profile_name == DEFAULT_MODEL_PROFILE or mode != "train", "MODEL_PROFILE_INFERENCE_ONLY")
     if mode == "plan_document":
-        return validate_document(dataset)
+        return validate_document(dataset, profile_name)
     if mode == "plan_tasks":
-        return validate_task_plan_input(dataset)
+        return validate_task_plan_input(dataset, profile_name)
     if type(dataset) is dict and dataset.get("version") == 2:
-        return validate_document_inference(dataset, mode)
+        return validate_document_inference(dataset, mode, profile_name)
     if type(dataset) is dict and dataset.get("version") == 3:
-        return validate_derived_inference(dataset, mode)
+        return validate_derived_inference(dataset, mode, profile_name)
     fields = {"version", "visibility", "license", "source_revision", "train", "heldout", "inference"}
     require(type(dataset) is dict and dataset.keys() == fields, "INVALID_DATASET_FIELDS")
     require(type(dataset["version"]) is int and dataset["version"] == VERSION
@@ -178,7 +209,7 @@ def validate_dataset(dataset, mode):
     require(type(dataset["source_revision"]) is str and HEX40.fullmatch(dataset["source_revision"]),
             "INVALID_DATASET_REVISION")
     for field, minimum, maximum in (("train", 1 if mode == "train" else 0, 32),
-                                    ("heldout", 1, 8), ("inference", 1, 4)):
+                                    ("heldout", 1, 8), ("inference", 1, profile["max_rows"])):
         rows = dataset[field]
         require(type(rows) is list and minimum <= len(rows) <= maximum, "INVALID_DATASET_SIZE")
         seen = set()
@@ -207,10 +238,12 @@ def public_license(value):
     return type(value) is str and value in PUBLIC_LICENSES
 
 
-def validate_document(dataset):
+def validate_document(dataset, profile_name=DEFAULT_MODEL_PROFILE):
     fields = {"version", "visibility", "license", "document", "question"}
-    require(type(dataset) is dict and fields <= dataset.keys() <= fields | {"synthesis"},
+    require(type(dataset) is dict and fields <= dataset.keys() <= fields | {"synthesis", "model_profile"},
             "INVALID_DOCUMENT_FIELDS")
+    model_profile(profile_name)
+    require(dataset.get("model_profile", DEFAULT_MODEL_PROFILE) == profile_name, "DOCUMENT_MODEL_PROFILE_MISMATCH")
     require(type(dataset.get("synthesis", False)) is bool, "INVALID_DOCUMENT_SYNTHESIS_PROFILE")
     require(type(dataset["version"]) is int and dataset["version"] == 1
             and dataset["visibility"] == "public" and public_license(dataset["license"]), "DOCUMENT_NOT_EXPLICIT_PUBLIC")
@@ -220,10 +253,12 @@ def validate_document(dataset):
     return dataset
 
 
-def validate_task_plan_input(dataset):
-    require(type(dataset) is dict and dataset.keys() == {
-        "version", "visibility", "license", "question", "source_sha256", "source_bytes", "source_excerpt"},
+def validate_task_plan_input(dataset, profile_name=DEFAULT_MODEL_PROFILE):
+    required = {"version", "visibility", "license", "question", "source_sha256", "source_bytes", "source_excerpt"}
+    require(type(dataset) is dict and required <= dataset.keys() <= required | {"model_profile"},
         "INVALID_TASK_PLAN_INPUT_FIELDS")
+    model_profile(profile_name)
+    require(dataset.get("model_profile", DEFAULT_MODEL_PROFILE) == profile_name, "TASK_PLAN_MODEL_PROFILE_MISMATCH")
     require(type(dataset["version"]) is int and dataset["version"] == 2
             and dataset["visibility"] == "public" and public_license(dataset["license"]),
             "TASK_PLAN_NOT_EXPLICIT_PUBLIC")
@@ -262,7 +297,7 @@ def validate_task_questions(value):
     return value
 
 
-def validate_document_inference(dataset, mode):
+def validate_document_inference(dataset, mode, profile_name=DEFAULT_MODEL_PROFILE):
     require(mode == "infer", "DOCUMENT_PROFILE_INFERENCE_ONLY")
     require(dataset.keys() == {"version", "visibility", "license", "source_manifest_hex", "inference"}, "INVALID_DOCUMENT_PROFILE_FIELDS")
     require(type(dataset["version"]) is int and dataset["version"] == 2
@@ -271,7 +306,7 @@ def validate_document_inference(dataset, mode):
     require(type(manifest) is str and 2 <= len(manifest) <= 2 * 65536 and len(manifest) % 2 == 0
             and re.fullmatch(r"[0-9a-f]+", manifest), "INVALID_DOCUMENT_MANIFEST")
     rows = dataset["inference"]
-    require(type(rows) is list and 1 <= len(rows) <= 4, "INVALID_DATASET_SIZE")
+    require(type(rows) is list and 1 <= len(rows) <= model_profile(profile_name)["max_rows"], "INVALID_DATASET_SIZE")
     previous_end = 0
     for row in rows:
         require(type(row) is dict and row.keys() == {"question", "context", "start", "end"}, "INVALID_SAMPLE_FIELDS")
@@ -284,10 +319,13 @@ def validate_document_inference(dataset, mode):
     return dataset
 
 
-def validate_derived_inference(dataset, mode):
+def validate_derived_inference(dataset, mode, profile_name=DEFAULT_MODEL_PROFILE):
     require(mode == "infer", "DERIVED_PROFILE_INFERENCE_ONLY")
-    require(dataset.keys() == {"version", "visibility", "license", "source_manifest_hex", "level", "claim_scope", "inference"},
+    required = {"version", "visibility", "license", "source_manifest_hex", "level", "claim_scope", "inference"}
+    require(required <= dataset.keys() <= required | {"model_profile"},
             "INVALID_DERIVED_PROFILE_FIELDS")
+    profile = model_profile(profile_name)
+    require(dataset.get("model_profile", DEFAULT_MODEL_PROFILE) == profile_name, "DERIVED_MODEL_PROFILE_MISMATCH")
     require(type(dataset["version"]) is int and dataset["version"] == 3
             and dataset["visibility"] == "public" and public_license(dataset["license"])
             and dataset["claim_scope"] == DERIVED_CLAIM_SCOPE and bounded_integer(dataset["level"], 1, 16),
@@ -298,7 +336,7 @@ def validate_derived_inference(dataset, mode):
     require(type(manifest) is str and 2 <= len(manifest) <= 2 * 65536 and len(manifest) % 2 == 0
             and re.fullmatch(r"[0-9a-f]+", manifest), "INVALID_DOCUMENT_MANIFEST")
     rows = dataset["inference"]
-    require(type(rows) is list and 1 <= len(rows) <= 4, "INVALID_DATASET_SIZE")
+    require(type(rows) is list and 1 <= len(rows) <= profile["max_rows"], "INVALID_DATASET_SIZE")
     input_fields = {"text", "provider_key", "job_id", "report_sha256", "package_manifest_id", "model_fingerprint",
                     "output_index", "parent_index", "source_start", "source_end", "piece_start", "piece_end"}
     for row in rows:
@@ -311,7 +349,7 @@ def validate_derived_inference(dataset, mode):
         assembled = bytearray()
         for item in inputs:
             require(type(item) is dict and item.keys() == input_fields, "INVALID_DERIVED_INPUT_FIELDS")
-            raw = public_text(item["text"], 1024, "INVALID_DERIVED_TEXT") + b"\n"
+            raw = public_text(item["text"], profile["wire_bytes"], "INVALID_DERIVED_TEXT") + b"\n"
             for field, length in (("provider_key", 64), ("job_id", 32), ("report_sha256", 64),
                                   ("package_manifest_id", 64), ("model_fingerprint", 64)):
                 value = item[field]
@@ -373,6 +411,8 @@ def read_bounded(path, maximum):
 
 
 def prepare_files(request):
+    profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
+    profile = model_profile(profile_name)
     model_root, model_metadata = plain_path(request["model_root"], True)
     dataset_path, _ = plain_path(request["dataset_path"], False)
     output_root, output_metadata = plain_path(request["output_root"], True)
@@ -382,22 +422,19 @@ def prepare_files(request):
             "OUTPUT_DIRECTORY_NOT_FRESH_PRIVATE")
     require(not model_root.is_relative_to(output_root) and not output_root.is_relative_to(model_root),
             "MODEL_OUTPUT_PATH_OVERLAP")
-    require({path.name for path in model_root.iterdir()} == set(MODEL_FILES), "UNSUPPORTED_MODEL_FILES")
-    files = {name: file_hash(model_root / name, expected_size=size) for name, size in MODEL_FILES.items()}
-    require(all(files[name]["sha256"] == expected for name, expected in MODEL_HASHES.items()),
+    require({path.name for path in model_root.iterdir()} == set(profile["files"]), "UNSUPPORTED_MODEL_FILES")
+    files = {name: file_hash(model_root / name, expected_size=size) for name, size in profile["files"].items()}
+    require(all(files[name]["sha256"] == expected for name, expected in profile["hashes"].items()),
             "MODEL_FILES_NOT_PINNED")
     config = parse_json(read_bounded(model_root / "config.json", 8192))
-    expected = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": 576,
-                "num_hidden_layers": 30, "num_attention_heads": 9, "num_key_value_heads": 3,
-                "intermediate_size": 1536, "vocab_size": 49152, "max_position_embeddings": 8192,
-                "tie_word_embeddings": True}
+    expected = profile["config"]
     require(type(config) is dict and all(config.get(key) == value for key, value in expected.items())
             and "auto_map" not in config and "quantization_config" not in config,
             "UNSUPPORTED_MODEL_ARCHITECTURE")
     maximum = (MAX_DOCUMENT_REQUEST if request["mode"] == "plan_document" else
                MAX_TASK_PLAN_BYTES if request["mode"] == "plan_tasks" else MAX_DATASET)
     raw_dataset = read_bounded(dataset_path, maximum)
-    dataset = validate_dataset(parse_json(raw_dataset), request["mode"])
+    dataset = validate_dataset(parse_json(raw_dataset), request["mode"], profile_name)
     identity = {
         "sha256": hashlib.sha256(raw_dataset).hexdigest(), "bytes": len(raw_dataset),
         "visibility": "public", "license": dataset["license"],
@@ -710,14 +747,14 @@ def load_backend(threads):
     return torch, transformers, peft, versions
 
 
-def load_model(transformers, torch, model_root):
+def load_model(transformers, torch, model_root, profile_name=DEFAULT_MODEL_PROFILE):
     model = transformers.AutoModelForCausalLM.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_safetensors=True,
         dtype=torch.float32, device_map=None, attn_implementation="eager")
     model.to(torch.device("cpu"))
     model.config.use_cache = False
     # Generated public adapter metadata must name the original model, never a local path.
-    model.config._name_or_path = MODEL_ID
+    model.config._name_or_path = model_profile(profile_name)["id"]
     return model
 
 
@@ -739,10 +776,11 @@ def prompt_tokens(tokenizer, row, synthesis=False):
     return prompt
 
 
-def plan_document(tokenizer, dataset, session):
+def plan_document(tokenizer, dataset, session, profile_name=DEFAULT_MODEL_PROFILE):
+    profile = model_profile(profile_name)
     text, question = dataset["document"], dataset["question"]
     synthesis = dataset.get("synthesis", False)
-    limit = MAX_CONTEXT - MAX_NEW_TOKENS
+    limit = profile["prompt_tokens"]
     session.check()
     require(1 <= len(prompt_tokens(tokenizer, {"question": question, "context": ""}, synthesis)) <= limit,
             "DOCUMENT_QUESTION_TOKEN_LIMIT_EXCEEDED")
@@ -785,8 +823,8 @@ def plan_document(tokenizer, dataset, session):
     raw = text.encode("utf-8")
     require(offset == len(raw), "DOCUMENT_COVERAGE_INVALID")
     result = {"version": 1, "source_sha256": hashlib.sha256(raw).hexdigest(), "source_bytes": len(raw),
-            "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(), "model_id": MODEL_ID,
-            "model_revision": MODEL_REVISION, "tokenizer_sha256": MODEL_HASHES["tokenizer.json"],
+            "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(), "model_id": profile["id"],
+            "model_revision": profile["revision"], "tokenizer_sha256": profile["hashes"]["tokenizer.json"],
             "prompt_limit": limit, "parts": parts}
     if synthesis:
         result["synthesis"] = True
@@ -931,8 +969,8 @@ def plan_task_question(model, tokenizer, torch, transformers, dataset, session, 
     return text, record
 
 
-def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
-    validate_task_plan_input(dataset)
+def plan_tasks(model, tokenizer, torch, transformers, dataset, session, profile_name=DEFAULT_MODEL_PROFILE):
+    validate_task_plan_input(dataset, profile_name)
     diagnostic = task_plan_diagnostic(session)
     require(getattr(session, "planner_started", False) is not True and not diagnostic["attempts"]
             and diagnostic["incomplete_attempt"] is False, "TASK_PLAN_ALREADY_STARTED")
@@ -963,15 +1001,18 @@ def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
 
 def execute_task_plan(request, session, tokenizer, torch, transformers, versions,
                       model_root, output_root, dataset, data_identity, model_files):
+    profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
+    profile = model_profile(profile_name)
     task_plan_diagnostic(session)
-    model = load_model(transformers, torch, model_root)
+    model = load_model(transformers, torch, model_root, profile_name)
     session.check()
     session.progress("baseline")
     base_before = parameter_hash(model, False, session)
-    plan, prompt_count, generated_count, stats = plan_tasks(model, tokenizer, torch, transformers, dataset, session)
+    plan, prompt_count, generated_count, stats = plan_tasks(model, tokenizer, torch, transformers, dataset, session, profile_name)
     base_after = parameter_hash(model, False, session)
     require(base_before == base_after, "BASE_WEIGHTS_CHANGED")
-    require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
+    require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+            == profile["hashes"]["model.safetensors"],
             "MODEL_WEIGHTS_CHANGED_ON_DISK")
     raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
     require(len(raw) <= MAX_TASK_PLAN_BYTES, "TASK_PLAN_OUTPUT_TOO_LARGE")
@@ -986,7 +1027,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
     require(artifact["sha256"] == hashlib.sha256(raw).hexdigest(), "TASK_PLAN_OUTPUT_CHANGED")
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": "plan_tasks",
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
-              "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
+              "model": {"id": profile["id"], "revision": profile["revision"], "files": model_files},
               "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
               "model_weights_loaded": True, "goal_only_planning": False,
               "source_contents_read_by_planner": True,
@@ -1001,7 +1042,8 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
     return finish_result(result, output_root, session)
 
 
-def encode_dataset(tokenizer, torch, dataset):
+def encode_dataset(tokenizer, torch, dataset, profile_name=DEFAULT_MODEL_PROFILE):
+    profile = model_profile(profile_name)
     result = {"train": [], "heldout": [], "inference": []}
     synthesis = dataset["version"] == 3
     for split in result:
@@ -1010,7 +1052,7 @@ def encode_dataset(tokenizer, torch, dataset):
             # Transformers 5.16.1 defaults to BatchEncoding; this worker deliberately
             # consumes a flat token-ID list and constructs its own tensors/masks.
             prompt = prompt_tokens(tokenizer, row, synthesis)
-            require(1 <= len(prompt) <= MAX_CONTEXT - MAX_NEW_TOKENS,
+            require(1 <= len(prompt) <= profile["prompt_tokens"],
                     "DOCUMENT_TOKEN_LIMIT_EXCEEDED")
             if split == "inference":
                 result[split].append(torch.tensor([prompt], dtype=torch.long, device="cpu"))
@@ -1018,7 +1060,7 @@ def encode_dataset(tokenizer, torch, dataset):
             complete = tokenizer.apply_chat_template(messages + [{"role": "assistant", "content": row["answer"]}],
                                                      tokenize=True, add_generation_prompt=False, return_dict=False)
             require(type(complete) is list, "MODEL_TOKENIZER_RETURN_TYPE")
-            require(complete[:len(prompt)] == prompt and len(prompt) < len(complete) <= MAX_CONTEXT,
+            require(complete[:len(prompt)] == prompt and len(prompt) < len(complete) <= profile["prompt_tokens"] + profile["new_tokens"],
                     "TRAINING_TOKEN_LIMIT_OR_TEMPLATE_INVALID")
             labels = [-100] * len(prompt) + complete[len(prompt):]
             result[split].append({
@@ -1050,7 +1092,24 @@ def evaluate(model, samples, torch, session):
     return {"loss": total / tokens, "target_tokens": tokens}
 
 
-def generate(model, samples, tokenizer, torch, session, transformers):
+def generation_metadata(tokens, eos_token_id, profile_name=DEFAULT_MODEL_PROFILE):
+    maximum = model_profile(profile_name)["new_tokens"]
+    require(type(tokens) is list and 1 <= len(tokens) <= maximum
+            and all(type(token) is int for token in tokens), "INVALID_GENERATION_TOKENS")
+    if tokens[-1] == eos_token_id:
+        reason = "eos"
+    else:
+        require(len(tokens) == maximum, "GENERATION_STOP_UNCONFIRMED")
+        reason = "token_limit"
+    result = {"version": 1, "stop_reason": reason, "max_new_tokens": maximum}
+    if profile_name != DEFAULT_MODEL_PROFILE:
+        result["model_profile"] = profile_name
+    return result
+
+
+def generate(model, samples, tokenizer, torch, session, transformers, profile_name=DEFAULT_MODEL_PROFILE):
+    profile = model_profile(profile_name)
+    require(1 <= len(samples) <= profile["max_rows"], "INVALID_DATASET_SIZE")
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):
             # Service the original owner's controls on this execution thread after
@@ -1065,20 +1124,22 @@ def generate(model, samples, tokenizer, torch, session, transformers):
         for index, input_ids in enumerate(samples):
             session.check()
             output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
-                                    max_new_tokens=MAX_NEW_TOKENS, do_sample=False, use_cache=True,
+                                    max_new_tokens=profile["new_tokens"], do_sample=False, use_cache=True,
                                     stopping_criteria=transformers.StoppingCriteriaList([OwnerCheckpoint()]),
                                     pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
             session.check()
             generated = output[0, input_ids.shape[1]:]
-            require(generated.numel() <= MAX_NEW_TOKENS, "GENERATION_TOKEN_LIMIT_EXCEEDED")
+            require(generated.numel() <= profile["new_tokens"], "GENERATION_TOKEN_LIMIT_EXCEEDED")
+            generation = generation_metadata(generated.tolist(), tokenizer.eos_token_id, profile_name)
             text = tokenizer.decode(generated, skip_special_tokens=True)
             # Bound the escaped wire representation too: four multilingual responses must
             # not overflow a frame merely because JSON represents one character as \uXXXX.
-            public_text = text[:1024]
-            while len(json.dumps(public_text, ensure_ascii=True).encode("ascii")) > 1024:
+            public_text = text[:profile["wire_bytes"]]
+            while len(json.dumps(public_text, ensure_ascii=True).encode("ascii")) > profile["wire_bytes"]:
                 public_text = public_text[:-1]
             results.append({"sample_index": index, "text": public_text,
-                            "generated_tokens": int(generated.numel()), "text_truncated": public_text != text})
+                            "generated_tokens": int(generated.numel()), "text_truncated": public_text != text,
+                            "generation": generation})
     return results
 
 
@@ -1132,6 +1193,8 @@ def save_checkpoint(model, output_root, session):
 
 
 def execute_job(request, session):
+    profile_name = request.get("model_profile", DEFAULT_MODEL_PROFILE)
+    profile = model_profile(profile_name)
     session.progress("preparing")
     model_root, output_root, dataset, data_identity, model_files = prepare_files(request)
     session.check()
@@ -1146,7 +1209,7 @@ def execute_job(request, session):
     require(tokenizer.pad_token_id == 2 and tokenizer.eos_token_id == 2, "MODEL_TOKENIZER_MISMATCH")
     session.check()
     if request["mode"] == "plan_document":
-        plan = plan_document(tokenizer, dataset, session)
+        plan = plan_document(tokenizer, dataset, session, profile_name)
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
         require(len(raw) <= MAX_DOCUMENT_PLAN, "DOCUMENT_PLAN_TOO_LARGE")
         session.check()
@@ -1160,16 +1223,16 @@ def execute_job(request, session):
         require(artifact["sha256"] == hashlib.sha256(raw).hexdigest(), "DOCUMENT_PLAN_CHANGED")
         result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": "plan_document",
                   "backend_versions": versions, "device": "cpu", "threads": request["threads"],
-                  "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
+                  "model": {"id": profile["id"], "revision": profile["revision"], "files": model_files},
                   "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
                   "model_weights_loaded": False, "network_policy_changed": False}
         return finish_result(result, output_root, session)
     if request["mode"] == "plan_tasks":
         return execute_task_plan(request, session, tokenizer, torch, transformers, versions,
                                  model_root, output_root, dataset, data_identity, model_files)
-    samples = encode_dataset(tokenizer, torch, dataset)
+    samples = encode_dataset(tokenizer, torch, dataset, profile_name)
     session.check()
-    model = load_model(transformers, torch, model_root)
+    model = load_model(transformers, torch, model_root, profile_name)
     session.check()
     input_adapter = None
     if prepared_adapter is not None:
@@ -1177,10 +1240,10 @@ def execute_job(request, session):
                                              trainable=request["mode"] == "train")
     session.progress("baseline")
     baseline = evaluate(model, samples["heldout"], torch, session) if samples["heldout"] else None
-    baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session, transformers)
+    baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session, transformers, profile_name)
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
-              "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
+              "model": {"id": profile["id"], "revision": profile["revision"], "files": model_files},
               "dataset": data_identity, "baseline_evaluation": baseline, "outputs": baseline_outputs,
               "updates_completed": 0, "artifacts": [], "better_answers_claimed": False,
               "network_policy_changed": False, "distributed_training_claimed": False}
@@ -1249,7 +1312,8 @@ def execute_job(request, session):
                     "INPUT_ADAPTER_CHANGED_DURING_INFERENCE")
     # Check original on-disk weights again; the public artifact identity is independent of
     # in-memory frozen-parameter comparison and is required for compatible adapter reuse.
-    require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
+    require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
+            == profile["hashes"]["model.safetensors"],
             "MODEL_WEIGHTS_CHANGED_ON_DISK")
     return finish_result(result, output_root, session)
 

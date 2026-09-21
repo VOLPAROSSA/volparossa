@@ -2,10 +2,12 @@
 
 use std::collections::BTreeSet;
 
+use super::ModelProfile;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+#[cfg(test)]
 use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
 use volparossa_local_control::compute::PublicTask;
 
@@ -20,6 +22,8 @@ pub(super) use recovery::PlanningDiagnostic;
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
     pub(super) version: u32,
+    #[serde(default, skip_serializing_if = "ModelProfile::is_default")]
+    pub(super) model_profile: ModelProfile,
     pub(super) visibility: String,
     pub(super) license: String,
     pub(super) question: String,
@@ -246,6 +250,7 @@ pub(super) fn validate_report(
         "compute_task_plan_input_changed"
     );
     let questions = Questions::decode(artifact)?;
+    let profile = input.model_profile.spec();
     ensure!(
         questions.version == input.version,
         "compute_task_plan_artifact_version"
@@ -293,10 +298,9 @@ pub(super) fn validate_report(
         "compute_task_plan_worker_result"
     );
     ensure!(
-        report["model"]["id"] == MODEL_ID
-            && report["model"]["revision"] == MODEL_REVISION
-            && report["model"]["files"]["model.safetensors"]["sha256"]
-                == hex::encode(BASE_MODEL_SHA256)
+        report["model"]["id"] == profile.model_id
+            && report["model"]["revision"] == profile.revision
+            && report["model"]["files"]["model.safetensors"]["sha256"] == profile.weights_sha256
             && report["dataset"] == input.descriptor(input_bytes)
             && report["artifacts"]
                 == json!([{

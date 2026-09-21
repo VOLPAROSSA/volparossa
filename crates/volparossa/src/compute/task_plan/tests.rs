@@ -1,7 +1,9 @@
 use super::*;
+use crate::compute::ModelProfile;
 
 fn input() -> Input {
     Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "GPL-3.0-only".into(),

@@ -65,6 +65,9 @@ pub struct ComputeDiscoverRequest {
     /// Recovery may explicitly request one compatible replacement without admitting a job.
     #[prost(uint32, tag = "7")]
     pub minimum: u32,
+    /// Optional recognized base profile; approved adapter fingerprints remain selectable.
+    #[prost(string, optional, tag = "8")]
+    pub model_profile: Option<String>,
 }
 
 /// One authenticated capability observation, not a reservation or successful worker job.
@@ -121,6 +124,7 @@ impl ComputeDiscoverRequest {
         let query = crate::compute::EligibilityQuery {
             publisher_keys,
             model_fingerprint: self.model_fingerprint.clone(),
+            model_profile: self.model_profile.clone(),
             require_task_derivation_v1: self.require_task_derivation_v1,
             require_document_inference_v2: self.require_document_inference_v2,
             require_derived_inference_v3: self.require_derived_inference_v3,

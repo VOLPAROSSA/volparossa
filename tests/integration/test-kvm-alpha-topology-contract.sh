@@ -48,6 +48,13 @@ for script in "$GUEST" "$HOST"; do
         | grep -Ei 'model.planning' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-task-graph --scenario agent-model-planning \
         | grep -Ei 'explicit public task graph|Agent-task-graph:' >/dev/null; then exit 1; fi
+    "$script" --preview --scenario agent-successor-serving | grep -Fi 'successor-serving' >/dev/null
+    if "$script" --preview --scenario agent-successor-serving --scenario agent-public-collection \
+        | grep -Fi 'successor-serving' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-model-planning --scenario agent-successor-serving \
+        | grep -Ei 'model.planning' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-successor-serving --scenario agent-model-planning \
+        | grep -Fi 'successor-serving' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-task-graph --scenario agent-public-collection \
         | grep -Ei 'task.graph' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-public-network-sources --scenario agent-public-collection \
@@ -86,7 +93,7 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-successor-serving") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
@@ -113,6 +120,37 @@ grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py report "$rep
 grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py self-test' "$WORKFLOW" >/dev/null
 grep -F 'agent_model_planning_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_model_planning_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+python3 -B - "$HERE" <<'PYTHON_MODEL_PROFILE'
+from pathlib import Path
+import shlex
+import sys
+
+root = Path(sys.argv[1])
+for name, expected_resumes in (("agent-model-planning", 2), ("agent-ready-dag", 1)):
+    script = (root / f"{name}-smoke.sh").read_text().replace("\\\n", " ")
+    command = name.replace("-", "_") + "_cli compute peer document "
+    commands = [shlex.split(line.strip()) for line in script.splitlines() if line.strip().startswith(command)]
+    fresh = [args for args in commands if "--resume" not in args]
+    resumed = [args for args in commands if "--resume" in args]
+    assert len(fresh) == 1 and len(resumed) == expected_resumes, name
+    assert fresh[0][fresh[0].index("--model-profile") + 1] == "smollm2-360m-v1", name
+    assert all("--model-profile" not in args for args in resumed), name
+jobs = (root / "agent-jobs-smoke.sh").read_text()
+profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then'
+assert jobs.count(profile_gate) == 2
+guest = (root / "kvm-alpha-topology.sh").read_text()
+assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ]; then') == 2
+PYTHON_MODEL_PROFILE
+grep -F 'agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-successor-serving-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'agent-successor-serving-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-successor-serving ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-successor-serving-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-successor-serving'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_successor_serving_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_successor_serving_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \

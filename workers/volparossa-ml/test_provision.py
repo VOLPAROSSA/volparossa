@@ -31,6 +31,35 @@ class Response(io.BytesIO):
 
 
 class ProvisionTests(unittest.TestCase):
+    def test_opt_in_360m_preview_preserves_runtime_and_separate_license_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "must-not-be-created"
+            with mock.patch.object(PROVISION.urllib.request, "build_opener", side_effect=AssertionError("preview used network")), \
+                 mock.patch.object(PROVISION.venv.EnvBuilder, "create", side_effect=AssertionError("preview installed")), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(PROVISION.main(["--model-profile", PROVISION.LARGE_MODEL_PROFILE, "--root", str(destination)]), 0)
+            plan = json.loads(output.getvalue())
+            self.assertEqual((plan["model_profile"], plan["download_bytes"], plan["wheel_count"]),
+                             (PROVISION.LARGE_MODEL_PROFILE, 977655758, 38))
+            self.assertFalse(destination.exists())
+        base = PROVISION.load_pins()
+        selected = PROVISION.load_pins(PROVISION.LARGE_MODEL_PROFILE)
+        self.assertEqual(base["wheels"], selected["wheels"])
+        self.assertEqual(base["source_revisions"], selected["source_revisions"])
+        self.assertEqual(selected["revision"], "a10cc1512eabd3dde888204e902eca88bddb4951")
+        self.assertIn("no LICENSE file", selected["license_provenance"])
+        source = importlib.util.spec_from_file_location("profile_worker", HERE / "worker.py")
+        worker = importlib.util.module_from_spec(source)
+        source.loader.exec_module(worker)
+        profile = worker.model_profile(worker.LARGE_MODEL_PROFILE)
+        self.assertEqual({item["path"]: item["bytes"] for item in selected["files"]}, profile["files"])
+        self.assertEqual({item["path"]: item["sha256"] for item in selected["files"]}, profile["hashes"])
+        for item in selected["files"]:
+            identity = PROVISION.PROFILES[PROVISION.DEFAULT_MODEL_PROFILE if item["path"] == "LICENSE" else PROVISION.LARGE_MODEL_PROFILE]
+            self.assertEqual(item["url"], f"https://huggingface.co/{identity[0]}/resolve/{identity[1]}/{item['path']}")
+        with self.assertRaises(PROVISION.ProvisionError):
+            PROVISION.load_pins("unrecognized-model")
+
     def test_graph_reads_own_metadata_not_vendored_distribution_metadata(self):
         # Execute the actual stdlib-only selector from the guest program without
         # importing/installing pip, packaging or the model runtime on this host.

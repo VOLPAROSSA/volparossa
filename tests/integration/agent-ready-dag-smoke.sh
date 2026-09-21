@@ -32,6 +32,7 @@ agent_ready_dag_run() {
     # first startup ACK; no historical broker progress can authorize the floor.
     python3 -B "$dag_script" fresh-brokers "$WORK" || fail READY_DAG_BROKERS_NOT_FRESH
     agent_ready_dag_cli compute peer document --task-plan "$jobs_source/ready-dag-task-plan.json" \
+        --model-profile smollm2-360m-v1 \
         --input "$jobs_source/ready-dag-input.txt" --public-content --license GPL-3.0-only \
         --runtime-root "$jobs_source/ready-dag-runtime" --model-root "$jobs_source/ready-dag-model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \

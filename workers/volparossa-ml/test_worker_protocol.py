@@ -178,6 +178,158 @@ def adapter_bytes(header_change=None, last_float=0.0):
     return len(raw_header).to_bytes(8, "little") + raw_header + bytes(offset - 4) + struct.pack("<f", last_float)
 
 
+class ModelProfileTests(unittest.TestCase):
+    def test_opt_in_profile_preserves_default_requests_and_refuses_training_or_adapters(self):
+        self.assertNotIn("model_profile", WORKER.validate_request(request()))
+        self.assertEqual(WORKER.model_profile()["max_rows"], 4)
+        for mode in ("infer", "plan_document", "plan_tasks"):
+            value = dict(request(), mode=mode, model_profile=WORKER.LARGE_MODEL_PROFILE)
+            self.assertEqual(WORKER.validate_request(value)["model_profile"], WORKER.LARGE_MODEL_PROFILE)
+            with self.assertRaisesRegex(WORKER.JobError, "MODEL_PROFILE_INFERENCE_ONLY"):
+                WORKER.validate_request(dict(value, adapter_root="/adapter"))
+        with self.assertRaisesRegex(WORKER.JobError, "MODEL_PROFILE_INFERENCE_ONLY"):
+            WORKER.validate_request(dict(request(), model_profile=WORKER.LARGE_MODEL_PROFILE))
+        for profile in (None, True, [], "smollm2-360m", "other-model"):
+            with self.subTest(profile=profile), self.assertRaisesRegex(WORKER.JobError, "UNSUPPORTED_MODEL_PROFILE"):
+                WORKER.validate_request(dict(request(), mode="infer", model_profile=profile))
+
+    def test_planning_and_derived_inputs_bind_the_request_profile_without_changing_legacy(self):
+        document = dict(version=1, visibility="public", license="CC0-1.0", document="Public source.", question="What?")
+        for mode, original in (("plan_document", document), ("plan_tasks", task_plan_input()), ("infer", derived_dataset())):
+            self.assertEqual(WORKER.validate_dataset(original, mode), original)
+            selected = dict(original, model_profile=WORKER.LARGE_MODEL_PROFILE)
+            self.assertEqual(WORKER.validate_dataset(selected, mode, WORKER.LARGE_MODEL_PROFILE), selected)
+            for value, profile in ((original, WORKER.LARGE_MODEL_PROFILE), (selected, WORKER.DEFAULT_MODEL_PROFILE)):
+                with self.subTest(mode=mode, profile=profile), self.assertRaises(WORKER.JobError):
+                    WORKER.validate_dataset(value, mode, profile)
+        large = dict(derived_dataset("x" * 4096), model_profile=WORKER.LARGE_MODEL_PROFILE)
+        large["inference"][0]["context"] = "x" * 4096
+        large["inference"][0]["inputs"][0]["piece_end"] = 4096
+        WORKER.validate_dataset(large, "infer", WORKER.LARGE_MODEL_PROFILE)
+        with self.assertRaisesRegex(WORKER.JobError, "INVALID_DERIVED_TEXT"):
+            WORKER.validate_dataset(dict(large, model_profile=WORKER.DEFAULT_MODEL_PROFILE), "infer")
+        for source in (large, dataset()):
+            bad = copy.deepcopy(source)
+            bad["inference"] *= 2
+            with self.assertRaisesRegex(WORKER.JobError, "INVALID_DATASET_SIZE"):
+                WORKER.validate_dataset(bad, "infer", WORKER.LARGE_MODEL_PROFILE)
+
+    def test_large_profile_checks_exact_original_assets_and_architecture(self):
+        profile = WORKER.model_profile(WORKER.LARGE_MODEL_PROFILE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, output, source = root/"model", root/"output", root/"input.json"
+            model.mkdir(mode=0o700)
+            output.mkdir(mode=0o700)
+            for name in profile["files"]:
+                (model/name).touch(mode=0o600)
+            (model/"config.json").write_text(json.dumps(profile["config"]))
+            source.write_text(json.dumps(dict(task_plan_input(), model_profile=WORKER.LARGE_MODEL_PROFILE)))
+            value = WORKER.validate_request(dict(request(), mode="plan_tasks", model_profile=WORKER.LARGE_MODEL_PROFILE,
+                model_root=str(model), output_root=str(output), dataset_path=str(source)))
+            def file_hash(path, expected_size=None):
+                self.assertEqual(expected_size, profile["files"][path.name])
+                return dict(bytes=expected_size, sha256=profile["hashes"][path.name])
+            with mock.patch.object(WORKER, "file_hash", side_effect=file_hash):
+                prepared = WORKER.prepare_files(value)
+                self.assertEqual(prepared[4]["model.safetensors"]["bytes"], 723674912)
+                self.assertEqual(prepared[2]["model_profile"], WORKER.LARGE_MODEL_PROFILE)
+                (model/"config.json").write_text(json.dumps(WORKER.MODEL_CONFIG))
+                with self.assertRaisesRegex(WORKER.JobError, "UNSUPPORTED_MODEL_ARCHITECTURE"):
+                    WORKER.prepare_files(value)
+            self.assertEqual(len(WORKER.adapter_shapes()), 120)
+            self.assertEqual(sum(shape[0] * shape[1] for shape in WORKER.adapter_shapes().values()), 230400)
+
+    def test_large_generation_uses_exact_tokens_owner_checkpoint_and_separate_wire_bound(self):
+        for tokens, reason in (([21, 2], "eos"), ([21] * 255 + [2], "eos"), ([21] * 256, "token_limit")):
+            model, tokenizer, torch, transformers = task_planner_doubles("é" * 4096, generated=tokens)
+            session = mock.Mock()
+            prompt = torch.tensor([[11, 12, 13]])
+            result = WORKER.generate(model, [prompt], tokenizer, torch, session, transformers, WORKER.LARGE_MODEL_PROFILE)[0]
+            self.assertEqual(result["generation"], dict(version=1, stop_reason=reason, max_new_tokens=256,
+                model_profile=WORKER.LARGE_MODEL_PROFILE))
+            self.assertEqual(model.generate.call_args.kwargs["max_new_tokens"], 256)
+            self.assertFalse(model.generate.call_args.kwargs["do_sample"])
+            self.assertEqual(session.check.call_count, 3)
+            self.assertTrue(result["text_truncated"])
+            self.assertLessEqual(len(json.dumps(result["text"], ensure_ascii=True).encode()), 4096)
+            self.assertGreater(len(json.dumps(result["text"], ensure_ascii=True).encode()), 1024)
+            with self.assertRaisesRegex(WORKER.JobError, "INVALID_DATASET_SIZE"):
+                WORKER.generate(model, [prompt, prompt], tokenizer, torch, session, transformers, WORKER.LARGE_MODEL_PROFILE)
+        for tokens in ([], [21] * 255, [21] * 257):
+            with self.assertRaises(WORKER.JobError):
+                WORKER.generation_metadata(tokens, 2, WORKER.LARGE_MODEL_PROFILE)
+        self.assertNotIn("model_profile", WORKER.generation_metadata([21, 2], 2))
+
+    def test_large_document_planning_and_encoding_share_the_1024_prompt_limit(self):
+        source = dict(version=1, visibility="public", license="CC0-1.0", document="Exact public text.",
+            question="What?", model_profile=WORKER.LARGE_MODEL_PROFILE)
+        _, tokenizer, torch, _ = task_planner_doubles("unused", prompt=[11] * 1024)
+        plan = WORKER.plan_document(tokenizer, source, mock.Mock(), WORKER.LARGE_MODEL_PROFILE)
+        self.assertEqual((plan["model_id"], plan["model_revision"], plan["prompt_limit"]),
+            (WORKER.model_profile(WORKER.LARGE_MODEL_PROFILE)["id"], WORKER.model_profile(WORKER.LARGE_MODEL_PROFILE)["revision"], 1024))
+        self.assertEqual(plan["parts"], [dict(start=0, end=len(source["document"]), prompt_tokens=1024)])
+        inference = dict(version=2, inference=[dict(question=source["question"], context=source["document"])])
+        encoded = WORKER.encode_dataset(tokenizer, torch, inference, WORKER.LARGE_MODEL_PROFILE)
+        self.assertEqual(encoded["inference"][0].shape[1], 1024)
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_QUESTION_TOKEN_LIMIT_EXCEEDED"):
+            WORKER.plan_document(tokenizer, dict(source, model_profile=WORKER.DEFAULT_MODEL_PROFILE), mock.Mock())
+        tokenizer.apply_chat_template.return_value = [11] * 1025
+        with self.assertRaisesRegex(WORKER.JobError, "DOCUMENT_TOKEN_LIMIT_EXCEEDED"):
+            WORKER.encode_dataset(tokenizer, torch, inference, WORKER.LARGE_MODEL_PROFILE)
+
+    def test_large_profile_executes_existing_mode_branches_with_bounded_reports(self):
+        # Inert backend doubles exercise actual dispatch, artifact writers and frame
+        # accounting; this is not successful real-model or answer-quality evidence.
+        profile = WORKER.model_profile(WORKER.LARGE_MODEL_PROFILE)
+        files = {name: dict(bytes=size, sha256=profile["hashes"][name]) for name,size in profile["files"].items()}
+        for mode in ("infer", "plan_document", "plan_tasks"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if mode == "plan_tasks":
+                    source = dict(task_plan_input(), model_profile=WORKER.LARGE_MODEL_PROFILE)
+                elif mode == "plan_document":
+                    source = dict(version=1, visibility="public", license="CC0-1.0", document="Public source.",
+                        question="What?", model_profile=WORKER.LARGE_MODEL_PROFILE)
+                else:
+                    source = dict(version=2, inference=[dict(question="What?", context="Public source.")])
+                model, tokenizer, torch, transformers = task_planner_doubles(
+                    ["Which source requirement?", "Which source limitation?"] if mode == "plan_tasks" else "é" * 4096)
+                value = WORKER.validate_request(dict(request(), mode=mode, model_profile=WORKER.LARGE_MODEL_PROFILE,
+                    output_root=str(root)))
+                real_hash = WORKER.file_hash
+                def file_hash(path, *args, **kwargs):
+                    if path.name == "model.safetensors":
+                        self.assertEqual(args[0], 723674912)
+                        return files[path.name]
+                    return real_hash(path, *args, **kwargs)
+                with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, source, {"sha256":"a"*64}, files)), \
+                     mock.patch.object(WORKER, "configure_offline"), \
+                     mock.patch.object(WORKER, "load_backend", return_value=(torch, transformers, mock.Mock(), WORKER.BACKENDS)), \
+                     mock.patch.object(WORKER, "load_model", return_value=model) as loader, \
+                     mock.patch.object(WORKER, "parameter_hash", return_value=dict(sha256="b"*64, parameters=361821120)), \
+                     mock.patch.object(WORKER, "file_hash", side_effect=file_hash), \
+                     mock.patch.object(WORKER, "new_lora", side_effect=AssertionError("360M created adapter")), \
+                     mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()):
+                    result = WORKER.execute_job(value, WORKER.Session(value))
+                self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))
+                self.assertEqual(result["updates_completed"], 0)
+                self.assertLessEqual((root/"report.json").stat().st_size, WORKER.MAX_LINE)
+                if mode == "plan_document":
+                    loader.assert_not_called()
+                    self.assertEqual(json.loads((root/"document-plan.json").read_text())["prompt_limit"], 1024)
+                else:
+                    loader.assert_called_once_with(transformers, torch, root/"model", WORKER.LARGE_MODEL_PROFILE)
+                if mode == "plan_tasks":
+                    self.assertEqual(len(result["planner_attempts"]), 2)
+                    self.assertEqual(result["planner_generated_tokens"], 6)
+                    self.assertTrue(all(item["max_new_tokens"] == 192 for item in result["planner_attempts"]))
+                    self.assertEqual((WORKER.TASK_PLAN_PROMPT_TOKENS, WORKER.TASK_PLAN_NEW_TOKENS, WORKER.TASK_PLAN_MAX_ATTEMPTS), (512, 384, 4))
+                elif mode == "infer":
+                    self.assertEqual(len(result["outputs"]), 1)
+                    self.assertEqual(result["outputs"][0]["generation"]["model_profile"], WORKER.LARGE_MODEL_PROFILE)
+
+
 class WorkerProtocolTests(unittest.TestCase):
     def test_task_planning_admission_requires_explicit_public_source_and_has_no_adapter(self):
         source = task_plan_input()
@@ -321,10 +473,36 @@ class WorkerProtocolTests(unittest.TestCase):
 
         model.generate.side_effect = generate
         result = WORKER.generate(model, [prompt], tokenizer, torch, session, transformers)
-        self.assertEqual(result, [dict(sample_index=0, text="Retained model text.", generated_tokens=3, text_truncated=False)])
+        self.assertEqual(result, [dict(sample_index=0, text="Retained model text.", generated_tokens=3, text_truncated=False,
+                                      generation=dict(version=1, stop_reason="eos", max_new_tokens=64))])
         self.assertEqual(session.check.call_count, 5)  # Before, each token, after.
         self.assertEqual(tokenizer.decode.call_args.args[0].tolist(), [21, 22, 2])
         self.assertEqual(tokenizer.decode.call_args.kwargs, dict(skip_special_tokens=True))
+
+    def test_inference_reports_actual_eos_including_last_budget_token(self):
+        for tokens, reason in (([21, 2], "eos"), ([21] * 63 + [2], "eos"), ([21] * 64, "token_limit")):
+            with self.subTest(tokens=len(tokens), reason=reason):
+                model, tokenizer, torch, transformers = task_planner_doubles("Real result text.", generated=tokens)
+                result = WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)
+                self.assertEqual(result[0]["generation"], dict(version=1, stop_reason=reason, max_new_tokens=64))
+                self.assertEqual(result[0]["generated_tokens"], len(tokens))
+                self.assertFalse(result[0]["text_truncated"])
+
+    def test_inference_short_or_empty_generation_cannot_invent_eos(self):
+        for tokens in ([], [21], [21] * 63):
+            with self.subTest(tokens=len(tokens)):
+                model, tokenizer, torch, transformers = task_planner_doubles("Never decoded.", generated=tokens)
+                with self.assertRaises(WORKER.JobError):
+                    WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)
+                tokenizer.decode.assert_not_called()
+
+    def test_inference_wire_truncation_is_independent_of_generation_stop(self):
+        for tokens, reason in (([21, 2], "eos"), ([21] * 64, "token_limit")):
+            model, tokenizer, torch, transformers = task_planner_doubles("é" * 1024, generated=tokens)
+            result = WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)[0]
+            self.assertEqual(result["generation"]["stop_reason"], reason)
+            self.assertTrue(result["text_truncated"])
+            self.assertLessEqual(len(json.dumps(result["text"], ensure_ascii=True).encode("ascii")), 1024)
 
     def test_inference_owner_cancellation_or_deadline_cannot_emit_a_completed_answer(self):
         for cause in ("JOB_CANCELLED", "JOB_DEADLINE_EXCEEDED", "OWNER_CONTROL_CLOSED"):

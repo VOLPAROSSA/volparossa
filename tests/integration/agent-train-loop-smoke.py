@@ -540,7 +540,7 @@ def check_validation_outputs(outputs):
     require(isinstance(outputs, list) and len(outputs) == 1, "wrong second-source output count")
     output = outputs[0]
     require(isinstance(output, dict)
-            and set(output) == {"sample_index", "text", "generated_tokens", "text_truncated"},
+            and set(output) == {"sample_index", "text", "generated_tokens", "text_truncated", "generation"},
             "second-source output is not the fixed worker result profile")
     require(type(output["sample_index"]) is int and output["sample_index"] == 0
             and isinstance(output["text"], str)
@@ -548,6 +548,7 @@ def check_validation_outputs(outputs):
             and type(output["generated_tokens"]) is int and 0 <= output["generated_tokens"] <= 64
             and type(output["text_truncated"]) is bool,
             "second-source output index, text, token bound or truncation flag differs")
+    TRAIN["check_generation"](output)
 
 
 def check_validation(cycle):
@@ -1248,7 +1249,8 @@ def synthetic_validation(cycle, publisher, approved):
             dataset=dict(source["dataset"], source_revision="a" * 40, training_examples=0, heldout_examples=1,
                 inference_examples=1, visibility="public", license="GPL-3.0-only"),
             outputs=[dict(sample_index=0, text="Parser fixture only; no model ran.",
-                          generated_tokens=8, text_truncated=False)],
+                          generated_tokens=8, text_truncated=False,
+                          generation=dict(version=1, stop_reason="eos", max_new_tokens=64))],
             better_answers_claimed=False, network_policy_changed=False,
             input_adapter=adapter, baseline_evaluation=dict(loss=2.0 if stage == "baseline" else 1.5 if approved else 2.5,
                 target_tokens=8), elapsed_ms=1000)
@@ -1574,24 +1576,32 @@ def catalog_chain_test():
 
 def validation_outputs_test():
     # Exact worker.generate result shape; these are parser fixtures, not generated answers.
-    output = dict(sample_index=0, text="Synthetic public answer.", generated_tokens=8, text_truncated=False)
+    output = dict(sample_index=0, text="Synthetic public answer.", generated_tokens=8, text_truncated=False,
+                  generation=dict(version=1, stop_reason="eos", max_new_tokens=64))
     check_validation_outputs([output])
-    check_validation_outputs([dict(output, text="", generated_tokens=0)])
+    check_validation_outputs([dict(output, text="", generated_tokens=1)])
     check_validation_outputs([dict(output, text="\u00e9", generated_tokens=64, text_truncated=True)])
+    check_validation_outputs([dict(output, generated_tokens=64,
+        generation=dict(version=1, stop_reason="token_limit", max_new_tokens=64))])
     invalid = [None, [], [output, output], ["old incorrect string fixture"], [dict(output, extra=True)],
                [{key:value for key,value in output.items() if key != "text_truncated"}]]
     for field, value in (("sample_index", 1), ("sample_index", False), ("text", None),
                          ("text", "x" * 1023), ("text", "\u00e9" * 171),
-                         ("generated_tokens", -1), ("generated_tokens", 65),
+                         ("generated_tokens", -1), ("generated_tokens", 0), ("generated_tokens", 65),
                          ("generated_tokens", True), ("text_truncated", "false")):
         invalid.append([dict(output, **{field:value})])
+    invalid.extend([dict(output, generation=value)] for value in (None, {},
+        dict(version=1, stop_reason="unknown", max_new_tokens=64),
+        dict(version=1, stop_reason="token_limit", max_new_tokens=64),
+        dict(version=True, stop_reason="eos", max_new_tokens=64),
+        dict(version=1, stop_reason="eos", max_new_tokens=65)))
     for value in invalid:
         try:
             check_validation_outputs(value)
         except ValueError:
             continue
         raise AssertionError("invalid fixed-worker second-source output accepted")
-    print("agent-train-loop actual worker output profile + 15 shape/index/text/token/flag rejections PASS; synthetic only")
+    print("agent-train-loop actual worker output profile, EOS/token-limit and invalid output rejections PASS; synthetic only")
 
 
 def shared_updates_test():

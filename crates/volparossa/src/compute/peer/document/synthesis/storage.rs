@@ -221,6 +221,7 @@ pub(super) async fn prepare(
             && super::unusable(parents).is_none(),
         "compute_synthesis_parent_budget"
     );
+    super::check_parent_profiles(original, parents)?;
     directory(root)?;
     let group = group(root, enrollment, parents, offset, level)?;
     retain_json(root, "parents.json", &parents)?;
@@ -249,6 +250,7 @@ pub(super) async fn prepare(
 fn reduction_input(original: &Input, parents: &[Answer]) -> Result<Input> {
     let input = Input {
         version: 1,
+        model_profile: original.model_profile,
         visibility: "public".into(),
         license: original.license.clone(),
         document: combined(parents),
@@ -277,6 +279,7 @@ pub(super) fn restore(
             && super::unusable(parents).is_none(),
         "compute_synthesis_parent_budget"
     );
+    super::check_parent_profiles(original, parents)?;
     if !document_storage::present(root)? {
         return Ok(None);
     }
@@ -331,6 +334,7 @@ fn from_plan(
         .chunks(4)
         .map(|rows| {
             let dataset = DerivedDataset {
+                model_profile: input.model_profile,
                 version: 3,
                 visibility: "public".into(),
                 license: input.license.clone(),

@@ -44,6 +44,7 @@ impl Options {
         derived: bool,
     ) -> Result<rpc::EligibilityQuery> {
         let query = rpc::EligibilityQuery {
+            model_profile: None,
             publisher_keys: publishers
                 .into_iter()
                 .collect::<BTreeSet<_>>()
@@ -93,6 +94,7 @@ async fn select_query(
     ensure!(!*cancelled.borrow(), "compute_discovery_cancelled");
     query.validate()?;
     let request = volparossa_local_control::ComputeDiscoverRequest {
+        model_profile: query.model_profile.clone(),
         publisher_keys: query
             .publisher_keys
             .iter()

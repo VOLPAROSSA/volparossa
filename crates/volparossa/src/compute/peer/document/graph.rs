@@ -122,6 +122,7 @@ fn load(root: &Path) -> Result<Loaded> {
                 && saved.native_source_proofs_sha256 == authority.native_source_proofs_sha256
                 && text.document == input.document
                 && text.license == input.license
+                && text.model_profile == input.model_profile
                 && text.question == plan.nodes[leaf.node].question,
             "compute_graph_shared_source_or_task_changed"
         );
@@ -190,6 +191,16 @@ pub(super) async fn run(
 /// Revalidate the exact receipt-derived answer on replay, retaining the original execution summary.
 fn retain_result(root: &Path, result: &Value) -> Result<()> {
     let path = root.join("result.json");
+    if super::output::preserve_legacy_result(
+        &path,
+        super::MAX_RESULT_BYTES as u64,
+        result["rounds_this_invocation"]
+            .as_u64()
+            .context("compute_graph_rounds")?,
+        result,
+    )? {
+        return Ok(());
+    }
     if result["complete"] == true && result["rounds_this_invocation"] == 0 && path.try_exists()? {
         let saved: Value = serde_json::from_slice(&read_file(&path, super::MAX_RESULT_BYTES)?)?;
         let answer = if result["operation"] == "compute_public_task_graph" {
@@ -228,12 +239,7 @@ fn summarize(
     states: &BTreeMap<usize, Value>,
     complete: &BTreeMap<usize, synthesis::Answer>,
 ) -> Result<Value> {
-    let summaries = loaded.plan.nodes.iter().enumerate().map(|(index, node)| {
-        json!({"id":node.id,"question":node.question,"depends_on":node.depends_on,
-            "complete":complete.contains_key(&index),"status":if complete.contains_key(&index) { "complete" }
-                else if states.contains_key(&index) { "pending" } else { "awaiting_dependencies" },
-            "answer":complete.get(&index)})
-    }).collect::<Vec<_>>();
+    let summaries = summarize_nodes(loaded, states, complete);
     let output_node = loaded
         .plan
         .node(&loaded.plan.output)
@@ -245,7 +251,9 @@ fn summarize(
         .position(|node| node.id == output_node.id)
         .context("compute_graph_output")?;
     let output = complete.get(&output_index);
-    let mut result = json!({"version":1,"operation":"compute_public_task_graph","complete":output.is_some(),
+    let mut result = json!({"version":2,"operation":"compute_public_task_graph","complete":output.is_some(),
+        "answer_complete":output.is_some(),"execution_complete":states.len()==loaded.plan.nodes.len()
+            && states.values().all(|state| state["execution_complete"]==true),"semantic_completeness_proven":false,
         "plan_sha256":loaded.enrollment.plan_sha256,"plan":loaded.plan,"nodes":summaries,"output":output,
         "source_manifest_id":loaded.authority.source_manifest_id,"source_expires_unix_seconds":loaded.authority.expires_at_unix_seconds,
         "provider_keys":loaded.authority.provider_keys,"rounds_this_invocation":rounds,"interrupted":*cancelled.borrow(),
@@ -259,6 +267,24 @@ fn summarize(
     }
     attach_provenance(&args.directory, loaded, output, &mut result)?;
     Ok(result)
+}
+
+fn summarize_nodes(
+    loaded: &Loaded,
+    states: &BTreeMap<usize, Value>,
+    complete: &BTreeMap<usize, synthesis::Answer>,
+) -> Vec<Value> {
+    loaded.plan.nodes.iter().enumerate().map(|(index, node)| {
+        json!({"id":node.id,"question":node.question,"depends_on":node.depends_on,
+            "complete":complete.contains_key(&index),"status":if complete.contains_key(&index) { "complete" }
+                else if states.get(&index).is_some_and(|state| state["execution_complete"] == true) { "incomplete_answer" }
+                else if states.contains_key(&index) { "pending" } else { "awaiting_dependencies" },
+            "execution_complete":states.get(&index).is_some_and(|state| state["execution_complete"] == true),
+            "answer_status":if complete.contains_key(&index) { "eos" }
+                else if states.get(&index).is_some_and(super::output::has_legacy_unknown) { "legacy_unknown" }
+                else { "incomplete" },
+            "answer":complete.get(&index)})
+    }).collect()
 }
 
 fn attach_provenance(

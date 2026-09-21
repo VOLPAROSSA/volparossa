@@ -1,5 +1,7 @@
 use super::*;
+use crate::compute::ModelProfile;
 use crate::compute::document_plan::Part;
+use crate::compute::inference_output::Generation;
 use std::os::unix::fs::PermissionsExt as _;
 
 #[test]
@@ -38,6 +40,85 @@ fn parent(text: &str, index: u16) -> Answer {
         source_end: u64::from(index + 1) * 100,
         generated_tokens: 15,
         text_truncated: false,
+        generation: Some(Generation {
+            model_profile: ModelProfile::default(),
+            version: 1,
+            stop_reason: crate::compute::inference_output::StopReason::Eos,
+            max_new_tokens: 64,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn incomplete_or_unknown_parent_starts_no_dependency_work_even_with_follow() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (mut enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    for (index, reason) in [
+        "legacy_generation_end_unknown",
+        "worker_output_hit_token_limit",
+        "worker_output_was_wire_truncated",
+        "worker_produced_empty_answer",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let target = temp.path().join(format!("never-started-{index}"));
+        let mut args = replay_options(&target);
+        args.follow.follow = true;
+        let mut answer = parent("public", 0);
+        match index {
+            0 => answer.generation = None,
+            1 => {
+                answer.generated_tokens = 64;
+                answer.generation.as_mut().unwrap().stop_reason =
+                    crate::compute::inference_output::StopReason::TokenLimit;
+            }
+            2 => answer.text_truncated = true,
+            _ => answer.text = " ".into(),
+        }
+        let mut result =
+            json!({"complete":false,"execution_complete":false,"rounds_this_invocation":0});
+        super::super::advance_frontier(
+            &args,
+            &temp.path().join("no-agent.sock"),
+            &cancelled,
+            &mut result,
+            &enrollment,
+            &original,
+            vec![answer.clone()],
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["execution_complete"], false);
+        assert_eq!(result["rounds_this_invocation"], 0);
+        assert_eq!(result["synthesis"]["reason"], reason);
+        assert!(!target.exists());
+        for budget in [0, 1] {
+            args.max_batches = budget;
+            let ready = super::super::prepare_frontier(
+                &args,
+                &cancelled,
+                &mut result,
+                &enrollment,
+                &original,
+                vec![answer.clone()],
+                true,
+                &|_, _| panic!("Incomplete parents must not consult or create a peer workflow"),
+            )
+            .await
+            .unwrap();
+            assert!(ready.is_empty());
+            assert_eq!(result["complete"], false);
+            assert_eq!(result["execution_complete"], false);
+            assert_eq!(result["synthesis"]["reason"], reason);
+            assert!(!target.exists());
+        }
     }
 }
 
@@ -45,6 +126,7 @@ fn parent(text: &str, index: u16) -> Answer {
 fn every_virtual_parent_byte_survives_unicode_and_cross_answer_tokenizer_cuts() {
     let parents = vec![parent("één", 0), parent("second", 1), parent("三", 2)];
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -87,6 +169,69 @@ fn every_virtual_parent_byte_survives_unicode_and_cross_answer_tokenizer_cuts() 
     assert!(row(&input, &bad, &parents, 64).is_err());
 }
 
+#[tokio::test]
+async fn completed_parent_from_another_profile_starts_no_synthesis_work() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (mut enrollment, mut original) = historical_original(temp.path(), &signer, &cancelled);
+    enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    original.model_profile = ModelProfile::Smol360;
+    let target = temp.path().join("wrong-profile");
+    let mut args = replay_options(&target);
+    let result = prepare(
+        &args,
+        &target,
+        &enrollment,
+        &original,
+        &[parent("public", 0)],
+        0,
+        1,
+        &cancelled,
+    )
+    .await;
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "compute_synthesis_parent_profile"
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        restore(
+            &args,
+            &target,
+            &enrollment,
+            &original,
+            &[parent("public", 0)],
+            0,
+            1
+        )
+        .err()
+        .unwrap()
+        .to_string(),
+        "compute_synthesis_parent_profile"
+    );
+    for budget in [0, 1] {
+        args.max_batches = budget;
+        let mut result = json!({"complete":false,"rounds_this_invocation":0});
+        let error = super::super::prepare_frontier(
+            &args,
+            &cancelled,
+            &mut result,
+            &enrollment,
+            &original,
+            vec![parent("public", 0)],
+            false,
+            &|_, _| panic!("A mismatched profile cannot read a peer workflow"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "compute_synthesis_parent_profile");
+        assert!(!target.exists());
+    }
+}
+
 #[test]
 fn resumed_intermediate_inputs_are_never_silently_replaced() {
     let temp = tempfile::tempdir().unwrap();
@@ -104,13 +249,13 @@ fn resumed_intermediate_inputs_are_never_silently_replaced() {
 
 // These token counts and parent report hashes are parser fixtures, not model-run evidence.
 fn parser_only_plan(input: &Input) -> Plan {
-    use volparossa_content::agent_artifact::{MODEL_ID, MODEL_REVISION};
+    let profile = input.model_profile.spec();
     serde_json::from_value(
         json!({"version":1,"source_sha256":sha(input.document.as_bytes()),
         "source_bytes":input.document.len(),"question_sha256":sha(input.question.as_bytes()),
-        "model_id":MODEL_ID,"model_revision":MODEL_REVISION,
+        "model_id":profile.model_id,"model_revision":profile.revision,
         "tokenizer_sha256":"9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
-        "prompt_limit":192,"synthesis":input.synthesis,
+        "prompt_limit":profile.prompt_tokens,"synthesis":input.synthesis,
         "parts":[{"start":0,"end":input.document.len(),"prompt_tokens":80}]}),
     )
     .unwrap()
@@ -123,6 +268,7 @@ fn replay_options(root: &Path) -> Options {
         limits: crate::content::Limits,
     }
     Options {
+        model_profile: ModelProfile::default(),
         discovery: crate::compute::peer::discovery::Options::default(),
         directory: root.into(),
         resume: true,
@@ -159,7 +305,17 @@ fn historical_original(
     signer: &ed25519_dalek::SigningKey,
     cancelled: &watch::Receiver<bool>,
 ) -> (document_storage::Enrollment, Input) {
+    historical_original_profile(root, signer, cancelled, ModelProfile::default())
+}
+
+fn historical_original_profile(
+    root: &Path,
+    signer: &ed25519_dalek::SigningKey,
+    cancelled: &watch::Receiver<bool>,
+    model_profile: ModelProfile,
+) -> (document_storage::Enrollment, Input) {
     let input = Input {
+        model_profile,
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -173,7 +329,7 @@ fn historical_original(
         ed25519_dalek::SigningKey::from_bytes(&[24; 32]).verifying_key(),
         ed25519_dalek::SigningKey::from_bytes(&[25; 32]).verifying_key(),
     ];
-    let enrollment = document_storage::publish(
+    let mut enrollment = document_storage::publish(
         root,
         &input,
         &parser_only_plan(&input),
@@ -185,6 +341,11 @@ fn historical_original(
         true,
     )
     .unwrap();
+    if !model_profile.is_default() {
+        enrollment.model_fingerprint =
+            super::super::super::required_fingerprint(model_profile).unwrap();
+        enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    }
     retain_json(root, "document.json", &enrollment).unwrap();
     document_storage::load(root).unwrap(); // Actual original source bytes, chunks and signatures.
     (enrollment, input)
@@ -216,6 +377,7 @@ fn historical_reduction_at(
     ));
     directory(&group_root).unwrap();
     let input = Input {
+        model_profile: original.model_profile,
         version: 1,
         visibility: "public".into(),
         license: original.license.clone(),
@@ -236,6 +398,7 @@ fn historical_reduction_at(
     };
     retain_json(&group_root, "group.json", &group).unwrap();
     let dataset = DerivedDataset {
+        model_profile: original.model_profile,
         version: 3,
         visibility: "public".into(),
         license: input.license.clone(),
@@ -338,6 +501,10 @@ async fn zero_budget_restore_does_not_finish_partially_prepared_groups() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One retained frontier test follows the exact profile, snapshot, and offline byte lineage"
+)]
 async fn external_frontier_keeps_one_parent_instruction_and_uses_owned_snapshot() {
     use std::cell::Cell;
     use std::os::unix::fs::MetadataExt as _;
@@ -345,10 +512,17 @@ async fn external_frontier_keeps_one_parent_instruction_and_uses_owned_snapshot(
     fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
     let (_owner, cancelled) = watch::channel(false);
-    let (mut enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    let (mut enrollment, original) =
+        historical_original_profile(temp.path(), &signer, &cancelled, ModelProfile::Smol360);
     enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
-    let parents = vec![parent("First answer.", 0)];
-    let (root, _) = historical_reduction(temp.path(), &enrollment, &original, &signer, &parents);
+    let mut answer = parent("First answer.", 0);
+    answer.model_fingerprint = enrollment.model_fingerprint.clone().unwrap();
+    answer.generation.as_mut().unwrap().model_profile = ModelProfile::Smol360;
+    answer.generation.as_mut().unwrap().max_new_tokens = 256;
+    let parents = vec![answer];
+    let (root, dataset) =
+        historical_reduction(temp.path(), &enrollment, &original, &signer, &parents);
+    assert_eq!(dataset.model_profile, ModelProfile::Smol360);
     let mut args = replay_options(temp.path());
     prepare(
         &args,
@@ -393,8 +567,9 @@ async fn external_frontier_keeps_one_parent_instruction_and_uses_owned_snapshot(
     let output = json!({"complete":true,"outputs":[{
         "sample_index":0,"text":"A distinct instructed answer.",
         "provider_key":enrollment.provider_keys[0],"job_id":"7".repeat(32),
-        "report_sha256":"8".repeat(64),"model_fingerprint":"3".repeat(64),
-        "output_index":0,"generated_tokens":19,"text_truncated":false}]});
+        "report_sha256":"8".repeat(64),"model_fingerprint":enrollment.model_fingerprint,
+        "output_index":0,"generated_tokens":256,"text_truncated":false,
+        "generation":{"version":1,"stop_reason":"eos","max_new_tokens":256,"model_profile":"smollm2-360m-v1"}}]});
     let snapshot = |path: &Path, expected: &workflow::ExpectedTask| {
         calls.set(calls.get() + 1);
         assert_eq!(path, work);
@@ -417,6 +592,15 @@ async fn external_frontier_keeps_one_parent_instruction_and_uses_owned_snapshot(
     assert!(ready.is_empty());
     assert_eq!(calls.get(), 1);
     assert_eq!(result["complete"], true);
+    assert_eq!(result["execution_complete"], true);
+    assert_eq!(result["answer_complete"], true);
+    assert_eq!(result["synthesis"]["generation_limit_reached"], false);
+    assert_eq!(result["synthesis"]["levels"][0]["execution_complete"], true);
+    assert_eq!(result["synthesis"]["levels"][0]["answer_complete"], true);
+    assert_eq!(
+        result["synthesized_answer"]["generation"],
+        output["outputs"][0]["generation"]
+    );
     assert_eq!(result["synthesized_answer"]["job_id"], "7".repeat(32));
     assert_ne!(result["synthesized_answer"]["job_id"], parents[0].job_id);
     assert_eq!(result["rounds_this_invocation"], 0);

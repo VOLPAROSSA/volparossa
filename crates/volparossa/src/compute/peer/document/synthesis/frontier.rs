@@ -65,6 +65,7 @@ pub(in crate::compute::peer::document) async fn prepare_frontier(
             unfinished(reason, &levels, result);
             return Ok(Vec::new());
         }
+        check_parent_profiles(input, &frontier)?;
         if frontier.len() == 1 && (!force_first || level > 1) {
             complete_answer(&frontier[0], &levels, result)?;
             return Ok(Vec::new());
@@ -77,6 +78,7 @@ pub(in crate::compute::peer::document) async fn prepare_frontier(
         let mut groups = Vec::new();
         let mut pending = Vec::new();
         let mut level_complete = true;
+        result["execution_complete"] = false.into();
         for (group, parents) in frontier.chunks(PARENTS_PER_GROUP).enumerate() {
             let directory = root.join(format!("level-{level:02}-group-{group:04}"));
             let allow_new = args.max_batches > 0 && !*cancelled.borrow();
@@ -190,9 +192,12 @@ pub(in crate::compute::peer::document) async fn prepare_frontier(
             result["synthesis"]["pending_work"] = pending.into();
             return Ok(ready);
         }
-        let record = json!({"level":level,"complete":true,"parents":frontier.len(),
+        result["execution_complete"] = true.into();
+        let reason = unusable(&next);
+        let record = json!({"level":level,"complete":reason.is_none(),"execution_complete":true,
+            "answer_complete":reason.is_none(),"parents":frontier.len(),
             "outputs":next.len(),"groups":groups,"answers":next,
-            "generation_limit_reached":next.iter().any(|answer| answer.generated_tokens == 64)});
+            "generation_limit_reached":next.iter().any(|answer| answer.generation.as_ref().is_some_and(|generation| !generation.is_eos()))});
         let name = format!("level-{level:02}-result.json");
         if args.max_batches > 0 && !*cancelled.borrow() {
             storage::retain_json(&root, &name, &record)?;
@@ -206,6 +211,10 @@ pub(in crate::compute::peer::document) async fn prepare_frontier(
             );
         }
         levels.push(record);
+        if let Some(reason) = reason {
+            unfinished(reason, &levels, result);
+            return Ok(Vec::new());
+        }
         if next.len() >= frontier.len() && !(force_first && level == 1) {
             unfinished(
                 "reduction_did_not_shrink_no_inputs_discarded",

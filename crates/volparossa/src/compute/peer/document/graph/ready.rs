@@ -71,10 +71,12 @@ fn source_state(
             "first_part":package.first_part,"parts":package.rows}),
         );
     }
-    let complete = packages.iter().all(|package| package["complete"] == true)
+    let execution_complete = packages.iter().all(|package| package["complete"] == true)
         && answers.len() == plan.parts.len();
+    let complete = execution_complete && super::super::output::all_complete(&answers)?;
     Ok((
-        json!({"version":1,"operation":"compute_public_document","complete":complete,
+        json!({"version":2,"operation":"compute_public_document","complete":complete,
+        "execution_complete":execution_complete,"answer_complete":complete,"semantic_completeness_proven":false,
         "source_manifest_id":enrollment.source_manifest_id,"source_sha256":plan.source_sha256,
         "source_bytes":plan.source_bytes,"public_question":input.question,"license":input.license,
         "total_parts":plan.parts.len(),"packages":packages,"answers":answers,"rounds_this_invocation":0,
@@ -93,7 +95,8 @@ async fn dependent(
     parents: Vec<synthesis::Answer>,
     reader: &dyn Fn(&Path, &workflow::ExpectedTask) -> Result<Value>,
 ) -> Result<(Value, Vec<workflow::Options>)> {
-    let mut result = json!({"operation":"compute_graph_dependency","complete":false,"rounds_this_invocation":0,
+    let mut result = json!({"version":2,"operation":"compute_graph_dependency","complete":false,
+        "execution_complete":false,"answer_complete":false,"semantic_completeness_proven":false,"rounds_this_invocation":0,
         "source_manifest_id":loaded.authority.source_manifest_id,"public_question":loaded.plan.nodes[index].question,
         "model_answer_correctness_proven":false});
     if !storage::present(&args.directory)? {
@@ -122,6 +125,7 @@ async fn dependent(
     }
     let input = Input {
         version: 1,
+        model_profile: loaded.input.model_profile,
         synthesis: false,
         visibility: "public".into(),
         license: loaded.input.license.clone(),
@@ -158,7 +162,7 @@ async fn scan(
         options.follow.follow = false;
         let (mut result, ready) = if node.depends_on.is_empty() {
             let (mut result, mut ready) = source_state(&options, &reader)?;
-            if result["complete"] == true {
+            if result["execution_complete"] == true {
                 ready.extend(synthesis::prepare(&options, cancelled, &mut result, &reader).await?);
             }
             (result, ready)
@@ -242,6 +246,49 @@ fn completed(
         .remove(&slot)
         .context("compute_graph_unowned_completion")?;
     works[work].owner.completed(result, cancelled)
+}
+
+fn terminal_answer_failure(states: &BTreeMap<usize, Value>) -> bool {
+    states.values().any(|state| {
+        matches!(
+            state["synthesis"]["reason"].as_str(),
+            Some(
+                "legacy_generation_end_unknown"
+                    | "worker_output_hit_token_limit"
+                    | "worker_output_was_wire_truncated"
+                    | "worker_produced_empty_answer"
+            )
+        )
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn terminal_answers_stop_follow_but_running_jobs_do_not() {
+    for reason in [
+        "legacy_generation_end_unknown",
+        "worker_output_hit_token_limit",
+        "worker_output_was_wire_truncated",
+        "worker_produced_empty_answer",
+    ] {
+        let states = BTreeMap::from([
+            (
+                0,
+                json!({"execution_complete":true,"synthesis":{"reason":reason}}),
+            ),
+            (
+                1,
+                json!({"execution_complete":false,"synthesis":{"reason":"peer_work_pending"}}),
+            ),
+        ]);
+        assert!(terminal_answer_failure(&states));
+    }
+    for reason in ["peer_work_pending", "invocation_round_budget", "cancelled"] {
+        assert!(!terminal_answer_failure(&BTreeMap::from([(
+            0,
+            json!({"synthesis":{"reason":reason}}),
+        )])));
+    }
 }
 
 /// One bounded window, with dynamic dependencies admitted to the same live lease table.
@@ -367,6 +414,8 @@ pub(super) async fn window(
         "complete"
     } else if *cancelled.borrow() {
         "interrupted_handles_retained"
+    } else if terminal_answer_failure(&scanned.states) {
+        "answer_incomplete_no_new_work"
     } else if loaded.authority.expires_at_unix_seconds <= super::super::now()? {
         "source_expired_new_signed_package_required"
     } else if reports

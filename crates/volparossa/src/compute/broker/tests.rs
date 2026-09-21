@@ -33,7 +33,7 @@ fn binding() -> JobBinding {
     }
 }
 
-fn request(operation: Operation) -> Request {
+pub(super) fn request(operation: Operation) -> Request {
     Request {
         version: compute::VERSION,
         request_id: "a".repeat(32),
@@ -42,12 +42,14 @@ fn request(operation: Operation) -> Request {
     }
 }
 
-fn broker(root: &Path) -> Broker {
+pub(super) fn broker(root: &Path) -> Broker {
     Broker {
         options: Serve {
+            model_profile: ModelProfile::default(),
             runtime_root: root.join("runtime"),
             model_root: root.join("model"),
             adapter_root: None,
+            serving_directory: None,
             work_root: root.to_owned(),
             socket: root.join("broker.sock"),
             execute: false,
@@ -73,14 +75,68 @@ fn broker(root: &Path) -> Broker {
             task_derivation_v1: true,
             document_inference_v2: false,
             derived_inference_v3: false,
+            successor_activation_v1: false,
         },
         jobs: VecDeque::new(),
         budget: Budget::fixed_for_test(Decision::Run),
+        successor: None,
+        initial_base: successors::InitialBase::Unknown,
+        next_successor_check: tokio::time::Instant::now(),
     }
 }
 
+#[test]
+fn larger_profile_rejects_multiple_rows_before_creating_a_job() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Smol360;
+    broker.capabilities.max_rows = 1;
+    let spec = ModelProfile::Smol360.spec();
+    broker.capabilities.model = ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    broker.capabilities.model_fingerprint =
+        sha(&serde_json::to_vec(&broker.capabilities.model).unwrap());
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: data(),
+        publication: publication(),
+    };
+    submit.binding.model_fingerprint = broker.capabilities.model_fingerprint.clone();
+    let mut dataset: Value = serde_json::from_str(&submit.dataset_json).unwrap();
+    dataset["inference"].as_array_mut().unwrap().push(serde_json::json!({"question":"Second question?","context":"Another public protocol fixture."}));
+    submit.dataset_json = dataset.to_string();
+    submit.binding.dataset_sha256 = sha(submit.dataset_json.as_bytes());
+    submit.binding.row_indices = vec![0, 1];
+    assert_eq!(
+        broker.submit("b", &submit, 1000),
+        Outcome::Error(ErrorCode::Invalid)
+    );
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn larger_profile_rejects_135m_successor_directory_before_service_start() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Smol360;
+    broker.options.serving_directory = Some(root.path().join("selected"));
+    assert_eq!(
+        validate_roots(&broker.options).unwrap_err().to_string(),
+        "compute_profile_inference_only"
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
 // Retention fixtures are cancelled protocol jobs, never manufactured model results.
-fn terminal_job(index: usize) -> Job {
+pub(super) fn terminal_job(index: usize) -> Job {
     let mut original = binding();
     original.job_id = format!("{:032x}", index + 1);
     let (activity, _) = watch::channel(false);

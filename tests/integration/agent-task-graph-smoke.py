@@ -186,7 +186,9 @@ def collect(work, phase):
 
 
 def check_partial(value):
-    require(value["operation"] == "compute_public_task_graph" and value["complete"] is False
+    require(value["version"] == 2 and value["operation"] == "compute_public_task_graph" and value["complete"] is False
+        and value["execution_complete"] is False and value["answer_complete"] is False
+        and value["semantic_completeness_proven"] is False
         and value["rounds_this_invocation"] == 2 and value["plan"] == PLAN and value["output"] is None
         and value["interrupted"] is False and [n["complete"] for n in value["nodes"]] == [True,True,False,False]
         and [n["status"] for n in value["nodes"]] == ["complete","complete","pending","awaiting_dependencies"],
@@ -236,24 +238,29 @@ def manifest(raw, data, authority, name, profile):
     return result
 
 
-def planner(raw, prefix, source, question, synthesis=False):
+def planner(raw, prefix, source, question, synthesis=False, model_profile="smollm2-135m-v1"):
+    selected=JOBS["TRAIN"]["inference_profile"](model_profile)
+    model=selected["model"];limit=selected["prompt_tokens"]
     load=lambda name:json.loads(raw[prefix+name])
     plan=load("document-plan.json")
     require(plan["version"]==1 and plan["source_bytes"]==len(source) and plan["source_sha256"]==sha(source)
-        and plan["question_sha256"]==sha(question.encode()) and plan["model_id"]==DOC["MODEL"]
-        and plan["model_revision"]==JOBS["TRAIN"]["MODEL_REVISION"] and plan["tokenizer_sha256"]==DOC["TOKENIZER"]
-        and plan["prompt_limit"]==192 and plan.get("synthesis",False) is synthesis
+        and plan["question_sha256"]==sha(question.encode()) and plan["model_id"]==model["model_id"]
+        and plan["model_revision"]==model["model_revision"] and plan["tokenizer_sha256"]==DOC["TOKENIZER"]
+        and plan["prompt_limit"]==limit and plan.get("synthesis",False) is synthesis
         and 1<=len(plan["parts"])<=128,"wrong actual tokenizer plan")
     end=0
     for part in plan["parts"]:
         require(type(part["start"]) is int and type(part["end"]) is int and part["start"]==end
             and 0<part["end"]-part["start"]<=4096 and part["end"]<=len(source)
-            and type(part["prompt_tokens"]) is int and 1<=part["prompt_tokens"]<=192,"invalid byte-complete bounded tokenizer range")
+            and type(part["prompt_tokens"]) is int and 1<=part["prompt_tokens"]<=limit,"invalid byte-complete bounded tokenizer range")
         source[part["start"]:part["end"]].decode();end=part["end"]
     require(end==len(source),"tokenizer omitted original input")
-    expected=dict(version=1,visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
+    expected=dict(version=1)
+    if model_profile!="smollm2-135m-v1":expected["model_profile"]=model_profile
+    expected.update(visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
     if synthesis:expected["synthesis"]=True
-    require(load("planner-input.json")==expected,"tokenizer got another instruction/context")
+    require(load("planner-input.json")==expected and raw[prefix+"planner-input.json"]==encoded(expected),
+        "tokenizer got another instruction/context/profile")
     report=load("tokenizer-report.json")
     require(report["mode"]=="plan_document" and report["status"]=="ok" and report["device"]=="cpu"
         and report["model_weights_loaded"] is False and report["updates_completed"]==0
@@ -276,7 +283,10 @@ def shared_queue(batch, required):
             "invalid singleton ready queue scope")
 
 
-def package(raw,prefix,data,manifest_id,authority,question,layout,executed,response_bytes,node_index,level,shared):
+def package(raw,prefix,data,manifest_id,authority,question,layout,executed,response_bytes,node_index,level,shared,
+            model_profile="smollm2-135m-v1"):
+    selected=JOBS["TRAIN"]["inference_profile"](model_profile)
+    model,fingerprint=selected["model"],selected["fingerprint"]
     load=lambda name:json.loads(raw[prefix+"/"+name])
     task=dict(kind="answer_public_question_v1",question=question)
     require(load("dataset.json")==data and raw[prefix+"/dataset.json"]==encoded(data),"signed task rows changed")
@@ -295,7 +305,7 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
     require(queue["version"]==1 and queue["scheduling"]=="ready_rows_v1" and queue["publisher_key"]==authority["publisher_key"]
         and queue["dataset_manifest_id"]==manifest_id and queue["dataset_sha256"]==sha(raw[prefix+"/dataset.json"])
         and queue["source_expires_unix_seconds"]==authority["expires_at_unix_seconds"]
-        and queue["model_fingerprint"]==MODEL and queue["task"]==task and queue["provider_keys"]==authority["provider_keys"]
+        and queue["model_fingerprint"]==fingerprint and queue["task"]==task and queue["provider_keys"]==authority["provider_keys"]
         and queue["ready_rows"]==list(range(len(data["inference"]))) and queue["pending_job_ids"]==[],"queue changed instruction/model/source/expiry")
     answers=[]
     for row in range(len(data["inference"])):
@@ -304,8 +314,9 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
         require(node is not None and identifier not in executed and re.fullmatch(r"[0-9a-f]{32}",identifier)
             and binding["dataset_manifest_id"]==manifest_id and binding["row_indices"]==[row] and binding["task"]==task
             and binding["expires_unix_seconds"]<=authority["expires_at_unix_seconds"]
-            and caps["model_fingerprint"]==binding["model_fingerprint"]==MODEL and caps["model"]==MODEL_ID
+            and caps["model_fingerprint"]==binding["model_fingerprint"]==fingerprint and caps["model"]==model
             and caps["public_inference_only"] is True and caps["runtime_slots"]==1 and caps["max_threads"]==2
+            and (model_profile=="smollm2-135m-v1" or caps["max_rows"]==1)
             and caps["task_derivation_v1"] is True and caps["derived_inference_v3" if level else "document_inference_v2"] is True,
             "singleton task/lease/executor changed")
         selected=copy.deepcopy(data);selected["inference"]=[selected["inference"][row]];selected_raw=encoded(selected)
@@ -320,14 +331,19 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
             and actual["updates_completed"]==0 and actual["dataset"]["version"]==data["version"]
             and actual["dataset"]["sha256"]==sha(selected_raw) and actual["dataset"]["source_manifest_sha256"]==authority["source_manifest_id"]
             and actual["baseline_evaluation"] is None and len(actual["outputs"])==1
-            and actual["model"]["files"]["model.safetensors"]==MODEL_ID["base_weights"],"real inference result missing")
+            and actual["model"]["id"]==model["model_id"] and actual["model"]["revision"]==model["model_revision"]
+            and actual["model"]["files"]["model.safetensors"]==model["base_weights"],"real inference result missing")
         DOC["check_supervisor"](actual)
+        if model_profile!="smollm2-135m-v1":
+            require(caps["max_job_seconds"]==600 and actual["supervisor"]["rss_limit_bytes"]==3*1024**3,
+                "selected profile changed the existing worker resource bounds")
         output=actual["outputs"][0]
-        require(batch["outputs"][row]==dict(sample_index=row,provider_key=handle["provider_key"],job_id=identifier,text=output["text"]),"joined output changed")
+        require(batch["outputs"][row]==dict(sample_index=row,provider_key=handle["provider_key"],job_id=identifier,text=output["text"],
+            **SYNTH["generation_fields"](output,model_profile=model_profile)),"joined output changed")
         context=data["inference"][row]
         start=context["start"] if not level else min(i["source_start"] for i in context["inputs"])
         end=context["end"] if not level else max(i["source_end"] for i in context["inputs"])
-        answers.append(SYNTH["answer"](output,handle,status,manifest_id,start,end,0))
+        answers.append(SYNTH["answer"](output,handle,status,manifest_id,start,end,0,model_profile=model_profile))
         executed[identifier]=dict(handle=handle,raw=selected_raw,node=node,graph_node=node_index,level=level,
             path=prefix+"/"+ATTEMPT+f"/job-{row}.json")
         response_bytes[node]+=len(status["report_json"].encode())
@@ -335,7 +351,9 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
 
 
 def check_graph_summary(value, source_id, expiry, providers, answers, rounds, complete=True):
-    require(value["version"]==1 and value["operation"]=="compute_public_task_graph" and value["complete"] is complete
+    require(value["version"]==2 and value["operation"]=="compute_public_task_graph" and value["complete"] is complete
+        and value["execution_complete"] is complete and value["answer_complete"] is complete
+        and value["semantic_completeness_proven"] is False
         and value["plan"]==PLAN and value["plan_sha256"]==sha(encoded(PLAN)) and value["source_manifest_id"]==source_id
         and value["source_expires_unix_seconds"]==expiry and value["provider_keys"]==providers
         and value["rounds_this_invocation"]==rounds and value["interrupted"] is False
@@ -345,7 +363,8 @@ def check_graph_summary(value, source_id, expiry, providers, answers, rounds, co
     for index,node in enumerate(PLAN["nodes"]):
         actual=value["nodes"][index]
         require(all(actual[k]==node[k] for k in ("id","question","depends_on"))
-            and actual["answer"]==answers.get(node["id"]),"graph node answer/instruction changed")
+            and actual["answer"]==answers.get(node["id"])
+            and actual["execution_complete"] is (node["id"] in answers),"graph node answer/instruction changed")
     if complete:
         require(len(value["nodes"])==4 and all(n["complete"] is True and n["status"]=="complete" for n in value["nodes"])
             and value["output"]==answers["refine"],"graph output is not original final receipt")
@@ -419,7 +438,8 @@ def check(value,revision):
         levels=result["synthesis"]["levels"]
         require(1<=len(levels)<=16,"dependent instruction was passed through without executing")
         for number,level in enumerate(levels,1):
-            require(level["level"]==number and level["complete"] is True and level["parents"]==len(parents)
+            require(level["level"]==number and level["complete"] is True
+                and level["execution_complete"] is True and level["answer_complete"] is True and level["parents"]==len(parents)
                 and len(level["groups"])==(len(parents)+63)//64,"derived stage lost original parents")
             following=[]
             for group_index,group in enumerate(level["groups"]):
@@ -443,10 +463,11 @@ def check(value,revision):
                     following.extend(package(raw,package_prefix,data,identity,authority,question,layout,executed,response_bytes,index,number,len(rows)>4))
                     rounds+=1
             require(level["outputs"]==len(following) and (number==1 or len(following)<len(parents))
-                and level["answers"]==following and level["generation_limit_reached"] is any(a["generated_tokens"]==64 for a in following)
+                and level["answers"]==following and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a) for a in following)
                 and load(prefix+f"/synthesis/level-{number:02d}-result.json")==level,"derived receipts/levels changed")
             parents=following
-        require(len(parents)==1 and result["complete"] is True and result["synthesized_answer"]==parents[0]
+        require(len(parents)==1 and result["version"]==2 and result["complete"] is True
+            and result["execution_complete"] is True and result["answer_complete"] is True and result["synthesized_answer"]==parents[0]
             and result["synthesis"]["complete"] is True and result["synthesis"]["claim_scope"]==SYNTH["CLAIM"]
             and result["synthesis"]["model_answer_correctness_proven"] is False
             and result["synthesis"]["semantic_completeness_proven"] is False,"dependent output or scope changed")
@@ -529,7 +550,8 @@ def self_test():
         try:shared_queue(batch,required)
         except ValueError:pass
         else:raise AssertionError("missing/false shared package scope accepted")
-    partial=dict(version=1,operation="compute_public_task_graph",complete=False,rounds_this_invocation=2,
+    partial=dict(version=2,operation="compute_public_task_graph",complete=False,rounds_this_invocation=2,
+        execution_complete=False,answer_complete=False,semantic_completeness_proven=False,
         plan=copy.deepcopy(PLAN),output=None,interrupted=False,nodes=[dict(complete=i<2,
             status=("complete" if i<2 else "pending" if i==2 else "awaiting_dependencies")) for i in range(4)])
     check_partial(partial)
@@ -545,19 +567,21 @@ def self_test():
     assert not HANDLE.fullmatch("node-0003/secret.key")
     parent=dict(text="Inert test parent",provider_key="a"*64,job_id="b"*32,report_sha256="c"*64,
         package_manifest_id="d"*64,model_fingerprint=MODEL,output_index=0,source_start=0,source_end=128,
-        generated_tokens=4,text_truncated=False)
+        generated_tokens=4,text_truncated=False,generation=dict(version=1,stop_reason="eos",max_new_tokens=64))
     combined=(parent["text"]+"\n").encode()
     source,rows=SYNTH["expected_rows"]([parent],[dict(start=0,end=len(combined))],PLAN["nodes"][3]["question"],0)
     assert source==combined and rows[0]["question"]==PLAN["nodes"][3]["question"] and rows[0]["inputs"][0]["job_id"]==parent["job_id"]
+    assert "generation" not in rows[0]["inputs"][0]  # Retained result metadata does not change signed derived-input schema.
     assert rows[0]["question"]!=PLAN["nodes"][2]["question"]
     # These minimal values exercise the final schema only; no receipt/worker is invented.
     answers={n["id"]:dict(job_id=str(i)*32) for i,n in enumerate(PLAN["nodes"],1)}
-    complete=dict(version=1,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
+    complete=dict(version=2,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
+        execution_complete=True,answer_complete=True,semantic_completeness_proven=False,
         plan_sha256=sha(encoded(PLAN)),source_manifest_id="a"*64,source_expires_unix_seconds=7200,
         provider_keys=["b"*64,"c"*64],rounds_this_invocation=3,interrupted=False,
         scheduling="shared_ready_dependency_queue_v1",private_data_supported=False,
         automatic_task_planning=False,external_actions_supported=False,model_answer_correctness_proven=False,
-        full_b03_claimed=False,output=answers["refine"],nodes=[dict(n,complete=True,status="complete",answer=answers[n["id"]]) for n in PLAN["nodes"]])
+        full_b03_claimed=False,output=answers["refine"],nodes=[dict(n,complete=True,execution_complete=True,status="complete",answer_status="eos",answer=answers[n["id"]]) for n in PLAN["nodes"]])
     check_graph_summary(complete,"a"*64,7200,["b"*64,"c"*64],answers,3)
     check_graph_summary(dict(complete,rounds_this_invocation=0),"a"*64,7200,["b"*64,"c"*64],answers,0)
     for change in (dict(automatic_task_planning=True),dict(rounds_this_invocation=0),dict(source_expires_unix_seconds=7201),
