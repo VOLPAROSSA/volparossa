@@ -71,6 +71,14 @@ The original mount guard still verifies actual topology before injection. No pro
 or host mount is changed; other scenarios retain systemd's shared default. The private setting
 also stops incoming mount events, so it is limited to these short-lived, fully torn-down units.
 The updated fixture still requires a fresh live run.
+The [combined 360M run on `b4eaa670`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35651954279)
+fails earlier, while waiting for the two initial source workers to overlap. The owner's final
+summary reports five EOS answers, but assigns A and B successively to relay4; relay5's log
+contains an initial worker that reaches `preparing` without a corresponding baseline/complete.
+The retained files do not establish why that attempt ended. No pressure injection or private
+mount verification was reached, so this does not prove or refute the mount correction.
+All 117 original files remain unchanged; private/network cleanup and identical host state pass.
+Initial concurrency, C while the same B remains paused, and full receipt/offline proof remain open.
 The combined candidate keeps that single dynamic queue while integrating the 360M profile and
 actual generation-end contract. Source and derived frontiers retain the enrolled profile;
 terminal empty, wire-truncated, token-limited or generation-unknown answers cannot create new
@@ -220,6 +228,18 @@ No text normalization, semantic-equivalence detector, canned replacement questio
 budget is introduced. All 239 CLI compute tests, 56 pure worker protocol tests and the updated
 fixture's pure controls pass. This addresses the observed literal-copy failure, not general
 decomposition quality; actual v4 model-and-peer execution and answer review remain pending.
+
+A separate `--plan-task-graph` candidate now connects model-selected task count and dependency
+edges to the existing incremental executor. Input and raw artifact version 3 retain the same
+public source binding; `model_task_graph_v1` proposes one to four tasks with earlier-index
+dependencies. Rust preserves every selected question and edge, supplies stable IDs, and adds
+only the unchanged original question as a terminal join of all model-selected terminal branches.
+The existing two-question mode and historical replay remain unchanged. One owner retains the
+512-prompt/384-total-generated-token budget across at most four whole-JSON attempts, charging
+rejections without replacement tasks. Raw JSON is retained exactly, including whitespace.
+All 245 focused CLI compute tests, 62 pure worker protocol tests and strict CLI Clippy pass.
+This remains an implementation candidate: live model-selected dependencies, peer execution
+and source-faithful answers are not yet proved, and B03 remains incomplete.
 
 Verified 135M learning-to-serving slice: an explicit shared `--serving-directory` connects the
 training loop's selected approved local/peer successor to an already running peer-inference

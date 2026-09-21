@@ -77,6 +77,70 @@ fn proposal(input: &task_plan::Input, questions: &task_plan::Questions) -> Resul
     Ok(plan)
 }
 
+fn graph_proposal(
+    input: &task_plan::Input,
+    graph: &task_plan::ModelTaskGraph,
+) -> Result<plan::Plan> {
+    input.validate()?;
+    graph.validate(&input.question)?;
+    ensure!(input.version == 3, "compute_task_planner_graph_version");
+    let mut consumed = vec![false; graph.tasks.len()];
+    let mut nodes = Vec::with_capacity(graph.tasks.len() + 1);
+    for (index, task) in graph.tasks.iter().enumerate() {
+        let parents = task
+            .depends_on
+            .iter()
+            .map(|&parent| {
+                consumed[parent] = true;
+                format!("question-{parent:02}")
+            })
+            .collect();
+        nodes.push(plan::Node {
+            id: format!("question-{index:02}"),
+            question: task.question.clone(),
+            depends_on: parents,
+        });
+    }
+    // Only IDs and the terminal owner question are local policy. The model's
+    // task count, exact questions and internal edges are retained without repair.
+    let parents = nodes
+        .iter()
+        .zip(consumed)
+        .filter_map(|(node, used)| (!used).then_some(node.id.clone()))
+        .collect();
+    nodes.push(plan::Node {
+        id: "answer".into(),
+        question: input.question.clone(),
+        depends_on: parents,
+    });
+    let plan = plan::Plan {
+        version: 1,
+        nodes,
+        output: "answer".into(),
+    };
+    plan.validate()?;
+    Ok(plan)
+}
+
+fn validated_proposal(
+    report: &Value,
+    input: &task_plan::Input,
+    input_bytes: &[u8],
+    artifact: &[u8],
+) -> Result<plan::Plan> {
+    if input.version == 3 {
+        graph_proposal(
+            input,
+            &task_plan::validate_graph_report(report, input, input_bytes, artifact)?,
+        )
+    } else {
+        proposal(
+            input,
+            &task_plan::validate_report(report, input, input_bytes, artifact)?,
+        )
+    }
+}
+
 fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     // Bind the full selected source and include its exact bounded UTF-8 prefix.
     // This is partial coverage for longer documents, never a fabricated summary.
@@ -94,7 +158,7 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     };
     input.validate()?;
     let input = task_plan::Input {
-        version: 2,
+        version: if args.plan_task_graph { 3 } else { 2 },
         model_profile: args.model_profile,
         visibility: input.visibility,
         license: input.license,
@@ -113,7 +177,11 @@ pub(super) async fn prepare(
     cancelled: &watch::Receiver<bool>,
 ) -> Result<(plan::Plan, Authority)> {
     ensure!(
-        args.plan_tasks && args.public_content && !args.synthesize && !args.batch_barrier,
+        (args.plan_tasks != args.plan_task_graph)
+            && args.task_plan.is_none()
+            && args.public_content
+            && !args.synthesize
+            && !args.batch_barrier,
         "compute_task_planner_explicit_public_mode_required"
     );
     ensure!(!*cancelled.borrow(), "compute_task_planner_cancelled");
@@ -165,10 +233,14 @@ pub(super) async fn prepare(
         }
     };
     save(&args.directory, "planner-report.json", &report, false)?;
-    let artifact = read_file(&output.join("task-questions.json"), MAX_PLANNER_BYTES)?;
-    let questions = task_plan::validate_report(&report, &input, &bytes, &artifact)?;
+    let name = if input.version == 3 {
+        "task-graph.json"
+    } else {
+        "task-questions.json"
+    };
+    let artifact = read_file(&output.join(name), MAX_PLANNER_BYTES)?;
+    let plan = validated_proposal(&report, &input, &bytes, &artifact)?;
     ensure!(!*cancelled.borrow(), "compute_task_planner_cancelled");
-    let plan = proposal(&input, &questions)?;
     task::write_bytes(
         &args.directory.join("planner-artifact.json"),
         &artifact,
@@ -263,9 +335,8 @@ pub(super) fn verify(
     let input = task_plan::Input::decode(&bytes)?;
     verify_input(authority, &input, source)?;
     let report: Value = serde_json::from_slice(&report_bytes)?;
-    let questions = task_plan::validate_report(&report, &input, &bytes, &artifact)?;
     ensure!(
-        proposal(&input, &questions)? == *plan,
+        validated_proposal(&report, &input, &bytes, &artifact)? == *plan,
         "compute_task_planner_enrolled_plan_changed"
     );
     Ok(())
@@ -297,6 +368,12 @@ pub(super) fn summary(authority: Option<&Authority>) -> Value {
             summary["source_contents_read_by_planner"] = true.into();
             summary["source_excerpt_complete"] = (excerpt.end == authority.source_bytes).into();
             summary["source_coverage"] = json!(excerpt);
+        }
+        if authority.version == 3 {
+            summary["kind"] = "bounded_model_task_graph_decomposition".into();
+            summary["model_selected_task_count"] = true.into();
+            summary["model_selected_dependencies"] = true.into();
+            summary["terminal_question_from_user"] = true.into();
         }
         summary
     })

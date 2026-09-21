@@ -162,6 +162,132 @@ fn model_questions_form_bounded_fork_join_with_exact_original_terminal_question(
 }
 
 #[test]
+fn model_graph_keeps_selected_edges_and_joins_only_terminal_branches() {
+    let document = "An explicitly public source used only for graph protocol tests.";
+    let mut input = input(document);
+    input.version = 3;
+    input.source_excerpt = Some(task_plan::SourceExcerpt::prefix(document));
+    let graph = task_plan::ModelTaskGraph {
+        version: 3,
+        tasks: vec![
+            task_plan::ModelTask {
+                question: "What is the first constraint?".into(),
+                depends_on: vec![],
+            },
+            task_plan::ModelTask {
+                question: "What is the second constraint?".into(),
+                depends_on: vec![],
+            },
+            task_plan::ModelTask {
+                question: "How do these constraints compare?".into(),
+                depends_on: vec![1, 0],
+            },
+            task_plan::ModelTask {
+                question: "Which opportunities are described?".into(),
+                depends_on: vec![],
+            },
+        ],
+    };
+    let plan = graph_proposal(&input, &graph).unwrap();
+    assert_eq!(plan.nodes.len(), 5);
+    assert_eq!(plan.nodes[2].depends_on, ["question-01", "question-00"]);
+    assert_eq!(plan.nodes[4].depends_on, ["question-02", "question-03"]);
+    assert_eq!(plan.nodes[4].question, input.question);
+    for (actual, selected) in plan.nodes.iter().zip(&graph.tasks) {
+        assert_eq!(actual.question, selected.question);
+    }
+    let single = task_plan::ModelTaskGraph {
+        version: 3,
+        tasks: vec![graph.tasks[0].clone()],
+    };
+    let plan = graph_proposal(&input, &single).unwrap();
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(plan.nodes[1].depends_on, ["question-00"]);
+    let mut bad = graph;
+    bad.tasks[2].depends_on = vec![3];
+    assert!(graph_proposal(&input, &bad).is_err());
+}
+
+#[test]
+fn model_graph_replay_uses_the_original_artifact_and_never_replans() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let document = "A public source for retained model-graph binding tests.";
+    let mut input = input(document);
+    input.version = 3;
+    input.source_excerpt = Some(task_plan::SourceExcerpt::prefix(document));
+    let artifact = br#"{"version":3,"tasks":[{"question":"Which limits apply?","depends_on":[]},{"question":"How do those limits affect use?","depends_on":[0]}]}"#;
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let mut report = report(&input, &bytes, artifact);
+    report["goal_only_planning"] = false.into();
+    report["source_contents_read_by_planner"] = true.into();
+    report["source_excerpt_complete"] = true.into();
+    report["dataset"]["version"] = 3.into();
+    let excerpt = input.source_excerpt.as_ref().unwrap();
+    report["dataset"]["source_excerpt"] = json!({"start":0,"end":excerpt.end,
+        "bytes":excerpt.text.len(),"sha256":excerpt.sha256});
+    report["artifacts"][0]["relative_path"] = "task-graph.json".into();
+    report["planner_strategy"] = task_plan::GRAPH_STRATEGY.into();
+    report["planner_structure_generated_by"] = "model".into();
+    report["planner_stop_reason"] = "task_graph".into();
+    report["planner_task_count"] = 2.into();
+    report["planner_dependency_count"] = 1.into();
+    report
+        .as_object_mut()
+        .unwrap()
+        .remove("planner_question_stats");
+    report["planner_attempts"] = json!([{"attempt":1,"prompt_tokens":100,"generated_tokens":80,
+        "max_new_tokens":384,"stop_reason":"graph_boundary","accepted":true,"rejection_code":null,
+        "text_bytes":artifact.len(),"text_sha256":digest(artifact)}]);
+    let plan = validated_proposal(&report, &input, &bytes, artifact).unwrap();
+    let report_bytes = serde_json::to_vec(&report).unwrap();
+    for (name, raw) in [
+        ("planner-input.json", bytes.as_slice()),
+        ("planner-report.json", report_bytes.as_slice()),
+        ("planner-artifact.json", artifact.as_slice()),
+    ] {
+        task::write_bytes(&root.path().join(name), raw, false).unwrap();
+    }
+    let authority = Authority {
+        version: 3,
+        input_sha256: digest(&bytes),
+        report_sha256: digest(&report_bytes),
+        artifact_sha256: digest(artifact),
+        question: input.question.clone(),
+        source_sha256: input.source_sha256.clone(),
+        source_bytes: input.source_bytes,
+        source_excerpt: input.source_excerpt.as_ref().map(Coverage::from),
+    };
+    let source = Input {
+        model_profile: ModelProfile::default(),
+        version: 1,
+        visibility: input.visibility,
+        license: input.license,
+        document: document.into(),
+        question: plan.nodes[0].question.clone(),
+        synthesis: false,
+    };
+    verify(root.path(), &authority, &plan, &source).unwrap();
+    assert_eq!(
+        summary(Some(&authority))["model_selected_dependencies"],
+        true
+    );
+    let mut changed_plan = plan.clone();
+    changed_plan.nodes[1].depends_on.clear();
+    assert!(verify(root.path(), &authority, &changed_plan, &source).is_err());
+    let original = read_file(
+        &root.path().join("planner-artifact.json"),
+        MAX_PLANNER_BYTES,
+    )
+    .unwrap();
+    assert_eq!(original, artifact);
+    assert!(!root.path().join("model-planner").exists());
+    let mut changed_source = source;
+    changed_source.model_profile = ModelProfile::Smol360;
+    assert!(verify(root.path(), &authority, &plan, &changed_source).is_err());
+}
+
+#[test]
 fn retained_planning_reopens_without_original_inputs_or_worker_output_and_rejects_mutation() {
     let root = tempfile::tempdir().unwrap();
     let (authority, plan, mut source) = retained(root.path());
@@ -327,6 +453,29 @@ async fn model_planning_preview_is_inert_and_enrollment_only() {
         .await
         .unwrap();
     assert!(!directory.exists());
+    let mut graph_words = words.clone();
+    let switch = graph_words
+        .iter()
+        .position(|word| *word == "--plan-tasks")
+        .unwrap();
+    graph_words[switch] = "--plan-task-graph";
+    let graph_args = Command::try_parse_from(&graph_words).unwrap().options;
+    assert!(graph_args.plan_task_graph && !graph_args.plan_tasks);
+    assert_eq!(checked_input(&graph_args, source).unwrap().version, 3);
+    super::super::super::run(&graph_args, &root.path().join("absent.sock"))
+        .await
+        .unwrap();
+    assert!(!directory.exists());
+    for conflict in [
+        "--plan-tasks",
+        "--resume",
+        "--synthesize",
+        "--batch-barrier",
+    ] {
+        let mut invalid = graph_words.clone();
+        invalid.push(conflict);
+        assert!(Command::try_parse_from(invalid).is_err());
+    }
     for extra in [
         vec!["--task-plan", "/missing/plan.json"],
         vec!["--resume"],

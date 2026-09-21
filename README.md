@@ -252,6 +252,11 @@ peer selection, inference and synthesis, with a larger per-answer budget. The ex
 training/adapters remain separate. Its first VM run executes real 360M planning but stops at a
 fixture command error before peer execution; that command is corrected. The complete peer
 workflow and answer-quality review remain pending. A larger model alone is not proof of better answers.
+The new opt-in `--plan-task-graph` goes beyond the fixed two-question layout: the model proposes
+one to four subtasks and their dependencies as one complete JSON object. The existing executor
+runs the accepted graph and joins its terminal branches under the unchanged original question.
+This candidate still needs real model-and-peer verification; choosing a valid graph is not proof
+of choosing useful work. The existing `--plan-tasks` mode and retained histories remain available.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

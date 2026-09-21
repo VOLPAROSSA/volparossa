@@ -1,4 +1,4 @@
-//! Enrolled public task dependencies, including bounded model-proposed fork/join questions.
+//! Enrolled public task dependencies, including bounded model-proposed task graphs.
 
 mod leaves;
 mod plan;
@@ -51,6 +51,7 @@ fn node_options(args: &Options, index: usize) -> Options {
     options.directory = node_root(&args.directory, index);
     options.task_plan = None;
     options.plan_tasks = false;
+    options.plan_task_graph = false;
     options.enroll_only = false;
     options.synthesize = true;
     options.batch_barrier = false;
@@ -142,7 +143,7 @@ pub(super) async fn run(
     cancelled: &watch::Receiver<bool>,
 ) -> Result<()> {
     if !args.resume {
-        let manual = if args.plan_tasks {
+        let manual = if args.plan_tasks || args.plan_task_graph {
             ensure!(
                 args.task_plan.is_none(),
                 "compute_graph_planning_modes_conflict"

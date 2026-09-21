@@ -103,6 +103,12 @@ def task_plan_input():
                 source_excerpt=dict(start=0, end=len(raw), text=text, sha256=hashlib.sha256(raw).hexdigest()))
 
 
+def task_graph_fixture(count=2):
+    # Inert model-output doubles only; never included in a production prompt.
+    return dict(version=3, tasks=[dict(question=f"What does source section {i} require?",
+        depends_on=[] if i < 2 else list(range(i))) for i in range(count)])
+
+
 def task_planner_doubles(text, generated=None, prompt=None):
     # Pure branch doubles only. Never import a real tokenizer, tensor library or model.
     class Vector:
@@ -455,6 +461,13 @@ class WorkerProtocolTests(unittest.TestCase):
                     source_excerpt=dict(start=0, end=dataset["source_excerpt"]["end"],
                         sha256=dataset["source_excerpt"]["sha256"], bytes=dataset["source_excerpt"]["end"])))
                 self.assertNotIn("text", prepared[3]["source_excerpt"])
+                dataset["version"] = 3
+                raw = json.dumps(dataset, separators=(",", ":")).encode()
+                source.write_bytes(raw)
+                graph = WORKER.prepare_files(value)
+                self.assertEqual(graph[2], dataset)
+                self.assertEqual(graph[3], dict(prepared[3], version=3,
+                    sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
                 source.write_bytes(b" " * WORKER.MAX_TASK_PLAN_BYTES + raw)
                 with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
                     WORKER.prepare_files(value)
@@ -895,6 +908,190 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual(result["base_before"], result["base_after"])
                 for field in ("outputs","baseline_evaluation","input_adapter","adapter_after"):
                     self.assertNotIn(field,result)
+
+    def test_task_graph_admission_and_schema_require_literal_model_selected_earlier_dependencies(self):
+        source = dict(task_plan_input(), version=3)
+        self.assertEqual(WORKER.validate_dataset(source, "plan_tasks"), source)
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_INPUT_VERSION"):
+            WORKER.plan_tasks(*task_planner_doubles("unused"), source, mock.Mock())
+        for count in range(1, 5):
+            value = task_graph_fixture(count)
+            self.assertIs(WORKER.validate_task_graph(value, source["question"]), value)
+        original = task_graph_fixture(4)
+        mutations = (
+            lambda x:x.update(version=True), lambda x:x.update(version=2), lambda x:x.update(tools=[]),
+            lambda x:x.update(tasks=[]), lambda x:x.update(tasks=task_graph_fixture(5)["tasks"]),
+            lambda x:x["tasks"][0].update(question=source["question"]),
+            lambda x:x["tasks"][0].update(question="not a question"),
+            lambda x:x["tasks"][0].update(question="é" * 256 + "?"),
+            lambda x:x["tasks"][0].update(question="\0?"), lambda x:x["tasks"][0].update(question="\ud800?"),
+            lambda x:x["tasks"][1].update(question=" " + x["tasks"][0]["question"] + " "),
+            lambda x:x["tasks"][0].update(depends_on=[0]), lambda x:x["tasks"][1].update(depends_on=[1]),
+            lambda x:x["tasks"][1].update(depends_on=[True]), lambda x:x["tasks"][1].update(depends_on=[-1]),
+            lambda x:x["tasks"][1].update(depends_on=[0.0]), lambda x:x["tasks"][2].update(depends_on=[0, 0]),
+            lambda x:x["tasks"][1].update(depends_on="0"), lambda x:x["tasks"][1].update(answer="invented"))
+        for mutate in mutations:
+            value = copy.deepcopy(original); mutate(value)
+            with self.subTest(value=value), self.assertRaises(WORKER.JobError):
+                WORKER.validate_task_graph(value, source["question"])
+        messages = WORKER.task_graph_messages(source)
+        self.assertEqual(json.loads(messages[1]["content"]), dict(goal=source["question"],
+            untrusted_source_excerpt=source["source_excerpt"]["text"]))
+        self.assertIn("untrusted data", messages[0]["content"])
+        self.assertIn("empty depends_on reads the original source", messages[0]["content"])
+        self.assertNotIn(original["tasks"][0]["question"], json.dumps(messages))
+
+    def test_task_graph_preserves_full_model_json_and_model_selected_count_at_eos_or_boundary(self):
+        for count in range(1, 5):
+            for stop in ("eos", "graph_boundary"):
+                with self.subTest(count=count, stop=stop):
+                    plan = task_graph_fixture(count)
+                    plan["tasks"][0]["question"] = "Which café requirement?"
+                    raw = (" \n" + json.dumps(plan, ensure_ascii=False, indent=1) + "\n ").encode()
+                    model, tokenizer, torch, transformers = task_planner_doubles(raw.decode(),
+                        [21, 22, 2] if stop == "eos" else [21, 22])
+                    session = mock.Mock()
+                    result = WORKER.plan_task_graph(model, tokenizer, torch, transformers,
+                        dict(task_plan_input(), version=3), session)
+                    self.assertEqual(result, (plan, raw, 3, 3 if stop == "eos" else 2))
+                    record, = session.planner_diagnostic["attempts"]
+                    self.assertEqual(set(record), {"attempt", "prompt_tokens", "generated_tokens", "max_new_tokens",
+                        "stop_reason", "accepted", "rejection_code", "text_bytes", "text_sha256"})
+                    self.assertEqual(record["stop_reason"], stop)
+                    self.assertEqual(record["text_sha256"], hashlib.sha256(raw).hexdigest())
+                    self.assertEqual(record["text_bytes"], len(raw))
+                    self.assertEqual(record["max_new_tokens"], 384)
+                    self.assertTrue(record["accepted"])
+                    self.assertIsNone(record["rejection_code"])
+                    model.generate.assert_called_once()
+                    self.assertFalse(model.generate.call_args.kwargs["do_sample"])
+
+    def test_task_graph_retries_only_charged_whole_json_or_schema_rejections(self):
+        valid = json.dumps(task_graph_fixture())
+        for bad, category, stop in (("```json\n" + valid + "\n```", "INVALID_JSON", "eos"),
+            ("prose " + valid, "INVALID_JSON", "eos"), (valid + " trailing", "INVALID_JSON", "eos"),
+            ('{"version":3,"version":3,"tasks":[]}', "INVALID_JSON", "eos"),
+            ('{"version":3,"tasks":[],"extra":NaN}', "INVALID_JSON", "eos"),
+            ('{"version":3,"tasks":[]}', "INVALID_GRAPH", "graph_boundary")):
+            with self.subTest(category=category, stop=stop):
+                model, tokenizer, torch, transformers = task_planner_doubles([bad, valid])
+                original = model.generate.side_effect
+                def generate(**kwargs):
+                    if model.generate.call_count == 1 and stop == "graph_boundary":
+                        ids = torch.tensor([[11, 12, 13, 21, 22]])
+                        self.assertTrue(kwargs["stopping_criteria"][0](ids, None))
+                        return ids
+                    return original(**kwargs)
+                model.generate.side_effect = generate
+                session = mock.Mock()
+                plan, raw, _, cost = WORKER.plan_task_graph(model, tokenizer, torch, transformers,
+                    dict(task_plan_input(), version=3), session)
+                self.assertEqual(plan, task_graph_fixture())
+                self.assertEqual(raw, valid.encode())
+                self.assertEqual(cost, 5 if stop == "graph_boundary" else 6)
+                attempts = session.planner_diagnostic["attempts"]
+                self.assertEqual([a["rejection_code"] for a in attempts], [category, None])
+                self.assertEqual([a["max_new_tokens"] for a in attempts], [384, 384-attempts[0]["generated_tokens"]])
+                self.assertEqual(attempts[0]["text_sha256"], hashlib.sha256(bad.encode()).hexdigest())
+                with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ALREADY_STARTED"):
+                    WORKER.plan_task_graph(model, tokenizer, torch, transformers,
+                        dict(task_plan_input(), version=3), session)
+
+    def test_task_graph_cap_requires_real_eos_or_exact_online_boundary_and_never_renews_budget(self):
+        valid = json.dumps(task_graph_fixture(1))
+        for tokens, success, expected_stop in (([21]*383+[2], True, "eos"),
+                                               ([21]*384, True, "graph_boundary"),
+                                               ([21]*384, False, "token_limit")):
+            with self.subTest(stop=expected_stop):
+                model, tokenizer, torch, transformers = task_planner_doubles(valid if success else "{", tokens)
+                session = mock.Mock()
+                if success:
+                    result = WORKER.plan_task_graph(model, tokenizer, torch, transformers,
+                        dict(task_plan_input(), version=3), session)
+                    self.assertEqual(result[3], 384)
+                else:
+                    with self.assertRaisesRegex(WORKER.JobError, "TASK_GRAPH_GENERATION_LIMIT_REACHED"):
+                        WORKER.plan_task_graph(model, tokenizer, torch, transformers,
+                            dict(task_plan_input(), version=3), session)
+                record, = session.planner_diagnostic["attempts"]
+                self.assertEqual((record["stop_reason"], record["generated_tokens"]), (expected_stop, 384))
+                self.assertEqual(record["accepted"], success)
+                model.generate.assert_called_once()
+        model, tokenizer, torch, transformers = task_planner_doubles("{}")
+        session = mock.Mock()
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_GRAPH_ATTEMPTS_EXHAUSTED"):
+            WORKER.plan_task_graph(model, tokenizer, torch, transformers, dict(task_plan_input(), version=3), session)
+        self.assertEqual([r["max_new_tokens"] for r in session.planner_diagnostic["attempts"]], [384, 381, 378, 375])
+        self.assertTrue(all(not r["accepted"] for r in session.planner_diagnostic["attempts"]))
+
+    def test_task_graph_stale_marker_and_owner_failure_are_fatal_without_retry(self):
+        valid = json.dumps(task_graph_fixture(1))
+        for returned in ([21, 23], [21, 22, 2], [21, 22, 23]):
+            model, tokenizer, torch, transformers = task_planner_doubles(valid)
+            def generate(**kwargs):
+                self.assertTrue(kwargs["stopping_criteria"][0](torch.tensor([[11, 12, 13, 21, 22]]), None))
+                return torch.tensor([[11, 12, 13]+returned])
+            model.generate.side_effect = generate
+            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "COMPLETION_TOKENS_CHANGED"):
+                WORKER.plan_task_graph(model, tokenizer, torch, transformers, dict(task_plan_input(), version=3), mock.Mock())
+            model.generate.assert_called_once()
+        for failure in (WORKER.JobError("JOB_CANCELLED"), WORKER.JobError("JOB_DEADLINE_EXCEEDED")):
+            model, tokenizer, torch, transformers = task_planner_doubles(valid)
+            session = mock.Mock(); session.check.side_effect = [None, None, failure]
+            with self.assertRaisesRegex(WORKER.JobError, str(failure)):
+                WORKER.plan_task_graph(model, tokenizer, torch, transformers, dict(task_plan_input(), version=3), session)
+            self.assertTrue(session.planner_diagnostic["incomplete_attempt"])
+            self.assertEqual(session.planner_diagnostic["attempts"], [])
+            tokenizer.decode.assert_not_called()
+            model.generate.assert_called_once()
+
+    def test_task_graph_execution_retains_raw_object_profile_and_base_checks_without_fallback(self):
+        for profile_name in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE):
+            for valid in (True, False):
+                with self.subTest(profile=profile_name, valid=valid), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    profile = WORKER.model_profile(profile_name)
+                    value = WORKER.validate_request(dict(request(), mode="plan_tasks", model_profile=profile_name, output_root=str(root)))
+                    source = dict(task_plan_input(), version=3, model_profile=profile_name)
+                    plan = task_graph_fixture(4)
+                    raw = ("\n"+json.dumps(plan, indent=2)+" \n").encode()
+                    model, tokenizer, torch, transformers = task_planner_doubles(raw.decode() if valid else "{}")
+                    digest = dict(sha256="b"*64, parameters=123)
+                    files = {name: dict(bytes=size, sha256=profile["hashes"][name]) for name,size in profile["files"].items()}
+                    real_hash = WORKER.file_hash
+                    def file_hash(path, *args, **kwargs):
+                        return files[path.name] if path.name == "model.safetensors" else real_hash(path, *args, **kwargs)
+                    with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, source, {"version":3,"sha256":"a"*64}, files)), \
+                         mock.patch.object(WORKER, "configure_offline"), \
+                         mock.patch.object(WORKER, "load_backend", return_value=(torch, transformers, mock.Mock(), WORKER.BACKENDS)), \
+                         mock.patch.object(WORKER, "load_model", return_value=model) as loader, \
+                         mock.patch.object(WORKER, "parameter_hash", return_value=digest) as hashes, \
+                         mock.patch.object(WORKER, "file_hash", side_effect=file_hash), \
+                         mock.patch.object(WORKER, "new_lora", side_effect=AssertionError("graph planner created adapter")), \
+                         mock.patch.object(WORKER, "plan_tasks", side_effect=AssertionError("graph planner substituted two-question scaffold")), \
+                         mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()):
+                        if not valid:
+                            with self.assertRaisesRegex(WORKER.JobError, "TASK_GRAPH_ATTEMPTS_EXHAUSTED"):
+                                WORKER.execute_job(value, WORKER.Session(value))
+                            self.assertEqual(list(root.iterdir()), [])
+                            continue
+                        result = WORKER.execute_job(value, WORKER.Session(value))
+                        loader.assert_called_once_with(transformers, torch, root/"model", profile_name)
+                        self.assertEqual(hashes.call_count, 2)
+                    self.assertEqual((root/"task-graph.json").read_bytes(), raw)
+                    self.assertEqual({p.name for p in root.iterdir()}, {"task-graph.json", "report.json"})
+                    self.assertEqual((root/"task-graph.json").stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(result["artifacts"], [dict(relative_path="task-graph.json", **real_hash(root/"task-graph.json"))])
+                    self.assertEqual((result["planner_strategy"],result["planner_structure_generated_by"],result["planner_stop_reason"]),
+                        ("model_task_graph_v1","model","task_graph"))
+                    self.assertEqual((result["planner_task_count"],result["planner_dependency_count"]), (4,5))
+                    self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))
+                    self.assertEqual(result["dataset"]["version"], 3)
+                    self.assertEqual(result["planner_generated_tokens"], 3)
+                    self.assertFalse(result["model_answer_correctness_proven"] or result["generation_limit_reached"])
+                    self.assertTrue(result["base_weights_unchanged"])
+                    self.assertNotIn("planner_question_stats", result)
+                    self.assertNotIn("outputs", result)
 
     def test_derived_v3_is_inference_only_and_preserves_exact_generated_pieces(self):
         value = derived_dataset("é")

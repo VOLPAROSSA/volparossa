@@ -27,13 +27,31 @@ struct GenerationAttempt {
 /// Diagnostic data only; neither a task plan nor remote execution attestation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::compute) struct PlanningDiagnostic {
+pub(in crate::compute) struct QuestionDiagnostic {
     strategy: String,
     attempts: Vec<GenerationAttempt>,
     incomplete_attempt: bool,
 }
 
+/// Both variants retain the original external JSON shape, without a new tag.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub(in crate::compute) enum PlanningDiagnostic {
+    Questions(QuestionDiagnostic),
+    Graph(super::graph::GraphDiagnostic),
+}
+
 impl PlanningDiagnostic {
+    pub(in crate::compute) fn from_value(value: &Value) -> Result<Self> {
+        if value["strategy"] == super::GRAPH_STRATEGY {
+            super::graph::GraphDiagnostic::from_value(value).map(Self::Graph)
+        } else {
+            QuestionDiagnostic::from_value(value).map(Self::Questions)
+        }
+    }
+}
+
+impl QuestionDiagnostic {
     pub(in crate::compute) fn from_value(value: &Value) -> Result<Self> {
         check_shape(&value["attempts"], 0)?;
         let diagnostic: Self = serde_json::from_value(value.clone())?;

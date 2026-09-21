@@ -1330,6 +1330,26 @@ paraphrases nor whitespace variants are silently normalized or claimed to be det
 This is a fixed two-question fork/join strategy, not model-selected task count or graph shape.
 Model output remains question data: it cannot select tools, commands, paths or external actions.
 
+The separate opt-in `compute peer document --plan-task-graph --public-question ...` candidate
+lets the model choose task count and internal dependencies, rather than replacing the existing
+two-question mode. Source-bound input version 3 produces an exact, unmodified `task-graph.json`
+with version 3 and one to four `tasks`, each containing only `question` and `depends_on`.
+Dependencies are unique earlier task indices: empty dependencies read the original public
+source; other tasks consume the listed parents' completed answers. Questions remain bounded,
+distinct and cannot exactly copy the original goal. Local code supplies stable IDs and one
+terminal task with the user's unchanged question, joining only the model graph's terminal
+branches. No selected task is dropped and no missing edge or question is repaired.
+
+Strategy `model_task_graph_v1` generates the whole JSON under one original owner/deadline:
+512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
+use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed
+whole-JSON boundary or model EOS may complete an accepted proposal, including at the last
+budget token. The exact raw artifact, report and source are bound before enrollment and reused
+on resume without replanning. Existing peer-capacity accounting, source expiry, EOS parent
+requirements, cancellation and offline receipts remain in force. This candidate needs a live
+model-and-peer proof of actual selected dependencies and useful output; pure graph validation
+is not evidence of autonomous reasoning, private computation or general tool use.
+
 The original planner input, report, questions and hashes are retained with the graph. Once
 enrolled, resume verifies that same plan and cannot ask the model to generate a different one.
 `--enroll-only --execute` **does run local model planning and tokenization**, but does not submit

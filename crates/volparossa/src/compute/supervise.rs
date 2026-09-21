@@ -237,17 +237,30 @@ pub(super) async fn run(
 }
 
 fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
-    ensure!(
-        result["planner_strategy"] == super::task_plan::CURRENT_STRATEGY,
-        "compute_task_plan_execution_strategy"
-    );
     let bytes = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
     let input = super::task_plan::Input::decode(&bytes)?;
+    input.validate_execution()?;
+    let (strategy, name) = if input.version == 3 {
+        (
+            super::task_plan::GRAPH_STRATEGY,
+            super::task_plan::GRAPH_ARTIFACT_NAME,
+        )
+    } else {
+        (super::task_plan::CURRENT_STRATEGY, "task-questions.json")
+    };
+    ensure!(
+        result["planner_strategy"] == strategy,
+        "compute_task_plan_execution_strategy"
+    );
     let artifact = super::read_file(
-        &options.output.join("task-questions.json"),
+        &options.output.join(name),
         super::task_plan::MAX_ARTIFACT_BYTES,
     )?;
-    super::task_plan::validate_report(result, &input, &bytes, &artifact).map(|_| ())
+    if input.version == 3 {
+        super::task_plan::validate_graph_report(result, &input, &bytes, &artifact).map(|_| ())
+    } else {
+        super::task_plan::validate_report(result, &input, &bytes, &artifact).map(|_| ())
+    }
 }
 
 fn pressure_action(budget: &mut Budget) -> Result<Action> {
@@ -365,19 +378,26 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         ensure!(
             value["model_weights_loaded"] == true
                 && artifacts.len() == 1
-                && artifacts[0]["relative_path"] == "task-questions.json",
+                && matches!(
+                    artifacts[0]["relative_path"].as_str(),
+                    Some("task-questions.json" | super::task_plan::GRAPH_ARTIFACT_NAME)
+                ),
             "compute_task_plan_artifact"
         );
-        let bytes = super::read_file(
-            &output.join("task-questions.json"),
-            super::task_plan::MAX_ARTIFACT_BYTES,
-        )?;
+        let name = artifacts[0]["relative_path"]
+            .as_str()
+            .context("compute_task_plan_artifact")?;
+        let bytes = super::read_file(&output.join(name), super::task_plan::MAX_ARTIFACT_BYTES)?;
         ensure!(
             artifacts[0]["bytes"] == bytes.len() as u64
                 && artifacts[0]["sha256"] == hex::encode(Sha256::digest(&bytes)),
             "compute_task_plan_artifact_hash"
         );
-        super::task_plan::Questions::decode(&bytes)?;
+        // Exact graph/goal corroboration follows the decoded original input after
+        // cleanup. At this boundary only either fixed filename and its bytes pass.
+        if name == "task-questions.json" {
+            super::task_plan::Questions::decode(&bytes)?;
+        }
         return Ok(());
     }
     if mode == Mode::PlanDocument {
@@ -828,7 +848,7 @@ mod tests {
             runtime_root: directory.path().join("unused-runtime"),
             model_root: directory.path().join("unused-model"),
             adapter_root: None,
-            dataset: directory.path().join("absent-input.json"),
+            dataset: directory.path().join("input.json"),
             output: directory.path().join("absent-output"),
             steps: 1,
             threads: 2,
@@ -836,18 +856,30 @@ mod tests {
             spare_capacity: true,
             execute: true,
         };
-        for strategy in [
-            "model_questions_scaffold_v1",
-            "model_questions_scaffold_recovery_v2",
-            "model_questions_source_recovery_v3",
-        ] {
-            let report = serde_json::json!({"planner_strategy":strategy});
-            assert_eq!(
-                check_task_plan_result(&report, &options)
-                    .unwrap_err()
-                    .to_string(),
-                "compute_task_plan_execution_strategy"
-            );
+        for version in [2, 3] {
+            let hash = hex::encode(Sha256::digest(b"public"));
+            let input = serde_json::json!({"version":version,"visibility":"public","license":"CC0-1.0",
+                "question":"What is described?","source_bytes":6,"source_sha256":hash,
+                "source_excerpt":{"start":0,"end":6,"text":"public","sha256":hash}});
+            std::fs::write(&options.dataset, serde_json::to_vec(&input).unwrap()).unwrap();
+            for strategy in [
+                "model_questions_scaffold_v1",
+                "model_questions_scaffold_recovery_v2",
+                "model_questions_source_recovery_v3",
+                if version == 3 {
+                    crate::compute::task_plan::CURRENT_STRATEGY
+                } else {
+                    crate::compute::task_plan::GRAPH_STRATEGY
+                },
+            ] {
+                let report = serde_json::json!({"planner_strategy":strategy});
+                assert_eq!(
+                    check_task_plan_result(&report, &options)
+                        .unwrap_err()
+                        .to_string(),
+                    "compute_task_plan_execution_strategy"
+                );
+            }
         }
     }
 

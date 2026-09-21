@@ -53,8 +53,11 @@ pub(crate) struct Options {
     #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
     task_plan: Option<PathBuf>,
     /// Ask the pinned model for bounded public subquestions; preserves the exact question in the final join.
-    #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "synthesize", "batch_barrier"])]
+    #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_task_graph", "synthesize", "batch_barrier"])]
     plan_tasks: bool,
+    /// Let the pinned model choose bounded public subtasks and dependencies; keeps the exact final question.
+    #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_tasks", "synthesize", "batch_barrier"])]
+    plan_task_graph: bool,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
@@ -141,7 +144,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
-            "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"model_profile":args.model_profile,
+            "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
@@ -162,6 +165,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let _lock = task::open_directory(&args.directory, args.resume)?;
     if args.task_plan.is_some()
         || args.plan_tasks
+        || args.plan_task_graph
         || (args.resume && args.directory.join("graph.json").try_exists()?)
     {
         return graph::run(args, socket, &cancellation.activity).await;

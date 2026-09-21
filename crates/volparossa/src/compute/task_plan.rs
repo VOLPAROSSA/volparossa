@@ -13,10 +13,16 @@ use volparossa_local_control::compute::PublicTask;
 
 pub(super) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024;
 pub(super) const CURRENT_STRATEGY: &str = "model_questions_source_recovery_v4";
+pub(super) const GRAPH_STRATEGY: &str = "model_task_graph_v1";
+pub(super) const GRAPH_ARTIFACT_NAME: &str = "task-graph.json";
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_EXCERPT_BYTES: usize = 1024;
 
+mod graph;
 mod recovery;
+#[cfg(test)]
+pub(super) use graph::ModelTask;
+pub(super) use graph::{ModelTaskGraph, validate_graph_report};
 pub(super) use recovery::PlanningDiagnostic;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -73,7 +79,7 @@ impl Input {
 
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            matches!(self.version, 1 | 2) && self.visibility == "public",
+            matches!(self.version, 1..=3) && self.visibility == "public",
             "compute_task_plan_public_required"
         );
         ensure!(
@@ -92,7 +98,7 @@ impl Input {
         );
         match (self.version, &self.source_excerpt) {
             (1, None) => (), // Retained historical reports only, never new execution.
-            (2, Some(excerpt)) => ensure!(
+            (2 | 3, Some(excerpt)) => ensure!(
                 excerpt.start == 0
                     && (1..=MAX_EXCERPT_BYTES).contains(&excerpt.text.len())
                     && !excerpt.text.contains('\0')
@@ -109,7 +115,10 @@ impl Input {
 
     pub(super) fn validate_execution(&self) -> Result<()> {
         self.validate()?;
-        ensure!(self.version == 2, "compute_task_plan_source_required");
+        ensure!(
+            matches!(self.version, 2 | 3),
+            "compute_task_plan_source_required"
+        );
         Ok(())
     }
 
