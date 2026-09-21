@@ -139,6 +139,9 @@ agent_jobs_stop_unit() {
 }
 
 agent_jobs_stop() {
+    if [ "${agent_jobs_package_queue:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-jobs-package-queue-smoke.py" cleanup-worker "$WORK" || return 1
+    fi
     if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-ready-queue-smoke.py" cleanup-worker "$WORK" || return 1
     fi
@@ -224,7 +227,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
-    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+    if [ "${agent_jobs_package_queue:-no}" = yes ]; then
+        agent_jobs_package_queue_run
+        return
+    elif [ "${agent_jobs_ready_queue:-no}" = yes ]; then
         agent_jobs_ready_queue_run
         return
     fi
@@ -316,7 +322,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
-    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+    if [ "${agent_jobs_package_queue:-no}" = yes ]; then
+        agent_jobs_package_queue_finalize_report "$jobs_status"
+        return
+    elif [ "${agent_jobs_ready_queue:-no}" = yes ]; then
         agent_jobs_ready_queue_finalize_report "$jobs_status"
         return
     fi

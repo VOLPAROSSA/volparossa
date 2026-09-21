@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 
 use super::*;
 
+pub(super) mod cohort;
+
 const SCHEDULING: &str = "ready_rows_v1";
 const PLAN: &str = "queue-plan.json";
 
@@ -419,6 +421,51 @@ fn dispatch(
         provider: args.providers[index],
         dataset_json: data,
     })
+}
+
+fn create_plan(
+    args: &ReadyOptions,
+    publication: &rpc::PublicDataset,
+    verified: &VerifiedPublicDataset,
+    fingerprint: &str,
+) -> Result<ReadyPlan> {
+    let time = now()?;
+    ensure!(time < verified.expires(), "compute_peer_source_expired");
+    super::super::super::private_directory(
+        args.output
+            .parent()
+            .context("compute_distribute_output_parent")?,
+    )?;
+    fs::DirBuilder::new().mode(0o700).create(&args.output)?;
+    if let Some((authorization, selected)) = &args.executor_admission {
+        executors::admit(&args.output, authorization, selected)?;
+    }
+    for (index, pending) in args.pending.iter().enumerate() {
+        save_new(
+            &args.output.join(format!("original-{index}.json")),
+            &pending.handle,
+        )?;
+    }
+    let plan = ReadyPlan {
+        version: 1,
+        scheduling: SCHEDULING.into(),
+        publisher_key: publication.publisher_key.clone(),
+        dataset_manifest_id: hex::encode(verified.manifest_id()),
+        dataset_sha256: sha(publication.dataset_json.as_bytes()),
+        source_expires_unix_seconds: verified.expires(),
+        model_fingerprint: fingerprint.into(),
+        task: args.task.clone(),
+        provider_keys: provider_keys(&args.providers),
+        ready_rows: args.ready_rows.clone(),
+        pending_job_ids: args
+            .pending
+            .iter()
+            .map(|pending| pending.handle.binding.job_id.clone())
+            .collect(),
+        planned_at_unix_seconds: time,
+    };
+    save_new(&args.output.join(PLAN), &plan)?;
+    Ok(plan)
 }
 
 #[allow(
