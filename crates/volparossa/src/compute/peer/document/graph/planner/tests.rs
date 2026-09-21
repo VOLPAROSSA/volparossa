@@ -13,6 +13,7 @@ fn input(document: &str) -> task_plan::Input {
         question: "  Compare the opportunities and constraints.\n".into(),
         source_sha256: digest(document.as_bytes()),
         source_bytes: document.len() as u64,
+        source_excerpt: None,
     }
 }
 
@@ -112,6 +113,7 @@ fn retained(root: &Path) -> (Authority, plan::Plan, Input) {
         question: input.question,
         source_sha256: input.source_sha256,
         source_bytes: input.source_bytes,
+        source_excerpt: None,
     };
     let source = Input {
         version: 1,
@@ -223,6 +225,54 @@ fn legacy_manual_graphs_stay_manual_and_cannot_discard_present_planner_authority
     assert_eq!(summary["decomposition_quality_proven"], false);
 }
 
+#[test]
+fn grounded_authority_binds_literal_prefix_and_reports_partial_coverage() {
+    let source = Input {
+        version: 1,
+        visibility: "public".into(),
+        license: "CC0-1.0".into(),
+        document: format!("{}é末", "a".repeat(1023)),
+        question: "A source task?".into(),
+        synthesis: false,
+    };
+    let mut input = input(&source.document);
+    input.version = 2;
+    input.source_excerpt = Some(task_plan::SourceExcerpt::prefix(&source.document));
+    let authority = Authority {
+        version: 2,
+        input_sha256: "a".repeat(64),
+        report_sha256: "b".repeat(64),
+        artifact_sha256: "c".repeat(64),
+        question: input.question.clone(),
+        source_sha256: input.source_sha256.clone(),
+        source_bytes: input.source_bytes,
+        source_excerpt: input.source_excerpt.as_ref().map(Coverage::from),
+    };
+    verify_input(&authority, &input, &source).unwrap();
+    let summary = summary(Some(&authority));
+    assert_eq!(summary["goal_only"], false);
+    assert_eq!(summary["source_contents_read_by_planner"], true);
+    assert_eq!(summary["source_excerpt_complete"], false);
+    assert_eq!(summary["source_coverage"]["end"], 1023);
+    assert_eq!(summary["decomposition_quality_proven"], false);
+    // Even a self-consistent replacement excerpt hash cannot substitute different
+    // source contents or silently provide less coverage than the canonical prefix.
+    for replacement in ["b".repeat(1023), "a".repeat(1000)] {
+        let mut changed = input.clone();
+        changed.source_excerpt = Some(task_plan::SourceExcerpt::prefix(&replacement));
+        changed.validate().unwrap();
+        let mut rehashed = authority.clone();
+        rehashed.source_excerpt = changed.source_excerpt.as_ref().map(Coverage::from);
+        assert!(verify_input(&rehashed, &changed, &source).is_err());
+    }
+    let mut changed = authority.clone();
+    changed.source_excerpt = None;
+    assert!(verify_input(&changed, &input, &source).is_err());
+    let mut changed = authority;
+    changed.version = 1;
+    assert!(verify_input(&changed, &input, &source).is_err());
+}
+
 #[derive(Parser)]
 struct Command {
     #[command(flatten)]
@@ -264,6 +314,11 @@ async fn model_planning_preview_is_inert_and_enrollment_only() {
     ];
     let args = Command::try_parse_from(&words).unwrap().options;
     assert!(args.plan_tasks);
+    let source = "The actual public source, not a preselected model answer.";
+    let planner_input = checked_input(&args, source).unwrap();
+    assert_eq!(planner_input.version, 2);
+    assert_eq!(planner_input.source_sha256, digest(source.as_bytes()));
+    assert_eq!(planner_input.source_excerpt.unwrap().text, source);
     super::super::super::run(&args, &root.path().join("absent.sock"))
         .await
         .unwrap();

@@ -260,7 +260,7 @@ impl Options {
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
     if mode == Mode::PlanTasks {
         ensure!(!has_adapter, "compute_task_plan_adapter");
-        return task_plan::Input::decode(dataset).map(|_| ());
+        return task_plan::Input::decode(dataset)?.validate_execution();
     }
     let public: Value = serde_json::from_slice(dataset).context("compute_dataset_json")?;
     if mode == Mode::PlanDocument {

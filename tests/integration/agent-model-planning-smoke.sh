@@ -43,7 +43,7 @@ agent_model_planning_run() {
     planning_root=$jobs_source/model-planning
     planning_script=$source_directory/tests/integration/agent-model-planning-smoke.py
     PHASE=agent-model-planning-owner-inputs
-    printf '%s\n' 'Disposable guest only: stage a literal public README prefix and one original question, copy pinned owner assets, observe one real isolated model proposing two subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute real protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback.'
+    printf '%s\n' 'Disposable guest only: stage the complete literal public README introduction before its navigation and the same original question, copy pinned owner assets, observe one real isolated model reading the source prefix and proposing two question-form subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute all real tokenized protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback or claim of semantic relevance from source metadata.'
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/model-planning-source-README.md"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source/planner-provision"
     for planning_part in venv model; do

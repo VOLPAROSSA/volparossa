@@ -1185,20 +1185,25 @@ selected source. A final task receives all of their retained answers and uses th
 user question**, not a model-rewritten goal. Sources are selected once; planning does not fetch
 other documents or replace a missing source with convenient cached content.
 
-This first planner sees the public question only, not the source text. Its source hash and byte
-count bind subsequent work, but are not evidence of source understanding. The current candidate
+The current source-grounded candidate sees the public question and an exact UTF-8 prefix of
+the selected source, at most 1024 bytes. The input retains its text, range and digest alongside
+the full-source hash and size; the report and graph authority bind the same range and digest.
+The summary states whether this covers the complete source. Larger sources are not silently
+presented as fully read, and source binding is not evidence of source understanding. The model
 generates one question, then a complementary question with the first included in the prompt.
 Each generation has at most 512 prompt tokens and 192 new tokens, or the smaller remaining
 allowance, within the same original owner deadline. At most four generations share the
 384-token total; rejected generations count too, and success requires two accepted questions
 before that total is exhausted. The software supplies only the
 `version`/`questions` JSON structure. It does not supply, extract, rewrite or repair the question
-text. Generation stops on the entire bounded question ending in `?`, or at model EOS. Empty,
-overlong, NUL-containing, duplicate or limit-hit text may prompt another generation with fixed
+text. Generation stops on the entire bounded question ending in `?`, or at model EOS; an EOS
+completion is accepted only if its entire bounded text also ends in `?`. Empty,
+overlong, NUL-containing, duplicate, non-question or limit-hit text may prompt another generation with fixed
 categorical feedback; backend, encoding, framing, owner and integrity failures remain fatal.
-The report records `model_questions_scaffold_recovery_v2`, `local_schema`, every attempt's
+The report records `model_questions_source_recovery_v3`, `local_schema`, every attempt's
 token cost, fixed rejection reason and text hash, and the two accepted questions' exact text
-binding and `question_boundary`/`eos` stop reasons. The earlier v1 reports remain verifiable.
+binding and `question_boundary`/`eos` stop reasons. New inputs, question artifacts and planner
+authorities use version 2; earlier goal-only histories remain verifiable as their original version.
 This is a fixed two-question fork/join strategy, not model-selected task count or graph shape.
 Model output remains question data: it cannot select tools, commands, paths or external actions.
 
@@ -1227,7 +1232,15 @@ of its 109 unchanged original files verifies owner isolation, pause/resume and f
 unchanged host state, but no accepted plan or peer jobs. The failing final text check rejects
 empty text, more than 512 UTF-8 bytes, NUL or unencodable text; the original text/tokens were not
 retained, so none of those conditions can individually be named as the cause.
-The bounded recovery candidate is still awaiting actual model/peer proof. When a worker fails,
+The [bounded goal-only recovery run on `3afd45db5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35632214835)
+passes its source-exact mechanical checker: four generations consume 380 tokens, three actual
+peer workers execute the enrolled graph, and completed offline resume preserves all retained
+files with no new work. Its 137 original files also verify protected captures, cleanup and
+unchanged host state. But the accepted texts hallucinate an unrelated electric-vehicle project
+and echo a shortening instruction. That is not useful decomposition. The new source-grounded
+candidate has no live proof yet. Its next fixture uses the complete literal README introduction
+before the navigation, retains the same original question, and verifies every actual tokenized
+peer task rather than assuming a fixed job count. When a worker fails,
 its validated attempt metadata can be retained in `planner-failure.json` only after cleanup;
 no rejected text is exported and the diagnostic cannot authorize enrollment or another run.
 JSON validity and real execution would still not establish decomposition quality, answer

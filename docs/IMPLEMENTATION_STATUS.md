@@ -27,8 +27,11 @@ pausing B; product deadlines and the original lease remain unchanged. A new live
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated
 question data forms a fixed fork/join graph, with the original user question unchanged in the
-terminal join. The model sees the goal only; original source hash/size bind later execution,
-without claiming source understanding. Source acquisition occurs once, and the exact planner
+terminal join. New planning includes the exact UTF-8 prefix of the selected public source,
+at most 1024 bytes, alongside its original full-source hash and size. The versioned input,
+report and graph authority bind that prefix's byte range and digest, explicitly distinguishing
+complete from partial source coverage. Receiving this text does not prove understanding or
+useful decomposition. Source acquisition occurs once, and the exact planner
 input, report, artifact and enrollment hashes are checked on resume without replanning. Invalid
 output may be regenerated within the same bounded invocation; exhausted budgets fail without
 a repaired/canned plan, tool authority or private offload.
@@ -65,7 +68,7 @@ the original output text/tokens were not exported. Source-exact review preserves
 artifact files and verifies actual owner isolation, pause/resume and complete cleanup/unchanged
 host state, not a valid model plan, peer graph, offline resume or answer quality.
 
-The current recovery candidate uses `model_questions_scaffold_recovery_v2`: at most four
+The earlier recovery candidate uses `model_questions_scaffold_recovery_v2`: at most four
 generations under the same original owner deadline and 384-token total allowance. Each
 generation receives at most 192 new tokens or the smaller remaining allowance. Rejected tokens
 count too; two accepted questions are required before that total is exhausted. Only empty,
@@ -75,8 +78,26 @@ encoding, framing, cancellation and other integrity failures remain fatal. Exact
 is bound to all attempt metadata; failure diagnostics retain only counts, fixed reasons and
 text hashes after child cleanup, not rejected text or enrollment authority. Resume never
 replans. Twenty-six focused Rust tests, thirty-nine pure worker tests, the fixture's pure
-checks and strict CLI Clippy pass. This candidate is not yet verified by an actual model/peer
-execution.
+checks and strict CLI Clippy pass. Its [actual run on
+`3afd45db5`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35632214835) and source-exact
+review of 137 unchanged original files **pass mechanically**: four charged generations use
+380 tokens; three real peer workers execute the enrolled graph; completed offline resume
+uses zero rounds and preserves the original history. Protected captures, full cleanup and
+unchanged host state pass. However, the accepted texts describe an unrelated electric-vehicle
+energy-storage project, are not useful VOLPAROSSA subquestions, and one echoes a shortening
+instruction. This is a concrete semantic shortfall, not successful task decomposition.
+
+The new `model_questions_source_recovery_v3` candidate supplies the actual public source prefix
+and requires the entire accepted output to end in `?`, including EOS completions. A bounded
+`NOT_A_QUESTION` rejection can trigger another charged attempt; there is no question extraction,
+text repair or canned fallback. Four attempts, 512 prompt tokens, the shared 384 generated-token
+budget and original owner deadline are unchanged. The next disposable fixture uses the full
+literal README introduction before its navigation, rather than a truncated 128-byte slogan,
+with the same original question. Tokenized peer work is counted from actual retained plans,
+not assumed to fit three jobs. This source-grounded variant has no live model/peer result yet;
+source binding and question punctuation alone cannot establish relevance or answer quality.
+Seventeen focused Rust tests, forty-two pure worker protocol tests, the updated fixture's
+pure controls, shell checks and strict CLI Clippy pass for this source-grounded change.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

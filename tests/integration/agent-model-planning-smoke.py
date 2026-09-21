@@ -19,13 +19,14 @@ TRAIN = JOBS["TRAIN"]
 read, write, require, sha, encoded = (GRAPH[k] for k in ("read", "write", "require", "sha", "encoded"))
 ATTEMPT, MODEL, MODEL_ID = (GRAPH[k] for k in ("ATTEMPT", "MODEL", "MODEL_ID"))
 PREFIX = "agent-model-planning"
-STRATEGY = "model_questions_scaffold_recovery_v2"
+STRATEGY = "model_questions_source_recovery_v3"
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
-SCOPE = ("One actual isolated pinned-model owner generates two public subquestions from a goal, "
+SCOPE = ("One actual isolated pinned-model owner generates two public subquestions from a goal and "
+    "an exact bounded public source prefix, "
     "with only their JSON structure supplied locally and at most four charged attempts within 384 generated tokens, "
-    "without seeing the source contents. The exact proposal is enrolled against one signed public README "
-    "excerpt, then actual protected peers execute its source questions and an exact original-question join. "
+    "without silently trimming or repairing model output. The exact proposal is enrolled against one signed "
+    "complete public README introduction, then actual protected peers execute its source questions and an exact original-question join. "
     "Every peer execution and the separate owner planner are observed. Original-free completed offline "
     "resume neither replans nor changes retained graph, planner or receipts. Not decomposition/answer "
     "quality, semantic completeness, private offload, model-selected tools, open-ended autonomy, full B03 or full alpha.")
@@ -40,6 +41,27 @@ def record(work, name):
     return work / f"{PREFIX}-{name}.json"
 
 
+def public_intro(original):
+    marker=b"[Network]("
+    end=original.find(marker)
+    require(0<end<=1024 and original.startswith(b"# VOLPAROSSA\n")
+        and original[:end].endswith(b"\n\n"),"complete bounded README introduction missing")
+    excerpt=original[:end]
+    require(excerpt.decode("utf-8").encode()==excerpt and b"\0" not in excerpt,
+        "README introduction is not exact public UTF-8")
+    return excerpt
+
+
+def planning_input(source):
+    text=source[:1024].decode("utf-8",errors="ignore")
+    prefix=text.encode()
+    require(source.decode("utf-8").encode()==source and 1<=len(source)<=1048576
+        and prefix and b"\0" not in prefix,"invalid original public planner source")
+    return dict(version=2,visibility="public",license="GPL-3.0-only",question=QUESTION,
+        source_sha256=sha(source),source_bytes=len(source),
+        source_excerpt=dict(start=0,end=len(prefix),text=text,sha256=sha(prefix)))
+
+
 def prepare(work):
     require(TRAIN["socket"].gethostname() == "volparossa-alpha"
         and JOBS["subprocess"].check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
@@ -51,8 +73,7 @@ def prepare(work):
             "planner helper/source not root-installed read-only")
     source=JOBS["private"](work / "state-client/compute-source", "compute-source")
     original=(HERE / "model-planning-source-README.md").read_bytes()
-    excerpt=original[:128].decode("utf-8", errors="ignore").encode()
-    require(124<=len(excerpt)<=128 and original.startswith(excerpt), "not a literal UTF-8 public source prefix")
+    excerpt=public_intro(original)
     path=source / "model-planning-input.txt"
     with path.open("xb") as stream:
         stream.write(excerpt)
@@ -67,6 +88,7 @@ def prepare(work):
         and JOBS["file_hash"](owner,269060552)==MODEL_ID["base_weights"],"planner is not an independent pinned copy")
     print(json.dumps(dict(source="README.md", original_repository_sha256=sha(original),
         excerpt_hex=excerpt.hex(), excerpt_sha256=sha(excerpt), excerpt_bytes=len(excerpt), question=QUESTION,
+        excerpt_range=dict(start=0,end=len(excerpt)),excerpt_selection="complete_intro_before_network_navigation",
         input_inode=[path.stat().st_dev,path.stat().st_ino], owner_model_inode=[own.st_dev,own.st_ino],
         peer_model_inode=[remote.st_dev,remote.st_ino], private_copies_no_hardlinks=True, supplied_task_plan=False)))
 
@@ -292,11 +314,11 @@ def questions_plan(artifact):
     require(len(artifact)<=16384,"model question artifact exceeds original bound")
     value=strict_json(artifact)
     require(type(value) is dict and value.keys()=={"version","questions"} and type(value["version"]) is int
-        and value["version"]==1 and type(value["questions"]) is list and 2<=len(value["questions"])<=4,"wrong model question artifact")
+        and value["version"]==2 and type(value["questions"]) is list and 2<=len(value["questions"])<=4,"wrong model question artifact")
     seen=set()
     for question in value["questions"]:
         require(type(question) is str and 1<=len(question.encode())<=512 and "\0" not in question
-            and question.strip() and question.strip() not in seen,"invalid/non-distinct model-generated question")
+            and question.rstrip().endswith("?") and question.strip() not in seen,"invalid/non-distinct model-generated question")
         seen.add(question.strip())
     nodes=[dict(id=f"question-{index:02d}",question=q,depends_on=[]) for index,q in enumerate(value["questions"])]
     nodes.append(dict(id="answer",question=QUESTION,depends_on=[n["id"] for n in nodes]))
@@ -326,13 +348,13 @@ def check_attempts(attempts,questions=None):
                 require(accepted<len(questions),"extra accepted question")
                 text=questions[accepted]
                 require(item["text_bytes"]==len(text.encode()) and item["text_sha256"]==sha(text.encode())
-                    and (item["stop_reason"]!="question_boundary" or text.rstrip().endswith("?")),
+                    and text.rstrip().endswith("?"),
                     "accepted question text differs from original model artifact")
             stats.append({k:item[k] for k in ("prompt_tokens","generated_tokens","stop_reason")});accepted+=1
         elif item["rejection_code"]=="GENERATION_LIMIT":
             require(item["generated_tokens"]==cap and item["stop_reason"]=="token_limit","uncharged generation limit")
         else:
-            require(item["rejection_code"] in ("EMPTY_TEXT","TEXT_TOO_LONG","NUL_TEXT","DUPLICATE_TEXT")
+            require(item["rejection_code"] in ("EMPTY_TEXT","TEXT_TOO_LONG","NUL_TEXT","DUPLICATE_TEXT","NOT_A_QUESTION")
                 and item["generated_tokens"]<cap and item["stop_reason"] in ("question_boundary","eos")
                 and (item["stop_reason"]!="question_boundary" or item["rejection_code"]=="DUPLICATE_TEXT"),"invalid rejection category")
             if item["rejection_code"]=="TEXT_TOO_LONG":require(item["text_bytes"]>512,"wrong long-text rejection")
@@ -346,7 +368,7 @@ def check_attempts(attempts,questions=None):
 
 
 def validate_failure(value,input_raw,source):
-    expected=dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(source),source_bytes=len(source))
+    expected=planning_input(source)
     require(strict_json(input_raw)==expected and input_raw==encoded(expected),"failure input/source changed")
     require(type(value) is dict and value.keys()=={"version","operation","request_id","code","input_sha256",
         "source_sha256","source_bytes","planner_diagnostic","child_reaped","plan_enrolled"}
@@ -369,8 +391,11 @@ def validate_failure(value,input_raw,source):
 
 def check_planning(raw,source):
     load=lambda name:strict_json(raw[name])
-    expected=dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(source),source_bytes=len(source))
-    require(load("planner-input.json")==expected and raw["planner-input.json"]==encoded(expected),"planner input is not exact goal-only selection")
+    expected=planning_input(source)
+    excerpt=expected["source_excerpt"]
+    coverage={k:excerpt[k] for k in ("start","end","sha256")}
+    complete=excerpt["end"]==len(source)
+    require(load("planner-input.json")==expected and raw["planner-input.json"]==encoded(expected),"planner input is not exact source-grounded selection")
     require(raw["planner-artifact.json"]==raw["model-planner/task-questions.json"],"original model questions replaced")
     plan=questions_plan(raw["planner-artifact.json"])
     require(load("graph-plan.json")==plan and raw["graph-plan.json"]==encoded(plan),"graph was not derived exactly from actual questions")
@@ -380,7 +405,8 @@ def check_planning(raw,source):
         and report["backend_versions"]=={"torch":"2.14.0+cpu","transformers":"5.16.1","peft":"0.20.0"}
         and report["model"]["id"]==DOC["MODEL"] and report["model"]["revision"]==MODEL_ID["model_revision"]
         and report["model"]["files"]["model.safetensors"]==MODEL_ID["base_weights"]
-        and report["model_weights_loaded"] is report["goal_only_planning"] is report["base_weights_unchanged"] is True
+        and report["model_weights_loaded"] is report["source_contents_read_by_planner"] is report["base_weights_unchanged"] is True
+        and report["goal_only_planning"] is False and report["source_excerpt_complete"] is complete
         and report["base_before"]==report["base_after"] and report["base_before"]["parameters"]>0
         and re.fullmatch(r"[0-9a-f]{64}",report["base_before"]["sha256"])
         and report["generation_limit_reached"] is report["model_answer_correctness_proven"] is False
@@ -395,16 +421,18 @@ def check_planning(raw,source):
     accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions)
     require(accepted==2 and report["planner_question_stats"]==stats and report["planner_prompt_tokens"]==maximum
         and report["planner_generated_tokens"]==total<384,"planner aggregate budget or accepted stages differ")
-    require(report["dataset"]==dict(version=1,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
-        visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source))
+    require(report["dataset"]==dict(version=2,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
+        visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
+        source_excerpt=dict(coverage,bytes=excerpt["end"]))
         and report["artifacts"]==[dict(relative_path="task-questions.json",bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
         and load("model-planner/report.json").items()<=report.items(),"planner report/artifact not tied to exact goal and source")
     DOC["check_supervisor"](report)
-    authority=dict(version=1,input_sha256=sha(raw["planner-input.json"]),report_sha256=sha(raw["planner-report.json"]),
-        artifact_sha256=sha(raw["planner-artifact.json"]),question=QUESTION,source_sha256=sha(source),source_bytes=len(source))
+    authority=dict(version=2,input_sha256=sha(raw["planner-input.json"]),report_sha256=sha(raw["planner-report.json"]),
+        artifact_sha256=sha(raw["planner-artifact.json"]),question=QUESTION,source_sha256=sha(source),source_bytes=len(source),source_excerpt=coverage)
     require(load("graph.json")["planner"]==authority,"planner authority was not pinned before graph enrollment")
-    summary=dict(kind="bounded_model_fork_join_decomposition",authority=authority,goal_only=True,
-        source_contents_read_by_planner=False,model_selected_tools=False,decomposition_quality_proven=False)
+    summary=dict(kind="bounded_model_fork_join_decomposition",authority=authority,goal_only=False,
+        source_contents_read_by_planner=True,source_excerpt_complete=complete,source_coverage=coverage,
+        model_selected_tools=False,decomposition_quality_proven=False)
     return plan,summary
 
 
@@ -460,7 +488,10 @@ def check(value,revision):
         and not any(HANDLE.fullmatch(n) or "/work/" in n or "/synthesis/" in n for n in initial["snapshot"]),"enrolled planner/source files changed or already admitted peers")
     original=value["input"];source=bytes.fromhex(original["excerpt_hex"])
     require(original["source"]=="README.md" and original["question"]==QUESTION and original["supplied_task_plan"] is False
-        and 124<=len(source)<=128 and original["excerpt_bytes"]==len(source) and original["excerpt_sha256"]==sha(source),"not exact public source/goal selection")
+        and 1<=len(source)<=1024 and original["excerpt_bytes"]==len(source) and original["excerpt_sha256"]==sha(source)
+        and original["excerpt_range"]==dict(start=0,end=len(source))
+        and original["excerpt_selection"]=="complete_intro_before_network_navigation"
+        and public_intro(source+b"[Network](")==source,"not exact complete public introduction/goal selection")
     plan,planning=check_planning(raw,source);count=len(plan["nodes"])-1;load=lambda name:json.loads(raw[name])
     graph=load("graph.json")
     require(graph["version"]==1 and graph["plan_sha256"]==sha(encoded(plan)) and graph["leaves"]==[
@@ -592,16 +623,29 @@ def report(value,revision):
 
 def self_test():
     # Inert schema/graph reconstruction only, not fabricated model or peer execution.
+    intro=b"# VOLPAROSSA\n\nPublic introduction.\n\n"
+    assert public_intro(intro+b"[Network](#network)\n")==intro
+    for original in (intro,b"wrong\n\n[Network](",intro.rstrip()+b"[Network](",b"# VOLPAROSSA\n"+b"x"*1024+b"\n\n[Network]("):
+        try:public_intro(original)
+        except ValueError:pass
+        else:raise AssertionError("incomplete/nonliteral source introduction accepted")
+    source=("a"*1023+"é"+"rest").encode()
+    selected=planning_input(source)
+    assert selected["version"]==2 and selected["source_sha256"]==sha(source)
+    assert selected["source_excerpt"]==dict(start=0,end=1023,text="a"*1023,sha256=sha(b"a"*1023))
+    assert planning_input(intro)["source_excerpt"]["end"]==len(intro)
     for count in (2,3,4):
         questions=[f"Inert question {n}?" for n in range(count)]
-        plan=questions_plan(encoded(dict(version=1,questions=questions)))
+        plan=questions_plan(encoded(dict(version=2,questions=questions)))
         assert len(plan["nodes"])==count+1 and [n["question"] for n in plan["nodes"][:-1]]==questions
         assert plan["nodes"][-1]==dict(id="answer",question=QUESTION,depends_on=[f"question-{n:02d}" for n in range(count)])
-    for raw in (b'{"version":1,"version":1,"questions":["A?","B?"]}',
-                b'{"version":1,"questions":["A?"," A? "]}',b'{"version":true,"questions":["A?","B?"]}',
-                b'{"version":1,"questions":["A?"]}',b'{"version":1,"questions":["A?","B?"],"tools":[]}',
-                b'```json\n{"version":1,"questions":["A?","B?"]}\n```',
-                b'{"version":1,"questions":["A?","B?"]} trailing'):
+    for raw in (b'{"version":2,"version":2,"questions":["A?","B?"]}',
+                b'{"version":2,"questions":["A?"," A? "]}',b'{"version":true,"questions":["A?","B?"]}',
+                b'{"version":2,"questions":["A?"]}',b'{"version":2,"questions":["A?","B?"],"tools":[]}',
+                b'```json\n{"version":2,"questions":["A?","B?"]}\n```',
+                b'{"version":2,"questions":["A?","B?"]} trailing',
+                b'{"version":1,"questions":["A?","B?"]}',
+                b'{"version":2,"questions":["A?","This is not a question."]}'):
         try:questions_plan(raw)
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid/canned/extracted model question shape accepted")
@@ -619,6 +663,16 @@ def self_test():
     limited=[attempt(0,1,"x",192,False,"GENERATION_LIMIT","token_limit"),
         attempt(0,2,questions[0],20),attempt(1,3,questions[1],25,cap=172)]
     assert check_attempts(limited,questions)[:3]==(2,237,83)
+    question_form=[attempt(0,1,"A declarative model response.",22,False,"NOT_A_QUESTION","eos"),
+        attempt(0,2,questions[0],20,stop="eos"),attempt(1,3,questions[1],25)]
+    assert check_attempts(question_form,questions)[:3]==(2,67,83)
+    for invalid in (
+        [attempt(0,1,"A declarative model response.",22,True,None,"eos")],
+        [attempt(0,1,"A question?",22,False,"NOT_A_QUESTION","question_boundary")],
+        [attempt(0,1,"",22,False,"NOT_A_QUESTION","eos")]):
+        try:check_attempts(invalid,["A declarative model response."])
+        except ValueError:pass
+        else:raise AssertionError("non-question accepted or wrong rejection framing")
     mutations=(
         lambda a:a[1].update(attempt=1),lambda a:a[1].update(question_index=0),
         lambda a:a[1].update(accepted=True,rejection_code=None),lambda a:a[2].update(text_sha256="0"*64),
@@ -634,13 +688,23 @@ def self_test():
         try:check_attempts(invalid,questions)
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid recovery attempt metadata accepted")
-    input_raw=encoded(dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(b"public"),source_bytes=6))
+    input_raw=encoded(planning_input(b"public"))
     failure=dict(version=1,operation="compute_public_task_planning_failure",request_id="a"*32,
         code="TASK_PLAN_GENERATION_LIMIT_REACHED",input_sha256=sha(input_raw),source_sha256=sha(b"public"),source_bytes=6,
         planner_diagnostic=dict(strategy=STRATEGY,attempts=[attempt(0,1,"x",192,False,"GENERATION_LIMIT","token_limit"),
             attempt(0,2,"y",192,False,"GENERATION_LIMIT","token_limit")],incomplete_attempt=False),
         child_reaped=True,plan_enrolled=False)
     validate_failure(failure,input_raw,b"public")
+    for mutate in (
+        lambda value:value.update(version=1),
+        lambda value:value["source_excerpt"].update(text="changed"),
+        lambda value:value["source_excerpt"].update(start=1),
+        lambda value:value["source_excerpt"].update(end=5),
+        lambda value:value["source_excerpt"].update(sha256="f"*64)):
+        changed=strict_json(input_raw);mutate(changed)
+        try:validate_failure(failure,encoded(changed),b"public")
+        except ValueError:pass
+        else:raise AssertionError("changed source prefix was accepted")
     after_generation=copy.deepcopy(failure)
     after_generation["code"]="BASE_WEIGHTS_CHANGED"
     after_generation["planner_diagnostic"]["attempts"]=attempts
@@ -656,7 +720,7 @@ def self_test():
         try:validate_failure(invalid,input_raw,b"public")
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid/non-reaped planner failure accepted")
-    print("model-planning proposal, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
+    print("source-grounded model-planning proposal, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
 
 
 def main(args):

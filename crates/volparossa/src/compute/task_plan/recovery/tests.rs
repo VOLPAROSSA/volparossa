@@ -135,3 +135,26 @@ fn failure_trace_may_be_incomplete_but_cannot_invent_completed_costs() {
     diagnostic["attempts"] = Value::Array(vec![report["planner_attempts"][0].clone(); 5]);
     assert!(PlanningDiagnostic::from_value(&diagnostic).is_err());
 }
+
+#[test]
+fn nonquestion_retry_requires_source_strategy_and_is_charged_without_renewal() {
+    let (mut report, mut questions) = fixture();
+    report["planner_strategy"] = SOURCE_STRATEGY.into();
+    questions.version = 2;
+    report["planner_attempts"][1]["rejection_code"] = "NOT_A_QUESTION".into();
+    report["planner_attempts"][1]["text_bytes"] = 90.into();
+    check(&report, &questions).unwrap();
+    let diagnostic = json!({"strategy":SOURCE_STRATEGY,
+        "attempts":report["planner_attempts"],"incomplete_attempt":false});
+    PlanningDiagnostic::from_value(&diagnostic).unwrap();
+    let mut old = diagnostic.clone();
+    old["strategy"] = STRATEGY.into();
+    assert!(PlanningDiagnostic::from_value(&old).is_err());
+    for replacement in [json!("question_boundary"), json!("token_limit")] {
+        let mut changed = diagnostic.clone();
+        changed["attempts"][1]["stop_reason"] = replacement;
+        assert!(PlanningDiagnostic::from_value(&changed).is_err());
+    }
+    report["planner_generated_tokens"] = 30.into(); // The rejected generation still costs 17.
+    assert!(check(&report, &questions).is_err());
+}

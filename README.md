@@ -225,16 +225,13 @@ accounting. Focused checks pass; the first live dependency-ready trial lost its 
 worker, so that proof remains pending while the fixture's startup coordination is corrected.
 
 The next opt-in mode asks the local model to propose the initial subquestions
-automatically, preserving the original question in the final task. That goal-only decomposition
-passes focused local checks. Two real-model attempts reached the generation limit without an
-accepted plan. The next candidate lets the model generate two complementary questions while
-the software supplies only the file structure. Complete model-and-peer execution proof is
-still pending: after correcting incompatible diagnostic codes, the latest real run identifies
-a second-question text-validation failure before enrollment. The original text was not retained,
-so the exact rejected condition is not yet known. The current recovery candidate allows up to
-four model generations within the same total token budget and deadline, charging rejected
-attempts too. It never repairs text or supplies replacement questions. This recovery still
-needs its real model-and-peer proof. The model does not choose task count or shape.
+automatically, preserving the original question in the final task. Its goal-only predecessor
+completed real model-and-peer execution, but the generated texts were unrelated to the source;
+that is not useful task decomposition. The current candidate supplies an exact bounded public
+source excerpt, records how much of the source was read, and rejects non-question output.
+Up to four generations share the same token budget and deadline, charging rejected attempts
+too. It never repairs text or supplies replacement questions. This source-grounded version
+still needs real execution and content review. The model does not choose task count or shape.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery
