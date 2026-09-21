@@ -127,12 +127,16 @@ impl DiscoveryRuntime {
             self.finish_exact_content_peer(key, peer, None);
             return true;
         };
-        if let Ok(request) = request {
-            self.content.exact.requests.insert(request, (key, peer));
-            self.content.event("CONTENT_EXACT_RESOLVED_REQUEST_SENT");
-        } else {
-            self.content.event("CONTENT_EXACT_ADDRESS_UNAVAILABLE");
-            self.finish_exact_content_peer(key, peer, None);
+        match request {
+            Ok(request) => {
+                self.content.exact.requests.insert(request, (key, peer));
+                self.content.event("CONTENT_EXACT_RESOLVED_REQUEST_SENT");
+            }
+            Err(error) => {
+                self.content.event(error.diagnostic_code());
+                self.content.event("CONTENT_EXACT_ADDRESS_UNAVAILABLE");
+                self.finish_exact_content_peer(key, peer, None);
+            }
         }
         true
     }
@@ -427,6 +431,18 @@ mod tests {
                 assert_eq!(
                     result.unwrap_err(),
                     super::super::ContentDiscoveryError::Unavailable
+                );
+                assert!(
+                    client
+                        .content
+                        .events
+                        .contains(&"CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE")
+                );
+                assert!(
+                    !client
+                        .content
+                        .events
+                        .contains(&"CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED")
                 );
             } else {
                 let offers = result.expect("fresh signed offers from both exact peers");

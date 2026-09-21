@@ -56,6 +56,86 @@ pub enum ContentProviderRpcError {
     Correlation,
 }
 
+/// Fixed failure boundary for an exact provider's address lookup, without peer/address data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum ContentAddressResolutionError {
+    /// The original Kademlia query did not return a successful result.
+    #[error("content address query unavailable")]
+    QueryUnavailable,
+    /// Query ownership or the exact requested key does not match.
+    #[error("content address query provenance rejected")]
+    Provenance,
+    /// No exact target was returned and no previously admitted address is available.
+    #[error("content address target missing")]
+    MissingTarget,
+    /// The exact target has no admissible hint or previously admitted address.
+    #[error("content address hints unavailable")]
+    NoAdmissibleAddress,
+    /// The subsequent bounded service request was not admitted.
+    #[error("content address service request rejected")]
+    RequestAdmission,
+}
+
+impl ContentAddressResolutionError {
+    /// Privacy-safe event code; this is a failure boundary, not proof of a malicious peer.
+    #[must_use]
+    pub const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::QueryUnavailable => "CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE",
+            Self::Provenance => "CONTENT_EXACT_ADDRESS_PROVENANCE_REJECTED",
+            Self::MissingTarget => "CONTENT_EXACT_ADDRESS_TARGET_MISSING",
+            Self::NoAdmissibleAddress => "CONTENT_EXACT_ADDRESS_HINTS_UNAVAILABLE",
+            Self::RequestAdmission => "CONTENT_EXACT_ADDRESS_REQUEST_REJECTED",
+        }
+    }
+}
+
+fn resolved_content_addresses(
+    local: &PeerId,
+    peer: PeerId,
+    result: &kad::GetClosestPeersResult,
+    address_known: bool,
+) -> Result<Vec<libp2p::Multiaddr>, ContentAddressResolutionError> {
+    let result = result
+        .as_ref()
+        .map_err(|_| ContentAddressResolutionError::QueryUnavailable)?;
+    if result.key != peer.to_bytes() {
+        return Err(ContentAddressResolutionError::Provenance);
+    }
+    let mut addresses = Vec::new();
+    let mut target_found = false;
+    for found in result
+        .peers
+        .iter()
+        .take(crate::MAX_DISCOVERY_ADDRESSES_PER_EVENT)
+    {
+        if found.peer_id != peer {
+            continue;
+        }
+        target_found = true;
+        for address in found
+            .addrs
+            .iter()
+            .take(crate::MAX_DISCOVERY_ADDRESSES_PER_PEER)
+        {
+            if let Ok(canonical) = crate::prepare_discovery_address(local, peer, address) {
+                if crate::private_address_is_local(&canonical) && !addresses.contains(&canonical) {
+                    addresses.push(canonical);
+                }
+            }
+        }
+        break;
+    }
+    if addresses.is_empty() && !address_known {
+        return Err(if target_found {
+            ContentAddressResolutionError::NoAdmissibleAddress
+        } else {
+            ContentAddressResolutionError::MissingTarget
+        });
+    }
+    Ok(addresses)
+}
+
 /// Request for one provider's generic, independently signed service offer.
 #[derive(Clone, PartialEq, Message)]
 pub struct ContentServiceRequest {
@@ -636,48 +716,23 @@ impl DiscoveryService {
         id: kad::QueryId,
         result: &kad::GetClosestPeersResult,
         request: ContentServiceRequest,
-    ) -> Result<request_response::OutboundRequestId, DiscoveryError> {
+    ) -> Result<request_response::OutboundRequestId, ContentAddressResolutionError> {
         let peer = self
             .content_provider
             .address_queries
             .get(&id)
             .copied()
-            .ok_or(DiscoveryError::ProtocolPeer)?;
-        self.finish_content_address_lookup(id)?;
-        let result = result.as_ref().map_err(|_| DiscoveryError::PeerAddress)?;
-        if result.key != peer.to_bytes() {
-            return Err(DiscoveryError::ProtocolPeer);
-        }
-        let mut addresses = Vec::new();
-        for found in result
-            .peers
-            .iter()
-            .take(crate::MAX_DISCOVERY_ADDRESSES_PER_EVENT)
-        {
-            if found.peer_id != peer {
-                continue;
-            }
-            for address in found
-                .addrs
-                .iter()
-                .take(crate::MAX_DISCOVERY_ADDRESSES_PER_PEER)
-            {
-                if let Ok(canonical) =
-                    crate::prepare_discovery_address(self.local_peer_id(), peer, address)
-                {
-                    if crate::private_address_is_local(&canonical)
-                        && !addresses.contains(&canonical)
-                    {
-                        addresses.push(canonical);
-                    }
-                }
-            }
-            break;
-        }
-        if addresses.is_empty() && !self.content_provider_address_known(&peer) {
-            return Err(DiscoveryError::PeerAddress);
-        }
+            .ok_or(ContentAddressResolutionError::Provenance)?;
+        self.finish_content_address_lookup(id)
+            .map_err(|_| ContentAddressResolutionError::Provenance)?;
+        let addresses = resolved_content_addresses(
+            self.local_peer_id(),
+            peer,
+            result,
+            self.content_provider_address_known(&peer),
+        )?;
         self.request_content_service_at(&peer, request, addresses)
+            .map_err(|_| ContentAddressResolutionError::RequestAdmission)
     }
 
     /// Finish only the exact generic content-provider lookup owned by this service.
@@ -946,6 +1001,100 @@ mod tests {
     use super::*;
     use futures::io::Cursor;
     use libp2p::request_response::Codec as _;
+
+    #[test]
+    fn content_address_diagnostics_separate_query_provenance_and_missing_target() {
+        let local = PeerId::random();
+        let target = PeerId::random();
+        let timeout = Err(kad::GetClosestPeersError::Timeout {
+            key: target.to_bytes(),
+            peers: vec![kad::PeerInfo {
+                peer_id: target,
+                addrs: vec!["/memory/1234".parse().unwrap()],
+            }],
+        });
+        // Classifying the failure does not start accepting partial timed-out queries.
+        assert_eq!(
+            resolved_content_addresses(&local, target, &timeout, true),
+            Err(ContentAddressResolutionError::QueryUnavailable)
+        );
+        let wrong_key = Ok(kad::GetClosestPeersOk {
+            key: local.to_bytes(),
+            peers: vec![],
+        });
+        assert_eq!(
+            resolved_content_addresses(&local, target, &wrong_key, true),
+            Err(ContentAddressResolutionError::Provenance)
+        );
+        let missing = Ok(kad::GetClosestPeersOk {
+            key: target.to_bytes(),
+            peers: vec![],
+        });
+        assert_eq!(
+            resolved_content_addresses(&local, target, &missing, false),
+            Err(ContentAddressResolutionError::MissingTarget)
+        );
+        // Previously admitted/live addresses remain usable exactly as before.
+        assert_eq!(
+            resolved_content_addresses(&local, target, &missing, true),
+            Ok(vec![])
+        );
+    }
+
+    #[test]
+    fn content_address_diagnostics_preserve_hint_validation_and_deduplication() {
+        let local = PeerId::random();
+        let target = PeerId::random();
+        let mut found = kad::GetClosestPeersOk {
+            key: target.to_bytes(),
+            peers: vec![kad::PeerInfo {
+                peer_id: target,
+                addrs: vec!["/ip4/8.8.8.8/tcp/0".parse().unwrap()],
+            }],
+        };
+        assert_eq!(
+            resolved_content_addresses(&local, target, &Ok(found.clone()), false),
+            Err(ContentAddressResolutionError::NoAdmissibleAddress)
+        );
+        assert_eq!(
+            resolved_content_addresses(&local, target, &Ok(found.clone()), true),
+            Ok(vec![])
+        );
+        let valid: libp2p::Multiaddr = "/memory/1234".parse().unwrap();
+        found.peers[0].addrs.extend([valid.clone(), valid.clone()]);
+        assert_eq!(
+            resolved_content_addresses(&local, target, &Ok(found), false),
+            Ok(vec![valid.with_p2p(target).unwrap()])
+        );
+    }
+
+    #[test]
+    fn content_address_diagnostics_are_fixed_private_detail_free_codes() {
+        for (error, code) in [
+            (
+                ContentAddressResolutionError::QueryUnavailable,
+                "CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE",
+            ),
+            (
+                ContentAddressResolutionError::Provenance,
+                "CONTENT_EXACT_ADDRESS_PROVENANCE_REJECTED",
+            ),
+            (
+                ContentAddressResolutionError::MissingTarget,
+                "CONTENT_EXACT_ADDRESS_TARGET_MISSING",
+            ),
+            (
+                ContentAddressResolutionError::NoAdmissibleAddress,
+                "CONTENT_EXACT_ADDRESS_HINTS_UNAVAILABLE",
+            ),
+            (
+                ContentAddressResolutionError::RequestAdmission,
+                "CONTENT_EXACT_ADDRESS_REQUEST_REJECTED",
+            ),
+        ] {
+            assert_eq!(error.diagnostic_code(), code);
+        }
+    }
 
     #[tokio::test]
     async fn exact_content_lookup_codec_binds_provider_subset_without_changing_generic_requests() {

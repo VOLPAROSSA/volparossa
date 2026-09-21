@@ -1076,6 +1076,17 @@ Unconfirmed batch results now retain an optional fixed `diagnostic`: the RPC ope
 An exchange failure alone does not identify a network cause or prove that a job was rejected.
 The disposable collection fixture also retains sampled allowlisted client boundary timestamps;
 those are diagnostic lower bounds, not authenticated per-job evidence or a product log archive.
+The [diagnostic run on `87b166d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35621161591)
+failed earlier, at the first native custody deposit: the control relay reported an unavailable
+provider address and returned an incomplete exact-target set. No peer compute submission was
+reached, so this run cannot explain the previous unconfirmed job. The earlier generic
+`OFFER_REJECTED` client event was not evidence of an invalid provider signature. Address failures
+now distinguish query failure, query provenance, missing target, inadmissible hints and service
+request admission; an incomplete target set has its own client event. The guest fixture takes
+bounded, fixed-code snapshots on the client and control relay around native deposits and warmup,
+before cleanup. These changes expose the failing boundary; they do not repair discovery or
+claim a successful network-source workflow. The failed run's original cleanup and unchanged
+host-state checks passed.
 
 ### Synthesizing one public answer
 

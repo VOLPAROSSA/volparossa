@@ -32,8 +32,15 @@ error code when available, while leaving uncertain handles, slot ownership and o
 deadlines unchanged. The disposable collection observer now samples only allowlisted RPC
 boundary codes before they leave the in-memory log ring. These timestamp observations are
 lower bounds, not task correlation or proof of a specific transport cause. Six focused queue
-tests and the pure diagnostic parser checks pass. This adds diagnosis, not a claimed fix for
-the unresolved submission; its new live run is pending.
+tests and the pure diagnostic parser checks pass. The [diagnostic run on
+`87b166d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35621161591) **failed earlier**, at
+the first native custody deposit. Original control-relay logs show an unavailable provider
+address after its exact lookup; the client rejected the resulting incomplete target set.
+No compute job was reached. This is not proof of an invalid signature and does not resolve
+the previous unconfirmed submission. All 121 original artifact files were retained; cleanup
+and unchanged host state passed. A follow-up adds fixed address-resolution failure categories
+and early client/control-relay snapshots around deposits and warmup, without changing lookup
+acceptance, timeouts, retries or authority. It is diagnostic, not a claimed functional fix.
 
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly

@@ -46,9 +46,17 @@ RPC_BOUNDARIES = frozenset("COMPUTE_RPC_" + name + "_FAILED" for name in (
     "LOCAL_REQUEST", "LOCAL_REPLY", "ROUTE_SETUP", "DISCOVERY", "OFFER_BINDING",
     "ROUTE_BINDING", "ROUTE_FLOW", "PROVIDER_TLS", "CHALLENGE", "PREEXPORT_CHECK",
     "SIGNED_EXCHANGE", "REPLY_BINDING", "PROVIDER_CLOSE", "ROUTE_CLOSE", "FINAL_POLICY"))
+SOURCE_BOUNDARIES = frozenset((
+    "CONTENT_EXACT_LOOKUP_STARTED", "CONTENT_EXACT_LOOKUP_FINISHED",
+    "CONTENT_EXACT_ADDRESS_QUERY_STARTED", "CONTENT_EXACT_ADDRESS_UNAVAILABLE",
+    "CONTENT_EXACT_ADDRESS_QUERY_UNAVAILABLE", "CONTENT_EXACT_ADDRESS_PROVENANCE_REJECTED",
+    "CONTENT_EXACT_ADDRESS_TARGET_MISSING", "CONTENT_EXACT_ADDRESS_HINTS_UNAVAILABLE",
+    "CONTENT_EXACT_ADDRESS_REQUEST_REJECTED", "CONTENT_EXACT_RESOLVED_REQUEST_SENT",
+    "CONTENT_DISCOVERY_RESPONSE_AUTHORITY_REJECTED", "CONTENT_DISCOVERY_RESPONSE_OFFER_REJECTED",
+    "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE", "CONTENT_DISCOVERY_RESPONSE_REJECTED"))
 
 
-def rpc_boundaries(raw, state):
+def rpc_boundaries(raw, state, allowed=RPC_BOUNDARIES):
     """Bounded, lower-bound timestamp counts; sampled ring logs are not a full trace."""
     if len(raw) > 262144:
         raise ValueError("oversized diagnostic snapshot")
@@ -58,12 +66,36 @@ def rpc_boundaries(raw, state):
             continue
         stamp = int(fields[0])
         code = fields[2].removeprefix(b"event=").decode("ascii", errors="replace")
-        if not fields[2].startswith(b"event=") or code not in RPC_BOUNDARIES or not 0 < stamp < 2**64:
+        if not fields[2].startswith(b"event=") or code not in allowed or not 0 < stamp < 2**64:
             continue
         previous = state.setdefault(code, dict(first_ms=stamp, last_ms=stamp, distinct_timestamp_observations=0))
         if stamp > previous["last_ms"] or previous["distinct_timestamp_observations"] == 0:
             previous["last_ms"] = stamp
             previous["distinct_timestamp_observations"] += 1
+
+
+def source_boundaries(work, stage):
+    """Guest-only early snapshots; no background process or retained raw log fields."""
+    JOBS["guest_work"](work)
+    require(stage in ("before", "deposit-1", "deposit-2", "warm"), "unknown source boundary stage")
+    layout = read(work / "agent-jobs-layout.json")
+    peers = read(work / "a01-expected-peers.json")
+    control = [name for name, peer in peers.items()
+               if re.fullmatch(r"relay[0-5]", name) and peer == layout["control_relay_peer_id"]]
+    require(len(control) == 1, "source boundary control relay is not exact")
+    summary = dict(version=1, scope="sampled_source_discovery_boundaries_not_job_correlation",
+                   stage=stage, timestamps_are_lower_bounds=True, nodes={})
+    for role, node in (("client", "client"), ("control_relay", control[0])):
+        sample = dict(sample_failed=False, events={})
+        try:
+            reply = JOBS["subprocess"].run([str(work / "bin/volparossa"), "--control-socket",
+                str(work / f"runtime-{node}/control/agent.sock"), "logs", "--limit", "400"],
+                stdout=JOBS["subprocess"].PIPE, stderr=JOBS["subprocess"].DEVNULL, timeout=2, check=True)
+            rpc_boundaries(reply.stdout, sample["events"], SOURCE_BOUNDARIES)
+        except (OSError, ValueError, JOBS["subprocess"].SubprocessError):
+            sample["sample_failed"] = True
+        summary["nodes"][role] = sample
+    write(record(work, f"source-boundaries-{stage}"), summary)
 
 
 @contextmanager
@@ -863,6 +895,7 @@ def main(args):
         self_test(network)
     elif command=="prepare":prepare(Path(args[1]),network)
     elif command=="network-plan" and network:network_plan(Path(args[1]))
+    elif command=="source-boundaries" and network:source_boundaries(Path(args[1]),args[2])
     elif command=="cache-before" and network:cache_before(Path(args[1]))
     elif command=="enrolled":enrolled(Path(args[1]),network)
     elif command=="observe":observe(Path(args[1]),int(args[2]))
@@ -890,6 +923,11 @@ def rpc_boundaries_self_test():
             "bounded fixed RPC codes lost or duplicated")
     require("never-retain" not in json.dumps(state) and "prompt" not in json.dumps(state),
             "unfiltered RPC log fields retained")
+    sources = {}
+    rpc_boundaries(line(104, "CONTENT_EXACT_ADDRESS_TARGET_MISSING") + line(105)
+                   + line(106, "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE"), sources, SOURCE_BOUNDARIES)
+    require(set(sources) == {"CONTENT_EXACT_ADDRESS_TARGET_MISSING", "CONTENT_DISCOVERY_RESPONSE_TARGETS_UNAVAILABLE"}
+            and "never-retain" not in json.dumps(sources), "source boundaries retained unrelated or private fields")
     try:
         rpc_boundaries(b"x" * 262145, state)
     except ValueError:

@@ -62,8 +62,8 @@ use connection_provenance::{ConnectionProvenanceBehaviour, ConnectionProvenanceE
 use content_connection::ContentConnectionBehaviour;
 pub use content_provider::{
     CONTENT_DISCOVERY_PROTOCOL, CONTENT_REQUEST_TIMEOUT, CONTENT_SERVICE_PROTOCOL,
-    ContentDiscoveryRequest, ContentDiscoveryResponse, ContentProviderOffer,
-    ContentProviderRpcError, ContentServiceRequest, ContentServiceResponse,
+    ContentAddressResolutionError, ContentDiscoveryRequest, ContentDiscoveryResponse,
+    ContentProviderOffer, ContentProviderRpcError, ContentServiceRequest, ContentServiceResponse,
     MAX_CONTENT_DISCOVERY_FRAME_BYTES, MAX_CONTENT_OFFER_BYTES, MAX_CONTENT_OFFERS,
     MAX_PENDING_CONTENT_REQUESTS,
 };
