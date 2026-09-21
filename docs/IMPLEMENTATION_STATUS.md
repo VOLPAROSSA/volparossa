@@ -36,6 +36,12 @@ Ordinary inference now services owner controls between generated tokens and afte
 rather than only before an entire output. Its existing token budget, cancellation, original
 deadline and control-acknowledgement limit remain unchanged. The 44 pure worker protocol checks
 pass; this updated dependency-ready scenario still needs its own live proof.
+Backend preparation also checks the same control pipe between its individual imports and
+configuration steps, always on the execution thread after the preceding operation returns.
+Two real-pipe tests with inert import doubles verify pause acknowledgement/resume gating and
+cancellation before the next import; all 64 current pure worker tests pass. An individual
+native import remains non-preemptible. This improves checkpoint granularity, without claiming
+that it explains or fixes the observed VM worker failures or completes owner-priority acceptance.
 Its [run on `66abf863`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35641415889)
 fails before pressure injection: the helper rejects the runner's actual
 `/opt/va.<32-lowercase-hex>.<6-mktemp-characters>` work directory because its old expression
@@ -86,6 +92,13 @@ quiescence and coherent-snapshot proof; success checks still reject replacement 
 Only the prepared public README fixture tree is included, never model/runtime/key/cache
 directories. Pure diagnostic controls and shell checks pass; the original attempt's cause still
 requires a new live observation, not an inference from this added diagnostic code.
+The [diagnostic run on `0e27c806`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35655335733)
+retains 116 original raw files: A and B initially used different providers, but B failed before
+expiry and a later follow window retried it on A's provider. Five tasks eventually yielded EOS
+reports, without proving the required original-live-B boundary, pressure injection or offline
+replay. This explains the eventual shared-provider assignment without demonstrating an initial
+allocation bug. All 119 exported files remain unchanged; private/network cleanup and equal
+host bytes pass. The underlying worker cause remains unknown on this pre-classification source.
 The combined candidate keeps that single dynamic queue while integrating the 360M profile and
 actual generation-end contract. Source and derived frontiers retain the enrolled profile;
 terminal empty, wire-truncated, token-limited or generation-unknown answers cannot create new

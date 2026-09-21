@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -1352,6 +1353,93 @@ class WorkerProtocolTests(unittest.TestCase):
             os.write(writer, control(129))
             with self.assertRaisesRegex(WORKER.JobError, "INVALID_CONTROL_SEQUENCE"):
                 session.check()
+
+    def test_backend_import_pause_ack_waits_for_return_and_resume_gates_next_import(self):
+        entered, released, paused = threading.Event(), threading.Event(), threading.Event()
+        imports, results, errors, acknowledgements = [], [], [], []
+        modules = {name: mock.Mock() for name in WORKER.BACKENDS}
+        modules["torch"].version.cuda = modules["torch"].version.hip = None
+        original_import, original_emit = __import__, WORKER.emit
+        with controlled_pipe() as (session, writer, output):
+            def importing(name, *args, **kwargs):
+                if name not in modules:
+                    return original_import(name, *args, **kwargs)
+                imports.append(name)
+                if name == "torch":
+                    entered.set()
+                    if not released.wait(3):
+                        raise AssertionError("test import was not released")
+                return modules[name]
+
+            def emitting(record):
+                original_emit(record)
+                acknowledgements.append((record["control_sequence"], threading.get_ident()))
+                if record["phase"] == "paused":
+                    paused.set()
+
+            def execute():
+                try:
+                    results.append(WORKER.load_backend(2, session))
+                except BaseException as error:
+                    errors.append(error)
+
+            os.write(writer, control(1))
+            with mock.patch("builtins.__import__", side_effect=importing), \
+                 mock.patch.object(WORKER.importlib.metadata, "version", side_effect=WORKER.BACKENDS.__getitem__), \
+                 mock.patch.object(WORKER, "emit", side_effect=emitting):
+                execution = threading.Thread(target=execute, daemon=True)
+                execution.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    os.write(writer, control(2, "pause"))
+                    self.assertEqual(session.sequence, 1)
+                    self.assertFalse(paused.is_set())
+                    self.assertEqual(imports, ["torch"])
+                    released.set()
+                    self.assertTrue(paused.wait(3))
+                    self.assertEqual(imports, ["torch"])
+                    self.assertTrue(execution.is_alive())
+                    os.write(writer, control(3))
+                    execution.join(3)
+                finally:
+                    released.set()
+                    if execution.is_alive():
+                        os.write(writer, control(session.sequence + 1, "cancel"))
+                        execution.join(3)
+                self.assertFalse(execution.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(imports, ["torch", "peft", "transformers"])
+            self.assertEqual(results, [(modules["torch"], modules["transformers"], modules["peft"], WORKER.BACKENDS)])
+            self.assertEqual(acknowledgements, [(i, execution.ident) for i in (1, 2, 3)])
+            self.assertEqual([json.loads(line)["phase"] for line in output.getvalue().splitlines()],
+                             ["resumed", "paused", "resumed"])
+            modules["torch"].set_num_threads.assert_called_once_with(2)
+            modules["torch"].set_num_interop_threads.assert_called_once_with(1)
+            modules["torch"].manual_seed.assert_called_once_with(7)
+            modules["transformers"].logging.set_verbosity_error.assert_called_once_with()
+
+    def test_backend_import_cancel_stops_before_next_import_or_configuration(self):
+        imports = []
+        original_import = __import__
+        backend = mock.Mock()
+        with controlled_pipe() as (session, writer, output):
+            def importing(name, *args, **kwargs):
+                if name not in WORKER.BACKENDS:
+                    return original_import(name, *args, **kwargs)
+                imports.append(name)
+                os.write(writer, control(2, "cancel"))
+                self.assertEqual(session.sequence, 1)
+                return backend
+
+            os.write(writer, control(1))
+            with mock.patch("builtins.__import__", side_effect=importing), \
+                 mock.patch.object(WORKER.importlib.metadata, "version", side_effect=WORKER.BACKENDS.__getitem__), \
+                 self.assertRaisesRegex(WORKER.JobError, "JOB_CANCELLED"):
+                WORKER.load_backend(2, session)
+            self.assertEqual(imports, ["torch"])
+            self.assertEqual(session.sequence, 2)
+            self.assertEqual([json.loads(line)["phase"] for line in output.getvalue().splitlines()], ["resumed"])
+            self.assertEqual(backend.mock_calls, [])
 
     def test_real_pipe_controls_reject_wrong_binding_replay_noncanonical_numbers_and_oversized_frames(self):
         cases = [(control(1, version=True), "INVALID_CONTROL_BINDING"),

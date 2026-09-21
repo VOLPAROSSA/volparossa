@@ -751,19 +751,29 @@ def configure_offline():
     sys.dont_write_bytecode = True
 
 
-def load_backend(threads):
+def load_backend(threads, session):
+    session.check()
     try:
         versions = {name: importlib.metadata.version(name) for name in BACKENDS}
     except importlib.metadata.PackageNotFoundError as error:
         raise JobError("BACKEND_NOT_INSTALLED") from error
     require(versions == BACKENDS, "BACKEND_VERSION_MISMATCH")
+    # Imports/configuration may perform native work. Service controls only after
+    # that work returns on this execution thread, before starting the next phase.
+    session.check()
     import torch
+    session.check()
     import peft
+    session.check()
     import transformers
+    session.check()
     require(torch.version.cuda is None and torch.version.hip is None, "CPU_BACKEND_REQUIRED")
     torch.set_num_threads(threads)
+    session.check()
     torch.set_num_interop_threads(1)
+    session.check()
     torch.manual_seed(7)
+    session.check()
     transformers.logging.set_verbosity_error()
     return torch, transformers, peft, versions
 
@@ -1359,7 +1369,7 @@ def execute_job(request, session):
                         if "adapter_root" in request else None)
     configure_offline()
     session.check()
-    torch, transformers, peft, versions = load_backend(request["threads"])
+    torch, transformers, peft, versions = load_backend(request["threads"], session)
     session.check()
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         str(model_root), local_files_only=True, trust_remote_code=False, use_fast=True)
