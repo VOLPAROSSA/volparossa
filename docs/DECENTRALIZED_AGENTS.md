@@ -781,7 +781,7 @@ under its unchanged lease. Four ordered results remain intact, completed resume 
 or new round, and protected-path/cleanup checks pass. That controlled pause proves refill, not
 comparative speedup or answer quality.
 
-The next executable candidate shares those provider slots **across signed source packages**.
+The executable coordinator also shares provider slots **across signed source packages**.
 Each admitted package contributes ready rows in round-robin order; it does not start a separate
 coordinator racing other packages for the same broker. Unconfirmed and still-running jobs reserve
 their slots, including jobs outside the current admission window. Sources, authorizations, tasks,
@@ -791,9 +791,14 @@ retries retain stopped/expired-job admission and run after the shared fresh-row 
 
 Document and synthesis frontends use cohorts of at most 32 source packages with this shared
 queue. Larger cohorts and actual synthesis dependencies remain sequential; this is not an
-unbounded global task planner. The `agent-jobs-package-queue` disposable proof separately requires
-two original signed packages, source-aware refill on a real free peer while another source's worker
-is paused, unchanged originals and zero-work completed resume. Its live proof is still pending.
+unbounded global task planner. The [cross-package run on
+`46e5b14`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35606034707) and review of its 136
+original evidence files pass: two signed packages share two real executors; while original A0
+remains paused under the same lease, the free peer completes B0 and A1, then starts B1.
+All four jobs complete, and stopped-broker resume performs zero rounds with unchanged receipts.
+Six captures (32,731 frames) and cleanup/host-state checks pass, with no drops or forbidden
+direct-exit packets. This proves work-conserving execution, not measured speedup, answer quality
+or completion of B03.
 
 Previously completed parts are reconstructed from full input/model/handle-bound receipts saved
 after authenticated RPC validation, not from an unchecked `complete` flag. These private local
@@ -957,6 +962,58 @@ pass with unchanged guest-host state. That run proves ordered fragment answers, 
 the earlier failed runs remain failed.
 Full B03 and confidential tasks remain open.
 
+### Working with several public sources
+
+Use `--source-plan` instead of `--input` to compare or summarize several explicitly public
+local documents in one enrolled task. The plan is a versioned JSON file with 2–32 sources:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    { "label": "Proposal A", "input": "/absolute/public/proposal-a.txt" },
+    { "label": "Proposal B", "input": "/absolute/public/proposal-b.txt" }
+  ]
+}
+```
+
+Inputs must be regular UTF-8 files at absolute paths. Labels are unique, nonempty, at most
+128 UTF-8 bytes and contain no control characters. The complete compilation, including generated
+headers, retains the current 1 MiB document bound. You must be authorized to publish every
+selected source under the one explicitly chosen common license; `--public-content` also makes
+the question public. This is explicit local-source enrollment, not browsing-history ingestion,
+automatic web research or selection based on what happens to be cached.
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer document \
+  --source-plan /absolute/public-sources.json --public-content --license CC-BY-4.0 \
+  --public-question 'Compare the proposals and explain their main differences.' --synthesize \
+  --runtime-root /absolute/existing-runtime --model-root /absolute/existing-model \
+  --identity /absolute/existing-identity --passphrase-file /absolute/private-passphrase \
+  --publisher-key OWN_PUBLISHER_HEX \
+  --provider-key WORKER_A_HEX --provider-key WORKER_B_HEX \
+  --directory /absolute/private-parent/comparison-001 --max-batches 32 --execute
+```
+
+The signed source is an **owner-authorized compilation**, not an authentication of its original
+publishers. Deterministic headers embed each label, original hash and byte length. Retained
+`collection.json` is pinned by the document enrollment and checked against the compilation's
+exact bytes. Original content and synthetic headers/separators have separate ranges.
+
+`result.json` includes `source_collection`; fragment answers and the final synthesized answer
+include `source_provenance`. These are exact UTF-8-byte intersections with the enrolled input,
+**not semantic citations**, proof that an answer is supported, or proof that every source was
+understood. Existing source expiry, model binding, worker limits, peer scheduling and synthesis
+rules still apply.
+
+Resume uses the retained compilation and ledger, so the original files and source-plan file
+need not remain present. An unfinished synthesis still needs the existing runtime/model and
+publisher options described below. Once complete, `--directory ... --resume --execute` reuses
+the retained receipts without those options or new peer execution, preserving the original
+execution summaries. Nineteen focused document tests, a dedicated completed-resume regression
+and strict all-target CLI/agent Clippy pass; the `agent-public-collection` disposable
+tokenizer/two-peer/synthesis/offline-resume proof is pending. B03 remains incomplete.
+
 ### Synthesizing one public answer
 
 Add `--synthesize` to the initial document command to enroll a hierarchy of actual peer
@@ -1095,10 +1152,15 @@ evidence without extending its original deadlines. The accepted warmstart is not
 later signed revisions remain eligible. Operational failures, a defective baseline and finite
 quality differences cannot mint this quarantine. It is not a finding that a publisher is
 malicious, a content-cache serving revocation, or a restriction on every explicit CLI command.
-Pure tests cover exact-artifact retirement and retention of an accepted update. The disposable
-`agent-artifact-quarantine` fixture is ready to require an actual signed NaN candidate arriving
-over protected content and the same loop continuing useful base-model training. Its live proof
-is pending; neither this fixture nor format checking completes B07 or detects all poisoned models.
+Pure tests cover exact-artifact retirement and retention of an accepted update. The
+[disposable run on `bae0d736`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35605406140)
+retains passing evidence of a signed NaN candidate arriving over protected content, local
+candidate-only quarantine and continued useful training in the same loop. The full run still
+**failed** at its later ordinary import (`CONTENT_PROVIDER_REGISTRY_BUSY`, then selector I/O).
+Correction `f5258b7ad01590afec6e8e74720f246f9f8d8319` adds a bounded two-second metadata wait;
+the [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968) is pending.
+Earlier fixture-layout failures remain failed. This scoped recovery
+does not complete B07 or detect all poisoned models.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their

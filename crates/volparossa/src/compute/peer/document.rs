@@ -1,5 +1,6 @@
 //! Owner-authorized public documents, split by the real tokenizer and resumed from full receipts.
 
+mod collection;
 mod storage;
 mod synthesis;
 #[cfg(test)]
@@ -46,8 +47,12 @@ pub(crate) struct Options {
     #[arg(long, conflicts_with = "resume")]
     synthesize: bool,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
+    /// Version-one plan of 2–32 explicitly public local documents to compare together.
+    /// Their exact bytes and labels form an owner-published compilation, not third-party attestations.
+    #[arg(long, conflicts_with_all = ["input", "resume"])]
+    source_plan: Option<PathBuf>,
     /// Explicit permission to disclose this document and question to the selected peers.
     #[arg(long, conflicts_with = "resume")]
     public_content: bool,
@@ -114,7 +119,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         println!(
             "{}",
             json!({"operation":"compute_document_plan", "execute":false,
-            "input":args.input,"directory":args.directory,"resume":args.resume,
+            "input":args.input,"source_plan":args.source_plan,"directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
@@ -156,6 +161,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             result["joining"] = "awaiting_fragments_before_peer_synthesis".into();
         }
     }
+    attach_collection(&args.directory, &mut result)?;
     save(&args.directory, "result.json", &result, true)?;
     println!("{}", serde_json::to_string(&result)?);
     ensure!(
@@ -170,15 +176,13 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         args.public_content,
         "compute_document_public_permission_required"
     );
+    let (document, collection) = selected_input(args)?;
     let input = Input {
         version: 1,
         synthesis: false,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
-        document: String::from_utf8(super::super::read_file(
-            args.input.as_ref().context("compute_document_input")?,
-            MAX_DOCUMENT_BYTES as u64,
-        )?)?,
+        document,
         question: args
             .public_question
             .clone()
@@ -223,6 +227,9 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         input.document.as_bytes(),
         false,
     )?;
+    if let Some(collection) = &collection {
+        save(&args.directory, "collection.json", collection, false)?;
+    }
     save(&args.directory, "planner-input.json", &input, false)?;
     let plan = tokenize(args, &args.directory, &input, cancelled).await?;
     ensure!(
@@ -249,8 +256,63 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
     enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
+    enrollment.collection_sha256 = collection
+        .as_ref()
+        .map(collection::Ledger::sha256)
+        .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
+}
+
+fn selected_input(args: &Options) -> Result<(String, Option<collection::Ledger>)> {
+    match (&args.input, &args.source_plan) {
+        (Some(path), None) => Ok((
+            String::from_utf8(super::super::read_file(path, MAX_DOCUMENT_BYTES as u64)?)?,
+            None,
+        )),
+        (None, Some(path)) => {
+            let prepared = collection::prepare(path)?;
+            Ok((prepared.document, Some(prepared.ledger)))
+        }
+        _ => anyhow::bail!("compute_document_exactly_one_source_selection"),
+    }
+}
+
+/// Citations here are deterministic input-byte lineage, never a claim that generated
+/// statements are supported by a particular source or that every source was understood.
+fn attach_collection(root: &Path, result: &mut Value) -> Result<()> {
+    let (enrollment, input, _) = storage::load(root)?;
+    let Some(ledger) = storage::load_collection(root, &enrollment, &input)? else {
+        return Ok(());
+    };
+    result["source_collection"] = json!({
+        "ledger":ledger,"ledger_sha256":enrollment.collection_sha256,
+        "publication_scope":"owner_authorized_public_compilation",
+        "original_publishers_authenticated":false,"common_license":input.license,
+        "source_files_needed_for_resume":false,"semantic_citations_proven":false
+    });
+    for answer in result["answers"]
+        .as_array_mut()
+        .context("compute_document_answers")?
+    {
+        let start = answer["start"]
+            .as_u64()
+            .context("compute_collection_answer_start")?;
+        let end = answer["end"]
+            .as_u64()
+            .context("compute_collection_answer_end")?;
+        answer["source_provenance"] = ledger.provenance(start, end)?;
+    }
+    if let Some(answer) = result.get_mut("synthesized_answer") {
+        let start = answer["source_start"]
+            .as_u64()
+            .context("compute_collection_answer_start")?;
+        let end = answer["source_end"]
+            .as_u64()
+            .context("compute_collection_answer_end")?;
+        answer["source_provenance"] = ledger.provenance(start, end)?;
+    }
+    Ok(())
 }
 
 async fn tokenize(

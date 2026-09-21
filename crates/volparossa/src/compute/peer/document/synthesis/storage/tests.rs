@@ -105,6 +105,7 @@ fn replay_options(root: &Path) -> Options {
         batch_barrier: false,
         synthesize: false,
         input: None,
+        source_plan: None,
         public_content: false,
         public_question: None,
         license: None,

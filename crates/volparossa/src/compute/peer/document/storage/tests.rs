@@ -19,6 +19,13 @@ fn limits() -> CacheLimits {
 }
 
 fn fixture() -> Fixture {
+    fixture_document("één\ntwo\nthree\nfour\nfive\n".into(), None)
+}
+
+fn fixture_document(
+    document: String,
+    collection: Option<super::super::collection::Ledger>,
+) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let input = Input {
@@ -26,11 +33,11 @@ fn fixture() -> Fixture {
         synthesis: false,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
-        document: "één\ntwo\nthree\nfour\nfive\n".into(),
+        document,
         question: "What does the public text say?".into(),
     };
     let mut offset = 0;
-    let parts: Vec<_> = input
+    let mut parts: Vec<_> = input
         .document
         .split_inclusive('\n')
         .map(|text| {
@@ -40,6 +47,10 @@ fn fixture() -> Fixture {
             json!({"start":start,"end":offset,"prompt_tokens":80})
         })
         .collect();
+    if collection.is_some() {
+        // Synthetic counts for source-retention tests, not actual tokenizer evidence.
+        parts = vec![json!({"start":0,"end":input.document.len(),"prompt_tokens":80})];
+    }
     let plan: Plan = serde_json::from_value(json!({"version":1,
         "source_sha256":sha(input.document.as_bytes()),"source_bytes":input.document.len(),
         "question_sha256":sha(input.question.as_bytes()),"model_id":MODEL_ID,"model_revision":MODEL_REVISION,
@@ -58,7 +69,7 @@ fn fixture() -> Fixture {
         SigningKey::from_bytes(&[25; 32]).verifying_key(),
     ];
     let (_owner, cancelled) = watch::channel(false);
-    let enrollment = publish(
+    let mut enrollment = publish(
         root.path(),
         &input,
         &plan,
@@ -70,6 +81,10 @@ fn fixture() -> Fixture {
         false,
     )
     .unwrap();
+    if let Some(collection) = collection {
+        enrollment.collection_sha256 = Some(collection.sha256().unwrap());
+        save(root.path(), "collection.json", &collection, false).unwrap();
+    }
     save(root.path(), "document.json", &enrollment, false).unwrap();
     Fixture {
         root,
@@ -78,6 +93,70 @@ fn fixture() -> Fixture {
         plan,
         enrollment,
     }
+}
+
+#[test]
+fn native_collection_reopens_without_source_files_and_rejects_relabelled_ledger() {
+    let sources = tempfile::tempdir().unwrap();
+    fs::set_permissions(sources.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    task::write_bytes(
+        &sources.path().join("north.txt"),
+        "Openbare noordelijke bron.\n".as_bytes(),
+        false,
+    )
+    .unwrap();
+    task::write_bytes(
+        &sources.path().join("south.txt"),
+        "Openbare zuidelijke bron.\n".as_bytes(),
+        false,
+    )
+    .unwrap();
+    let plan = sources.path().join("sources.json");
+    task::write_bytes(
+        &plan,
+        &serde_json::to_vec(&json!({"version":1,"sources":[
+            {"label":"North","input":sources.path().join("north.txt")},
+            {"label":"South","input":sources.path().join("south.txt")}
+        ]}))
+        .unwrap(),
+        false,
+    )
+    .unwrap();
+    let prepared = super::super::collection::prepare(&plan).unwrap();
+    let ledger = prepared.ledger.clone();
+    let fixture = fixture_document(prepared.document, Some(prepared.ledger));
+    drop(sources); // Only this test's disposable original files; no reread is possible.
+    let (enrollment, input, _) = load(fixture.root.path()).unwrap();
+    assert_eq!(
+        load_collection(fixture.root.path(), &enrollment, &input).unwrap(),
+        Some(ledger.clone())
+    );
+    let mut output = json!({"answers":[{"start":0,"end":input.document.len(),"text":"synthetic test answer"}],
+        "synthesized_answer":{"source_start":0,"source_end":input.document.len(),"text":"synthetic test answer"}});
+    super::super::attach_collection(fixture.root.path(), &mut output).unwrap();
+    assert_eq!(
+        output["source_collection"]["original_publishers_authenticated"],
+        false
+    );
+    for answer in [&output["answers"][0], &output["synthesized_answer"]] {
+        assert_eq!(
+            answer["source_provenance"]["original_sources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(answer["source_provenance"]["semantic_citation"], false);
+    }
+    let mut changed = ledger;
+    changed.sources[0].label = "False".into();
+    save(fixture.root.path(), "collection.json", &changed, true).unwrap();
+    assert!(load(fixture.root.path()).is_err());
+    // Even repinning the local ledger cannot change labels in the signed compilation.
+    let mut enrollment = enrollment;
+    enrollment.collection_sha256 = Some(changed.sha256().unwrap());
+    save(fixture.root.path(), "document.json", &enrollment, true).unwrap();
+    assert!(load(fixture.root.path()).is_err());
 }
 
 #[test]

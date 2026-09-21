@@ -1,5 +1,39 @@
 use super::*;
 
+#[test]
+fn completed_replay_preserves_execution_summary_but_new_work_is_recorded() {
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.path().join("last-workflow-report.json");
+    let first = json!({"complete":true,"rounds_this_invocation":1,"maximum_rounds_per_window":32});
+    retain_workflow_report(directory.path(), &first).unwrap();
+    let original = fs::read(&path).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    let replay = json!({"complete":true,"rounds_this_invocation":0,"maximum_rounds_per_window":1});
+    retain_workflow_report(directory.path(), &replay).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+
+    let pending = json!({"complete":false,"rounds_this_invocation":0});
+    retain_workflow_report(directory.path(), &pending).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
+        pending
+    );
+    retain_workflow_report(directory.path(), &first).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), original);
+
+    let recovered = tempfile::tempdir().unwrap();
+    fs::set_permissions(recovered.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    retain_workflow_report(recovered.path(), &replay).unwrap();
+    assert!(recovered.path().join("last-workflow-report.json").is_file());
+}
+
 fn output() -> Value {
     json!({"text":"An explicitly public answer.",
         "provider_key":hex::encode(ed25519_dalek::SigningKey::from_bytes(&[19;32]).verifying_key().as_bytes()),

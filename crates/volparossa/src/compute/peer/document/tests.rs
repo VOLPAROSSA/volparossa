@@ -96,7 +96,13 @@ fn resume_retains_inputs_and_lease_and_batch_budgets_stay_separate() {
     let mut enrollment = args.to_vec();
     enrollment.extend(["--enroll-only", "--execute"]);
     assert!(Command::try_parse_from(enrollment).is_err());
-    for field in ["--input", "--public-question", "--license", "--synthesize"] {
+    for field in [
+        "--input",
+        "--source-plan",
+        "--public-question",
+        "--license",
+        "--synthesize",
+    ] {
         let mut changed = args.to_vec();
         changed.extend([field, "changed"]);
         assert!(Command::try_parse_from(changed).is_err());
@@ -121,4 +127,51 @@ fn resume_retains_inputs_and_lease_and_batch_budgets_stay_separate() {
     assert_eq!(parsed.max_seconds, 60);
     assert!(parsed.follow.follow);
     assert_eq!(parsed.follow.follow_poll_seconds, 2);
+}
+
+#[tokio::test]
+async fn collection_preview_never_reads_sources_and_cannot_mix_or_reselect_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("collection");
+    let key = hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[95; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let args = [
+        "document",
+        "--directory",
+        directory.to_str().unwrap(),
+        "--source-plan",
+        "/missing/collection-plan.json",
+        "--public-content",
+        "--public-question",
+        "Compare these public sources.",
+        "--license",
+        "CC0-1.0",
+        "--runtime-root",
+        "/missing/runtime",
+        "--model-root",
+        "/missing/model",
+        "--identity",
+        "/missing/identity",
+        "--passphrase-file",
+        "/missing/passphrase",
+        "--publisher-key",
+        &key,
+        "--discover-peers",
+        "--synthesize",
+    ];
+    let options = Command::try_parse_from(args).unwrap().options;
+    assert!(options.input.is_none());
+    run(&options, &root.path().join("missing.sock"))
+        .await
+        .unwrap();
+    assert!(!directory.exists());
+    let mut mixed = args.to_vec();
+    mixed.extend(["--input", "/missing/other.txt"]);
+    assert!(Command::try_parse_from(mixed).is_err());
+    let mut resumed = args.to_vec();
+    resumed.push("--resume");
+    assert!(Command::try_parse_from(resumed).is_err());
 }

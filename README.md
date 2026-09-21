@@ -206,6 +206,13 @@ trained a successor and published that successor for reuse. Public document frag
 been combined into one answer through four real peer-inference levels. These scoped results
 prove execution, not answer quality, general intelligence or universally better updates.
 
+Public work now has verified cross-package peer scheduling: a free worker can take work from
+another signed package while a slower worker continues. A new **source collection** candidate
+adds comparisons across explicitly public local documents, preserving exact source-byte
+provenance through the existing peer-execution and synthesis pipeline. Its live proof is pending;
+source ranges are not proof that generated statements are true.
+[Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
+
 Public work can be split across selected peers, with retained results and bounded recovery
 after worker loss. Private distributed computation, general autonomous planning, defended model
 aggregation and a complete self-maintaining “brain” remain work to do. More participants offer

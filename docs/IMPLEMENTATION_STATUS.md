@@ -4,6 +4,20 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Current public-source collection candidate: `compute peer document --source-plan` accepts
+2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly
+selected common license. It builds an owner-published compilation whose signed bytes bind
+each source label, original hash, byte length and exact ranges. A separately pinned ledger
+distinguishes original bytes from synthetic headers; result provenance describes input-byte
+coverage, not semantic citations or authentication of the original publishers. Existing real
+tokenization, shared peer queues and optional synthesis process the compilation. Resume uses
+retained compilation bytes and receipts, without reopening the original input files. Completed
+shared-queue synthesis also preserves its existing execution summaries instead of replacing
+them with a zero-round resume summary. The 19 focused document tests, the dedicated completed-resume
+regression and strict all-target CLI/agent Clippy pass; the new
+`agent-public-collection` disposable VM proof is pending. This does not complete B03.
+See [source-plan format and usage](DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
+
 Verified single-package ready queue: new `compute peer workflow`, `task` and `document` enrollments
 use `ready_rows_v1`. Within one signed source package, a free compatible peer receives the
 next never-submitted row without waiting for other peers' running rows. Immutable queue plans
@@ -24,7 +38,7 @@ forbidden direct client-to-exit packets. Private/network cleanup and unchanged h
 pass. The pause is disposable-fixture orchestration, not product scheduling behavior. This is
 execution/retention evidence, not measured speedup, answer quality or full B03.
 
-Current cross-package candidate: several independently signed packages now share one bounded
+Verified cross-package queue: several independently signed packages now share one bounded
 provider registry and source-aware round-robin queue. New rows from another admitted package
 can use a freed peer without waiting for the first package to finish. Original source/model/expiry,
 per-package plans, handles and receipts remain separate; uncertain leases reserve capacity even
@@ -33,11 +47,16 @@ groups of at most 32 packages, within the explicit per-window package-attempt bu
 and dependent synthesis stages remain sequential; eligible failed-row retries still use the existing
 stopped/expired-job path after the fresh-row queue drains. The `agent-jobs-package-queue` disposable
 scenario requires real A0/B0/A1/B1 execution across two signed packages, overlap with the original
-paused worker, original receipts, no-work completed resume and full cleanup. Its live proof is
-pending. All 147 focused CLI compute tests and strict all-target CLI Clippy pass without loading
-a model; the new fixture's pure positive/12-negative parser checks, shell syntax and non-mutating
-topology contracts pass. These do not replace the pending live proof. General task planning,
-comparative throughput and full B03 remain incomplete.
+paused worker, original receipts, no-work completed resume and full cleanup. The [live run on
+`46e5b14`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35606034707) and reconstruction of
+its 136 unchanged original evidence files **pass**: with A0 paused under its original pidfd-bound
+worker and lease, the free peer completes B0, then A1, then executes B1. All four actual jobs
+retain their source-specific results; completed offline resume performs zero rounds and changes
+no receipts. Six captures cover 32,731 frames with zero drops or forbidden direct-exit packets;
+private/network cleanup and unchanged host-state checks pass. All 147 focused CLI compute tests,
+strict all-target CLI Clippy and the fixture's pure positive/12-negative checks also pass.
+This proves cross-package refill and retention, not comparative throughput, answer quality,
+general task planning or full B03.
 
 The corrected executor-discovery checkpoints on `8a21d43d` now **pass**: the
 [document/synthesis run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600666064)
@@ -140,18 +159,17 @@ requires the same loop to continue with real base-model training and successor v
 Four successful model stages are observed; rejection before candidate inference is not counted
 as a fifth. Its pure positive/negative checker, shell syntax, new-helper ShellCheck and topology
 preview contracts pass; the modified existing training helper retains two baseline SC2015
-warnings. Live protected-transfer, real-model and cleanup evidence remains pending.
-The [first quarantine run on `8a21d43d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600678484)
-failed before constructing/publishing the invalid candidate: its setup guard incorrectly required
-the source-tree location although that command runs from the copied guest `WORK/bin`. The fix
-binds that copy to its exact private fixture root while retaining dedicated-VM, KVM and non-root
-checks. The [follow-up on `3240e278`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35602912581)
-also failed before invalid-candidate construction: the copy was accepted, but its fixture-directory
-check incorrectly omitted the real `client-fixtures/` parent. Commit `bae0d736` corrects that exact
-layout and derives the positive layout regression from the original shell assignment instead of
-duplicating an assumed path. Positive/negative layout checks pass. Both original failures retain
-complete cleanup and unchanged-host evidence, but neither proves quarantine; the corrected live
-run remains pending.
+warnings. The [run on `bae0d736`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35605406140)
+**failed overall**, during the later ordinary artifact import: `CONTENT_PROVIDER_REGISTRY_BUSY`
+was followed by selector I/O failure. Its retained evidence does prove the earlier signed NaN
+candidate's local quarantine and continued useful training in the same loop; that passing substep
+does not upgrade the full scenario. Production correction `f5258b7ad01590afec6e8e74720f246f9f8d8319`
+adds a bounded two-second metadata wait; the [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968)
+is pending. The earlier
+[run on `8a21d43d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600678484) and
+[run on `3240e278`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35602912581)
+remain failed at their fixture-layout guards, before invalid-candidate construction. Neither
+proved quarantine, despite successful cleanup and unchanged-host evidence. B07 remains open.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

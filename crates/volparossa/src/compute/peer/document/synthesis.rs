@@ -405,13 +405,27 @@ async fn advance_group_packages(
             .enumerate()
         {
             let package = directory.join(format!("package-{:04}", group * 32 + offset));
-            super::save(&package, "last-workflow-report.json", saved, true)?;
+            retain_workflow_report(&package, saved)?;
         }
         if report["complete"] != true {
             break;
         }
     }
     Ok(rounds)
+}
+
+/// A completed replay has already revalidated its source and receipts. Its zero-round
+/// invocation summary must not replace the original execution summary with new budgets.
+fn retain_workflow_report(package: &Path, report: &Value) -> Result<()> {
+    let rounds = report["rounds_this_invocation"]
+        .as_u64()
+        .context("compute_synthesis_rounds")?;
+    let path = package.join("last-workflow-report.json");
+    if rounds == 0 && report["complete"] == true && path.try_exists()? {
+        crate::compute::read_file(&path, super::MAX_SAVED_BYTES as u64)?;
+        return Ok(());
+    }
+    super::save(package, "last-workflow-report.json", report, true)
 }
 
 #[cfg(test)]
