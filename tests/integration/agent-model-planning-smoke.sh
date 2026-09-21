@@ -58,6 +58,7 @@ agent_model_planning_run() {
         >"$WORK/agent-model-planning-input.json" || fail MODEL_PLANNING_PUBLIC_INPUT_FAILED
     PHASE=agent-model-planning-real-model-enrollment
     agent_model_planning_cli compute peer document --plan-tasks \
+        --model-profile smollm2-360m-v1 \
         --input "$jobs_source/model-planning-input.txt" --public-content --license GPL-3.0-only \
         --public-question 'What requirements and risks does this project describe?' \
         --runtime-root "$jobs_source/planner-provision/venv" --model-root "$jobs_source/planner-provision/model" \
@@ -70,6 +71,7 @@ agent_model_planning_run() {
     PHASE=agent-model-planning-model-derived-peer-tasks
     content_custody_phase_start fetch
     agent_model_planning_cli compute peer document --directory "$planning_root" --resume \
+        --model-profile smollm2-360m-v1 \
         --runtime-root "$jobs_source/planner-provision/venv" --model-root "$jobs_source/planner-provision/model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         --max-batches 16 --max-seconds 600 --execute \

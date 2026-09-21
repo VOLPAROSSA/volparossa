@@ -27,9 +27,10 @@ async fn providers(
         "compute_discovery_conflicting_providers"
     );
     let publisher = args.publisher_key.context("compute_document_publisher")?;
-    let query = args
+    let mut query = args
         .discovery
         .query([hex::encode(publisher.as_bytes())], true, true, true)?;
+    super::super::bind_profile_query(&mut query, args.model_profile)?;
     Ok(Some(args.discovery.select(socket, query, cancelled).await?))
 }
 
@@ -57,6 +58,10 @@ pub(super) async fn prepare(
     );
     plan.validate()?;
     let selected = providers(args, socket, cancelled).await?;
+    let model_fingerprint = match &selected {
+        Some(selected) => selected.model_fingerprint.clone(),
+        None => super::super::manual_fingerprint(args, socket, cancelled).await?,
+    };
     let provider_keys = selected
         .as_ref()
         .map_or(&args.provider_key, |selected| &selected.providers);
@@ -84,6 +89,7 @@ pub(super) async fn prepare(
         let _lock = task::open_directory(&root, false)?;
         let input = Input {
             version: 1,
+            model_profile: args.model_profile,
             synthesis: false,
             visibility: "public".into(),
             license: args.license.clone().context("compute_document_license")?,
@@ -153,9 +159,7 @@ pub(super) async fn prepare(
                 volparossa_content::MAX_MANIFEST_BYTES,
             )?)?);
         }
-        enrollment.model_fingerprint = selected
-            .as_ref()
-            .map(|selected| selected.model_fingerprint.clone());
+        enrollment.model_fingerprint = Some(model_fingerprint.clone());
         enrollment.replace_peers = args.discovery.replace_peers;
         enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
         enrollment.collection_sha256 = collection

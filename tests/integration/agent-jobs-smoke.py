@@ -152,11 +152,13 @@ def dataset(revision, source):
                           {"question": "May a normal client directly contact an exit dataplane?", "context": second}]}
 
 
-def prepare(path):
+def prepare(path, model_profile="smollm2-135m-v1"):
+    TRAIN["inference_profile"](model_profile)
     root = private(path, "agent-jobs-user")
     require(not list(root.iterdir()), "provision root already populated")
+    profile_args = [] if model_profile == "smollm2-135m-v1" else ["--model-profile", model_profile]
     subprocess.run([sys.executable, "-B", str(HERE / "ml/provision.py"), "--execute", "--yes",
-                    "--disposable-guest", "--root", str(root / "provision"), "--budget-bytes", str(3 * 1024 ** 3)],
+                    "--disposable-guest", "--root", str(root / "provision"), "--budget-bytes", str(3 * 1024 ** 3), *profile_args],
                    check=True, timeout=1850)
 
 
@@ -949,8 +951,8 @@ def main():
                                                time.monotonic_ns(), raw)))
     elif args == ["loss-self-test"]:
         loss_self_test()
-    elif len(args) == 2 and args[0] == "prepare":
-        prepare(args[1])
+    elif len(args) in (2, 3) and args[0] == "prepare":
+        prepare(*args[1:])
     elif len(args) == 3 and args[0] == "source":
         source(args[1], args[2])
     elif len(args) == 2 and args[0] == "publication":

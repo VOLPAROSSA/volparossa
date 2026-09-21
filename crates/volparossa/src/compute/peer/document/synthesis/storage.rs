@@ -196,11 +196,18 @@ pub(super) async fn prepare(
             && super::unusable(parents).is_none(),
         "compute_synthesis_parent_budget"
     );
+    ensure!(
+        parents.iter().all(|parent| parent
+            .generation
+            .is_some_and(|generation| generation.model_profile == original.model_profile)),
+        "compute_synthesis_parent_profile"
+    );
     directory(root)?;
     let group = group(root, enrollment, parents, offset, level)?;
     retain_json(root, "parents.json", &parents)?;
     let input = Input {
         version: 1,
+        model_profile: original.model_profile,
         visibility: "public".into(),
         license: original.license.clone(),
         document: combined(parents),
@@ -239,6 +246,7 @@ pub(super) async fn prepare(
         .chunks(4)
         .map(|rows| {
             let dataset = DerivedDataset {
+                model_profile: original.model_profile,
                 version: 3,
                 visibility: "public".into(),
                 license: input.license.clone(),

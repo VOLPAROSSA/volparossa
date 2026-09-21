@@ -238,24 +238,29 @@ def manifest(raw, data, authority, name, profile):
     return result
 
 
-def planner(raw, prefix, source, question, synthesis=False):
+def planner(raw, prefix, source, question, synthesis=False, model_profile="smollm2-135m-v1"):
+    selected=JOBS["TRAIN"]["inference_profile"](model_profile)
+    model=selected["model"];limit=selected["prompt_tokens"]
     load=lambda name:json.loads(raw[prefix+name])
     plan=load("document-plan.json")
     require(plan["version"]==1 and plan["source_bytes"]==len(source) and plan["source_sha256"]==sha(source)
-        and plan["question_sha256"]==sha(question.encode()) and plan["model_id"]==DOC["MODEL"]
-        and plan["model_revision"]==JOBS["TRAIN"]["MODEL_REVISION"] and plan["tokenizer_sha256"]==DOC["TOKENIZER"]
-        and plan["prompt_limit"]==192 and plan.get("synthesis",False) is synthesis
+        and plan["question_sha256"]==sha(question.encode()) and plan["model_id"]==model["model_id"]
+        and plan["model_revision"]==model["model_revision"] and plan["tokenizer_sha256"]==DOC["TOKENIZER"]
+        and plan["prompt_limit"]==limit and plan.get("synthesis",False) is synthesis
         and 1<=len(plan["parts"])<=128,"wrong actual tokenizer plan")
     end=0
     for part in plan["parts"]:
         require(type(part["start"]) is int and type(part["end"]) is int and part["start"]==end
             and 0<part["end"]-part["start"]<=4096 and part["end"]<=len(source)
-            and type(part["prompt_tokens"]) is int and 1<=part["prompt_tokens"]<=192,"invalid byte-complete bounded tokenizer range")
+            and type(part["prompt_tokens"]) is int and 1<=part["prompt_tokens"]<=limit,"invalid byte-complete bounded tokenizer range")
         source[part["start"]:part["end"]].decode();end=part["end"]
     require(end==len(source),"tokenizer omitted original input")
-    expected=dict(version=1,visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
+    expected=dict(version=1)
+    if model_profile!="smollm2-135m-v1":expected["model_profile"]=model_profile
+    expected.update(visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
     if synthesis:expected["synthesis"]=True
-    require(load("planner-input.json")==expected,"tokenizer got another instruction/context")
+    require(load("planner-input.json")==expected and raw[prefix+"planner-input.json"]==encoded(expected),
+        "tokenizer got another instruction/context/profile")
     report=load("tokenizer-report.json")
     require(report["mode"]=="plan_document" and report["status"]=="ok" and report["device"]=="cpu"
         and report["model_weights_loaded"] is False and report["updates_completed"]==0
@@ -278,7 +283,10 @@ def shared_queue(batch, required):
             "invalid singleton ready queue scope")
 
 
-def package(raw,prefix,data,manifest_id,authority,question,layout,executed,response_bytes,node_index,level,shared):
+def package(raw,prefix,data,manifest_id,authority,question,layout,executed,response_bytes,node_index,level,shared,
+            model_profile="smollm2-135m-v1"):
+    selected=JOBS["TRAIN"]["inference_profile"](model_profile)
+    model,fingerprint=selected["model"],selected["fingerprint"]
     load=lambda name:json.loads(raw[prefix+"/"+name])
     task=dict(kind="answer_public_question_v1",question=question)
     require(load("dataset.json")==data and raw[prefix+"/dataset.json"]==encoded(data),"signed task rows changed")
@@ -297,7 +305,7 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
     require(queue["version"]==1 and queue["scheduling"]=="ready_rows_v1" and queue["publisher_key"]==authority["publisher_key"]
         and queue["dataset_manifest_id"]==manifest_id and queue["dataset_sha256"]==sha(raw[prefix+"/dataset.json"])
         and queue["source_expires_unix_seconds"]==authority["expires_at_unix_seconds"]
-        and queue["model_fingerprint"]==MODEL and queue["task"]==task and queue["provider_keys"]==authority["provider_keys"]
+        and queue["model_fingerprint"]==fingerprint and queue["task"]==task and queue["provider_keys"]==authority["provider_keys"]
         and queue["ready_rows"]==list(range(len(data["inference"]))) and queue["pending_job_ids"]==[],"queue changed instruction/model/source/expiry")
     answers=[]
     for row in range(len(data["inference"])):
@@ -306,8 +314,9 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
         require(node is not None and identifier not in executed and re.fullmatch(r"[0-9a-f]{32}",identifier)
             and binding["dataset_manifest_id"]==manifest_id and binding["row_indices"]==[row] and binding["task"]==task
             and binding["expires_unix_seconds"]<=authority["expires_at_unix_seconds"]
-            and caps["model_fingerprint"]==binding["model_fingerprint"]==MODEL and caps["model"]==MODEL_ID
+            and caps["model_fingerprint"]==binding["model_fingerprint"]==fingerprint and caps["model"]==model
             and caps["public_inference_only"] is True and caps["runtime_slots"]==1 and caps["max_threads"]==2
+            and (model_profile=="smollm2-135m-v1" or caps["max_rows"]==1)
             and caps["task_derivation_v1"] is True and caps["derived_inference_v3" if level else "document_inference_v2"] is True,
             "singleton task/lease/executor changed")
         selected=copy.deepcopy(data);selected["inference"]=[selected["inference"][row]];selected_raw=encoded(selected)
@@ -322,15 +331,19 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
             and actual["updates_completed"]==0 and actual["dataset"]["version"]==data["version"]
             and actual["dataset"]["sha256"]==sha(selected_raw) and actual["dataset"]["source_manifest_sha256"]==authority["source_manifest_id"]
             and actual["baseline_evaluation"] is None and len(actual["outputs"])==1
-            and actual["model"]["files"]["model.safetensors"]==MODEL_ID["base_weights"],"real inference result missing")
+            and actual["model"]["id"]==model["model_id"] and actual["model"]["revision"]==model["model_revision"]
+            and actual["model"]["files"]["model.safetensors"]==model["base_weights"],"real inference result missing")
         DOC["check_supervisor"](actual)
+        if model_profile!="smollm2-135m-v1":
+            require(caps["max_job_seconds"]==600 and actual["supervisor"]["rss_limit_bytes"]==3*1024**3,
+                "selected profile changed the existing worker resource bounds")
         output=actual["outputs"][0]
         require(batch["outputs"][row]==dict(sample_index=row,provider_key=handle["provider_key"],job_id=identifier,text=output["text"],
-            **SYNTH["generation_fields"](output)),"joined output changed")
+            **SYNTH["generation_fields"](output,model_profile=model_profile)),"joined output changed")
         context=data["inference"][row]
         start=context["start"] if not level else min(i["source_start"] for i in context["inputs"])
         end=context["end"] if not level else max(i["source_end"] for i in context["inputs"])
-        answers.append(SYNTH["answer"](output,handle,status,manifest_id,start,end,0))
+        answers.append(SYNTH["answer"](output,handle,status,manifest_id,start,end,0,model_profile=model_profile))
         executed[identifier]=dict(handle=handle,raw=selected_raw,node=node,graph_node=node_index,level=level,
             path=prefix+"/"+ATTEMPT+f"/job-{row}.json")
         response_bytes[node]+=len(status["report_json"].encode())

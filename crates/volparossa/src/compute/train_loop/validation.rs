@@ -316,6 +316,7 @@ async fn run_stage(
         .context("train_validation_source_expired")?
         .min(u64::from(args.max_seconds));
     let options = super::super::Options {
+        model_profile: super::super::ModelProfile::default(),
         mode: super::super::Mode::Infer,
         runtime_root: args.runtime_root.clone(),
         model_root: args.model_root.clone(),

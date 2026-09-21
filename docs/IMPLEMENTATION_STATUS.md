@@ -98,6 +98,24 @@ tests, 47 pure worker protocol tests and seven targeted pure fixture checks pass
 do not execute a model; the updated termination contract still needs live execution. No new
 model-quality or complete-alpha claim is made.
 
+The next executable candidate adds explicit `smollm2-360m-v1` selection across guest-only
+provisioning, the isolated worker, broker capabilities, discovery/manual peer enrollment,
+task/document planning, resumed receipts and derived synthesis. It pins the original 360M
+revision and complete assets, permits one ordinary inference row with a 1,024-token prompt,
+256 generated tokens and 4,096 escaped output bytes, and refuses 135M adapters/training.
+The 135M default, historical encodings and training path remain unchanged. New enrollment
+pins a common exact model fingerprint even with manual peers; resume cannot substitute a
+different profile. Signed four-row packages are dispatched as singleton jobs. Complete parent
+answers are retained with the matching profile; no shortened parent or smaller-model fallback
+is introduced. Existing CPU/RSS/deadline limits and separate task-planner budgets stay fixed.
+Compilation, strict Clippy for the four changed crates, 215 CLI compute tests, eleven focused
+content/control/agent profile tests, 53 pure worker tests, seven provisioning tests, the
+targeted pure integration helpers and shell/KVM-contract checks pass. They are local evidence
+only, not model execution. The updated disposable
+`agent-model-planning` scenario must still execute the actual 360M model and peers, preserve
+offline receipts and cleanup, and undergo direct answer review. No 360M performance, quality,
+full B03 or alpha-completion claim is made before that run.
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same

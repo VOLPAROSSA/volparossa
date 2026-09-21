@@ -8,6 +8,7 @@ use ed25519_dalek::SigningKey;
 use std::{os::unix::fs::PermissionsExt as _, time::Duration};
 use tokio::{net::UnixListener, sync::watch};
 use volparossa_config::{Config, RolesConfig, RuntimeMode};
+use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
 use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validity, publish};
 use volparossa_local_control::compute::{
     ErrorCode, FileIdentity, JobBinding, ModelIdentity, PublicDataset, Submit,
@@ -41,6 +42,65 @@ fn capabilities() -> Capabilities {
         document_inference_v2: false,
         derived_inference_v3: false,
     }
+}
+
+#[test]
+fn capability_profiles_bind_exact_base_identity_rows_and_adapter_compatibility() {
+    fn bind(caps: &mut Capabilities) {
+        caps.model_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&caps.model).unwrap()));
+    }
+    let mut larger = capabilities();
+    let spec = ModelProfile::Smol360.spec();
+    larger.model.model_id = spec.model_id.into();
+    larger.model.model_revision = spec.revision.into();
+    larger.model.base_weights = FileIdentity {
+        bytes: spec.weights_bytes,
+        sha256: spec.weights_sha256.into(),
+    };
+    larger.max_rows = spec.max_rows;
+    bind(&mut larger);
+    validate_capabilities(&capabilities()).unwrap();
+    validate_capabilities(&larger).unwrap();
+    for rows in [0, 2, 4] {
+        let mut invalid = larger.clone();
+        invalid.max_rows = rows;
+        assert!(validate_capabilities(&invalid).is_err());
+    }
+    for field in 0..4 {
+        let mut invalid = larger.clone();
+        match field {
+            0 => invalid.model.model_id.push('x'),
+            1 => invalid.model.model_revision.push('0'),
+            2 => invalid.model.base_weights.bytes += 1,
+            _ => invalid.model.base_weights.sha256 = "f".repeat(64),
+        }
+        bind(&mut invalid);
+        assert!(validate_capabilities(&invalid).is_err());
+    }
+    let adapter = [
+        "README.md",
+        "adapter_config.json",
+        "adapter_model.safetensors",
+    ]
+    .into_iter()
+    .map(|name| {
+        (
+            name.into(),
+            FileIdentity {
+                bytes: 1,
+                sha256: "a".repeat(64),
+            },
+        )
+    })
+    .collect();
+    let mut old = capabilities();
+    old.model.adapter_files = Some(adapter);
+    bind(&mut old);
+    validate_capabilities(&old).unwrap();
+    larger.model.adapter_files = old.model.adapter_files;
+    bind(&mut larger);
+    assert!(validate_capabilities(&larger).is_err());
 }
 
 fn original() -> String {

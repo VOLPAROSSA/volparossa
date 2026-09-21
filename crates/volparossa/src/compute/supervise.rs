@@ -297,19 +297,23 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             .as_array()
             .context("compute_result_outputs")?;
         ensure!(
-            (1..=4).contains(&outputs.len()),
+            (1..=usize::from(request.model_profile.spec().max_rows)).contains(&outputs.len()),
             "compute_result_output_count"
         );
         for (index, output) in outputs.iter().enumerate() {
             ensure!(
                 output["sample_index"] == index
-                    && output["text"]
-                        .as_str()
-                        .is_some_and(|text| text.len() <= 1024)
+                    && output["text"].as_str().is_some_and(
+                        |text| text.len() <= request.model_profile.spec().max_output_bytes
+                    )
                     && output["text_truncated"].is_boolean(),
                 "compute_result_output_shape"
             );
-            super::inference_output::Generation::from_output(output, true)?;
+            ensure!(
+                super::inference_output::Generation::from_output(output, true)?
+                    .is_some_and(|generation| generation.model_profile == request.model_profile),
+                "compute_result_generation_profile"
+            );
         }
     }
     Ok(())
@@ -819,6 +823,7 @@ mod tests {
                 version: 1,
                 id: "abc".into(),
                 mode,
+                model_profile: super::super::ModelProfile::default(),
                 model_root: "/model",
                 dataset_path: "/dataset.json",
                 output_root: "/output",

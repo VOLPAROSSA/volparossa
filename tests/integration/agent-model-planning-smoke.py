@@ -17,12 +17,15 @@ GRAPH = runpy.run_path(str(HERE / "agent-task-graph-smoke.py"))
 DOC, JOBS, SYNTH, CUSTODY = (GRAPH[k] for k in ("DOC", "JOBS", "SYNTH", "CUSTODY"))
 TRAIN = JOBS["TRAIN"]
 read, write, require, sha, encoded = (GRAPH[k] for k in ("read", "write", "require", "sha", "encoded"))
-ATTEMPT, MODEL, MODEL_ID = (GRAPH[k] for k in ("ATTEMPT", "MODEL", "MODEL_ID"))
+ATTEMPT = GRAPH["ATTEMPT"]
+MODEL_PROFILE = "smollm2-360m-v1"
+SELECTED_MODEL = TRAIN["inference_profile"](MODEL_PROFILE)
+MODEL, MODEL_ID = SELECTED_MODEL["fingerprint"], SELECTED_MODEL["model"]
 PREFIX = "agent-model-planning"
 STRATEGY = "model_questions_source_recovery_v3"
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
-SCOPE = ("One actual isolated pinned-model owner generates two public subquestions from a goal and "
+SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates two public subquestions from a goal and "
     "an exact bounded public source prefix, "
     "with only their JSON structure supplied locally and at most four charged attempts within 384 generated tokens, "
     "without silently trimming or repairing model output. The exact proposal is enrolled against one signed "
@@ -57,7 +60,7 @@ def planning_input(source):
     prefix=text.encode()
     require(source.decode("utf-8").encode()==source and 1<=len(source)<=1048576
         and prefix and b"\0" not in prefix,"invalid original public planner source")
-    return dict(version=2,visibility="public",license="GPL-3.0-only",question=QUESTION,
+    return dict(version=2,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",question=QUESTION,
         source_sha256=sha(source),source_bytes=len(source),
         source_excerpt=dict(start=0,end=len(prefix),text=text,sha256=sha(prefix)))
 
@@ -85,7 +88,7 @@ def prepare(work):
     peer=work / "agent-jobs-user/provision/model/model.safetensors"
     own,remote=owner.stat(),peer.stat()
     require((own.st_dev,own.st_ino)!=(remote.st_dev,remote.st_ino)
-        and JOBS["file_hash"](owner,269060552)==MODEL_ID["base_weights"],"planner is not an independent pinned copy")
+        and JOBS["file_hash"](owner,MODEL_ID["base_weights"]["bytes"])==MODEL_ID["base_weights"],"planner is not an independent pinned copy")
     print(json.dumps(dict(source="README.md", original_repository_sha256=sha(original),
         excerpt_hex=excerpt.hex(), excerpt_sha256=sha(excerpt), excerpt_bytes=len(excerpt), question=QUESTION,
         excerpt_range=dict(start=0,end=len(excerpt)),excerpt_selection="complete_intro_before_network_navigation",
@@ -403,7 +406,7 @@ def check_planning(raw,source):
     require(report["mode"]=="plan_tasks" and report["version"]==1 and report["status"]=="ok" and report["kind"]=="result"
         and report["device"]=="cpu" and report["threads"]==2 and report["updates_completed"]==0
         and report["backend_versions"]=={"torch":"2.14.0+cpu","transformers":"5.16.1","peft":"0.20.0"}
-        and report["model"]["id"]==DOC["MODEL"] and report["model"]["revision"]==MODEL_ID["model_revision"]
+        and report["model"]["id"]==MODEL_ID["model_id"] and report["model"]["revision"]==MODEL_ID["model_revision"]
         and report["model"]["files"]["model.safetensors"]==MODEL_ID["base_weights"]
         and report["model_weights_loaded"] is report["source_contents_read_by_planner"] is report["base_weights_unchanged"] is True
         and report["goal_only_planning"] is False and report["source_excerpt_complete"] is complete
@@ -427,6 +430,7 @@ def check_planning(raw,source):
         and report["artifacts"]==[dict(relative_path="task-questions.json",bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
         and load("model-planner/report.json").items()<=report.items(),"planner report/artifact not tied to exact goal and source")
     DOC["check_supervisor"](report)
+    require(report["supervisor"]["rss_limit_bytes"]==3*1024**3,"planner changed its memory limit")
     authority=dict(version=2,input_sha256=sha(raw["planner-input.json"]),report_sha256=sha(raw["planner-report.json"]),
         artifact_sha256=sha(raw["planner-artifact.json"]),question=QUESTION,source_sha256=sha(source),source_bytes=len(source),source_excerpt=coverage)
     require(load("graph.json")["planner"]==authority,"planner authority was not pinned before graph enrollment")
@@ -454,19 +458,20 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
                 and saved["parents_sha256"]==sha(encoded(previous)) and saved["source_manifest_id"]==authority["source_manifest_id"]
                 and authority["selected_at_unix_seconds"]<=saved["created_at_unix_seconds"]<authority["expires_at_unix_seconds"],"model-derived publication renewed source authority")
             combined,rows=SYNTH["expected_rows"](previous,load(group_prefix+"/document-plan.json")["parts"],question,group_index*64)
-            GRAPH["planner"](raw,group_prefix+"/",combined,question,True)
+            GRAPH["planner"](raw,group_prefix+"/",combined,question,True,model_profile=MODEL_PROFILE)
             require(group==dict(group=group_index,parents=len(previous),complete=True,parts=len(rows),input_sha256=sha(combined)),"derived group accounting changed")
             for p in range((len(rows)+3)//4):
                 package=group_prefix+f"/package-{p:04d}"
                 data=dict(version=3,visibility="public",license="GPL-3.0-only",source_manifest_hex=source_manifest.hex(),
-                    level=number,claim_scope=SYNTH["CLAIM"],inference=rows[p*4:p*4+4])
+                    level=number,claim_scope=SYNTH["CLAIM"],model_profile=MODEL_PROFILE,inference=rows[p*4:p*4+4])
                 original=dict(authority,selected_at_unix_seconds=saved["created_at_unix_seconds"])
                 identity=GRAPH["manifest"](raw[package+"/dataset.manifest"],raw[package+"/dataset.json"],original,
                     f"derived-l{number:02d}-g{group_index:04d}-p{p:04d}",SYNTH["PROFILE"])
-                following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,node_index,number,len(rows)>4))
+                following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,node_index,number,len(rows)>4,
+                    model_profile=MODEL_PROFILE))
                 rounds+=1
         require(level["outputs"]==len(following) and ((force and number==1) or len(following)<len(parents))
-            and level["answers"]==following and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a) for a in following)
+            and level["answers"]==following and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a,model_profile=MODEL_PROFILE) for a in following)
             and load(prefix+f"/synthesis/level-{number:02d}-result.json")==level,"derived results or reduction changed")
         parents=following
     require(len(parents)==1 and result["version"]==2 and result["complete"] is True
@@ -477,11 +482,25 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
     return parents[0],rounds
 
 
+def check_provision(provision):
+    pin_root=HERE/"ml" if (HERE/"ml").is_dir() else HERE.parent.parent/"workers/volparossa-ml"
+    pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
+    weights=next(item for item in pins["files"] if item["path"]=="model.safetensors")
+    require(pins["model_id"]==MODEL_ID["model_id"] and pins["revision"]==MODEL_ID["model_revision"]
+        and {key:weights[key] for key in ("bytes","sha256")}==MODEL_ID["base_weights"],"selected provision pins changed")
+    require(provision["success"] is True and provision["installed_wheels"]==len(pins["wheels"])==38
+        and provision["model_profile"]==MODEL_PROFILE and provision["model_id"]==MODEL_ID["model_id"]
+        and provision["revision"]==MODEL_ID["model_revision"]
+        and provision["download_bytes"]==sum(item["bytes"] for item in pins["files"]+pins["wheels"])==977655758
+        and provision["model_pins_sha256"]==sha((json.dumps(pins,indent=2)+"\n").encode())
+        and provision["requirements_sha256"]==sha((pin_root/"requirements.lock").read_bytes())
+        and provision["budget_bytes"]==3*1024**3 and provision["runtime_autofetch_enabled"] is False
+        and provision["training_performed"] is False,"unverified selected-model provision")
+
+
 def check(value,revision):
     require(value["source_revision"]==revision,"wrong model-planning revision")
-    provision=value["provision"]
-    require(provision["success"] is True and provision["installed_wheels"]==38 and provision["download_bytes"]==523040250
-        and provision["training_performed"] is False,"unverified model provision")
+    check_provision(value["provision"])
     saved=value["result-files"]["snapshot"];raw={n:bytes.fromhex(v) for n,v in value["result-files"]["raw"].items()}
     require(set(saved)==set(raw) and sum(map(len,raw.values()))<=32*1048576
         and all(saved[n]["bytes"]==len(b) and saved[n]["sha256"]==sha(b) for n,b in raw.items()),"retained planning-file hashes differ")
@@ -514,7 +533,8 @@ def check(value,revision):
         and all(w["input_inodes"]["model/model.safetensors"]==original["peer_model_inode"] for w in workers.values()),"planner/peer model copies or isolation differ")
     authority=load("node-0000/document.json");source_manifest=raw["node-0000/source.manifest"]
     source_id=GRAPH["manifest"](source_manifest,source,authority,"document-source","text/plain")
-    require(source_id==authority["source_manifest_id"] and authority["expires_at_unix_seconds"]-authority["selected_at_unix_seconds"]==7200,"shared original source authority changed")
+    require(source_id==authority["source_manifest_id"] and authority["model_fingerprint"]==MODEL
+        and authority["expires_at_unix_seconds"]-authority["selected_at_unix_seconds"]==7200,"shared original source/model authority changed")
     DOC["selected_providers"](authority,layout)
     enrollment=value["enrollment"]
     require(enrollment["operation"]=="compute_graph_enrolled" and enrollment["execution_started"] is True
@@ -526,7 +546,7 @@ def check(value,revision):
     executed,response_bytes,answers,rounds={},dict.fromkeys(workers,0),{},0
     for index,node in enumerate(plan["nodes"][:-1]):
         prefix=f"node-{index:04d}";enrolled=load(prefix+"/document.json");question=node["question"]
-        tokenized=GRAPH["planner"](raw,prefix+"/",source,question)
+        tokenized=GRAPH["planner"](raw,prefix+"/",source,question,model_profile=MODEL_PROFILE)
         require(raw[prefix+"/source.txt"]==source and raw[prefix+"/source.manifest"]==source_manifest
             and enrolled["scheduling"]=="ready_rows_v1" and enrolled["synthesize"] is True
             and enrolled["source_sha256"]==sha(source) and enrolled["source_bytes"]==len(source)
@@ -541,7 +561,8 @@ def check(value,revision):
                 inference=[dict(question=question,context=source[v["start"]:v["end"]].decode(),start=v["start"],end=v["end"]) for v in parts])
             identity=GRAPH["manifest"](raw[package+"/dataset.manifest"],raw[package+"/dataset.json"],enrolled,f"document-package-{p:04d}",DOC["PROFILE"])
             require(selection==dict(manifest_id=identity,dataset_sha256=sha(encoded(data)),first_part=p*4,rows=len(parts)),"leaf package mapping changed")
-            parents.extend(GRAPH["package"](raw,package,data,identity,enrolled,question,layout,executed,response_bytes,index,0,True));rounds+=1
+            parents.extend(GRAPH["package"](raw,package,data,identity,enrolled,question,layout,executed,response_bytes,index,0,True,
+                model_profile=MODEL_PROFILE));rounds+=1
         answer,used=reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,index,False)
         rounds+=used;answers[node["id"]]=answer
         require(load(prefix+"/result.json")["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"leaf graph identity changed")
@@ -623,8 +644,63 @@ def report(value,revision):
     check(value["evidence"],revision)
 
 
+def profile_self_test():
+    # Only inert provenance/report values: this exercises both checker branches,
+    # never a tokenizer, model, worker or signed publication.
+    pin_root=HERE.parent.parent/"workers/volparossa-ml"
+    pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
+    provision=dict(success=True,installed_wheels=38,model_profile=MODEL_PROFILE,model_id=MODEL_ID["model_id"],
+        revision=MODEL_ID["model_revision"],download_bytes=977655758,budget_bytes=3*1024**3,
+        model_pins_sha256=sha((json.dumps(pins,indent=2)+"\n").encode()),
+        requirements_sha256=sha((pin_root/"requirements.lock").read_bytes()),
+        runtime_autofetch_enabled=False,training_performed=False)
+    check_provision(provision)
+    for changed in (dict(model_profile="smollm2-135m-v1"),dict(download_bytes=523040250),
+                    dict(model_pins_sha256="0"*64),dict(budget_bytes=4*1024**3)):
+        try:check_provision(dict(provision,**changed))
+        except ValueError:pass
+        else:raise AssertionError("wrong-profile or unpinned provision accepted")
+    for profile in ("smollm2-135m-v1",MODEL_PROFILE):
+        selected=TRAIN["inference_profile"](profile);model=selected["model"]
+        source=b"Inert public source.";question="Inert question?"
+        inp=dict(version=1)
+        if profile==MODEL_PROFILE:inp["model_profile"]=profile
+        inp.update(visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
+        plan=dict(version=1,source_bytes=len(source),source_sha256=sha(source),question_sha256=sha(question.encode()),
+            model_id=model["model_id"],model_revision=model["model_revision"],tokenizer_sha256=DOC["TOKENIZER"],
+            prompt_limit=selected["prompt_tokens"],parts=[dict(start=0,end=len(source),prompt_tokens=selected["prompt_tokens"])])
+        supervisor=dict(child_reaped=True,network_access=False,gpu_access=False,max_observed_rss_bytes=1,rss_limit_bytes=3*1024**3)
+        report=dict(mode="plan_document",status="ok",device="cpu",model_weights_loaded=False,updates_completed=0,
+            dataset=dict(sha256=sha(encoded(inp))),supervisor=supervisor,
+            artifacts=[dict(relative_path="document-plan.json",bytes=len(encoded(plan)),sha256=sha(encoded(plan)))])
+        raw={"planner-input.json":encoded(inp),"document-plan.json":encoded(plan),"tokenizer/document-plan.json":encoded(plan),
+            "tokenizer-report.json":encoded(report),"tokenizer/report.json":encoded(report)}
+        assert GRAPH["planner"](raw,"",source,question,model_profile=profile)==plan
+        other=MODEL_PROFILE if profile!=MODEL_PROFILE else "smollm2-135m-v1"
+        try:GRAPH["planner"](raw,"",source,question,model_profile=other)
+        except ValueError:pass
+        else:raise AssertionError("tokenizer accepted the other model profile")
+        generation=dict(version=1,stop_reason="eos",max_new_tokens=selected["new_tokens"])
+        if profile==MODEL_PROFILE:generation["model_profile"]=profile
+        output=dict(sample_index=0,text="Inert bounded answer.",generated_tokens=selected["new_tokens"],
+            text_truncated=False,generation=generation)
+        handle=dict(provider_key="a"*64,binding=dict(job_id="b"*32,model_fingerprint=selected["fingerprint"]))
+        status=dict(report_sha256="c"*64)
+        actual=SYNTH["answer"](output,handle,status,"d"*64,0,len(source),0,model_profile=profile)
+        assert actual["generation"]==generation and not SYNTH["generation_limited"](actual,model_profile=profile)
+        assert SYNTH["generation_fields"](output,annotated=True,model_profile=profile)["answer_complete"] is True
+        for mutation in (lambda x:x["generation"].update(stop_reason="token_limit"),
+            lambda x:x.update(text="\\"*selected["wire_bytes"]),lambda x:x.update(text_truncated=True),
+            lambda x:x["generation"].update(model_profile=other)):
+            invalid=copy.deepcopy(output);mutation(invalid)
+            try:SYNTH["answer"](invalid,handle,status,"d"*64,0,len(source),0,model_profile=profile)
+            except ValueError:pass
+            else:raise AssertionError("incomplete/wrong-profile or escaped-oversized parent accepted")
+
+
 def self_test():
     # Inert schema/graph reconstruction only, not fabricated model or peer execution.
+    profile_self_test()
     intro=b"# VOLPAROSSA\n\nPublic introduction.\n\n"
     assert public_intro(intro+b"[Network](#network)\n")==intro
     for original in (intro,b"wrong\n\n[Network](",intro.rstrip()+b"[Network](",b"# VOLPAROSSA\n"+b"x"*1024+b"\n\n[Network]("):
@@ -633,7 +709,7 @@ def self_test():
         else:raise AssertionError("incomplete/nonliteral source introduction accepted")
     source=("a"*1023+"é"+"rest").encode()
     selected=planning_input(source)
-    assert selected["version"]==2 and selected["source_sha256"]==sha(source)
+    assert selected["version"]==2 and selected["source_sha256"]==sha(source) and selected["model_profile"]==MODEL_PROFILE
     assert selected["source_excerpt"]==dict(start=0,end=1023,text="a"*1023,sha256=sha(b"a"*1023))
     assert planning_input(intro)["source_excerpt"]["end"]==len(intro)
     for count in (2,3,4):
@@ -699,6 +775,8 @@ def self_test():
     validate_failure(failure,input_raw,b"public")
     for mutate in (
         lambda value:value.update(version=1),
+        lambda value:value.pop("model_profile"),
+        lambda value:value.update(model_profile="smollm2-135m-v1"),
         lambda value:value["source_excerpt"].update(text="changed"),
         lambda value:value["source_excerpt"].update(start=1),
         lambda value:value["source_excerpt"].update(end=5),

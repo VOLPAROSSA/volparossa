@@ -1,12 +1,14 @@
 //! Pure retained-protocol and CLI fixtures; not evidence of model planning or answer quality.
 
 use super::*;
+use crate::compute::ModelProfile;
 use clap::Parser;
 use std::os::unix::fs::PermissionsExt as _;
 use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
 
 fn input(document: &str) -> task_plan::Input {
     task_plan::Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -116,6 +118,7 @@ fn retained(root: &Path) -> (Authority, plan::Plan, Input) {
         source_excerpt: None,
     };
     let source = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -228,6 +231,7 @@ fn legacy_manual_graphs_stay_manual_and_cannot_discard_present_planner_authority
 #[test]
 fn grounded_authority_binds_literal_prefix_and_reports_partial_coverage() {
     let source = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),

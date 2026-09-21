@@ -17,6 +17,7 @@ current Debian package; a later distributable ML package still needs complete no
 | Component | Original source / revision | License/provenance scope |
 | --- | --- | --- |
 | SmolLM2-135M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/tree/83212e1e2b3cfd6958f3707877bb878945dea8ee), `83212e1e2b3cfd6958f3707877bb878945dea8ee` | Apache-2.0; unchanged model LICENSE SHA-256 `59899c6091b540582ed617e8eeaac4919dc985ccfc35459ee9752b699be5205b` |
+| Opt-in SmolLM2-360M-Instruct | [HuggingFaceTB model](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct/tree/a10cc1512eabd3dde888204e902eca88bddb4951), `a10cc1512eabd3dde888204e902eca88bddb4951` | Apache-2.0 declared by the original model card; this revision has no `LICENSE` file. The explicitly pinned, unchanged Apache-2.0 text from the 135M row is retained separately, not described as a file from the 360M repository. |
 | PyTorch CPU `2.14.0+cpu` | [pytorch/pytorch](https://github.com/pytorch/pytorch/tree/2b3ec34829036a65cd9d1398ea72a0167dc37470), `2b3ec34829036a65cd9d1398ea72a0167dc37470` | Original official CPU wheel; retain its own and bundled dependency notices |
 | Transformers `5.16.1` | [huggingface/transformers](https://github.com/huggingface/transformers/tree/93c8b7b485963a10800c91f55304db6be211c2bd), `93c8b7b485963a10800c91f55304db6be211c2bd` | Apache-2.0; original wheel notices retained |
 | PEFT `0.20.0` | [huggingface/peft](https://github.com/huggingface/peft/tree/a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e), `a5526d27a9d47d1e8264d5e1b1f96c0fdc79464e` | Apache-2.0; original wheel notices retained |
@@ -27,6 +28,17 @@ This is slightly larger than the current native content-object ceiling; the ceil
 been silently raised. The initial trained rank-4 adapter fits a normal content object, while
 full-model distribution needs explicit compatible sharding/parts integration. No trained
 adapter or actual backend execution is claimed until the isolated guest smoke succeeds.
+
+The optional `smollm2-360m-v1` inference/planning profile adds seven original model assets
+in `workers/volparossa-ml/model-pins-360m.json` and the separately attributed license text;
+it reuses the exact 38-wheel runtime lock. Its original weights are 723,674,912 bytes,
+SHA-256 `e6bffe7435d7ddc10fd3b9a9efd429dafbacb1cb17015fb5562664e7532bf86e`.
+Tokenizer SHA-256 `9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c`
+is reused because upstream lists the identical Git blob
+`f922b1797f0c88e71addc8393787831f2477a4bd` at both exact model revisions.
+No weights or tokenizer were downloaded for this metadata check. The 360M profile does
+not enable training or apply 135M adapters, and does not raise the native content-object
+ceiling or establish answer quality.
 
 The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux resource/priority
 tools as separate executables, not vendored copies. The sandbox argument vector is part of our

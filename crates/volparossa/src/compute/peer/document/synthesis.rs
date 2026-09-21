@@ -43,11 +43,16 @@ impl Answer {
             "generated_tokens":output["generated_tokens"],"text_truncated":output["text_truncated"]
         }))?;
         answer.generation = Generation::from_output(output, false)?;
+        let profile = answer
+            .generation
+            .map(|generation| generation.model_profile)
+            .unwrap_or_default()
+            .spec();
         ensure!(
             start < end
-                && answer.text.len() <= 1024
+                && answer.text.len() <= profile.max_output_bytes
                 && !answer.text.contains('\0')
-                && answer.generated_tokens <= 64
+                && answer.generated_tokens <= profile.max_new_tokens
                 && rpc::nonzero_hex(&answer.job_id, 32)
                 && [
                     &answer.report_sha256,

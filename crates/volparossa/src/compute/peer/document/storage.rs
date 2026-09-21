@@ -470,6 +470,13 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
     if let Some(fingerprint) = &enrollment.model_fingerprint {
         super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
     }
+    if !input.model_profile.is_default() {
+        ensure!(
+            enrollment.model_fingerprint == super::required_fingerprint(input.model_profile)?
+                && enrollment.scheduling == workflow::Scheduling::ReadyRowsV1,
+            "compute_document_profile_binding"
+        );
+    }
     verify_original(root, &enrollment, &input)?;
     match load_collection(root, &enrollment, &input)? {
         Some(ledger) => {
@@ -685,6 +692,14 @@ pub(super) fn join_answers(
                 .context("compute_document_result_provider")?,
         )
         .map_err(anyhow::Error::msg)?;
+        let generation = crate::compute::inference_output::Generation::from_output(
+            output,
+            !input.model_profile.is_default(),
+        )?;
+        ensure!(
+            generation.is_none_or(|generation| generation.model_profile == input.model_profile),
+            "compute_document_output_profile"
+        );
         let mut answer = json!({"source_part":index,"start":part.start,"end":part.end,
             "context_sha256":sha(context.as_bytes()),"package_manifest_id":package.manifest_id,
             "text":output["text"],"provider_key":output["provider_key"],"job_id":output["job_id"],

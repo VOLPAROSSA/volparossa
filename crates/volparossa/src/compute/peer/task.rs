@@ -697,12 +697,13 @@ mod tests {
     // Full local receipt fixtures exercise parser/hash binding, never successful remote ML.
     fn retained_receipts(fixture: &Fixture) -> Value {
         let source = verified_source(fixture.root.path(), &fixture.selected).unwrap();
+        let profile = crate::compute::ModelProfile::Default135.spec();
         let model = rpc::ModelIdentity {
-            model_id: "local-receipt-fixture".into(),
-            model_revision: "fixture".into(),
+            model_id: profile.model_id.into(),
+            model_revision: profile.revision.into(),
             base_weights: rpc::FileIdentity {
-                bytes: 1,
-                sha256: "a".repeat(64),
+                bytes: profile.weights_bytes,
+                sha256: profile.weights_sha256.into(),
             },
             adapter_files: None,
         };

@@ -153,6 +153,33 @@ provisioner in `workers/volparossa-ml/` verifies every model asset and all 38 CP
 wheels against exact sizes/SHA-256 pins. It preserves original license/model-card bytes and
 does not install on the development host or fetch dependencies at worker runtime.
 
+An explicit second profile, `smollm2-360m-v1`, pins SmolLM2-360M-Instruct at
+`a10cc1512eabd3dde888204e902eca88bddb4951`. It supports inference, source tokenization and
+task planning, not training or the incompatible 135M adapters. It uses the same pinned CPU
+runtime and isolation; see [asset and license provenance](../THIRD_PARTY_LICENSES.md).
+
+| Explicit profile | Ordinary prompt | Generated answer | Escaped answer bytes | Rows per worker |
+| --- | ---: | ---: | ---: | ---: |
+| `smollm2-135m-v1` (default) | 192 tokens | 64 tokens | 1,024 | 4 |
+| `smollm2-360m-v1` | 1,024 tokens | 256 tokens | 4,096 | 1 |
+
+Select the same `--model-profile` when explicitly provisioning the model, starting its
+`compute serve` broker, and enrolling a new `compute peer document` task. `compute run`
+also accepts it. Discovery filters for the chosen base profile; manual enrollment checks the
+actual peers and pins their common complete model fingerprint before tokenization or publication.
+Resume uses the original profile and fingerprint, not a newly supplied CLI choice. Signed
+packages may still contain four rows, but the ready queue dispatches singleton 360M jobs.
+Legacy batch-barrier enrollment is not supported for that profile.
+
+Synthesis retains complete parent text and the matching profile rather than silently applying
+135M limits. A token-limited or wire-truncated output cannot become a completed answer or new
+dependency. The task-question planner keeps its separate 512-prompt / 384-total-generated-token
+budget and four-attempt limit; selecting a model does not enlarge that planner budget, the
+600-second worker deadline, two-thread bound, or 3-GiB sampled RSS cancellation limit.
+The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
+wheels; no model or runtime is installed on the development host. Actual 360M execution,
+resource behavior and useful/source-faithful answers remain pending the disposable VM proof.
+
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount
 isolation, exposing only the installed runtime, selected public dataset, pinned model and
@@ -1229,7 +1256,7 @@ inference, rather than stop at separate fragment answers. The original document 
 remain explicitly public. After all fragments complete, the coordinator retains the exact
 generated answers, groups them in source order, and uses the same isolated pinned tokenizer
 to plan fitting synthesis prompts. Their outputs form the next level until one answer remains.
-Every prompt still fits 192 input tokens; every worker keeps its existing resource and lease
+Every prompt fits its enrolled profile (192 or 1,024 input tokens); every worker keeps its resource and lease
 limits. Large frontiers use groups of at most 64 parent outputs, not an enlarged model context.
 
 ```sh
@@ -1258,7 +1285,8 @@ wrong. Encryption protects transport, not inputs from the selected executing pee
 
 The result retains original `answers`, all intermediate level records and, on completion,
 `synthesized_answer`. New worker outputs include a versioned `generation` object with the
-actual `stop_reason` (`eos` or `token_limit`) and `max_new_tokens`. EOS on the last permitted
+actual `stop_reason` (`eos` or `token_limit`) and `max_new_tokens`. Non-default outputs also
+carry their exact `model_profile`; limits are derived from that known profile. EOS on the last permitted
 token is still EOS; token count alone cannot distinguish the two. `text_truncated` independently
 reports whether the wire-text cap removed text. A terminal job receipt remains terminal even
 when its answer is unusable: no automatic resubmission or renewed lease is authorized.

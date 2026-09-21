@@ -28,11 +28,12 @@ def encoded(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
 
 
-def answer(output, handle, status, manifest, start, end, index):
-    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=True)
+def answer(output, handle, status, manifest, start, end, index, model_profile="smollm2-135m-v1"):
+    selected = JOBS["TRAIN"]["inference_profile"](model_profile)
+    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=True, model_profile=model_profile)
     require(output["sample_index"] == index and isinstance(output["text"], str) and output["text"].strip()
-            and len(output["text"].encode()) <= 1024 and "\0" not in output["text"]
-            and type(output["generated_tokens"]) is int and 1 <= output["generated_tokens"] <= 64
+            and len(json.dumps(output["text"], ensure_ascii=True).encode("ascii")) <= selected["wire_bytes"] and "\0" not in output["text"]
+            and type(output["generated_tokens"]) is int and 1 <= output["generated_tokens"] <= selected["new_tokens"]
             and output["text_truncated"] is False, "generated parent is missing, malformed or wire-truncated")
     return {"text": output["text"], "provider_key": handle["provider_key"], "job_id": handle["binding"]["job_id"],
             "report_sha256": status["report_sha256"], "package_manifest_id": manifest,
@@ -41,12 +42,12 @@ def answer(output, handle, status, manifest, start, end, index):
             "generation": generation}
 
 
-def generation_limited(output):
-    return JOBS["TRAIN"]["check_generation"](output)["stop_reason"] == "token_limit"
+def generation_limited(output, model_profile="smollm2-135m-v1"):
+    return JOBS["TRAIN"]["check_generation"](output, model_profile=model_profile)["stop_reason"] == "token_limit"
 
 
-def generation_fields(output, annotated=False):
-    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=annotated)
+def generation_fields(output, annotated=False, model_profile="smollm2-135m-v1"):
+    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=annotated, model_profile=model_profile)
     require(type(output["text_truncated"]) is bool, "invalid wire truncation metadata")
     result = dict(generation=generation, generated_tokens=output["generated_tokens"], text_truncated=output["text_truncated"])
     if annotated:

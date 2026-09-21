@@ -82,6 +82,7 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     // This is partial coverage for longer documents, never a fabricated summary.
     let input = Input {
         version: 1,
+        model_profile: args.model_profile,
         synthesis: false,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
@@ -94,6 +95,7 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     input.validate()?;
     let input = task_plan::Input {
         version: 2,
+        model_profile: args.model_profile,
         visibility: input.visibility,
         license: input.license,
         question: input.question,
@@ -125,6 +127,7 @@ pub(super) async fn prepare(
     let output = args.directory.join("model-planner");
     let options = compute::Options {
         mode: compute::Mode::PlanTasks,
+        model_profile: args.model_profile,
         runtime_root: args
             .runtime_root
             .clone()
@@ -220,6 +223,7 @@ fn verify_input(authority: &Authority, input: &task_plan::Input, source: &Input)
     source.validate()?;
     ensure!(
         authority.version == input.version
+            && input.model_profile == source.model_profile
             && input.question == authority.question
             && input.license == source.license
             && input.source_sha256 == authority.source_sha256

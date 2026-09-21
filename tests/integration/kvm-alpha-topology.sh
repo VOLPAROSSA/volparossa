@@ -713,6 +713,10 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     done
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
+if [ "$agent_model_planning" = yes ]; then
+    [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
+        && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
+fi
 if [ "$scenario" = agent-jobs ]; then
     for jobs_fixture in agent-jobs-smoke.sh agent-jobs-smoke.py agent-jobs-follow-smoke.sh agent-jobs-follow-smoke.py; do
         [ -f "$source_directory/tests/integration/$jobs_fixture" ] && [ ! -L "$source_directory/tests/integration/$jobs_fixture" ] || exit 69
@@ -2195,6 +2199,9 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_pin in provision.py requirements.lock model-pins.json; do
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
     done
+    if [ "$agent_model_planning" = yes ]; then
+        install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
+    fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-artifact-README.md"
 fi
 if [ "$scenario" = agent-jobs ]; then

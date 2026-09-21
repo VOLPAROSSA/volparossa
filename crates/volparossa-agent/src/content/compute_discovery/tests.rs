@@ -14,6 +14,7 @@ fn query() -> rpc::EligibilityQuery {
     rpc::EligibilityQuery {
         publisher_keys: vec![hex::encode(key(1))],
         model_fingerprint: None,
+        model_profile: None,
         require_task_derivation_v1: true,
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
@@ -117,6 +118,51 @@ fn largest_compatible_pool_and_ties_do_not_depend_on_probe_order() {
     for provider in selected.providers {
         let caps: rpc::Capabilities = serde_json::from_str(&provider.capabilities_json).unwrap();
         assert_eq!(caps.model_fingerprint, fingerprint);
+    }
+}
+
+#[test]
+fn selected_base_profile_filters_larger_other_model_pool_without_excluding_adapters() {
+    let mut samples = vec![observation(2, true), observation(3, true)];
+    let profile = volparossa_content::ModelProfile::Smol360;
+    let spec = profile.spec();
+    for seed in 4..=6 {
+        let mut sample = observation(seed, false);
+        let caps = &mut sample.1.capabilities;
+        caps.model.model_id = spec.model_id.into();
+        caps.model.model_revision = spec.revision.into();
+        caps.model.base_weights = rpc::FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        };
+        caps.model_fingerprint =
+            hex::encode(Sha256::digest(serde_json::to_vec(&caps.model).unwrap()));
+        caps.max_rows = spec.max_rows;
+        samples.push(sample);
+    }
+    assert_eq!(
+        select_pool(&query(), samples.clone(), 2, 4)
+            .unwrap()
+            .providers
+            .len(),
+        3
+    );
+    let mut requested = query();
+    requested.model_profile = Some("smollm2-135m-v1".into());
+    let selected = select_pool(&requested, samples.clone(), 2, 4).unwrap();
+    assert_eq!(selected.providers.len(), 2);
+    for provider in selected.providers {
+        let caps: rpc::Capabilities = serde_json::from_str(&provider.capabilities_json).unwrap();
+        assert_eq!(caps.model.model_id, MODEL_ID);
+        assert!(caps.model.adapter_files.is_some());
+    }
+    requested.model_profile = Some(profile.to_string());
+    let selected = select_pool(&requested, samples, 2, 4).unwrap();
+    assert_eq!(selected.providers.len(), 3);
+    for provider in selected.providers {
+        let caps: rpc::Capabilities = serde_json::from_str(&provider.capabilities_json).unwrap();
+        assert_eq!(caps.model.model_id, spec.model_id);
+        assert!(caps.model.adapter_files.is_none());
     }
 }
 

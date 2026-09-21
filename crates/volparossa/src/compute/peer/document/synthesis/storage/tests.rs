@@ -1,4 +1,5 @@
 use super::*;
+use crate::compute::ModelProfile;
 use crate::compute::document_plan::Part;
 use crate::compute::inference_output::Generation;
 use std::os::unix::fs::PermissionsExt as _;
@@ -21,6 +22,7 @@ fn parent(text: &str, index: u16) -> Answer {
         generated_tokens: 15,
         text_truncated: false,
         generation: Some(Generation {
+            model_profile: ModelProfile::default(),
             version: 1,
             stop_reason: crate::compute::inference_output::StopReason::Eos,
             max_new_tokens: 64,
@@ -84,6 +86,7 @@ async fn incomplete_or_unknown_parent_starts_no_dependency_work_even_with_follow
 fn every_virtual_parent_byte_survives_unicode_and_cross_answer_tokenizer_cuts() {
     let parents = vec![parent("één", 0), parent("second", 1), parent("三", 2)];
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -126,6 +129,34 @@ fn every_virtual_parent_byte_survives_unicode_and_cross_answer_tokenizer_cuts() 
     assert!(row(&input, &bad, &parents, 64).is_err());
 }
 
+#[tokio::test]
+async fn completed_parent_from_another_profile_starts_no_synthesis_work() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (enrollment, mut original) = historical_original(temp.path(), &signer, &cancelled);
+    original.model_profile = ModelProfile::Smol360;
+    let target = temp.path().join("wrong-profile");
+    let args = replay_options(&target);
+    let result = prepare(
+        &args,
+        &target,
+        &enrollment,
+        &original,
+        &[parent("public", 0)],
+        0,
+        1,
+        &cancelled,
+    )
+    .await;
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "compute_synthesis_parent_profile"
+    );
+    assert!(!target.exists());
+}
+
 #[test]
 fn resumed_intermediate_inputs_are_never_silently_replaced() {
     let temp = tempfile::tempdir().unwrap();
@@ -162,6 +193,7 @@ fn replay_options(root: &Path) -> Options {
         limits: crate::content::Limits,
     }
     Options {
+        model_profile: ModelProfile::default(),
         discovery: crate::compute::peer::discovery::Options::default(),
         directory: root.into(),
         resume: true,
@@ -199,6 +231,7 @@ fn historical_original(
     cancelled: &watch::Receiver<bool>,
 ) -> (document_storage::Enrollment, Input) {
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
@@ -241,6 +274,7 @@ fn historical_reduction(
     let group_root = directory_root.join("level-01-group-0000");
     directory(&group_root).unwrap();
     let input = Input {
+        model_profile: ModelProfile::default(),
         version: 1,
         visibility: "public".into(),
         license: original.license.clone(),
@@ -261,6 +295,7 @@ fn historical_reduction(
     };
     retain_json(&group_root, "group.json", &group).unwrap();
     let dataset = DerivedDataset {
+        model_profile: ModelProfile::default(),
         version: 3,
         visibility: "public".into(),
         license: input.license.clone(),

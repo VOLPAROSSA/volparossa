@@ -121,6 +121,7 @@ fn load(root: &Path) -> Result<Loaded> {
                 && saved.native_source_proofs_sha256 == authority.native_source_proofs_sha256
                 && text.document == input.document
                 && text.license == input.license
+                && text.model_profile == input.model_profile
                 && text.question == plan.nodes[leaf.node].question,
             "compute_graph_shared_source_or_task_changed"
         );
@@ -467,6 +468,7 @@ async fn dependent(
     }
     let input = Input {
         version: 1,
+        model_profile: loaded.input.model_profile,
         synthesis: false,
         visibility: "public".into(),
         license: loaded.input.license.clone(),

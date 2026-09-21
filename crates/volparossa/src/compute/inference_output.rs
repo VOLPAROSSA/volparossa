@@ -1,11 +1,9 @@
 //! Generation termination is independent of job completion and answer correctness.
 
+use super::ModelProfile;
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-// The currently supported inference profile, not a budget accepted from a peer.
-const MAX_NEW_TOKENS: u16 = 64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +18,8 @@ pub(super) struct Generation {
     pub(super) version: u8,
     pub(super) stop_reason: StopReason,
     pub(super) max_new_tokens: u16,
+    #[serde(default, skip_serializing_if = "ModelProfile::is_default")]
+    pub(super) model_profile: ModelProfile,
 }
 
 impl Generation {
@@ -35,12 +35,12 @@ impl Generation {
         let tokens = output["generated_tokens"]
             .as_u64()
             .context("compute_generation_token_count")?;
+        let limit = generation.model_profile.spec().max_new_tokens;
         ensure!(
             generation.version == 1
-                && generation.max_new_tokens == MAX_NEW_TOKENS
-                && (1..=u64::from(MAX_NEW_TOKENS)).contains(&tokens)
-                && (generation.stop_reason == StopReason::Eos
-                    || tokens == u64::from(MAX_NEW_TOKENS)),
+                && generation.max_new_tokens == limit
+                && (1..=u64::from(limit)).contains(&tokens)
+                && (generation.stop_reason == StopReason::Eos || tokens == u64::from(limit)),
             "compute_generation_termination_invalid"
         );
         Ok(Some(generation))
@@ -75,6 +75,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!limited.is_eos());
+    }
+
+    #[test]
+    fn larger_budget_requires_its_explicit_pinned_profile() {
+        let mut row = output(256, "eos");
+        row["generation"]["max_new_tokens"] = 256.into();
+        assert!(Generation::from_output(&row, true).is_err());
+        row["generation"]["model_profile"] = "smollm2-360m-v1".into();
+        let generation = Generation::from_output(&row, true).unwrap().unwrap();
+        assert!(generation.is_eos());
+        row["generation"]["stop_reason"] = "token_limit".into();
+        assert!(
+            !Generation::from_output(&row, true)
+                .unwrap()
+                .unwrap()
+                .is_eos()
+        );
+        row["generated_tokens"] = 255.into();
+        assert!(Generation::from_output(&row, true).is_err());
+        row["generation"]["model_profile"] = "unapproved".into();
+        assert!(Generation::from_output(&row, true).is_err());
     }
 
     #[test]

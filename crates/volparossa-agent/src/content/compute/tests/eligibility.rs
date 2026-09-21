@@ -48,6 +48,7 @@ fn fixture() -> Fixture {
         operation: Operation::Eligibility(rpc::EligibilityQuery {
             publisher_keys: vec![hex::encode(publisher.verifying_key().as_bytes())],
             model_fingerprint: Some(capabilities().model_fingerprint),
+            model_profile: None,
             require_task_derivation_v1: true,
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
@@ -115,6 +116,12 @@ async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment
     cases.push((query, false)); // Trusting one publisher cannot authorize the other.
     let mut query = original_query.clone();
     query.model_fingerprint = Some("b".repeat(64));
+    cases.push((query, false));
+    let mut query = original_query.clone();
+    query.model_profile = Some("smollm2-135m-v1".into());
+    cases.push((query, true));
+    let mut query = original_query.clone();
+    query.model_profile = Some("smollm2-360m-v1".into());
     cases.push((query, false));
     let mut query = original_query.clone();
     query.require_document_inference_v2 = true;

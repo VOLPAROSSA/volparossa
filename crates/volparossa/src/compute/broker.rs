@@ -25,7 +25,9 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+#[cfg(test)]
 use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
+use volparossa_content::model_profile::ModelProfile;
 use volparossa_local_control::compute::{
     self, Capabilities, ErrorCode, FileIdentity, JobBinding, JobState, JobStatus, ModelIdentity,
     Operation, Outcome, Request, Response, Submit,
@@ -56,6 +58,9 @@ pub(crate) struct Serve {
     /// Existing private fixed `SmolLM2` model directory; never downloaded by serving.
     #[arg(long)]
     model_root: PathBuf,
+    /// Explicit pinned profile; no model is downloaded or selected by a peer.
+    #[arg(long, default_value_t = ModelProfile::default())]
+    model_profile: ModelProfile,
     /// Optional existing compatible fixed adapter, never selected by an incoming path.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -119,7 +124,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
             serde_json::json!({
                 "version": 1, "kind": "volparossa-compute-broker-plan", "execute": false,
                 "socket": options.socket, "runtime_root": options.runtime_root,
-                "model_root": options.model_root, "adapter_root": options.adapter_root,
+                "model_root": options.model_root, "model_profile": options.model_profile, "adapter_root": options.adapter_root,
                 "work_root": options.work_root, "mode": "public_inference_only",
                 "runtime_slots": 1, "pending_queue": 0, "retained_jobs": RETAINED_JOBS,
                 "retained_data_budget_bytes": MAX_RETAINED_BYTES,
@@ -182,6 +187,10 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 }
 
 fn validate_roots(options: &Serve) -> Result<()> {
+    ensure!(
+        options.model_profile.is_default() || options.adapter_root.is_none(),
+        "compute_profile_inference_only"
+    );
     for root in [
         &options.runtime_root,
         &options.model_root,
@@ -228,9 +237,14 @@ fn validate_roots(options: &Serve) -> Result<()> {
 }
 
 fn capabilities(options: &Serve) -> Result<Capabilities> {
-    let base_weights = identity(&options.model_root.join("model.safetensors"), 269_060_552)?;
+    let profile = options.model_profile.spec();
+    let base_weights = identity(
+        &options.model_root.join("model.safetensors"),
+        profile.weights_bytes,
+    )?;
     ensure!(
-        base_weights.bytes == 269_060_552 && base_weights.sha256 == hex::encode(BASE_MODEL_SHA256),
+        base_weights.bytes == profile.weights_bytes
+            && base_weights.sha256 == profile.weights_sha256,
         "compute_broker_model_mismatch"
     );
     let adapter_files = options
@@ -260,8 +274,8 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         })
         .transpose()?;
     let model = ModelIdentity {
-        model_id: MODEL_ID.into(),
-        model_revision: MODEL_REVISION.into(),
+        model_id: profile.model_id.into(),
+        model_revision: profile.revision.into(),
         base_weights,
         adapter_files,
     };
@@ -275,7 +289,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_threads: 2,
         max_job_seconds: compute::MAX_JOB_SECONDS,
         max_dataset_bytes: compute::MAX_DATASET_BYTES as u64,
-        max_rows: 4,
+        max_rows: profile.max_rows,
         task_derivation_v1: true,
         document_inference_v2: true,
         derived_inference_v3: true,
@@ -362,7 +376,15 @@ impl Broker {
             return Outcome::Error(ErrorCode::ModelMismatch);
         }
         if sha(submit.dataset_json.as_bytes()) != submit.binding.dataset_sha256
+            || submit.binding.row_indices.len() > usize::from(self.capabilities.max_rows)
             || dataset::validate(&submit.dataset_json, submit.binding.row_indices.len()).is_err()
+            || super::validate_profile_dataset(
+                Mode::Infer,
+                self.options.adapter_root.is_some(),
+                submit.dataset_json.as_bytes(),
+                self.options.model_profile,
+            )
+            .is_err()
             || !self.accepts_task(submit)
         {
             return Outcome::Error(ErrorCode::Invalid);
@@ -442,6 +464,7 @@ impl Broker {
         drop(dataset);
         let options = Options {
             mode: Mode::Infer,
+            model_profile: self.options.model_profile,
             runtime_root: self.options.runtime_root.clone(),
             model_root: self.options.model_root.clone(),
             adapter_root: self.options.adapter_root.clone(),
@@ -627,6 +650,7 @@ pub(super) fn checked_report(
     binding: &JobBinding,
     caps: &Capabilities,
 ) -> Result<String> {
+    let profile = profile_for_model(&caps.model)?;
     ensure!(
         report["mode"] == "infer"
             && report["status"] == "ok"
@@ -665,14 +689,16 @@ pub(super) fn checked_report(
             output["sample_index"] == index
                 && output["text"]
                     .as_str()
-                    .is_some_and(|text| text.len() <= 1024),
+                    .is_some_and(|text| text.len() <= profile.spec().max_output_bytes),
             "compute_broker_result_row"
         );
         // The same validator reads retained historical receipts on the requester.
         // Missing legacy metadata stays unknown; malformed new metadata is rejected.
-        if super::inference_output::Generation::from_output(output, false)?.is_some() {
+        if let Some(generation) =
+            super::inference_output::Generation::from_output(output, !profile.is_default())?
+        {
             ensure!(
-                output["text_truncated"].is_boolean(),
+                output["text_truncated"].is_boolean() && generation.model_profile == profile,
                 "compute_broker_result_truncation"
             );
         }
@@ -683,6 +709,21 @@ pub(super) fn checked_report(
         "compute_broker_result_size"
     );
     Ok(json)
+}
+
+pub(super) fn profile_for_model(model: &ModelIdentity) -> Result<ModelProfile> {
+    let profile = ModelProfile::from_identity(
+        &model.model_id,
+        &model.model_revision,
+        model.base_weights.bytes,
+        &model.base_weights.sha256,
+    )
+    .context("compute_model_profile")?;
+    ensure!(
+        profile.is_default() || model.adapter_files.is_none(),
+        "compute_profile_inference_only"
+    );
+    Ok(profile)
 }
 
 fn sha(bytes: &[u8]) -> String {

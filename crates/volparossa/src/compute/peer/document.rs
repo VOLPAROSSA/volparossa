@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::compute::ModelProfile;
 use anyhow::{Context as _, Result, ensure};
 use clap::Args;
 use ed25519_dalek::VerifyingKey;
@@ -27,8 +28,8 @@ use super::batch::output;
 use super::{Cancellation, discovery, now, parse_key, read_file, rpc, task, workflow};
 
 const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
-// Up to MAX_PARTS independently checked 1024-byte answers, including worst-case
-// JSON escaping and per-answer provenance. Metadata retains its smaller bound.
+// Up to MAX_PARTS independently checked answers (at most 4096 escaped bytes each),
+// including per-answer provenance. Metadata retains its smaller bound.
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, Args)]
@@ -82,6 +83,9 @@ pub(crate) struct Options {
     runtime_root: Option<PathBuf>,
     #[arg(long, required_unless_present = "resume")]
     model_root: Option<PathBuf>,
+    /// Explicit pinned profile for new planning and the exact peer cohort; resume retains it.
+    #[arg(long, default_value_t = ModelProfile::default(), conflicts_with = "resume")]
+    model_profile: ModelProfile,
     /// Existing encrypted publisher identity; must match --publisher-key.
     #[arg(long, required_unless_present = "resume")]
     identity: Option<PathBuf>,
@@ -137,7 +141,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
-            "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,
+            "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"model_profile":args.model_profile,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
@@ -214,12 +218,17 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
 )]
 async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
     ensure!(
+        args.model_profile.is_default() || !args.batch_barrier,
+        "compute_profile_requires_ready_rows"
+    );
+    ensure!(
         args.public_content,
         "compute_document_public_permission_required"
     );
     let (document, collection, network) = selected_input(args, socket, cancelled).await?;
     let input = Input {
         version: 1,
+        model_profile: args.model_profile,
         synthesis: false,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
@@ -236,15 +245,20 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
             "compute_discovery_conflicting_providers"
         );
         let publisher = args.publisher_key.context("compute_document_publisher")?;
-        let query = args.discovery.query(
+        let mut query = args.discovery.query(
             [hex::encode(publisher.as_bytes())],
             true,
             true,
             args.synthesize,
         )?;
+        bind_profile_query(&mut query, args.model_profile)?;
         Some(args.discovery.select(socket, query, cancelled).await?)
     } else {
         None
+    };
+    let model_fingerprint = match &selected {
+        Some(selected) => selected.model_fingerprint.clone(),
+        None => manual_fingerprint(args, socket, cancelled).await?,
     };
     let providers = selected
         .as_ref()
@@ -303,7 +317,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         cancelled,
         args.synthesize,
     )?;
-    enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
+    enrollment.model_fingerprint = Some(model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
     enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
     enrollment.collection_sha256 = collection
@@ -316,6 +330,62 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         .transpose()?;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
+}
+
+fn required_fingerprint(profile: ModelProfile) -> Result<Option<String>> {
+    if profile.is_default() {
+        return Ok(None); // Existing default cohorts may use an explicitly approved adapter.
+    }
+    let spec = profile.spec();
+    let model = rpc::ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: rpc::FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    Ok(Some(super::sha(&serde_json::to_vec(&model)?)))
+}
+
+fn bind_profile_query(query: &mut rpc::EligibilityQuery, profile: ModelProfile) -> Result<()> {
+    query.model_profile = Some(profile.to_string());
+    if let Some(required) = required_fingerprint(profile)? {
+        ensure!(
+            query
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|selected| selected == &required),
+            "compute_discovery_profile_conflict"
+        );
+        query.model_fingerprint = Some(required);
+    }
+    Ok(())
+}
+
+async fn manual_fingerprint(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<String> {
+    let mut fingerprint: Option<String> = None;
+    for provider in &args.provider_key {
+        ensure!(!*cancelled.borrow(), "compute_document_cancelled");
+        let caps = super::capabilities(socket, provider).await?;
+        ensure!(
+            crate::compute::broker::profile_for_model(&caps.model)? == args.model_profile,
+            "compute_document_peer_model_profile"
+        );
+        ensure!(
+            fingerprint
+                .as_ref()
+                .is_none_or(|value| value == &caps.model_fingerprint),
+            "compute_document_mixed_peer_models"
+        );
+        fingerprint = Some(caps.model_fingerprint);
+    }
+    fingerprint.context("compute_document_missing_peer_model")
 }
 
 fn retain_selected_sources(
@@ -471,6 +541,7 @@ async fn tokenize(
     );
     let options = super::super::Options {
         mode: Mode::PlanDocument,
+        model_profile: input.model_profile,
         runtime_root: args
             .runtime_root
             .clone()

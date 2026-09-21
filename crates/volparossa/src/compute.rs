@@ -25,6 +25,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
+use volparossa_content::model_profile::ModelProfile;
 
 const MAX_DATASET_BYTES: u64 = 1024 * 1024;
 const MAX_LINE_BYTES: usize = 16 * 1024;
@@ -71,6 +72,9 @@ pub(crate) struct Options {
     /// Private directory containing verified model assets, not executable remote code.
     #[arg(long)]
     model_root: PathBuf,
+    /// Explicit pinned inference/planning profile; the default also supports training/adapters.
+    #[arg(long, default_value_t = ModelProfile::default())]
+    model_profile: ModelProfile,
     /// Explicit verified adapter directory; cache storage alone never activates an adapter.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -102,6 +106,8 @@ struct WorkerRequest {
     version: u8,
     id: String,
     mode: Mode,
+    #[serde(skip_serializing_if = "ModelProfile::is_default")]
+    model_profile: ModelProfile,
     model_root: &'static str,
     dataset_path: &'static str,
     output_root: &'static str,
@@ -130,7 +136,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
             serde_json::json!({
                 "version": 1, "kind": "volparossa-compute-plan", "execute": false,
                 "mode": options.mode, "runtime_root": options.runtime_root,
-                "model_root": options.model_root, "dataset": options.dataset,
+                "model_root": options.model_root, "model_profile": options.model_profile, "dataset": options.dataset,
                 "adapter_root": options.adapter_root,
                 "new_output": options.output, "steps": options.steps,
                 "threads": options.threads, "max_seconds": options.max_seconds,
@@ -196,6 +202,7 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
         version: 1,
         id: hex::encode(nonce),
         mode: options.mode,
+        model_profile: options.model_profile,
         model_root: "/model",
         dataset_path: "/dataset.json",
         output_root: "/output",
@@ -239,7 +246,12 @@ impl Options {
                 MAX_DATASET_BYTES
             },
         )?;
-        validate_dataset(self.mode, self.adapter_root.is_some(), &dataset)?;
+        validate_profile_dataset(
+            self.mode,
+            self.adapter_root.is_some(),
+            &dataset,
+            self.model_profile,
+        )?;
         for file in [
             "/usr/bin/bwrap",
             "/usr/bin/prlimit",
@@ -302,6 +314,50 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
                 .is_some_and(|s| is_hex(s, 40)),
             "compute_dataset_revision"
         );
+    }
+    Ok(())
+}
+
+fn validate_profile_dataset(
+    mode: Mode,
+    has_adapter: bool,
+    dataset: &[u8],
+    profile: ModelProfile,
+) -> Result<()> {
+    ensure!(
+        profile.is_default() || (mode != Mode::Train && !has_adapter),
+        "compute_profile_inference_only"
+    );
+    validate_dataset(mode, has_adapter, dataset)?;
+    if mode == Mode::PlanTasks {
+        ensure!(
+            task_plan::Input::decode(dataset)?.model_profile == profile,
+            "compute_planning_model_profile"
+        );
+    } else if mode == Mode::PlanDocument {
+        let input: document_plan::Input = serde_json::from_slice(dataset)?;
+        ensure!(
+            input.model_profile == profile,
+            "compute_planning_model_profile"
+        );
+    }
+    if mode == Mode::Infer {
+        let public: Value = serde_json::from_slice(dataset)?;
+        let rows = public["inference"]
+            .as_array()
+            .context("compute_profile_inference_rows")?;
+        ensure!(
+            (1..=usize::from(profile.spec().max_rows)).contains(&rows.len()),
+            "compute_profile_row_limit"
+        );
+        if public["version"] == 3 {
+            let selected: ModelProfile = public
+                .get("model_profile")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            ensure!(selected == profile, "compute_derived_model_profile");
+        }
     }
     Ok(())
 }

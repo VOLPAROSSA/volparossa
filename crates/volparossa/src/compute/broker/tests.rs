@@ -45,6 +45,7 @@ fn request(operation: Operation) -> Request {
 fn broker(root: &Path) -> Broker {
     Broker {
         options: Serve {
+            model_profile: ModelProfile::default(),
             runtime_root: root.join("runtime"),
             model_root: root.join("model"),
             adapter_root: None,
@@ -77,6 +78,43 @@ fn broker(root: &Path) -> Broker {
         jobs: VecDeque::new(),
         budget: Budget::fixed_for_test(Decision::Run),
     }
+}
+
+#[test]
+fn larger_profile_rejects_multiple_rows_before_creating_a_job() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.options.model_profile = ModelProfile::Smol360;
+    broker.capabilities.max_rows = 1;
+    let spec = ModelProfile::Smol360.spec();
+    broker.capabilities.model = ModelIdentity {
+        model_id: spec.model_id.into(),
+        model_revision: spec.revision.into(),
+        base_weights: FileIdentity {
+            bytes: spec.weights_bytes,
+            sha256: spec.weights_sha256.into(),
+        },
+        adapter_files: None,
+    };
+    broker.capabilities.model_fingerprint =
+        sha(&serde_json::to_vec(&broker.capabilities.model).unwrap());
+    let mut submit = Submit {
+        binding: binding(),
+        dataset_json: data(),
+        publication: publication(),
+    };
+    submit.binding.model_fingerprint = broker.capabilities.model_fingerprint.clone();
+    let mut dataset: Value = serde_json::from_str(&submit.dataset_json).unwrap();
+    dataset["inference"].as_array_mut().unwrap().push(serde_json::json!({"question":"Second question?","context":"Another public protocol fixture."}));
+    submit.dataset_json = dataset.to_string();
+    submit.binding.dataset_sha256 = sha(submit.dataset_json.as_bytes());
+    submit.binding.row_indices = vec![0, 1];
+    assert_eq!(
+        broker.submit("b", &submit, 1000),
+        Outcome::Error(ErrorCode::Invalid)
+    );
+    assert!(broker.jobs.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 // Retention fixtures are cancelled protocol jobs, never manufactured model results.

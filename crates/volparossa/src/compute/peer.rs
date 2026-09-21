@@ -406,16 +406,13 @@ async fn capabilities(socket: &Path, provider: &VerifyingKey) -> Result<rpc::Cap
 }
 
 fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
-    use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
+    let profile = super::broker::profile_for_model(&caps.model)?;
     ensure!(
         caps.public_inference_only
             && caps.runtime_slots == 1
             && caps.max_threads <= 2
             && (1..=600).contains(&caps.max_job_seconds)
-            && (1..=4).contains(&caps.max_rows)
-            && caps.model.model_id == MODEL_ID
-            && caps.model.model_revision == MODEL_REVISION
-            && caps.model.base_weights.sha256 == hex::encode(BASE_MODEL_SHA256)
+            && (1..=profile.spec().max_rows).contains(&caps.max_rows)
             && caps.model_fingerprint == sha(&serde_json::to_vec(&caps.model)?),
         "compute_peer_profile"
     );

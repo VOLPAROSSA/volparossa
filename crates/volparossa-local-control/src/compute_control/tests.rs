@@ -16,6 +16,7 @@ fn discovery() -> ComputeDiscoverRequest {
     ComputeDiscoverRequest {
         publisher_keys: vec![key(1), key(2)],
         model_fingerprint: None,
+        model_profile: None,
         require_task_derivation_v1: true,
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
@@ -81,6 +82,34 @@ fn explicit_single_replacement_does_not_change_legacy_initial_minimum() {
             ..legacy.clone()
         };
         assert!(rejected.eligibility().is_err());
+    }
+}
+
+#[test]
+fn discovery_base_profile_tag_eight_preserves_absent_frames_and_reaches_eligibility() {
+    let legacy = discovery();
+    let legacy_bytes = legacy.encode_to_vec();
+    let decoded = ComputeDiscoverRequest::decode(legacy_bytes.as_slice()).unwrap();
+    assert_eq!(decoded.model_profile, None);
+    assert_eq!(decoded.eligibility().unwrap().model_profile, None);
+    for profile in ["smollm2-135m-v1", "smollm2-360m-v1"] {
+        let mut selected = legacy.clone();
+        selected.model_profile = Some(profile.into());
+        let mut expected = legacy_bytes.clone();
+        expected.extend_from_slice(&[0x42, u8::try_from(profile.len()).unwrap()]);
+        expected.extend_from_slice(profile.as_bytes());
+        assert_eq!(selected.encode_to_vec(), expected);
+        let decoded = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+        assert_eq!(decoded, selected);
+        assert_eq!(
+            decoded.eligibility().unwrap().model_profile.as_deref(),
+            Some(profile)
+        );
+    }
+    for profile in ["", "smollm2-360m", "SMOLLM2-135M-V1"] {
+        let mut invalid = legacy.clone();
+        invalid.model_profile = Some(profile.into());
+        assert!(invalid.eligibility().is_err());
     }
 }
 
