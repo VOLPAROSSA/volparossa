@@ -1058,8 +1058,65 @@ still covers **every** input and the question; a signature alone does not grant 
 The compilation and its jobs cannot extend the earliest original source expiry. Completed
 offline resume verifies retained history at its original observation time without fetching
 again or renewing authorization. Unfinished work remains subject to the original deadline.
-The mixed local/cache-hit/network-miss execution proof is pending; the targeted source and
-document checks pass, but do not substitute for the live two-peer/tokenizer/synthesis run.
+The first mixed local/cache-hit/network-miss run on `1faa76d` verified the selected native
+signatures, cache reuse and protected missing-source retrieval, then stalled after sixteen
+actual jobs: both brokers counted their eight retained terminal receipts against admission.
+The complete workflow failed; its final synthesis and offline resume are not verified yet.
+A targeted broker correction separates the single execution slot from bounded receipt history
+(256 records and a 32 MiB retained-data budget, reserving space before each new job), without
+changing original receipt expiry or deleting unfinished/retained work. Its thirteen focused
+broker tests pass; the corrected end-to-end run is still pending.
+
+### Cooperating public tasks
+
+Use `compute peer document --task-plan /absolute/public/tasks.json` in place of
+`--public-question` and `--synthesize`. Keep the same explicit source, license, permission,
+runtime, publisher and peer-selection options from the document examples. The task graph can
+use one `--input` or a local/native `--source-plan`; it does not acquire unselected sources.
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    { "id": "requirements", "question": "List the requirements.", "depends_on": [] },
+    { "id": "risks", "question": "Identify possible contradictions.", "depends_on": [] },
+    { "id": "compare", "question": "Compare these findings.", "depends_on": ["requirements", "risks"] },
+    { "id": "refine", "question": "State the main unresolved question.", "depends_on": ["compare"] }
+  ],
+  "output": "refine"
+}
+```
+
+```mermaid
+flowchart LR
+    S[Selected public sources] --> R[Requirements task]
+    S --> K[Contradictions task]
+    R --> C[Compare both real answers]
+    K --> C
+    C --> F[New refinement instruction]
+```
+
+The first bounded plan format admits 2–16 named nodes, rejects cycles and unused work, and
+retains the exact plan before execution. Every node must contribute to the selected output.
+An empty dependency list reads the original signed source; other nodes receive their named
+parents' actual answers in the declared order. The owner verifies those answers against retained
+job receipts before constructing signed derived inputs. Original source identity and expiry
+are shared, not renewed for each question. A one-parent dependency still executes a new job.
+
+Initial source packages share one provider queue. This first scheduler finishes that source
+stage before ordered dependent steps; it does not yet overlap every ready DAG frontier.
+Individual token budgets, worker leases and per-invocation `--max-batches` remain bounded.
+`--enroll-only --execute` prepares without submitting peer work. Unfinished execution returns
+a nonzero status and retains its progress. Resume uses `--directory ... --resume --execute`;
+unfinished new reductions still need the tokenizer runtime/model and publisher identity options.
+Once complete, neither those options nor the original input/plan files are needed to validate
+and return the retained result. Only explicitly public sources and questions are supported.
+
+The graph executor and forty focused document tests currently pass, including exact source
+reuse, plan validation and zero-round completion after a previously partial summary. Its real
+four-node fork/join/one-parent/offline-resume VM proof is pending. These local controls are not
+model execution evidence. This is a user-enrolled cooperating task plan, not automatic planning,
+general tool use, a guarantee of sensible answers, or completion of B03.
 
 ### Synthesizing one public answer
 

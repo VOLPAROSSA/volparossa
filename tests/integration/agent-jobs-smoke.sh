@@ -227,6 +227,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_task_graph:-no}" = yes ]; then
+        agent_task_graph_run
+        return
+    fi
     if [ "${agent_public_collection:-no}" = yes ]; then
         agent_public_collection_run
         return
@@ -326,6 +330,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_task_graph:-no}" = yes ]; then
+        agent_task_graph_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_public_collection:-no}" = yes ]; then
         agent_public_collection_finalize_report "$jobs_status"
         return

@@ -1,6 +1,7 @@
 //! Owner-authorized public documents, split by the real tokenizer and resumed from full receipts.
 
 mod collection;
+mod graph;
 mod storage;
 mod synthesis;
 #[cfg(test)]
@@ -29,7 +30,7 @@ const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
 // JSON escaping and per-answer provenance. Metadata retains its smaller bound.
 const MAX_RESULT_BYTES: usize = 128 * 1024 * 1024;
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "Independent explicit CLI permission and execution switches"
@@ -46,6 +47,9 @@ pub(crate) struct Options {
     /// Combine all fragment answers through further peer inference; retains every intermediate receipt.
     #[arg(long, conflicts_with = "resume")]
     synthesize: bool,
+    /// Explicit public question/dependency graph over the selected sources; not an autonomous planner.
+    #[arg(long, conflicts_with_all = ["resume", "public_question", "synthesize", "batch_barrier"])]
+    task_plan: Option<PathBuf>,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
@@ -63,7 +67,7 @@ pub(crate) struct Options {
     /// Explicit permission to disclose this document and question to the selected peers.
     #[arg(long, conflicts_with = "resume")]
     public_content: bool,
-    #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, required_unless_present_any = ["resume", "task_plan"], conflicts_with_all = ["resume", "task_plan"])]
     public_question: Option<String>,
     /// Explicit content license; no license is silently assigned to your document.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume",
@@ -129,6 +133,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"source_plan":args.source_plan,"source_cache":args.source_cache,
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
+            "task_plan":args.task_plan,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
@@ -147,6 +152,11 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "compute_document_public_permission_required"
     );
     let _lock = task::open_directory(&args.directory, args.resume)?;
+    if args.task_plan.is_some()
+        || (args.resume && args.directory.join("graph.json").try_exists()?)
+    {
+        return graph::run(args, socket, &cancellation.activity).await;
+    }
     if !args.resume {
         prepare(args, socket, &cancellation.activity).await?;
     }

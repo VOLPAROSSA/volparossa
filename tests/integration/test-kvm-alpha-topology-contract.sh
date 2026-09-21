@@ -37,6 +37,9 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario agent-jobs-package-queue | grep -Fi 'package' >/dev/null
     "$script" --preview --scenario agent-public-collection | grep -Fi 'collection' >/dev/null
     "$script" --preview --scenario agent-public-network-sources | grep -Ei 'network.sources' >/dev/null
+    "$script" --preview --scenario agent-task-graph | grep -Ei 'task.graph' >/dev/null
+    if "$script" --preview --scenario agent-task-graph --scenario agent-public-collection \
+        | grep -Ei 'task.graph' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-public-network-sources --scenario agent-public-collection \
         | grep -Ei 'network.sources' >/dev/null; then exit 1; fi
     set +e
@@ -68,6 +71,17 @@ grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-public-network-
 grep -F 'python3 -B tests/integration/agent-public-collection-smoke.py report "$report" "$GITHUB_SHA" --network' "$WORKFLOW" >/dev/null
 grep -F 'command -v openssl >/dev/null 2>&1 || exit 69' "$GUEST" >/dev/null
 grep -F 'install -o root -g root -m 0555 "$source_directory/tests/integration/agent-train-loop-catalog.py" "$WORK/bin/agent-train-loop-catalog.py"' "$GUEST" >/dev/null
+grep -F 'agent-task-graph) scenario=agent-jobs; agent_task_graph=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario == "agent-task-graph" else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_task_graph_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_task_graph_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \
