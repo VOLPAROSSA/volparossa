@@ -26,10 +26,10 @@ def require(condition, reason):
         raise AssertionError(reason)
 
 
-def run(binary, root, flags, success):
+def run(binary, root, flags, success, command="policy-assess"):
     completed = subprocess.run(
         [str(binary), "--control-socket", str(root / "absent-control.sock"),
-         "compute", "peer", "policy-assess", *flags],
+         "compute", "peer", command, *flags],
         capture_output=True, text=True, timeout=15, check=False,
     )
     require((completed.returncode == 0) == success,
@@ -47,7 +47,7 @@ def main():
         output = str(root / "new-assessment")
         help_text = run(binary, root, ["--help"], True).stdout
         for option in ("--source-publisher-key", "--source-manifest-id", "--provider-key",
-                       "--resume", "--execute"):
+                       "--resume", "--execute", "--portable-receipts"):
             require(option in help_text, f"missing real CLI option {option}")
         flags = [
             "--output", output,
@@ -66,9 +66,24 @@ def main():
         resumed = json.loads(run(binary, root, ["--output", output, "--resume"], True).stdout)
         require(resumed["execute"] is False and resumed["network_policy_activation"] is False,
                 "resume preview acquired execution authority")
+        portable = json.loads(run(binary, root, [*flags, "--portable-receipts"], True).stdout)
+        require(portable["portable_receipts"] is True, "portable opt-in missing")
+        pack = json.loads(run(binary, root, ["--assessment", output, "--output", str(root / "pack"),
+            "--requester-key", KEYS[2]], True, "policy-pack").stdout)
+        require(pack["execute"] is False and pack["automatic_publication"] is False,
+                "pack preview published or accessed absent workflow")
+        fetch_flags = ["--publisher-key", KEYS[2], "--name", "selected-assessment",
+            "--manifest-id", "43" * 32, "--cache", str(root / "fetch-cache"),
+            "--output", str(root / "fetch"), "--requester-key", KEYS[2],
+            "--source-publisher-key", KEYS[0], "--source-manifest-id", "42" * 32,
+            "--provider-key", KEYS[0], "--provider-key", KEYS[1]]
+        fetched = json.loads(run(binary, root, fetch_flags, True, "policy-fetch").stdout)
+        require(fetched["execute"] is False and fetched["model_execution"] is False
+                and fetched["network_policy_activation"] is False, "fetch preview acquired authority")
+        run(binary, root, [*fetch_flags, "--allow-network-policy-activation"], False, "policy-fetch")
         run(binary, root, [*flags, "--allow-network-policy-activation"], False)
         run(binary, root, ["--output", output, "--resume", "--execute"], False)
-    print("PASS: compiled policy-assess CLI, inert new/resume previews and absent-state rejection")
+    print("PASS: compiled policy-assess/pack/fetch CLI, inert previews and absent-state rejection")
     print("NOT PROVEN: real models, peer execution, cross-review or policy correctness")
 
 

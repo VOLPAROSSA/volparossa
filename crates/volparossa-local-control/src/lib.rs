@@ -12,7 +12,7 @@ mod compute_control;
 mod content;
 pub use compute_control::{
     ComputeAttachRequest, ComputeDiscoverRequest, ComputeDiscovered, ComputeDiscoveredProvider,
-    ComputeReady, ComputeRemoteRequest,
+    ComputeReady, ComputeRemoteRequest, ComputeTranscript,
 };
 mod custody;
 mod mailbox;
@@ -231,7 +231,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -241,9 +241,10 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ComputeDiscovered, ComputeReady, ContentCustodyReady, ContentReceipt, ContentTransferReady,
-        Empty, HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady,
-        PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
+        ComputeDiscovered, ComputeReady, ComputeTranscript, ContentCustodyReady, ContentReceipt,
+        ContentTransferReady, Empty, HttpsContentTransferReady, LogList, MailboxReady,
+        NamedContentTransferReady, PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList,
+        StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -297,6 +298,9 @@ pub mod control_response {
         /// Compatible capacity observations, not reservations or execution receipts.
         #[prost(message, tag = "25")]
         ComputeDiscovered(ComputeDiscovered),
+        /// Opt-in original signed Poll transcript after protected route and policy closure.
+        #[prost(message, tag = "26")]
+        ComputeTranscript(ComputeTranscript),
     }
 }
 
@@ -810,6 +814,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::ComputeReady(ready) => ready.validate()?,
         control_response::Payload::ComputeDiscovered(discovered) => discovered.validate()?,
+        control_response::Payload::ComputeTranscript(transcript) => transcript.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

@@ -4,6 +4,33 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-22
 
+The [graph run on `7309b266`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663652657)
+now produces a valid model-selected plan after one `GRAPH_GOAL_COPY` correction (55 + 52 tokens).
+It chooses only one source question, without an internal dependency. The unchanged
+`MODEL_TASK_GRAPH_INTERNAL_EDGE_NOT_PROVEN` gate therefore **fails** before peer execution:
+valid JSON and enrollment are not the requested dependent-workflow proof. Its 110 original
+files retain the exact proposal, input and report; original worker cleanup and host-state checks pass.
+
+The [first principle-assessment run on `db2f0776`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663659331)
+also **fails**: the original 128-byte public subject is fetched from its selected peer, and both
+real 360M assessors run on distinct peers, but each reaches 256 generated tokens without EOS.
+The incomplete schema-like outputs are not repaired or adopted. Neither cross-review starts;
+the result remains incomplete/undetermined. Original cleanup and unchanged host state pass.
+This is a model-output failure, not evidence of a failed content path or a peer memory-pressure event.
+
+The next B06 transfer slice adds opt-in original provider-signed Poll transcripts, `policy-pack`
+and `policy-fetch`. A completed four-stage public judgment can be packaged as an inert signed
+native publication, retrieved through a fresh cache and reconstructed against independently
+selected requester, assessor and subject keys. Every original challenge/request/reply signature,
+exact source/context/dataset/report binding and opposite review is rechecked. Historical signatures
+prove statements by keys, not truthful computation, trusted time, independent moral judgment or
+policy authority. This candidate does not cure the model-output failure above; the real-model
+four-stage/cache roundtrip remains unproven. No network-policy activation is introduced.
+Verification for this slice: 268 CLI compute tests, six original-transcript tests, two local
+protocol tests, two agent handoff tests, strict Clippy for the four affected crates and the
+compiled CLI preview smoke pass. The four-stage transfer test uses real signatures over
+explicitly synthetic reports; it proves binding/reconstruction and rejection, not model work.
+
 The task-graph worker now uses `model_task_graph_constrained_v2`: a pinned, optional
 LM Format Enforcer adapter filters next-token choices to the JSON schema. The model still
 chooses one to four questions and their dependencies; the original raw output is never repaired

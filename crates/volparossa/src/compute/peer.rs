@@ -9,6 +9,7 @@ mod policy_assessment;
 mod readiness;
 mod resume;
 mod task;
+mod transcript;
 mod workflow;
 
 use std::{
@@ -54,6 +55,10 @@ pub(crate) enum Command {
     Document(Box<document::Options>),
     /// Two selected peers assess one public publication and cross-review a local concept verdict.
     PolicyAssess(Box<policy_assessment::Options>),
+    /// Package complete public assessments with their original provider-signed Poll replies.
+    PolicyPack(Box<policy_assessment::transfer::Pack>),
+    /// Retrieve and independently recheck a selected assessment package without activating policy.
+    PolicyFetch(Box<policy_assessment::transfer::Fetch>),
 }
 
 #[derive(Debug, Args)]
@@ -260,6 +265,10 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Task(args) => return task::run(&args, socket).await,
         Command::Document(args) => return document::run(&args, socket).await,
         Command::PolicyAssess(args) => return policy_assessment::run(&args, socket).await,
+        Command::PolicyPack(args) => return policy_assessment::transfer::pack(&args),
+        Command::PolicyFetch(args) => {
+            return policy_assessment::transfer::fetch(&args, socket).await;
+        }
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -434,6 +443,7 @@ async fn exchange(
             socket,
             Operation::ComputeRemote(ComputeRemoteRequest {
                 provider_key: provider.to_bytes().to_vec(),
+                retain_transcript: false,
             }),
         )
         .await?;

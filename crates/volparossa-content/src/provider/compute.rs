@@ -6,6 +6,12 @@
 
 pub mod dataset;
 mod protocol;
+mod transcript;
+
+pub use transcript::{
+    AuthenticatedExchange, MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_REQUEST_BYTES, VerifiedTranscript,
+    verify_transcript,
+};
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -158,6 +164,46 @@ pub async fn exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (_, _, reply) = exchange_records(stream, challenge, requester, payload).await?;
+    Ok(reply.payload().to_vec())
+}
+
+/// Execute one short exchange and retain its original signed challenge/request/reply.
+///
+/// The application must explicitly restrict which requests may be exported (for
+/// example, Poll rather than Submit containing a dataset). This opaque transport
+/// contract only imposes the smaller transcript request bound. A transcript proves
+/// signed statements and correlation, not independent computation or trusted time.
+///
+/// # Errors
+/// Rejects requests over 16 KiB before sending them, bad exchange authentication,
+/// noncanonical records and reply timestamps preceding their bound request.
+pub async fn exchange_attested<S>(
+    stream: &mut S,
+    challenge: ComputeChallenge,
+    requester: &SigningKey,
+    payload: Vec<u8>,
+) -> Result<AuthenticatedExchange, ComputeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if payload.is_empty() || payload.len() > MAX_TRANSCRIPT_REQUEST_BYTES {
+        return Err(ComputeError::Invalid);
+    }
+    let (challenge, request, reply) =
+        exchange_records(stream, challenge, requester, payload).await?;
+    transcript::authenticated(&challenge, &request, &reply)
+}
+
+async fn exchange_records<S>(
+    stream: &mut S,
+    challenge: ComputeChallenge,
+    requester: &SigningKey,
+    payload: Vec<u8>,
+) -> Result<(Record, Record, Record), ComputeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     timeout(Duration::from_secs(EXCHANGE_SECONDS), async {
         let request = Record::request(requester, &challenge.0, payload, now()?)?;
         let bytes = request.encode();
@@ -172,7 +218,7 @@ where
         if reply.sender() != challenge.0.sender() || reply.request_hash() != expected {
             return Err(ComputeError::Authentication);
         }
-        Ok(reply.payload().to_vec())
+        Ok((challenge.0, request, reply))
     })
     .await
     .map_err(|_| ComputeError::Expired)?

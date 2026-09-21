@@ -115,7 +115,82 @@ pub(super) async fn run(
     if status.state != rpc::JobState::Complete {
         return Ok(stage);
     }
+    if enrolled.portable_receipts {
+        let proof_path = stage_root.join("provider-transcript.json");
+        if !storage::exists(&proof_path)? {
+            if *cancelled.borrow() || now()? >= handle.binding.expires_unix_seconds {
+                stage.state = "original_signed_receipt_unavailable";
+                return Ok(stage);
+            }
+            let proof = super::super::transcript::poll(socket, &handle).await?;
+            ensure!(
+                proof.check(&handle, enrolled.selected_at, &proof.requester_key)? == status,
+                "compute_policy_signed_status_changed"
+            );
+            storage::save(&proof_path, &proof)?;
+        }
+        check_proof(&stage_root, enrolled, &handle, &status, None)?;
+    }
     completed(stage, handle, status)
+}
+
+fn check_proof(
+    root: &Path,
+    enrolled: &Enrollment,
+    handle: &JobHandle,
+    status: &rpc::JobStatus,
+    requester: Option<&str>,
+) -> Result<()> {
+    let proof: super::super::transcript::Retained = serde_json::from_slice(&storage::read(
+        &root.join("provider-transcript.json"),
+        256 * 1024,
+    )?)?;
+    ensure!(
+        proof.check(
+            handle,
+            enrolled.selected_at,
+            requester.unwrap_or(&proof.requester_key)
+        )? == *status,
+        "compute_policy_signed_status_changed"
+    );
+    Ok(())
+}
+
+/// Offline-only replay; it has neither a socket nor a submit capability.
+pub(super) fn replay(
+    root: &Path,
+    enrolled: &Enrollment,
+    name: &str,
+    index: usize,
+    context: &str,
+    question: &str,
+    requester: &str,
+) -> Result<Stage> {
+    let stage_root = root.join(name);
+    let source = storage::check_stage(&stage_root, enrolled, context, question)?;
+    let handle = load_handle(
+        &stage_root.join("work/job-0.json"),
+        enrolled,
+        index,
+        &source,
+    )?;
+    let status = receipts(&stage_root, &handle, enrolled.selected_at)?
+        .context("compute_policy_missing_terminal_receipt")?;
+    ensure!(
+        enrolled.portable_receipts && status.state == rpc::JobState::Complete,
+        "compute_policy_portable_complete_required"
+    );
+    check_proof(&stage_root, enrolled, &handle, &status, Some(requester))?;
+    completed(
+        Stage {
+            name: name.into(),
+            state: "complete",
+            execution_complete: false,
+            answer: None,
+        },
+        handle,
+        status,
+    )
 }
 
 fn completed(mut stage: Stage, handle: JobHandle, status: rpc::JobStatus) -> Result<Stage> {

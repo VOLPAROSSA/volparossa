@@ -198,7 +198,7 @@ pub(super) fn prepare(
     check_stage(&root, enrolled, context, question)
 }
 
-fn check_stage(
+pub(super) fn check_stage(
     root: &Path,
     enrolled: &Enrollment,
     context: &str,

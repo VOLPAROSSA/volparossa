@@ -27,6 +27,28 @@ pub struct ComputeRemoteRequest {
     /// Independently selected Ed25519 provider key.
     #[prost(bytes = "vec", tag = "1")]
     pub provider_key: Vec<u8>,
+    /// Explicitly retain the original signed exchange; the following operation must be Poll.
+    /// Omitted/false preserves the existing no-transcript handoff.
+    #[prost(bool, tag = "2")]
+    pub retain_transcript: bool,
+}
+
+/// Opt-in original signed Poll transcript, returned only after the complete protected exchange.
+/// The content protocol verifier, not this local framing check, authenticates its three records.
+#[derive(Clone, PartialEq, Message)]
+pub struct ComputeTranscript {
+    /// Canonical content-protocol bytes, never an unsigned reconstruction of a worker receipt.
+    #[prost(bytes = "vec", tag = "1")]
+    pub transcript: Vec<u8>,
+}
+
+impl ComputeTranscript {
+    pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.transcript.is_empty() || self.transcript.len() > 96 * 1024 {
+            return Err(ControlProtocolError::Invalid("compute transcript bound"));
+        }
+        Ok(())
+    }
 }
 
 /// Readiness for a single request, not a successful job or completed network exchange.

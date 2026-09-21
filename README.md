@@ -341,8 +341,11 @@ risk, or justify breaking private encryption.
 The new `compute peer policy-assess` development candidate fetches one exact public text object,
 asks two selected peers for principle-led judgments, and has each peer examine the other's
 reasoning. It retains the original answers, evidence and disagreements; its concept outcome is
-**allow, deny or undetermined**. Local checks pass; the real peer/model proof is still pending.
-These concepts do not yet change network policy or establish legality.
+**allow, deny or undetermined**. The first real-model run fetched the source and executed both
+assessors, but their answers hit the token limit without complete JSON; cross-review remains
+unproven. An opt-in transfer path now preserves the original provider-signed replies and can
+package/retrieve completed judgments through the shared cache. This verifies who signed each
+answer, not that the answer is correct. These concepts do not change network policy or establish legality.
 [Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
 [Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·

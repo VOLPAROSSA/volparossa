@@ -12,6 +12,69 @@ fn key(seed: u8) -> Vec<u8> {
         .to_vec()
 }
 
+#[test]
+fn transcript_opt_in_uses_tag_two_without_changing_legacy_request_bytes() {
+    let legacy = ComputeRemoteRequest {
+        provider_key: key(4),
+        retain_transcript: false,
+    };
+    let mut original = vec![0x0a, 0x20];
+    original.extend_from_slice(&legacy.provider_key);
+    assert_eq!(legacy.encode_to_vec(), original);
+    assert!(
+        !ComputeRemoteRequest::decode(original.as_slice())
+            .unwrap()
+            .retain_transcript
+    );
+    let selected = ComputeRemoteRequest {
+        retain_transcript: true,
+        ..legacy
+    };
+    original.extend_from_slice(&[0x10, 0x01]);
+    assert_eq!(selected.encode_to_vec(), original);
+    let request = ControlRequest {
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        request_id: vec![1; 16],
+        operation: Some(Operation::ComputeRemote(selected)),
+    };
+    assert_eq!(
+        decode_request(&encode_request(&request).unwrap()).unwrap(),
+        request
+    );
+}
+
+#[test]
+fn transcript_final_payload_has_a_separate_bounded_frame() {
+    // Framing bytes only; the content verifier separately authenticates the original records.
+    for bytes in [1, 96 * 1024] {
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![1; 16],
+            result: ControlResult::Ok.into(),
+            diagnostic_code: "COMPUTE_RPC_OK".into(),
+            payload: Some(Payload::ComputeTranscript(ComputeTranscript {
+                transcript: vec![7; bytes],
+            })),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
+    }
+    for bytes in [0, 96 * 1024 + 1] {
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![1; 16],
+            result: ControlResult::Ok.into(),
+            diagnostic_code: "COMPUTE_RPC_OK".into(),
+            payload: Some(Payload::ComputeTranscript(ComputeTranscript {
+                transcript: vec![7; bytes],
+            })),
+        };
+        assert!(encode_response(&response).is_err());
+    }
+}
+
 fn discovery() -> ComputeDiscoverRequest {
     ComputeDiscoverRequest {
         publisher_keys: vec![key(1), key(2)],

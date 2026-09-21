@@ -16,11 +16,18 @@ agent_policy_assessment_run() {
     policy_script=$source_directory/tests/integration/agent-policy-assessment-smoke.py
     policy_root=$jobs_source/policy-assessment
     PHASE=agent-policy-assessment-publication
-    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object into a distinct consumer cache, execute two bounded principle assessments and two cross-reviews on the two actual selected peers, replay completed evidence offline, and clean all owned resources. No production policy keys, network-policy activation or legal-correctness claim.'
+    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews on the two actual selected peers, retain original provider-signed replies, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, and clean all owned resources. No other-node isolation, production policy keys, network-policy activation or legal-correctness claim.'
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/agent-policy-assessment-smoke.py" prepare "$WORK" \
         >"$WORK/agent-policy-assessment-input.json" || fail POLICY_PUBLIC_INPUT_FAILED
+    setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$binary_directory/volparossa" content recipient-key --identity "$WORK/state-client/identity.key" \
+        --passphrase-file "$WORK/credential-client/identity-passphrase" \
+        >"$WORK/agent-policy-assessment-requester.json" || fail POLICY_REQUESTER_KEY_FAILED
+    # This field is the node's Ed25519 identity, not recipient_public_key_hex (X25519).
+    policy_requester=$(jq -er '.identity_public_key_hex' "$WORK/agent-policy-assessment-requester.json")
     agent_jobs_cli client content publish --input "$jobs_source/policy-input.txt" \
         --name disposable-policy-subject --revision 1 --content-type text/plain \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
@@ -40,7 +47,7 @@ agent_policy_assessment_run() {
         --source-manifest-id "$policy_manifest" --cache "$jobs_source/policy-source-cache" \
         --publisher-key "$jobs_publisher" --identity "$jobs_source/identity.key" \
         --passphrase-file "$jobs_source/passphrase" --license CC0-1.0 \
-        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --max-seconds 600 --execute \
+        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --max-seconds 600 --portable-receipts --execute \
         >"$WORK/agent-policy-assessment-result.json" 2>"$WORK/agent-policy-assessment-result.err" &
     jobs_batch_pid=$!
     policy_observer_status=0
@@ -57,6 +64,30 @@ agent_policy_assessment_run() {
         2>"$WORK/agent-policy-assessment-collect.err" || fail POLICY_RETAINED_EVIDENCE_INVALID
     [ "$policy_observer_status" -eq 0 ] || fail POLICY_FOUR_REAL_WORKERS_NOT_OBSERVED
     [ "$policy_owner_status" -eq 0 ] || fail POLICY_REASONING_INCOMPLETE
+    PHASE=agent-policy-assessment-bundle-roundtrip
+    policy_pack=$jobs_source/policy-bundle-publication
+    agent_policy_assessment_cli compute peer policy-pack --assessment "$policy_root" --output "$policy_pack" \
+        --requester-key "$policy_requester" --identity "$jobs_source/identity.key" \
+        --passphrase-file "$jobs_source/passphrase" --execute \
+        >"$WORK/agent-policy-assessment-pack.json" 2>"$WORK/agent-policy-assessment-pack.err" \
+        || fail POLICY_BUNDLE_PACK_FAILED
+    policy_bundle_name=$(jq -er '.name' "$WORK/agent-policy-assessment-pack.json")
+    policy_bundle_manifest=$(jq -er '.manifest_id' "$WORK/agent-policy-assessment-pack.json")
+    policy_bundle_publisher=$(jq -er '.publisher_key' "$WORK/agent-policy-assessment-pack.json")
+    python3 -B "$policy_script" bundle_before "$WORK" || fail POLICY_BUNDLE_FRESH_TARGET_FAILED
+    agent_jobs_cli client content custody deposit --manifest "$policy_pack/assessment.manifest" \
+        --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
+        --cache "$policy_pack/cache" --provider-key "$jobs_key_a" \
+        >"$WORK/agent-policy-assessment-bundle-deposit.json" 2>"$WORK/agent-policy-assessment-bundle-deposit.err" \
+        || fail POLICY_BUNDLE_DEPOSIT_FAILED
+    agent_policy_assessment_cli compute peer policy-fetch --publisher-key "$policy_bundle_publisher" \
+        --name "$policy_bundle_name" --manifest-id "$policy_bundle_manifest" --requester-key "$policy_requester" \
+        --source-publisher-key "$jobs_publisher" --source-manifest-id "$policy_manifest" \
+        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \
+        --cache "$jobs_source/policy-bundle-cache" --output "$jobs_source/policy-bundle-fetch" --execute \
+        >"$WORK/agent-policy-assessment-fetch.json" 2>"$WORK/agent-policy-assessment-fetch.err" \
+        || fail POLICY_BUNDLE_FETCH_FAILED
+    python3 -B "$policy_script" transfer "$WORK" || fail POLICY_BUNDLE_ROUNDTRIP_INVALID
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail POLICY_ROUTE_CLEANUP_FAILED
     PHASE=agent-policy-assessment-offline-replay

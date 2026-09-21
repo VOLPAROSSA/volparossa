@@ -95,6 +95,7 @@ async fn cancellation_or_original_expiry_starts_no_assessment_work() {
         selected_at: 1,
         expires: 2,
         max_seconds: 600,
+        portable_receipts: false,
     };
     let (cancel, activity) = watch::channel(false);
     let socket = root.path().join("no-socket");

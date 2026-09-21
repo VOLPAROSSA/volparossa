@@ -2,6 +2,7 @@
 
 mod execution;
 mod storage;
+pub(super) mod transfer;
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,10 @@ use super::{Cancellation, batch, now, parse_key, rpc, sha, task};
 use crate::compute::policy_assessment as assessment;
 
 #[derive(Debug, Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent explicit CLI execution, replay, cache and public receipt-retention switches"
+)]
 pub(crate) struct Options {
     /// Private retained workflow directory; new unless --resume is selected.
     #[arg(long)]
@@ -24,6 +29,9 @@ pub(crate) struct Options {
     /// Replay exact original handles. Never resubmit or replace a leased job.
     #[arg(long)]
     resume: bool,
+    /// Retain original signed provider Poll replies so this public result can be shared.
+    #[arg(long, conflicts_with = "resume")]
+    portable_receipts: bool,
     /// Select an explicitly public native text/plain object, not a cache-selected subject.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_key)]
     source_publisher_key: Option<VerifyingKey>,
@@ -72,6 +80,8 @@ struct Enrollment {
     selected_at: u64,
     expires: u64,
     max_seconds: u16,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    portable_receipts: bool,
 }
 
 fn parse_manifest(value: &str) -> Result<[u8; 32], String> {
@@ -107,6 +117,7 @@ fn preview(args: &Options) -> Result<Value> {
     Ok(
         json!({"operation":"compute_peer_policy_assessment","execute":false,
         "network_policy_activation":false,"assessment_peers":2,"planned_jobs":4,
+        "portable_receipts":args.portable_receipts,
         "model_profile":"smollm2-360m-v1","resume":args.resume,
         "subject_limit_bytes":512,"prompt_limit_tokens":1024,"generation_limit_tokens":256,
         "framework":assessment::framework(),"private_data_supported":false,
@@ -193,6 +204,7 @@ async fn enroll(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>
         selected_at: download.verified_at,
         expires: download.expires,
         max_seconds: args.max_seconds,
+        portable_receipts: args.portable_receipts,
     };
     task::write_bytes(
         &args.output.join("subject.txt"),
@@ -278,11 +290,19 @@ async fn assess(
         return Ok(incomplete(enrolled, &stages));
     };
     let decision = assessment::resolve(&enrolled.scope, subject, &assessments, &reviews)?;
-    Ok(
-        json!({"version":1,"operation":"compute_peer_policy_assessment","complete":true,
+    Ok(completed_result(enrolled, &decision, &stages))
+}
+
+fn completed_result(
+    enrolled: &Enrollment,
+    decision: &assessment::Decision,
+    stages: &[Value],
+) -> Value {
+    json!({"version":1,"operation":"compute_peer_policy_assessment","complete":true,
         "network_policy_activation":false,"decision":decision,"stages":stages,
-        "receipt_scope":"locally_retained_authenticated_rpc_not_portable_attestation"}),
-    )
+        "receipt_scope":if enrolled.portable_receipts {
+            "original_provider_signed_poll_claims_not_independent_execution_proof"
+        } else { "locally_retained_authenticated_rpc_not_portable_attestation" }})
 }
 
 fn incomplete(enrolled: &Enrollment, stages: &[Value]) -> Value {

@@ -1364,6 +1364,12 @@ dependency, checks all actual peer jobs and completed offline replay, and does n
 parallel shape or supply a replacement graph. Its local fixture checks are not a live-model
 pass or an answer-quality claim.
 
+The [source-exact `7309b266` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663652657)
+corrects `GRAPH_GOAL_COPY` and accepts the second model proposal using 107 total tokens. That
+proposal contains just one source question, so the unchanged internal-dependency proof fails
+before peer submission. Enrollment and syntactic correctness are observed; dependent cooperation
+and useful decomposition are not. Its original artifact is retained without adding a missing edge.
+
 The original planner input, report, questions and hashes are retained with the graph. Once
 enrolled, resume verifies that same plan and cannot ask the model to generate a different one.
 `--enroll-only --execute` **does run local model planning and tokenization**, but does not submit
@@ -1630,10 +1636,45 @@ decision offline without the signer or any new model work; source expiry is neve
 start later stages. Interrupted or invalid model answers remain explicitly incomplete, while a
 valid completed disagreement remains a complete assessment process with an undetermined outcome.
 
-Nine targeted Rust checks and a compiled-CLI preview smoke pass. The `agent-policy-assessment`
-disposable scenario is prepared to exercise a real native cache miss, all four model jobs,
-opposite reviews, offline replay, protected routes and cleanup; its live proof is pending.
-This does not complete B06: these local concepts are not portable signed policy decisions,
+The [first disposable run on `db2f0776`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663659331)
+fetches the exact 128-byte public subject through its selected protected peer and runs both
+actual 360M assessors. Both responses reach 256 tokens without EOS, copying schema-like text
+rather than completing the required JSON. The coordinator retains both original reports and
+returns incomplete/undetermined; it does not start reviews. Cleanup and unchanged host state pass.
+The full four-model-job proof is still missing; no raw answer is repaired or silently accepted.
+
+#### Sharing original signed assessments
+
+Enroll with `policy-assess --portable-receipts` to retain each provider's original signed Poll
+reply immediately after the completed job, while its original lease remains valid. The opt-in
+local handoff is Poll-only and returns the transcript only after the protected exchange closes
+successfully. Existing workflows without the flag keep their original behavior; missing old
+transcripts are not manufactured or retroactively signed by the coordinator.
+
+`compute peer policy-pack --assessment DIRECTORY --output NEW_DIRECTORY --requester-key KEY
+--identity IDENTITY --passphrase-file FILE --execute` rechecks a completed four-stage workflow
+and creates `assessment.bundle`, `assessment.manifest` and `cache/`. It does not advertise or
+upload anything. Use the existing native `content custody deposit` or `content serve` operations
+to contribute that explicit public publication. Its validity cannot exceed the original subject.
+
+`compute peer policy-fetch --publisher-key KEY --name NAME --manifest-id EXACT_ID --cache NEW_CACHE
+--output NEW_DIRECTORY --requester-key KEY --source-publisher-key KEY --source-manifest-id EXACT_ID
+--provider-key FIRST --provider-key SECOND --execute` retrieves the selected package and rechecks
+the four original challenge/request/reply signatures, complete source/context/dataset bindings,
+raw model outputs and opposite-peer review hashes before reconstructing the exact concept outcome.
+All authorities are explicitly selected rather than adopted from package bytes. The package is
+fixed-field public data, not an executable model, arbitrary file archive or trust-anchor update.
+Omitting `--execute` previews either command without filesystem or network work. Neither command
+starts a model, trains on these judgments or activates a policy.
+
+Portable verification establishes **which keys signed which exact statements**. Provider-signed
+timestamps are not an independently trusted clock, and the provider's report is still its claim
+of execution. This is not proof of honest hardware, independent reasoning, legality or a network
+quorum. Transport/signature tests use explicitly synthetic reports and cannot substitute for the
+real-model/cache roundtrip; the disposable fixture now exercises that additional path when the
+four model outputs actually complete.
+
+This does not complete B06: these concepts are not authorized network-wide policy decisions,
 legal determinations, authority membership/quorum, conflict resolution across partitions or
 automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
 

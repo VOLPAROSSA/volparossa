@@ -10,6 +10,7 @@ import re
 import runpy
 import stat
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -21,7 +22,8 @@ SUBJECT = "Neighbors voluntarily lend spare computing capacity to help each othe
 STAGES = ("assessment-0", "assessment-1", "review-0", "review-1")
 SCOPE = ("one exact synthetic public native object fetched through its protected content path, two actual "
          "360M peer assessments and opposite-peer cross-reviews under the seven virtues/vices, bound "
-         "to original EOS receipts, then unchanged completed offline replay and full owned cleanup; "
+         "to original provider-signed EOS receipts, publish and fetch their exact native bundle into "
+         "a new cache and directory on the same client, then unchanged completed offline replay and full owned cleanup; "
          "not classifier quality, legal correctness, independent semantic judgment, network-policy activation or full B06")
 
 
@@ -83,7 +85,7 @@ def snapshot(root):
             relative = path.relative_to(root).as_posix()
             require(name in {"subject.txt", "subject.manifest", "subject-download.json", "enrollment.json",
                              "result.json", "context.txt", "context.manifest", "dataset.json", "dataset.manifest",
-                             "job-0.json", ".task.lock"}
+                             "job-0.json", "provider-transcript.json", ".task.lock"}
                     or re.fullmatch(r"receipt-[0-9a-f]{32}\.json", name), "unexpected exported policy file")
             info = path.lstat()
             require(stat.S_ISREG(info.st_mode) and info.st_uid == owner.st_uid and info.st_nlink == 1
@@ -156,9 +158,202 @@ def decode_file(files, name, json_value=True):
     return json.loads(raw) if json_value else raw
 
 
+def receipt_name(files, stage, handle):
+    suffix = "/receipt-" + handle["binding"]["job_id"] + ".json"
+    names = [stage + "/" + directory + suffix
+             for directory in ["work"] + [f"poll-{index:02}" for index in range(32)]]
+    found = [name for name in names if name in files]
+    require(found, "original terminal receipt missing")
+    return found[-1]
+
+
+def verify_signature(body, signature, publisher, domain):
+    # Public-only Ed25519 verification; no private identity or model is loaded.
+    require(len(signature) == 64 and len(publisher) == 32, "invalid signature dimensions")
+    with tempfile.TemporaryDirectory(prefix="volparossa-public-signature-") as name:
+        root = Path(name)
+        (root / "key.der").write_bytes(bytes.fromhex("302a300506032b6570032100") + publisher)
+        (root / "message").write_bytes(domain + body)
+        (root / "signature").write_bytes(signature)
+        verified = JOBS["subprocess"].run(["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
+            "-inkey", str(root / "key.der"), "-rawin", "-in", str(root / "message"),
+            "-sigfile", str(root / "signature")], capture_output=True, timeout=5, check=False)
+        require(verified.returncode == 0, "original public Ed25519 signature failed")
+
+
+def check_transcript(retained, handle, status, requester, selected_at):
+    require(set(retained) == {"version", "requester_key", "transcript_hex"}
+            and retained["version"] == 1 and retained["requester_key"] == requester,
+            "portable requester differs")
+    raw = bytes.fromhex(retained["transcript_hex"])
+    fields = CUSTODY["fields"]
+    proof = fields(raw, 96 * 1024)
+    require(set(proof) == {1, 2, 3, 4} and proof[1] == 1, "wrong portable transcript framing")
+    bodies = []
+    for kind, encoded, key in zip((1, 2, 3), (proof[2], proof[3], proof[4]),
+                                  (handle["provider_key"], requester, handle["provider_key"])):
+        envelope = fields(encoded, 96 * 1024)
+        require(set(envelope) == {1, 2}, "wrong signed envelope")
+        body = fields(envelope[1], 96 * 1024)
+        expected = set(range(1, 8)) if kind == 1 else set(range(1, 9)) | {10}
+        if kind == 3:
+            expected.add(9)
+        require(set(body) == expected and body[1] == 1 and body[6] == kind
+                and body[2] == bytes.fromhex(key) and len(body[5]) == 32
+                and 0 < body[4] - body[3] <= 30
+                and body[7] == hashlib.sha256(body.get(8, b"")).digest(), "signed body bindings differ")
+        verify_signature(envelope[1], envelope[2], bytes.fromhex(key), b"VOLPAROSSA/compute-control/v1\0")
+        bodies.append(body)
+    challenge, request, reply = bodies
+    require(challenge[5] == request[5] == reply[5] and challenge[4] == request[4] == reply[4]
+            and challenge[3] <= request[3] <= reply[3] < reply[4]
+            and request[10] == reply[10] == hashlib.sha256(proof[2]).digest()
+            and reply[9] == hashlib.sha256(proof[3]).digest()
+            and len(request[8]) <= 16 * 1024 and len(reply[8]) <= 64 * 1024
+            and selected_at <= reply[3] < handle["binding"]["expires_unix_seconds"],
+            "historical signed exchange chronology/hash/lease differs")
+    request_value, response_value = json.loads(request[8]), json.loads(reply[8])
+    require(set(request_value) == {"version", "request_id", "requester_key", "operation"}
+            and request_value["version"] == 1 and request_value["requester_key"] == requester
+            and re.fullmatch(r"[0-9a-f]{32}", request_value["request_id"])
+            and request_value["operation"] == {"operation": "poll", "value": handle["binding"]}
+            and response_value == {"version": 1, "request_id": request_value["request_id"],
+                                   "outcome": {"outcome": "job", "value": status}},
+            "original provider signed another request or result")
+
+
+def bundle_projection(files, requester):
+    value = {"version": 1, "requester_key": requester}
+    for field, name in (("enrollment", "enrollment.json"), ("subject", "subject.txt"),
+                        ("subject_manifest", "subject.manifest"), ("source_receipt", "subject-download.json"),
+                        ("result", "result.json")):
+        value[field] = decode_file(files, name, False).hex()
+    value["stages"] = []
+    for stage in STAGES:
+        handle = decode_file(files, stage + "/work/job-0.json")
+        names = {"context": stage + "/context.txt", "context_manifest": stage + "/context.manifest",
+                 "dataset": stage + "/dataset.json", "dataset_manifest": stage + "/dataset.manifest",
+                 "handle": stage + "/work/job-0.json", "receipt": receipt_name(files, stage, handle),
+                 "provider_transcript": stage + "/provider-transcript.json"}
+        value["stages"].append({key: decode_file(files, name, False).hex() for key, name in names.items()})
+    return value
+
+
+def bundle_before(work):
+    JOBS["guest_work"](work)
+    source = root_path(work).parent
+    require(all(not os.path.lexists(source / name) for name in ("policy-bundle-fetch", "policy-bundle-cache")),
+            "bundle consumer directory/cache were not fresh")
+    require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
+            "pack changed original workflow")
+    write(record(work, "bundle-before"), {"same_client": True, "new_output_absent": True,
+          "new_cache_absent": True, "original_files_unchanged": True})
+
+
+def public_file(path, owner):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1
+            and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 2 * 1048576,
+            "unsafe retained public bundle file")
+    raw = path.read_bytes()
+    require(len(raw) == info.st_size, "bundle file changed during observation")
+    return raw
+
+
+def transfer(work):
+    JOBS["guest_work"](work)
+    source = root_path(work).parent
+    owner = source.stat().st_uid
+    pack, fetched = source / "policy-bundle-publication", source / "policy-bundle-fetch"
+    require(set(path.name for path in fetched.iterdir()) == {
+        ".task.lock", "assessment.bundle", "assessment.manifest", "download.json", "result.json"},
+        "fetch created extra work or retained a temporary projection")
+    raw = public_file(pack / "assessment.bundle", owner)
+    manifest = public_file(pack / "assessment.manifest", owner)
+    require(raw == public_file(fetched / "assessment.bundle", owner)
+            and manifest == public_file(fetched / "assessment.manifest", owner),
+            "native bundle roundtrip changed original bytes")
+    require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
+            "bundle roundtrip changed original tasks/receipts")
+    require(json.loads(public_file(fetched / "result.json", owner)) == read(record(work, "result")),
+            "fetched signed evidence reconstructed a different decision")
+    write(record(work, "transfer"), {"before": read(record(work, "bundle-before")),
+        "bundle_hex": raw.hex(), "manifest_hex": manifest.hex(),
+        "pack": read(record(work, "pack")), "fetch": read(record(work, "fetch")),
+        "download": json.loads(public_file(fetched / "download.json", owner)),
+        "fetched_names": sorted(path.name for path in fetched.iterdir()),
+        "exact_bundle_and_manifest": True, "identical_result": True, "original_files_unchanged": True,
+        "new_jobs": 0, "other_node_execution_claimed": False})
+
+
+def check_transfer(value, files, requester, layout, peers, result, publisher):
+    raw = bytes.fromhex(value["bundle_hex"])
+    require(0 < len(raw) <= 2 * 1048576 and json.loads(raw) == bundle_projection(files, requester),
+            "portable bundle is not the exact fixed original-file projection")
+    pack, fetched, receipt = value["pack"], value["fetch"], value["download"]
+    enrolled = decode_file(files, "enrollment.json")
+    check_bundle_manifest(bytes.fromhex(value["manifest_hex"]), raw, publisher, enrolled)
+    require(pack == {"operation": "compute_policy_pack", "complete": True,
+        "name": "assessment-" + sha(raw)[:32], "manifest_id": sha(bytes.fromhex(value["manifest_hex"])),
+        "publisher_key": publisher, "expires": enrolled["expires"], "network_policy_activation": False,
+        "provider_signed_claims_verified": True, "independent_execution_proven": False}, "package authority changed")
+    require(fetched == {"operation": "compute_policy_fetch", "complete": True, "decision": result["decision"],
+        "provider_signed_claims_verified": True, "independent_execution_proven": False,
+        "network_policy_activation": False}, "fetch did not verify/reconstruct original claims")
+    require(receipt["operation"] == "named_content_download" and receipt["publisher_key"] == publisher
+            and receipt["name"] == pack["name"] and receipt["manifest_id"] == pack["manifest_id"]
+            and receipt["sha256"] == sha(raw) and receipt["bytes"] == len(raw)
+            and receipt["peer_bytes"] == len(raw) and receipt["providers_used"] == 1
+            and receipt["provider_peer_ids"] == [peers[layout["provider_nodes"][0]]]
+            and receipt["control_relay_peer_id"] == layout["control_relay_peer_id"]
+            and receipt["origin_body_bytes"] == 0 and receipt["origin_range_requests"] == 0,
+            "fresh-cache bundle bytes did not arrive through the selected protected peer")
+    require(value["before"] == {"same_client": True, "new_output_absent": True, "new_cache_absent": True,
+                                "original_files_unchanged": True}
+            and value["fetched_names"] == sorted([".task.lock", "assessment.bundle", "assessment.manifest",
+                                                  "download.json", "result.json"])
+            and all(value[key] is True for key in ("exact_bundle_and_manifest", "identical_result", "original_files_unchanged"))
+            and value["new_jobs"] == 0 and value["other_node_execution_claimed"] is False,
+            "roundtrip isolation/history scope differs")
+
+
+def protobuf_value(number, value):
+    # Only an encoder for exact expected native metadata; reuse the existing strict parser.
+    def integer(value):
+        encoded = bytearray()
+        while value >= 128:
+            encoded.append((value & 127) | 128)
+            value >>= 7
+        return bytes(encoded) + bytes([value])
+    if isinstance(value, bytes):
+        return integer(number * 8 + 2) + integer(len(value)) + value
+    return integer(number * 8) + integer(value)
+
+
+def check_bundle_manifest(encoded, raw, publisher, enrolled):
+    fields, field = CUSTODY["fields"], protobuf_value
+    envelope = fields(encoded, 64 * 1024)
+    require(set(envelope) == {1, 2}, "invalid bundle signed manifest envelope")
+    body = fields(envelope[1], 64 * 1024)
+    payload = field(1, ("assessment-" + sha(raw)[:32]).encode()) + field(2, 1)
+    payload += field(3, b"application/vnd.volparossa.principle-assessment+json") + field(4, len(raw))
+    for offset in range(0, len(raw), 256 * 1024):
+        chunk = raw[offset:offset + 256 * 1024]
+        payload += field(5, field(1, hashlib.sha256(chunk).digest()) + field(2, len(chunk)))
+    payload += field(6, hashlib.sha256(raw).digest())
+    require(set(body) == set(range(1, 9)) and body[1] == 1 and body[2] == bytes.fromhex(publisher)
+            and enrolled["selected_at"] <= body[3] < body[4] == enrolled["expires"]
+            and len(body[5]) == 32 and body[6] == 1
+            and body[7] == hashlib.sha256(payload).digest() and body[8] == payload,
+            "bundle publisher, original expiry or exact ordered chunks changed")
+    verify_signature(envelope[1], envelope[2], body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
+
+
 def check_result(value):
     require(value["operation"] == "compute_peer_policy_assessment" and value["complete"] is True
-            and value["network_policy_activation"] is False, "model reasoning incomplete or overclaims activation")
+            and value["network_policy_activation"] is False
+            and value["receipt_scope"] == "original_provider_signed_poll_claims_not_independent_execution_proof",
+            "model reasoning incomplete or overclaims activation")
     decision = value["decision"]
     require(decision["outcome"] in ("allow", "deny", "undetermined")
             and decision["decision_scope"] == "principle_framework_concept_only"
@@ -202,6 +397,11 @@ def check_evidence(value, revision):
     result = value["result"]
     records = check_result(result)
     files = value["files"]
+    enrolled = decode_file(files, "enrollment.json")
+    requester = value["requester"]["identity_public_key_hex"]
+    require(requester == CUSTODY["peer_key"](value["peers"]["client"])
+            and requester != value["publication"]["publisher_key_hex"] and enrolled["portable_receipts"] is True,
+            "portable requester was not independently bound to the client agent identity")
     require(decode_file(files, "subject.txt", False) == SUBJECT.encode(), "wrong original subject")
     require(decode_file(files, "result.json") == result, "CLI result differs from retained result")
     subject_manifest = decode_file(files, "subject.manifest", False)
@@ -228,9 +428,11 @@ def check_evidence(value, revision):
     for stage, assessment in zip(STAGES, records):
         handle = decode_file(files, stage + "/work/job-0.json")
         bind = handle["binding"]
-        receipt = decode_file(files, stage + "/work/receipt-" + bind["job_id"] + ".json")
+        receipt = decode_file(files, receipt_name(files, stage, handle))
         require(receipt["handle"] == handle and receipt["status"]["binding"] == bind
                 and receipt["status"]["state"] == "complete", "original actual receipt differs")
+        check_transcript(decode_file(files, stage + "/provider-transcript.json"), handle,
+                         receipt["status"], requester, enrolled["selected_at"])
         report_json = receipt["status"]["report_json"]
         report = json.loads(report_json)
         require(sha(report_json.encode()) == receipt["status"]["report_sha256"]
@@ -258,6 +460,9 @@ def check_evidence(value, revision):
         require(report["supervisor"]["child_reaped"] is True
                 and report["supervisor"]["network_access"] is False, "worker cleanup/network differs")
         response_bytes[observation["node"]] += len(report_json.encode())
+    check_transfer(value["transfer"], files, requester, value["layout"], value["peers"], result,
+                   value["publication"]["publisher_key_hex"])
+    response_bytes[value["layout"]["provider_nodes"][0]] += value["transfer"]["download"]["peer_bytes"]
     CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
     for node, minimum in response_bytes.items():
         require(value["path"]["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] >= minimum,
@@ -272,6 +477,7 @@ def evidence(work, revision):
     value = dict(source_revision=revision, scope=SCOPE, result=read(record(work, "result")),
         files=read(record(work, "files"), 32 * 1048576), observation=read(record(work, "observation")),
         publication=read(record(work, "publication")), replay=read(record(work, "replay")),
+        requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
         stopped=read(record(work, "stopped")), layout=read(work / "agent-jobs-layout.json"),
         peers=read(work / "a01-expected-peers.json"), cleanup=read(work / "agent-jobs-private-cleanup.json"),
         path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
@@ -306,6 +512,8 @@ def check_report(value, revision):
 
 
 def self_test():
+    from unittest.mock import patch
+
     for value in ({}, {"operation": "compute_peer_policy_assessment", "complete": False,
                       "network_policy_activation": False},
                   {"operation": "compute_peer_policy_assessment", "complete": True,
@@ -317,14 +525,72 @@ def self_test():
         else:
             raise ValueError("missing/incomplete/activating result accepted")
     require(0 < len(SUBJECT.encode()) <= 512, "synthetic subject exceeds actual product scope")
-    print("PASS: policy fixture incomplete/authority rejection; no real model execution")
+    # Synthetic protocol bindings only. Real signatures are checked by OpenSSL in
+    # evidence/report, and the Rust transcript tests exercise actual signing keys.
+    field = protobuf_value
+    provider, requester = "11" * 32, "22" * 32
+    handle = {"provider_key": provider, "binding": {"job_id": "33" * 16, "expires_unix_seconds": 100}}
+    status = {"binding": handle["binding"], "state": "complete", "report_json": "{}"}
+    request = {"version": 1, "request_id": "44" * 16, "requester_key": requester,
+               "operation": {"operation": "poll", "value": handle["binding"]}}
+    response = {"version": 1, "request_id": request["request_id"],
+                "outcome": {"outcome": "job", "value": status}}
+    def envelope(kind, key, payload, challenge=None, original_request=None):
+        body = field(1, 1) + field(2, bytes.fromhex(key)) + field(3, 10 + kind) + field(4, 30)
+        body += field(5, b"n" * 32) + field(6, kind) + field(7, hashlib.sha256(payload).digest())
+        if payload:
+            body += field(8, payload)
+        if original_request:
+            body += field(9, hashlib.sha256(original_request).digest())
+        if challenge:
+            body += field(10, hashlib.sha256(challenge).digest())
+        return field(1, body) + field(2, b"s" * 64)
+    challenge = envelope(1, provider, b"")
+    original_request = envelope(2, requester, json.dumps(request).encode(), challenge)
+    reply = envelope(3, provider, json.dumps(response).encode(), challenge, original_request)
+    transcript = field(1, 1) + field(2, challenge) + field(3, original_request) + field(4, reply)
+    retained = {"version": 1, "requester_key": requester, "transcript_hex": transcript.hex()}
+    with patch.dict(globals(), {"verify_signature": lambda *_: None}):
+        check_transcript(retained, handle, status, requester, 10)
+        failures = [lambda: check_transcript(retained, handle, status, provider, 10),
+                    lambda: check_transcript(retained, handle, {**status, "state": "failed"}, requester, 10),
+                    lambda: check_transcript(retained, handle, status, requester, 14),
+                    lambda: check_transcript({**retained, "transcript_hex": (transcript + field(4, reply)).hex()},
+                                             handle, status, requester, 10)]
+        for failure in failures:
+            try:
+                failure()
+            except (KeyError, ValueError):
+                pass
+            else:
+                raise ValueError("synthetic transcript binding mutation accepted")
+    files = {}
+    def add(name, raw):
+        files[name] = {"bytes": len(raw), "sha256": sha(raw), "raw_hex": raw.hex()}
+    for name in ("enrollment.json", "subject.txt", "subject.manifest", "subject-download.json", "result.json"):
+        add(name, name.encode())
+    for stage in STAGES:
+        for name in ("context.txt", "context.manifest", "dataset.json", "dataset.manifest", "provider-transcript.json"):
+            add(stage + "/" + name, name.encode())
+        add(stage + "/work/job-0.json", json.dumps(handle).encode())
+        add(stage + "/work/receipt-" + handle["binding"]["job_id"] + ".json", b"running")
+        add(stage + "/poll-00/receipt-" + handle["binding"]["job_id"] + ".json", b"complete")
+    projected = bundle_projection(files, requester)
+    require(set(projected) == {"version", "requester_key", "enrollment", "subject", "subject_manifest",
+                              "source_receipt", "result", "stages"}
+            and all(set(stage) == {"context", "context_manifest", "dataset", "dataset_manifest",
+                                  "handle", "receipt", "provider_transcript"}
+                    and bytes.fromhex(stage["receipt"]) == b"complete" for stage in projected["stages"]),
+            "portable projection dropped proof fields or selected a superseded receipt")
+    print("PASS: 3 incomplete/authority rejections, synthetic transcript positive + 4 binding rejections, "
+          "fixed bundle projection/terminal receipt selection; no model or real-signature execution")
 
 
 def main():
     args = sys.argv[1:]
     if args == ["self-test"]:
         self_test()
-    elif len(args) == 2 and args[0] in ("prepare", "collect", "stopped", "replay"):
+    elif len(args) == 2 and args[0] in ("prepare", "collect", "stopped", "replay", "bundle_before", "transfer"):
         globals()[args[0]](Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))

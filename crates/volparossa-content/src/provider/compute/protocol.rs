@@ -159,6 +159,16 @@ impl Record {
     }
 
     pub(super) fn decode(bytes: &[u8], kind: Kind, now: u64) -> Result<Self, ComputeError> {
+        Self::decode_at(bytes, kind, Some(now))
+    }
+
+    /// Check an original signature and its internally bounded signed validity.
+    /// No wall-clock freshness or current authorization follows from this check.
+    pub(super) fn decode_historical(bytes: &[u8], kind: Kind) -> Result<Self, ComputeError> {
+        Self::decode_at(bytes, kind, None)
+    }
+
+    fn decode_at(bytes: &[u8], kind: Kind, now: Option<u64>) -> Result<Self, ComputeError> {
         if bytes.is_empty() || bytes.len() > MAX_REQUEST_BYTES + super::FRAME_OVERHEAD {
             return Err(ComputeError::Invalid);
         }
@@ -182,7 +192,7 @@ impl Record {
             signature,
             sender,
         };
-        result.check(kind, now)?;
+        result.check(kind, now.unwrap_or(result.body.created))?;
         VerifyingKey::from_bytes(&sender)
             .map_err(|_| ComputeError::Authentication)?
             .verify_strict(
@@ -252,6 +262,12 @@ impl Record {
     }
     pub(super) fn request_hash(&self) -> &[u8] {
         &self.body.request_hash
+    }
+    pub(super) const fn created(&self) -> u64 {
+        self.body.created
+    }
+    pub(super) const fn expires(&self) -> u64 {
+        self.body.expires
     }
 }
 
