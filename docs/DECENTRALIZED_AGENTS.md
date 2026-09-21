@@ -621,13 +621,33 @@ distinct peers with the same exact model fingerprint. `--model-fingerprint` opti
 a particular model; `--max-peers 2..4` limits this job's enrolled pool, not the size of the network.
 Without an explicit model pin this is compatibility selection, not a claim to choose the smartest
 model or fastest workers. Generic content providers without an eligible broker are not executors.
+Temporary busy/unavailable observations are retried every two seconds within one 150-second
+window, including initial route setup and probes; retries do not renew that deadline. Policy
+and protocol failures stop selection. Fixed diagnostic categories retain no task or publisher
+body and do not turn an unsuccessful query into proof of available workers.
 
 The original peer keys and model fingerprint are saved before any task submission. Fresh
 pre-submit capabilities and retained job bindings must match that fingerprint. Discovery observes
 availability; it does not reserve capacity, and a peer may become busy or leave afterward.
-Resume retains the enrolled group and model, including across synthesis levels, rather than
-silently selecting replacements from the whole network. Existing bounded recovery within the
-enrolled pool still applies. Dynamic mid-task pool expansion remains future work.
+By default, resume retains the enrolled group and model, including across synthesis levels.
+Existing bounded recovery within the enrolled pool still applies. To permit automatic discovery
+of replacements, also supply `--replace-peers` when first enrolling with `--discover-peers`:
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer workflow \
+  --plan /absolute/plan.json --directory /absolute/private-parent/workflow-002 \
+  --discover-peers --replace-peers --follow --execute
+```
+
+This permission is retained with the original enrollment, not added by a later resume. If the
+original pool is unavailable, eligible unfinished work can move to newly discovered peers with
+the same exact model and required source profile. Recovery may use one available peer; initial
+discovery still needs at least two. Completed results are reused, and an unconfirmed job with
+an unexpired lease is not duplicated. Each fresh attempt retains `executor-admission.json`
+binding the additional peer keys to the original workflow, publisher, source, model and expiry
+before saving new handles or submitting work. These are private coordinator records, not
+independent execution attestations. Source authority and original leases are never extended.
+This is failure recovery, not arbitrary mid-task model changes or unbounded worker growth.
 
 A preview without `--execute` remains networkless. For documents,
 `--enroll-only --execute` performs discovery, public-document preparation and durable enrollment,
@@ -635,8 +655,14 @@ but submits no inference jobs. Continue with the ordinary `document --resume --e
 This is useful when preparation and execution need separate scheduling or observation;
 without `--enroll-only`, a new document command proceeds directly to execution.
 
-Focused local protocol and CLI checks pass. The disposable automatic-discovery scenario is
-pending; earlier live document proofs used explicitly selected peers.
+Focused local protocol and CLI checks pass. The [first automatic-discovery run on
+`a65a3242`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34916523136) failed before any
+peer submission with `CONTENT_UNAVAILABLE` during enrollment. Offers and two completed protected
+flows were observed, but no retained eligibility/budget replies establish why the eligible cohort
+was insufficient. Final route/policy rejection would have produced a different error code;
+temporary readiness remains an unproved hypothesis. The run remains failed; the earlier live
+document proofs used explicitly selected peers. Live automatic discovery and recovery onto a
+newly discovered third peer remain pending.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry

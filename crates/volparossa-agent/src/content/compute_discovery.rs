@@ -9,19 +9,26 @@ use std::{
 use ed25519_dalek::SigningKey;
 use libp2p::PeerId;
 use rand_core::{OsRng, RngCore as _};
-use tokio::{task::JoinSet, time::timeout};
+use tokio::{
+    task::JoinSet,
+    time::{Instant, sleep_until, timeout, timeout_at},
+};
 use volparossa_local_control::{
     ComputeDiscoverRequest, ComputeDiscovered, ComputeDiscoveredProvider, compute as rpc,
 };
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
 use super::{ContentError, ContentRuntime, compute::validate_capabilities, compute_remote, now};
-use crate::{control::ControlContext, discovery::DiscoveredContentProvider};
+use crate::{
+    control::ControlContext,
+    discovery::{ContentDiscoveryError, DiscoveredContentProvider},
+};
 
 const MAX_CANDIDATES: usize = 16;
 const MAX_PROBES: usize = 4;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(150);
+const READINESS_RETRY: Duration = Duration::from_secs(2);
 
 impl ContentRuntime {
     pub(crate) async fn compute_discover(
@@ -31,12 +38,16 @@ impl ContentRuntime {
     ) -> Result<ComputeDiscovered, ContentError> {
         let query = request.eligibility().map_err(|_| ContentError::Invalid)?;
         let maximum = usize::try_from(request.maximum).map_err(|_| ContentError::Invalid)?;
+        let minimum =
+            usize::try_from(request.effective_minimum()).map_err(|_| ContentError::Invalid)?;
         let _foreground = self.foreground.enter();
         // One absolute window includes route setup, discovery, all probes and final checks.
         // Dropping the bounded JoinSet on expiry aborts only these short network RPCs: no
         // worker is admitted, so there is no remote job lease to lose or silently extend.
-        let result = timeout(DISCOVERY_TIMEOUT, async {
+        let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+        let result = timeout_at(deadline, async {
             let policy = compute_remote::checked_policy(context, None).await?;
+            super::content_event(context, "COMPUTE_DISCOVERY_ROUTE_SETUP").await;
             Box::pin(context.routes.connect_tcp(
                 &context.config,
                 &context.discovery,
@@ -49,11 +60,6 @@ impl ContentRuntime {
                 .content_discovery_control()
                 .await
                 .ok_or(ContentError::Unavailable)?;
-            let providers = context
-                .discovery
-                .discover_content_providers(control, MAX_CANDIDATES)
-                .await
-                .map_err(|_| ContentError::Unavailable)?;
             let probes = ProbeContext {
                 context: context.clone(),
                 policy,
@@ -61,34 +67,53 @@ impl ContentRuntime {
                 query,
                 signer: Arc::clone(&self.signer),
             };
-            let observations = probes.collect(providers).await?;
-            let mut eligible = Vec::new();
-            for (provider, eligibility) in observations {
-                // Offers can expire or the carrying route can change while other probes run.
-                compute_remote::checked_route(context, &probes.policy, control, provider.peer_id)
-                    .await?;
-                eligible.push((
-                    *provider.offer.provider_key(),
-                    eligibility,
-                    provider.offer.validity().expires,
-                ));
+            loop {
+                match probes.discover(minimum, maximum).await {
+                    Ok(selected) => return Ok(selected),
+                    Err(error) => {
+                        let Some(retry_at) = readiness_retry_at(&error, Instant::now(), deadline)
+                        else {
+                            return Err(error);
+                        };
+                        // Only fresh metadata is queried again. No job is started and no
+                        // source, offer, policy or job expiry is renewed by this wait.
+                        super::content_event(context, "COMPUTE_DISCOVERY_READINESS_WAIT").await;
+                        sleep_until(retry_at).await;
+                    }
+                }
             }
-            compute_remote::checked_policy(context, Some(&probes.policy)).await?;
-            let at = now();
-            let live = eligible
-                .into_iter()
-                .filter(|(_, _, expires)| *expires > at)
-                .map(|(key, eligibility, _)| (key, eligibility))
-                .collect();
-            select_pool(&probes.query, live, maximum)
         })
-        .await
-        .map_err(|_| ContentError::Unavailable)
-        .and_then(std::convert::identity);
+        .await;
+        let result = if let Ok(result) = result {
+            result
+        } else {
+            super::content_event(context, "COMPUTE_DISCOVERY_DEADLINE_EXPIRED").await;
+            Err(ContentError::Unavailable)
+        };
         if result.is_err() {
             super::content_event(context, "COMPUTE_DISCOVERY_UNAVAILABLE").await;
         }
         result
+    }
+}
+
+/// Decide from the original absolute window, never from a renewed per-attempt timeout.
+fn readiness_retry_at(error: &ContentError, at: Instant, deadline: Instant) -> Option<Instant> {
+    if !matches!(error, ContentError::Unavailable | ContentError::Busy) {
+        return None;
+    }
+    let retry_at = at.checked_add(READINESS_RETRY)?;
+    (retry_at < deadline).then_some(retry_at)
+}
+
+fn discovery_error(error: ContentDiscoveryError) -> ContentError {
+    match error {
+        ContentDiscoveryError::Invalid => ContentError::Invalid,
+        ContentDiscoveryError::Invalidated => ContentError::Policy,
+        ContentDiscoveryError::Busy => ContentError::Busy,
+        ContentDiscoveryError::Closed
+        | ContentDiscoveryError::Timeout
+        | ContentDiscoveryError::Unavailable => ContentError::Unavailable,
     }
 }
 
@@ -102,6 +127,80 @@ struct ProbeContext {
 }
 
 impl ProbeContext {
+    async fn discover(
+        &self,
+        minimum: usize,
+        maximum: usize,
+    ) -> Result<ComputeDiscovered, ContentError> {
+        // Retain the original policy and carrying route even while brokers become ready.
+        compute_remote::checked_policy(&self.context, Some(&self.policy)).await?;
+        if self.context.routes.content_discovery_control().await != Some(self.control) {
+            super::content_event(&self.context, "COMPUTE_DISCOVERY_FINAL_ROUTE_UNAVAILABLE").await;
+            return Err(ContentError::Policy);
+        }
+        let providers = match self
+            .context
+            .discovery
+            .discover_content_providers(self.control, MAX_CANDIDATES)
+            .await
+        {
+            Ok(providers) => providers,
+            Err(error) => {
+                super::content_event(&self.context, "COMPUTE_DISCOVERY_QUERY_FAILED").await;
+                return Err(discovery_error(error));
+            }
+        };
+        super::content_event(&self.context, "COMPUTE_DISCOVERY_QUERY_COMPLETE").await;
+        let observations = self.collect(providers).await?;
+        super::content_event(&self.context, "COMPUTE_DISCOVERY_PROBES_COMPLETE").await;
+        for code in eligibility_diagnostics(
+            &self.query,
+            observations.iter().map(|(_, eligibility)| eligibility),
+        )
+        .into_iter()
+        .flatten()
+        {
+            super::content_event(&self.context, code).await;
+        }
+        let mut eligible = Vec::new();
+        for (provider, eligibility) in observations {
+            // Offers can expire or the carrying route can change while other probes run.
+            if let Err(error) = compute_remote::checked_route(
+                &self.context,
+                &self.policy,
+                self.control,
+                provider.peer_id,
+            )
+            .await
+            {
+                super::content_event(&self.context, "COMPUTE_DISCOVERY_FINAL_ROUTE_UNAVAILABLE")
+                    .await;
+                return Err(error);
+            }
+            eligible.push((
+                *provider.offer.provider_key(),
+                eligibility,
+                provider.offer.validity().expires,
+            ));
+        }
+        if let Err(error) = compute_remote::checked_policy(&self.context, Some(&self.policy)).await
+        {
+            super::content_event(&self.context, "COMPUTE_DISCOVERY_FINAL_POLICY_FAILED").await;
+            return Err(error);
+        }
+        let at = now();
+        let live = eligible
+            .into_iter()
+            .filter(|(_, _, expires)| *expires > at)
+            .map(|(key, eligibility, _)| (key, eligibility))
+            .collect();
+        let selected = select_pool(&self.query, live, minimum, maximum);
+        if matches!(selected, Err(ContentError::Unavailable)) {
+            super::content_event(&self.context, "COMPUTE_DISCOVERY_NO_COMPATIBLE_POOL").await;
+        }
+        selected
+    }
+
     async fn collect(
         &self,
         providers: Vec<DiscoveredContentProvider>,
@@ -146,12 +245,16 @@ impl ProbeContext {
             };
             match result {
                 Ok(Ok(observation)) => observations.push(observation),
-                Ok(Err(_)) => {
+                Ok(Err(ContentError::Unavailable | ContentError::Busy)) => {
                     // Generic CONTENT can mean an ordinary content provider, an old peer,
                     // or a temporarily unavailable broker. No error payload is logged.
                     super::content_event(&self.context, "COMPUTE_ELIGIBILITY_UNAVAILABLE").await;
                 }
-                Err(_) => return Err(ContentError::Unavailable),
+                Ok(Err(error)) => {
+                    super::content_event(&self.context, "COMPUTE_ELIGIBILITY_REJECTED").await;
+                    return Err(error);
+                }
+                Err(_) => return Err(ContentError::Invalid),
             }
         }
         Ok(observations)
@@ -182,11 +285,45 @@ impl ProbeContext {
             &mut stage,
         )
         .await?;
-        let rpc::Outcome::Eligibility(eligibility) = response.outcome else {
-            return Err(ContentError::Unavailable);
-        };
+        let eligibility = eligibility_response(response.outcome)?;
         validate_capabilities(&eligibility.capabilities).map_err(|_| ContentError::Invalid)?;
         Ok((provider, eligibility))
+    }
+}
+
+/// Aggregate fixed categories only, without retaining which peer or publisher was involved.
+/// Declined eligibility is not, by itself, proof of a publisher-trust rejection.
+fn eligibility_diagnostics<'a>(
+    query: &rpc::EligibilityQuery,
+    observations: impl Iterator<Item = &'a rpc::Eligibility>,
+) -> [Option<&'static str>; 3] {
+    let (mut declined, mut busy, mut mismatch) = (false, false, false);
+    for observation in observations {
+        declined |= !observation.eligible;
+        busy |= !observation.capabilities.accepting_work;
+        // Separate model/profile compatibility from transient availability for diagnostics
+        // only. Admission and select_pool always inspect the unmodified observation.
+        let mut profile = observation.capabilities.clone();
+        profile.accepting_work = true;
+        mismatch |= !query.matches(&profile);
+    }
+    [
+        declined.then_some("COMPUTE_DISCOVERY_ELIGIBILITY_DECLINED"),
+        busy.then_some("COMPUTE_DISCOVERY_PEERS_BUSY"),
+        mismatch.then_some("COMPUTE_DISCOVERY_PROFILE_MISMATCH"),
+    ]
+}
+
+fn eligibility_response(outcome: rpc::Outcome) -> Result<rpc::Eligibility, ContentError> {
+    match outcome {
+        rpc::Outcome::Eligibility(eligibility) => Ok(eligibility),
+        rpc::Outcome::Error(rpc::ErrorCode::Busy) => Err(ContentError::Busy),
+        rpc::Outcome::Error(rpc::ErrorCode::Unavailable | rpc::ErrorCode::ModelMismatch) => {
+            Err(ContentError::Unavailable)
+        }
+        // A correlated response of the wrong operation/type or an invalid request must
+        // not be turned into a successful-looking readiness wait.
+        _ => Err(ContentError::Invalid),
     }
 }
 
@@ -195,10 +332,14 @@ impl ProbeContext {
 fn select_pool(
     query: &rpc::EligibilityQuery,
     observations: Vec<([u8; 32], rpc::Eligibility)>,
+    minimum: usize,
     maximum: usize,
 ) -> Result<ComputeDiscovered, ContentError> {
     query.validate().map_err(|_| ContentError::Invalid)?;
-    if !(2..=4).contains(&maximum) || observations.len() > MAX_CANDIDATES {
+    if !(1..=4).contains(&maximum)
+        || !(1..=maximum).contains(&minimum)
+        || observations.len() > MAX_CANDIDATES
+    {
         return Err(ContentError::Invalid);
     }
     let mut cohorts: BTreeMap<String, BTreeMap<[u8; 32], rpc::Capabilities>> = BTreeMap::new();
@@ -224,7 +365,7 @@ fn select_pool(
             largest = cohort;
         }
     }
-    if largest.len() < 2 {
+    if largest.len() < minimum {
         return Err(ContentError::Unavailable);
     }
     let providers = largest

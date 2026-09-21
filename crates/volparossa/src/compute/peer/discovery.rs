@@ -10,6 +10,9 @@ pub(super) struct Options {
     /// Find a compatible idle worker group through the current protected route before enrollment.
     #[arg(long, conflicts_with_all = ["provider_key", "resume"])]
     pub(super) discover_peers: bool,
+    /// Allow enrolled recovery to discover compatible replacements; no old lease is extended.
+    #[arg(long, requires = "discover_peers", conflicts_with = "resume")]
+    pub(super) replace_peers: bool,
     /// Optional exact base/adapter profile; otherwise select one mutually compatible group.
     #[arg(long, requires = "discover_peers", value_parser = parse_fingerprint)]
     pub(super) model_fingerprint: Option<String>,
@@ -18,6 +21,7 @@ pub(super) struct Options {
     max_peers: Option<u32>,
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct Selected {
     pub(super) providers: Vec<VerifyingKey>,
     pub(super) model_fingerprint: String,
@@ -61,42 +65,71 @@ impl Options {
         cancelled: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<Selected> {
         ensure!(self.discover_peers, "compute_discovery_not_enabled");
-        ensure!(!*cancelled.borrow(), "compute_discovery_cancelled");
-        query.validate()?;
-        let maximum = self.max_peers.unwrap_or(4);
-        let request = volparossa_local_control::ComputeDiscoverRequest {
-            publisher_keys: query
-                .publisher_keys
-                .iter()
-                .map(hex::decode)
-                .collect::<Result<_, _>>()?,
-            model_fingerprint: query.model_fingerprint.clone(),
-            require_task_derivation_v1: query.require_task_derivation_v1,
-            require_document_inference_v2: query.require_document_inference_v2,
-            require_derived_inference_v3: query.require_derived_inference_v3,
-            maximum,
-        };
-        let mut cancellation = cancelled.clone();
-        // This query never submits jobs. Dropping it cannot strand remote execution.
-        let response = tokio::select! { biased;
-            _ = cancellation.changed() => anyhow::bail!("compute_discovery_cancelled"),
-            result = timeout(Duration::from_secs(155), crate::control::request(
-                socket, Operation::ComputeDiscover(request))) => result.context("compute_discovery_timeout")??,
-        };
-        let Some(Payload::ComputeDiscovered(found)) = response.payload else {
-            anyhow::bail!("compute_discovery_response");
-        };
-        checked_selection(&found, &query, maximum)
+        select_query(socket, query, cancelled, 2, self.max_peers.unwrap_or(4)).await
     }
+}
+
+/// Recovery observes one through four candidates in the already enrolled exact model cohort.
+/// The coordinator must persist authorization before any actual replacement Submit.
+pub(super) async fn select_replacements(
+    socket: &Path,
+    query: rpc::EligibilityQuery,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Selected> {
+    ensure!(
+        query.model_fingerprint.is_some(),
+        "compute_replacement_model_required"
+    );
+    select_query(socket, query, cancelled, 1, 4).await
+}
+
+async fn select_query(
+    socket: &Path,
+    query: rpc::EligibilityQuery,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+    minimum: u32,
+    maximum: u32,
+) -> Result<Selected> {
+    ensure!(!*cancelled.borrow(), "compute_discovery_cancelled");
+    query.validate()?;
+    let request = volparossa_local_control::ComputeDiscoverRequest {
+        publisher_keys: query
+            .publisher_keys
+            .iter()
+            .map(hex::decode)
+            .collect::<Result<_, _>>()?,
+        model_fingerprint: query.model_fingerprint.clone(),
+        require_task_derivation_v1: query.require_task_derivation_v1,
+        require_document_inference_v2: query.require_document_inference_v2,
+        require_derived_inference_v3: query.require_derived_inference_v3,
+        maximum,
+        // Ordinary selection retains the original omitted/default minimum on the wire.
+        minimum: if minimum == 2 { 0 } else { minimum },
+    };
+    request.eligibility()?;
+    let mut cancellation = cancelled.clone();
+    // This query never submits jobs. Dropping it cannot strand remote execution.
+    let response = tokio::select! { biased;
+        _ = cancellation.changed() => anyhow::bail!("compute_discovery_cancelled"),
+        result = timeout(Duration::from_secs(155), crate::control::request(
+            socket, Operation::ComputeDiscover(request))) => result.context("compute_discovery_timeout")??,
+    };
+    let Some(Payload::ComputeDiscovered(found)) = response.payload else {
+        anyhow::bail!("compute_discovery_response");
+    };
+    checked_selection(&found, &query, minimum, maximum)
 }
 
 fn checked_selection(
     found: &volparossa_local_control::ComputeDiscovered,
     query: &rpc::EligibilityQuery,
+    minimum: u32,
     maximum: u32,
 ) -> Result<Selected> {
     ensure!(
-        (2..=maximum as usize).contains(&found.providers.len()),
+        (1..=4).contains(&maximum)
+            && (1..=maximum).contains(&minimum)
+            && (minimum as usize..=maximum as usize).contains(&found.providers.len()),
         "compute_discovery_insufficient_peers"
     );
     let mut providers = Vec::new();

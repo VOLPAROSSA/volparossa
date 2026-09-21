@@ -2,19 +2,44 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-15
+Last updated: 2026-09-21
 
 Current executor-discovery candidate: `compute peer workflow`, `task` and `document` accept
 `--discover-peers` in place of manually supplied provider keys. Authenticated, protected probes
 check actual broker availability, supported inference profiles and permission for the explicitly
 selected public-source publishers. The coordinator selects two through four compatible peers
 with one exact model fingerprint and durably pins that selection before submitting work.
-Resume reuses the original selection; a fresh capability check cannot silently change its model.
+Resume retains the original selection and model; additional peers require replacement permission
+recorded at enrollment. A fresh capability check cannot silently change the model.
 Discovery contains no prompt or source body and does not admit a worker. Source choice remains
 independent of cache availability. `document --enroll-only --execute` explicitly separates this
-preparation from later execution. Focused checks pass; live automatic-selection proof is pending.
-This is not general task planning, a resource lease, dynamic mid-task pool growth or quality-based
-model selection. See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
+preparation from later execution. The [first automatic-discovery run on
+`a65a3242`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34916523136) **failed** during
+executor enrollment with `CONTENT_UNAVAILABLE`, before any peer job or synthesis. Its retained
+logs show provider offers and two completed protected flows, but no retained capability/budget
+replies explain why no eligible cohort was selected. Final route/policy rejection would produce
+`CONTENT_POLICY`, not the observed code; offer expiry also does not fit the observed startup
+timing. Temporary startup readiness remains a hypothesis, not a proven cause. Cleanup completed
+with zero owned objects and unchanged guest-host state. Exact-head Quality and CodeQL passed; they do not turn the live run
+green. Live automatic-selection proof remains pending.
+
+Discovery now retries temporary unavailable/busy observations with fresh offers and nonces,
+within one original 150-second deadline. Fixed diagnostic categories separate query, probe,
+readiness and final-check failures without storing publisher identities or task bodies.
+Policy/protocol failures are not converted into readiness waits.
+
+The recovery candidate adds explicit `--discover-peers --replace-peers` enrollment permission
+for workflow, task and document commands. Eligible unfinished parts can discover new peers in
+the same exact model cohort when the original pool is unavailable. Each attempt saves an
+immutable `executor-admission.json` before any new handle or submission. Original source bytes,
+publisher, expiry and completed receipts remain unchanged; uncertain unexpired jobs are not
+duplicated. Recovery can use one available peer without weakening the two-peer initial discovery
+requirement. Synthetic protocol/coordinator checks are not real-model recovery evidence; the
+new-third-peer disposable proof is pending. This is not general planning, unlimited pool growth,
+a capacity reservation or quality-based model selection. The 123 focused CLI compute tests,
+three local-control discovery tests, six agent discovery tests, formatting and strict Clippy
+for all targets of those three packages pass. No local model execution was used.
+See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

@@ -58,9 +58,13 @@ pub struct ComputeDiscoverRequest {
     /// Require signed model-generated synthesis inputs.
     #[prost(bool, tag = "5")]
     pub require_derived_inference_v3: bool,
-    /// Maximum returned compatible pool, between two and four.
+    /// Maximum returned compatible pool, at most four; one requires explicit minimum one.
     #[prost(uint32, tag = "6")]
     pub maximum: u32,
+    /// Required pool size; zero preserves the legacy minimum of two.
+    /// Recovery may explicitly request one compatible replacement without admitting a job.
+    #[prost(uint32, tag = "7")]
+    pub minimum: u32,
 }
 
 /// One authenticated capability observation, not a reservation or successful worker job.
@@ -77,12 +81,18 @@ pub struct ComputeDiscoveredProvider {
 /// One compatible observed pool; Submit still decides actual admission.
 #[derive(Clone, PartialEq, Message)]
 pub struct ComputeDiscovered {
-    /// Between two and four distinct providers with the same model fingerprint.
+    /// One through four distinct providers with the same model fingerprint.
+    /// The correlated caller also enforces its requested minimum (normally two).
     #[prost(message, repeated, tag = "1")]
     pub providers: Vec<ComputeDiscoveredProvider>,
 }
 
 impl ComputeDiscoverRequest {
+    /// Legacy frames omit the minimum and retain two-provider initial selection.
+    pub const fn effective_minimum(&self) -> u32 {
+        if self.minimum == 0 { 2 } else { self.minimum }
+    }
+
     /// Convert bounded local requirements to the signed content-free eligibility query.
     ///
     /// # Errors
@@ -90,7 +100,8 @@ impl ComputeDiscoverRequest {
     pub fn eligibility(&self) -> Result<crate::compute::EligibilityQuery, ControlProtocolError> {
         use std::fmt::Write as _;
 
-        if !(2..=4).contains(&self.maximum)
+        if !(1..=4).contains(&self.maximum)
+            || !(1..=self.maximum).contains(&self.effective_minimum())
             || !(1..=32).contains(&self.publisher_keys.len())
             || self.publisher_keys.iter().any(|key| key.len() != 32)
         {
@@ -125,7 +136,7 @@ impl ComputeDiscovered {
     pub(crate) fn validate(&self) -> Result<(), ControlProtocolError> {
         let mut keys = std::collections::BTreeSet::new();
         let mut fingerprint = None;
-        if !(2..=4).contains(&self.providers.len()) {
+        if !(1..=4).contains(&self.providers.len()) {
             return Err(ControlProtocolError::Invalid("compute discovered pool"));
         }
         for provider in &self.providers {

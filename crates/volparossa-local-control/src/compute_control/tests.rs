@@ -20,11 +20,13 @@ fn discovery() -> ComputeDiscoverRequest {
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
         maximum: 4,
+        minimum: 0,
     }
 }
 
 #[test]
 fn bounded_discovery_roundtrip_retains_exact_requirements() {
+    assert_eq!(discovery().effective_minimum(), 2);
     let request = ControlRequest {
         protocol_version: CONTROL_PROTOCOL_VERSION,
         request_id: vec![1; 16],
@@ -54,6 +56,31 @@ fn bounded_discovery_roundtrip_retains_exact_requirements() {
         let mut rejected = request.clone();
         rejected.operation = Some(Operation::ComputeDiscover(invalid));
         assert!(encode_request(&rejected).is_err());
+    }
+}
+
+#[test]
+fn explicit_single_replacement_does_not_change_legacy_initial_minimum() {
+    let legacy = ComputeDiscoverRequest::decode(discovery().encode_to_vec().as_slice()).unwrap();
+    assert_eq!(legacy.minimum, 0);
+    assert_eq!(legacy.effective_minimum(), 2);
+    assert!(legacy.eligibility().is_ok());
+    let recovery = ComputeDiscoverRequest {
+        minimum: 1,
+        maximum: 1,
+        ..legacy.clone()
+    };
+    let decoded = ComputeDiscoverRequest::decode(recovery.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, recovery);
+    assert_eq!(decoded.effective_minimum(), 1);
+    assert!(decoded.eligibility().is_ok());
+    for (minimum, maximum) in [(0, 1), (2, 1), (5, 4), (1, 0), (1, 5)] {
+        let rejected = ComputeDiscoverRequest {
+            maximum,
+            minimum,
+            ..legacy.clone()
+        };
+        assert!(rejected.eligibility().is_err());
     }
 }
 

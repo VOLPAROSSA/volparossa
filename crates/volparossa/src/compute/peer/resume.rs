@@ -28,6 +28,8 @@ pub(crate) struct Options {
     execute: bool,
     #[arg(skip)]
     prefer_other_provider: bool,
+    #[arg(skip)]
+    replacement_discovery: Option<executors::Authorization>,
 }
 
 impl Options {
@@ -46,11 +48,17 @@ impl Options {
             max_seconds,
             execute: true,
             prefer_other_provider: false,
+            replacement_discovery: None,
         }
     }
 
     pub(super) fn prefer_other_provider(mut self, enabled: bool) -> Self {
         self.prefer_other_provider = enabled;
+        self
+    }
+
+    pub(super) fn discover_replacements(mut self, authorization: executors::Authorization) -> Self {
+        self.replacement_discovery = Some(authorization);
         self
     }
 }
@@ -71,6 +79,22 @@ struct Observed {
     status: Option<rpc::JobStatus>,
 }
 
+#[derive(Default)]
+struct DiscoveryRound {
+    attempted: bool,
+    providers: Vec<VerifyingKey>,
+}
+
+impl DiscoveryRound {
+    fn begin(&mut self, state: Observation, expiry: u64, time: u64, cancelled: bool) -> bool {
+        if self.attempted || cancelled || !retry_allowed(state, expiry, time) {
+            return false;
+        }
+        self.attempted = true;
+        true
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "One bounded reconciliation round retains original handles, observations and replacement reports"
@@ -82,6 +106,16 @@ pub(super) async fn report_with_activity(
 ) -> Result<serde_json::Value> {
     let (publication, source) = source(&args.source)?;
     let handles = load_handles(args, &source)?;
+    if let Some(authorization) = &args.replacement_discovery {
+        ensure!(
+            authorization.publisher_key == hex::encode(args.source.publisher_key.as_bytes())
+                && authorization.dataset_sha256 == sha(publication.dataset_json.as_bytes()),
+            "compute_resume_executor_source"
+        );
+        for handle in &handles {
+            authorization.validate_handle(&source, handle)?;
+        }
+    }
     let requested_rows: Vec<_> = handles
         .iter()
         .flat_map(|handle| handle.binding.row_indices.iter().copied())
@@ -104,12 +138,9 @@ pub(super) async fn report_with_activity(
         save_new(&args.output.join(format!("original-{index}.json")), handle)?;
     }
     let observations = observe_all(socket, handles).await?;
-    let mut used = BTreeSet::new();
-    let mut jobs = Vec::new();
-    let mut outputs = Vec::new();
-    let mut retries = JoinSet::new();
-    let mut unfinished = 0;
-    for (index, observed) in observations.into_iter().enumerate() {
+    // Every original observation is durable before discovery or another admission. A failed
+    // later lookup must not hide the completed peer's receipt or an ambiguous live lease.
+    for (index, observed) in observations.iter().enumerate() {
         if let Some(status) = &observed.status {
             batch::save_status(&args.output, &observed.handle, status)?;
         }
@@ -118,6 +149,14 @@ pub(super) async fn report_with_activity(
             &serde_json::json!({
             "handle":observed.handle,"state":observed.state,"status":observed.status}),
         )?;
+    }
+    let mut used = BTreeSet::new();
+    let mut jobs = Vec::new();
+    let mut outputs = Vec::new();
+    let mut planned = Vec::new();
+    let mut discovery = DiscoveryRound::default();
+    let mut unfinished = 0;
+    for (index, observed) in observations.into_iter().enumerate() {
         if observed.state == Observation::Complete {
             let status = observed
                 .status
@@ -138,17 +177,71 @@ pub(super) async fn report_with_activity(
             jobs.push(serde_json::json!({"handle":observed.handle,"state":observed.state,"retried":false}));
             continue;
         }
-        let Some(work) = replacement(socket, args, &source, &observed.handle, &mut used).await?
-        else {
+        let mut work = replacement(
+            socket,
+            args,
+            &source,
+            &observed.handle,
+            &discovery.providers,
+            &mut used,
+            &activity,
+        )
+        .await?;
+        // Never retain a watch borrow across the awaited discovery: the owner must be
+        // able to send cancellation while only these read-only probes are in flight.
+        let cancelled = *activity.borrow();
+        if work.is_none() {
+            if let Some(authorization) = &args.replacement_discovery {
+                let allowed = discovery.begin(
+                    observed.state,
+                    observed.handle.binding.expires_unix_seconds,
+                    now()?,
+                    cancelled,
+                );
+                if allowed {
+                    if let Ok(selected) =
+                        executors::discover(authorization, socket, &activity).await
+                    {
+                        // This admission survives a crash before any new handle/Submit.
+                        // Discovery never renews an original lease.
+                        executors::admit(&args.output, authorization, &selected)?;
+                        discovery.providers = selected.providers;
+                        work = replacement(
+                            socket,
+                            args,
+                            &source,
+                            &observed.handle,
+                            &discovery.providers,
+                            &mut used,
+                            &activity,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        let Some(work) = work else {
             unfinished += 1;
             jobs.push(serde_json::json!({"handle":observed.handle,"state":observed.state,"retried":false,"reason":"NO_COMPATIBLE_IDLE_REPLACEMENT"}));
             continue;
         };
         // The original lease remains immutable. This is an explicit new attempt with a new
         // ID and bounded lifetime, not a disguised TTL extension or success from absence.
+        planned.push((index, observed.handle, observed.state, work));
+    }
+    if *activity.borrow() {
+        for (_, original, state, _) in planned.drain(..) {
+            unfinished += 1;
+            jobs.push(serde_json::json!({"handle":original,"state":state,"retried":false}));
+        }
+    }
+    // Finish fallible planning and persist every new handle before starting any worker;
+    // otherwise a later discovery/storage error could drop an already running retry.
+    for (index, _, _, work) in &planned {
         save_new(&args.output.join(format!("job-{index}.json")), &work.handle)?;
-        let original = observed.handle;
-        let original_state = observed.state;
+    }
+    let mut retries = JoinSet::new();
+    for (index, original, original_state, work) in planned {
         let public = publication.clone();
         let socket = socket.to_owned();
         let cancelled = activity.clone();
@@ -305,13 +398,27 @@ async fn replacement(
     args: &Options,
     source: &VerifiedPublicDataset,
     original: &JobHandle,
+    discovered: &[VerifyingKey],
     used: &mut BTreeSet<[u8; 32]>,
+    activity: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<Option<batch::Prepared>> {
-    for provider in replacement_order(args, original) {
-        if used.contains(&provider.to_bytes()) {
+    let mut probed = BTreeSet::new();
+    for provider in replacement_order(args, original)
+        .into_iter()
+        .chain(discovered)
+    {
+        if *activity.borrow() {
+            return Ok(None);
+        }
+        if used.contains(&provider.to_bytes()) || !probed.insert(provider.to_bytes()) {
             continue;
         }
-        let Ok(caps) = capabilities(socket, provider).await else {
+        let mut cancellation = activity.clone();
+        let reply = tokio::select! { biased;
+            _ = cancellation.changed() => return Ok(None),
+            response = capabilities(socket, provider) => response,
+        };
+        let Ok(caps) = reply else {
             continue;
         };
         if !caps.accepting_work
@@ -403,6 +510,23 @@ mod tests {
         assert!(retry_allowed(Observation::Unconfirmed, 100, 100));
         assert!(retry_allowed(Observation::Stopped, 100, 99));
         assert!(retry_allowed(Observation::Missing, 100, 99));
+    }
+
+    #[test]
+    fn replacement_discovery_is_once_per_round_and_cannot_admit_active_or_uncertain_work() {
+        let mut round = DiscoveryRound::default();
+        assert!(!round.begin(Observation::Complete, 100, 200, false));
+        assert!(!round.begin(Observation::Running, 100, 200, false));
+        assert!(!round.begin(Observation::Unconfirmed, 100, 99, false));
+        assert!(!round.begin(Observation::Stopped, 100, 99, true));
+        assert!(!round.attempted);
+        assert!(round.begin(Observation::Stopped, 100, 99, false));
+        // Even an unavailable discovery response consumes the one query in this round.
+        assert!(round.providers.is_empty());
+        assert!(!round.begin(Observation::Missing, 100, 99, false));
+        assert!(!round.begin(Observation::Unconfirmed, 100, 100, false));
+        let mut later = DiscoveryRound::default();
+        assert!(later.begin(Observation::Unconfirmed, 100, 100, false));
     }
 
     #[test]
@@ -501,6 +625,7 @@ mod tests {
             max_seconds: 600,
             execute: false,
             prefer_other_provider: false,
+            replacement_discovery: None,
         };
         let loaded = load_handles(&args, &source).unwrap();
         assert_eq!(loaded[0].binding, handle.binding);

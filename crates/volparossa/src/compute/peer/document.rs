@@ -114,6 +114,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "input":args.input,"directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
             "discover_peers":args.discovery.discover_peers,
+            "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
             "maximum_document_bytes":MAX_DOCUMENT_BYTES,"private_data_supported":false,
             "tokenizer_execution":false,"network_execution":false})
@@ -243,6 +244,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         args.synthesize,
     )?;
     enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
+    enrollment.replace_peers = args.discovery.replace_peers;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
 }

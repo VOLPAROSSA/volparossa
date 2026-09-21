@@ -79,6 +79,8 @@ struct Enrollment {
     provider_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replace_peers: bool,
 }
 
 fn selection(args: &Options) -> Result<Enrollment> {
@@ -103,6 +105,7 @@ fn selection(args: &Options) -> Result<Enrollment> {
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
         model_fingerprint: None,
+        replace_peers: args.discovery.replace_peers,
     };
     if args.discovery.discover_peers {
         ensure!(
@@ -117,6 +120,10 @@ fn selection(args: &Options) -> Result<Enrollment> {
 }
 
 fn validate_selection(selected: &Enrollment) -> Result<()> {
+    ensure!(
+        !selected.replace_peers || selected.model_fingerprint.is_some(),
+        "compute_executor_replacement_requires_pinned_model"
+    );
     ensure!(
         selected.version == 1
             && selected.selected_at_unix_seconds > 0
@@ -479,6 +486,7 @@ fn expected_work(
         task: selected.task.clone(),
         provider_keys: selected.provider_keys.clone(),
         model_fingerprint: selected.model_fingerprint.clone(),
+        replace_peers: selected.replace_peers,
         selected_at_unix_seconds: selected.selected_at_unix_seconds,
     })
 }
@@ -625,6 +633,7 @@ mod tests {
                 .map(|key| hex::encode(key.verifying_key().as_bytes()))
                 .collect(),
             model_fingerprint: None,
+            replace_peers: false,
         };
         write_bytes(&root.path().join("dataset.json"), json.as_bytes(), false).unwrap();
         write_bytes(

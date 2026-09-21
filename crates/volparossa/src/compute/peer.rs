@@ -3,6 +3,7 @@
 mod batch;
 mod discovery;
 mod document;
+mod executors;
 mod follow;
 mod readiness;
 mod resume;
