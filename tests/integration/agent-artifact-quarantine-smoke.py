@@ -5,10 +5,13 @@
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import re
 import runpy
+import socket
 import struct
+import subprocess
 import sys
 
 PEER = runpy.run_path(str(Path(__file__).resolve().with_name("agent-peer-learning-smoke.py")))
@@ -77,10 +80,23 @@ def corrupt_one_value(raw):
     return changed, offset
 
 
+def setup_location(root, script):
+    require(root.name == "agent-artifact-user" and root.parent.parent == Path("/opt")
+            and re.fullmatch(r"va\.[A-Za-z0-9_.-]+", root.parent.name)
+            and script == root.parent / "bin/agent-artifact-quarantine-smoke.py",
+            "unexpected copied guest fixture layout")
+
+
 def setup(path, publisher):
-    TRAIN["guest_guard"]()
-    selected = PEER["setup"](path, publisher)
+    # This entry point is deliberately copied into the guest's fixed WORK/bin, not
+    # run from /home/vpci/source. Keep the VM/privilege guard and bind that copy to
+    # the exact private fixture root before making the separate invalid revision.
+    require(socket.gethostname() == "volparossa-alpha", "not the dedicated VM")
+    require(subprocess.check_output(["systemd-detect-virt"], text=True).strip() == "kvm", "not KVM")
+    require(os.geteuid() != 0, "incorrect guest privilege for phase")
     root = ART["private_root"](path)
+    setup_location(root, Path(__file__).resolve())
+    selected = PEER["setup"](path, publisher)
     cycle = root / "loop" / f"cycle-{selected['provider_sequence']:016x}"
     originals = {name: (cycle / "training/adapter" / name).read_bytes() for name in FILES}
     manifest = selected["source"]["manifest_id"]
@@ -333,6 +349,18 @@ def report(value, revision):
 
 
 def self_test():
+    root = Path("/opt/va.fixture.abcdef/agent-artifact-user")
+    script = root.parent / "bin/agent-artifact-quarantine-smoke.py"
+    setup_location(root, script)
+    for bad_root, bad_script in ((root, Path("/home/vpci/source/tests/integration/agent-artifact-quarantine-smoke.py")),
+                                 (Path("/tmp/va.fixture.abcdef/agent-artifact-user"), script),
+                                 (root, Path("/opt/va.other.abcdef/bin/agent-artifact-quarantine-smoke.py"))):
+        try:
+            setup_location(bad_root, bad_script)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("wrong copied guest setup location accepted")
     header = json.dumps({"fixture":dict(dtype="F32", shape=[2], data_offsets=[0, 8])}).encode()
     original = len(header).to_bytes(8, "little") + header + struct.pack("<ff", 1.0, 2.0)
     changed, offset = corrupt_one_value(original)
