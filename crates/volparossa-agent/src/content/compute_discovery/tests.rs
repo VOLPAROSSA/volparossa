@@ -65,6 +65,7 @@ fn observation(seed: u8, adapter: bool) -> ([u8; 32], rpc::Eligibility) {
                 task_derivation_v1: true,
                 document_inference_v2: true,
                 derived_inference_v3: true,
+                successor_activation_v1: false,
             },
         },
     )

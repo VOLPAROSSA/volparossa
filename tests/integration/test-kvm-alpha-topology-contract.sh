@@ -38,6 +38,9 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario agent-public-collection | grep -Fi 'collection' >/dev/null
     "$script" --preview --scenario agent-public-network-sources | grep -Ei 'network.sources' >/dev/null
     "$script" --preview --scenario agent-task-graph | grep -Ei 'task.graph' >/dev/null
+    "$script" --preview --scenario agent-successor-serving | grep -Fi 'successor-serving' >/dev/null
+    if "$script" --preview --scenario agent-successor-serving --scenario agent-public-collection \
+        | grep -Fi 'successor-serving' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-task-graph --scenario agent-public-collection \
         | grep -Ei 'task.graph' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-public-network-sources --scenario agent-public-collection \
@@ -76,12 +79,22 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario == "agent-task-graph" else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-successor-serving") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
 grep -F 'agent_task_graph_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_task_graph_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-successor-serving-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'agent-successor-serving-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-successor-serving ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-successor-serving-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-successor-serving'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-successor-serving-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_successor_serving_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_successor_serving_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \

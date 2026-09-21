@@ -4,6 +4,62 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Current learning-to-serving candidate: an explicit shared `--serving-directory` connects the
+training loop's selected approved local/peer successor to an already running peer-inference
+broker. Publication binds the original approval, exact three adapter files, runtime and expiry;
+idle-only activation copies those bytes into broker-owned bounded storage. Active work and old
+receipts keep their original bindings. The agent attachment follows changing model fingerprints
+only with an explicit broker capability, while preserving its socket, base-model and task-profile
+checks. Static brokers retain their prior behavior. Expired/corrupt selections cannot become
+base-model admission after restart; a retained valid copy stops at its original expiry.
+Thirty-three focused storage, selection, broker, protocol and attachment checks plus strict
+all-target CLI/agent/local-control Clippy pass; the actual trained-model/protected-peer-job transition still awaits a
+disposable VM proof. This is not a B03/B05 completion or evidence of general model improvement.
+See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
+
+The [first learning-to-serving run on
+`98ce45bf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35636907319) fails before
+base-model inference or training. Its 115 unchanged original files show
+`accepting_work=false`, followed by an immediate `compute_peer_busy` refusal before any job
+handle or Submit RPC. The exact capacity constraint is not recorded. The fixture also parses
+the runner's cleanup flag as `yes` instead of `true`; its original report therefore remains
+failed despite independently recorded zero remaining objects and identical host-state hashes.
+The correction waits within a fixed bound for the actual expected broker/model to admit work
+and parses the runner's boolean without relaxing capacity, ownership or cleanup checks.
+Training, activation and adapted peer inference still require a successful new execution.
+
+The [readiness-corrected run on
+`de3922b3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35639387212) verifies actual
+base-model peer inference and a 1,005-byte public-source fetch. It then records an unsuccessful
+training-loop cycle before any training worker is observed. The missing `/proc` entry belongs
+to the loop owner, not an identified training worker. Its 125 unchanged original files contain
+no training report or specific cycle error, so they do not prove a worker crash, memory failure
+or expired lease. Cleanup and unchanged host-state checks pass; the failed run lacks the final
+selection records needed for full protected-path reconstruction.
+
+Source inspection identifies a blocking fixture mismatch: its selected learner is relay-only,
+but named-source retrieval requires the client role even for a complete local cache hit. The
+correction enables client capability in that disposable learner's startup configuration, keeps
+relay service enabled and validates its exact pre-provisioned source through the ordinary
+cache-only API before training. It does not bypass the download ACL or claim learner-side
+network acquisition. Training, approval and same-broker adapted inference still need live proof.
+Pure fixture checks and shell syntax/ShellCheck pass. Failure cleanup now retains only bounded
+fixed-file identities and cycle-state categories, not source text or arbitrary error chains.
+
+The [role-corrected run on
+`41911695`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35642406080) reaches the new
+cache-only preflight with the correct learner roles, but returns `CONTENT_INVALID` before
+training. No cycle is started. The fixture had copied the complete cache, including the owner
+marker bound to its original directory's device, inode and UID; reopening the different copied
+directory is correctly rejected. The fixture correction relocates the closed, same-owner cache
+without changing its directory identity or bytes, an operation already supported by the store.
+It never rewrites the marker or relaxes the product cache validation. The failed run's original
+cleanup records prove removal of its observed workers/private stores and unchanged host state;
+training, approval and activation remain unproved until a successful new run.
+The four existing cache-reopen tests pass, including rename/reopen and copied-marker rejection;
+the fixture's pure relocation checks, shell syntax and ShellCheck also pass. No model was run
+by these checks.
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same

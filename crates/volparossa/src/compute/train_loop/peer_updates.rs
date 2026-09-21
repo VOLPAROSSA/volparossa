@@ -317,6 +317,34 @@ pub(super) fn clear_active(registry: &mut Registry) {
     registry.active = None;
 }
 
+pub(super) fn active_sequence(registry: &Registry) -> Option<u64> {
+    registry.active
+}
+
+pub(super) fn serving_candidate(
+    args: &Options,
+    registry: &Registry,
+    local_latest: Option<u64>,
+) -> Result<Option<(PathBuf, u64, Value)>> {
+    let Some(accepted) = active(args, registry, local_latest)? else {
+        return Ok(None);
+    };
+    let sequence = registry.active.context("serving_peer_active_missing")?;
+    let root = round_root(args, sequence)?;
+    // active() rechecks the immutable round/import and both actual comparison reports.
+    // Its original selection expires at min(import publication, dataset, validation).
+    let raw = read_file(&root.join("comparison/selection.json"), 512 * 1024)?;
+    let selection: Value = serde_json::from_slice(&raw)?;
+    let expires = selection["expires"]
+        .as_u64()
+        .context("serving_peer_expiry")?;
+    let provenance = json!({"kind":"approved_peer_update","approved":true,
+        "selection_sha256":hex::encode(Sha256::digest(raw)),"origin":accepted.origin,
+        "adapter_files":accepted.origin["adapter_files"],"expires_unix_seconds":expires,
+        "general_quality_proven":false,"network_authority_claimed":false});
+    Ok(Some((accepted.adapter_root, expires, provenance)))
+}
+
 pub(super) fn active(
     args: &Options,
     registry: &Registry,

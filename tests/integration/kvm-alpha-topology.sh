@@ -22,6 +22,7 @@ agent_public_document=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
+agent_successor_serving=no
 agent_train_cycle=no
 agent_train_loop=no
 agent_artifact_quarantine=no
@@ -40,7 +41,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-successor-serving|agent-task-graph|dns-cache]'
 }
 
 print_plan() {
@@ -57,6 +58,17 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_successor_serving" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA successor-serving plan:' \
+                '  explicitly start disposable learner relay4 with Client+Relay roles, and verify its own cache-only source;' \
+                '  complete a protected base-model inference before local learning;' \
+                '  train a real owner-approved adapter and activate an independently copied idle-broker snapshot;' \
+                '  serve a new protected inference using that exact successor while retaining the old binding and receipt;' \
+                '  preserve original expiry, isolated worker controls, private cleanup and unchanged guest host state;' \
+                '  no automatic model-quality, global-trust or full-alpha claim.'
+            return
+        fi
         if [ "$agent_task_graph" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA explicit public task graph plan:' \
@@ -488,6 +500,7 @@ while [ "$#" -gt 0 ]; do
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
+            agent_successor_serving=no
             agent_train_cycle=no
             agent_train_loop=no
             agent_artifact_quarantine=no
@@ -505,6 +518,7 @@ while [ "$#" -gt 0 ]; do
                 agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-network-sources) scenario=agent-jobs; agent_public_collection=yes; agent_public_network_sources=yes; wifi_link=no; uplink_link=no ;;
                 agent-task-graph) scenario=agent-jobs; agent_task_graph=yes; wifi_link=no; uplink_link=no ;;
+                agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -746,6 +760,14 @@ if [ "$agent_task_graph" = yes ]; then
         agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         [ -f "$source_directory/tests/integration/$graph_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$graph_fixture" ] || exit 69
+    done
+    command -v openssl >/dev/null 2>&1 || exit 69
+fi
+if [ "$agent_successor_serving" = yes ]; then
+    for successor_fixture in agent-successor-serving-smoke.sh agent-successor-serving-smoke.py \
+        agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
+        [ -f "$source_directory/tests/integration/$successor_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$successor_fixture" ] || exit 69
     done
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
@@ -2058,6 +2080,10 @@ if [ "$agent_task_graph" = yes ]; then
     # shellcheck source=tests/integration/agent-task-graph-smoke.sh
     . "$source_directory/tests/integration/agent-task-graph-smoke.sh"
 fi
+if [ "$agent_successor_serving" = yes ]; then
+    # shellcheck source=tests/integration/agent-successor-serving-smoke.sh
+    . "$source_directory/tests/integration/agent-successor-serving-smoke.sh"
+fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
     . "$source_directory/tests/integration/agent-artifact-smoke.sh"
@@ -2199,6 +2225,11 @@ fi
 if [ "$agent_task_graph" = yes ]; then
     for graph_script in agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$graph_script" "$WORK/bin/$graph_script"
+    done
+fi
+if [ "$agent_successor_serving" = yes ]; then
+    for successor_script in agent-successor-serving-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$successor_script" "$WORK/bin/$successor_script"
     done
 fi
 if [ "$agent_train_loop" = yes ]; then
@@ -2504,6 +2535,12 @@ write_config() {
     uplink=independent_internet; extra_listen=none
     dc_enabled=false; dc_upstream=null; dc_metrics=false
     [ "$node" != client ] || client_role=true
+    if [ "$agent_successor_serving" = yes ] && [ "$node" = relay4 ]; then
+        # Disposable learner only: the existing local cache API requires Client.
+        # Roles cannot be enabled dynamically without restarting discovery.
+        # Relay stays enabled; this is not a production participation configuration.
+        client_role=true
+    fi
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
     case $node in
@@ -4662,7 +4699,11 @@ grep -Fx 'client: false' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_CLIE
 grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay3.txt" >/dev/null || fail RELAY3_CLIENT_ROLE_INVALID
-grep -Fx 'client: false' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+if [ "$agent_successor_serving" = yes ]; then
+    grep -Fx 'client: true' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+else
+    grep -Fx 'client: false' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+fi
 grep -Fx 'client: false' "$WORK/roles-relay5.txt" >/dev/null || fail RELAY5_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-exit2.txt" >/dev/null || fail EXIT2_CLIENT_ROLE_INVALID

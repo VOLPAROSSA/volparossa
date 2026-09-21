@@ -1,6 +1,7 @@
 //! Explicit owner-side inference executor, never an arbitrary remote command broker.
 
 mod dataset;
+mod successors;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +60,9 @@ pub(crate) struct Serve {
     /// Optional existing compatible fixed adapter, never selected by an incoming path.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
+    /// Follow only owner-approved immutable successors published by a training loop using this same runtime.
+    #[arg(long, conflicts_with = "adapter_root")]
+    serving_directory: Option<PathBuf>,
     /// Existing private directory for bounded temporary job inputs and outputs.
     #[arg(long)]
     work_root: PathBuf,
@@ -90,6 +94,9 @@ struct Broker {
     capabilities: Capabilities,
     jobs: VecDeque<Job>,
     budget: Budget,
+    successor: Option<super::serving_snapshot::Snapshot>,
+    initial_base: successors::InitialBase,
+    next_successor_check: tokio::time::Instant,
 }
 
 struct SocketGuard {
@@ -120,6 +127,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "version": 1, "kind": "volparossa-compute-broker-plan", "execute": false,
                 "socket": options.socket, "runtime_root": options.runtime_root,
                 "model_root": options.model_root, "adapter_root": options.adapter_root,
+                "serving_directory": options.serving_directory,
+                "successor_activation_v1": options.serving_directory.is_some(),
                 "work_root": options.work_root, "mode": "public_inference_only",
                 "runtime_slots": 1, "pending_queue": 0, "retained_jobs": RETAINED_JOBS,
                 "retained_data_budget_bytes": MAX_RETAINED_BYTES,
@@ -157,6 +166,9 @@ pub(super) async fn run(options: Serve) -> Result<()> {
         capabilities,
         jobs: VecDeque::new(),
         budget: Budget::new(),
+        successor: None,
+        initial_base: successors::InitialBase::Unknown,
+        next_successor_check: tokio::time::Instant::now(),
     };
     let mut ticks = tokio::time::interval(Duration::from_millis(100));
     let serving = async {
@@ -191,6 +203,23 @@ fn validate_roots(options: &Serve) -> Result<()> {
     }
     if let Some(adapter) = &options.adapter_root {
         private_directory(adapter)?;
+    }
+    if let Some(directory) = &options.serving_directory {
+        private_directory(directory)?;
+        ensure!(
+            options.adapter_root.is_none(),
+            "compute_broker_successor_initial_adapter"
+        );
+        for root in [
+            &options.work_root,
+            &options.runtime_root,
+            &options.model_root,
+        ] {
+            ensure!(
+                !directory.starts_with(root) && !root.starts_with(directory),
+                "compute_broker_successor_overlap"
+            );
+        }
     }
     ensure!(
         options.socket.is_absolute(),
@@ -279,6 +308,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         task_derivation_v1: true,
         document_inference_v2: true,
         derived_inference_v3: true,
+        successor_activation_v1: options.serving_directory.is_some(),
     })
 }
 
@@ -324,7 +354,16 @@ impl Broker {
             match &request.operation {
                 Operation::Capabilities => {
                     let mut caps = self.capabilities.clone();
-                    caps.accepting_work = self.available();
+                    caps.accepting_work = self.available() && self.successor_valid(time);
+                    if let Some(snapshot) = &self.successor {
+                        caps.max_job_seconds = caps.max_job_seconds.min(
+                            snapshot
+                                .selection
+                                .expires_unix_seconds
+                                .saturating_sub(time)
+                                .max(1),
+                        );
+                    }
                     Outcome::Capabilities(caps)
                 }
                 // Only the authenticated provider attachment owns publisher trust decisions.
@@ -348,18 +387,16 @@ impl Broker {
             && self
                 .jobs
                 .iter()
-                .try_fold(JOB_RESERVATION_BYTES, |total, job| {
-                    total.checked_add(job.retained_bytes)
-                })
+                .try_fold(
+                    JOB_RESERVATION_BYTES.saturating_add(self.successor_bytes()),
+                    |total, job| total.checked_add(job.retained_bytes),
+                )
                 .is_some_and(|total| total <= MAX_RETAINED_BYTES)
     }
 
     fn submit(&mut self, requester: &str, submit: &Submit, time: u64) -> Outcome {
         if submit.binding.expires_unix_seconds <= time {
             return Outcome::Error(ErrorCode::Expired);
-        }
-        if submit.binding.model_fingerprint != self.capabilities.model_fingerprint {
-            return Outcome::Error(ErrorCode::ModelMismatch);
         }
         if sha(submit.dataset_json.as_bytes()) != submit.binding.dataset_sha256
             || dataset::validate(&submit.dataset_json, submit.binding.row_indices.len()).is_err()
@@ -377,6 +414,18 @@ impl Broker {
             } else {
                 Outcome::Error(ErrorCode::Missing)
             };
+        }
+        // Idempotent old submissions retain the original receipt, even after an
+        // owner-approved model switch. A NEW job must use the current exact model.
+        if submit.binding.model_fingerprint != self.capabilities.model_fingerprint {
+            return Outcome::Error(ErrorCode::ModelMismatch);
+        }
+        if !self.successor_valid(time)
+            || self.successor.as_ref().is_some_and(|snapshot| {
+                submit.binding.expires_unix_seconds > snapshot.selection.expires_unix_seconds
+            })
+        {
+            return Outcome::Error(ErrorCode::Expired);
         }
         if !self.available() {
             return Outcome::Error(ErrorCode::Busy);
@@ -444,7 +493,11 @@ impl Broker {
             mode: Mode::Infer,
             runtime_root: self.options.runtime_root.clone(),
             model_root: self.options.model_root.clone(),
-            adapter_root: self.options.adapter_root.clone(),
+            adapter_root: self
+                .successor
+                .as_ref()
+                .map(|snapshot| snapshot.adapter_path().to_path_buf())
+                .or_else(|| self.options.adapter_root.clone()),
             dataset: dataset_path,
             output: directory.path().join("output"),
             steps: 1,
@@ -517,6 +570,8 @@ impl Broker {
         self.jobs.retain(|job| {
             job.execution.is_some() || job.terminal_retain_until.is_some_and(|until| until > time)
         });
+        // Settlement always uses the original capabilities before any idle switch.
+        self.refresh_successor(time);
     }
 
     async fn shutdown(&mut self) -> Result<()> {
@@ -537,6 +592,9 @@ impl Broker {
                     let _ = execution.await;
                     if let Some(directory) = job.directory.take() {
                         let _ = directory.keep();
+                    }
+                    if let Some(snapshot) = self.successor.take() {
+                        let _ = snapshot.directory.keep();
                     }
                     anyhow::bail!("compute_broker_shutdown_unconfirmed");
                 }

@@ -6,6 +6,7 @@ mod document_plan;
 mod owner_control;
 mod peer;
 mod sandbox;
+mod serving_snapshot;
 mod spare_capacity;
 mod supervise;
 mod train_cycle;

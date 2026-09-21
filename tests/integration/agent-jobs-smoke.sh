@@ -63,6 +63,11 @@ agent_jobs_broker() {
     done
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
+    set --
+    if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
+        set -- --serving-directory "$jobs_private/serving"
+    fi
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
@@ -76,7 +81,7 @@ agent_jobs_broker() {
         --property="StandardError=append:$WORK/agent-jobs-$jobs_node-broker.err" \
         -- "$binary_directory/volparossa" compute serve \
         --runtime-root "$jobs_private/runtime" --model-root "$jobs_root/provision/model" \
-        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" --execute || {
+        --work-root "$jobs_private/work" --socket "$jobs_private/broker.sock" "$@" --execute || {
             agent_jobs_broker_startup start_failed || true
             return 1
         }
@@ -157,6 +162,9 @@ agent_jobs_stop() {
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" cleanup-workers "$WORK" || return 1
+    fi
 }
 
 agent_jobs_cleanup() {
@@ -227,6 +235,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_run
+        return
+    fi
     if [ "${agent_task_graph:-no}" = yes ]; then
         agent_task_graph_run
         return
@@ -330,6 +342,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_task_graph:-no}" = yes ]; then
         agent_task_graph_finalize_report "$jobs_status"
         return
