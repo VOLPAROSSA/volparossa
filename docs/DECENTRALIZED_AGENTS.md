@@ -1529,8 +1529,15 @@ local administrator. The owner can choose to retain stdout, but no private text 
 or added to the network cache by this command.
 
 Strict admission, private-file lifecycle, unchanged public prompts and incomplete-answer
-controls pass locally. Real private-model/guest-isolation evidence remains pending. This is
-not confidential remote execution, private training, secure aggregation or completion of B04.
+controls pass locally. The [disposable proof on `9d870440`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35661083371)
+also passes its source-exact original-artifact check: an actual pinned 360M worker returns the
+synthetic note's random identifier with EOS after 12 tokens, using independently copied private
+input and readonly model/runtime mounts in a network-denied namespace. Owner acknowledgements,
+worker reaping and temporary removal before first stdout, unchanged original input, full guest
+cleanup and identical host network state are observed. No raw private input or internal worker
+report is exported; the test answer is explicitly authorized synthetic data. This narrow proof
+is not general model accuracy, confidential remote execution, private training, secure
+aggregation or completion of B04.
 
 Secure aggregation and differential privacy are candidate building blocks, not installed
 features or blanket guarantees. The [Bonawitz et al. secure-aggregation protocol](https://research.google/pubs/practical-secure-aggregation-for-privacy-preserving-machine-learning/)
@@ -1580,6 +1587,55 @@ rejection. This guards the existing configured authority scope. It does not defi
 membership, authorize key rotation, judge content or complete automatic governance.
 
 ## Mutual checking, quarantine and repair
+
+### Public principle assessments and cross-review
+
+`compute peer policy-assess` is an executable development candidate for the first part of
+automatic content governance. It selects an exact native `text/plain` publication by its original
+publisher, name and manifest ID. The source is chosen before cache lookup; missing chunks are
+fetched through the existing protected content path. Two explicitly selected peers each assess
+the whole subject, then each reviews the other peer's assessment. The versioned framework
+contains all fourteen Latin principles and their English meanings; it directs reasoning from
+intent, context and consequences, not from a catalogue of example prohibitions.
+
+```sh
+volparossa compute peer policy-assess \
+  --output /absolute/private/assessment \
+  --source-publisher-key SOURCE_PUBLIC_KEY --source-name PUBLIC_TEXT_NAME \
+  --source-manifest-id EXACT_MANIFEST_ID --cache /absolute/private/source-cache \
+  --publisher-key OWNER_PUBLIC_KEY --identity /absolute/private/identity.key \
+  --passphrase-file /absolute/private/passphrase --license CC0-1.0 \
+  --provider-key FIRST_PEER_KEY --provider-key SECOND_PEER_KEY --execute
+```
+
+The owner must have permission to redistribute the public subject under the specified license;
+the source signature does not itself grant that permission. Both peers must already be
+provisioned with the pinned 360M profile and independently trust the owner's context publisher.
+Omit `--execute` for an inert preview. Reuse an existing source cache only with `--reuse-cache`.
+No automatic installation, private-file ingestion, training or network-policy signing occurs.
+
+This initial assessment unit is one complete UTF-8 subject of at most 512 bytes, not a silently
+truncated page. Each actual prompt must fit 1024 tokens, each worker has the existing 256-token
+generation bound and at most a 600-second lease. Oversized prompts or incomplete/non-JSON answers
+cannot become judgments. The four jobs run sequentially, with original receipts retained before
+later stages. Outcomes retain principle-linked literal source quotes, reasoning, counterarguments
+and material uncertainty. The coordinator binds opposite-peer reviews to the exact earlier
+assessment and receipt. Agreement without material uncertainty can yield a scoped concept
+`allow` or `deny`; disagreement or uncertainty yields `undetermined`. Different peer keys do not
+prove independent judgment, and a quoted passage does not prove a sound interpretation.
+
+`--output /absolute/private/assessment --resume --execute` reconciles original job handles rather
+than submitting replacement jobs. Once all four stages are complete it can reconstruct the
+decision offline without the signer or any new model work; source expiry is never renewed to
+start later stages. Interrupted or invalid model answers remain explicitly incomplete, while a
+valid completed disagreement remains a complete assessment process with an undetermined outcome.
+
+Nine targeted Rust checks and a compiled-CLI preview smoke pass. The `agent-policy-assessment`
+disposable scenario is prepared to exercise a real native cache miss, all four model jobs,
+opposite reviews, offline replay, protected routes and cleanup; its live proof is pending.
+This does not complete B06: these local concepts are not portable signed policy decisions,
+legal determinations, authority membership/quorum, conflict resolution across partitions or
+automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

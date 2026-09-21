@@ -272,8 +272,10 @@ and cancellation; broader device-activity integration remains incomplete.
 An explicit `compute private-task` candidate keeps a short sensitive question and document
 entirely local: no peer execution, publication, cache admission or training. It uses the same
 isolated model worker and removes its temporary input/report before printing the owner's answer.
-Local contract checks pass; real-model verification is pending. This is a local privacy fallback,
-not confidential distributed computation. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-private-questions)
+A [disposable real-model proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35661083371)
+passes for one synthetic private question, including isolation and cleanup before answer output.
+This is a local privacy fallback, not confidential distributed computation or a guarantee of
+answer quality. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-private-questions)
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
 
@@ -335,6 +337,13 @@ Today, exits enforce a threshold-signed **destination/port whitelist**; this is 
 classifier for everything behind a hostname. The complete governance and agent “immune system”
 are not yet implemented. Filtering cannot guarantee a perfectly clean cache, eliminate legal
 risk, or justify breaking private encryption.
+
+The new `compute peer policy-assess` development candidate fetches one exact public text object,
+asks two selected peers for principle-led judgments, and has each peer examine the other's
+reasoning. It retains the original answers, evidence and disagreements; its concept outcome is
+**allow, deny or undetermined**. Local checks pass; the real peer/model proof is still pending.
+These concepts do not yet change network policy or establish legality.
+[Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
 [Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
 [Current whitelist enforcement →](docs/WHITELIST.md)

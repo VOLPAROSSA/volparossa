@@ -6,6 +6,7 @@ mod document_plan;
 mod inference_output;
 mod owner_control;
 mod peer;
+mod policy_assessment;
 mod private_task;
 mod sandbox;
 mod serving_snapshot;

@@ -152,7 +152,7 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving", "agent-policy-assessment") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
@@ -181,7 +181,7 @@ grep -F 'agent_model_planning_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_model_planning_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent-model-task-graph) scenario=agent-jobs; agent_model_planning=yes; agent_model_task_graph=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-model-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
-for model_scenario in agent-ready-dag agent-model-planning agent-model-task-graph; do
+for model_scenario in agent-ready-dag agent-model-planning agent-model-task-graph agent-policy-assessment; do
     "$HOST" --preview --scenario "$model_scenario" | grep -F 'Guest resources: 4 vCPUs, 6144 MiB RAM;' >/dev/null
 done
 "$HOST" --preview --scenario alpha | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
@@ -209,10 +209,10 @@ for name, expected_resumes in (("agent-model-planning", 2), ("agent-ready-dag", 
     assert fresh[0][fresh[0].index("--model-profile") + 1] == "smollm2-360m-v1", name
     assert all("--model-profile" not in args for args in resumed), name
 jobs = (root / "agent-jobs-smoke.sh").read_text()
-profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then'
+profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then'
 assert jobs.count(profile_gate) == 2
 guest = (root / "kvm-alpha-topology.sh").read_text()
-assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ]; then') == 2
+assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then') == 2
 dag = (root / "agent-ready-dag-smoke.sh").read_text()
 assert dag.count('"$dag_script" collect-failure "$WORK"') == 2
 for phase, failure in (("pause", "READY_DAG_INITIAL_WORKERS_NOT_OBSERVED"),

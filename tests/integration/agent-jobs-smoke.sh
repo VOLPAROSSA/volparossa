@@ -28,7 +28,7 @@ agent_jobs_prepare() {
     jobs_batch_pid=
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_root"
     set -- "$jobs_root"
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- "$@" smollm2-360m-v1
     fi
     if [ "${agent_model_task_graph:-no}" = yes ]; then
@@ -71,7 +71,7 @@ agent_jobs_broker() {
     jobs_attempt=0
     jobs_started=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
     set --
-    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then
+    if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
     fi
     if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
@@ -262,6 +262,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        agent_policy_assessment_run
+        return
+    fi
     if [ "${agent_ready_dag:-no}" = yes ]; then
         agent_ready_dag_run
         return
@@ -377,6 +381,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        agent_policy_assessment_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_ready_dag:-no}" = yes ]; then
         agent_ready_dag_finalize_report "$jobs_status"
         return

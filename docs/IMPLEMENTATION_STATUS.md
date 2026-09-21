@@ -11,10 +11,31 @@ or replaced. Independent graph validation and the original 512-prompt/384-total-
 budget remain in force. Parser failures cannot log a prefix or manufacture EOS. Source-bundled
 adapter code runs only in the existing sandbox, and the three extra wheels require explicit
 guest provisioning; ordinary inference/training retain the original 38-wheel runtime. Historical
-v1 results remain readable without a decoder claim. The combined CLI passes 255 compute tests
-and strict Clippy; 70 pure worker, 10 decoder and 10 provisioning checks pass. This is an
-executable candidate awaiting real decoder/model/peer evidence, not a claim that the token-limit
-failure below is solved or that a syntactically valid graph is a useful decomposition.
+v1 results remain readable without a decoder claim. The combined CLI passes 266 compute tests
+and strict Clippy; 72 pure worker checks pass, with the preceding 10 decoder and 10 provisioning
+checks unchanged. This is an
+executable candidate, not a claim that the token-limit failure below is solved or that a
+syntactically valid graph is a useful decomposition.
+
+The [constrained graph run on `9d870440`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35661093770)
+**fails** before enrollment with `TASK_GRAPH_ATTEMPTS_EXHAUSTED`. The real pinned decoder/model
+uses 55, 147, 147 and 35 tokens: the first three complete JSON responses fail semantic graph
+validation, and the fourth hits the remaining token limit. Rejected text was not exported;
+the particular semantic defects cannot be inferred from the generic `INVALID_GRAPH` code.
+All 112 original files are source-exact checked, including pinned decoder dependencies, actual
+owner isolation, 6-GiB/four-vCPU guest, reaping, cleanup and unchanged host state. No peer job
+or offline replay is reached, so this also does not prove the earlier peer-memory-pressure
+problem resolved. Specific bounded rejection feedback is now added without repairing output,
+supplying task contents or increasing generation budgets.
+
+New B06 candidate: `compute peer policy-assess` fetches one exact signed public native text,
+executes two selected peers' principle-led assessments and opposite-peer reviews, and derives
+a scoped concept outcome with original receipts and preserved uncertainty/disagreement.
+It uses all fourteen Latin principles as its reasoning framework, not the historical examples
+as a classifier. Nine focused Rust checks and a compiled-CLI inert-preview smoke pass. A real
+four-job disposable test is wired but not yet passed. No threshold signing, network-policy
+activation, legal correctness, independent model judgment or full B06 completion is claimed.
+See [scope and usage](DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review).
 
 Latest real-model results remain failures, not completed agent cooperation. The
 [model-selected graph run on `7de9448a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656629758)
@@ -41,13 +62,13 @@ not truncated; one context must fit the selected model's actual tokenizer budget
 input/report deletion follows confirmed worker reaping and precedes answer stdout, while the
 original owner file remains untouched. Unconfirmed cleanup emits no answer and retains only
 the owned job tree. Partial/non-EOS answers cannot become complete outputs. Five focused Rust
-checks and 68 pure worker checks pass; live model/guest proof remains pending. This supplies a
+checks and 70 pure worker checks pass; live model/guest proof now passes as recorded below. This supplies a
 local privacy fallback, not confidential distributed execution, larger private-document task
 graphs, private training or B04 completion. A standalone `agent-private-task` KVM scenario now
 checks a real pinned 360M answer to an authorized synthetic private note, observed readonly
 snapshot/model mounts, owner acknowledgements and cleanup at the first stdout read. It also
 requires the public executor to reject that private input before acquiring the runtime. Pure
-fixture and static workflow checks pass; no live success is claimed. Only selected proof and
+fixture and static workflow checks pass. Only selected proof and
 the explicitly synthetic test answer may be exported, never a user's private input or internal
 worker report. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
 The [first private run on `75dcc9ad`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35660153750)
@@ -56,7 +77,16 @@ executes the actual 360M worker, returns the generated synthetic identifier with
 the cleanup tracker aliased the embedded observed-process list and appended the same identities
 again, so the final bundle disagrees with the separate original isolation record. The fixture
 now copies that list before tracking cleanup; neither the original artifacts nor the strict
-bundle-equality check are changed. A fresh run must verify the correction before claiming PASS.
+bundle-equality check are changed.
+The [fresh run on `9d870440`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35661083371)
+**passes**, including a source-exact check of all 15 original exported files. The actual pinned
+360M worker returns the new synthetic identifier with EOS after 12 tokens. Independent private
+snapshot, readonly mounts, network isolation, public-path rejection before runtime acquisition,
+owner acknowledgements, worker reaping and temporary removal before first stdout all pass.
+Original owner input stays intact; guest roots are removed without fallback signals and host
+network-state bytes remain identical. The original failed run remains failed and unchanged.
+This verifies the bounded local private lane, not confidential distributed computation,
+private training, general answer accuracy or full B04.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready

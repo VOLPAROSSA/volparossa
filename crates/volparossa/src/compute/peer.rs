@@ -5,6 +5,7 @@ mod discovery;
 mod document;
 mod executors;
 mod follow;
+mod policy_assessment;
 mod readiness;
 mod resume;
 mod task;
@@ -51,6 +52,8 @@ pub(crate) enum Command {
     Task(Box<task::Options>),
     /// Tokenize one explicitly public document and execute all its excerpts on selected peers.
     Document(Box<document::Options>),
+    /// Two selected peers assess one public publication and cross-review a local concept verdict.
+    PolicyAssess(Box<policy_assessment::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -256,6 +259,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::Workflow(args) => return workflow::run(&args, socket).await,
         Command::Task(args) => return task::run(&args, socket).await,
         Command::Document(args) => return document::run(&args, socket).await,
+        Command::PolicyAssess(args) => return policy_assessment::run(&args, socket).await,
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())

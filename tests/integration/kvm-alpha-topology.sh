@@ -26,6 +26,7 @@ agent_ready_dag=no
 agent_model_planning=no
 agent_model_task_graph=no
 agent_successor_serving=no
+agent_policy_assessment=no
 agent_train_cycle=no
 agent_train_loop=no
 agent_artifact_quarantine=no
@@ -44,7 +45,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|agent-policy-assessment|dns-cache]'
 }
 
 print_plan() {
@@ -61,6 +62,15 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_policy_assessment" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA public policy-assessment plan:' \
+                '  bind one public native subject to its original publication and protected peer jobs;' \
+                '  observe four real 360M assessments, retain exact original worker receipts and replay offline;' \
+                '  invalid or unknown model output fails; no text repair or forced policy verdict;' \
+                '  no production whitelist change, legal guarantee or full-B06 claim.'
+            return
+        fi
         if [ "$agent_ready_dag" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA ready-DAG dependency queue plan:' \
@@ -538,6 +548,7 @@ while [ "$#" -gt 0 ]; do
             agent_model_planning=no
             agent_model_task_graph=no
             agent_successor_serving=no
+            agent_policy_assessment=no
             agent_train_cycle=no
             agent_train_loop=no
             agent_artifact_quarantine=no
@@ -559,6 +570,7 @@ while [ "$#" -gt 0 ]; do
                 agent-model-planning) scenario=agent-jobs; agent_model_planning=yes; wifi_link=no; uplink_link=no ;;
                 agent-model-task-graph) scenario=agent-jobs; agent_model_planning=yes; agent_model_task_graph=yes; wifi_link=no; uplink_link=no ;;
                 agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;
+                agent-policy-assessment) scenario=agent-jobs; agent_policy_assessment=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -754,7 +766,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     done
     command -v bwrap >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ]; then
+if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
     [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
         && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
 fi
@@ -825,6 +837,13 @@ if [ "$agent_model_planning" = yes ]; then
         agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         [ -f "$source_directory/tests/integration/$planning_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$planning_fixture" ] || exit 69
+    done
+    command -v openssl >/dev/null 2>&1 || exit 69
+fi
+if [ "$agent_policy_assessment" = yes ]; then
+    for assessment_fixture in agent-policy-assessment-smoke.sh agent-policy-assessment-smoke.py; do
+        [ -f "$source_directory/tests/integration/$assessment_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$assessment_fixture" ] || exit 69
     done
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
@@ -2153,6 +2172,10 @@ if [ "$agent_model_planning" = yes ]; then
     # shellcheck source=tests/integration/agent-model-planning-smoke.sh
     . "$source_directory/tests/integration/agent-model-planning-smoke.sh"
 fi
+if [ "$agent_policy_assessment" = yes ]; then
+    # shellcheck source=tests/integration/agent-policy-assessment-smoke.sh
+    . "$source_directory/tests/integration/agent-policy-assessment-smoke.sh"
+fi
 if [ "$agent_successor_serving" = yes ]; then
     # shellcheck source=tests/integration/agent-successor-serving-smoke.sh
     . "$source_directory/tests/integration/agent-successor-serving-smoke.sh"
@@ -2269,7 +2292,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_pin in provision.py requirements.lock model-pins.json; do
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$artifact_pin" "$WORK/bin/ml/$artifact_pin"
     done
-    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ]; then
+    if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi
     if [ "$agent_model_task_graph" = yes ]; then
@@ -2317,6 +2340,9 @@ if [ "$agent_model_planning" = yes ]; then
     for planning_script in agent-model-planning-smoke.py agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$planning_script" "$WORK/bin/$planning_script"
     done
+fi
+if [ "$agent_policy_assessment" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-policy-assessment-smoke.py" "$WORK/bin/agent-policy-assessment-smoke.py"
 fi
 if [ "$agent_successor_serving" = yes ]; then
     for successor_script in agent-successor-serving-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do

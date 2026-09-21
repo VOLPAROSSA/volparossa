@@ -386,7 +386,7 @@ pub(super) async fn execute(
 }
 
 /// Observe a previously persisted job without ever repeating its Submit.
-async fn observe_existing(
+pub(super) async fn observe_existing(
     socket: &Path,
     handle: &JobHandle,
     cancelled: watch::Receiver<bool>,
