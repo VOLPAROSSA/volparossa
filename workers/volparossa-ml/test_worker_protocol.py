@@ -307,7 +307,7 @@ class WorkerProtocolTests(unittest.TestCase):
                 return incomplete
 
             model.generate.side_effect = generate
-            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_INCOMPLETE_GENERATION"):
+            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_INCOMPLETE_GENERATION"):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
             model.generate.assert_called_once()
 
@@ -322,13 +322,13 @@ class WorkerProtocolTests(unittest.TestCase):
                 return torch.tensor([[11, 12, 13] + returned])
 
             model.generate.side_effect = generate
-            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_COMPLETION_TOKENS_CHANGED"):
+            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_COMPLETION_TOKENS_CHANGED"):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
         # Even valid final text without EOS needs its own in-generation marker.
         model, tokenizer, torch, transformers = task_planner_doubles(valid)
         model.generate.side_effect = None
         model.generate.return_value = torch.tensor([[11, 12, 13, 21, 22]])
-        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_INCOMPLETE_GENERATION"):
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_INCOMPLETE_GENERATION"):
             WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
 
     def test_task_planning_never_truncates_repairs_retries_or_falls_back(self):
@@ -353,8 +353,8 @@ class WorkerProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(WORKER.JobError, "DUPLICATE_OR_EMPTY_TASK_PLAN_QUESTION"):
             WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
         self.assertEqual(model.generate.call_count, 2)
-        for change, error in (("prompt", "TASK_PLAN_QUESTION_2_PROMPT_TOKEN_LIMIT_EXCEEDED"),
-                              ("tokens", "TASK_PLAN_QUESTION_2_GENERATION_LIMIT_REACHED"),
+        for change, error in (("prompt", "TASK_PLAN_QUESTION_TWO_PROMPT_TOKEN_LIMIT_EXCEEDED"),
+                              ("tokens", "TASK_PLAN_QUESTION_TWO_GENERATION_LIMIT_REACHED"),
                               ("owner", "JOB_DEADLINE_EXCEEDED")):
             model, tokenizer, torch, transformers = task_planner_doubles(["First question?", "Second question?"])
             session = mock.Mock()
@@ -374,6 +374,18 @@ class WorkerProtocolTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaisesRegex(WORKER.JobError, error):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
             self.assertEqual(model.generate.call_count, 2 if change == "tokens" else 1)
+
+    def test_task_question_failure_codes_match_supervisor_fixed_alphabet(self):
+        # The Rust supervisor deliberately accepts only [A-Z_]{1,64}; digits
+        # would hide either stage behind UNKNOWN_FIXED_FAILURE.
+        for previous, stage in ((None, "ONE"), ("Earlier model question?", "TWO")):
+            model, tokenizer, torch, transformers = task_planner_doubles(" ")
+            with self.subTest(stage=stage), self.assertRaises(WORKER.JobError) as failure:
+                WORKER.plan_task_question(model, tokenizer, torch, transformers,
+                                          task_plan_input(), mock.Mock(), previous)
+            code = str(failure.exception)
+            self.assertEqual(code, "TASK_PLAN_QUESTION_" + stage + "_EMPTY_TEXT")
+            self.assertRegex(code, r"\A[A-Z_]{1,64}\Z")
 
     def test_task_plan_branch_loads_weights_and_retains_only_valid_hashed_questions(self):
         expected = dict(version=1, questions=["Which requirements?", "Which risks?"])

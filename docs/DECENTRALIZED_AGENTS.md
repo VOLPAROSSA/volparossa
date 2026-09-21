@@ -1069,6 +1069,13 @@ broker tests pass. The [corrected run on `dd405d9`](https://github.com/VOLPAROSS
 also failed, this time after eight completed fragment jobs: another submitted job remained
 unconfirmed without a terminal receipt. It did not reach synthesis; this is a separate unresolved
 submission/confirmation failure, not evidence that the complete native-source workflow works.
+The subsequent [run on `0faba056`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35624295193)
+does verify the full mixed-source execution: nine fragments and four real reduction levels
+(9→5→3→2→1), twenty actual workers, original signatures and expiry, cache hit/protected miss and
+zero-round offline resume with unchanged receipts. All 174 original files reconstruct the
+retained report exactly; five captures show 131,266 frames with no drops/direct-exit packets,
+and cleanup/host checks pass. Earlier intermittent failures remain unresolved rather than
+being relabeled as fixed by diagnostics.
 
 Unconfirmed batch results now retain an optional fixed `diagnostic`: the RPC operation phase,
 `exchange_unconfirmed`, `broker_rejected` plus its authenticated `ErrorCode`, or
@@ -1178,7 +1185,12 @@ also hit that limit before any plan or peer job. Its 109 original files retain a
 isolation and complete cleanup, not the generated text. That disproves neither model reasoning
 nor JSON validity of a particular prefix: those details were not observed. The two-question
 candidate removes model-generated JSON as a prerequisite without supplying canned questions.
-Complete model-planning/peer-execution proof remains pending.
+The [two-question run on `14b91c0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35625031280)
+also failed before enrollment, now with `UNKNOWN_FIXED_FAILURE`. The new stage-code digits
+were incompatible with the supervisor's fixed-code grammar; prefixes now use `QUESTION_ONE`
+and `QUESTION_TWO` without changing generation. The original unfiltered reply was not retained,
+so neither the failing stage nor its cause can be reconstructed. Complete model/peer proof
+remains pending.
 JSON validity and real execution would still not establish decomposition quality, answer
 correctness, general autonomous planning or full B03.
 

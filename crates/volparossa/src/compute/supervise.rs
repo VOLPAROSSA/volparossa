@@ -768,6 +768,32 @@ mod tests {
         serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
     }
 
+    #[test]
+    fn planner_stage_failures_preserve_fixed_codes_without_adapter_authority() {
+        for stage in ["ONE", "TWO"] {
+            for cause in [
+                "PROMPT_TOKEN_LIMIT_EXCEEDED",
+                "INVALID_GENERATION_SHAPE",
+                "PROMPT_CHANGED",
+                "GENERATION_LIMIT_REACHED",
+                "COMPLETION_TOKENS_CHANGED",
+                "INCOMPLETE_GENERATION",
+                "INVALID_TEXT",
+                "EMPTY_TEXT",
+            ] {
+                let code = format!("TASK_PLAN_QUESTION_{stage}_{cause}");
+                let error = reaped_failure(worker_failure(
+                    &failure_reply(&code),
+                    "abc",
+                    ExitStatus::from_raw(256),
+                ));
+                assert_eq!(error.to_string(), format!("compute_backend_failed: {code}"));
+                assert_eq!(error.downcast_ref::<WorkerFailure>().unwrap().code(), code);
+                assert_eq!(adapter_violation(&error), None);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn exact_adapter_failures_become_typed_only_at_the_reaped_boundary() {
         for code in [

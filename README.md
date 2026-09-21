@@ -207,14 +207,13 @@ been combined into one answer through four real peer-inference levels. These sco
 prove execution, not answer quality, general intelligence or universally better updates.
 
 Public work now has verified cross-package peer scheduling: a free worker can take work from
-another signed package while a slower worker continues. A new **source collection** candidate
-adds comparisons across explicitly public local documents and selected signed network publications,
+another signed package while a slower worker continues. **Source collections** now
+add comparisons across explicitly public local documents and selected signed network publications,
 reusing cached bytes and fetching missing sources without changing the selection. It preserves source-byte
-provenance through the existing peer-execution and synthesis pipeline. The local-source proof
-passes. The first native-network-source run verified cache reuse and protected retrieval,
-but stalled when both executors filled their retained-job history. After a targeted fix, the
-next run stopped on an unconfirmed peer submission; this combined workflow is not yet verified.
-A diagnostic run then failed earlier, while resolving the first cache provider's address.
+provenance through the existing peer-execution and synthesis pipeline. Both local-source and
+mixed local/cache/network execution have passed real VM proofs, including offline resume.
+The mixed run observed twenty actual workers. Earlier intermittent address/submission failures
+remain documented; one passing execution does not establish that their causes are resolved.
 Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
@@ -225,7 +224,8 @@ automatically, preserving the original question in the final task. That goal-onl
 passes focused local checks. Two real-model attempts reached the generation limit without an
 accepted plan. The next candidate lets the model generate two complementary questions while
 the software supplies only the file structure. Complete model-and-peer execution proof is
-still pending; the model does not yet choose the number or shape of tasks.
+still pending: its real run failed before enrollment, and incompatible diagnostic codes hid
+the precise stage. Those codes are corrected; the model does not yet choose task count or shape.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

@@ -30,6 +30,12 @@ counts remain bound to the original report. No canned questions, model-selected 
 complete model/peer/offline-resume proof or answer-quality claim; B03 remains incomplete.
 Eight focused Rust checks, thirty-three pure worker tests, the fixture's pure checks and strict
 CLI Clippy pass; the two-question strategy still needs its actual isolated model/peer proof.
+The [two-question run on `14b91c0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35625031280)
+**failed before enrollment** with `UNKNOWN_FIXED_FAILURE`; no accepted plan or peer phase is
+proved. The new `QUESTION_1`/`QUESTION_2` diagnostic prefixes contain digits, but the existing
+supervisor admits only uppercase letters and underscores. They are corrected to `QUESTION_ONE`
+and `QUESTION_TWO`, with cross-language contract checks; generation and budgets are unchanged.
+The original unfiltered failure reply was not retained, so its precise stage/cause remains unknown.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
@@ -48,7 +54,7 @@ private/network cleanup and unchanged host state pass. This verifies the explici
 The current scheduler has a source-stage barrier and ordered dependent stages, not fully dynamic
 DAG scheduling or automatic task planning. This does not complete B03 or add private computation.
 
-Current network-source candidate: source-plan v2 combines explicitly selected local files and
+Verified mixed network-source execution: source-plan v2 combines explicitly selected local files and
 native signed `text/plain` publications in the same public document task. Publisher key, name
 and exact manifest ID are fixed before any cache lookup. Verified cached chunks are reused;
 missing content is fetched through the existing protected content path, never replaced by a
@@ -68,8 +74,8 @@ unchanged; thirteen focused broker tests pass. The [corrected run on
 `dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632) **also failed**, now
 after eight completed fragment jobs: a new retained job handle remained unconfirmed with
 `COMPUTE_RPC_UNCONFIRMED`, without a terminal receipt. Synthesis did not start. This is a
-separate submission/confirmation failure under investigation; there is no complete workflow
-proof, automatic web research, private computation or completed B03 checkpoint.
+separate submission/confirmation failure under investigation. The later passing execution below
+does not retrospectively resolve it or add automatic web research, private computation or B03.
 
 The new diagnostic step preserves fixed RPC operation/category and an authenticated broker
 error code when available, while leaving uncertain handles, slot ownership and original
@@ -85,6 +91,14 @@ the previous unconfirmed submission. All 121 original artifact files were retain
 and unchanged host state passed. A follow-up adds fixed address-resolution failure categories
 and early client/control-relay snapshots around deposits and warmup, without changing lookup
 acceptance, timeouts, retries or authority. It is diagnostic, not a claimed functional fix.
+The [run on `0faba056`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35624295193) and
+source-exact reconstruction of all 174 original files **pass**: one local source, two exact
+native publications and their original custody signatures, a real cache hit and protected cache
+miss. Nine fragment jobs feed synthesis 9→5→3→2→1, twenty actual workers across two peers.
+Original input/source-plan removal and stopped brokers precede zero-round offline resume with
+identical retained receipts. Five captures contain 131,266 frames, zero drops/direct-exit packets;
+complete cleanup and unchanged host state pass. This proves this mixed-source execution, not
+answer quality or causal repair of the earlier intermittent address/submission failures.
 
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly

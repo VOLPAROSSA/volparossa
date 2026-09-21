@@ -789,7 +789,7 @@ def task_plan_messages(dataset, previous=None):
 
 
 def plan_task_question(model, tokenizer, torch, transformers, dataset, session, previous):
-    code = "TASK_PLAN_QUESTION_" + ("1_" if previous is None else "2_")
+    code = "TASK_PLAN_QUESTION_" + ("ONE_" if previous is None else "TWO_")
     session.check()
     prompt = tokenizer.apply_chat_template(task_plan_messages(dataset, previous), tokenize=True,
                                            add_generation_prompt=True, return_dict=False)
