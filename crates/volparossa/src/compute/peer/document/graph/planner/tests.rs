@@ -16,6 +16,49 @@ fn input(document: &str) -> task_plan::Input {
     }
 }
 
+#[test]
+fn terminal_failure_retains_post_cleanup_trace_without_enrollment_or_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let input = input("Explicit public source.");
+    let bytes = serde_json::to_vec(&input).unwrap();
+    retain_failure(
+        root.path(),
+        &input,
+        &bytes,
+        &anyhow::anyhow!("compute_reap"),
+    )
+    .unwrap();
+    verify_absent(root.path()).unwrap();
+    let diagnostic = json!({"strategy":"model_questions_scaffold_recovery_v2",
+        "attempts":[],"incomplete_attempt":true});
+    let failure = compute::supervise::test_worker_failure_with_diagnostic(
+        "BACKEND_EXECUTION_FAILED",
+        Some(diagnostic.clone()),
+    );
+    retain_failure(root.path(), &input, &bytes, &failure).unwrap();
+    let saved = read_file(&root.path().join("planner-failure.json"), MAX_REPORT_BYTES).unwrap();
+    let report: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(
+        report,
+        json!({
+            "version":1,"operation":"compute_public_task_planning_failure",
+            "request_id":"ab".repeat(16),"code":"BACKEND_EXECUTION_FAILED",
+            "input_sha256":digest(&bytes),"source_sha256":input.source_sha256,
+            "source_bytes":input.source_bytes,"planner_diagnostic":diagnostic,
+            "child_reaped":true,"plan_enrolled":false
+        })
+    );
+    assert!(!root.path().join("planner-report.json").exists());
+    assert!(!root.path().join("graph.json").exists());
+    assert!(verify_absent(root.path()).is_err());
+    assert!(retain_failure(root.path(), &input, &bytes, &failure).is_err());
+    assert_eq!(
+        read_file(&root.path().join("planner-failure.json"), MAX_REPORT_BYTES).unwrap(),
+        saved
+    );
+}
+
 fn questions(count: usize) -> task_plan::Questions {
     task_plan::Questions {
         version: 1,

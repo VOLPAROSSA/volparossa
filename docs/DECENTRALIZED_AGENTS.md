@@ -1162,12 +1162,17 @@ other documents or replace a missing source with convenient cached content.
 This first planner sees the public question only, not the source text. Its source hash and byte
 count bind subsequent work, but are not evidence of source understanding. The current candidate
 generates one question, then a complementary question with the first included in the prompt.
-Each generation has at most 512 prompt tokens and 192 new tokens, within the same original
-owner deadline; combined generated tokens stay below 384. The software supplies only the
+Each generation has at most 512 prompt tokens and 192 new tokens, or the smaller remaining
+allowance, within the same original owner deadline. At most four generations share the
+384-token total; rejected generations count too, and success requires two accepted questions
+before that total is exhausted. The software supplies only the
 `version`/`questions` JSON structure. It does not supply, extract, rewrite or repair the question
-text. Generation stops on the entire bounded question ending in `?`, or at model EOS; duplicate,
-empty or limit-hit output fails. The report explicitly records `model_questions_scaffold_v1`,
-`local_schema`, both stages' token counts and their `question_boundary`/`eos` stop reasons.
+text. Generation stops on the entire bounded question ending in `?`, or at model EOS. Empty,
+overlong, NUL-containing, duplicate or limit-hit text may prompt another generation with fixed
+categorical feedback; backend, encoding, framing, owner and integrity failures remain fatal.
+The report records `model_questions_scaffold_recovery_v2`, `local_schema`, every attempt's
+token cost, fixed rejection reason and text hash, and the two accepted questions' exact text
+binding and `question_boundary`/`eos` stop reasons. The earlier v1 reports remain verifiable.
 This is a fixed two-question fork/join strategy, not model-selected task count or graph shape.
 Model output remains question data: it cannot select tools, commands, paths or external actions.
 
@@ -1190,7 +1195,15 @@ also failed before enrollment, now with `UNKNOWN_FIXED_FAILURE`. The new stage-c
 were incompatible with the supervisor's fixed-code grammar; prefixes now use `QUESTION_ONE`
 and `QUESTION_TWO` without changing generation. The original unfiltered reply was not retained,
 so neither the failing stage nor its cause can be reconstructed. Complete model/peer proof
-remains pending.
+remains pending. The [corrected-code run on `809497b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35627888279)
+now identifies `TASK_PLAN_QUESTION_TWO_INVALID_TEXT` before enrollment. Source-exact review
+of its 109 unchanged original files verifies owner isolation, pause/resume and full cleanup with
+unchanged host state, but no accepted plan or peer jobs. The failing final text check rejects
+empty text, more than 512 UTF-8 bytes, NUL or unencodable text; the original text/tokens were not
+retained, so none of those conditions can individually be named as the cause.
+The bounded recovery candidate is still awaiting actual model/peer proof. When a worker fails,
+its validated attempt metadata can be retained in `planner-failure.json` only after cleanup;
+no rejected text is exported and the diagnostic cannot authorize enrollment or another run.
 JSON validity and real execution would still not establish decomposition quality, answer
 correctness, general autonomous planning or full B03.
 

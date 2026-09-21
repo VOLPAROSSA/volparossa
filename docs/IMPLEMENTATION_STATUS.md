@@ -10,7 +10,8 @@ question data forms a fixed fork/join graph, with the original user question unc
 terminal join. The model sees the goal only; original source hash/size bind later execution,
 without claiming source understanding. Source acquisition occurs once, and the exact planner
 input, report, artifact and enrollment hashes are checked on resume without replanning. Invalid
-or generation-limit output fails, with no repaired/canned plan, tool authority or private offload.
+output may be regenerated within the same bounded invocation; exhausted budgets fail without
+a repaired/canned plan, tool authority or private offload.
 The initial implementation passed forty-eight focused Rust checks, twenty-nine pure Python
 protocol tests and strict CLI Clippy. The [first real run on
 `086761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35619669855) **failed** at
@@ -36,6 +37,26 @@ proved. The new `QUESTION_1`/`QUESTION_2` diagnostic prefixes contain digits, bu
 supervisor admits only uppercase letters and underscores. They are corrected to `QUESTION_ONE`
 and `QUESTION_TWO`, with cross-language contract checks; generation and budgets are unchanged.
 The original unfiltered failure reply was not retained, so its precise stage/cause remains unknown.
+The [diagnostic-corrected run on `809497b`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35627888279)
+**fails at `TASK_PLAN_QUESTION_TWO_INVALID_TEXT`**, before enrollment or peer execution.
+The final second-question text check was reached after token/framing checks; it rejects empty,
+over-512-byte, NUL-containing or non-UTF-8-encodable text. Its exact condition is unknown because
+the original output text/tokens were not exported. Source-exact review preserves all 109 original
+artifact files and verifies actual owner isolation, pause/resume and complete cleanup/unchanged
+host state, not a valid model plan, peer graph, offline resume or answer quality.
+
+The current recovery candidate uses `model_questions_scaffold_recovery_v2`: at most four
+generations under the same original owner deadline and 384-token total allowance. Each
+generation receives at most 192 new tokens or the smaller remaining allowance. Rejected tokens
+count too; two accepted questions are required before that total is exhausted. Only empty,
+overlong, NUL-containing, duplicate or token-limit output may trigger another generation, using
+fixed categorical feedback rather than repaired text or replacement questions. Backend,
+encoding, framing, cancellation and other integrity failures remain fatal. Exact accepted text
+is bound to all attempt metadata; failure diagnostics retain only counts, fixed reasons and
+text hashes after child cleanup, not rejected text or enrollment authority. Resume never
+replans. Twenty-six focused Rust tests, thirty-nine pure worker tests, the fixture's pure
+checks and strict CLI Clippy pass. This candidate is not yet verified by an actual model/peer
+execution.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

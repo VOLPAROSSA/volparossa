@@ -125,11 +125,17 @@ pub(super) async fn prepare(
         }
         let _ = owner.send(false);
     });
-    // Exactly one attempt. Failed/invalid output remains diagnostic data, not a
-    // request for another model attempt, a canned plan or an overwritten result.
+    // Exactly one worker invocation and owner deadline. Its bounded generation
+    // retries share the original token budget; a terminal failure never replans.
     let report = compute::execute(&options, idle).await;
     bridge.abort();
-    let report = report?;
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            retain_failure(&args.directory, &input, &bytes, &error)?;
+            return Err(error);
+        }
+    };
     save(&args.directory, "planner-report.json", &report, false)?;
     let artifact = read_file(&output.join("task-questions.json"), MAX_PLANNER_BYTES)?;
     let questions = task_plan::validate_report(&report, &input, &bytes, &artifact)?;
@@ -153,6 +159,34 @@ pub(super) async fn prepare(
         source_bytes: input.source_bytes,
     };
     Ok((plan, authority))
+}
+
+fn retain_failure(
+    root: &Path,
+    input: &task_plan::Input,
+    bytes: &[u8],
+    error: &anyhow::Error,
+) -> Result<()> {
+    // WorkerFailure is exposed only after the exact child has been reaped. Neither
+    // generic supervisor errors nor a string resembling a worker reply prove that.
+    let Some(failure) = error.downcast_ref::<compute::supervise::WorkerFailure>() else {
+        return Ok(());
+    };
+    let Some(diagnostic) = failure.planner_diagnostic() else {
+        return Ok(());
+    };
+    save(
+        root,
+        "planner-failure.json",
+        &json!({
+            "version":1,"operation":"compute_public_task_planning_failure",
+            "request_id":failure.request_id(),"code":failure.code(),
+            "input_sha256":digest(bytes),"source_sha256":input.source_sha256,
+            "source_bytes":input.source_bytes,"planner_diagnostic":diagnostic,
+            "child_reaped":true,"plan_enrolled":false
+        }),
+        false,
+    )
 }
 
 fn verify_input(authority: &Authority, input: &task_plan::Input, source: &Input) -> Result<()> {
@@ -202,6 +236,7 @@ pub(super) fn verify_absent(root: &Path) -> Result<()> {
         "planner-input.json",
         "planner-report.json",
         "planner-artifact.json",
+        "planner-failure.json",
         "model-planner",
     ] {
         ensure!(

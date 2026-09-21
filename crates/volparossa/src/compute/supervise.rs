@@ -32,6 +32,7 @@ const MAX_OBSERVED_THREADS: usize = 128;
 pub(super) struct WorkerFailure {
     request_id: String,
     code: String,
+    planner_diagnostic: Option<super::task_plan::PlanningDiagnostic>,
 }
 
 impl WorkerFailure {
@@ -41,6 +42,10 @@ impl WorkerFailure {
 
     pub(super) fn code(&self) -> &str {
         &self.code
+    }
+
+    pub(super) fn planner_diagnostic(&self) -> Option<&super::task_plan::PlanningDiagnostic> {
+        self.planner_diagnostic.as_ref()
     }
 }
 
@@ -58,6 +63,7 @@ impl std::error::Error for WorkerFailure {}
 struct PendingWorkerFailure {
     request_id: String,
     code: String,
+    planner_diagnostic: Option<super::task_plan::PlanningDiagnostic>,
 }
 
 impl fmt::Display for PendingWorkerFailure {
@@ -92,6 +98,7 @@ fn reaped_failure(error: anyhow::Error) -> anyhow::Error {
         Ok(failure) => WorkerFailure {
             request_id: failure.request_id,
             code: failure.code,
+            planner_diagnostic: failure.planner_diagnostic,
         }
         .into(),
         Err(error) => error,
@@ -101,9 +108,20 @@ fn reaped_failure(error: anyhow::Error) -> anyhow::Error {
 /// Synthetic protocol input for pure caller tests; not evidence of a real worker or cleanup.
 #[cfg(test)]
 pub(super) fn test_worker_failure(code: &str) -> anyhow::Error {
+    test_worker_failure_with_diagnostic(code, None)
+}
+
+#[cfg(test)]
+pub(super) fn test_worker_failure_with_diagnostic(
+    code: &str,
+    diagnostic: Option<Value>,
+) -> anyhow::Error {
     let id = "ab".repeat(16);
-    let reply =
+    let mut reply =
         serde_json::json!({"version":1,"id":id,"kind":"result", "status":"error","code":code});
+    if let Some(diagnostic) = diagnostic {
+        reply["planner_diagnostic"] = diagnostic;
+    }
     reaped_failure(worker_failure(&reply, &id, ExitStatus::from_raw(1 << 8)))
 }
 
@@ -294,6 +312,11 @@ fn worker_failure(value: &Value, id: &str, status: ExitStatus) -> anyhow::Error 
         PendingWorkerFailure {
             request_id: id.to_owned(),
             code: code.to_owned(),
+            // Optional diagnostic data cannot change the fixed failure or authorize a plan.
+            // Invalid traces are discarded, never normalized into plausible observations.
+            planner_diagnostic: value
+                .get("planner_diagnostic")
+                .and_then(|value| super::task_plan::PlanningDiagnostic::from_value(value).ok()),
         }
         .into()
     } else {
@@ -766,6 +789,30 @@ mod tests {
 
     fn failure_reply(code: &str) -> Value {
         serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
+    }
+
+    #[test]
+    fn planning_diagnostics_are_typed_only_after_reaping_and_never_quarantine() {
+        let trace = serde_json::json!({"strategy":"model_questions_scaffold_recovery_v2",
+            "attempts":[],"incomplete_attempt":true});
+        let mut reply = failure_reply("BACKEND_EXECUTION_FAILED");
+        reply["planner_diagnostic"] = trace.clone();
+        let pending = worker_failure(&reply, "abc", ExitStatus::from_raw(256));
+        assert!(pending.downcast_ref::<WorkerFailure>().is_none());
+        let error = reaped_failure(pending);
+        let failure = error.downcast_ref::<WorkerFailure>().unwrap();
+        assert_eq!(
+            serde_json::to_value(failure.planner_diagnostic().unwrap()).unwrap(),
+            trace
+        );
+        assert_eq!(adapter_violation(&error), None);
+        reply["planner_diagnostic"]["incomplete_attempt"] = "invented".into();
+        let error = reaped_failure(worker_failure(&reply, "abc", ExitStatus::from_raw(256)));
+        let failure = error.downcast_ref::<WorkerFailure>().unwrap();
+        assert_eq!(failure.code(), "BACKEND_EXECUTION_FAILED");
+        assert!(failure.planner_diagnostic().is_none());
+        let error = reaped_failure(worker_failure(&reply, "abc", ExitStatus::from_raw(9)));
+        assert!(error.downcast_ref::<WorkerFailure>().is_none());
     }
 
     #[test]
