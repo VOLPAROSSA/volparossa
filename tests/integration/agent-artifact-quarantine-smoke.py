@@ -81,9 +81,10 @@ def corrupt_one_value(raw):
 
 
 def setup_location(root, script):
-    require(root.name == "agent-artifact-user" and root.parent.parent == Path("/opt")
-            and re.fullmatch(r"va\.[A-Za-z0-9_.-]+", root.parent.name)
-            and script == root.parent / "bin/agent-artifact-quarantine-smoke.py",
+    work = root.parent.parent
+    require(root.name == "agent-artifact-user" and root.parent.name == "client-fixtures"
+            and work.parent == Path("/opt") and re.fullmatch(r"va\.[A-Za-z0-9_.-]+", work.name)
+            and script == work / "bin/agent-artifact-quarantine-smoke.py",
             "unexpected copied guest fixture layout")
 
 
@@ -349,11 +350,17 @@ def report(value, revision):
 
 
 def self_test():
-    root = Path("/opt/va.fixture.abcdef/agent-artifact-user")
-    script = root.parent / "bin/agent-artifact-quarantine-smoke.py"
+    # Exercise the actual shell fixture's assignment, not a second invented layout.
+    shell = Path(__file__).resolve().with_name("agent-artifact-smoke.sh").read_text()
+    assignments = re.findall(r"(?m)^    artifact_user=\$WORK(/[-a-z/]+)$", shell)
+    require(len(assignments) == 1, "ambiguous artifact fixture assignment")
+    work = Path("/opt/va.fixture.abcdef")
+    root = Path(str(work) + assignments[0])
+    script = work / "bin/agent-artifact-quarantine-smoke.py"
     setup_location(root, script)
     for bad_root, bad_script in ((root, Path("/home/vpci/source/tests/integration/agent-artifact-quarantine-smoke.py")),
                                  (Path("/tmp/va.fixture.abcdef/agent-artifact-user"), script),
+                                 (Path("/opt/va.fixture.abcdef/agent-artifact-user"), script),
                                  (root, Path("/opt/va.other.abcdef/bin/agent-artifact-quarantine-smoke.py"))):
         try:
             setup_location(bad_root, bad_script)

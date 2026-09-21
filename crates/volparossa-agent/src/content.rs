@@ -57,6 +57,16 @@ use crate::{
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const OFFER_LIFETIME: u64 = 300;
+// Metadata admission only, shorter than the existing 15-second selector exchange.
+// The four-session serving bound still applies while a caller waits.
+const REGISTRY_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn provider_snapshot(
+    registry: &Mutex<PublicationRegistry>,
+    maximum_wait: Duration,
+) -> Result<PublicationRegistry, tokio::time::error::Elapsed> {
+    timeout(maximum_wait, async { registry.lock().await.clone() }).await
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ContentError {
@@ -349,12 +359,9 @@ impl ContentRuntime {
                         // Snapshot at most 64 explicit registrations; never hold the metadata
                         // lock while a background receiver waits before requesting a chunk.
                         // Cache handles retain their own exclusive ownership checks.
-                        let registry = {
-                            let Ok(current) = registry.try_lock() else {
-                                provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_BUSY").await;
-                                return;
-                            };
-                            current.clone()
+                        let Ok(registry) = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT).await else {
+                            provider_event(events.as_ref(), "CONTENT_PROVIDER_REGISTRY_TIMEOUT").await;
+                            return;
                         };
                         match serve_publication(&mut stream, &registry, TransferLimits::default()).await {
                             Ok(_) => { let _ = tls::finish(&mut stream).await; }
@@ -870,6 +877,37 @@ fn complete(manifest: &VerifiedManifest, store: &mut ChunkStore) -> Result<bool,
 #[cfg(test)]
 mod provider_diagnostic_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_waits_for_metadata_owner_and_releases_lock_before_serving() {
+        let registry = Mutex::new(PublicationRegistry::default());
+        let owner = registry.lock().await;
+        let snapshot = provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT);
+        tokio::pin!(snapshot);
+        tokio::select! {
+            biased;
+            _ = &mut snapshot => panic!("a held metadata lock must not fail or admit immediately"),
+            () = tokio::task::yield_now() => {},
+        }
+        drop(owner);
+        let snapshot = snapshot.await.unwrap();
+        assert_eq!(snapshot.len(), 0);
+        assert!(registry.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn snapshot_deadline_drops_waiter_without_poisoning_the_registry() {
+        let registry = Mutex::new(PublicationRegistry::default());
+        let owner = registry.lock().await;
+        assert!(provider_snapshot(&registry, Duration::ZERO).await.is_err());
+        drop(owner);
+        assert!(
+            provider_snapshot(&registry, REGISTRY_SNAPSHOT_TIMEOUT)
+                .await
+                .is_ok()
+        );
+        assert!(REGISTRY_SNAPSHOT_TIMEOUT < TransferLimits::default().exchange_timeout);
+    }
 
     #[test]
     fn fixed_categories_preserve_stage_and_never_expose_error_payload() {
