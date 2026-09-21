@@ -79,6 +79,21 @@ query proves collection. Three inert cleanup regressions cover these cases and c
 races; they do not replace the corrected live run. Original network cleanup and host-state
 evidence remain preserved, without upgrading the failed run to success.
 
+Local model-update recovery candidate: the enrolled public training loop can now quarantine
+an exact imported adapter after a correlated fixed-worker format/value failure and successful
+worker cleanup. Only candidate-stage adapter violations qualify; baseline faults, network
+failure, resource pressure, cancellation and ordinary quality regressions do not. Original
+signed import, baseline, hashes and deadlines remain checked on restart. The accepted warmstart
+is unchanged and later revisions remain eligible. This is local adoption/execution exclusion
+inside that loop, not a publisher ban, cache-wide revocation or the complete B07 immune system.
+All 131 CLI compute tests and strict all-target CLI Clippy pass without local model execution.
+The new `agent-artifact-quarantine` scenario fetches a separately signed NaN adapter on R3 and
+requires the same loop to continue with real base-model training and successor validation.
+Four successful model stages are observed; rejection before candidate inference is not counted
+as a fifth. Its pure positive/negative checker, shell syntax, new-helper ShellCheck and topology
+preview contracts pass; the modified existing training helper retains two baseline SC2015
+warnings. Live protected-transfer, real-model and cleanup evidence remains pending.
+
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate
 inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;

@@ -86,6 +86,7 @@ enum Phase {
     Evaluating,
     Approved,
     Rejected,
+    Quarantined,
     Failed,
     Expired,
 }
@@ -205,6 +206,8 @@ pub(super) fn restore(
         );
         if matches!(round.phase, Phase::Approved | Phase::Rejected) {
             verify_round(args, &registry, round)?;
+        } else if round.phase == Phase::Quarantined {
+            verify_quarantine_round(args, &registry, round)?;
         }
     }
     if registry
@@ -214,6 +217,22 @@ pub(super) fn restore(
     {
         // No confirmed local admission was committed before interruption.
         finish(args, &mut registry, Phase::Failed)?;
+    }
+    if let Some(round) = registry
+        .pending
+        .clone()
+        .filter(|round| round.phase == Phase::Evaluating)
+    {
+        if round_root(args, round.sequence)?
+            .join("comparison/quarantine.json")
+            .try_exists()?
+        {
+            // The immutable observation may have reached disk just before the
+            // coordinator checkpoint. Restore it without executing the artifact
+            // again or renewing its original source/worker admission.
+            verify_quarantine_round(args, &registry, &round)?;
+            finish(args, &mut registry, Phase::Quarantined)?;
+        }
     }
     if registry.active.is_some() {
         active(args, &registry, state.latest)?;
@@ -262,7 +281,11 @@ impl Registry {
             );
             let terminal = matches!(
                 round.phase,
-                Phase::Approved | Phase::Rejected | Phase::Failed | Phase::Expired
+                Phase::Approved
+                    | Phase::Rejected
+                    | Phase::Quarantined
+                    | Phase::Failed
+                    | Phase::Expired
             );
             ensure!(
                 terminal == self.completed.iter().any(|r| r.sequence == round.sequence)
@@ -368,6 +391,29 @@ fn verify_round(
         "peer_updates_comparison_changed"
     );
     Ok(comparison)
+}
+
+fn verify_quarantine_round(args: &Options, registry: &Registry, round: &Round) -> Result<()> {
+    let root = round_root(args, round.sequence)?;
+    let query = request(args, &registry.feeds[round.channel], Some(round.revision))?;
+    let source = dataset_source(
+        round
+            .source
+            .as_ref()
+            .context("peer_updates_source_missing")?,
+    )?;
+    let imported = peer_update::reopen(
+        &root.join("import"),
+        &query,
+        &source,
+        round.imported_at.context("peer_updates_import_time")?,
+    )?;
+    bind_import(&imported, round)?;
+    let baseline = round
+        .baseline
+        .as_ref()
+        .context("peer_updates_baseline_missing")?;
+    super::peer_evaluation::verify_quarantine(&root, &baseline.origin, imported.provenance())
 }
 
 /// Called only while the normal owner budget admits work. At most one candidate
@@ -501,7 +547,7 @@ pub(super) async fn tick(
     )
     .await;
     match compared {
-        Ok(comparison) => {
+        Ok(super::peer_evaluation::Outcome::Compared(comparison)) => {
             ensure!(
                 comparison.baseline_origin == baseline.origin,
                 "peer_updates_comparison_baseline"
@@ -521,6 +567,16 @@ pub(super) async fn tick(
             } else {
                 eprintln!("compute loop_event=peer_update_rejected");
             }
+        }
+        Ok(super::peer_evaluation::Outcome::Quarantined) => {
+            if !running(activity) {
+                return Ok(false);
+            }
+            verify_quarantine_round(args, &registry, &round)?;
+            // Never change the accepted warmstart or ban this publisher. Only
+            // this exact manifest is consumed; subsequent revisions remain eligible.
+            finish(args, &mut registry, Phase::Quarantined)?;
+            eprintln!("compute loop_event=peer_update_quarantined");
         }
         Err(_) if !running(activity) => return Ok(false),
         Err(_) => {
@@ -696,7 +752,7 @@ fn finish(args: &Options, registry: &mut Registry, phase: Phase) -> Result<()> {
     ensure!(
         matches!(
             phase,
-            Phase::Approved | Phase::Rejected | Phase::Failed | Phase::Expired
+            Phase::Approved | Phase::Rejected | Phase::Quarantined | Phase::Failed | Phase::Expired
         ),
         "peer_updates_finish_phase"
     );
@@ -786,6 +842,7 @@ fn allowed(path: &Path, directory: bool) -> bool {
             | "comparison/baseline-report.json"
             | "comparison/candidate-report.json"
             | "comparison/decision.json"
+            | "comparison/quarantine.json"
             | "comparison/baseline/report.json"
             | "comparison/candidate/report.json"
     )

@@ -19,6 +19,7 @@ agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
 agent_train_loop=no
+agent_artifact_quarantine=no
 wifi_link=no
 uplink_link=no
 download_sharing=no
@@ -34,7 +35,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -113,6 +114,15 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-artifact ]; then
+        if [ "$agent_artifact_quarantine" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA agent-artifact-quarantine plan:' \
+                '  preserve the ordinary signed source/training setup, then publish an explicit NaN adapter fixture;' \
+                '  another node retrieves the original signed artifact over protected paths and refuses its invalid weights;' \
+                '  retain correlated artifact-local quarantine and continue useful training from the valid base;' \
+                '  require actual model workers, original captures and complete owned cleanup; no network-wide ban claim.'
+            return
+        fi
         if [ "$agent_train_loop" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA owner-enabled autonomous public train-loop plan:' \
@@ -418,7 +428,9 @@ while [ "$#" -gt 0 ]; do
             agent_public_document=no
             agent_train_cycle=no
             agent_train_loop=no
+            agent_artifact_quarantine=no
             case $2 in
+                agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
@@ -605,6 +617,11 @@ fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_fixture in agent-train-loop-smoke.sh agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.sh agent-peer-learning-smoke.py content-replication-smoke.sh content-replication-smoke.py content-replication-capture.py; do
         [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    for quarantine_fixture in agent-artifact-quarantine-smoke.sh agent-artifact-quarantine-smoke.py; do
+        [ -f "$source_directory/tests/integration/$quarantine_fixture" ] && [ ! -L "$source_directory/tests/integration/$quarantine_fixture" ] || exit 69
     done
 fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
@@ -1942,6 +1959,10 @@ if [ "$agent_train_loop" = yes ]; then
     # shellcheck source=tests/integration/agent-peer-learning-smoke.sh
     . "$source_directory/tests/integration/agent-peer-learning-smoke.sh"
 fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    # shellcheck source=tests/integration/agent-artifact-quarantine-smoke.sh
+    . "$source_directory/tests/integration/agent-artifact-quarantine-smoke.sh"
+fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
     # shellcheck source=tests/integration/content-provider-smoke.sh
@@ -2053,6 +2074,9 @@ if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
     done
+fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-artifact-quarantine-smoke.py" "$WORK/bin/agent-artifact-quarantine-smoke.py"
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.

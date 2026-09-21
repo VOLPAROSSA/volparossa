@@ -284,7 +284,11 @@ agent_train_loop_run() {
     agent_train_loop_shared loop-all-shared true || fail TRAIN_LOOP_DATASET_NOT_SHARED
     agent_peer_learning_share_validation || fail PEER_LEARNING_VALIDATION_NOT_SHARED
     agent_artifact_cli relay5 content stop >"$WORK/agent-train-loop-source-stop.json" || fail TRAIN_LOOP_SOURCE_STOP_FAILED
-    agent_peer_learning_run
+    if [ "${agent_artifact_quarantine:-no}" = yes ]; then
+        agent_artifact_quarantine_run
+    else
+        agent_peer_learning_run
+    fi
 
     if [ "$loop_latest" != none ]; then
     PHASE=agent-train-loop-independent-import
@@ -363,6 +367,10 @@ agent_train_loop_finalize_report() {
     python3 -B "$source_directory/tests/integration/agent-train-loop-smoke.py" report "$WORK/agent-train-loop-smoke.json" "$expected_commit" \
         || loop_report_status=1
     # Preserve both diagnostic reports even when the earlier proof is incomplete.
-    agent_peer_learning_finalize "$loop_status" || loop_report_status=1
+    if [ "${agent_artifact_quarantine:-no}" = yes ]; then
+        agent_artifact_quarantine_finalize "$loop_status" || loop_report_status=1
+    else
+        agent_peer_learning_finalize "$loop_status" || loop_report_status=1
+    fi
     return "$loop_report_status"
 }

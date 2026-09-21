@@ -1,6 +1,8 @@
 //! Local comparison of a peer update against the actual current adapter.
 //! Two real inference jobs use one explicitly pinned public validation set.
 
+mod quarantine;
+
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -45,6 +47,11 @@ pub(super) struct Comparison {
     candidate: Metric,
     validation_manifest_id: String,
     files: Files,
+}
+
+pub(super) enum Outcome {
+    Compared(Box<Comparison>),
+    Quarantined,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -116,7 +123,7 @@ pub(super) async fn assess(
     baseline_origin: &Value,
     import_proof: &Value,
     activity: &watch::Receiver<bool>,
-) -> Result<Comparison> {
+) -> Result<Outcome> {
     ensure!(active(activity), "peer_comparison_cancelled");
     private_directory(candidate_root)?;
     private_directory(validation_input_root)?;
@@ -166,17 +173,27 @@ pub(super) async fn assess(
         write_new(&root.join("provenance.json"), &provenance)?;
     }
     if root.join("decision.json").try_exists()? {
-        return verify(candidate_root);
+        ensure!(
+            !root.join("quarantine.json").try_exists()?,
+            "peer_comparison_conflicting_outcomes"
+        );
+        return Ok(Outcome::Compared(Box::new(verify(candidate_root)?)));
+    }
+    if root.join("quarantine.json").try_exists()? {
+        verify_quarantine(candidate_root, baseline_origin, import_proof)?;
+        return Ok(Outcome::Quarantined);
     }
     for (stage, adapter) in [
         ("baseline", baseline_adapter),
         ("candidate", Some(candidate_adapter.as_path())),
     ] {
-        execute_stage(args, &root, &expected, stage, adapter, activity).await?;
+        if execute_stage(args, &root, &expected, stage, adapter, activity).await? {
+            return Ok(Outcome::Quarantined);
+        }
     }
     let comparison = recompute(&root)?;
     write_json(&root.join("decision.json"), &comparison)?;
-    Ok(comparison)
+    Ok(Outcome::Compared(Box::new(comparison)))
 }
 
 fn validate_source(source: &Source, signed: &[u8], dataset: &[u8], time: u64) -> Result<u64> {
@@ -211,11 +228,11 @@ async fn execute_stage(
     name: &str,
     adapter: Option<&Path>,
     activity: &watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<bool> {
     let envelope = root.join(format!("{name}-report.json"));
     if envelope.try_exists()? {
         checked_stage(root, selection, name)?;
-        return Ok(());
+        return Ok(false);
     }
     let output = root.join(name);
     ensure!(
@@ -247,7 +264,26 @@ async fn execute_stage(
     };
     options.validate()?;
     // Await cancellation cleanup; never drop an active model supervisor's future.
-    let report = super::super::execute(&options, activity.clone()).await?;
+    let report = match super::super::execute(&options, activity.clone()).await {
+        Ok(report) => report,
+        Err(error) => {
+            // Only an exact candidate-stage adapter fault from the reaped fixed
+            // worker qualifies. Baseline/cancel/resource/source failures do not.
+            if active(activity)
+                && quarantine::record_failure(
+                    root,
+                    selection,
+                    name,
+                    started,
+                    started + seconds,
+                    &error,
+                )?
+            {
+                return Ok(true);
+            }
+            return Err(error);
+        }
+    };
     let stage = Stage {
         version: 1,
         started_at: started,
@@ -256,7 +292,8 @@ async fn execute_stage(
         report,
     };
     validate_stage(&stage, root, selection, name)?;
-    write_json(&envelope, &stage)
+    write_json(&envelope, &stage)?;
+    Ok(false)
 }
 
 fn metric(value: &Value) -> Result<Metric> {
@@ -444,6 +481,19 @@ pub(super) fn verify(candidate_root: &Path) -> Result<Comparison> {
     let actual = recompute(&root)?;
     ensure!(saved == actual, "peer_comparison_decision_changed");
     Ok(actual)
+}
+
+pub(super) fn verify_quarantine(
+    candidate_root: &Path,
+    baseline_origin: &Value,
+    import_proof: &Value,
+) -> Result<()> {
+    let record = quarantine::verify(&candidate_root.join("comparison"))?;
+    ensure!(
+        &record.baseline_origin == baseline_origin && &record.import_proof == import_proof,
+        "peer_quarantine_import_or_baseline_changed"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

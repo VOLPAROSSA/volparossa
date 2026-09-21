@@ -1016,6 +1016,19 @@ documents model poisoning and limitations of mitigations.
 
 Local workers can automatically quarantine an artifact that violates its runtime contract,
 stop assigning it work, revoke its scoped lease and fall back to a known accepted version.
+An executable development candidate implements a narrower local part: `compute train-loop`
+retains a candidate-only fixed adapter violation after the correlated worker has been reaped,
+binds it to the original imported manifest, source, exact bytes and successful baseline, and
+excludes that manifest from adoption in the enrolled loop. Restart rechecks the retained
+evidence without extending its original deadlines. The accepted warmstart is not replaced;
+later signed revisions remain eligible. Operational failures, a defective baseline and finite
+quality differences cannot mint this quarantine. It is not a finding that a publisher is
+malicious, a content-cache serving revocation, or a restriction on every explicit CLI command.
+Pure tests cover exact-artifact retirement and retention of an accepted update. The disposable
+`agent-artifact-quarantine` fixture is ready to require an actual signed NaN candidate arriving
+over protected content and the same loop continuing useful base-model training. Its live proof
+is pending; neither this fixture nor format checking completes B07 or detects all poisoned models.
+
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their
 host; removal means withdrawing execution/serving authority and deleting only locally owned

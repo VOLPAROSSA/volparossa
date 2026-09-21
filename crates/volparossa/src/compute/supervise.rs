@@ -1,7 +1,7 @@
 //! Owner-controlled lifecycle and bounded observations, outside the model worker.
 
 use std::{
-    collections::BTreeSet, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
+    collections::BTreeSet, fmt, fs::File, io::Read, os::unix::process::ExitStatusExt, path::Path,
     process::ExitStatus, time::Duration,
 };
 
@@ -25,6 +25,87 @@ pub(super) const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_FREE_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OBSERVED_PROCESSES: usize = 64;
 const MAX_OBSERVED_THREADS: usize = 128;
+
+/// A fixed error reply from the exact local worker, exposed only after its cleanup succeeds.
+/// This is local execution evidence, not an independently portable or network-wide verdict.
+#[derive(Debug)]
+pub(super) struct WorkerFailure {
+    request_id: String,
+    code: String,
+}
+
+impl WorkerFailure {
+    pub(super) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(super) fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+impl fmt::Display for WorkerFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "compute_backend_failed: {}", self.code)
+    }
+}
+
+impl std::error::Error for WorkerFailure {}
+
+// This private type is deliberately not WorkerFailure and does not expose one as its source.
+// An error in the supervisor's cleanup must supersede the pending worker observation.
+#[derive(Debug)]
+struct PendingWorkerFailure {
+    request_id: String,
+    code: String,
+}
+
+impl fmt::Display for PendingWorkerFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "compute_backend_failed: {}", self.code)
+    }
+}
+
+impl std::error::Error for PendingWorkerFailure {}
+
+/// Only deterministic adapter format/value failures authorize local artifact quarantine.
+pub(super) fn adapter_violation(error: &anyhow::Error) -> Option<&'static str> {
+    let failure = error.downcast_ref::<WorkerFailure>()?;
+    [
+        "INVALID_ADAPTER_WEIGHTS",
+        "INVALID_ADAPTER_HEADER",
+        "INVALID_ADAPTER_METADATA",
+        "UNSUPPORTED_ADAPTER_TENSOR_KEYS",
+        "UNSUPPORTED_ADAPTER_TENSOR_FORMAT",
+        "INVALID_ADAPTER_TENSOR_OFFSETS",
+        "INVALID_ADAPTER_TENSOR_LAYOUT",
+        "NONFINITE_ADAPTER_WEIGHTS",
+        "UNSUPPORTED_ADAPTER_CONFIG",
+        "INVALID_ADAPTER_README",
+    ]
+    .into_iter()
+    .find(|code| *code == failure.code())
+}
+
+fn reaped_failure(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<PendingWorkerFailure>() {
+        Ok(failure) => WorkerFailure {
+            request_id: failure.request_id,
+            code: failure.code,
+        }
+        .into(),
+        Err(error) => error,
+    }
+}
+
+/// Synthetic protocol input for pure caller tests; not evidence of a real worker or cleanup.
+#[cfg(test)]
+pub(super) fn test_worker_failure(code: &str) -> anyhow::Error {
+    let id = "ab".repeat(16);
+    let reply =
+        serde_json::json!({"version":1,"id":id,"kind":"result", "status":"error","code":code});
+    reaped_failure(worker_failure(&reply, &id, ExitStatus::from_raw(1 << 8)))
+}
 
 pub(super) async fn run(
     mut child: Child,
@@ -61,7 +142,7 @@ pub(super) async fn run(
             let (result, status) = collect_completion(
                 &mut child, stdout, stderr, &request.id, controls.as_ref()
             ).await?;
-            check_result(&result, request)?;
+            check_result(&result, request, status)?;
             if let Some(controls) = &controls {
                 controls.check_report(&result)?;
             } else {
@@ -111,7 +192,8 @@ pub(super) async fn run(
             .context("compute_reap_deadline")?
             .context("compute_reap")?;
     }
-    let mut result = result?;
+    // Only this post-cleanup boundary can expose typed worker failure evidence to callers.
+    let mut result = result.map_err(reaped_failure)?;
     result["supervisor"] = serde_json::json!({
         "version": 1, "sandbox": "bubblewrap-private-user-net-pid-ipc-mount",
         "network_access": false, "gpu_access": false,
@@ -141,18 +223,9 @@ fn pressure_action(budget: &mut Budget) -> Result<Action> {
     }
 }
 
-fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
+fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> Result<()> {
     if value.get("status").and_then(Value::as_str) == Some("error") {
-        let code = value
-            .get("code")
-            .and_then(Value::as_str)
-            .filter(|s| {
-                !s.is_empty()
-                    && s.len() <= 64
-                    && s.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-            })
-            .unwrap_or("UNKNOWN_FIXED_FAILURE");
-        bail!("compute_backend_failed: {code}");
+        return Err(worker_failure(value, &request.id, status));
     }
     ensure!(
         value.get("status").and_then(Value::as_str) == Some("ok"),
@@ -189,6 +262,30 @@ fn check_result(value: &Value, request: &WorkerRequest) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn worker_failure(value: &Value, id: &str, status: ExitStatus) -> anyhow::Error {
+    let fixed_code = value.get("code").and_then(Value::as_str).filter(|s| {
+        !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+    });
+    let code = fixed_code.unwrap_or("UNKNOWN_FIXED_FAILURE");
+    if fixed_code.is_some()
+        && value.get("version") == Some(&Value::from(1))
+        && value.get("id").and_then(Value::as_str) == Some(id)
+        && value.get("kind").and_then(Value::as_str) == Some("result")
+        && value.get("status").and_then(Value::as_str) == Some("error")
+        // The fixed Python protocol returns 1 after emitting its error reply. A later
+        // signal/OOM/crash is not deterministic evidence against the adapter bytes.
+        && status.code() == Some(1)
+    {
+        PendingWorkerFailure {
+            request_id: id.to_owned(),
+            code: code.to_owned(),
+        }
+        .into()
+    } else {
+        anyhow::anyhow!("compute_backend_failed: {code}")
+    }
 }
 
 fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
@@ -634,6 +731,134 @@ fn status_kib(text: &str, key: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failure_reply(code: &str) -> Value {
+        serde_json::json!({"version":1,"id":"abc","kind":"result","status":"error","code":code})
+    }
+
+    #[tokio::test]
+    async fn exact_adapter_failures_become_typed_only_at_the_reaped_boundary() {
+        for code in [
+            "INVALID_ADAPTER_WEIGHTS",
+            "INVALID_ADAPTER_HEADER",
+            "INVALID_ADAPTER_METADATA",
+            "UNSUPPORTED_ADAPTER_TENSOR_KEYS",
+            "UNSUPPORTED_ADAPTER_TENSOR_FORMAT",
+            "INVALID_ADAPTER_TENSOR_OFFSETS",
+            "INVALID_ADAPTER_TENSOR_LAYOUT",
+            "NONFINITE_ADAPTER_WEIGHTS",
+            "UNSUPPORTED_ADAPTER_CONFIG",
+            "INVALID_ADAPTER_README",
+        ] {
+            let line = format!("{}\n", failure_reply(code));
+            let reply = collect_stdout(line.as_bytes(), "abc", None)
+                .await
+                .unwrap()
+                .unwrap();
+            let pending = worker_failure(&reply, "abc", ExitStatus::from_raw(256));
+            assert!(pending.downcast_ref::<WorkerFailure>().is_none());
+            assert_eq!(adapter_violation(&pending), None);
+            let error = reaped_failure(pending);
+            assert_eq!(error.to_string(), format!("compute_backend_failed: {code}"));
+            let failure = error.downcast_ref::<WorkerFailure>().unwrap();
+            assert_eq!(failure.request_id(), "abc");
+            assert_eq!(failure.code(), code);
+            assert_eq!(adapter_violation(&error), Some(code));
+            assert_eq!(
+                adapter_violation(&error.context("local evaluation failed")),
+                Some(code)
+            );
+        }
+    }
+
+    #[test]
+    fn resource_io_cancel_and_text_errors_never_authorize_adapter_quarantine() {
+        for code in [
+            "JOB_INPUT_NOT_FOUND",
+            "JOB_PATH_PERMISSION_DENIED",
+            "JOB_MEMORY_EXHAUSTED",
+            "JOB_DEADLINE_EXCEEDED",
+            "BACKEND_IMPORT_FAILED",
+            "BACKEND_EXECUTION_FAILED",
+            "JOB_CANCELLED",
+            "ADAPTER_INPUT_CHANGED",
+            "INVALID_ADAPTER_CONFIG",
+        ] {
+            let error = reaped_failure(worker_failure(
+                &failure_reply(code),
+                "abc",
+                ExitStatus::from_raw(256),
+            ));
+            assert_eq!(adapter_violation(&error), None);
+        }
+        for message in [
+            "compute_backend_failed: INVALID_ADAPTER_WEIGHTS",
+            "compute_owner_busy",
+            "compute_deadline",
+            "compute_reap_deadline",
+            "compute_reap",
+            "compute_input_adapter_hash",
+        ] {
+            let error = reaped_failure(anyhow::anyhow!("{message}"));
+            assert!(error.downcast_ref::<WorkerFailure>().is_none());
+            assert_eq!(adapter_violation(&error), None);
+        }
+        let error = anyhow::Error::new(std::io::Error::other(
+            "compute_backend_failed: INVALID_ADAPTER_WEIGHTS",
+        ));
+        assert_eq!(adapter_violation(&error), None);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_uncorrelated_worker_output_cannot_mint_failure_evidence() {
+        let valid = failure_reply("INVALID_ADAPTER_WEIGHTS");
+        for field in ["version", "id", "kind", "status"] {
+            let mut changed = valid.clone();
+            changed[field] = Value::Null;
+            let line = format!("{changed}\n");
+            let error = collect_stdout(line.as_bytes(), "abc", None)
+                .await
+                .unwrap_err();
+            assert_eq!(adapter_violation(&error), None);
+            assert!(
+                reaped_failure(worker_failure(&changed, "abc", ExitStatus::from_raw(256)))
+                    .downcast_ref::<WorkerFailure>()
+                    .is_none()
+            );
+        }
+        for suffix in ["{}\n".to_owned(), format!("{valid}\n")] {
+            let line = format!("{valid}\n{suffix}");
+            let error = collect_stdout(line.as_bytes(), "abc", None)
+                .await
+                .unwrap_err();
+            assert_eq!(adapter_violation(&error), None);
+        }
+        for status in [0, 9, 15, 512] {
+            let error = reaped_failure(worker_failure(&valid, "abc", ExitStatus::from_raw(status)));
+            assert!(error.downcast_ref::<WorkerFailure>().is_none());
+            assert_eq!(
+                error.to_string(),
+                "compute_backend_failed: INVALID_ADAPTER_WEIGHTS"
+            );
+        }
+        for code in [
+            "",
+            "invalid_adapter_weights",
+            "/private/input",
+            "A".repeat(65).as_str(),
+        ] {
+            let error = reaped_failure(worker_failure(
+                &failure_reply(code),
+                "abc",
+                ExitStatus::from_raw(256),
+            ));
+            assert!(error.downcast_ref::<WorkerFailure>().is_none());
+            assert_eq!(
+                error.to_string(),
+                "compute_backend_failed: UNKNOWN_FIXED_FAILURE"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn startup_diagnostics_classify_only_fixed_prefixes_without_echoing_private_text() {
