@@ -342,7 +342,7 @@ async fn finish(
                 rpc::Operation::Cancel(handle.binding.clone()),
             )
             .await?;
-            job(outcome, &handle)
+            job_in_phase(outcome, &handle, RpcPhase::Cancel)
         }
         .await;
         if let Ok(status) = cancellation {
@@ -382,7 +382,8 @@ fn completed(
     } else {
         Ok(
             serde_json::json!({"handle":handle,"state":"unconfirmed","new_submission":new_submission,
-            "error":"COMPUTE_RPC_UNCONFIRMED"}),
+            "error":"COMPUTE_RPC_UNCONFIRMED",
+            "diagnostic":result.as_ref().err().and_then(rpc_diagnostic)}),
         )
     }
 }
@@ -707,6 +708,142 @@ pub(super) async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diagnostic_handle() -> JobHandle {
+        JobHandle {
+            version: 1,
+            provider_key: "1".repeat(64),
+            binding: rpc::JobBinding {
+                job_id: "2".repeat(32),
+                dataset_manifest_id: "3".repeat(64),
+                dataset_sha256: "4".repeat(64),
+                model_fingerprint: "5".repeat(64),
+                row_indices: vec![0],
+                expires_unix_seconds: 1600,
+                task: None,
+            },
+            capabilities: rpc::Capabilities {
+                model: rpc::ModelIdentity {
+                    model_id: "protocol-only-test".into(),
+                    model_revision: "6".repeat(40),
+                    base_weights: rpc::FileIdentity {
+                        bytes: 1,
+                        sha256: "7".repeat(64),
+                    },
+                    adapter_files: None,
+                },
+                model_fingerprint: "5".repeat(64),
+                accepting_work: true,
+                public_inference_only: true,
+                runtime_slots: 1,
+                max_threads: 2,
+                max_job_seconds: 600,
+                max_dataset_bytes: 1024 * 1024,
+                max_rows: 4,
+                task_derivation_v1: true,
+                document_inference_v2: true,
+                derived_inference_v3: true,
+            },
+        }
+    }
+
+    #[test]
+    fn rpc_diagnostic_preserves_fixed_broker_code_and_operation_phase() {
+        let handle = diagnostic_handle();
+        for phase in [RpcPhase::Submit, RpcPhase::Poll, RpcPhase::Cancel] {
+            for code in [
+                rpc::ErrorCode::Invalid,
+                rpc::ErrorCode::Busy,
+                rpc::ErrorCode::Missing,
+                rpc::ErrorCode::Expired,
+                rpc::ErrorCode::ModelMismatch,
+                rpc::ErrorCode::WorkerFailed,
+                rpc::ErrorCode::ResultMismatch,
+                rpc::ErrorCode::Unavailable,
+            ] {
+                let error = job_in_phase(rpc::Outcome::Error(code), &handle, phase).unwrap_err();
+                assert_eq!(error.to_string(), "compute_peer_job_rejected");
+                assert_eq!(
+                    rpc_diagnostic(&error.context("outer context")),
+                    Some(&RpcDiagnostic::BrokerRejected { phase, code })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rpc_diagnostic_distinguishes_receipt_exchange_and_untyped_error() {
+        let handle = diagnostic_handle();
+        let mut status = rpc::JobStatus {
+            binding: handle.binding.clone(),
+            state: rpc::JobState::Running,
+            cancellation_requested: false,
+            report_json: None,
+            report_sha256: None,
+            error: None,
+        };
+        status.binding.job_id = "8".repeat(32);
+        let error = job_in_phase(rpc::Outcome::Job(status), &handle, RpcPhase::Poll).unwrap_err();
+        assert_eq!(error.to_string(), "compute_peer_job_binding");
+        assert_eq!(
+            rpc_diagnostic(&error),
+            Some(&RpcDiagnostic::ReceiptValidation {
+                phase: RpcPhase::Poll
+            })
+        );
+        let transport = rpc_failure(
+            anyhow::anyhow!("private exception text"),
+            RpcDiagnostic::ExchangeUnconfirmed {
+                phase: RpcPhase::Submit,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(rpc_diagnostic(&transport)).unwrap(),
+            serde_json::json!({"category":"exchange_unconfirmed","phase":"submit"})
+        );
+        assert!(rpc_diagnostic(&anyhow::anyhow!("compute_peer_job_rejected")).is_none());
+    }
+
+    #[test]
+    fn rpc_diagnostic_never_changes_unconfirmed_handle_or_lease_semantics() {
+        let handle = diagnostic_handle();
+        let original = serde_json::to_value(&handle).unwrap();
+        let failures = [
+            job_in_phase(
+                rpc::Outcome::Error(rpc::ErrorCode::Busy),
+                &handle,
+                RpcPhase::Submit,
+            )
+            .unwrap_err(),
+            rpc_failure(
+                anyhow::anyhow!("private transport detail"),
+                RpcDiagnostic::ExchangeUnconfirmed {
+                    phase: RpcPhase::Cancel,
+                },
+            ),
+            anyhow::anyhow!("compute_peer_job_rejected: arbitrary untrusted text"),
+        ];
+        for error in failures {
+            let mut outputs = vec![None];
+            let result = completed(
+                Path::new("unused"),
+                &handle,
+                &Err(error),
+                true,
+                &mut outputs,
+            )
+            .unwrap();
+            assert_eq!(result["handle"], original);
+            assert_eq!(result["state"], "unconfirmed");
+            assert_eq!(result["error"], "COMPUTE_RPC_UNCONFIRMED");
+            assert_eq!(result["new_submission"], true);
+            assert!(!result.to_string().contains("private"));
+            assert!(!result.to_string().contains("arbitrary"));
+            assert_eq!(outputs, vec![None]);
+            assert!(!reusable(None, handle.binding.expires_unix_seconds, 1599));
+            assert!(reusable(None, handle.binding.expires_unix_seconds, 1600));
+        }
+    }
 
     #[test]
     fn fast_peer_refills_while_original_slow_slot_remains_owned() {

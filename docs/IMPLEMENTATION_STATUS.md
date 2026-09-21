@@ -12,8 +12,28 @@ different cached source. The owner retains original manifests and correlated loc
 authenticates their exact bytes on resume and caps compilation validity at the earliest original
 source expiry. A publication signature is not a claim about authorship, licensing or answer truth.
 Twenty-eight focused document tests and five public-text tests pass without model/network
-execution. The mixed local/cache-hit/network-miss two-peer fixture is implemented, but its run is pending; it is not
-yet live evidence, automatic web research, private computation or a completed B03 checkpoint.
+execution. The [first mixed local/cache-hit/network-miss run on
+`1faa76d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35612754648) **failed** after
+sixteen actual worker jobs. Its original artifacts independently verify both native signatures,
+one cache hit, one protected cache miss and nine completed source-fragment jobs, but not the
+final synthesis or offline resume. Both executors retained eight terminal jobs until their
+original expiry and consequently refused further admission. The corrective broker change
+separates its unchanged single active worker from a bounded 256-record/32 MiB retained history,
+including a worst-case space reservation for the next job. Original receipts and expiry remain
+unchanged; thirteen focused broker tests pass. The [corrected run on
+`dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632) **also failed**, now
+after eight completed fragment jobs: a new retained job handle remained unconfirmed with
+`COMPUTE_RPC_UNCONFIRMED`, without a terminal receipt. Synthesis did not start. This is a
+separate submission/confirmation failure under investigation; there is no complete workflow
+proof, automatic web research, private computation or completed B03 checkpoint.
+
+The new diagnostic step preserves fixed RPC operation/category and an authenticated broker
+error code when available, while leaving uncertain handles, slot ownership and original
+deadlines unchanged. The disposable collection observer now samples only allowlisted RPC
+boundary codes before they leave the in-memory log ring. These timestamp observations are
+lower bounds, not task correlation or proof of a specific transport cause. Six focused queue
+tests and the pure diagnostic parser checks pass. This adds diagnosis, not a claimed fix for
+the unresolved submission; its new live run is pending.
 
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly

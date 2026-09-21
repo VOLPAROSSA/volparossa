@@ -211,7 +211,9 @@ another signed package while a slower worker continues. A new **source collectio
 adds comparisons across explicitly public local documents and selected signed network publications,
 reusing cached bytes and fetching missing sources without changing the selection. It preserves source-byte
 provenance through the existing peer-execution and synthesis pipeline. The local-source proof
-passes; the added native-network-source proof is pending.
+passes. The first native-network-source run verified cache reuse and protected retrieval,
+but stalled when both executors filled their retained-job history. After a targeted fix, the
+next run stopped on an unconfirmed peer submission; this combined workflow is not yet verified.
 Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
