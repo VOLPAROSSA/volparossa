@@ -30,6 +30,8 @@ pub(crate) struct Options {
     prefer_other_provider: bool,
     #[arg(skip)]
     replacement_discovery: Option<executors::Authorization>,
+    #[arg(skip)]
+    retained_stopped: Vec<(JobHandle, rpc::JobStatus)>,
 }
 
 impl Options {
@@ -49,6 +51,7 @@ impl Options {
             execute: true,
             prefer_other_provider: false,
             replacement_discovery: None,
+            retained_stopped: Vec::new(),
         }
     }
 
@@ -59,6 +62,16 @@ impl Options {
 
     pub(super) fn discover_replacements(mut self, authorization: executors::Authorization) -> Self {
         self.replacement_discovery = Some(authorization);
+        self
+    }
+
+    /// Only the owning workflow supplies full receipts already checked while loading progress.
+    /// This is not a CLI authority to assert that an unreachable executor has stopped.
+    pub(super) fn with_verified_stopped_receipts(
+        mut self,
+        receipts: Vec<(JobHandle, rpc::JobStatus)>,
+    ) -> Self {
+        self.retained_stopped = receipts;
         self
     }
 }
@@ -137,7 +150,7 @@ pub(super) async fn report_with_activity(
     for (index, handle) in handles.iter().enumerate() {
         save_new(&args.output.join(format!("original-{index}.json")), handle)?;
     }
-    let observations = observe_all(socket, handles).await?;
+    let observations = observe_all(socket, handles, &args.retained_stopped).await?;
     // Every original observation is durable before discovery or another admission. A failed
     // later lookup must not hide the completed peer's receipt or an ambiguous live lease.
     for (index, observed) in observations.iter().enumerate() {
@@ -344,9 +357,55 @@ pub(super) fn load_handles(
     Ok(handles)
 }
 
-async fn observe_all(socket: &Path, handles: Vec<JobHandle>) -> Result<Vec<Observed>> {
+fn retained_stopped(
+    handles: &[JobHandle],
+    receipts: &[(JobHandle, rpc::JobStatus)],
+) -> Result<Vec<Observed>> {
+    ensure!(
+        receipts.len() <= handles.len(),
+        "compute_resume_retained_bound"
+    );
+    let mut seen = BTreeSet::new();
+    let mut observed = Vec::new();
+    for (saved, status) in receipts {
+        let handle = handles
+            .iter()
+            .find(|handle| handle.binding.job_id == saved.binding.job_id)
+            .context("compute_resume_retained_unknown_handle")?;
+        ensure!(
+            seen.insert(&saved.binding.job_id)
+                && serde_json::to_vec(saved)? == serde_json::to_vec(handle)?
+                && matches!(
+                    status.state,
+                    rpc::JobState::Failed | rpc::JobState::Cancelled
+                ),
+            "compute_resume_retained_stopped_binding"
+        );
+        observed.push(Observed {
+            handle: handle.clone(),
+            state: Observation::Stopped,
+            status: Some(job(rpc::Outcome::Job(status.clone()), handle)?),
+        });
+    }
+    Ok(observed)
+}
+
+async fn observe_all(
+    socket: &Path,
+    handles: Vec<JobHandle>,
+    receipts: &[(JobHandle, rpc::JobStatus)],
+) -> Result<Vec<Observed>> {
+    let mut observed = retained_stopped(&handles, receipts)?;
     let mut tasks = JoinSet::new();
     for handle in handles {
+        // A checked terminal receipt survives broker disappearance. Unknown/running work
+        // still needs a fresh observation and retains the ordinary ambiguous-lease rule.
+        if observed
+            .iter()
+            .any(|saved| saved.handle.binding.job_id == handle.binding.job_id)
+        {
+            continue;
+        }
         let socket = socket.to_owned();
         tasks.spawn(async move {
             let provider = parse_key(&handle.provider_key).map_err(anyhow::Error::msg)?;
@@ -376,7 +435,6 @@ async fn observe_all(socket: &Path, handles: Vec<JobHandle>) -> Result<Vec<Obser
             })
         });
     }
-    let mut observed = Vec::new();
     while let Some(result) = tasks.join_next().await {
         observed.push(result??);
     }
@@ -626,6 +684,7 @@ mod tests {
             execute: false,
             prefer_other_provider: false,
             replacement_discovery: None,
+            retained_stopped: Vec::new(),
         };
         let loaded = load_handles(&args, &source).unwrap();
         assert_eq!(loaded[0].binding, handle.binding);

@@ -197,6 +197,23 @@ impl Progress {
         self.output_rows(false)
     }
 
+    fn stopped_receipts(&self) -> Vec<(JobHandle, rpc::JobStatus)> {
+        self.parts
+            .values()
+            .filter_map(|part| {
+                part.status
+                    .as_ref()
+                    .filter(|status| {
+                        matches!(
+                            status.state,
+                            rpc::JobState::Failed | rpc::JobState::Cancelled
+                        )
+                    })
+                    .map(|status| (part.handle.clone(), status.clone()))
+            })
+            .collect()
+    }
+
     fn output_rows(&self, detailed: bool) -> Result<Vec<serde_json::Value>> {
         let mut outputs = Vec::new();
         for part in self.parts.values() {
@@ -754,7 +771,8 @@ async fn advance(
                         output,
                         args.max_seconds,
                     )
-                    .prefer_other_provider(args.follow.follow);
+                    .prefer_other_provider(args.follow.follow)
+                    .with_verified_stopped_receipts(progress.stopped_receipts());
                     if let Some(authorization) = authorization {
                         retry = retry.discover_replacements(authorization);
                     }
@@ -1437,6 +1455,83 @@ mod tests {
         drop(first);
         assert!(lock_directory(&fixture.options.directory).is_ok());
         assert!(persist_enrollment(&fixture.options.directory, &record, &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn vanished_broker_does_not_erase_checked_terminal_failure() {
+        let fixture = fixture(1);
+        let (args, source, original) = handles(&fixture, 0);
+        let directory = fixture.options.directory.join("package-0000");
+        let first = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+        for (index, handle) in original.iter().enumerate() {
+            save_new(&first.join(format!("job-{index}.json")), handle).unwrap();
+        }
+        let failed = rpc::JobStatus {
+            binding: original[0].binding.clone(),
+            state: rpc::JobState::Failed,
+            cancellation_requested: false,
+            report_json: None,
+            report_sha256: None,
+            error: Some(rpc::ErrorCode::WorkerFailed),
+        };
+        batch::save_status(&first, &original[0], &failed).unwrap();
+        batch::save_status(&first, &original[1], &synthetic_status(&original[1])).unwrap();
+        let progress = load_progress(&directory, &args, &source, &fixture.enrollment).unwrap();
+        assert_eq!(progress.stopped_receipts().len(), 1);
+        assert_eq!(progress.pending().len(), 1);
+        let output = fixture.root.path().join("reconciled");
+        let options = resume::Options::workflow(
+            args.clone(),
+            progress.pending(),
+            vec![],
+            output.clone(),
+            600,
+        )
+        .with_verified_stopped_receipts(progress.stopped_receipts());
+        let (_sender, activity) = tokio::sync::watch::channel(false);
+        let socket = fixture.root.path().join("no-agent.sock");
+        let result = resume::report_with_activity(&options, &socket, &activity)
+            .await
+            .unwrap();
+        assert_eq!(result["complete"], false); // No replacement is available in this protocol fixture.
+        assert_eq!(result["jobs"][0]["state"], "stopped");
+        let retained: serde_json::Value = serde_json::from_slice(
+            &read_file(&output.join("observation-0.json"), MAX_RECEIPT_BYTES).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained["status"], serde_json::to_value(&failed).unwrap());
+        assert_eq!(
+            retained["handle"],
+            serde_json::to_value(&original[0]).unwrap()
+        );
+        assert!(original[0].binding.expires_unix_seconds > now().unwrap());
+        // A mere cancellation request/running status or another executor cannot grant this shortcut.
+        for index in 0..2 {
+            let mut receipts = progress.stopped_receipts();
+            if index == 0 {
+                receipts[0].1.state = rpc::JobState::Running;
+                receipts[0].1.cancellation_requested = true;
+            } else {
+                receipts[0]
+                    .0
+                    .provider_key
+                    .clone_from(&original[1].provider_key);
+            }
+            let rejected = resume::Options::workflow(
+                args.clone(),
+                progress.pending(),
+                vec![],
+                fixture.root.path().join(format!("rejected-{index}")),
+                600,
+            )
+            .with_verified_stopped_receipts(receipts);
+            assert!(
+                resume::report_with_activity(&rejected, &socket, &activity)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

@@ -102,6 +102,9 @@ agent_jobs_broker() {
 }
 
 agent_jobs_stop() {
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" cleanup-owner "$WORK" || return 1
+    fi
     if [ -n "${jobs_batch_pid:-}" ] && kill -0 "$jobs_batch_pid" 2>/dev/null; then
         kill -INT "$jobs_batch_pid" || return 1
         wait "$jobs_batch_pid" || true
@@ -149,7 +152,13 @@ agent_jobs_setup() {
         | map(select($p[.] != $control)) | .[:2] | select(length == 2)' "$WORK/a01-expected-peers.json") || fail JOBS_PEERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    content_provider_control_underlay
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
+            "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
+        content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
+    else
+        content_provider_control_underlay
+    fi
     for jobs_node in "$provider_node_a" "$provider_node_b"; do
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
@@ -160,6 +169,13 @@ agent_jobs_setup() {
     done
     jobs_key_a=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_a-public.json")
     jobs_key_b=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_b-public.json")
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        # Product discovery orders a same-model cohort by the actual public key.
+        # Preserve real node identities, never assume R4 sorts before R5.
+        provider_nodes=$(jq -cn --arg a "$provider_node_a" --arg b "$provider_node_b" \
+            --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
+            '[{node:$a,key:$ka},{node:$b,key:$kb}] | sort_by(.key) | map(.node)')
+    fi
     jq -n --argjson nodes "$provider_nodes" --arg context "$custody_context" --arg control "$provider_control_peer" \
         --arg a "$provider_node_a" --arg b "$provider_node_b" --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
         '{provider_nodes:$nodes,route_context_id:$context,control_relay_peer_id:$control,
@@ -168,6 +184,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        agent_jobs_peer_recovery_run
+        return
+    fi
     if [ "${agent_jobs_follow:-no}" = yes ]; then
         agent_jobs_follow_run
         return
@@ -250,6 +270,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        agent_jobs_peer_recovery_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_jobs_follow:-no}" = yes ]; then
         agent_jobs_follow_finalize_report "$jobs_status"
         return

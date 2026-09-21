@@ -648,6 +648,9 @@ binding the additional peer keys to the original workflow, publisher, source, mo
 before saving new handles or submitting work. These are private coordinator records, not
 independent execution attestations. Source authority and original leases are never extended.
 This is failure recovery, not arbitrary mid-task model changes or unbounded worker growth.
+Previously checked terminal failure/cancellation receipts remain usable after a broker leaves;
+the workflow does not downgrade that recorded termination to uncertainty. A running status or
+requested-but-unconfirmed cancellation never grants replacement permission.
 
 A preview without `--execute` remains networkless. For documents,
 `--enroll-only --execute` performs discovery, public-document preparation and durable enrollment,
@@ -663,6 +666,10 @@ was insufficient. Final route/policy rejection would have produced a different e
 temporary readiness remains an unproved hypothesis. The run remains failed; the earlier live
 document proofs used explicitly selected peers. Live automatic discovery and recovery onto a
 newly discovered third peer remain pending.
+The new `agent-jobs-peer-recovery` disposable scenario exercises that third-peer transition with
+one unchanged owner command. It records a fixture-controlled pause while replacing the original
+brokers, then requires a genuinely new node, saved admission, actual inference and preserved
+completed output. The pause is test orchestration, not a dependency or claimed product feature.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry

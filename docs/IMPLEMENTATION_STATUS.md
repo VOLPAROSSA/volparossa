@@ -41,6 +41,21 @@ three local-control discovery tests, six agent discovery tests, formatting and s
 for all targets of those three packages pass. No local model execution was used.
 See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
 
+The follow-up recovery slice preserves previously checked terminal failure/cancellation receipts
+even after their broker disappears. The owning workflow passes the exact retained handle/status
+to reconciliation; a running job or a cancellation request cannot use this shortcut. This avoids
+waiting out a lease for a worker already observed stopped, without turning an unreachable worker
+into proof of termination. Its focused no-agent-socket regression and strict CLI Clippy pass.
+The `agent-jobs-peer-recovery` disposable scenario now covers two discovered initial workers,
+one actual worker loss, both original brokers leaving, and a real third-node replacement under
+the same owner command. A recorded fixture-only owner pause makes broker cutover deterministic;
+it is not product behavior. The checker requires original receipts, new-peer admission before
+submission, actual model execution, both protected paths, complete cleanup and unchanged host
+state. All 124 CLI compute tests, strict CLI Clippy, the synthetic positive/negative checker
+contracts, script syntax and non-mutating scenario previews pass. ShellCheck passes for the
+new helper and modified jobs helper; the outer wrappers still report existing baseline/source
+context warnings. The scenario and synthetic fixtures are not yet live success evidence.
+
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate
 inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;

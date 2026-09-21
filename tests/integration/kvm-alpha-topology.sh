@@ -14,6 +14,7 @@ mode=preview
 scenario=alpha
 agent_jobs_loss=no
 agent_jobs_follow=no
+agent_jobs_peer_recovery=no
 agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
@@ -33,7 +34,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -69,6 +70,17 @@ print_plan() {
                 '  stop brokers and disconnect the route, then resume exact retained receipts without new work;' \
                 '  require real worker/input/result/capture evidence and complete guest cleanup;' \
                 '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
+            return
+        fi
+        if [ "$agent_jobs_peer_recovery" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA discovered public executor replacement plan:' \
+                '  one workflow discovers two real workers and explicitly permits compatible replacement peers;' \
+                '  lose one exact guest worker, retain terminal originals and the completed result;' \
+                '  pause the same owner only for deterministic fixture cutover; stop both original brokers;' \
+                '  start a real third node with its unchanged identity, then resume the same owner command;' \
+                '  require actual new-peer execution, exact preserved receipts, separate captures and complete cleanup;' \
+                '  no survivor-only reassignment, private offload, exactly-once or full-B03 claim.'
             return
         fi
         if [ "$agent_jobs_follow" = yes ]; then
@@ -401,6 +413,7 @@ while [ "$#" -gt 0 ]; do
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
+            agent_jobs_peer_recovery=no
             agent_public_task=no
             agent_public_document=no
             agent_train_cycle=no
@@ -410,6 +423,7 @@ while [ "$#" -gt 0 ]; do
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-follow) scenario=agent-jobs; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
+                agent-jobs-peer-recovery) scenario=agent-jobs; agent_jobs_peer_recovery=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -610,6 +624,11 @@ fi
 if [ "$agent_public_task" = yes ]; then
     for task_fixture in agent-public-task-smoke.sh agent-public-task-smoke.py; do
         [ -f "$source_directory/tests/integration/$task_fixture" ] && [ ! -L "$source_directory/tests/integration/$task_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_jobs_peer_recovery" = yes ]; then
+    for recovery_fixture in agent-jobs-peer-recovery-smoke.sh agent-jobs-peer-recovery-smoke.py; do
+        [ -f "$source_directory/tests/integration/$recovery_fixture" ] && [ ! -L "$source_directory/tests/integration/$recovery_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_document" = yes ]; then
@@ -1897,6 +1916,10 @@ if [ "$scenario" = agent-jobs ]; then
         # shellcheck source=tests/integration/agent-jobs-follow-smoke.sh
         . "$source_directory/tests/integration/agent-jobs-follow-smoke.sh"
     fi
+    if [ "$agent_jobs_peer_recovery" = yes ]; then
+        # shellcheck source=tests/integration/agent-jobs-peer-recovery-smoke.sh
+        . "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.sh"
+    fi
 fi
 if [ "$agent_public_task" = yes ]; then
     # shellcheck source=tests/integration/agent-public-task-smoke.sh
@@ -2020,6 +2043,9 @@ if [ "$scenario" = agent-jobs ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-smoke.py" "$WORK/bin/agent-jobs-smoke.py"
     if [ "$agent_jobs_follow" = yes ]; then
         install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-follow-smoke.py" "$WORK/bin/agent-jobs-follow-smoke.py"
+    fi
+    if [ "$agent_jobs_peer_recovery" = yes ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" "$WORK/bin/agent-jobs-peer-recovery-smoke.py"
     fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
@@ -2931,6 +2957,9 @@ launch_agent() {
         "$binary_directory/volparossa-agent" >/dev/null
 }
 
+if [ "$agent_jobs_peer_recovery" = yes ]; then
+    agent_jobs_peer_recovery_filter || fail PEER_RECOVERY_CONTROL_FILTER_FAILED
+fi
 if [ "$wifi_link" = yes ]; then wifi_link_observe_start; fi
 launch_agent client "$CLIENT"
 if [ "$wifi_link" != yes ]; then
@@ -5020,6 +5049,8 @@ start_privacy_observers() {
             [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || return 1 ;;
         content-custody-executor-discovery-privacy)
             [ "$scenario" = agent-jobs ] && [ "$agent_public_document" = yes ] || return 1 ;;
+        content-custody-peer-initial-privacy|content-custody-peer-replacement-privacy)
+            [ "$scenario" = agent-jobs ] && [ "$agent_jobs_peer_recovery" = yes ] || return 1 ;;
         *) return 1 ;;
     esac
     set --
