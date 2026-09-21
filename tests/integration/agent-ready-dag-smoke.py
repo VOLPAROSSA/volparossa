@@ -855,7 +855,7 @@ def failure_snapshot_self_test():
         oversized.chmod(0o600); rejected(); oversized.unlink()
         (root/"graph-plan.json").write_text('{"version":1,"nodes":[]}')
         rejected()
-    print("ready-DAG diagnostic retry/receipt retention, concurrent-change detection and seven unsafe controls PASS")
+    print("ready-DAG diagnostic retry/receipt retention, concurrent-change detection and eight unsafe controls PASS")
 
 
 def self_test():

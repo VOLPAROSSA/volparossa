@@ -3,6 +3,44 @@
 use super::*;
 use tokio::io::AsyncWriteExt as _;
 
+#[test]
+fn execution_failure_diagnostic_preserves_known_typed_and_supervisor_classes() {
+    let worker = super::super::supervise::test_worker_failure("BACKEND_IMPORT_FAILED");
+    assert_eq!(
+        execution_failure_class(&worker),
+        ("worker", "BACKEND_IMPORT_FAILED")
+    );
+    for code in [
+        "compute_control_ack_deadline",
+        "compute_memory_budget",
+        "compute_deadline",
+    ] {
+        assert_eq!(
+            execution_failure_class(&anyhow::anyhow!(code)),
+            ("supervisor", code)
+        );
+    }
+}
+
+#[test]
+fn execution_failure_diagnostic_redacts_unknown_text_and_unlisted_worker_codes() {
+    let private = anyhow::anyhow!("private /home/example/source.json secret prompt");
+    assert_eq!(
+        execution_failure_class(&private),
+        ("supervisor", "supervisor_unknown")
+    );
+    let disguised = anyhow::anyhow!("compute_backend_failed: BACKEND_IMPORT_FAILED");
+    assert_eq!(
+        execution_failure_class(&disguised),
+        ("supervisor", "supervisor_unknown")
+    );
+    let worker = super::super::supervise::test_worker_failure("PRIVATE_CONTENT_IN_UPPERCASE");
+    assert_eq!(
+        execution_failure_class(&worker),
+        ("worker", "worker_unknown")
+    );
+}
+
 fn data() -> String {
     serde_json::json!({"version":1,"visibility":"public","license":"GPL-3.0-only",
         "source_revision":"a".repeat(40),"train":[],

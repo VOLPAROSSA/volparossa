@@ -50,6 +50,11 @@ for script in "$GUEST" "$HOST"; do
     if "$script" --preview --scenario agent-task-graph --scenario agent-ready-dag \
         | grep -Ei 'explicit public task graph|Agent-task-graph:' >/dev/null; then exit 1; fi
     "$script" --preview --scenario agent-model-planning | grep -Ei 'model.planning' >/dev/null
+    "$script" --preview --scenario agent-model-task-graph | grep -Ei 'model.task.graph|model-selected task graph' >/dev/null
+    if "$script" --preview --scenario agent-model-task-graph --scenario agent-model-planning \
+        | grep -Ei 'model.task.graph|model-selected task graph' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-model-planning --scenario agent-model-task-graph \
+        | grep -Ei 'Model-planning:|public model planning plan' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-model-planning --scenario agent-task-graph \
         | grep -Ei 'model.planning' >/dev/null; then exit 1; fi
     if "$script" --preview --scenario agent-task-graph --scenario agent-model-planning \
@@ -99,7 +104,7 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-successor-serving") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
@@ -126,6 +131,12 @@ grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py report "$rep
 grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py self-test' "$WORKFLOW" >/dev/null
 grep -F 'agent_model_planning_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_model_planning_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent-model-task-graph) scenario=agent-jobs; agent_model_planning=yes; agent_model_task_graph=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-model-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-model-task-graph-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-model-task-graph'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py --task-graph report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py --task-graph self-test' "$WORKFLOW" >/dev/null
 python3 -B - "$HERE" <<'PYTHON_MODEL_PROFILE'
 from pathlib import Path
 import shlex
@@ -146,6 +157,14 @@ profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_d
 assert jobs.count(profile_gate) == 2
 guest = (root / "kvm-alpha-topology.sh").read_text()
 assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ]; then') == 2
+dag = (root / "agent-ready-dag-smoke.sh").read_text()
+assert dag.count('"$dag_script" collect-failure "$WORK"') == 2
+for phase, failure in (("pause", "READY_DAG_INITIAL_WORKERS_NOT_OBSERVED"),
+                       ("observe-ready", "READY_DAG_C_DID_NOT_FINISH_BEFORE_B")):
+    expected = ('"$dag_script" collect-failure "$WORK" ' + phase + ' \\\n'
+                '                2>"$WORK/agent-ready-dag-failure-files.err" || true\n'
+                '            fail ' + failure)
+    assert expected in dag, "failure diagnostic must precede unchanged failure: " + phase
 PYTHON_MODEL_PROFILE
 grep -F 'agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-successor-serving-smoke.sh"' "$GUEST" >/dev/null

@@ -671,6 +671,58 @@ fn retained_job_bytes(job: &Job) -> Result<u64> {
     Ok(bytes)
 }
 
+// Diagnostic-only literals: neither an arbitrary error string nor a merely
+// uppercase worker-provided code is safe to write to the local service log.
+fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &'static str) {
+    if let Some(worker) = error.downcast_ref::<super::supervise::WorkerFailure>() {
+        let code = [
+            "BACKEND_NOT_INSTALLED",
+            "BACKEND_VERSION_MISMATCH",
+            "BACKEND_IMPORT_FAILED",
+            "BACKEND_EXECUTION_FAILED",
+            "CPU_BACKEND_REQUIRED",
+            "JOB_INPUT_NOT_FOUND",
+            "JOB_PATH_PERMISSION_DENIED",
+            "JOB_MEMORY_EXHAUSTED",
+            "MODEL_FILES_NOT_PINNED",
+            "UNSUPPORTED_MODEL_FILES",
+            "UNSUPPORTED_MODEL_ARCHITECTURE",
+            "MODEL_TOKENIZER_MISMATCH",
+            "MODEL_TOKENIZER_RETURN_TYPE",
+            "DOCUMENT_TOKEN_LIMIT_EXCEEDED",
+            "INVALID_DATASET_SIZE",
+            "INVALID_DOCUMENT_PROFILE_FIELDS",
+            "INVALID_DOCUMENT_RANGE",
+        ]
+        .into_iter()
+        .find(|code| *code == worker.code())
+        .unwrap_or("worker_unknown");
+        return ("worker", code);
+    }
+    let message = error.to_string();
+    let code = [
+        "compute_control_ack_deadline",
+        "compute_control_write_deadline",
+        "compute_control_write",
+        "compute_deadline",
+        "compute_owner_busy",
+        "compute_memory_budget",
+        "compute_memory_pressure",
+        "compute_owner_pressure",
+        "compute_process_bound",
+        "compute_thread_bound",
+        "compute_storage_budget",
+        "compute_reap_deadline",
+        "compute_reap",
+        "compute_missing_result_exit_deadline",
+        "compute_worker_exit",
+    ]
+    .into_iter()
+    .find(|code| *code == message)
+    .unwrap_or("supervisor_unknown");
+    ("supervisor", code)
+}
+
 fn finish_job(
     job: &mut Job,
     result: Result<Result<Value>, tokio::task::JoinError>,
@@ -688,10 +740,20 @@ fn finish_job(
         job.status.state = JobState::Cancelled;
         return;
     }
-    let Ok(Ok(report)) = result else {
-        job.status.state = JobState::Failed;
-        job.status.error = Some(ErrorCode::WorkerFailed);
-        return;
+    let report = match result {
+        Ok(Ok(report)) => report,
+        failed => {
+            let (class, code) = match &failed {
+                Ok(Err(error)) => execution_failure_class(error),
+                Err(error) if error.is_cancelled() => ("join", "cancelled"),
+                Err(_) => ("join", "panicked"),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            eprintln!("compute terminal_failure class={class} code={code}");
+            job.status.state = JobState::Failed;
+            job.status.error = Some(ErrorCode::WorkerFailed);
+            return;
+        }
     };
     let checked = checked_report(&report, &job.status.binding, caps);
     if let Ok(report_json) = checked {

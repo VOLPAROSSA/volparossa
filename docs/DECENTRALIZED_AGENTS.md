@@ -1349,6 +1349,11 @@ on resume without replanning. Existing peer-capacity accounting, source expiry, 
 requirements, cancellation and offline receipts remain in force. This candidate needs a live
 model-and-peer proof of actual selected dependencies and useful output; pure graph validation
 is not evidence of autonomous reasoning, private computation or general tool use.
+The disposable `agent-model-task-graph` scenario exercises that exact path separately from
+the fixed two-question test. It retains the original proposal before requiring an internal
+dependency, checks all actual peer jobs and completed offline replay, and does not force a
+parallel shape or supply a replacement graph. Its local fixture checks are not a live-model
+pass or an answer-quality claim.
 
 The original planner input, report, questions and hashes are retained with the graph. Once
 enrolled, resume verifies that same plan and cannot ask the model to generate a different one.

@@ -233,8 +233,19 @@ budget and original deadline. Successful reports bind the rejected hash and byte
 original input and cannot accept that exact text; historical v1–v3 reports remain readable.
 No text normalization, semantic-equivalence detector, canned replacement question or larger
 budget is introduced. All 239 CLI compute tests, 56 pure worker protocol tests and the updated
-fixture's pure controls pass. This addresses the observed literal-copy failure, not general
-decomposition quality; actual v4 model-and-peer execution and answer review remain pending.
+fixture's pure controls pass. The [actual v4 run on
+`ab026329`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35653401923) rejects an exact
+goal copy, then accepts two questions in three attempts and 39 total tokens. The first accepted
+question paraphrases the goal, so useful decomposition is still not established. Both real
+isolated peer workers start on different brokers, then return `Failed/worker_failed` well before
+their original expiry; neither produces an answer and the dependent join does not run. The
+128 unchanged original files prove pinned planning, tokenizer/source bindings and passing
+private/network cleanup with identical host bytes, not a complete peer workflow. The old broker
+discarded the detailed cause. A new local diagnostic emits only allowlisted fixed worker or
+supervisor failure categories, never arbitrary error text or task data; external receipts,
+retries and deadlines stay unchanged. All 17 focused broker checks pass. Memory pressure,
+owner-control failure and backend failure remain hypotheses until a new execution identifies
+the category; no resource limits have been increased to conceal the failure.
 
 A separate `--plan-task-graph` candidate now connects model-selected task count and dependency
 edges to the existing incremental executor. Input and raw artifact version 3 retain the same
@@ -245,8 +256,14 @@ The existing two-question mode and historical replay remain unchanged. One owner
 512-prompt/384-total-generated-token budget across at most four whole-JSON attempts, charging
 rejections without replacement tasks. Raw JSON is retained exactly, including whitespace.
 All 245 focused CLI compute tests, 62 pure worker protocol tests and strict CLI Clippy pass.
-This remains an implementation candidate: live model-selected dependencies, peer execution
-and source-faithful answers are not yet proved, and B03 remains incomplete.
+The separate disposable `agent-model-task-graph` scenario now preserves the raw proposal and
+requires at least two model-selected tasks and one internal dependency before checking real
+peer execution, unchanged original-question synthesis and completed offline resume. Serial
+graphs need not pretend to have simultaneous workers. Valid graphs without an internal edge
+remain legal product output but cannot pass this particular proof. Pure fixture controls,
+shell/YAML and the KVM contract checks pass; no graph is supplied to the live planner by those
+tests. Live model-selected dependencies, peer execution and source-faithful answers are not
+yet proved, and B03 remains incomplete.
 
 Verified 135M learning-to-serving slice: an explicit shared `--serving-directory` connects the
 training loop's selected approved local/peer successor to an already running peer-inference

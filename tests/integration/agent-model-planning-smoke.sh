@@ -3,6 +3,25 @@
 # Guest-only model-proposed public task graph; no host model/network execution.
 # shellcheck disable=SC2154,SC2034
 
+agent_model_planning_mode() {
+    planning_prefix=agent-model-planning
+    planning_option=--plan-tasks
+    if [ "${agent_model_task_graph:-no}" = yes ]; then
+        planning_prefix=agent-model-task-graph
+        planning_option=--plan-task-graph
+    fi
+}
+
+agent_model_planning_python() {
+    planning_python_script=$1
+    shift
+    if [ "${agent_model_task_graph:-no}" = yes ]; then
+        python3 -B "$planning_python_script" --task-graph "$@"
+    else
+        python3 -B "$planning_python_script" "$@"
+    fi
+}
+
 agent_model_planning_cli() {
     planning_cli_pid=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
     case $planning_cli_pid in ''|0|*[!0-9]*) return 1 ;; esac
@@ -16,8 +35,8 @@ agent_model_planning_cli() {
 
 agent_model_planning_wait() {
     planning_observer_status=0
-    python3 -B "$planning_script" "$1" "$WORK" "$jobs_batch_pid" \
-        >"$WORK/agent-model-planning-$2-observer.log" 2>"$WORK/agent-model-planning-$2-observer.err" \
+    agent_model_planning_python "$planning_script" "$1" "$WORK" "$jobs_batch_pid" \
+        >"$WORK/${planning_prefix}-$2-observer.log" 2>"$WORK/${planning_prefix}-$2-observer.err" \
         || planning_observer_status=$?
     if [ "$planning_observer_status" -ne 0 ] && kill -0 "$jobs_batch_pid" 2>/dev/null; then
         kill -INT "$jobs_batch_pid" 2>/dev/null || true
@@ -29,21 +48,26 @@ agent_model_planning_wait() {
         # Exact error output remains diagnostic, never substituted with a canned task plan.
         # A failed planner has no graph authority: retain its bounded, text-free
         # original metadata independently, before the ordinary private cleanup.
-        python3 -B "$planning_script" collect-failure "$WORK" \
-            2>"$WORK/agent-model-planning-planner-failure-export.err" || true
-        python3 -B "$planning_script" collect "$WORK" "$2" \
-            2>"$WORK/agent-model-planning-$2-partial-files.err" || true
+        agent_model_planning_python "$planning_script" collect-failure "$WORK" \
+            2>"$WORK/${planning_prefix}-planner-failure-export.err" || true
+        agent_model_planning_python "$planning_script" collect "$WORK" "$2" \
+            2>"$WORK/${planning_prefix}-$2-partial-files.err" || true
         [ "$planning_observer_status" -eq 0 ] || fail MODEL_PLANNING_REAL_WORKER_NOT_OBSERVED
         fail MODEL_PLANNING_REAL_EXECUTION_INCOMPLETE
     fi
-    python3 -B "$planning_script" collect "$WORK" "$2" || fail MODEL_PLANNING_RETAINED_FILES_INVALID
+    agent_model_planning_python "$planning_script" collect "$WORK" "$2" || fail MODEL_PLANNING_RETAINED_FILES_INVALID
 }
 
 agent_model_planning_run() {
+    agent_model_planning_mode
     planning_root=$jobs_source/model-planning
     planning_script=$source_directory/tests/integration/agent-model-planning-smoke.py
-    PHASE=agent-model-planning-owner-inputs
+    PHASE=${planning_prefix}-owner-inputs
+    if [ "${agent_model_task_graph:-no}" = yes ]; then
+        printf '%s\n' 'Disposable guest only: the actual pinned model selects public task count, questions and dependencies. Preserve raw task-graph.json before requiring at least two tasks and one internal edge; execute exact original-question terminal join, protected peer receipts and unchanged offline resume. No prescribed graph, answer-quality or simultaneous-worker claim.'
+    else
     printf '%s\n' 'Disposable guest only: stage the complete literal public README introduction before its navigation and the same original question, copy pinned owner assets, observe one real isolated model reading the source prefix and proposing two question-form subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute all real tokenized protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback or claim of semantic relevance from source metadata.'
+    fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/model-planning-source-README.md"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source/planner-provision"
     for planning_part in venv model; do
@@ -52,12 +76,14 @@ agent_model_planning_run() {
             -- cp --archive --reflink=auto -- "$jobs_root/provision/$planning_part" "$jobs_source/planner-provision/$planning_part" \
             || fail MODEL_PLANNING_OWNER_PROVISION_FAILED
     done
+    set -- prepare "$WORK"
+    [ "${agent_model_task_graph:-no}" != yes ] || set -- --task-graph "$@"
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/agent-model-planning-smoke.py" prepare "$WORK" \
-        >"$WORK/agent-model-planning-input.json" || fail MODEL_PLANNING_PUBLIC_INPUT_FAILED
-    PHASE=agent-model-planning-real-model-enrollment
-    agent_model_planning_cli compute peer document --plan-tasks \
+        -- python3 -B "$WORK/bin/agent-model-planning-smoke.py" "$@" \
+        >"$WORK/${planning_prefix}-input.json" || fail MODEL_PLANNING_PUBLIC_INPUT_FAILED
+    PHASE=${planning_prefix}-real-model-enrollment
+    agent_model_planning_cli compute peer document "$planning_option" \
         --model-profile smollm2-360m-v1 \
         --input "$jobs_source/model-planning-input.txt" --public-content --license GPL-3.0-only \
         --public-question 'What requirements and risks does this project describe?' \
@@ -65,43 +91,50 @@ agent_model_planning_run() {
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         --publisher-key "$jobs_publisher" --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \
         --directory "$planning_root" --lifetime-seconds 7200 --enroll-only --max-seconds 600 --execute \
-        >"$WORK/agent-model-planning-enrollment.json" 2>"$WORK/agent-model-planning-enrollment.err" &
+        >"$WORK/${planning_prefix}-enrollment.json" 2>"$WORK/${planning_prefix}-enrollment.err" &
     jobs_batch_pid=$!
     agent_model_planning_wait observe-planner enrolled
-    PHASE=agent-model-planning-model-derived-peer-tasks
+    if [ "${agent_model_task_graph:-no}" = yes ]; then
+        # Original raw proposal is already retained even when the model chose
+        # no internal edge: that is legal product output, not this fixture proof.
+        agent_model_planning_python "$planning_script" check-enrollment "$WORK" \
+            2>"$WORK/${planning_prefix}-shape.err" || fail MODEL_TASK_GRAPH_INTERNAL_EDGE_NOT_PROVEN
+    fi
+    PHASE=${planning_prefix}-model-derived-peer-tasks
     content_custody_phase_start fetch
     agent_model_planning_cli compute peer document --directory "$planning_root" --resume \
         --runtime-root "$jobs_source/planner-provision/venv" --model-root "$jobs_source/planner-provision/model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         --max-batches 16 --max-seconds 600 --execute \
-        >"$WORK/agent-model-planning-result.json" 2>"$WORK/agent-model-planning-result.err" &
+        >"$WORK/${planning_prefix}-result.json" 2>"$WORK/${planning_prefix}-result.err" &
     jobs_batch_pid=$!
     agent_model_planning_wait observe-peers result
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail MODEL_PLANNING_ROUTE_CLEANUP_FAILED
-    PHASE=agent-model-planning-offline-completed-resume
+    PHASE=${planning_prefix}-offline-completed-resume
     agent_jobs_stop || fail MODEL_PLANNING_BROKERS_STOP_FAILED
-    python3 -B "$planning_script" remove-input "$WORK" || fail MODEL_PLANNING_ORIGINAL_INPUT_REMOVAL_FAILED
-    python3 -B "$planning_script" stopped "$WORK" || fail MODEL_PLANNING_PROCESS_CLEANUP_FAILED
+    agent_model_planning_python "$planning_script" remove-input "$WORK" || fail MODEL_PLANNING_ORIGINAL_INPUT_REMOVAL_FAILED
+    agent_model_planning_python "$planning_script" stopped "$WORK" || fail MODEL_PLANNING_PROCESS_CLEANUP_FAILED
     agent_model_planning_cli compute peer document --directory "$planning_root" --resume --execute \
-        >"$WORK/agent-model-planning-resume.json" 2>"$WORK/agent-model-planning-resume.err" \
+        >"$WORK/${planning_prefix}-resume.json" 2>"$WORK/${planning_prefix}-resume.err" \
         || fail MODEL_PLANNING_OFFLINE_RESUME_FAILED
-    python3 -B "$planning_script" resumed "$WORK" || fail MODEL_PLANNING_OFFLINE_HISTORY_CHANGED
+    agent_model_planning_python "$planning_script" resumed "$WORK" || fail MODEL_PLANNING_OFFLINE_HISTORY_CHANGED
     agent_jobs_cleanup || fail MODEL_PLANNING_PRIVATE_CLEANUP_FAILED
-    python3 -B "$planning_script" evidence "$WORK" "$expected_commit" || fail MODEL_PLANNING_EVIDENCE_INVALID
+    agent_model_planning_python "$planning_script" evidence "$WORK" "$expected_commit" || fail MODEL_PLANNING_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE
-    PHASE=agent-model-planning-complete
+    PHASE=${planning_prefix}-complete
 }
 
 agent_model_planning_finalize_report() {
-    for planning_log in "$WORK"/agent-model-planning-*.json "$WORK"/agent-model-planning-*.jsonl \
-        "$WORK"/agent-model-planning-*.err "$WORK"/agent-model-planning-*.log; do
+    agent_model_planning_mode
+    for planning_log in "$WORK/${planning_prefix}"-*.json "$WORK/${planning_prefix}"-*.jsonl \
+        "$WORK/${planning_prefix}"-*.err "$WORK/${planning_prefix}"-*.log; do
         [ ! -f "$planning_log" ] || [ -L "$planning_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$planning_log" "$output_directory/$(basename -- "$planning_log")"
     done
-    python3 -B "$source_directory/tests/integration/agent-model-planning-smoke.py" finalize "$WORK" "$expected_commit" \
+    agent_model_planning_python "$source_directory/tests/integration/agent-model-planning-smoke.py" finalize "$WORK" "$expected_commit" \
         "$1" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
-    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-model-planning-smoke.json" "$output_directory/agent-model-planning-smoke.json"
-    python3 -B "$source_directory/tests/integration/agent-model-planning-smoke.py" \
-        report "$WORK/agent-model-planning-smoke.json" "$expected_commit"
+    install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/${planning_prefix}-smoke.json" "$output_directory/${planning_prefix}-smoke.json"
+    agent_model_planning_python "$source_directory/tests/integration/agent-model-planning-smoke.py" \
+        report "$WORK/${planning_prefix}-smoke.json" "$expected_commit"
 }

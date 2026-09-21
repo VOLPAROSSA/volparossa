@@ -24,6 +24,7 @@ agent_public_network_sources=no
 agent_task_graph=no
 agent_ready_dag=no
 agent_model_planning=no
+agent_model_task_graph=no
 agent_successor_serving=no
 agent_train_cycle=no
 agent_train_loop=no
@@ -43,7 +44,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-successor-serving|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving|dns-cache]'
 }
 
 print_plan() {
@@ -69,6 +70,16 @@ print_plan() {
                 '  reuse complete receipts offline after removing originals and stopping brokers;' \
                 '  real cooperative Pause/Resume ACKs, EOS-terminated answers, tokenizer/model execution, captures and full cleanup;' \
                 '  no fabricated results, model-quality or general autonomous-planning claim.'
+            return
+        fi
+        if [ "$agent_model_task_graph" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA public model-selected task graph plan:' \
+                '  one isolated pinned 360M owner model chooses one to four public tasks and their earlier-task dependencies;' \
+                '  retain the exact original JSON proposal before any protected peer execution;' \
+                '  execute the selected dependencies and join terminal answers under the exact original goal;' \
+                '  preserve planner and worker receipts across completed offline resume and full cleanup;' \
+                '  no supplied graph, canned fallback, model-selected tools or answer-quality claim.'
             return
         fi
         if [ "$agent_model_planning" = yes ]; then
@@ -525,6 +536,7 @@ while [ "$#" -gt 0 ]; do
             agent_task_graph=no
             agent_ready_dag=no
             agent_model_planning=no
+            agent_model_task_graph=no
             agent_successor_serving=no
             agent_train_cycle=no
             agent_train_loop=no
@@ -545,6 +557,7 @@ while [ "$#" -gt 0 ]; do
                 agent-task-graph) scenario=agent-jobs; agent_task_graph=yes; wifi_link=no; uplink_link=no ;;
                 agent-ready-dag) scenario=agent-jobs; agent_ready_dag=yes; wifi_link=no; uplink_link=no ;;
                 agent-model-planning) scenario=agent-jobs; agent_model_planning=yes; wifi_link=no; uplink_link=no ;;
+                agent-model-task-graph) scenario=agent-jobs; agent_model_planning=yes; agent_model_task_graph=yes; wifi_link=no; uplink_link=no ;;
                 agent-successor-serving) scenario=agent-jobs; agent_successor_serving=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;

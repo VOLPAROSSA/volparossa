@@ -34,6 +34,22 @@ SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates two public sub
     "resume neither replans nor changes retained graph, planner or receipts. Not decomposition/answer "
     "quality, semantic completeness, private offload, model-selected tools, open-ended autonomy, full B03 or full alpha.")
 HANDLE = GRAPH["HANDLE"]
+TASK_GRAPH = False
+
+
+def select_task_graph():
+    global TASK_GRAPH, PREFIX, STRATEGY, KIND, SCOPE
+    TASK_GRAPH = True
+    PREFIX = "agent-model-task-graph"
+    STRATEGY = "model_task_graph_v1"
+    KIND = "volparossa-bounded-model-selected-public-task-graph"
+    SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates an exact raw public task graph from "
+        "the original goal and bounded literal source prefix, choosing at least two tasks and one internal dependency "
+        "within four attempts and 384 total generated tokens. Local translation adds only stable IDs and an exact "
+        "original-question terminal join over model-selected sinks. Actual protected peer jobs consume EOS-complete "
+        "parents; original-free completed offline resume preserves planner and receipts. No required parallel shape, "
+        "simultaneous-worker claim, task repair, canned fallback, semantic quality, private offload, model-selected tools, "
+        "open-ended autonomy, full B03 or full alpha.")
 
 
 def root_path(work):
@@ -60,7 +76,7 @@ def planning_input(source):
     prefix=text.encode()
     require(source.decode("utf-8").encode()==source and 1<=len(source)<=1048576
         and prefix and b"\0" not in prefix,"invalid original public planner source")
-    return dict(version=2,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",question=QUESTION,
+    return dict(version=3 if TASK_GRAPH else 2,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",question=QUESTION,
         source_sha256=sha(source),source_bytes=len(source),
         source_excerpt=dict(start=0,end=len(prefix),text=text,sha256=sha(prefix)))
 
@@ -256,7 +272,7 @@ def observe_peers(work,launcher):
                 current.append(dict(graph_node=int(match[1]),level=int(match[2] or 0),handle_path=relative,handle=handle,
                     handle_file=JOBS["file_hash"](path,16384),worker=worker,first_monotonic_ns=first,
                     last_monotonic_ns=time.monotonic_ns(),alive_before_and_after=JOBS["alive"](worker["worker"])))
-        if not overlap:
+        if not overlap and not TASK_GRAPH:
             if len(current)!=2 or not all(JOBS["alive"](w["worker"]["worker"]) for w in current):
                 time.sleep(0.025);continue
             require(all(w["graph_node"]<leaf_count and w["level"]==0 for w in current),"first observed cohort was not source work")
@@ -267,8 +283,13 @@ def observe_peers(work,launcher):
             require(item["alive_before_and_after"],"planned worker disappeared during observation")
             write(record(work,f"worker-{len(observed):04d}"),item)
             observed.append(item);seen.add(item["handle"]["binding"]["job_id"])
+        if TASK_GRAPH and observed:
+            # All actually observed workers are retained for ordinary cleanup;
+            # serial graphs do not assert simultaneous independent execution.
+            write(work/"agent-jobs-observation.json",dict(workers=[w["worker"] for w in observed],
+                simultaneous_execution_claimed=False))
         time.sleep(0.025)
-    require(not JOBS["alive"](owner) and overlap and {w["graph_node"] for w in observed}==set(range(leaf_count+1)),
+    require(not JOBS["alive"](owner) and (overlap or TASK_GRAPH) and {w["graph_node"] for w in observed}==set(range(leaf_count+1)),
         "not every model-derived graph node executed or owner exceeded bound")
     write(record(work,"observation"),dict(owner=owner,owner_reaped=True,workers=observed))
 
@@ -327,6 +348,57 @@ def questions_plan(artifact):
     nodes=[dict(id=f"question-{index:02d}",question=q,depends_on=[]) for index,q in enumerate(value["questions"])]
     nodes.append(dict(id="answer",question=QUESTION,depends_on=[n["id"] for n in nodes]))
     return dict(version=1,nodes=nodes,output="answer")
+
+
+def model_graph_plan(artifact,require_edge=True):
+    require(0<len(artifact)<=16384,"model graph artifact bound")
+    value=strict_json(artifact)
+    require(type(value) is dict and value.keys()=={"version","tasks"} and type(value["version"]) is int
+        and value["version"]==3 and type(value["tasks"]) is list and 1<=len(value["tasks"])<=4,"model graph schema")
+    seen,consumed,nodes=set(),set(),[]
+    for index,task in enumerate(value["tasks"]):
+        require(type(task) is dict and task.keys()=={"question","depends_on"},"model task fields")
+        question=task["question"];deps=task["depends_on"]
+        require(type(question) is str and 1<=len(question.encode())<=512 and "\0" not in question
+            and question.rstrip().endswith("?") and question.strip() not in seen
+            and question.encode()!=QUESTION.encode(),"model graph question invalid/duplicate/goal-copy")
+        require(type(deps) is list and all(type(n) is int and 0<=n<index for n in deps)
+            and len(set(deps))==len(deps),"model graph dependencies invalid")
+        seen.add(question.strip());consumed.update(deps)
+        nodes.append(dict(id=f"question-{index:02d}",question=question,depends_on=[f"question-{n:02d}" for n in deps]))
+    if require_edge:
+        require(len(nodes)>=2 and consumed,"model selected no internal dependency; valid product shape is not this graph proof")
+    nodes.append(dict(id="answer",question=QUESTION,
+        depends_on=[node["id"] for index,node in enumerate(nodes) if index not in consumed]))
+    return dict(version=1,nodes=nodes,output="answer")
+
+
+def check_graph_attempts(attempts,artifact=None):
+    require(type(attempts) is list and len(attempts)<=4,"graph attempt bound")
+    accepted,total,maximum=0,0,0
+    for number,item in enumerate(attempts,1):
+        require(type(item) is dict and item.keys()=={"attempt","prompt_tokens","generated_tokens",
+            "max_new_tokens","stop_reason","accepted","rejection_code","text_bytes","text_sha256"},"graph attempt fields")
+        cap=384-total
+        require(accepted==0 and all(type(item[k]) is int for k in
+            ("attempt","prompt_tokens","generated_tokens","max_new_tokens","text_bytes"))
+            and item["attempt"]==number and 1<=item["prompt_tokens"]<=512 and cap>0
+            and item["max_new_tokens"]==cap and 1<=item["generated_tokens"]<=cap
+            and type(item["accepted"]) is bool and 0<=item["text_bytes"]<=1048576
+            and type(item["text_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}",item["text_sha256"]),"graph attempt order/budget/hash")
+        total+=item["generated_tokens"];maximum=max(maximum,item["prompt_tokens"])
+        if item["accepted"]:
+            require(item["rejection_code"] is None and item["stop_reason"] in ("graph_boundary","eos")
+                and 1<=item["text_bytes"]<=16384,"invalid graph acceptance")
+            if artifact is not None:
+                require(item["text_bytes"]==len(artifact) and item["text_sha256"]==sha(artifact),"raw model graph artifact replaced")
+            accepted+=1
+        elif item["rejection_code"]=="GENERATION_LIMIT":
+            require(item["stop_reason"]=="token_limit" and item["generated_tokens"]==cap,"graph limit not fully charged")
+        else:
+            require((item["rejection_code"]=="INVALID_JSON" and item["stop_reason"]=="eos")
+                or (item["rejection_code"]=="INVALID_GRAPH" and item["stop_reason"] in ("eos","graph_boundary")),"graph rejection category")
+    return accepted,total,maximum,[]
 
 
 def check_attempts(attempts,questions=None,goal=QUESTION):
@@ -390,12 +462,14 @@ def validate_failure(value,input_raw,source):
     diagnostic=value["planner_diagnostic"]
     require(type(diagnostic) is dict and diagnostic.keys()=={"strategy","attempts","incomplete_attempt"}
         and diagnostic["strategy"]==STRATEGY and type(diagnostic["incomplete_attempt"]) is bool,"invalid planner failure diagnostic")
-    accepted,total,_,_=check_attempts(diagnostic["attempts"],goal=expected["question"])
+    accepted,total,_,_=(check_graph_attempts(diagnostic["attempts"]) if TASK_GRAPH else
+        check_attempts(diagnostic["attempts"],goal=expected["question"]))
     # Accepted questions do not enroll a plan: later model-integrity or artifact
     # I/O checks can still fail. Only an incomplete generation needs another slot.
-    require(accepted<=2 and total<=384,"failure exceeds planning budget")
+    accepted_bound=1 if TASK_GRAPH else 2
+    require(accepted<=accepted_bound and total<=384,"failure exceeds planning budget")
     if diagnostic["incomplete_attempt"]:
-        require(accepted<2 and len(diagnostic["attempts"])<4 and total<384,"incomplete attempt was outside original budget")
+        require(accepted<accepted_bound and len(diagnostic["attempts"])<4 and total<384,"incomplete attempt was outside original budget")
 
 
 def check_planning(raw,source):
@@ -405,8 +479,9 @@ def check_planning(raw,source):
     coverage={k:excerpt[k] for k in ("start","end","sha256")}
     complete=excerpt["end"]==len(source)
     require(load("planner-input.json")==expected and raw["planner-input.json"]==encoded(expected),"planner input is not exact source-grounded selection")
-    require(raw["planner-artifact.json"]==raw["model-planner/task-questions.json"],"original model questions replaced")
-    plan=questions_plan(raw["planner-artifact.json"])
+    artifact_name="task-graph.json" if TASK_GRAPH else "task-questions.json"
+    require(raw["planner-artifact.json"]==raw["model-planner/"+artifact_name],"original model proposal replaced")
+    plan=(model_graph_plan if TASK_GRAPH else questions_plan)(raw["planner-artifact.json"])
     require(load("graph-plan.json")==plan and raw["graph-plan.json"]==encoded(plan),"graph was not derived exactly from actual questions")
     report=load("planner-report.json")
     require(report["mode"]=="plan_tasks" and report["version"]==1 and report["status"]=="ok" and report["kind"]=="result"
@@ -419,30 +494,39 @@ def check_planning(raw,source):
         and report["base_before"]==report["base_after"] and report["base_before"]["parameters"]>0
         and re.fullmatch(r"[0-9a-f]{64}",report["base_before"]["sha256"])
         and report["generation_limit_reached"] is report["model_answer_correctness_proven"] is False
-        and report["planner_stop_reason"]=="two_questions"
+        and report["planner_stop_reason"]==("task_graph" if TASK_GRAPH else "two_questions")
         and report["planner_strategy"]==STRATEGY
-        and report["planner_structure_generated_by"]=="local_schema"
+        and report["planner_structure_generated_by"]==("model" if TASK_GRAPH else "local_schema")
         and type(report["planner_prompt_tokens"]) is int and 1<=report["planner_prompt_tokens"]<=512
-        and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<384
+        and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<=(384 if TASK_GRAPH else 383)
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
-    questions=strict_json(raw["planner-artifact.json"])["questions"]
-    require(len(questions)==2,"two model-generated questions required")
-    accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions,goal=expected["question"])
-    require(accepted==2 and report["planner_question_stats"]==stats and report["planner_prompt_tokens"]==maximum
-        and report["planner_generated_tokens"]==total<384,"planner aggregate budget or accepted stages differ")
-    require(report["dataset"]==dict(version=2,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
+    if TASK_GRAPH:
+        accepted,total,maximum,_=check_graph_attempts(report["planner_attempts"],raw["planner-artifact.json"])
+        require(accepted==1 and "planner_question_stats" not in report
+            and report["planner_task_count"]==len(plan["nodes"])-1
+            and report["planner_dependency_count"]==sum(len(n["depends_on"]) for n in plan["nodes"][:-1]),"graph structure/accounting mismatch")
+    else:
+        questions=strict_json(raw["planner-artifact.json"])["questions"]
+        require(len(questions)==2,"two model-generated questions required")
+        accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions,goal=expected["question"])
+        require(accepted==2 and report["planner_question_stats"]==stats and total<384,"planner accepted stages differ")
+    require(report["planner_prompt_tokens"]==maximum and report["planner_generated_tokens"]==total,"planner aggregate budget differs")
+    require(report["dataset"]==dict(version=expected["version"],sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
         visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
         source_excerpt=dict(coverage,bytes=excerpt["end"]))
-        and report["artifacts"]==[dict(relative_path="task-questions.json",bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
+        and report["artifacts"]==[dict(relative_path=artifact_name,bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
         and load("model-planner/report.json").items()<=report.items(),"planner report/artifact not tied to exact goal and source")
     DOC["check_supervisor"](report)
     require(report["supervisor"]["rss_limit_bytes"]==3*1024**3,"planner changed its memory limit")
-    authority=dict(version=2,input_sha256=sha(raw["planner-input.json"]),report_sha256=sha(raw["planner-report.json"]),
+    authority=dict(version=expected["version"],input_sha256=sha(raw["planner-input.json"]),report_sha256=sha(raw["planner-report.json"]),
         artifact_sha256=sha(raw["planner-artifact.json"]),question=QUESTION,source_sha256=sha(source),source_bytes=len(source),source_excerpt=coverage)
     require(load("graph.json")["planner"]==authority,"planner authority was not pinned before graph enrollment")
     summary=dict(kind="bounded_model_fork_join_decomposition",authority=authority,goal_only=False,
         source_contents_read_by_planner=True,source_excerpt_complete=complete,source_coverage=coverage,
         model_selected_tools=False,decomposition_quality_proven=False)
+    if TASK_GRAPH:
+        summary.update(kind="bounded_model_task_graph_decomposition",model_selected_task_count=True,
+            model_selected_dependencies=True,terminal_question_from_user=True)
     return plan,summary
 
 
@@ -520,9 +604,10 @@ def check(value,revision):
         and original["excerpt_selection"]=="complete_intro_before_network_navigation"
         and public_intro(source+b"[Network](")==source,"not exact complete public introduction/goal selection")
     plan,planning=check_planning(raw,source);count=len(plan["nodes"])-1;load=lambda name:json.loads(raw[name])
+    source_indices=[i for i,node in enumerate(plan["nodes"]) if not node["depends_on"]]
     graph=load("graph.json")
     require(graph["version"]==1 and graph["plan_sha256"]==sha(encoded(plan)) and graph["leaves"]==[
-        dict(node=i,enrollment_sha256=sha(raw[f"node-{i:04d}/document.json"])) for i in range(count)],"model-plan leaf pins changed")
+        dict(node=i,enrollment_sha256=sha(raw[f"node-{i:04d}/document.json"])) for i in source_indices],"model-plan leaf pins changed")
     observed=value["planner-observation"];TRAIN["check_isolation"](observed["isolation"])
     require(observed["node_lineage"]["node"]=="client" and observed["node_lineage"]["cli"]==observed["isolation"]["cli"]
         and observed["node_lineage"]["cli_namespace"]==observed["node_lineage"]["service_namespace"]
@@ -532,8 +617,13 @@ def check(value,revision):
         and observed["dataset_inode"]==saved["planner-input.json"]["inode"]
         and observed["model_inode"]==original["owner_model_inode"]
         and observed["runtime_lock_held"] is observed["alive_before_and_after"] is True,"actual owner planner lineage/input missing")
-    JOBS["check_overlap"](value["overlap"]);layout=value["layout"];workers={w["node"]:w for w in value["overlap"]["workers"]}
-    require(set(workers)==set(layout["provider_nodes"]) and all(CUSTODY["peer_key"](value["peers"][n])==k for n,k in layout["provider_keys"].items())
+    if TASK_GRAPH:
+        require(value["overlap"].get("simultaneous_execution_claimed") is False
+            and value["overlap"]["workers"]==[w["worker"] for w in value["observation"]["workers"]],"graph worker cleanup lineage differs")
+    else:JOBS["check_overlap"](value["overlap"])
+    layout=value["layout"];workers={w["node"]:w for w in value["overlap"]["workers"]}
+    require((bool(workers) and set(workers)<=set(layout["provider_nodes"]) if TASK_GRAPH else set(workers)==set(layout["provider_nodes"]))
+        and all(CUSTODY["peer_key"](value["peers"][n])==k for n,k in layout["provider_keys"].items())
         and layout["control_relay_peer_id"] not in {value["peers"][n] for n in workers}
         and original["private_copies_no_hardlinks"] is True and original["owner_model_inode"]!=original["peer_model_inode"]
         and all(w["input_inodes"]["model/model.safetensors"]==original["peer_model_inode"] for w in workers.values()),"planner/peer model copies or isolation differ")
@@ -546,12 +636,22 @@ def check(value,revision):
     require(enrollment["operation"]=="compute_graph_enrolled" and enrollment["execution_started"] is True
         and enrollment["model_planning_performed"] is enrollment["automatic_task_planning"] is True
         and enrollment["peer_execution_started"] is enrollment["task_complete"] is enrollment["private_data_supported"] is False
-        and enrollment["nodes"]==count+1 and enrollment["source_tasks"]==count and enrollment["plan_sha256"]==sha(encoded(plan))
+        and enrollment["nodes"]==count+1 and enrollment["source_tasks"]==len(source_indices) and enrollment["plan_sha256"]==sha(encoded(plan))
         and enrollment["source_manifest_id"]==source_id and enrollment["provider_keys"]==authority["provider_keys"]
         and enrollment["planning"]==planning,"enrollment did not distinguish real planning from pending peer work")
     executed,response_bytes,answers,rounds={},dict.fromkeys(workers,0),{},0
-    for index,node in enumerate(plan["nodes"][:-1]):
-        prefix=f"node-{index:04d}";enrolled=load(prefix+"/document.json");question=node["question"]
+    for index,node in enumerate(plan["nodes"]):
+        prefix=f"node-{index:04d}";question=node["question"]
+        if node["depends_on"]:
+            joined=load(prefix+"/result.json")
+            require(raw[prefix+"/source.manifest"]==source_manifest and joined["operation"]=="compute_graph_dependency"
+                and joined["public_question"]==question and joined["source_manifest_id"]==source_id
+                and joined["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"dependency substituted original instruction/source")
+            answer,used=reduction(raw,prefix,[answers[n] for n in node["depends_on"]],question,authority,
+                source_manifest,layout,executed,response_bytes,index,True)
+            rounds+=used;answers[node["id"]]=answer
+            continue
+        enrolled=load(prefix+"/document.json")
         tokenized=GRAPH["planner"](raw,prefix+"/",source,question,model_profile=MODEL_PROFILE)
         require(raw[prefix+"/source.txt"]==source and raw[prefix+"/source.manifest"]==source_manifest
             and enrolled["scheduling"]=="ready_rows_v1" and enrolled["synthesize"] is True
@@ -572,12 +672,6 @@ def check(value,revision):
         answer,used=reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,index,False)
         rounds+=used;answers[node["id"]]=answer
         require(load(prefix+"/result.json")["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"leaf graph identity changed")
-    node=plan["nodes"][-1];prefix=f"node-{count:04d}";joined=load(prefix+"/result.json")
-    require(raw[prefix+"/source.manifest"]==source_manifest and joined["operation"]=="compute_graph_dependency"
-        and joined["public_question"]==QUESTION and joined["source_manifest_id"]==source_id
-        and joined["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"join substituted original question/source")
-    answer,used=reduction(raw,prefix,[answers[n] for n in node["depends_on"]],QUESTION,authority,source_manifest,layout,executed,response_bytes,count,True)
-    rounds+=used;answers["answer"]=answer
     require(count+1<=rounds<=16 and len({a["job_id"] for a in answers.values()})==count+1,"model join reused a source task")
     for phase,used in (("result",rounds),("resume",0)):
         result=value[phase]
@@ -841,14 +935,103 @@ def self_test():
     print("source-grounded model-planning v4 proposal, exact goal-copy rejection, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
 
 
+def graph_self_test():
+    # Pure schema, exact-byte retention and accounting. No generated task is
+    # supplied to the live planner by this test or the execution helper.
+    profile_self_test()
+    source=b"Public source."
+    assert planning_input(source)["version"]==3
+    artifact=encoded(dict(version=3,tasks=[dict(question="Which requirements?",depends_on=[]),
+        dict(question="Which risks affect those requirements?",depends_on=[0]),
+        dict(question="Which other constraints?",depends_on=[])]))
+    plan=model_graph_plan(artifact)
+    assert len(plan["nodes"])==4 and plan["nodes"][1]["depends_on"]==["question-00"]
+    assert plan["nodes"][-1]==dict(id="answer",question=QUESTION,depends_on=["question-01","question-02"])
+    def attempt(number,raw,tokens,cap=384,accepted=True,code=None,stop="graph_boundary"):
+        return dict(attempt=number,prompt_tokens=128,generated_tokens=tokens,max_new_tokens=cap,
+            accepted=accepted,rejection_code=code,stop_reason=stop,text_bytes=len(raw),text_sha256=sha(raw))
+    for stop in ("graph_boundary","eos"):
+        assert check_graph_attempts([attempt(1,artifact,384,stop=stop)],artifact)[:3]==(1,384,128)
+    attempts=[attempt(1,b'not JSON',24,accepted=False,code="INVALID_JSON",stop="eos"),
+        attempt(2,artifact,120,cap=360)]
+    assert check_graph_attempts(attempts,artifact)[:3]==(1,144,128)
+    # Inert report/source binding, deliberately not proof of a real model run.
+    selected=planning_input(source);input_raw=encoded(selected)
+    excerpt=selected["source_excerpt"];coverage={k:excerpt[k] for k in ("start","end","sha256")}
+    report=dict(mode="plan_tasks",version=1,status="ok",kind="result",device="cpu",threads=2,updates_completed=0,
+        backend_versions={"torch":"2.14.0+cpu","transformers":"5.16.1","peft":"0.20.0"},
+        model=dict(id=MODEL_ID["model_id"],revision=MODEL_ID["model_revision"],files={"model.safetensors":MODEL_ID["base_weights"]}),
+        model_weights_loaded=True,source_contents_read_by_planner=True,base_weights_unchanged=True,
+        goal_only_planning=False,source_excerpt_complete=True,base_before=dict(parameters=1,sha256="a"*64),
+        base_after=dict(parameters=1,sha256="a"*64),generation_limit_reached=False,model_answer_correctness_proven=False,
+        planner_stop_reason="task_graph",planner_strategy=STRATEGY,planner_structure_generated_by="model",
+        planner_prompt_tokens=128,planner_generated_tokens=144,planner_attempts=attempts,planner_task_count=3,planner_dependency_count=1,
+        dataset=dict(version=3,sha256=sha(input_raw),bytes=len(input_raw),visibility="public",license="GPL-3.0-only",
+            question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
+            source_excerpt=dict(coverage,bytes=len(source))),
+        artifacts=[dict(relative_path="task-graph.json",bytes=len(artifact),sha256=sha(artifact))],
+        supervisor=dict(child_reaped=True,network_access=False,gpu_access=False,max_observed_rss_bytes=1,rss_limit_bytes=3*1024**3))
+    raw={"planner-input.json":input_raw,"planner-artifact.json":artifact,"model-planner/task-graph.json":artifact,
+        "graph-plan.json":encoded(plan),"planner-report.json":encoded(report),"model-planner/report.json":encoded(report)}
+    authority=dict(version=3,input_sha256=sha(input_raw),report_sha256=sha(raw["planner-report.json"]),
+        artifact_sha256=sha(artifact),question=QUESTION,source_sha256=sha(source),source_bytes=len(source),source_excerpt=coverage)
+    raw["graph.json"]=encoded(dict(planner=authority))
+    actual,summary=check_planning(raw,source)
+    assert actual==plan and summary["authority"]==authority and summary["model_selected_dependencies"] is True
+    for name in ("planner-artifact.json","model-planner/task-graph.json","graph-plan.json","planner-input.json"):
+        changed=dict(raw);changed[name]+=b" "
+        try:check_planning(changed,source)
+        except ValueError:pass
+        else:raise AssertionError("modified retained model/source/graph bytes accepted")
+    for change in (lambda a:a[1].update(max_new_tokens=384),lambda a:a[1].update(text_sha256="0"*64),
+        lambda a:a[0].update(stop_reason="graph_boundary"),lambda a:a[1].update(question_index=0),
+        lambda a:a.append(attempt(3,artifact,1)),lambda a:a[1].update(stop_reason="token_limit")):
+        invalid=copy.deepcopy(attempts);change(invalid)
+        try:check_graph_attempts(invalid,artifact)
+        except ValueError:pass
+        else:raise AssertionError("invalid model graph accounting accepted")
+    for tasks in ([dict(question="One?",depends_on=[])],
+        [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[])],
+        [dict(question=QUESTION,depends_on=[]),dict(question="Two?",depends_on=[0])],
+        [dict(question="One?",depends_on=[0]),dict(question="Two?",depends_on=[0])],
+        [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[0,0])],
+        [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[True])],
+        [dict(question="One?",depends_on=[]),dict(question=" One? ",depends_on=[0])]):
+        try:model_graph_plan(encoded(dict(version=3,tasks=tasks)))
+        except ValueError:pass
+        else:raise AssertionError("invalid graph or non-edge fixture proof accepted")
+    for raw in (encoded(dict(version=2,questions=["One?","Two?"])),b'```json\n'+artifact+b'\n```',
+        artifact+b' trailing',b'{"version":3,"version":3,"tasks":[]}'):
+        try:model_graph_plan(raw)
+        except ValueError:pass
+        else:raise AssertionError("old, extracted or duplicate-key graph accepted")
+    input_raw=encoded(planning_input(source))
+    failure=dict(version=1,operation="compute_public_task_planning_failure",request_id="a"*32,
+        code="TASK_GRAPH_GENERATION_LIMIT",input_sha256=sha(input_raw),source_sha256=sha(source),source_bytes=len(source),
+        planner_diagnostic=dict(strategy=STRATEGY,attempts=[attempt(1,b'partial',384,accepted=False,
+            code="GENERATION_LIMIT",stop="token_limit")],incomplete_attempt=False),child_reaped=True,plan_enrolled=False)
+    validate_failure(failure,input_raw,source)
+    failure["planner_diagnostic"]["incomplete_attempt"]=True
+    try:validate_failure(failure,input_raw,source)
+    except ValueError:pass
+    else:raise AssertionError("extra generation after original budget accepted")
+    print("model-selected graph v1 exact task/edge translation, charged attempts and no-edge negative controls PASS; no model/network executed")
+
+
 def main(args):
+    if args and args[0]=="--task-graph":
+        select_task_graph();args=args[1:]
     command=args[0]
-    if command=="self-test":self_test()
+    if command=="self-test":graph_self_test() if TASK_GRAPH else self_test()
     elif command=="prepare":prepare(Path(args[1]))
     elif command=="observe-planner":observe_planner(Path(args[1]),int(args[2]))
     elif command=="observe-peers":observe_peers(Path(args[1]),int(args[2]))
     elif command=="collect":collect(Path(args[1]),args[2])
     elif command=="collect-failure":collect_failure(Path(args[1]))
+    elif command=="check-enrollment":
+        work=Path(args[1]);saved=read(record(work,"enrolled-files"),64*1048576)
+        check_planning({name:bytes.fromhex(raw) for name,raw in saved["raw"].items()},
+            bytes.fromhex(read(record(work,"input"))["excerpt_hex"]))
     elif command=="remove-input":remove_input(Path(args[1]))
     elif command=="stopped":stopped(Path(args[1]))
     elif command=="resumed":stopped(Path(args[1]),True)

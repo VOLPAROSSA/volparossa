@@ -244,14 +244,15 @@ cut off by the token limit. The updated answer path retains the model's actual s
 and prevents unfinished outputs from becoming completed answers or new dependencies; its
 focused checks pass, with live execution of the updated contract still pending.
 Useful, source-faithful decomposition remains unfinished. The model does not choose task count or shape.
-The next planner revision explicitly asks for narrower questions and rejects an exact copy of
-the original question as a charged attempt. Local checks pass; this is not a semantic quality
-test and does not detect every paraphrase or whitespace variant. Its live model proof is pending.
+The latest fixed-layout planner asks for narrower questions and rejects an exact copy of
+the original question as a charged attempt. A real model run now demonstrates that rejection,
+but still accepts a paraphrase: this is not a semantic quality test.
 An explicit `smollm2-360m-v1` profile now connects the larger pinned model to planning,
 peer selection, inference and synthesis, with a larger per-answer budget. The existing 135M
-training/adapters remain separate. Its first VM run executes real 360M planning but stops at a
-fixture command error before peer execution; that command is corrected. The complete peer
-workflow and answer-quality review remain pending. A larger model alone is not proof of better answers.
+training/adapters remain separate. The latest VM run executes real 360M planning and starts
+two peer workers, but both fail before producing answers. The complete peer workflow remains
+unfinished; fixed, privacy-limited failure diagnostics now support investigating the cause.
+A larger model alone is not proof of better answers.
 The new opt-in `--plan-task-graph` goes beyond the fixed two-question layout: the model proposes
 one to four subtasks and their dependencies as one complete JSON object. The existing executor
 runs the accepted graph and joins its terminal branches under the unchanged original question.
