@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Real public source compilation, singleton peer execution and source-byte provenance."""
 import copy
+from contextlib import contextmanager
 import fcntl
 import json
 import os
@@ -11,6 +12,7 @@ import runpy
 import stat
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -37,6 +39,70 @@ SCOPE = ("three explicit public repository excerpts, an owner-signed compilation
 NETWORK_SCOPE = SCOPE + (" Additionally one local and two independently selected native publications: "
     "one actual preferred-cache hit and one protected missing-source download; exact original signatures, "
     "native identities and unextended expiry retained. Publisher signatures do not authenticate original authors.")
+
+# Capture only fixed boundary codes, never the rest of the product log line. A late
+# ring snapshot loses the Submit boundary while an uncertain original lease expires.
+RPC_BOUNDARIES = frozenset("COMPUTE_RPC_" + name + "_FAILED" for name in (
+    "LOCAL_REQUEST", "LOCAL_REPLY", "ROUTE_SETUP", "DISCOVERY", "OFFER_BINDING",
+    "ROUTE_BINDING", "ROUTE_FLOW", "PROVIDER_TLS", "CHALLENGE", "PREEXPORT_CHECK",
+    "SIGNED_EXCHANGE", "REPLY_BINDING", "PROVIDER_CLOSE", "ROUTE_CLOSE", "FINAL_POLICY"))
+
+
+def rpc_boundaries(raw, state):
+    """Bounded, lower-bound timestamp counts; sampled ring logs are not a full trace."""
+    if len(raw) > 262144:
+        raise ValueError("oversized diagnostic snapshot")
+    for line in raw.splitlines():
+        fields = line.split(b"\t")
+        if len(fields) != 5 or not re.fullmatch(rb"[0-9]{1,20}", fields[0]):
+            continue
+        stamp = int(fields[0])
+        code = fields[2].removeprefix(b"event=").decode("ascii", errors="replace")
+        if not fields[2].startswith(b"event=") or code not in RPC_BOUNDARIES or not 0 < stamp < 2**64:
+            continue
+        previous = state.setdefault(code, dict(first_ms=stamp, last_ms=stamp, distinct_timestamp_observations=0))
+        if stamp > previous["last_ms"] or previous["distinct_timestamp_observations"] == 0:
+            previous["last_ms"] = stamp
+            previous["distinct_timestamp_observations"] += 1
+
+
+@contextmanager
+def capture_rpc_boundaries(work):
+    """Guest-only diagnostic sampler, stopped and joined even on worker-proof failure."""
+    stop = threading.Event()
+    summary = dict(version=1, scope="sampled_client_rpc_boundaries_not_job_correlation",
+                   samples=0, sample_failures=0, timestamps_are_lower_bounds=True, events={})
+    output = record(work, "rpc-boundaries")
+    stream = os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
+
+    def sample():
+        for _ in range(512):
+            try:
+                reply = JOBS["subprocess"].run([str(work / "bin/volparossa"), "--control-socket",
+                    str(work / "runtime-client/control/agent.sock"), "logs", "--limit", "400"],
+                    stdout=JOBS["subprocess"].PIPE, stderr=JOBS["subprocess"].DEVNULL,
+                    timeout=2, check=True)
+                rpc_boundaries(reply.stdout, summary["events"])
+                summary["samples"] += 1
+            except (OSError, ValueError, JOBS["subprocess"].SubprocessError):
+                # Never retain exception strings, command output or unknown event codes.
+                summary["sample_failures"] += 1
+            stream.seek(0)
+            json.dump(summary, stream, allow_nan=False)
+            stream.write("\n")
+            stream.truncate()
+            stream.flush()
+            if stop.wait(4):
+                break
+
+    thread = threading.Thread(target=sample, name="collection-rpc-boundaries")
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        stream.close()
 
 
 def root_path(work):
@@ -194,6 +260,11 @@ def enrolled(work, network=False):
 
 def observe(work, launcher):
     JOBS["guest_work"](work)
+    with capture_rpc_boundaries(work):
+        observe_workers(work, launcher)
+
+
+def observe_workers(work, launcher):
     owner = JOBS["identity"](launcher)
     root = root_path(work)
     JOBS["observe"](work)
@@ -787,7 +858,9 @@ def main(args):
     network=args[-1]=="--network"
     if network:args=args[:-1]
     command=args[0]
-    if command=="self-test":self_test(network)
+    if command=="self-test":
+        rpc_boundaries_self_test()
+        self_test(network)
     elif command=="prepare":prepare(Path(args[1]),network)
     elif command=="network-plan" and network:network_plan(Path(args[1]))
     elif command=="cache-before" and network:cache_before(Path(args[1]))
@@ -801,6 +874,29 @@ def main(args):
     elif command=="finalize":finalize(Path(args[1]),args[2],int(args[3]),args[4]=="true",int(args[5]),args[6],args[7],network)
     elif command=="report":report(read(Path(args[1]),64*1048576),args[2],network)
     else:raise ValueError("unknown fixed collection fixture command")
+
+
+def rpc_boundaries_self_test():
+    # Pure log parser fixtures, not claimed production transport or worker evidence.
+    code = "COMPUTE_RPC_PROVIDER_TLS_FAILED"
+    def line(stamp, event=code):
+        return f"{stamp}\tlevel=0\tevent={event}\tsession=never-retain\tpath=never-retain\n".encode()
+    state = {}
+    raw = line(100) + line(100) + line(101) + line(102, "COMPUTE_RPC_not-a-fixed-code")
+    rpc_boundaries(raw, state)
+    rpc_boundaries(raw + line(103), state)
+    rpc_boundaries(line(99) + line(2**64) + b"private prompt\n", state)
+    require(state == {code: dict(first_ms=100, last_ms=103, distinct_timestamp_observations=3)},
+            "bounded fixed RPC codes lost or duplicated")
+    require("never-retain" not in json.dumps(state) and "prompt" not in json.dumps(state),
+            "unfiltered RPC log fields retained")
+    try:
+        rpc_boundaries(b"x" * 262145, state)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("oversized RPC log accepted")
+    print("fixed RPC boundary privacy/deduplication parser PASS; no service or model executed")
 
 
 if __name__=="__main__":

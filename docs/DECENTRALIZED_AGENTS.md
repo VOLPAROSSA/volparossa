@@ -1065,7 +1065,17 @@ The complete workflow failed; its final synthesis and offline resume are not ver
 A targeted broker correction separates the single execution slot from bounded receipt history
 (256 records and a 32 MiB retained-data budget, reserving space before each new job), without
 changing original receipt expiry or deleting unfinished/retained work. Its thirteen focused
-broker tests pass; the corrected end-to-end run is still pending.
+broker tests pass. The [corrected run on `dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632)
+also failed, this time after eight completed fragment jobs: another submitted job remained
+unconfirmed without a terminal receipt. It did not reach synthesis; this is a separate unresolved
+submission/confirmation failure, not evidence that the complete native-source workflow works.
+
+Unconfirmed batch results now retain an optional fixed `diagnostic`: the RPC operation phase,
+`exchange_unconfirmed`, `broker_rejected` plus its authenticated `ErrorCode`, or
+`receipt_validation`. This never includes upstream exception text or changes original leases.
+An exchange failure alone does not identify a network cause or prove that a job was rejected.
+The disposable collection fixture also retains sampled allowlisted client boundary timestamps;
+those are diagnostic lower bounds, not authenticated per-job evidence or a product log archive.
 
 ### Cooperating public tasks
 
@@ -1112,11 +1122,14 @@ unfinished new reductions still need the tokenizer runtime/model and publisher i
 Once complete, neither those options nor the original input/plan files are needed to validate
 and return the retained result. Only explicitly public sources and questions are supported.
 
-The graph executor and forty focused document tests currently pass, including exact source
-reuse, plan validation and zero-round completion after a previously partial summary. Its real
-four-node fork/join/one-parent/offline-resume VM proof is pending. These local controls are not
-model execution evidence. This is a user-enrolled cooperating task plan, not automatic planning,
-general tool use, a guarantee of sensible answers, or completion of B03.
+The graph executor and forty focused document tests pass, including exact source reuse, plan
+validation and zero-round completion after a previously partial summary. The [real four-node
+run on `56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and replay of
+its 138 unchanged original evidence files also pass: two source questions complete first, then
+comparison and single-parent refinement each execute a distinct real worker job. Removing the
+original input/plan and stopping brokers still permits zero-round completed resume without
+changing retained files. Protected captures, cleanup and unchanged host state pass. This proves
+execution of the enrolled plan, not useful answers, general tool use or completion of B03.
 
 ### Synthesizing one public answer
 

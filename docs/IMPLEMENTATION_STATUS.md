@@ -4,15 +4,21 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
-Current public task-graph candidate: `compute peer document --task-plan` enrolls different
+Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same
 original signed source, validity and peer selection. Once source work completes, ordered
 dependency frontiers consume receipt-reconstructed parent answers. Even a single-parent step
 runs its own new instruction; it cannot return the parent's answer as if it performed new work.
 Graph and per-node identities are retained, and completed replay preserves existing execution
-summaries. Forty focused document tests and strict all-target CLI Clippy pass. The new four-node
-fork/join/one-parent continuation fixture is wired; no live task-graph proof is claimed yet.
+summaries. Forty focused document tests and strict all-target CLI Clippy pass. The [run on
+`56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and reconstruction
+of its 138 original evidence files pass: four distinct actual workers execute the two source
+questions, comparison and single-parent refinement. An intentionally partial first invocation
+resumes without changing original source authority. Removing the input/plan files and stopping
+both brokers still permits a zero-round offline completed resume with unchanged retained
+history. Five captures contain 33,052 frames with zero drops/direct client-to-exit packets;
+private/network cleanup and unchanged host state pass. This verifies the explicitly enrolled plan.
 The current scheduler has a source-stage barrier and ordered dependent stages, not fully dynamic
 DAG scheduling or automatic task planning. This does not complete B03 or add private computation.
 
@@ -32,8 +38,20 @@ final synthesis or offline resume. Both executors retained eight terminal jobs u
 original expiry and consequently refused further admission. The corrective broker change
 separates its unchanged single active worker from a bounded 256-record/32 MiB retained history,
 including a worst-case space reservation for the next job. Original receipts and expiry remain
-unchanged; thirteen focused broker tests pass. The corrected full run is pending. This is not
-automatic web research, private computation or a completed B03 checkpoint.
+unchanged; thirteen focused broker tests pass. The [corrected run on
+`dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632) **also failed**, now
+after eight completed fragment jobs: a new retained job handle remained unconfirmed with
+`COMPUTE_RPC_UNCONFIRMED`, without a terminal receipt. Synthesis did not start. This is a
+separate submission/confirmation failure under investigation; there is no complete workflow
+proof, automatic web research, private computation or completed B03 checkpoint.
+
+The new diagnostic step preserves fixed RPC operation/category and an authenticated broker
+error code when available, while leaving uncertain handles, slot ownership and original
+deadlines unchanged. The disposable collection observer now samples only allowlisted RPC
+boundary codes before they leave the in-memory log ring. These timestamp observations are
+lower bounds, not task correlation or proof of a specific transport cause. Six focused queue
+tests and the pure diagnostic parser checks pass. This adds diagnosis, not a claimed fix for
+the unresolved submission; its new live run is pending.
 
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly
