@@ -222,9 +222,10 @@ An explicit **public task graph** lets peers answer different source questions, 
 retained answers into dependent instructions. Its real four-task fork/join and offline-resume
 VM proof passes. The next opt-in mode asks the local model to propose the initial subquestions
 automatically, preserving the original question in the final task. That goal-only decomposition
-passes focused local checks. Its first real-model run reached the generation limit without an
-accepted plan; the next candidate stops on a complete, validated JSON proposal. The complete
-model-and-peer execution proof is still pending.
+passes focused local checks. Two real-model attempts reached the generation limit without an
+accepted plan. The next candidate lets the model generate two complementary questions while
+the software supplies only the file structure. Complete model-and-peer execution proof is
+still pending; the model does not yet choose the number or shape of tasks.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

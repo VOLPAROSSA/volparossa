@@ -5,7 +5,7 @@ This is the repository's source of truth for implementation progress. A checked 
 Last updated: 2026-09-21
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
-runs one isolated pinned-model attempt to propose 2–4 public subquestions. Strictly validated
+runs an isolated pinned model to propose two public subquestions. Strictly validated
 question data forms a fixed fork/join graph, with the original user question unchanged in the
 terminal join. The model sees the goal only; original source hash/size bind later execution,
 without claiming source understanding. Source acquisition occurs once, and the exact planner
@@ -18,14 +18,18 @@ protocol tests and strict CLI Clippy. The [first real run on
 384-new-token limit before any plan was accepted. No peer task started. The 109 original
 artifact files retain the real worker observation and successful cleanup/unchanged host state;
 the generated token sequence was not retained, so its text and reason for continuing are unknown.
-The next candidate shortens the format instruction and stops generation as soon as the entire
-generated text is a valid proposal, without extracting, repairing or inventing any questions.
-It records `complete_json` or `eos` as the stopping reason; budgets and one-attempt behavior
-are unchanged. This is an improvement to generation control, not proof that the old run had a
-valid JSON prefix. No complete model/peer/offline-resume proof or answer-quality claim yet;
-B03 remains incomplete.
-The revised stop passes eight focused Rust checks, thirty-two pure Python protocol tests,
-the fixture's pure checks and strict all-target CLI Clippy; its actual VM run remains pending.
+The shorter prompt and whole-JSON stop passed eight focused Rust checks, thirty-two pure Python
+checks and strict CLI Clippy, but [actual run `845b1c0`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35622327797)
+**failed at the same generation limit**, before a plan or peer job. Its 109 original files
+verify actual owner isolation and complete cleanup/unchanged host state, not generated text.
+The next candidate separates task content from serialization: two successive model-generated
+questions, with the first included while generating the second, and a locally supplied JSON
+structure. Each stage has fewer than 192 new tokens (combined below 384), at most 512 prompt
+tokens and the same original owner deadline. Exact question text, per-stage stop reasons and
+counts remain bound to the original report. No canned questions, model-selected task count,
+complete model/peer/offline-resume proof or answer-quality claim; B03 remains incomplete.
+Eight focused Rust checks, thirty-three pure worker tests, the fixture's pure checks and strict
+CLI Clippy pass; the two-question strategy still needs its actual isolated model/peer proof.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

@@ -105,6 +105,47 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionStats {
+    prompt_tokens: u64,
+    generated_tokens: u64,
+    stop_reason: String,
+}
+
+fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> {
+    let stats: Vec<QuestionStats> =
+        serde_json::from_value(report["planner_question_stats"].clone())?;
+    ensure!(
+        report["planner_strategy"] == "model_questions_scaffold_v1"
+            && report["planner_structure_generated_by"] == "local_schema"
+            && report["planner_stop_reason"] == "two_questions"
+            && stats.len() == 2
+            && questions.questions.len() == 2,
+        "compute_task_plan_strategy"
+    );
+    for (stat, question) in stats.iter().zip(&questions.questions) {
+        ensure!(
+            (1..=512).contains(&stat.prompt_tokens)
+                && (1..192).contains(&stat.generated_tokens)
+                && match stat.stop_reason.as_str() {
+                    "question_boundary" => question.trim_end().ends_with('?'),
+                    "eos" => true,
+                    _ => false,
+                },
+            "compute_task_plan_question_budget"
+        );
+    }
+    ensure!(
+        report["planner_prompt_tokens"].as_u64()
+            == stats.iter().map(|stat| stat.prompt_tokens).max()
+            && report["planner_generated_tokens"].as_u64()
+                == Some(stats.iter().map(|stat| stat.generated_tokens).sum()),
+        "compute_task_plan_total_budget"
+    );
+    Ok(())
+}
+
 /// Correlate the actual isolated worker's retained result. This is a local execution
 /// record, not independent remote attestation or evidence of meaningful decomposition.
 pub(super) fn validate_report(
@@ -118,6 +159,7 @@ pub(super) fn validate_report(
         "compute_task_plan_input_changed"
     );
     let questions = Questions::decode(artifact)?;
+    validate_question_stats(report, &questions)?;
     ensure!(
         report["version"] == 1
             && report["kind"] == "result"
@@ -134,10 +176,6 @@ pub(super) fn validate_report(
             && report["model_weights_loaded"] == true
             && report["goal_only_planning"] == true
             && report["generation_limit_reached"] == false
-            && matches!(
-                report["planner_stop_reason"].as_str(),
-                Some("complete_json" | "eos")
-            )
             && report["model_answer_correctness_proven"] == false
             && report["planner_prompt_tokens"]
                 .as_u64()

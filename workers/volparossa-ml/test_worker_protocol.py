@@ -122,7 +122,8 @@ def task_planner_doubles(text, generated=None, prompt=None):
     tokenizer, torch, transformers, model = (mock.Mock() for _ in range(4))
     tokenizer.pad_token_id = tokenizer.eos_token_id = 2
     tokenizer.apply_chat_template.return_value = prompt
-    tokenizer.decode.return_value = text
+    texts = text if isinstance(text, (list, tuple)) else [text, text]
+    tokenizer.decode.side_effect = lambda *_args, **_kwargs: texts[model.generate.call_count - 1]
     torch.tensor.side_effect = lambda rows, **_kwargs: Tensor(rows)
     torch.inference_mode.side_effect = contextlib.nullcontext
     transformers.StoppingCriteria = object
@@ -130,9 +131,10 @@ def task_planner_doubles(text, generated=None, prompt=None):
     transformers.AutoTokenizer.from_pretrained.return_value = tokenizer
 
     def generate(**kwargs):
+        actual_prompt = kwargs["input_ids"].rows[0]
         for criterion in kwargs["stopping_criteria"]:
-            criterion(Tensor([prompt + generated]), None)
-        return Tensor([prompt + generated])
+            criterion(Tensor([actual_prompt + generated]), None)
+        return Tensor([actual_prompt + generated])
 
     model.generate.side_effect = generate
     return model, tokenizer, torch, transformers
@@ -246,27 +248,35 @@ class WorkerProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
                     WORKER.prepare_files(value)
 
-    def test_task_planner_is_one_greedy_bounded_generation_with_owner_checkpoints(self):
+    def test_task_planner_has_two_real_greedy_generations_with_one_shared_owner(self):
         expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
-        model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected))
+        model, tokenizer, torch, transformers = task_planner_doubles(expected["questions"])
+        tokenizer.apply_chat_template.side_effect = [[11, 12, 13], [31, 32, 33, 34]]
         session = mock.Mock()
-        result, prompts, generated, stop_reason = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
-        self.assertEqual((result, prompts, generated, stop_reason), (expected, 3, 3, "eos"))
-        model.generate.assert_called_once()
-        arguments = model.generate.call_args.kwargs
-        self.assertEqual((arguments["max_new_tokens"], arguments["do_sample"], arguments["num_beams"],
-                          arguments["num_return_sequences"]), (384, False, 1, 1))
-        tokenizer.decode.assert_called_once_with([21, 22], skip_special_tokens=False, clean_up_tokenization_spaces=False)
-        self.assertGreaterEqual(session.check.call_count, 4)
+        result, prompts, generated, stats = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual((result, prompts, generated), (expected, 4, 6))
+        self.assertEqual(stats, [dict(prompt_tokens=count, generated_tokens=3, stop_reason="eos") for count in (3, 4)])
+        self.assertEqual(model.generate.call_count, 2)
+        for call in model.generate.call_args_list:
+            arguments = call.kwargs
+            self.assertEqual((arguments["max_new_tokens"], arguments["do_sample"], arguments["num_beams"],
+                              arguments["num_return_sequences"]), (192, False, 1, 1))
+        self.assertEqual(tokenizer.decode.call_args_list,
+                         [mock.call([21, 22], skip_special_tokens=False, clean_up_tokenization_spaces=False)] * 2)
+        self.assertEqual(session.check.call_count, 8)
         self.assertEqual((WORKER.MAX_CONTEXT, WORKER.MAX_NEW_TOKENS), (256, 64))
         self.assertEqual((WORKER.TASK_PLAN_PROMPT_TOKENS, WORKER.TASK_PLAN_CONTEXT_TOKENS), (512, 896))
-        tokenizer.apply_chat_template.assert_called_once_with(WORKER.task_plan_messages(task_plan_input()),
-            tokenize=True, add_generation_prompt=True, return_dict=False)
+        self.assertEqual(WORKER.TASK_PLAN_NEW_TOKENS, 384)
+        self.assertEqual(tokenizer.apply_chat_template.call_args_list,
+                         [mock.call(WORKER.task_plan_messages(task_plan_input(), previous),
+                                    tokenize=True, add_generation_prompt=True, return_dict=False)
+                          for previous in (None, expected["questions"][0])])
 
-    def test_task_planner_stops_on_whole_valid_json_before_an_extra_token(self):
+    def test_task_planner_stops_at_each_whole_question_without_changing_its_text(self):
         expected = dict(version=1, questions=[" Which requirements? ", "Which risks?"])
-        model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected), [21, 22])
-        tokenizer.decode.side_effect = ['{"version":1,"questions":[', json.dumps(expected), json.dumps(expected)]
+        model, tokenizer, torch, transformers = task_planner_doubles(expected["questions"], [21, 22])
+        tokenizer.decode.side_effect = [" Which requirements", expected["questions"][0], expected["questions"][0],
+                                       "Which risks", expected["questions"][1], expected["questions"][1]]
         session = mock.Mock()
 
         def generate(**kwargs):
@@ -278,18 +288,16 @@ class WorkerProtocolTests(unittest.TestCase):
 
         model.generate.side_effect = generate
         self.assertEqual(WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session),
-                         (expected, 3, 2, "complete_json"))
-        model.generate.assert_called_once()
-        self.assertEqual(session.check.call_count, 5)
+                         (expected, 3, 4, [dict(prompt_tokens=3, generated_tokens=2, stop_reason="question_boundary")] * 2))
+        self.assertEqual(model.generate.call_count, 2)
+        self.assertEqual(session.check.call_count, 10)
         self.assertEqual(tokenizer.decode.call_args_list,
                          [mock.call(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-                          for tokens in ([21], [21, 22], [21, 22])])
+                          for tokens in ([21], [21, 22], [21, 22])] * 2)
 
-    def test_task_planner_online_stop_never_repairs_or_extracts_json(self):
-        valid = '{"version":1,"questions":["A?","B?"]}'
-        for text in ('{"version":1,"questions":[', valid + " trailing", "prefix " + valid,
-                     "```json\n" + valid + "\n```", '{"version":1,"version":1,"questions":["A?","B?"]}',
-                     '{"version":1,"questions":["A?","A?"]}', '{"version":1,"questions":["Only one?"]}'):
+    def test_task_planner_online_stop_does_not_extract_questions_from_longer_output(self):
+        for text in ("Incomplete question", "A question? trailing", "```\nA question?\n```", "", " ",
+                     "a\0?", "\ud800?", "é" * 256 + "?"):
             model, tokenizer, torch, transformers = task_planner_doubles(text, [21, 22])
 
             def generate(**kwargs):
@@ -299,12 +307,12 @@ class WorkerProtocolTests(unittest.TestCase):
                 return incomplete
 
             model.generate.side_effect = generate
-            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_INCOMPLETE_GENERATION"):
+            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_INCOMPLETE_GENERATION"):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
             model.generate.assert_called_once()
 
     def test_task_planner_complete_marker_is_bound_to_exact_returned_tokens(self):
-        valid = '{"version":1,"questions":["A?","B?"]}'
+        valid = "What does the source require?"
         for returned in ([21, 23], [21, 22, 23], [21], [21, 22, 2]):
             model, tokenizer, torch, transformers = task_planner_doubles(valid)
 
@@ -314,20 +322,20 @@ class WorkerProtocolTests(unittest.TestCase):
                 return torch.tensor([[11, 12, 13] + returned])
 
             model.generate.side_effect = generate
-            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_COMPLETION_TOKENS_CHANGED"):
+            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_COMPLETION_TOKENS_CHANGED"):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
         # Even valid final text without EOS needs its own in-generation marker.
         model, tokenizer, torch, transformers = task_planner_doubles(valid)
         model.generate.side_effect = None
         model.generate.return_value = torch.tensor([[11, 12, 13, 21, 22]])
-        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_INCOMPLETE_GENERATION"):
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_1_INCOMPLETE_GENERATION"):
             WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
 
     def test_task_planning_never_truncates_repairs_retries_or_falls_back(self):
-        valid = '{"version":1,"questions":["A?","B?"]}'
-        for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*383+[2], valid),
-                                       ([1], [21]*384, valid), ([1], [2, 21, 2], valid),
-                                       ([1], [21, 2], valid+" trailing"), ([1], [21, 2], "```json\n"+valid+"\n```")):
+        valid = "What does the source require?"
+        for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*191+[2], valid),
+                                       ([1], [21]*192, valid), ([1], [2, 21, 2], valid),
+                                       ([1], [21, 2], " "), ([1], [21, 2], "é"*257)):
             model, tokenizer, torch, transformers = task_planner_doubles(text, generated, prompt)
             with self.subTest(prompt=len(prompt), generated=len(generated)), self.assertRaises(WORKER.JobError):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
@@ -340,6 +348,33 @@ class WorkerProtocolTests(unittest.TestCase):
         model.generate.assert_called_once()  # Cancellation propagated from the generation-thread criterion.
         tokenizer.decode.assert_not_called()
 
+    def test_task_planner_rejects_duplicate_model_questions_and_does_not_restart_budget(self):
+        model, tokenizer, torch, transformers = task_planner_doubles(["Same question?", " Same question? "])
+        with self.assertRaisesRegex(WORKER.JobError, "DUPLICATE_OR_EMPTY_TASK_PLAN_QUESTION"):
+            WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
+        self.assertEqual(model.generate.call_count, 2)
+        for change, error in (("prompt", "TASK_PLAN_QUESTION_2_PROMPT_TOKEN_LIMIT_EXCEEDED"),
+                              ("tokens", "TASK_PLAN_QUESTION_2_GENERATION_LIMIT_REACHED"),
+                              ("owner", "JOB_DEADLINE_EXCEEDED")):
+            model, tokenizer, torch, transformers = task_planner_doubles(["First question?", "Second question?"])
+            session = mock.Mock()
+            if change == "prompt":
+                tokenizer.apply_chat_template.side_effect = [[11, 12, 13], [11] * 513]
+            elif change == "tokens":
+                original = model.generate.side_effect
+
+                def generate(**kwargs):
+                    if model.generate.call_count == 1:
+                        return original(**kwargs)
+                    return torch.tensor([kwargs["input_ids"].rows[0] + [21] * 191 + [2]])
+
+                model.generate.side_effect = generate
+            else:
+                session.check.side_effect = [None] * 4 + [WORKER.JobError("JOB_DEADLINE_EXCEEDED")]
+            with self.subTest(change=change), self.assertRaisesRegex(WORKER.JobError, error):
+                WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+            self.assertEqual(model.generate.call_count, 2 if change == "tokens" else 1)
+
     def test_task_plan_branch_loads_weights_and_retains_only_valid_hashed_questions(self):
         expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
         source = task_plan_input()
@@ -347,7 +382,7 @@ class WorkerProtocolTests(unittest.TestCase):
             with self.subTest(valid=valid), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 value = WORKER.validate_request(dict(request(), mode="plan_tasks", output_root=str(root)))
-                model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected) if valid else "not JSON")
+                model, tokenizer, torch, transformers = task_planner_doubles(expected["questions"] if valid else " ")
                 digest = dict(sha256="b"*64, parameters=123)
                 real_hash = WORKER.file_hash
 
@@ -381,7 +416,11 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual((result["mode"],result["updates_completed"]), ("plan_tasks",0))
                 self.assertTrue(result["goal_only_planning"] and result["model_weights_loaded"] and result["base_weights_unchanged"])
                 self.assertFalse(result["generation_limit_reached"] or result["model_answer_correctness_proven"])
-                self.assertEqual(result["planner_stop_reason"], "eos")
+                self.assertEqual(result["planner_stop_reason"], "two_questions")
+                self.assertEqual(result["planner_strategy"], "model_questions_scaffold_v1")
+                self.assertEqual(result["planner_structure_generated_by"], "local_schema")
+                self.assertEqual(result["planner_question_stats"],
+                                 [dict(prompt_tokens=3, generated_tokens=3, stop_reason="eos")] * 2)
                 self.assertEqual(result["base_before"], result["base_after"])
                 for field in ("outputs","baseline_evaluation","input_adapter","adapter_after"):
                     self.assertNotIn(field,result)

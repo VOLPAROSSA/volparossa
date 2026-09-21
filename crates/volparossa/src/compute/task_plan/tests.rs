@@ -74,7 +74,11 @@ fn retained_planner_report_binds_original_input_artifact_model_and_cleanup() {
         "version":1,"id":"ab".repeat(16),"kind":"result","status":"ok","mode":"plan_tasks",
         "device":"cpu","threads":2,"updates_completed":0,"model_weights_loaded":true,
         "goal_only_planning":true,"generation_limit_reached":false,"model_answer_correctness_proven":false,
-        "planner_prompt_tokens":100,"planner_generated_tokens":40,"planner_stop_reason":"eos",
+        "planner_prompt_tokens":100,"planner_generated_tokens":40,"planner_stop_reason":"two_questions",
+        "planner_strategy":"model_questions_scaffold_v1","planner_structure_generated_by":"local_schema",
+        "planner_question_stats":[
+            {"prompt_tokens":80,"generated_tokens":20,"stop_reason":"question_boundary"},
+            {"prompt_tokens":100,"generated_tokens":20,"stop_reason":"eos"}],
         "model":{"id":MODEL_ID,"revision":MODEL_REVISION,"files":{"model.safetensors":{"sha256":hex::encode(BASE_MODEL_SHA256)}}},
         "dataset":{"version":1,"sha256":digest(&bytes),"bytes":bytes.len(),"visibility":"public","license":input.license,
             "question_sha256":digest(input.question.as_bytes()),"source_sha256":input.source_sha256,"source_bytes":input.source_bytes},
@@ -82,9 +86,14 @@ fn retained_planner_report_binds_original_input_artifact_model_and_cleanup() {
         "supervisor":{"child_reaped":true,"network_access":false}
     });
     validate_report(&report, &input, &bytes, artifact).unwrap();
-    let mut complete_json = report.clone();
-    complete_json["planner_stop_reason"] = json!("complete_json");
-    validate_report(&complete_json, &input, &bytes, artifact).unwrap();
+    let mut question_boundary = report.clone();
+    question_boundary["planner_question_stats"][1]["stop_reason"] = json!("question_boundary");
+    validate_report(&question_boundary, &input, &bytes, artifact).unwrap();
+    let mut unchanged_text = Questions::decode(artifact).unwrap();
+    unchanged_text.questions[0].push_str(" \n");
+    validate_question_stats(&question_boundary, &unchanged_text).unwrap();
+    unchanged_text.questions[0].push_str("continuation");
+    assert!(validate_question_stats(&question_boundary, &unchanged_text).is_err());
     for (path, value) in [
         ("/mode", json!("infer")),
         ("/updates_completed", json!(1)),
@@ -95,6 +104,18 @@ fn retained_planner_report_binds_original_input_artifact_model_and_cleanup() {
         ("/planner_stop_reason", json!(null)),
         ("/planner_generated_tokens", json!(384)),
         ("/planner_prompt_tokens", json!(513)),
+        ("/planner_generated_tokens", json!(39)),
+        ("/planner_prompt_tokens", json!(99)),
+        ("/planner_strategy", json!("whole_json")),
+        ("/planner_structure_generated_by", json!("model")),
+        ("/planner_question_stats", json!([])),
+        ("/planner_question_stats/0/prompt_tokens", json!(513)),
+        ("/planner_question_stats/0/generated_tokens", json!(192)),
+        ("/planner_question_stats/0/generated_tokens", json!(0)),
+        (
+            "/planner_question_stats/0/stop_reason",
+            json!("complete_json"),
+        ),
         ("/dataset/source_sha256", json!("b".repeat(64))),
         ("/dataset/question_sha256", json!("b".repeat(64))),
         ("/model/revision", json!("b".repeat(40))),

@@ -20,7 +20,8 @@ ATTEMPT, MODEL, MODEL_ID = (GRAPH[k] for k in ("ATTEMPT", "MODEL", "MODEL_ID"))
 PREFIX = "agent-model-planning"
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
-SCOPE = ("One actual isolated pinned-model owner generates two to four public subquestions from a goal, "
+SCOPE = ("One actual isolated pinned-model owner generates two public subquestions from a goal, "
+    "with only their JSON structure supplied locally and both generation stages bounded, "
     "without seeing the source contents. The exact proposal is enrolled against one signed public README "
     "excerpt, then actual protected peers execute its source questions and an exact original-question join. "
     "Every peer execution and the separate owner planner are observed. Original-free completed offline "
@@ -286,10 +287,23 @@ def check_planning(raw,source):
         and report["base_before"]==report["base_after"] and report["base_before"]["parameters"]>0
         and re.fullmatch(r"[0-9a-f]{64}",report["base_before"]["sha256"])
         and report["generation_limit_reached"] is report["model_answer_correctness_proven"] is False
-        and report["planner_stop_reason"] in ("complete_json","eos")
+        and report["planner_stop_reason"]=="two_questions"
+        and report["planner_strategy"]=="model_questions_scaffold_v1"
+        and report["planner_structure_generated_by"]=="local_schema"
         and type(report["planner_prompt_tokens"]) is int and 1<=report["planner_prompt_tokens"]<=512
         and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<384
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
+    stats=report["planner_question_stats"]
+    questions=strict_json(raw["planner-artifact.json"])["questions"]
+    require(type(stats) is list and len(stats)==len(questions)==2,"two model-generated question stages required")
+    for item,question in zip(stats,questions):
+        require(type(item) is dict and item.keys()=={"prompt_tokens","generated_tokens","stop_reason"}
+            and type(item["prompt_tokens"]) is int and 1<=item["prompt_tokens"]<=512
+            and type(item["generated_tokens"]) is int and 1<=item["generated_tokens"]<192
+            and item["stop_reason"] in ("question_boundary","eos")
+            and (item["stop_reason"]!="question_boundary" or question.rstrip().endswith("?")),"invalid model question stage")
+    require(report["planner_prompt_tokens"]==max(s["prompt_tokens"] for s in stats)
+        and report["planner_generated_tokens"]==sum(s["generated_tokens"] for s in stats),"planner aggregate budget differs")
     require(report["dataset"]==dict(version=1,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
         visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source))
         and report["artifacts"]==[dict(relative_path="task-questions.json",bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
