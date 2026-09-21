@@ -83,6 +83,7 @@ fn discovery() -> ComputeDiscoverRequest {
         require_task_derivation_v1: true,
         require_document_inference_v2: true,
         require_derived_inference_v3: true,
+        require_principle_inference_v4: false,
         maximum: 4,
         minimum: 0,
     }
@@ -174,6 +175,26 @@ fn discovery_base_profile_tag_eight_preserves_absent_frames_and_reaches_eligibil
         invalid.model_profile = Some(profile.into());
         assert!(invalid.eligibility().is_err());
     }
+}
+
+#[test]
+fn principle_requirement_tag_nine_preserves_legacy_frames_and_reaches_eligibility() {
+    let mut request = discovery();
+    let mut expected = request.encode_to_vec();
+    let legacy = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert!(!legacy.require_principle_inference_v4);
+    assert!(!legacy.eligibility().unwrap().require_principle_inference_v4);
+    request.require_principle_inference_v4 = true;
+    expected.extend_from_slice(&[0x48, 0x01]);
+    assert_eq!(request.encode_to_vec(), expected);
+    let decoded = ComputeDiscoverRequest::decode(expected.as_slice()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(
+        decoded
+            .eligibility()
+            .unwrap()
+            .require_principle_inference_v4
+    );
 }
 
 #[test]

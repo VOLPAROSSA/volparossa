@@ -20,15 +20,98 @@ read, write, require = JOBS["read"], JOBS["write"], JOBS["require"]
 NAME = "agent-policy-assessment"
 SUBJECT = "Neighbors voluntarily lend spare computing capacity to help each other, while respecting consent and each device owner's needs.\n"
 STAGES = ("assessment-0", "assessment-1", "review-0", "review-1")
+CONTRACTS = ("principle_assessment_v1", "principle_review_v1")
+CONTENT_TYPE = "application/vnd.volparossa.agent-principle.v4+json"
+DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3", "adapter_version": 1,
+           "schema_version": 3, "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 SCOPE = ("one exact synthetic public native object fetched through its protected content path, two actual "
          "360M peer assessments and opposite-peer cross-reviews under the seven virtues/vices, bound "
-         "to original provider-signed EOS receipts, publish and fetch their exact native bundle into "
+         "to signed dataset-v4 contracts and original provider-signed JSON-boundary/EOS receipts, "
+         "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
          "a new cache and directory on the same client, then unchanged completed offline replay and full owned cleanup; "
          "not classifier quality, legal correctness, independent semantic judgment, network-policy activation or full B06")
 
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def strict_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "duplicate JSON field")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique)
+
+
+def provision_pins():
+    pin_root = HERE / "ml" if (HERE / "ml").is_dir() else HERE.parent.parent / "workers/volparossa-ml"
+    pins = read(pin_root / "model-pins.json")
+    pins.update(read(pin_root / "model-pins-360m.json"))
+    extra = read(pin_root / "graph-decoder-pins.json")
+    require(extra["format_version"] == 1 and extra["decoder"] == DECODER and len(extra["wheels"]) == 3,
+            "unexpected explicitly selected decoder pins")
+    pins["wheels"] += extra["wheels"]
+    pins["task_graph_decoder"] = extra["decoder"]
+    lock = (pin_root / "requirements.lock").read_bytes()
+    lock += (b"" if lock.endswith(b"\n") else b"\n") + (pin_root / "graph-decoder-requirements.lock").read_bytes()
+    return pins, lock
+
+
+def check_provision(value):
+    pins, lock = provision_pins()
+    model = TRAIN["inference_profile"]("smollm2-360m-v1")["model"]
+    weights = next(item for item in pins["files"] if item["path"] == "model.safetensors")
+    require(pins["model_id"] == model["model_id"] and pins["revision"] == model["model_revision"]
+            and {key: weights[key] for key in ("bytes", "sha256")} == model["base_weights"],
+            "selected provision/model profile mismatch")
+    require(value["success"] is True and value["installed_wheels"] == len(pins["wheels"]) == 41
+            and value["model_profile"] == "smollm2-360m-v1" and value["model_id"] == pins["model_id"]
+            and value["revision"] == pins["revision"] and value["task_graph_decoder"] == DECODER
+            and value["download_bytes"] == sum(item["bytes"] for item in pins["files"] + pins["wheels"])
+            and value["model_pins_sha256"] == sha((json.dumps(pins, indent=2) + "\n").encode())
+            and value["requirements_sha256"] == sha(lock) and value["budget_bytes"] == 3 * 1024**3
+            and value["runtime_autofetch_enabled"] is False and value["training_performed"] is False,
+            "unverified 360M/41-wheel structured-inference provision")
+
+
+def stage_contract(stage):
+    require(stage in STAGES, "unknown policy stage")
+    return CONTRACTS[0 if stage.startswith("assessment-") else 1]
+
+
+def check_dataset(dataset, stage, context, manifest):
+    require(set(dataset) == {"version", "visibility", "license", "source_manifest_hex", "inference", "output_contract"}
+            and dataset["version"] == 4 and dataset["visibility"] == "public" and dataset["license"] == "CC0-1.0"
+            and dataset["output_contract"] == stage_contract(stage)
+            and dataset["source_manifest_hex"] == manifest.hex() and len(dataset["inference"]) == 1,
+            "not the original explicit public singleton dataset-v4 contract")
+    row = dataset["inference"][0]
+    require(set(row) == {"question", "context", "start", "end"} and row["question"].strip()
+            and row["context"] == context.decode() and row["start"] == 0 and row["end"] == len(context),
+            "dataset did not retain its complete signed original context")
+
+
+def check_output(output, stage, assessment):
+    generation = output["generation"]
+    require(set(generation) == {"version", "stop_reason", "max_new_tokens", "model_profile", "output_contract"}
+            and generation["version"] == 2 and generation["max_new_tokens"] == 256
+            and generation["model_profile"] == "smollm2-360m-v1"
+            and generation["output_contract"] == stage_contract(stage)
+            and generation["stop_reason"] in ("json_boundary", "eos")
+            and type(output["generated_tokens"]) is int and 0 < output["generated_tokens"] <= 256
+            and output["text_truncated"] is False, "incomplete/mismatched structured model generation")
+    raw = output["text"].encode()
+    payload = strict_json(raw)
+    fields = {"version", "outcome", "reasoning", "counterargument", "uncertainty"}
+    if stage.startswith("review-"):
+        fields.add("verdict")
+    require(0 < len(raw) <= 1024 and set(payload) == fields and payload["version"] == 1
+            and sha(raw) == assessment["output_sha256"]
+            and payload == assessment.get("assessment", assessment.get("review")),
+            "full model JSON was malformed, repaired, replaced or bound to a different contract")
 
 
 def record(work, suffix):
@@ -349,6 +432,26 @@ def check_bundle_manifest(encoded, raw, publisher, enrolled):
     verify_signature(envelope[1], envelope[2], body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
 
 
+def check_stage_manifest(encoded, raw, enrolled, name, content_type):
+    fields = CUSTODY["fields"]
+    envelope = fields(encoded, 64 * 1024)
+    require(set(envelope) == {1, 2}, "invalid signed policy manifest envelope")
+    body = fields(envelope[1], 64 * 1024)
+    payload = fields(body[8], 64 * 1024)
+    chunk = fields(payload[5], 64)
+    require(set(body) == set(range(1, 9)) and body[1] == 1
+            and body[2] == bytes.fromhex(enrolled["publisher_key"]) and body[6] == 1
+            and body[3] == enrolled["selected_at"] and body[4] == enrolled["expires"]
+            and 0 < body[3] < body[4] and len(body[5]) == 32
+            and body[7] == hashlib.sha256(body[8]).digest(), "signed stage authority/expiry changed")
+    require(set(payload) == set(range(1, 7)) and payload[1] == name.encode() and payload[2] == 1
+            and payload[3] == content_type.encode() and payload[4] == len(raw)
+            and payload[6] == hashlib.sha256(raw).digest()
+            and chunk == {1: hashlib.sha256(raw).digest(), 2: len(raw)},
+            "signed stage MIME or original bytes differ")
+    verify_signature(envelope[1], envelope[2], body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
+
+
 def check_result(value):
     require(value["operation"] == "compute_peer_policy_assessment" and value["complete"] is True
             and value["network_policy_activation"] is False
@@ -394,10 +497,12 @@ def assessment_hash(value):
 
 def check_evidence(value, revision):
     require(value["source_revision"] == revision and value["scope"] == SCOPE, "wrong source/scope")
+    check_provision(value["provision"])
     result = value["result"]
     records = check_result(result)
     files = value["files"]
     enrolled = decode_file(files, "enrollment.json")
+    require(enrolled["version"] == 2, "new fixture did not explicitly enroll structured public inference")
     requester = value["requester"]["identity_public_key_hex"]
     require(requester == CUSTODY["peer_key"](value["peers"]["client"])
             and requester != value["publication"]["publisher_key_hex"] and enrolled["portable_receipts"] is True,
@@ -428,6 +533,17 @@ def check_evidence(value, revision):
     for stage, assessment in zip(STAGES, records):
         handle = decode_file(files, stage + "/work/job-0.json")
         bind = handle["binding"]
+        dataset_raw = decode_file(files, stage + "/dataset.json", False)
+        context = decode_file(files, stage + "/context.txt", False)
+        context_manifest = decode_file(files, stage + "/context.manifest", False)
+        dataset_manifest = decode_file(files, stage + "/dataset.manifest", False)
+        dataset = strict_json(dataset_raw)
+        check_dataset(dataset, stage, context, context_manifest)
+        check_stage_manifest(context_manifest, context, enrolled, "policy-" + stage + "-context", "text/plain")
+        check_stage_manifest(dataset_manifest, dataset_raw, enrolled, "policy-" + stage + "-dataset", CONTENT_TYPE)
+        require(sha(dataset_manifest) == bind["dataset_manifest_id"] and bind["row_indices"] == [0]
+                and handle["capabilities"].get("principle_inference_v4") is True,
+                "actual job does not bind the signed v4 contract or explicit peer capability")
         receipt = decode_file(files, receipt_name(files, stage, handle))
         require(receipt["handle"] == handle and receipt["status"]["binding"] == bind
                 and receipt["status"]["state"] == "complete", "original actual receipt differs")
@@ -446,15 +562,15 @@ def check_evidence(value, revision):
                 and report["status"] == "ok" and report["mode"] == "infer" and report["device"] == "cpu"
                 and report["updates_completed"] == 0 and len(report["outputs"]) == 1, "not actual pinned public inference")
         output = report["outputs"][0]
-        require(output["generation"]["stop_reason"] == "eos" and output["text_truncated"] is False
-                and 0 < output["generated_tokens"] <= 256
-                and sha(output["text"].encode()) == assessment["output_sha256"]
-                and json.loads(output["text"]) == assessment.get("assessment", assessment.get("review")),
-                "model output was truncated, repaired or replaced")
+        check_output(output, stage, assessment)
         observation = observed[stage]["observation"]
         require(observed[stage]["handle"] == handle
                 and sha(observation["dataset_json"].encode()) == bind["dataset_sha256"]
+                and strict_json(observation["dataset_json"]) == dataset
                 and report["dataset"]["sha256"] == bind["dataset_sha256"]
+                and report["dataset"]["version"] == 4
+                and report["dataset"]["output_contract"] == stage_contract(stage)
+                and report["dataset"]["source_manifest_sha256"] == sha(context_manifest)
                 and observation["network_devices"] == ["lo"] and observation["runtime_lock_held"] is True,
                 "worker mount/input/isolation does not bind the actual task")
         require(report["supervisor"]["child_reaped"] is True
@@ -475,6 +591,7 @@ def check_evidence(value, revision):
 def evidence(work, revision):
     JOBS["guest_work"](work)
     value = dict(source_revision=revision, scope=SCOPE, result=read(record(work, "result")),
+        provision=read(work / "agent-jobs-provision.json"),
         files=read(record(work, "files"), 32 * 1048576), observation=read(record(work, "observation")),
         publication=read(record(work, "publication")), replay=read(record(work, "replay")),
         requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
@@ -512,7 +629,69 @@ def check_report(value, revision):
 
 
 def self_test():
+    from copy import deepcopy
     from unittest.mock import patch
+
+    checked_rejections = 0
+    def rejects(function, *args):
+        nonlocal checked_rejections
+        try:
+            function(*args)
+        except (KeyError, ValueError):
+            checked_rejections += 1
+        else:
+            raise ValueError("structured inference mutation accepted")
+
+    # Synthetic checker controls only; never supplied to real model inference.
+    payload = {"version": 1, "outcome": "undetermined", "reasoning": [
+        {"principle": "Humilitas", "quote": "Neighbors", "reason": "Synthetic checker input."}],
+        "counterargument": "Synthetic counterargument.", "uncertainty": {"material": True, "reason": "Synthetic uncertainty."}}
+    for stage in ("assessment-0", "review-0"):
+        expected = deepcopy(payload)
+        if stage.startswith("review-"):
+            expected["verdict"] = "undetermined"
+        text = json.dumps(expected, separators=(",", ":"))
+        assertion = {"review" if stage.startswith("review-") else "assessment": expected, "output_sha256": sha(text.encode())}
+        output = {"text": text, "text_truncated": False, "generated_tokens": 120,
+            "generation": {"version": 2, "stop_reason": "json_boundary", "max_new_tokens": 256,
+                           "model_profile": "smollm2-360m-v1", "output_contract": stage_contract(stage)}}
+        check_output(output, stage, assertion)
+        check_output({**output, "generation": {**output["generation"], "stop_reason": "eos"}}, stage, assertion)
+        for key, value in (("version", 1), ("stop_reason", "token_limit"), ("stop_reason", "graph_boundary"),
+                           ("max_new_tokens", 384), ("model_profile", "smollm2-135m-v1"),
+                           ("output_contract", CONTRACTS[1 if stage.startswith("assessment-") else 0])):
+            bad = deepcopy(output)
+            bad["generation"][key] = value
+            if value == "token_limit":
+                bad["generated_tokens"] = 256
+            rejects(check_output, bad, stage, assertion)
+        for key, value in (("text_truncated", True), ("generated_tokens", 0), ("generated_tokens", 257),
+                           ("generated_tokens", True), ("text", text + " extra"), ("text", text[:-1])):
+            rejects(check_output, {**output, key: value}, stage, assertion)
+        duplicate = text[:-1] + ',"version":1}'
+        rejects(check_output, {**output, "text": duplicate}, stage,
+                {**assertion, "output_sha256": sha(duplicate.encode())})
+        dataset = {"version": 4, "visibility": "public", "license": "CC0-1.0", "source_manifest_hex": b"manifest".hex(),
+            "inference": [{"question": "Synthetic question", "context": SUBJECT, "start": 0, "end": len(SUBJECT.encode())}],
+            "output_contract": stage_contract(stage)}
+        check_dataset(dataset, stage, SUBJECT.encode(), b"manifest")
+        for key, value in (("version", 2), ("visibility", "private"), ("source_manifest_hex", "00"),
+                           ("output_contract", "arbitrary"), ("inference", []), ("license", "unknown")):
+            rejects(check_dataset, {**dataset, key: value}, stage, SUBJECT.encode(), b"manifest")
+        bad = deepcopy(dataset)
+        bad["inference"][0]["end"] -= 1
+        rejects(check_dataset, bad, stage, SUBJECT.encode(), b"manifest")
+
+    pins, lock = provision_pins()
+    provision = {"success": True, "installed_wheels": len(pins["wheels"]), "model_profile": "smollm2-360m-v1",
+        "model_id": pins["model_id"], "revision": pins["revision"], "task_graph_decoder": DECODER,
+        "download_bytes": sum(item["bytes"] for item in pins["files"] + pins["wheels"]),
+        "model_pins_sha256": sha((json.dumps(pins, indent=2) + "\n").encode()), "requirements_sha256": sha(lock),
+        "budget_bytes": 3 * 1024**3, "runtime_autofetch_enabled": False, "training_performed": False}
+    check_provision(provision)
+    for key, value in (("installed_wheels", 38), ("task_graph_decoder", None), ("model_pins_sha256", "00" * 32),
+                       ("requirements_sha256", "00" * 32), ("model_profile", "smollm2-135m-v1")):
+        rejects(check_provision, {**provision, key: value})
 
     for value in ({}, {"operation": "compute_peer_policy_assessment", "complete": False,
                       "network_policy_activation": False},
@@ -551,6 +730,22 @@ def self_test():
     transcript = field(1, 1) + field(2, challenge) + field(3, original_request) + field(4, reply)
     retained = {"version": 1, "requester_key": requester, "transcript_hex": transcript.hex()}
     with patch.dict(globals(), {"verify_signature": lambda *_: None}):
+        enrolled = {"publisher_key": provider, "selected_at": 10, "expires": 100}
+        raw = b'{"version":4}'
+        object_name = "policy-assessment-0-dataset"
+        package = field(1, object_name.encode()) + field(2, 1) + field(3, CONTENT_TYPE.encode()) + field(4, len(raw))
+        package += field(5, field(1, hashlib.sha256(raw).digest()) + field(2, len(raw)))
+        package += field(6, hashlib.sha256(raw).digest())
+        body = field(1, 1) + field(2, bytes.fromhex(provider)) + field(3, 10) + field(4, 100)
+        body += field(5, b"n" * 32) + field(6, 1) + field(7, hashlib.sha256(package).digest()) + field(8, package)
+        signed = field(1, body) + field(2, b"s" * 64)
+        check_stage_manifest(signed, raw, enrolled, object_name, CONTENT_TYPE)
+        rejects(check_stage_manifest, signed, raw, enrolled, object_name,
+                "application/vnd.volparossa.agent-document.v2+json")
+        rejects(check_stage_manifest, signed, raw, enrolled, "policy-review-0-dataset", CONTENT_TYPE)
+        rejects(check_stage_manifest, signed, raw + b" ", enrolled, object_name, CONTENT_TYPE)
+        rejects(check_stage_manifest, signed, raw, {**enrolled, "expires": 101}, object_name, CONTENT_TYPE)
+        rejects(check_stage_manifest, signed, raw, {**enrolled, "publisher_key": requester}, object_name, CONTENT_TYPE)
         check_transcript(retained, handle, status, requester, 10)
         failures = [lambda: check_transcript(retained, handle, status, provider, 10),
                     lambda: check_transcript(retained, handle, {**status, "state": "failed"}, requester, 10),
@@ -582,7 +777,8 @@ def self_test():
                                   "handle", "receipt", "provider_transcript"}
                     and bytes.fromhex(stage["receipt"]) == b"complete" for stage in projected["stages"]),
             "portable projection dropped proof fields or selected a superseded receipt")
-    print("PASS: 3 incomplete/authority rejections, synthetic transcript positive + 4 binding rejections, "
+    print(f"PASS: structured contract/provision positives + {checked_rejections} rejections; "
+          "3 incomplete/authority rejections, synthetic transcript positive + 4 binding rejections, "
           "fixed bundle projection/terminal receipt selection; no model or real-signature execution")
 
 

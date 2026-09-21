@@ -298,7 +298,7 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
     if mode == Mode::PlanDocument {
         ensure!(!has_adapter, "compute_document_plan_adapter");
         document_plan::validate_input(&public)?;
-    } else if public["version"] == 2 || public["version"] == 3 {
+    } else if matches!(public["version"].as_u64(), Some(2..=4)) {
         ensure!(
             mode == Mode::Infer,
             "compute_document_training_not_supported"
@@ -308,7 +308,9 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
             .context("compute_document_rows")?
             .len();
         let text = std::str::from_utf8(dataset)?;
-        if public["version"] == 3 {
+        if public["version"] == 4 {
+            volparossa_content::provider::compute::dataset::validate_principle_json(text, rows)?;
+        } else if public["version"] == 3 {
             volparossa_content::provider::compute::dataset::validate_derived_json(text, rows)?;
         } else {
             volparossa_content::provider::compute::dataset::validate_document_json(text, rows)?;
@@ -376,6 +378,12 @@ fn validate_profile_dataset(
                 .transpose()?
                 .unwrap_or_default();
             ensure!(selected == profile, "compute_derived_model_profile");
+        }
+        if public["version"] == 4 {
+            ensure!(
+                profile == ModelProfile::Smol360 && !has_adapter,
+                "compute_principle_model_profile"
+            );
         }
     }
     Ok(())

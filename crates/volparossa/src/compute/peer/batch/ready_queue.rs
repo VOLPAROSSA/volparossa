@@ -745,6 +745,7 @@ mod tests {
                 max_rows: 4,
                 task_derivation_v1: true,
                 document_inference_v2: true,
+                principle_inference_v4: false,
                 derived_inference_v3: true,
                 successor_activation_v1: false,
             },

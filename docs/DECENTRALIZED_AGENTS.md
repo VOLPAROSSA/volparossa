@@ -1678,6 +1678,19 @@ This does not complete B06: these concepts are not authorized network-wide polic
 legal determinations, authority membership/quorum, conflict resolution across partitions or
 automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
 
+New assessment workflows use enrollment version 2 and signed
+`application/vnd.volparossa.agent-principle.v4+json` inputs. Each singleton input selects only
+`principle_assessment_v1` or `principle_review_v1`; peers cannot submit arbitrary decoder schemas.
+The owner must explicitly provision the existing pinned optional decoder (`--task-graph-decoder`)
+and enable `compute serve --model-profile smollm2-360m-v1 --principle-inference-v4` with the usual
+runtime/model/work/socket options. Other brokers do not advertise this capability. The decoder
+constrains JSON structure, not allow/deny/undetermined, principles or the model's reasoning.
+One generation keeps the existing 1024-prompt/256-generation budget. A fully validated JSON
+boundary is reported as `json_boundary`, separately from actual EOS and incomplete `token_limit`.
+The fixed question no longer asks the model to imitate a schema-placeholder string. Quote
+grounding and opposite-peer review still apply; well-formed JSON does not prove sound judgment.
+Original enrollment-version-1 workflows remain bound to their original inputs and outputs.
+
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied
 models or coordinated peers can share the same error. Disagreement alone is not proof of a

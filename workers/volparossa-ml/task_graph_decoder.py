@@ -32,6 +32,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+import copy
 import importlib
 import importlib.metadata
 
@@ -143,10 +144,19 @@ class GraphDecoder:
     model callback, text repair or semantic-quality assertion.
     """
 
-    def __init__(self, tokenizer, check, accepts_graph_bytes):
+    def __init__(self, tokenizer, check, accepts_graph_bytes, *, schema=None,
+                 prompt_limit=512, output_limit=16384):
+        # Only compiled worker code supplies this schema/limits, never a dataset.
+        # Defaults preserve the original graph profile and historical contract.
+        if (type(prompt_limit) is not int or not 1 <= prompt_limit <= 1024
+                or type(output_limit) is not int or not 1 <= output_limit <= 16384
+                or schema is not None and type(schema) is not dict):
+            raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
         self.check = check
         self.tokenizer = tokenizer
         self.accepts_graph_bytes = accepts_graph_bytes
+        self.schema = graph_schema() if schema is None else schema
+        self.prompt_limit, self.output_limit = prompt_limit, output_limit
         parser, data, base, token_list = _load_backend(check)
         self.parser = parser
         self.enforcer = _strict_enforcer(base, token_list)
@@ -194,12 +204,12 @@ class GraphDecoder:
 
     def new_attempt(self, prompt_ids, max_new_tokens):
         self.check()
-        if (type(prompt_ids) is not list or not 1 <= len(prompt_ids) <= 512
+        if (type(prompt_ids) is not list or not 1 <= len(prompt_ids) <= self.prompt_limit
                 or any(type(token) is not int or not 0 <= token < self.vocab_size for token in prompt_ids)
                 or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 384):
             raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
         try:
-            enforcer = self.enforcer(self.data, self.parser(graph_schema()))
+            enforcer = self.enforcer(self.data, self.parser(copy.deepcopy(self.schema)))
         except Exception:
             raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED") from None
         self.check()
@@ -236,7 +246,7 @@ class _Attempt:
                 raise DecoderError("TASK_GRAPH_DECODER_ALLOWED_TOKENS_INVALID")
             if decoder.eos in allowed:
                 raw = decoder._decode(list(generated)).encode("utf-8")
-                accepted = len(raw) <= 16384 and decoder.accepts_graph_bytes(raw) is True
+                accepted = len(raw) <= decoder.output_limit and decoder.accepts_graph_bytes(raw) is True
                 if not accepted:
                     allowed = [token for token in allowed if token != decoder.eos]
             if not allowed:

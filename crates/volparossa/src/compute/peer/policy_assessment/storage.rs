@@ -6,7 +6,8 @@ use ed25519_dalek::SigningKey;
 use volparossa_content::{
     CacheLimits, ChunkStore, Metadata, Publication, SignedManifest, Validity,
     provider::compute::dataset::{
-        DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, verify_source,
+        DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, PRINCIPLE_CONTENT_TYPE,
+        PrincipleDataset, verify_source,
     },
 };
 
@@ -53,7 +54,7 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, String)> {
     let enrolled: Enrollment =
         serde_json::from_slice(&read(&root.join("enrollment.json"), 16 * 1024)?)?;
     ensure!(
-        enrolled.version == 1
+        matches!(enrolled.version, 1 | 2)
             && enrolled.providers[0] != enrolled.providers[1]
             && (1..=600).contains(&enrolled.max_seconds)
             && enrolled.selected_at < enrolled.expires
@@ -117,8 +118,8 @@ fn publication(
     )?)
 }
 
-fn dataset(enrolled: &Enrollment, context: &str, question: &str, source: &[u8]) -> DocumentDataset {
-    DocumentDataset {
+fn dataset(enrolled: &Enrollment, context: &str, question: &str, source: &[u8]) -> Result<Vec<u8>> {
+    let document = DocumentDataset {
         version: 2,
         visibility: "public".into(),
         license: enrolled.license.clone(),
@@ -129,7 +130,18 @@ fn dataset(enrolled: &Enrollment, context: &str, question: &str, source: &[u8]) 
             start: 0,
             end: context.len() as u64,
         }],
-    }
+    };
+    let Some(output_contract) = enrolled.output_contract(question)? else {
+        return Ok(serde_json::to_vec(&document)?);
+    };
+    Ok(serde_json::to_vec(&PrincipleDataset {
+        version: 4,
+        visibility: document.visibility,
+        license: document.license,
+        source_manifest_hex: document.source_manifest_hex,
+        inference: document.inference,
+        output_contract,
+    })?)
 }
 
 pub(super) fn prepare(
@@ -175,11 +187,15 @@ pub(super) fn prepare(
             &signer,
             &mut cache,
         )?;
-        let bytes = serde_json::to_vec(&dataset(enrolled, context, question, &source.encode()))?;
+        let bytes = dataset(enrolled, context, question, &source.encode())?;
         let package_manifest = publication(
             &bytes,
             format!("policy-{name}-dataset"),
-            DOCUMENT_CONTENT_TYPE,
+            if enrolled.version == 1 {
+                DOCUMENT_CONTENT_TYPE
+            } else {
+                PRINCIPLE_CONTENT_TYPE
+            },
             validity,
             &signer,
             &mut cache,
@@ -218,7 +234,7 @@ pub(super) fn check_stage(
     );
     let bytes = read(&root.join("dataset.json"), rpc::MAX_DATASET_BYTES as u64)?;
     ensure!(
-        bytes == serde_json::to_vec(&dataset(enrolled, context, question, &source_bytes))?,
+        bytes == dataset(enrolled, context, question, &source_bytes)?,
         "compute_policy_context_dataset"
     );
     let signed = read(&root.join("dataset.manifest"), 64 * 1024)?;

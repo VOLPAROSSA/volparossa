@@ -16,7 +16,7 @@ agent_policy_assessment_run() {
     policy_script=$source_directory/tests/integration/agent-policy-assessment-smoke.py
     policy_root=$jobs_source/policy-assessment
     PHASE=agent-policy-assessment-publication
-    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews on the two actual selected peers, retain original provider-signed replies, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, and clean all owned resources. No other-node isolation, production policy keys, network-policy activation or legal-correctness claim.'
+    printf '%s\n' 'Disposable guest only: publish one new synthetic CC0 public text, deposit its exact chunks on a peer, fetch the selected native object, execute two bounded principle assessments and two cross-reviews using signed dataset-v4 contracts on two explicitly enabled peers and the pinned JSON decoder, retain original provider-signed replies with truthful JSON-boundary/EOS termination, publish/deposit their bundle and fetch it into a new cache and directory on the SAME client, replay completed evidence offline, and clean all owned resources. No canned verdicts, other-node isolation, production policy keys, network-policy activation or legal-correctness claim.'
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- python3 -B "$WORK/bin/agent-policy-assessment-smoke.py" prepare "$WORK" \

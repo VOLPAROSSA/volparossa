@@ -51,6 +51,7 @@ impl Authorization {
             require_task_derivation_v1: self.task.is_some(),
             require_document_inference_v2: self.document,
             require_derived_inference_v3: self.derived,
+            require_principle_inference_v4: false,
         };
         query.validate()?;
         Ok(query)

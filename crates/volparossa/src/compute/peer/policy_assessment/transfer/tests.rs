@@ -9,7 +9,10 @@ use volparossa_content::{
         PublicationRegistry,
         compute::{
             self as wire, ComputeBackend, ComputeFuture, ComputeService,
-            dataset::{DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, verify_source},
+            dataset::{
+                DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, PRINCIPLE_CONTENT_TYPE,
+                PrincipleDataset, PrincipleOutputContract, verify_source,
+            },
         },
         serve_publication,
     },
@@ -54,6 +57,7 @@ fn capabilities() -> rpc::Capabilities {
         max_rows: 1,
         task_derivation_v1: true,
         document_inference_v2: true,
+        principle_inference_v4: false,
         derived_inference_v3: true,
         successor_activation_v1: false,
     }
@@ -93,7 +97,12 @@ fn publication(
     .unwrap()
 }
 
-fn enrollment(root: &Path, owner: &SigningKey, providers: &[SigningKey; 2]) -> Enrollment {
+fn enrollment(
+    root: &Path,
+    owner: &SigningKey,
+    providers: &[SigningKey; 2],
+    version: u32,
+) -> Enrollment {
     let original_publisher = SigningKey::from_bytes(&[21; 32]);
     let selected_at = now().unwrap() - 1;
     let expires = selected_at + 7200;
@@ -115,7 +124,7 @@ fn enrollment(root: &Path, owner: &SigningKey, providers: &[SigningKey; 2]) -> E
     let receipt = br#"{"synthetic_transport_fixture":true,"protected_retrieval_claimed":false}"#;
     let fingerprint = capabilities().model_fingerprint;
     let enrollment = Enrollment {
-        version: 1,
+        version,
         scope: assessment::Scope::new(&key(&original_publisher), &source_id, SUBJECT).unwrap(),
         source_name: "synthetic-transport-fixture".into(),
         source_download_sha256: sha(receipt),
@@ -208,6 +217,43 @@ fn payload(review: bool) -> Value {
     payload
 }
 
+fn stage_dataset(
+    enrolled: &Enrollment,
+    context: &str,
+    question: &str,
+    context_manifest: &SignedManifest,
+) -> (Vec<u8>, &'static str) {
+    let dataset = DocumentDataset {
+        version: 2,
+        visibility: "public".into(),
+        license: enrolled.license.clone(),
+        source_manifest_hex: hex::encode(context_manifest.encode()),
+        inference: vec![DocumentQuestion {
+            question: question.into(),
+            context: context.into(),
+            start: 0,
+            end: context.len() as u64,
+        }],
+    };
+    let contract = enrolled.output_contract(question).unwrap();
+    if let Some(output_contract) = contract {
+        (
+            serde_json::to_vec(&PrincipleDataset {
+                version: 4,
+                visibility: dataset.visibility,
+                license: dataset.license,
+                source_manifest_hex: dataset.source_manifest_hex,
+                inference: dataset.inference,
+                output_contract,
+            })
+            .unwrap(),
+            PRINCIPLE_CONTENT_TYPE,
+        )
+    } else {
+        (serde_json::to_vec(&dataset).unwrap(), DOCUMENT_CONTENT_TYPE)
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Each synthetic stage binds the actual selected signers and its exact compiled context"
@@ -232,20 +278,9 @@ async fn stage(
         expires: enrolled.expires,
     };
     let context_manifest = publication(context.as_bytes(), "text/plain", owner, validity);
-    let dataset = DocumentDataset {
-        version: 2,
-        visibility: "public".into(),
-        license: enrolled.license.clone(),
-        source_manifest_hex: hex::encode(context_manifest.encode()),
-        inference: vec![DocumentQuestion {
-            question: question.into(),
-            context: context.into(),
-            start: 0,
-            end: context.len() as u64,
-        }],
-    };
-    let dataset_bytes = serde_json::to_vec(&dataset).unwrap();
-    let dataset_manifest = publication(&dataset_bytes, DOCUMENT_CONTENT_TYPE, owner, validity);
+    let (dataset_bytes, mime) = stage_dataset(enrolled, context, question, &context_manifest);
+    let contract = enrolled.output_contract(question).unwrap();
+    let dataset_manifest = publication(&dataset_bytes, mime, owner, validity);
     let verified = verify_source(
         &dataset_manifest.encode(),
         &owner.verifying_key(),
@@ -253,7 +288,8 @@ async fn stage(
         enrolled.selected_at,
     )
     .unwrap();
-    let caps = capabilities();
+    let mut caps = capabilities();
+    caps.principle_inference_v4 = enrolled.version == 2;
     let handle = JobHandle {
         version: 1,
         provider_key: key(provider),
@@ -270,13 +306,21 @@ async fn stage(
     };
     // Required broker schema only: these fabricated worker fields are deliberately not
     // presented as execution evidence. The provider authentically signs this TEST statement.
-    let report = json!({"mode":"infer","status":"ok","updates_completed":0,
+    let mut report = json!({"mode":"infer","status":"ok","updates_completed":0,
         "dataset":{"sha256":handle.binding.dataset_sha256,"visibility":"public","inference_examples":1},
         "model":{"id":handle.capabilities.model.model_id,"revision":handle.capabilities.model.model_revision,
             "files":{"model.safetensors":handle.capabilities.model.base_weights}},
         "supervisor":{"child_reaped":true,"network_access":false},
         "outputs":[{"sample_index":0,"text":output.to_string(),"text_truncated":false,"generated_tokens":1,
             "generation":{"version":1,"model_profile":"smollm2-360m-v1","stop_reason":"eos","max_new_tokens":256}}]});
+    if let Some(contract) = contract {
+        report["dataset"]["version"] = 4.into();
+        report["dataset"]["output_contract"] = serde_json::to_value(contract).unwrap();
+        report["outputs"][0]["generation"]["version"] = 2.into();
+        report["outputs"][0]["generation"]["stop_reason"] = "json_boundary".into();
+        report["outputs"][0]["generation"]["output_contract"] =
+            serde_json::to_value(contract).unwrap();
+    }
     let report_json = report.to_string();
     let status = rpc::JobStatus {
         binding: handle.binding.clone(),
@@ -313,13 +357,13 @@ async fn stage(
     }
 }
 
-async fn fixture(root: &Path, requester: &SigningKey) -> Value {
+async fn fixture(root: &Path, requester: &SigningKey, version: u32) -> Value {
     let owner = SigningKey::from_bytes(&[22; 32]);
     let providers = [
         SigningKey::from_bytes(&[23; 32]),
         SigningKey::from_bytes(&[24; 32]),
     ];
-    let enrolled = enrollment(root, &owner, &providers);
+    let enrolled = enrollment(root, &owner, &providers, version);
     let mut assessments = Vec::new();
     let mut stages = Vec::new();
     for index in 0..2_u8 {
@@ -332,7 +376,7 @@ async fn fixture(root: &Path, requester: &SigningKey) -> Value {
             requester,
             index,
             &assessment::assessment_context(SUBJECT).unwrap(),
-            assessment::assessment_question(),
+            enrolled.question(false),
             &output,
         )
         .await;
@@ -361,7 +405,7 @@ async fn fixture(root: &Path, requester: &SigningKey) -> Value {
             requester,
             index + 2,
             &assessment::review_context(SUBJECT, target).unwrap(),
-            assessment::review_question(),
+            enrolled.question(true),
             &output,
         )
         .await;
@@ -414,7 +458,7 @@ async fn four_provider_signed_poll_statements_survive_projection_and_reject_chan
     let root = private_root();
     let requester = SigningKey::from_bytes(&[25; 32]);
     let requester_key = key(&requester);
-    let original = fixture(root.path(), &requester).await;
+    let original = fixture(root.path(), &requester, 1).await;
     assert_eq!(replay(root.path(), &requester_key).unwrap(), original);
     let package =
         serde_json::to_value(bundle::collect(root.path(), &requester_key).unwrap()).unwrap();
@@ -468,4 +512,44 @@ async fn four_provider_signed_poll_statements_survive_projection_and_reject_chan
             "accepted changed {alteration}"
         );
     }
+}
+
+#[tokio::test]
+async fn structured_four_stage_projection_rejects_an_authentic_but_wrong_stage_contract() {
+    let root = private_root();
+    let requester = SigningKey::from_bytes(&[25; 32]);
+    let requester_key = key(&requester);
+    let original = fixture(root.path(), &requester, 2).await;
+    assert_eq!(replay(root.path(), &requester_key).unwrap(), original);
+    let mut package =
+        serde_json::to_value(bundle::collect(root.path(), &requester_key).unwrap()).unwrap();
+    assert_eq!(projected(&package, &requester_key).unwrap(), original);
+    assert_eq!(original["network_policy_activation"], false);
+    assert_eq!(original["decision"]["independent_evidence_proven"], false);
+
+    // Both the signature and this review-shaped response are valid. They still cannot
+    // satisfy the immutable assessment input. This is a synthetic signed claim, not ML.
+    let stage = &mut package["stages"][0];
+    let handle: JobHandle =
+        serde_json::from_slice(&hex::decode(stage["handle"].as_str().unwrap()).unwrap()).unwrap();
+    let mut receipt: Value =
+        serde_json::from_slice(&hex::decode(stage["receipt"].as_str().unwrap()).unwrap()).unwrap();
+    let mut report: Value =
+        serde_json::from_str(receipt["status"]["report_json"].as_str().unwrap()).unwrap();
+    report["outputs"][0]["text"] = payload(true).to_string().into();
+    report["outputs"][0]["generation"]["output_contract"] =
+        serde_json::to_value(PrincipleOutputContract::PrincipleReviewV1).unwrap();
+    let raw = report.to_string();
+    receipt["status"]["report_sha256"] = sha(raw.as_bytes()).into();
+    receipt["status"]["report_json"] = raw.into();
+    let status: rpc::JobStatus = serde_json::from_value(receipt["status"].clone()).unwrap();
+    let provider = SigningKey::from_bytes(&[23; 32]);
+    let proof = signed_poll(&provider, &requester, &handle, &status).await;
+    assert_eq!(proof.check(&handle, 1, &requester_key).unwrap(), status);
+    stage["receipt"] = hex::encode(serde_json::to_vec(&receipt).unwrap()).into();
+    stage["provider_transcript"] = hex::encode(serde_json::to_vec(&proof).unwrap()).into();
+    assert_eq!(
+        projected(&package, &requester_key).unwrap_err().to_string(),
+        "compute_policy_output_contract"
+    );
 }

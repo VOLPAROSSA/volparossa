@@ -31,7 +31,7 @@ agent_jobs_prepare() {
     if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- "$@" smollm2-360m-v1
     fi
-    if [ "${agent_model_task_graph:-no}" = yes ]; then
+    if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- "$@" --task-graph-decoder
     fi
     agent_jobs_private prepare "$@" >"$WORK/agent-jobs-provision.log" \
@@ -73,6 +73,10 @@ agent_jobs_broker() {
     set --
     if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
+    fi
+    if [ "${agent_policy_assessment:-no}" = yes ]; then
+        # Explicit owner opt-in; no other fixture advertises structured principle inference.
+        set -- "$@" --principle-inference-v4
     fi
     if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"

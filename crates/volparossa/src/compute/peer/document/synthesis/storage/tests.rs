@@ -42,6 +42,7 @@ fn parent(text: &str, index: u16) -> Answer {
         text_truncated: false,
         generation: Some(Generation {
             model_profile: ModelProfile::default(),
+            output_contract: None,
             version: 1,
             stop_reason: crate::compute::inference_output::StopReason::Eos,
             max_new_tokens: 64,

@@ -240,7 +240,7 @@ fn replay(root: &Path, requester: &str) -> Result<Value> {
             &format!("assessment-{index}"),
             index,
             &assessment::assessment_context(&subject)?,
-            assessment::assessment_question(),
+            enrolled.question(false),
             requester,
         )?;
         let (text, evidence) = stage
@@ -267,7 +267,7 @@ fn replay(root: &Path, requester: &str) -> Result<Value> {
             &format!("review-{index}"),
             index,
             &assessment::review_context(&subject, original)?,
-            assessment::review_question(),
+            enrolled.question(true),
             requester,
         )?;
         let (text, evidence) = stage

@@ -62,6 +62,9 @@ pub(crate) struct Serve {
     /// Explicit pinned profile; no model is downloaded or selected by a peer.
     #[arg(long, default_value_t = ModelProfile::default())]
     model_profile: ModelProfile,
+    /// Enable fixed principle JSON inference; requires the explicitly provisioned pinned decoder.
+    #[arg(long)]
+    principle_inference_v4: bool,
     /// Optional existing compatible fixed adapter, never selected by an incoming path.
     #[arg(long)]
     adapter_root: Option<PathBuf>,
@@ -146,6 +149,7 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "network_access": false, "remote_execution_proved": false,
                 "task_derivation_v1": true,
                 "document_inference_v2": true,
+                "principle_inference_v4": options.principle_inference_v4,
                 "derived_inference_v3": true
             })
         );
@@ -199,6 +203,10 @@ pub(super) async fn run(options: Serve) -> Result<()> {
 }
 
 fn validate_roots(options: &Serve) -> Result<()> {
+    ensure!(
+        !options.principle_inference_v4 || options.model_profile == ModelProfile::Smol360,
+        "compute_principle_model_profile"
+    );
     ensure!(
         options.model_profile.is_default()
             || (options.adapter_root.is_none() && options.serving_directory.is_none()),
@@ -322,6 +330,7 @@ fn capabilities(options: &Serve) -> Result<Capabilities> {
         max_rows: profile.max_rows,
         task_derivation_v1: true,
         document_inference_v2: true,
+        principle_inference_v4: options.principle_inference_v4,
         derived_inference_v3: true,
         successor_activation_v1: options.serving_directory.is_some(),
     })
@@ -464,6 +473,11 @@ impl Broker {
     }
 
     fn accepts_task(&self, submit: &Submit) -> bool {
+        if serde_json::from_str::<Value>(&submit.dataset_json)
+            .is_ok_and(|value| value["version"] == 4)
+        {
+            return self.capabilities.principle_inference_v4 && submit.binding.task.is_none();
+        }
         if !self.capabilities.document_inference_v2
             && serde_json::from_str::<Value>(&submit.dataset_json)
                 .is_ok_and(|value| value["version"] == 2)
@@ -821,6 +835,10 @@ pub(super) fn checked_report(
             ensure!(
                 output["text_truncated"].is_boolean() && generation.model_profile == profile,
                 "compute_broker_result_truncation"
+            );
+            ensure!(
+                generation.output_contract.is_none() || caps.principle_inference_v4,
+                "compute_broker_unrequested_principle_output"
             );
         }
     }

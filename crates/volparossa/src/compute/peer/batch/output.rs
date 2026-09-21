@@ -31,6 +31,8 @@ pub(in crate::compute::peer) fn status(output: &Value) -> Result<&'static str> {
         Ok("empty")
     } else if generation.is_eos() {
         Ok("eos")
+    } else if generation.is_json_boundary() {
+        Ok("json_boundary")
     } else {
         Ok("token_limit")
     }
@@ -39,14 +41,14 @@ pub(in crate::compute::peer) fn status(output: &Value) -> Result<&'static str> {
 pub(in crate::compute::peer) fn annotate(output: &mut Value) -> Result<()> {
     let state = status(output)?;
     output["answer_status"] = state.into();
-    output["answer_complete"] = (state == "eos").into();
+    output["answer_complete"] = matches!(state, "eos" | "json_boundary").into();
     Ok(())
 }
 
 pub(in crate::compute::peer) fn all_complete(outputs: &[Value]) -> Result<bool> {
     let mut complete = !outputs.is_empty();
     for output in outputs {
-        complete &= status(output)? == "eos";
+        complete &= matches!(status(output)?, "eos" | "json_boundary");
     }
     Ok(complete)
 }

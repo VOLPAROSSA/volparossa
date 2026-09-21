@@ -18,6 +18,19 @@ The incomplete schema-like outputs are not repaired or adopted. Neither cross-re
 the result remains incomplete/undetermined. Original cleanup and unchanged host state pass.
 This is a model-output failure, not evidence of a failed content path or a peer memory-pressure event.
 
+The next functional candidate addresses that failure with an explicit signed public principle
+dataset v4 and fixed assessment/review JSON decoding, not an outcome chosen by the coordinator.
+Owner-enabled `--principle-inference-v4` brokers use the pinned optional decoder with the same
+360M model, one source row, 1024 prompt tokens and 256 generation tokens. Complete JSON has its
+own `json_boundary` ending; it is not relabeled EOS. All source quotes, uncertainty and opposite
+reviews remain independently checked. New enrollments are version 2; original version-1 jobs
+keep their old document inputs and receipts. Real four-job success and B06 remain unproven until
+the updated disposable fixture passes. No network-policy authority or activation is added.
+Verification: 270 CLI compute checks, the additional v4 four-stage signed transfer/replay test,
+seven content/protocol/agent admission checks, 91 pure worker/decoder checks, scoped strict Clippy,
+the compiled inert CLI smoke and the static disposable-topology contract pass. These are not
+evidence that the real model now produces usable judgments; the next VM run must establish that.
+
 The next B06 transfer slice adds opt-in original provider-signed Poll transcripts, `policy-pack`
 and `policy-fetch`. A completed four-stage public judgment can be packaged as an inert signed
 native publication, retrieved through a fresh cache and reconstructed against independently

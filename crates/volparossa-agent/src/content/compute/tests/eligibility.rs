@@ -52,6 +52,7 @@ pub(super) fn fixture() -> Fixture {
             require_task_derivation_v1: true,
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
+            require_principle_inference_v4: false,
         }),
     };
     Fixture {
@@ -128,6 +129,9 @@ async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment
     cases.push((query, false));
     let mut query = original_query.clone();
     query.require_derived_inference_v3 = true;
+    cases.push((query, false));
+    let mut query = original_query.clone();
+    query.require_principle_inference_v4 = true;
     cases.push((query, false));
     cases.push((original_query, false)); // Last normal response reports actual Busy capacity.
     let count = cases.len();

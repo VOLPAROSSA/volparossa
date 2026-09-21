@@ -770,7 +770,7 @@ if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agen
     [ -f "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] \
         && [ ! -L "$source_directory/workers/volparossa-ml/model-pins-360m.json" ] || exit 69
 fi
-if [ "$agent_model_task_graph" = yes ]; then
+if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then
     for decoder_pin in graph-decoder-pins.json graph-decoder-requirements.lock; do
         [ -f "$source_directory/workers/volparossa-ml/$decoder_pin" ] \
             && [ ! -L "$source_directory/workers/volparossa-ml/$decoder_pin" ] || exit 69
@@ -2295,7 +2295,7 @@ if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then
         install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/model-pins-360m.json" "$WORK/bin/ml/model-pins-360m.json"
     fi
-    if [ "$agent_model_task_graph" = yes ]; then
+    if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then
         for decoder_pin in graph-decoder-pins.json graph-decoder-requirements.lock; do
             install -o root -g root -m 0444 "$source_directory/workers/volparossa-ml/$decoder_pin" "$WORK/bin/ml/$decoder_pin"
         done

@@ -238,6 +238,20 @@ fn reasoning(
     uncertainty: &Uncertainty,
     source: &str,
 ) -> Result<()> {
+    reasoning_shape(version, reasons, counterargument, uncertainty)?;
+    ensure!(
+        reasons.iter().all(|reason| source.contains(&reason.quote)),
+        "compute_policy_assessment_quote_or_principle"
+    );
+    Ok(())
+}
+
+fn reasoning_shape(
+    version: u32,
+    reasons: &[Reasoning],
+    counterargument: &str,
+    uncertainty: &Uncertainty,
+) -> Result<()> {
     ensure!(
         version == 1 && (1..=3).contains(&reasons.len()),
         "compute_policy_assessment_reasoning"
@@ -247,13 +261,48 @@ fn reasoning(
         text(&reason.quote, 128)?;
         text(&reason.reason, 192)?;
         ensure!(
-            source.contains(&reason.quote) && principles.insert(reason.principle),
+            principles.insert(reason.principle),
             "compute_policy_assessment_quote_or_principle"
         );
     }
     text(counterargument, 192)?;
     text(&uncertainty.reason, 192)?;
     Ok(())
+}
+
+/// Structural completion only. Source grounding and cross-review still require
+/// the original signed subject, context, job and independent peer records.
+pub(in crate::compute) fn validate_output_shape(
+    raw: &[u8],
+    contract: volparossa_content::provider::compute::dataset::PrincipleOutputContract,
+) -> Result<()> {
+    use volparossa_content::provider::compute::dataset::PrincipleOutputContract::{
+        PrincipleAssessmentV1, PrincipleReviewV1,
+    };
+    ensure!(
+        !raw.is_empty() && raw.len() <= MAX_OUTPUT_BYTES,
+        "compute_policy_assessment_output_bound"
+    );
+    match contract {
+        PrincipleAssessmentV1 => {
+            let value: AssessmentPayload = serde_json::from_slice(raw)?;
+            reasoning_shape(
+                value.version,
+                &value.reasoning,
+                &value.counterargument,
+                &value.uncertainty,
+            )
+        }
+        PrincipleReviewV1 => {
+            let value: ReviewPayload = serde_json::from_slice(raw)?;
+            reasoning_shape(
+                value.version,
+                &value.reasoning,
+                &value.counterargument,
+                &value.uncertainty,
+            )
+        }
+    }
 }
 
 /// Only the decoding constructor creates records. Resume re-decodes the original

@@ -355,7 +355,9 @@ fn supports_source(
     source: &volparossa_content::provider::compute::dataset::VerifiedPublicDataset,
     caps: &rpc::Capabilities,
 ) -> bool {
-    if source.is_derived() {
+    if source.is_principle() {
+        caps.principle_inference_v4
+    } else if source.is_derived() {
         caps.derived_inference_v3
     } else {
         !source.is_document() || caps.document_inference_v2
@@ -422,6 +424,7 @@ fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
     let profile = super::broker::profile_for_model(&caps.model)?;
     ensure!(
         caps.public_inference_only
+            && (!caps.principle_inference_v4 || profile == super::ModelProfile::Smol360)
             && caps.runtime_slots == 1
             && caps.max_threads <= 2
             && (1..=600).contains(&caps.max_job_seconds)

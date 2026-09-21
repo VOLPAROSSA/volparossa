@@ -199,6 +199,10 @@ pub struct Capabilities {
     /// This is not an attestation of the parent workers or permission to train on their answers.
     #[serde(default, skip_serializing_if = "is_false")]
     pub derived_inference_v3: bool,
+    /// Supports fixed structured public principle assessment/review (dataset version four).
+    /// This capability never grants network-policy authority.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub principle_inference_v4: bool,
     /// This owner broker may activate validated local successors for new jobs.
     /// Existing job bindings stay immutable and pollable through the same broker.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -206,6 +210,10 @@ pub struct Capabilities {
 }
 
 /// A content-free suitability query, not publisher authority or a capacity reservation.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent versioned capability requirements preserve old query encoding"
+)]
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EligibilityQuery {
@@ -222,6 +230,9 @@ pub struct EligibilityQuery {
     pub require_document_inference_v2: bool,
     /// Require signed generated-intermediate public inference.
     pub require_derived_inference_v3: bool,
+    /// Require the explicit structured principle inference profile.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_principle_inference_v4: bool,
 }
 
 impl EligibilityQuery {
@@ -274,6 +285,7 @@ impl EligibilityQuery {
             && (!self.require_task_derivation_v1 || capabilities.task_derivation_v1)
             && (!self.require_document_inference_v2 || capabilities.document_inference_v2)
             && (!self.require_derived_inference_v3 || capabilities.derived_inference_v3)
+            && (!self.require_principle_inference_v4 || capabilities.principle_inference_v4)
     }
 }
 
@@ -571,6 +583,7 @@ mod tests {
             require_task_derivation_v1: false,
             require_document_inference_v2: false,
             require_derived_inference_v3: false,
+            require_principle_inference_v4: false,
         }
     }
 
@@ -672,6 +685,7 @@ mod tests {
             task_derivation_v1: false,
             document_inference_v2: false,
             derived_inference_v3: false,
+            principle_inference_v4: false,
             successor_activation_v1: false,
         }
     }
@@ -700,6 +714,39 @@ mod tests {
             invalid[forbidden] = "not authorized".into();
             assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn principle_capability_and_requirement_are_explicit_and_absent_on_legacy_wire() {
+        let mut caps = capabilities();
+        let mut query = eligibility_query();
+        let legacy_caps = serde_json::to_string(&caps).unwrap();
+        let legacy_query = serde_json::to_string(&query).unwrap();
+        assert!(!legacy_caps.contains("principle_inference_v4"));
+        assert!(!legacy_query.contains("require_principle_inference_v4"));
+        assert!(
+            !serde_json::from_str::<Capabilities>(&legacy_caps)
+                .unwrap()
+                .principle_inference_v4
+        );
+        assert!(
+            !serde_json::from_str::<EligibilityQuery>(&legacy_query)
+                .unwrap()
+                .require_principle_inference_v4
+        );
+        query.require_principle_inference_v4 = true;
+        assert!(!query.matches(&caps));
+        caps.principle_inference_v4 = true;
+        assert!(query.matches(&caps));
+        assert_eq!(
+            serde_json::from_slice::<Capabilities>(&serde_json::to_vec(&caps).unwrap()).unwrap(),
+            caps
+        );
+        assert_eq!(
+            serde_json::from_slice::<EligibilityQuery>(&serde_json::to_vec(&query).unwrap())
+                .unwrap(),
+            query
+        );
     }
 
     #[test]

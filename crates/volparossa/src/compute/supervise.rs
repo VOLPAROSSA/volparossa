@@ -161,6 +161,7 @@ pub(super) async fn run(
                 &mut child, stdout, stderr, &request.id, controls.as_ref()
             ).await?;
             check_result(&result, request, status)?;
+            check_public_contract(&result, options)?;
             if let Some(controls) = &controls {
                 controls.check_report(&result)?;
             } else {
@@ -281,6 +282,14 @@ fn pressure_action(budget: &mut Budget) -> Result<Action> {
         Decision::Pause => Ok(Action::Pause),
         Decision::Cancel => bail!("{}", budget.cancellation_code()),
     }
+}
+
+fn check_public_contract(value: &Value, options: &Options) -> Result<()> {
+    if options.mode == Mode::Infer {
+        let dataset = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::inference_output::check_dataset_contract(value, &dataset)?;
+    }
+    Ok(())
 }
 
 fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> Result<()> {

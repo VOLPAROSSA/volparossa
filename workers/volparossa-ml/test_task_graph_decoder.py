@@ -137,6 +137,21 @@ def decoder(check=lambda: None, accepts=lambda raw: raw == RAW, tokenizer=None):
 
 
 class DecoderTests(unittest.TestCase):
+    def test_compiled_policy_schema_uses_same_strict_core_with_explicit_prompt_bound(self):
+        schema = {"type": "object", "properties": {"outcome": {"enum": ["allow", "deny", "undetermined"]}}}
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda raw: raw == RAW,
+                schema=schema, prompt_limit=1024, output_limit=1024)
+        callback = value.new_attempt([0] * 1024, 256)
+        self.assertEqual(callback.enforcer.root_parser.schema, schema)
+        self.assertIsNot(callback.enforcer.root_parser.schema, schema)
+        self.assertNotIn(2, callback(0, Tensor(*([0] * 1024))))
+        self.assertIn(2, callback(0, Tensor(*([0] * 1024 + [7]))))
+        with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+            value.new_attempt([0] * 1025, 256)
+        with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+            decoder().new_attempt([0] * 513, 256)
+
     def test_metadata_and_schema_do_not_choose_tasks(self):
         value = decoder()
         self.assertEqual(value.metadata, DECODER.decoder_metadata())

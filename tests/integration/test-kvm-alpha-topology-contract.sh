@@ -211,8 +211,16 @@ for name, expected_resumes in (("agent-model-planning", 2), ("agent-ready-dag", 
 jobs = (root / "agent-jobs-smoke.sh").read_text()
 profile_gate = 'if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then'
 assert jobs.count(profile_gate) == 2
+decoder_gate = 'if [ "${agent_model_task_graph:-no}" = yes ] || [ "${agent_policy_assessment:-no}" = yes ]; then'
+assert jobs.count(decoder_gate) == 1
+assert decoder_gate + '\n        set -- "$@" --task-graph-decoder\n    fi' in jobs
+assert ('if [ "${agent_policy_assessment:-no}" = yes ]; then\n'
+        '        # Explicit owner opt-in; no other fixture advertises structured principle inference.\n'
+        '        set -- "$@" --principle-inference-v4\n    fi') in jobs
+assert jobs.count('--principle-inference-v4') == 1
 guest = (root / "kvm-alpha-topology.sh").read_text()
 assert guest.count('if [ "$agent_model_planning" = yes ] || [ "$agent_ready_dag" = yes ] || [ "$agent_policy_assessment" = yes ]; then') == 2
+assert guest.count('if [ "$agent_model_task_graph" = yes ] || [ "$agent_policy_assessment" = yes ]; then') == 2
 dag = (root / "agent-ready-dag-smoke.sh").read_text()
 assert dag.count('"$dag_script" collect-failure "$WORK"') == 2
 for phase, failure in (("pause", "READY_DAG_INITIAL_WORKERS_NOT_OBSERVED"),

@@ -131,7 +131,7 @@ pub(super) async fn run(
         }
         check_proof(&stage_root, enrolled, &handle, &status, None)?;
     }
-    completed(stage, handle, status)
+    completed(stage, handle, status, enrolled, question)
 }
 
 fn check_proof(
@@ -190,10 +190,18 @@ pub(super) fn replay(
         },
         handle,
         status,
+        enrolled,
+        question,
     )
 }
 
-fn completed(mut stage: Stage, handle: JobHandle, status: rpc::JobStatus) -> Result<Stage> {
+fn completed(
+    mut stage: Stage,
+    handle: JobHandle,
+    status: rpc::JobStatus,
+    enrolled: &Enrollment,
+    question: &str,
+) -> Result<Stage> {
     stage.execution_complete = true;
     let report: Value = serde_json::from_str(
         status
@@ -205,7 +213,15 @@ fn completed(mut stage: Stage, handle: JobHandle, status: rpc::JobStatus) -> Res
         .as_array()
         .context("compute_policy_output_array")?;
     ensure!(outputs.len() == 1, "compute_policy_single_output");
-    if batch::output::status(&outputs[0])? != "eos" {
+    let expected = enrolled.output_contract(question)?;
+    let generation = crate::compute::inference_output::Generation::from_output(&outputs[0], true)?
+        .context("compute_policy_generation")?;
+    ensure!(
+        generation.output_contract == expected,
+        "compute_policy_output_contract"
+    );
+    let ending = batch::output::status(&outputs[0])?;
+    if ending != "eos" && !(expected.is_some() && ending == "json_boundary") {
         stage.state = "answer_incomplete";
         return Ok(stage);
     }
@@ -250,7 +266,11 @@ fn load_handle(
             && handle.capabilities.model_fingerprint == handle.binding.model_fingerprint
             && crate::compute::broker::profile_for_model(&handle.capabilities.model)?
                 == ModelProfile::Smol360
-            && handle.capabilities.document_inference_v2
+            && if enrolled.version == 1 {
+                handle.capabilities.document_inference_v2
+            } else {
+                handle.capabilities.principle_inference_v4
+            }
             && handle.binding.row_indices == [0]
             && handle.binding.task.is_none()
             && handle.binding.dataset_manifest_id == hex::encode(verified.manifest_id())

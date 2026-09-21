@@ -84,6 +84,7 @@ pub(super) fn broker(root: &Path) -> Broker {
     Broker {
         options: Serve {
             model_profile: ModelProfile::default(),
+            principle_inference_v4: false,
             runtime_root: root.join("runtime"),
             model_root: root.join("model"),
             adapter_root: None,
@@ -112,6 +113,7 @@ pub(super) fn broker(root: &Path) -> Broker {
             max_rows: 4,
             task_derivation_v1: true,
             document_inference_v2: false,
+            principle_inference_v4: false,
             derived_inference_v3: false,
             successor_activation_v1: false,
         },
