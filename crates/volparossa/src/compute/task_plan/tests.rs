@@ -11,6 +11,7 @@ fn input() -> Input {
         source_sha256: "a".repeat(64),
         source_bytes: 128,
         source_excerpt: None,
+        plan_requirement: None,
     }
 }
 

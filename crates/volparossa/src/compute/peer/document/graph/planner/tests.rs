@@ -16,7 +16,32 @@ fn input(document: &str) -> task_plan::Input {
         source_sha256: digest(document.as_bytes()),
         source_bytes: document.len() as u64,
         source_excerpt: None,
+        plan_requirement: None,
     }
+}
+
+#[test]
+fn requested_internal_dependency_is_not_satisfied_by_the_local_terminal_join() {
+    let document = "Constraints and alternatives are explicitly public.";
+    let mut input = input(document);
+    input.version = 3;
+    input.source_excerpt = Some(task_plan::SourceExcerpt::prefix(document));
+    let singleton = task_plan::ModelTaskGraph::decode(
+        br#"{"version":3,"tasks":[{"question":"Which constraints apply?","depends_on":[]}]}"#,
+        &input.question,
+    )
+    .unwrap();
+    assert_eq!(graph_proposal(&input, &singleton).unwrap().nodes.len(), 2);
+    input.plan_requirement = Some(task_plan::PlanRequirement::DependentAnalysisV1);
+    assert!(graph_proposal(&input, &singleton).is_err());
+    let dependent = task_plan::ModelTaskGraph::decode(
+        br#"{"version":3,"tasks":[{"question":"Which constraints apply?","depends_on":[]},{"question":"How do those constraints affect the choices?","depends_on":[0]}]}"#,
+        &input.question,
+    ).unwrap();
+    let plan = graph_proposal(&input, &dependent).unwrap();
+    assert_eq!(plan.nodes[1].question, dependent.tasks[1].question);
+    assert_eq!(plan.nodes[1].depends_on, ["question-00"]);
+    assert_eq!(plan.nodes.last().unwrap().question, input.question);
 }
 
 #[test]

@@ -58,6 +58,14 @@ pub(crate) struct Options {
     /// Let the pinned model choose bounded public subtasks and dependencies; keeps the exact final question.
     #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_tasks", "synthesize", "batch_barrier"])]
     plan_task_graph: bool,
+    /// Require a model-selected dependent analysis, not just independent source questions.
+    #[arg(
+        long,
+        value_enum,
+        requires = "plan_task_graph",
+        conflicts_with_all = ["resume", "plan_tasks", "task_plan", "synthesize", "batch_barrier"]
+    )]
+    plan_structure: Option<crate::compute::task_plan::PlanRequirement>,
     /// UTF-8 text that you are authorized to publish, not automatic browsing/private-file ingestion.
     #[arg(long, required_unless_present_any = ["resume", "source_plan"], conflicts_with_all = ["resume", "source_plan"])]
     input: Option<PathBuf>,
@@ -137,6 +145,16 @@ pub(super) fn save(
 }
 
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    ensure!(
+        args.plan_structure.is_none()
+            || (args.plan_task_graph
+                && !args.plan_tasks
+                && !args.resume
+                && args.task_plan.is_none()
+                && !args.synthesize
+                && !args.batch_barrier),
+        "compute_task_plan_requirement_mode"
+    );
     if !args.execute {
         println!(
             "{}",
@@ -145,6 +163,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
             "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
+            "plan_structure":args.plan_structure,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,

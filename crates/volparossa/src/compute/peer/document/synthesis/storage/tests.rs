@@ -278,6 +278,7 @@ fn replay_options(root: &Path) -> Options {
         task_plan: None,
         plan_tasks: false,
         plan_task_graph: false,
+        plan_structure: None,
         input: None,
         source_plan: None,
         source_cache: None,

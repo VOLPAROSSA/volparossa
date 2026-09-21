@@ -70,6 +70,16 @@ impl ModelTaskGraph {
     pub(in crate::compute) fn dependency_count(&self) -> usize {
         self.tasks.iter().map(|task| task.depends_on.len()).sum()
     }
+
+    pub(in crate::compute) fn validate_requirement(&self, input: &Input) -> Result<()> {
+        self.validate(&input.question)?;
+        ensure!(
+            input.plan_requirement.is_none()
+                || (self.tasks.len() >= 2 && self.dependency_count() > 0),
+            "compute_task_graph_dependency_required"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -176,6 +186,7 @@ fn semantic_rejection(attempt: &GraphAttempt, strategy: &str) -> bool {
                     | "GRAPH_GOAL_COPY"
                     | "GRAPH_DUPLICATE_QUESTION"
                     | "GRAPH_DEPENDENCIES"
+                    | "GRAPH_DEPENDENCY_REQUIRED"
             )
         )
 }
@@ -244,6 +255,7 @@ pub(in crate::compute) fn validate_graph_report(
         "compute_task_graph_input_changed"
     );
     let graph = ModelTaskGraph::decode(artifact, &input.question)?;
+    graph.validate_requirement(input)?;
     let excerpt = input
         .source_excerpt
         .as_ref()

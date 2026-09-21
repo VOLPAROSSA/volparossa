@@ -26,6 +26,15 @@ STRATEGY = "model_questions_source_recovery_v4"
 DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3", "adapter_version": 1,
            "schema_version": 3, "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 QUESTION = "What requirements and risks does this project describe?"
+PLAN_REQUIREMENT = "dependent_analysis_v1"
+GRAPH_QUESTION = "Which route meets the stated privacy constraints, why, and what further evidence is needed before comparing performance?"
+GRAPH_SOURCE = (b"Synthetic public routing case.\n"
+    b"Required path: client -> one relay -> exit -> destination.\n"
+    b"A relay may know the client and exit, but not the Internet destination.\n"
+    b"An exit may know the destination and relay, but not the client's public address.\n"
+    b"Route A uses client -> relay -> exit -> destination.\n"
+    b"Route B uses client -> exit -> destination; the exit sees the client's public address.\n"
+    b"No throughput, latency or failure measurements are provided.\n")
 KIND = "volparossa-bounded-model-public-task-planning"
 SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates two public subquestions from a goal and "
     "an exact bounded public source prefix, "
@@ -40,17 +49,20 @@ TASK_GRAPH = False
 
 
 def select_task_graph():
-    global TASK_GRAPH, PREFIX, STRATEGY, KIND, SCOPE
+    global TASK_GRAPH, PREFIX, STRATEGY, KIND, SCOPE, QUESTION
     TASK_GRAPH = True
     PREFIX = "agent-model-task-graph"
     STRATEGY = "model_task_graph_constrained_v2"
-    KIND = "volparossa-bounded-model-selected-public-task-graph"
+    QUESTION = GRAPH_QUESTION
+    KIND = "volparossa-bounded-model-selected-dependent-public-task-graph"
     SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates an exact raw public task graph from "
-        "the original goal and bounded literal source prefix, choosing at least two tasks and one internal dependency "
+        "a synthetic public routing case with explicit privacy facts and absent performance measurements, "
+        "under the explicit dependent_analysis_v1 requirement, choosing at least two tasks and one internal dependency "
         "within four attempts and 384 total generated tokens, with pinned JSON-constrained decoding. "
         "Local translation adds only stable IDs and an exact "
         "original-question terminal join over model-selected sinks. Actual protected peer jobs consume EOS-complete "
-        "parents; original-free completed offline resume preserves planner and receipts. No required parallel shape, "
+        "parents bound byte-for-byte to their original receipts; original-free completed offline resume preserves planner and receipts. "
+        "This is a new fixture contract, not a reinterpretation of historical failed runs. No required parallel shape, "
         "simultaneous-worker claim, task repair, canned fallback, semantic quality, private offload, model-selected tools, "
         "open-ended autonomy, full B03 or full alpha.")
 
@@ -79,9 +91,28 @@ def planning_input(source):
     prefix=text.encode()
     require(source.decode("utf-8").encode()==source and 1<=len(source)<=1048576
         and prefix and b"\0" not in prefix,"invalid original public planner source")
-    return dict(version=3 if TASK_GRAPH else 2,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",question=QUESTION,
+    selected=dict(version=3 if TASK_GRAPH else 2,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",question=QUESTION,
         source_sha256=sha(source),source_bytes=len(source),
         source_excerpt=dict(start=0,end=len(prefix),text=text,sha256=sha(prefix)))
+    if TASK_GRAPH:selected["plan_requirement"]=PLAN_REQUIREMENT
+    return selected
+
+
+def check_public_input(original,source):
+    require(original["question"]==QUESTION and original["supplied_task_plan"] is False
+        and 1<=len(source)<=1024 and original["excerpt_bytes"]==len(source)
+        and original["excerpt_sha256"]==sha(source)
+        and original["excerpt_range"]==dict(start=0,end=len(source)),"public source/goal selection changed")
+    if TASK_GRAPH:
+        require(source==GRAPH_SOURCE and original["source"]=="synthetic-public-routing-case-v1"
+            and original["fixture_contract"]==PLAN_REQUIREMENT and original["synthetic_test_data"] is True
+            and original["original_source_sha256"]==sha(GRAPH_SOURCE)
+            and original["excerpt_selection"]=="complete_synthetic_public_routing_case",
+            "not the explicit complete synthetic dependent-analysis case")
+    else:
+        require(original["source"]=="README.md"
+            and original["excerpt_selection"]=="complete_intro_before_network_navigation"
+            and public_intro(source+b"[Network](")==source,"not exact complete public introduction/goal selection")
 
 
 def prepare(work):
@@ -89,13 +120,14 @@ def prepare(work):
         and JOBS["subprocess"].check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
         and os.geteuid() != 0 and work.parent == Path("/opt") and work.name.startswith("va.")
         and not work.is_symlink() and HERE == work / "bin", "wrong installed guest model-planning helper")
-    for path in (Path(__file__), HERE / "model-planning-source-README.md"):
+    installed=(Path(__file__),) if TASK_GRAPH else (Path(__file__), HERE / "model-planning-source-README.md")
+    for path in installed:
         info=path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and not info.st_mode & 0o222,
             "planner helper/source not root-installed read-only")
     source=JOBS["private"](work / "state-client/compute-source", "compute-source")
-    original=(HERE / "model-planning-source-README.md").read_bytes()
-    excerpt=public_intro(original)
+    original=GRAPH_SOURCE if TASK_GRAPH else (HERE / "model-planning-source-README.md").read_bytes()
+    excerpt=original if TASK_GRAPH else public_intro(original)
     path=source / "model-planning-input.txt"
     with path.open("xb") as stream:
         stream.write(excerpt)
@@ -108,11 +140,18 @@ def prepare(work):
     own,remote=owner.stat(),peer.stat()
     require((own.st_dev,own.st_ino)!=(remote.st_dev,remote.st_ino)
         and JOBS["file_hash"](owner,MODEL_ID["base_weights"]["bytes"])==MODEL_ID["base_weights"],"planner is not an independent pinned copy")
-    print(json.dumps(dict(source="README.md", original_repository_sha256=sha(original),
+    selected=dict(source="README.md", original_repository_sha256=sha(original),
         excerpt_hex=excerpt.hex(), excerpt_sha256=sha(excerpt), excerpt_bytes=len(excerpt), question=QUESTION,
         excerpt_range=dict(start=0,end=len(excerpt)),excerpt_selection="complete_intro_before_network_navigation",
         input_inode=[path.stat().st_dev,path.stat().st_ino], owner_model_inode=[own.st_dev,own.st_ino],
-        peer_model_inode=[remote.st_dev,remote.st_ino], private_copies_no_hardlinks=True, supplied_task_plan=False)))
+        peer_model_inode=[remote.st_dev,remote.st_ino], private_copies_no_hardlinks=True, supplied_task_plan=False)
+    if TASK_GRAPH:
+        del selected["original_repository_sha256"]
+        selected.update(source="synthetic-public-routing-case-v1",original_source_sha256=sha(original),
+            fixture_contract=PLAN_REQUIREMENT,synthetic_test_data=True,
+            excerpt_selection="complete_synthetic_public_routing_case")
+    check_public_input(selected,excerpt)
+    print(json.dumps(selected))
 
 
 def snapshot(root):
@@ -403,7 +442,7 @@ def check_graph_attempts(attempts,artifact=None):
                 or (item["rejection_code"]=="INVALID_GRAPH" and item["stop_reason"] in ("eos","graph_boundary"))
                 or (item["rejection_code"] in {"GRAPH_FIELDS", "GRAPH_TASK_COUNT", "GRAPH_TASK_FIELDS",
                     "GRAPH_QUESTION_TEXT", "GRAPH_QUESTION_FORM", "GRAPH_GOAL_COPY", "GRAPH_DUPLICATE_QUESTION",
-                    "GRAPH_DEPENDENCIES"} and 1<=item["text_bytes"]<=16384
+                    "GRAPH_DEPENDENCIES", "GRAPH_DEPENDENCY_REQUIRED"} and 1<=item["text_bytes"]<=16384
                     and item["stop_reason"] in ("eos","graph_boundary"))
                 or (item["rejection_code"]=="GRAPH_OUTPUT_TOO_LARGE" and item["stop_reason"]=="eos"
                     and item["text_bytes"]>16384),"graph rejection category")
@@ -524,9 +563,11 @@ def check_planning(raw,source):
         accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions,goal=expected["question"])
         require(accepted==2 and report["planner_question_stats"]==stats and total<384,"planner accepted stages differ")
     require(report["planner_prompt_tokens"]==maximum and report["planner_generated_tokens"]==total,"planner aggregate budget differs")
-    require(report["dataset"]==dict(version=expected["version"],sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
+    descriptor=dict(version=expected["version"],sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
         visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
         source_excerpt=dict(coverage,bytes=excerpt["end"]))
+    if TASK_GRAPH:descriptor["plan_requirement"]=PLAN_REQUIREMENT
+    require(report["dataset"]==descriptor
         and report["artifacts"]==[dict(relative_path=artifact_name,bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
         and load("model-planner/report.json").items()<=report.items(),"planner report/artifact not tied to exact goal and source")
     DOC["check_supervisor"](report)
@@ -625,11 +666,7 @@ def check(value,revision):
     require(all(saved.get(n)==v and raw[n].hex()==initial["raw"][n] for n,v in initial["snapshot"].items())
         and not any(HANDLE.fullmatch(n) or "/work/" in n or "/synthesis/" in n for n in initial["snapshot"]),"enrolled planner/source files changed or already admitted peers")
     original=value["input"];source=bytes.fromhex(original["excerpt_hex"])
-    require(original["source"]=="README.md" and original["question"]==QUESTION and original["supplied_task_plan"] is False
-        and 1<=len(source)<=1024 and original["excerpt_bytes"]==len(source) and original["excerpt_sha256"]==sha(source)
-        and original["excerpt_range"]==dict(start=0,end=len(source))
-        and original["excerpt_selection"]=="complete_intro_before_network_navigation"
-        and public_intro(source+b"[Network](")==source,"not exact complete public introduction/goal selection")
+    check_public_input(original,source)
     plan,planning=check_planning(raw,source);count=len(plan["nodes"])-1;load=lambda name:json.loads(raw[name])
     source_indices=[i for i,node in enumerate(plan["nodes"]) if not node["depends_on"]]
     graph=load("graph.json")
@@ -756,13 +793,16 @@ def evidence(work,revision):
 def finalize(work,revision,status,complete,remaining,phase,blocker):
     path=record(work,"evidence");value=read(path,64*1048576) if path.is_file() else None
     host=read(work/"a15-evidence.json") if (work/"a15-evidence.json").is_file() else {}
-    write(record(work,"smoke"),dict(report_kind=KIND,source_revision=revision,scope=SCOPE,
+    result=dict(report_kind=KIND,source_revision=revision,scope=SCOPE,
         success=status==0 and complete and remaining==0 and value is not None,runner_exit_status=status,phase=phase,
         observed_blocker=None if blocker=="NONE" else blocker,evidence=value,cleanup=dict(complete=complete,remaining_owned_objects=remaining),
-        host_state=host,decomposition_quality_proven=False,model_answer_correctness_proven=False,full_b03_claimed=False,full_alpha_claimed=False))
+        host_state=host,decomposition_quality_proven=False,model_answer_correctness_proven=False,full_b03_claimed=False,full_alpha_claimed=False)
+    if TASK_GRAPH:result["fixture_contract"]=PLAN_REQUIREMENT
+    write(record(work,"smoke"),result)
 
 
 def report(value,revision):
+    if TASK_GRAPH:require(value.get("fixture_contract")==PLAN_REQUIREMENT,"historical fixture is not dependent-analysis proof")
     require(value["report_kind"]==KIND and value["source_revision"]==revision and value["scope"]==SCOPE
         and value["success"] is True and value["runner_exit_status"]==0 and value["observed_blocker"] is None
         and value["cleanup"]==dict(complete=True,remaining_owned_objects=0) and value["host_state"]["unchanged"] is True
@@ -967,8 +1007,21 @@ def graph_self_test():
     # Pure schema, exact-byte retention and accounting. No generated task is
     # supplied to the live planner by this test or the execution helper.
     profile_self_test()
-    source=b"Public source."
-    assert planning_input(source)["version"]==3
+    source=GRAPH_SOURCE
+    selected=planning_input(source)
+    assert selected["version"]==3 and selected["plan_requirement"]==PLAN_REQUIREMENT
+    assert selected["source_excerpt"]["text"].encode()==source and len(source)<=1024
+    original=dict(source="synthetic-public-routing-case-v1",fixture_contract=PLAN_REQUIREMENT,
+        synthetic_test_data=True,original_source_sha256=sha(source),question=GRAPH_QUESTION,
+        supplied_task_plan=False,excerpt_bytes=len(source),excerpt_sha256=sha(source),
+        excerpt_range=dict(start=0,end=len(source)),excerpt_selection="complete_synthetic_public_routing_case")
+    check_public_input(original,source)
+    for mutation in (dict(source="README.md"),dict(fixture_contract="historical"),
+                     dict(question="What requirements and risks does this project describe?"),
+                     dict(synthetic_test_data=False),dict(original_source_sha256="f"*64)):
+        try:check_public_input(dict(original,**mutation),source)
+        except ValueError:pass
+        else:raise AssertionError("changed source/goal or old proof accepted as dependent analysis")
     artifact=encoded(dict(version=3,tasks=[dict(question="Which requirements?",depends_on=[]),
         dict(question="Which risks affect those requirements?",depends_on=[0]),
         dict(question="Which other constraints?",depends_on=[])]))
@@ -996,7 +1049,7 @@ def graph_self_test():
         planner_prompt_tokens=128,planner_generated_tokens=144,planner_attempts=attempts,planner_task_count=3,planner_dependency_count=1,
         dataset=dict(version=3,sha256=sha(input_raw),bytes=len(input_raw),visibility="public",license="GPL-3.0-only",
             question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
-            source_excerpt=dict(coverage,bytes=len(source))),
+            source_excerpt=dict(coverage,bytes=len(source)),plan_requirement=PLAN_REQUIREMENT),
         artifacts=[dict(relative_path="task-graph.json",bytes=len(artifact),sha256=sha(artifact))],
         supervisor=dict(child_reaped=True,network_access=False,gpu_access=False,max_observed_rss_bytes=1,rss_limit_bytes=3*1024**3))
     raw={"planner-input.json":input_raw,"planner-artifact.json":artifact,"model-planner/task-graph.json":artifact,
@@ -1011,6 +1064,16 @@ def graph_self_test():
         try:check_planning(changed,source)
         except ValueError:pass
         else:raise AssertionError("modified retained model/source/graph bytes accepted")
+    changed=dict(raw);changed_report=copy.deepcopy(report)
+    del changed_report["dataset"]["plan_requirement"]
+    changed["planner-report.json"]=encoded(changed_report)
+    try:check_planning(changed,source)
+    except ValueError:pass
+    else:raise AssertionError("missing requested structure descriptor accepted")
+    independent=encoded(dict(version=3,tasks=[dict(question="First?",depends_on=[]),dict(question="Second?",depends_on=[])]))
+    rejected=[attempt(1,independent,20,accepted=False,code="GRAPH_DEPENDENCY_REQUIRED",stop="eos"),
+        attempt(2,artifact,120,cap=364)]
+    assert check_graph_attempts(rejected,artifact)[:3]==(1,140,128)
     for change in (lambda a:a[1].update(max_new_tokens=384),lambda a:a[1].update(text_sha256="0"*64),
         lambda a:a[0].update(stop_reason="graph_boundary"),lambda a:a[1].update(question_index=0),
         lambda a:a.append(attempt(3,artifact,1)),lambda a:a[1].update(stop_reason="token_limit")):
@@ -1043,7 +1106,7 @@ def graph_self_test():
     try:validate_failure(failure,input_raw,source)
     except ValueError:pass
     else:raise AssertionError("extra generation after original budget accepted")
-    print("model-selected constrained graph v2 exact decoder/task/edge/budget controls PASS; no model/network executed")
+    print("dependent_analysis_v1 synthetic public routing case, exact graph/input/parent-contract controls PASS; no model/network executed")
 
 
 def main(args):

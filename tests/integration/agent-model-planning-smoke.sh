@@ -6,9 +6,11 @@
 agent_model_planning_mode() {
     planning_prefix=agent-model-planning
     planning_option=--plan-tasks
+    planning_question='What requirements and risks does this project describe?'
     if [ "${agent_model_task_graph:-no}" = yes ]; then
         planning_prefix=agent-model-task-graph
         planning_option=--plan-task-graph
+        planning_question="Which route meets the stated privacy constraints, why, and what further evidence is needed before comparing performance?"
     fi
 }
 
@@ -64,11 +66,13 @@ agent_model_planning_run() {
     planning_script=$source_directory/tests/integration/agent-model-planning-smoke.py
     PHASE=${planning_prefix}-owner-inputs
     if [ "${agent_model_task_graph:-no}" = yes ]; then
-        printf '%s\n' 'Disposable guest only: the actual pinned model selects public task count, questions and dependencies. Preserve raw task-graph.json before requiring at least two tasks and one internal edge; execute exact original-question terminal join, protected peer receipts and unchanged offline resume. No prescribed graph, answer-quality or simultaneous-worker claim.'
+        printf '%s\n' 'Disposable guest only: use the complete synthetic public routing case with explicit privacy facts and missing performance measurements. Request dependent_analysis_v1; the actual pinned model chooses task count, questions and dependencies under unchanged limits. Preserve raw task-graph.json and prove at least two tasks, one internal edge, exact parent-text consumption, original-question terminal join, protected peer receipts and unchanged offline resume. No prescribed graph/answer, semantic-quality or simultaneous-worker claim; historical failed probes stay failed.'
     else
     printf '%s\n' 'Disposable guest only: stage the complete literal public README introduction before its navigation and the same original question, copy pinned owner assets, observe one real isolated model reading the source prefix and proposing two question-form subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute all real tokenized protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback or claim of semantic relevance from source metadata.'
     fi
-    install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/model-planning-source-README.md"
+    if [ "${agent_model_task_graph:-no}" != yes ]; then
+        install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/model-planning-source-README.md"
+    fi
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source/planner-provision"
     for planning_part in venv model; do
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
@@ -83,10 +87,12 @@ agent_model_planning_run() {
         -- python3 -B "$WORK/bin/agent-model-planning-smoke.py" "$@" \
         >"$WORK/${planning_prefix}-input.json" || fail MODEL_PLANNING_PUBLIC_INPUT_FAILED
     PHASE=${planning_prefix}-real-model-enrollment
-    agent_model_planning_cli compute peer document "$planning_option" \
+    set -- "$planning_option"
+    [ "${agent_model_task_graph:-no}" != yes ] || set -- "$@" --plan-structure dependent
+    agent_model_planning_cli compute peer document "$@" \
         --model-profile smollm2-360m-v1 \
         --input "$jobs_source/model-planning-input.txt" --public-content --license GPL-3.0-only \
-        --public-question 'What requirements and risks does this project describe?' \
+        --public-question "$planning_question" \
         --runtime-root "$jobs_source/planner-provision/venv" --model-root "$jobs_source/planner-provision/model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         --publisher-key "$jobs_publisher" --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \
@@ -95,8 +101,8 @@ agent_model_planning_run() {
     jobs_batch_pid=$!
     agent_model_planning_wait observe-planner enrolled
     if [ "${agent_model_task_graph:-no}" = yes ]; then
-        # Original raw proposal is already retained even when the model chose
-        # no internal edge: that is legal product output, not this fixture proof.
+        # Preserve the accepted raw proposal before checking this proof. The
+        # dependent requirement never repairs tasks or inserts a model edge.
         agent_model_planning_python "$planning_script" check-enrollment "$WORK" \
             2>"$WORK/${planning_prefix}-shape.err" || fail MODEL_TASK_GRAPH_INTERNAL_EDGE_NOT_PROVEN
     fi

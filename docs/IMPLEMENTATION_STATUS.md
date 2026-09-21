@@ -11,6 +11,18 @@ It chooses only one source question, without an internal dependency. The unchang
 valid JSON and enrollment are not the requested dependent-workflow proof. Its 110 original
 files retain the exact proposal, input and report; original worker cleanup and host-state checks pass.
 
+Dependent analysis is now an explicit owner request: `--plan-task-graph --plan-structure dependent`
+binds `plan_requirement: dependent_analysis_v1` into the original input and report. Only that
+request requires at least two model-selected tasks and an internal dependency; the normal
+one-to-four-task contract remains unchanged. The worker explains the requirement and uses bounded
+correction feedback without inserting questions or edges. The updated disposable graph fixture
+uses a new, clearly synthetic routing-privacy case with concrete constraints and missing performance
+measurements, rather than the earlier README introduction. Historical runs above remain failures;
+this new request still needs real-model and peer-execution evidence.
+Verification: 22 task-plan and ten graph-planner Rust checks, 95 pure worker/decoder checks,
+scoped strict CLI Clippy, both fixture checkers and the compiled inert CLI smoke pass. The CLI
+rejects the dependent option outside graph planning, before acquiring source or runtime state.
+
 The [first principle-assessment run on `db2f0776`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663659331)
 also **fails**: the original 128-byte public subject is fetched from its selected peer, and both
 real 360M assessors run on distinct peers, but each reaches 256 generated tokens without EOS.

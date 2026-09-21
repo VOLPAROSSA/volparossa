@@ -15,6 +15,7 @@ fn input() -> Input {
         source_sha256: digest(source.as_bytes()),
         source_bytes: source.len() as u64,
         source_excerpt: Some(SourceExcerpt::prefix(source)),
+        plan_requirement: None,
     }
 }
 
@@ -24,6 +25,61 @@ fn artifact() -> Vec<u8> {
         {"question":"What risks are described?","depends_on":[]},
         {"question":"Which requirements address which risks?","depends_on":[0,1]}] }"#
         .to_vec()
+}
+
+#[test]
+fn dependent_request_is_explicit_preserves_old_bytes_and_binds_the_graph_report() {
+    use crate::compute::task_plan::PlanRequirement;
+    let mut request = input();
+    let legacy_bytes = serde_json::to_vec(&request).unwrap();
+    assert!(
+        !std::str::from_utf8(&legacy_bytes)
+            .unwrap()
+            .contains("plan_requirement")
+    );
+    assert_eq!(
+        serde_json::to_vec(&Input::decode(&legacy_bytes).unwrap()).unwrap(),
+        legacy_bytes
+    );
+    let singleton = br#"{"version":3,"tasks":[{"question":"What is required?","depends_on":[]}]}"#;
+    let old_report = report(&request, &legacy_bytes, singleton);
+    validate_graph_report(&old_report, &request, &legacy_bytes, singleton).unwrap();
+    request.plan_requirement = Some(PlanRequirement::DependentAnalysisV1);
+    let bytes = serde_json::to_vec(&request).unwrap();
+    assert_ne!(bytes, legacy_bytes);
+    assert_eq!(
+        request.descriptor(&bytes)["plan_requirement"],
+        "dependent_analysis_v1"
+    );
+    let bad_report = report(&request, &bytes, singleton);
+    assert_eq!(
+        validate_graph_report(&bad_report, &request, &bytes, singleton)
+            .unwrap_err()
+            .to_string(),
+        "compute_task_graph_dependency_required"
+    );
+    for raw in [artifact(), br#"{"version":3,"tasks":[{"question":"Which constraints apply?","depends_on":[]},{"question":"How do those constraints affect the choices?","depends_on":[0]}]}"#.to_vec()] {
+        let report = report(&request, &bytes, &raw);
+        validate_graph_report(&report, &request, &bytes, &raw).unwrap();
+        // A requirement cannot be appended to, or removed from, an original receipt.
+        assert!(validate_graph_report(&report, &request, &legacy_bytes, &raw).is_err());
+        let mut original = request.clone();
+        original.plan_requirement = None;
+        let changed_bytes = serde_json::to_vec(&original).unwrap();
+        assert!(validate_graph_report(&report, &original, &changed_bytes, &raw).is_err());
+    }
+    let mut no_edges = ModelTaskGraph::decode(&artifact(), &request.question).unwrap();
+    for task in &mut no_edges.tasks {
+        task.depends_on.clear();
+    }
+    assert!(no_edges.validate_requirement(&request).is_err());
+    for value in [json!(null), json!("independent"), json!(true)] {
+        let mut changed = serde_json::to_value(&request).unwrap();
+        changed["plan_requirement"] = value;
+        assert!(Input::decode(&serde_json::to_vec(&changed).unwrap()).is_err());
+    }
+    request.version = 2;
+    assert!(request.validate_execution().is_err());
 }
 
 fn attempt(raw: &[u8], accepted: bool, code: Option<&str>) -> Value {
@@ -316,6 +372,7 @@ fn detailed_graph_rejections_are_versioned_fixed_and_bound_to_original_budget() 
         "GRAPH_GOAL_COPY",
         "GRAPH_DUPLICATE_QUESTION",
         "GRAPH_DEPENDENCIES",
+        "GRAPH_DEPENDENCY_REQUIRED",
     ] {
         for stop in ["eos", "graph_boundary"] {
             let mut rejected = attempt(b"{}", false, Some(code));

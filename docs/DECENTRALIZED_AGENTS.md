@@ -1340,6 +1340,15 @@ distinct and cannot exactly copy the original goal. Local code supplies stable I
 terminal task with the user's unchanged question, joining only the model graph's terminal
 branches. No selected task is dropped and no missing edge or question is repaired.
 
+Add `--plan-structure dependent` when the user requests dependent analysis. This is not inferred
+from arbitrary words in the question: the optional `dependent_analysis_v1` requirement is bound
+to the retained input, report and enrollment hash. It requires two to four model-selected tasks,
+with at least one later task consuming an earlier result. The model still chooses the questions,
+count and edges; the coordinator's terminal join cannot satisfy the internal-dependency condition.
+An absent option preserves the historical one-to-four-task contract. `--resume` cannot change
+the requirement or replan. Fixed dependency feedback uses the same four-attempt/384-token budget.
+Structural dependency alone is not proof of useful reasoning or correct answers.
+
 Strategy `model_task_graph_constrained_v2` generates the whole JSON under one original owner/deadline:
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
 use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed
@@ -1358,11 +1367,12 @@ Provisioning requires the explicit `--task-graph-decoder` option to add three pi
 wheels. The ordinary 38-wheel runtime stays unchanged, and a missing decoder refuses graph
 execution rather than silently reverting to unconstrained generation. There is no model or
 runtime download from the worker. Current pure/compile checks are not real-model proof.
-The disposable `agent-model-task-graph` scenario exercises that exact path separately from
-the fixed two-question test. It retains the original proposal before requiring an internal
-dependency, checks all actual peer jobs and completed offline replay, and does not force a
-parallel shape or supply a replacement graph. Its local fixture checks are not a live-model
-pass or an answer-quality claim.
+The disposable `agent-model-task-graph` scenario now explicitly requests dependent analysis over
+a synthetic public routing case: privacy constraints, two route choices and absent performance
+measurements. This is a new request and source, not a reinterpretation of the earlier README test.
+It retains the original model proposal, checks all actual peer jobs and completed offline replay,
+and does not supply subquestions, edges or a replacement answer. The fixed two-question fixture
+is unchanged. Local fixture checks are not a live-model pass or an answer-quality claim.
 
 The [source-exact `7309b266` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663652657)
 corrects `GRAPH_GOAL_COPY` and accepts the second model proposal using 107 total tokens. That

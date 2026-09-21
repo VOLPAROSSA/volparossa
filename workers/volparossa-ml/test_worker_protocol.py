@@ -595,6 +595,15 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual(graph[2], dataset)
                 self.assertEqual(graph[3], dict(prepared[3], version=3,
                     sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
+                self.assertNotIn("plan_requirement", graph[3])
+                dataset["plan_requirement"] = WORKER.DEPENDENT_ANALYSIS_REQUIREMENT
+                raw = json.dumps(dataset, separators=(",", ":")).encode()
+                source.write_bytes(raw)
+                dependent = WORKER.prepare_files(value)
+                self.assertEqual(dependent[2], dataset)
+                self.assertEqual(dependent[3], dict(graph[3], plan_requirement=WORKER.DEPENDENT_ANALYSIS_REQUIREMENT,
+                    sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw)))
+                self.assertNotEqual(graph[3]["sha256"], dependent[3]["sha256"])
                 source.write_bytes(b" " * WORKER.MAX_TASK_PLAN_BYTES + raw)
                 with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
                     WORKER.prepare_files(value)
@@ -1077,6 +1086,91 @@ class WorkerProtocolTests(unittest.TestCase):
         model.generate.assert_not_called()
         self.assertEqual(session.planner_diagnostic, dict(strategy=WORKER.TASK_GRAPH_STRATEGY,
             attempts=[], incomplete_attempt=False, planner_decoder=WORKER.TASK_GRAPH_DECODER))
+
+    def test_dependent_analysis_input_is_explicit_graph_only_and_default_unchanged(self):
+        source = dict(task_plan_input(), version=3)
+        original = json.dumps(source, separators=(",", ":")).encode()
+        WORKER.validate_dataset(source, "plan_tasks")
+        self.assertEqual(json.dumps(source, separators=(",", ":")).encode(), original)
+        self.assertNotIn("requires dependent analysis", WORKER.task_graph_messages(source)[0]["content"])
+        value = dict(source, plan_requirement=WORKER.DEPENDENT_ANALYSIS_REQUIREMENT)
+        self.assertIs(WORKER.validate_dataset(value, "plan_tasks"), value)
+        prompt = WORKER.task_graph_messages(value)[0]["content"]
+        self.assertIn("later question that uses an earlier task's result", prompt)
+        self.assertIn("You choose the questions", prompt)
+        for version, requirement in ((2, WORKER.DEPENDENT_ANALYSIS_REQUIREMENT),
+                                     (1, WORKER.DEPENDENT_ANALYSIS_REQUIREMENT), (3, None),
+                                     (3, "dependent"), (3, ""), (3, True), (3, [])):
+            with self.subTest(version=version, requirement=requirement), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(dict(source, version=version, plan_requirement=requirement), "plan_tasks")
+        for mode in ("infer", "train", "plan_document", "private_infer"):
+            with self.subTest(mode=mode), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(value, mode)
+
+    def test_dependent_analysis_validates_model_edges_without_inventing_or_rewriting_them(self):
+        goal = task_plan_input()["question"]
+        requirement = WORKER.DEPENDENT_ANALYSIS_REQUIREMENT
+        for count in (1, 2):
+            independent = task_graph_fixture(count)
+            raw = json.dumps(independent).encode()
+            self.assertEqual(WORKER.task_graph_candidate(raw, goal), (independent, None))
+            self.assertEqual(WORKER.task_graph_candidate(raw, goal, requirement),
+                             (None, "GRAPH_DEPENDENCY_REQUIRED"))
+        for parents in (([], [0]), ([], [], [1]), ([], [0], [0], [1, 2])):
+            value = task_graph_fixture(len(parents))
+            for task, selected in zip(value["tasks"], parents):
+                task["depends_on"] = selected
+            original = copy.deepcopy(value)
+            self.assertIs(WORKER.validate_task_graph(value, goal, requirement), value)
+            self.assertEqual(value, original)
+        copied = task_graph_fixture(2)
+        copied["tasks"][1]["depends_on"] = [0]
+        copied["tasks"][1]["question"] = goal
+        self.assertEqual(WORKER.task_graph_candidate(json.dumps(copied).encode(), goal, requirement),
+                         (None, "GRAPH_GOAL_COPY"))
+
+    def test_dependent_analysis_decoder_keeps_schema_version_and_does_not_choose_edges(self):
+        module = mock.Mock()
+        module.DecoderError = type("DecoderFailure", (Exception,), {})
+        module.decoder_metadata.return_value = WORKER.TASK_GRAPH_DECODER
+        module.GraphDecoder.return_value.metadata = WORKER.TASK_GRAPH_DECODER
+        # Inert subset sufficient to inspect the compiled minItems override.
+        module.graph_schema.return_value = {"properties": {"tasks": {"minItems": 1, "maxItems": 4}}}
+        source = dict(task_plan_input(), version=3, plan_requirement=WORKER.DEPENDENT_ANALYSIS_REQUIREMENT)
+        with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": module}):
+            WORKER.create_task_graph_decoder(mock.Mock(), source, mock.Mock())
+        args, options = module.GraphDecoder.call_args
+        self.assertEqual(options, {"schema": {"properties": {"tasks": {"minItems": 2, "maxItems": 4}}}})
+        self.assertEqual(WORKER.TASK_GRAPH_DECODER["schema_version"], 3)
+        self.assertFalse(args[2](json.dumps(task_graph_fixture(2)).encode()))
+        self.assertTrue(args[2](json.dumps(task_graph_fixture(3)).encode()))
+
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_dependent_analysis_corrections_charge_original_budget_without_canned_graph(self, decoder_factory):
+        source = dict(task_plan_input(), version=3, plan_requirement=WORKER.DEPENDENT_ANALYSIS_REQUIREMENT)
+        plans = [task_graph_fixture(count) for count in (1, 2, 3)]
+        texts = [json.dumps(plan) for plan in plans]
+        model, tokenizer, torch, transformers = task_planner_doubles(texts, [21, 22])
+        session = mock.Mock()
+        result = WORKER.plan_task_graph(model, tokenizer, torch, transformers, source, session)
+        self.assertEqual(result, (plans[-1], texts[-1].encode(), 3, 6))
+        attempts = session.planner_diagnostic["attempts"]
+        self.assertEqual([item["rejection_code"] for item in attempts],
+                         ["GRAPH_DEPENDENCY_REQUIRED", "GRAPH_DEPENDENCY_REQUIRED", None])
+        self.assertEqual([item["max_new_tokens"] for item in attempts], [384, 382, 380])
+        prompts = [call.args[0] for call in tokenizer.apply_chat_template.call_args_list]
+        self.assertNotIn("Correction attempt", prompts[0][0]["content"])
+        for prompt in prompts[1:]:
+            self.assertIn(WORKER.TASK_GRAPH_CORRECTIONS["GRAPH_DEPENDENCY_REQUIRED"], prompt[0]["content"])
+            self.assertEqual(prompt[1], prompts[0][1])
+            self.assertNotIn(plans[-1]["tasks"][0]["question"], str(prompt))
+        decoder_factory.assert_called_once()
+        model, tokenizer, torch, transformers = task_planner_doubles(texts[0], [21, 22])
+        session = mock.Mock()
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_GRAPH_ATTEMPTS_EXHAUSTED"):
+            WORKER.plan_task_graph(model, tokenizer, torch, transformers, source, session)
+        self.assertEqual(model.generate.call_count, 4)
+        self.assertEqual(sum(item["generated_tokens"] for item in session.planner_diagnostic["attempts"]), 8)
 
     def test_task_graph_decoder_factory_binds_validator_and_redacts_only_decoder_failures(self):
         class DecoderFailure(Exception):

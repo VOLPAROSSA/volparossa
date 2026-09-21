@@ -46,6 +46,7 @@ TASK_PLAN_CONTEXT_TOKENS = 896
 TASK_PLAN_MAX_ATTEMPTS = 4
 TASK_PLAN_STRATEGY = "model_questions_source_recovery_v4"
 TASK_GRAPH_STRATEGY = "model_task_graph_constrained_v2"
+DEPENDENT_ANALYSIS_REQUIREMENT = "dependent_analysis_v1"
 TASK_GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                       "adapter_version": 1, "schema_version": 3,
                       "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
@@ -64,6 +65,7 @@ TASK_GRAPH_CORRECTIONS = {
     "GRAPH_GOAL_COPY": "Write narrower research questions; do not repeat the original goal verbatim.",
     "GRAPH_DUPLICATE_QUESTION": "Give each task a different question, ignoring only outer whitespace.",
     "GRAPH_DEPENDENCIES": "Use only distinct integer indices of earlier tasks, never names, self or future indices.",
+    "GRAPH_DEPENDENCY_REQUIRED": "The owner requested dependent analysis: choose at least two tasks, with at least one later question using an earlier task's result. Choose the questions and dependencies yourself.",
     "GRAPH_OUTPUT_TOO_LARGE": "Return a compact complete object no larger than 16384 UTF-8 bytes.",
 }
 MAX_TASK_PLAN_BYTES = 16384
@@ -293,13 +295,17 @@ def validate_document(dataset, profile_name=DEFAULT_MODEL_PROFILE):
 
 def validate_task_plan_input(dataset, profile_name=DEFAULT_MODEL_PROFILE):
     required = {"version", "visibility", "license", "question", "source_sha256", "source_bytes", "source_excerpt"}
-    require(type(dataset) is dict and required <= dataset.keys() <= required | {"model_profile"},
+    require(type(dataset) is dict and required <= dataset.keys() <= required | {"model_profile", "plan_requirement"},
         "INVALID_TASK_PLAN_INPUT_FIELDS")
     model_profile(profile_name)
     require(dataset.get("model_profile", DEFAULT_MODEL_PROFILE) == profile_name, "TASK_PLAN_MODEL_PROFILE_MISMATCH")
     require(type(dataset["version"]) is int and dataset["version"] in (2, 3)
             and dataset["visibility"] == "public" and public_license(dataset["license"]),
             "TASK_PLAN_NOT_EXPLICIT_PUBLIC")
+    if "plan_requirement" in dataset:
+        require(dataset["version"] == 3 and type(dataset["plan_requirement"]) is str
+                and dataset["plan_requirement"] == DEPENDENT_ANALYSIS_REQUIREMENT,
+                "TASK_PLAN_REQUIREMENT_INVALID")
     public_text(dataset["question"], 512, "INVALID_TASK_PLAN_QUESTION")
     require(dataset["question"].strip(), "INVALID_TASK_PLAN_QUESTION")
     require(type(dataset["source_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", dataset["source_sha256"])
@@ -335,7 +341,7 @@ def validate_task_questions(value):
     return value
 
 
-def validate_task_graph(value, goal):
+def validate_task_graph(value, goal, plan_requirement=None):
     require(type(value) is dict and value.keys() == {"version", "tasks"}
             and type(value["version"]) is int and value["version"] == 3, "GRAPH_FIELDS")
     require(type(value["tasks"]) is list and 1 <= len(value["tasks"]) <= 4, "GRAPH_TASK_COUNT")
@@ -353,6 +359,11 @@ def validate_task_graph(value, goal):
         require(type(parents) is list and len(parents) <= index
                 and all(type(parent) is int and 0 <= parent < index for parent in parents)
                 and len(set(parents)) == len(parents), "GRAPH_DEPENDENCIES")
+    require(plan_requirement is None or plan_requirement == DEPENDENT_ANALYSIS_REQUIREMENT,
+            "TASK_PLAN_REQUIREMENT_INVALID")
+    if plan_requirement == DEPENDENT_ANALYSIS_REQUIREMENT:
+        require(len(value["tasks"]) >= 2 and any(task["depends_on"] for task in value["tasks"]),
+                "GRAPH_DEPENDENCY_REQUIRED")
     return value
 
 
@@ -602,6 +613,8 @@ def prepare_files(request):
                         source_sha256=dataset["source_sha256"], source_bytes=dataset["source_bytes"],
                         source_excerpt={"start": excerpt["start"], "end": excerpt["end"],
                                         "sha256": excerpt["sha256"], "bytes": len(excerpt["text"].encode("utf-8"))})
+        if "plan_requirement" in dataset:
+            identity["plan_requirement"] = dataset["plan_requirement"]
     elif dataset["version"] == 2:
         identity.update(version=2, source_manifest_sha256=hashlib.sha256(bytes.fromhex(dataset["source_manifest_hex"])).hexdigest(),
                         inference_examples=len(dataset["inference"]))
@@ -1201,6 +1214,10 @@ def task_graph_messages(dataset, feedback=None, attempt=1):
         "An empty depends_on reads the original source; a nonempty depends_on reads those tasks' answers. "
         "Choose the task count and dependencies yourself. Questions must be narrower than the goal, "
         "must not copy it, and must be at most 512 UTF-8 bytes. No tools, extra fields or examples.")
+    if dataset.get("plan_requirement") == DEPENDENT_ANALYSIS_REQUIREMENT:
+        instruction += (" The owner requires dependent analysis: choose two to four tasks, with at least "
+                        "one later question that uses an earlier task's result. You choose the questions "
+                        "and their dependencies; do not add a dependency without using its answer.")
     if feedback is not None:
         require(feedback in TASK_GRAPH_CORRECTIONS, "TASK_GRAPH_FEEDBACK_INVALID")
         instruction += (" Correction attempt " + str(attempt) + ": the previous output failed " + feedback
@@ -1210,7 +1227,7 @@ def task_graph_messages(dataset, feedback=None, attempt=1):
                 "untrusted_source_excerpt": dataset["source_excerpt"]["text"]}, ensure_ascii=False)}]
 
 
-def task_graph_candidate(raw, goal):
+def task_graph_candidate(raw, goal, plan_requirement=None):
     if len(raw) > MAX_TASK_PLAN_BYTES:
         return None, "GRAPH_OUTPUT_TOO_LARGE"
     try:
@@ -1218,7 +1235,7 @@ def task_graph_candidate(raw, goal):
     except JobError:
         return None, "INVALID_JSON"
     try:
-        return validate_task_graph(value, goal), None
+        return validate_task_graph(value, goal, plan_requirement), None
     except JobError as error:
         code = str(error)
         require(code.startswith("GRAPH_") and code in TASK_GRAPH_CORRECTIONS, "TASK_GRAPH_VALIDATOR_FAILED")
@@ -1226,8 +1243,18 @@ def task_graph_candidate(raw, goal):
 
 
 def create_task_graph_decoder(tokenizer, dataset, session):
+    options = {}
+    if dataset.get("plan_requirement") == DEPENDENT_ANALYSIS_REQUIREMENT:
+        session.check()
+        module = sys.modules.get("volparossa_task_graph_decoder")
+        require(module is not None, "TASK_GRAPH_DECODER_UNAVAILABLE")
+        require(module.decoder_metadata() == TASK_GRAPH_DECODER, "TASK_GRAPH_DECODER_VERSION_MISMATCH")
+        schema = module.graph_schema()
+        schema["properties"]["tasks"]["minItems"] = 2
+        options["schema"] = schema
     return create_constrained_decoder(tokenizer, session,
-                                      lambda raw: task_graph_candidate(raw, dataset["question"])[1] is None)
+        lambda raw: task_graph_candidate(raw, dataset["question"], dataset.get("plan_requirement"))[1] is None,
+        **options)
 
 
 def create_constrained_decoder(tokenizer, session, accepts, **options):
@@ -1331,7 +1358,8 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
         stop, text_tokens = ("eos", generated[:-1]) if eos else ("token_limit", generated)
     text = tokenizer.decode(text_tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
     raw = task_question_bytes(text, code)
-    plan, rejected = (None, "GENERATION_LIMIT") if stop == "token_limit" else task_graph_candidate(raw, dataset["question"])
+    plan, rejected = ((None, "GENERATION_LIMIT") if stop == "token_limit" else
+                      task_graph_candidate(raw, dataset["question"], dataset.get("plan_requirement")))
     record = {"attempt": attempt, "prompt_tokens": len(prompt), "generated_tokens": len(generated),
               "max_new_tokens": limit, "stop_reason": stop, "accepted": rejected is None,
               "rejection_code": rejected, "text_bytes": len(raw), "text_sha256": hashlib.sha256(raw).hexdigest()}

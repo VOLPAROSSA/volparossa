@@ -82,7 +82,7 @@ fn graph_proposal(
     graph: &task_plan::ModelTaskGraph,
 ) -> Result<plan::Plan> {
     input.validate()?;
-    graph.validate(&input.question)?;
+    graph.validate_requirement(input)?;
     ensure!(input.version == 3, "compute_task_planner_graph_version");
     let mut consumed = vec![false; graph.tasks.len()];
     let mut nodes = Vec::with_capacity(graph.tasks.len() + 1);
@@ -159,6 +159,7 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     input.validate()?;
     let input = task_plan::Input {
         version: if args.plan_task_graph { 3 } else { 2 },
+        plan_requirement: args.plan_structure,
         model_profile: args.model_profile,
         visibility: input.visibility,
         license: input.license,

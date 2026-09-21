@@ -26,6 +26,14 @@ pub(super) use graph::ModelTask;
 pub(super) use graph::{ModelTaskGraph, validate_graph_report};
 pub(super) use recovery::PlanningDiagnostic;
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PlanRequirement {
+    /// At least one model-selected task consumes another task's result.
+    #[value(name = "dependent")]
+    DependentAnalysisV1,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
@@ -40,6 +48,19 @@ pub(super) struct Input {
     pub(super) source_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_excerpt: Option<SourceExcerpt>,
+    /// Explicit owner-selected workflow shape; absence preserves historical input bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_requirement"
+    )]
+    pub(super) plan_requirement: Option<PlanRequirement>,
+}
+
+fn present_requirement<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<PlanRequirement>, D::Error> {
+    PlanRequirement::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -92,6 +113,10 @@ impl Input {
         );
         question(&self.question)?;
         ensure!(
+            self.plan_requirement.is_none() || self.version == 3,
+            "compute_task_plan_requirement_version"
+        );
+        ensure!(
             (1..=super::MAX_DATASET_BYTES).contains(&self.source_bytes)
                 && super::is_hex(&self.source_sha256, 64)
                 && self.source_sha256.bytes().any(|byte| byte != b'0'),
@@ -135,6 +160,9 @@ impl Input {
                 "start":excerpt.start,"end":excerpt.end,"sha256":excerpt.sha256,
                 "bytes":excerpt.text.len()
             });
+        }
+        if let Some(requirement) = self.plan_requirement {
+            descriptor["plan_requirement"] = json!(requirement);
         }
         descriptor
     }
