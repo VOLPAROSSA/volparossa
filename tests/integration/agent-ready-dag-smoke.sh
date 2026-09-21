@@ -28,6 +28,9 @@ agent_ready_dag_run() {
         >"$WORK/agent-ready-dag-input.json" || fail READY_DAG_PUBLIC_INPUT_FAILED
     content_custody_phase_start fetch
     PHASE=agent-ready-dag-two-source-workers
+    # Empty log/inode plus original broker/worker identity binds the upcoming
+    # first startup ACK; no historical broker progress can authorize SIGSTOP.
+    python3 -B "$dag_script" fresh-brokers "$WORK" || fail READY_DAG_BROKERS_NOT_FRESH
     agent_ready_dag_cli compute peer document --task-plan "$jobs_source/ready-dag-task-plan.json" \
         --input "$jobs_source/ready-dag-input.txt" --public-content --license GPL-3.0-only \
         --runtime-root "$jobs_source/ready-dag-runtime" --model-root "$jobs_source/ready-dag-model" \

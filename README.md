@@ -221,7 +221,8 @@ An explicit **public task graph** lets peers answer different source questions, 
 retained answers into dependent instructions. Its real four-task fork/join and offline-resume
 VM proof passes. A dependency-ready scheduler is now being integrated: a follow-up task can
 use its completed parents while unrelated work continues, sharing the same peer-capacity
-accounting. Focused checks pass; its live overlap proof is still pending.
+accounting. Focused checks pass; the first live dependency-ready trial lost its paused test
+worker, so that proof remains pending while the fixture's startup coordination is corrected.
 
 The next opt-in mode asks the local model to propose the initial subquestions
 automatically, preserving the original question in the final task. That goal-only decomposition

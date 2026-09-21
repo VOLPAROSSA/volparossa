@@ -1150,7 +1150,13 @@ Completed, receipt-checked work unlocks the next tasks. Cancellation drains admi
 workflow locks are released, and original source expiry is not renewed on dependency changes.
 Forty-nine focused document tests, nine cohort tests and strict CLI Clippy pass. A separate
 five-node fixture is ready to observe real C execution while an exact disposable B worker
-is paused. That live dependency-ready proof is **pending**; the four-node proof below covers the
+is paused. Its [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35629187398)
+lost the original paused B before C was observed complete. B had been stopped before its first
+owner-control acknowledgement, which can expire the unchanged ten-second control deadline.
+The precise terminal cause was not retained. Later completion through a replacement B does
+not satisfy the intended boundary. The next fixture waits for correlated acknowledgement and
+baseline progress before pausing, without extending product deadlines or leases.
+That live dependency-ready proof is **pending**; the four-node proof below covers the
 earlier scheduler only.
 
 Individual token budgets, worker leases and per-invocation `--max-batches` remain bounded.

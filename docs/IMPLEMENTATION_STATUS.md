@@ -13,6 +13,16 @@ retain their existing contracts. Forty-nine focused document checks, nine cohort
 strict CLI Clippy pass. A disposable five-node A→C, B→D, C+D→E fixture is ready to observe
 C completing while an actual B worker is paused under its original lease. **That live proof is
 pending**; this is neither verified fully dynamic scheduling nor completion of B03.
+The [first run on `c0e692a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35629187398)
+fails at `READY_DAG_C_DID_NOT_FINISH_BEFORE_B`: the exact paused B worker disappeared.
+The retained startup observation precedes any owner-control acknowledgement. Pausing there
+can trigger the existing ten-second acknowledgement deadline; the original terminal reason
+was not exported, so that mechanism is a source-backed diagnosis, not a captured verdict.
+All five tasks eventually completed in six rounds with a replacement B, but that does not
+prove C finished while the original B remained occupied. The 119 original files verify initial
+worker overlap and cleanup/unchanged host state, not the required dependency-ready boundary.
+The corrected fixture waits for correlated startup acknowledgement and baseline progress before
+pausing B; product deadlines and the original lease remain unchanged. A new live proof is required.
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated

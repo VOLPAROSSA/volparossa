@@ -44,6 +44,58 @@ def record(work, name):
     return work / f"{PREFIX}-{name}.json"
 
 
+def broker_log(work,node):
+    require(node in JOBS["NODES"],"unexpected ready-DAG broker log")
+    path=work/f"agent-jobs-{node}-broker.err"
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(descriptor)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and not info.st_mode&0o022
+            and info.st_uid in (0,(work/f"state-{node}/compute").stat().st_uid)
+            and info.st_size<=65536,"unsafe or oversized broker startup log")
+        raw=os.read(descriptor,65537)
+        require(len(raw)<=65536,"broker startup log exceeded bound")
+    finally:os.close(descriptor)
+    return dict(inode=[info.st_dev,info.st_ino],uid=info.st_uid,mode=stat.S_IMODE(info.st_mode),
+        bytes=len(raw),sha256=sha(raw),hex=raw.hex())
+
+
+def fresh_brokers(work):
+    JOBS["guest_work"](work)
+    require(not root_path(work).exists(),"ready-DAG owner was already enrolled")
+    layout=read(work/"agent-jobs-layout.json");entries={}
+    for node in layout["provider_nodes"]:
+        value=broker_log(work,node)
+        require(value["bytes"]==0,"broker already contains historical worker progress")
+        entries[node]=dict(broker=JOBS["identity"](JOBS["broker_pid"](node)),log=value)
+    write(record(work,"fresh-brokers"),dict(entries=entries,monotonic_ns=time.monotonic_ns()))
+
+
+def startup_ack(raw):
+    """Only the first worker of a recorded-empty, identity-pinned broker qualifies."""
+    require(len(raw)<=65536,"oversized startup prefix")
+    if not raw or not raw.endswith(b"\n"):return None
+    acknowledged=0;last_action=None;preparing=0;baseline=0;phase_echo=None
+    for line in raw.decode("ascii").splitlines():
+        ack=re.fullmatch(r"compute owner_ack phase=(paused|resumed) sequence=([0-9]+) step=([0-9]+) elapsed_ms=([0-9]+)",line)
+        if ack:
+            require(phase_echo is None and int(ack[2])==acknowledged+1 and int(ack[3])==0
+                and int(ack[4])<600000,"uncorrelated startup owner ACK")
+            acknowledged+=1;last_action=ack[1];phase_echo=last_action
+        elif line in ("compute phase=paused","compute phase=resumed"):
+            require(phase_echo==line.split("=",1)[1],"unpaired startup owner ACK")
+            phase_echo=None
+        elif line=="compute phase=preparing":
+            require(phase_echo is None and acknowledged>0 and preparing==baseline==0,"historical worker startup")
+            preparing=1
+        elif line=="compute phase=baseline":
+            require(phase_echo is None and preparing==1 and baseline==0,"historical worker baseline")
+            baseline=1
+        else:raise ValueError("unexpected prior or completed broker work")
+    if baseline!=1 or phase_echo is not None or last_action!="resumed":return None
+    return dict(acknowledged_sequence=acknowledged,last_action=last_action,baseline_observed=True)
+
+
 def prepare(work):
     require(JOBS["TRAIN"]["socket"].gethostname() == "volparossa-alpha"
         and JOBS["subprocess"].check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
@@ -155,12 +207,19 @@ def pause(work, launcher):
     JOBS["guest_work"](work)
     owner = JOBS["identity"](launcher); layout = read(work / "agent-jobs-layout.json")
     brokers = {n:JOBS["identity"](JOBS["broker_pid"](n)) for n in layout["provider_nodes"]}
+    fresh=read(record(work,"fresh-brokers"))
+    require({n:v["broker"] for n,v in fresh["entries"].items()}==brokers,"fresh broker identity changed")
     deadline = time.monotonic()+300
     while JOBS["alive"](owner) and time.monotonic() < deadline:
         active = active_workers(work, brokers, set())
         if len(active) != 2 or {x["graph_node"] for x in active} != {0,1} or not all(JOBS["alive"](x["worker"]["worker"]) for x in active):
             time.sleep(0.025); continue
         active.sort(key=lambda x:x["graph_node"])
+        node=active[1]["worker"]["node"];log=broker_log(work,node);empty=fresh["entries"][node]["log"]
+        require(all(log[k]==empty[k] for k in ("inode","uid","mode")),"original broker log replaced")
+        acknowledgement=startup_ack(bytes.fromhex(log["hex"]))
+        if acknowledgement is None:
+            time.sleep(0.025);continue
         for index in (0,1):
             plan = read(root_path(work)/f"node-{index:04d}/document-plan.json")
             require(len(plan["parts"]) == 1 and active[index]["level"] == 0, "initial source task did not tokenize to one actual row")
@@ -168,10 +227,12 @@ def pause(work, launcher):
             first_monotonic_ns=min(x["first_monotonic_ns"] for x in active), last_monotonic_ns=time.monotonic_ns())
         JOBS["check_overlap"](overlap); write(work/"agent-jobs-observation.json",overlap)
         plan = dict(owner=owner, brokers=brokers, initial=active, slow=active[1], fast=active[0],
-            signal="SIGSTOP", pidfd_bound=True, fixture_only=True)
+            signal="SIGSTOP", pidfd_bound=True, fixture_only=True,
+            startup=dict(node=node,log=log,acknowledgement=acknowledgement,
+                handle=active[1]["handle"],worker=active[1]["worker"]["worker"]))
         write(record(work,"pause-plan"),plan)
         member = active[1]["worker"]["worker"]
-        print(f"Disposable guest only: pidfd SIGSTOP observed B worker {member['pid']}; retain its original lease and owner.",flush=True)
+        print(f"Disposable guest only: pidfd SIGSTOP observed B worker {member['pid']} after its first acknowledged startup and baseline; retain its original lease and owner.",flush=True)
         READY["send_exact"](member,signal.SIGSTOP)
         for _ in range(100):
             if READY["stopped"](member): break
@@ -323,6 +384,23 @@ def check_progress(value,raw,executed,answers):
         "unready D/E or B completion preceded the dependency boundary")
 
 
+def check_startup(value):
+    fresh=value["fresh-brokers"];plan=value["pause-plan"];slow=plan["slow"];startup=plan["startup"]
+    require(set(fresh["entries"])==set(value["layout"]["provider_nodes"])
+        and {n:v["broker"] for n,v in fresh["entries"].items()}==plan["brokers"]
+        and startup["node"]==slow["worker"]["node"] and startup["handle"]==slow["handle"]
+        and startup["worker"]==slow["worker"]["worker"]
+        and fresh["monotonic_ns"]<min(x["first_monotonic_ns"] for x in plan["initial"]),
+        "startup evidence is not from the original B execution")
+    for entry in fresh["entries"].values():
+        require(entry["log"]["bytes"]==0 and entry["log"]["hex"]=="" and entry["log"]["sha256"]==sha(b""),
+            "historical broker ACK accepted")
+    log=startup["log"];empty=fresh["entries"][startup["node"]]["log"];raw=bytes.fromhex(log["hex"])
+    require(all(log[k]==empty[k] for k in ("inode","uid","mode")) and log["bytes"]==len(raw)
+        and log["sha256"]==sha(raw) and startup["acknowledgement"]==startup_ack(raw)
+        and startup["acknowledgement"] is not None,"first B startup ACK/baseline was not retained")
+
+
 def check_summary(value,authority,answers,rounds):
     require(value["version"]==1 and value["operation"]=="compute_public_task_graph" and value["complete"] is True
         and value["plan"]==PLAN and value["plan_sha256"]==sha(encoded(PLAN)) and value["nodes"]==[
@@ -442,7 +520,7 @@ def check(value,revision):
             and worker["worker_namespaces"]["net"]!=worker["node_namespace"],"actual DAG worker isolation missing")
         observed.add(identifier);processes.append(worker["worker"])
     require(observed==set(executed),"not every DAG worker was observed")
-    check_progress(value,raw,executed,answers)
+    check_startup(value);check_progress(value,raw,executed,answers)
     require(value["inputs-removed"]["original_input_absent"] is True and value["inputs-removed"]["original_plan_absent"] is True
         and value["inputs-removed"]["retained_graph_plan"] is True
         and all(value[phase][k] is True for phase in ("stopped","resumed") for k in
@@ -456,7 +534,7 @@ def check(value,revision):
 
 def evidence(work,revision):
     JOBS["guest_work"](work)
-    names=("input","pause-plan","paused","ready","ready-files","running-status","continued",
+    names=("input","fresh-brokers","pause-plan","paused","ready","ready-files","running-status","continued",
         "result","result-files","observation","resume","inputs-removed","stopped","resumed")
     value={name:read(record(work,name),64*1048576) for name in names}
     value.update({name:read(work/f"agent-jobs-{name}.json") for name in ("provision","publish","layout")})
@@ -488,6 +566,18 @@ def report(value,revision):
 
 def self_test():
     # Inert summary/identity controls only. No model, namespace, network or signal.
+    startup=(b"compute owner_ack phase=resumed sequence=1 step=0 elapsed_ms=0\n"
+        b"compute phase=resumed\ncompute phase=preparing\ncompute phase=baseline\n")
+    assert startup_ack(startup)==dict(acknowledged_sequence=1,last_action="resumed",baseline_observed=True)
+    assert startup_ack(b"") is None and startup_ack(startup[:-1]) is None
+    assert startup_ack(startup.rsplit(b"compute phase=baseline",1)[0]) is None
+    for invalid in (startup.replace(b"sequence=1",b"sequence=2"),startup.replace(b"step=0",b"step=1"),
+        startup+b"compute phase=complete\n",startup+b"compute phase=baseline\n",
+        startup.replace(b"compute phase=resumed\n",b"compute phase=paused\n"),
+        b"compute phase=baseline\n"+startup):
+        try:startup_ack(invalid)
+        except ValueError:pass
+        else:raise AssertionError("historical or uncorrelated startup ACK accepted")
     authority=dict(source_manifest_id="a"*64,expires_at_unix_seconds=7200,provider_keys=["b"*64,"c"*64])
     answers={n["id"]:dict(job_id=str(i)*32) for i,n in enumerate(PLAN["nodes"],1)}
     value=dict(version=1,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
@@ -535,13 +625,14 @@ def self_test():
         try:check_progress(invalid,{},executed,answers)
         except ValueError:pass
         else:raise AssertionError("invalid paused-worker dependency boundary accepted")
-    print("ready-DAG schema/identity and ordering controls PASS (15 negatives); no model, network or signal executed")
+    print("ready-DAG startup ACK, schema/identity and ordering controls PASS (21 negatives); no model, network or signal executed")
 
 
 def main(args):
     command=args[0]
     if command=="self-test":self_test()
     elif command=="prepare":prepare(Path(args[1]))
+    elif command=="fresh-brokers":fresh_brokers(Path(args[1]))
     elif command=="pause":pause(Path(args[1]),int(args[2]))
     elif command=="observe-ready":observe_ready(Path(args[1]))
     elif command=="continue-worker":continue_worker(Path(args[1]))
