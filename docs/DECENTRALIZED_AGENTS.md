@@ -1070,6 +1070,13 @@ also failed, this time after eight completed fragment jobs: another submitted jo
 unconfirmed without a terminal receipt. It did not reach synthesis; this is a separate unresolved
 submission/confirmation failure, not evidence that the complete native-source workflow works.
 
+Unconfirmed batch results now retain an optional fixed `diagnostic`: the RPC operation phase,
+`exchange_unconfirmed`, `broker_rejected` plus its authenticated `ErrorCode`, or
+`receipt_validation`. This never includes upstream exception text or changes original leases.
+An exchange failure alone does not identify a network cause or prove that a job was rejected.
+The disposable collection fixture also retains sampled allowlisted client boundary timestamps;
+those are diagnostic lower bounds, not authenticated per-job evidence or a product log archive.
+
 ### Cooperating public tasks
 
 Use `compute peer document --task-plan /absolute/public/tasks.json` in place of

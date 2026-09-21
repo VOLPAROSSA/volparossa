@@ -55,6 +55,14 @@ after eight completed fragment jobs: a new retained job handle remained unconfir
 separate submission/confirmation failure under investigation; there is no complete workflow
 proof, automatic web research, private computation or completed B03 checkpoint.
 
+The new diagnostic step preserves fixed RPC operation/category and an authenticated broker
+error code when available, while leaving uncertain handles, slot ownership and original
+deadlines unchanged. The disposable collection observer now samples only allowlisted RPC
+boundary codes before they leave the in-memory log ring. These timestamp observations are
+lower bounds, not task correlation or proof of a specific transport cause. Six focused queue
+tests and the pure diagnostic parser checks pass. This adds diagnosis, not a claimed fix for
+the unresolved submission; its new live run is pending.
+
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly
 selected common license. It builds an owner-published compilation whose signed bytes bind

@@ -325,11 +325,12 @@ pub(super) async fn report_with_activity(
                 complete = false;
                 parts.push(serde_json::json!({"handle":handle,"state":status.state,"cancellation_requested":status.cancellation_requested,"error":status.error}));
             }
-            Err(_) => {
+            Err(error) => {
                 complete = false;
                 // No upstream exception/prompt is persisted. The retained handle can be polled
                 // or cancelled explicitly; failed RPC does not prove that execution stopped.
-                parts.push(serde_json::json!({"handle":handle,"state":"unconfirmed","error":"COMPUTE_RPC_UNCONFIRMED"}));
+                parts.push(serde_json::json!({"handle":handle,"state":"unconfirmed","error":"COMPUTE_RPC_UNCONFIRMED",
+                    "diagnostic":rpc_diagnostic(&error)}));
             }
         }
     }
@@ -370,7 +371,7 @@ pub(super) async fn execute(
     let first = exchange(socket, &work.provider, submission).await;
     // A broken Submit reply is ambiguous; poll the same retained job, never submit a new ID.
     let status = match first {
-        Ok(outcome) => Some(job(outcome, &work.handle)?),
+        Ok(outcome) => Some(job_in_phase(outcome, &work.handle, RpcPhase::Submit)?),
         Err(_) => None,
     };
     follow_status(socket, &work.handle, &work.provider, status, cancelled).await
@@ -388,9 +389,10 @@ async fn observe_existing(
     } else {
         rpc::Operation::Poll(handle.binding.clone())
     };
+    let phase = RpcPhase::of(&operation);
     let first = exchange(socket, &provider, operation).await;
     let status = match first {
-        Ok(outcome) => Some(job(outcome, handle)?),
+        Ok(outcome) => Some(job_in_phase(outcome, handle, phase)?),
         Err(_) => None,
     };
     follow_status(socket, handle, &provider, status, cancelled).await
@@ -417,7 +419,7 @@ async fn follow_status(
                 rpc::Operation::Cancel(handle.binding.clone()),
             )
             .await?;
-            return job(outcome, handle); // Running remains explicitly nonterminal.
+            return job_in_phase(outcome, handle, RpcPhase::Cancel); // Running remains explicitly nonterminal.
         }
         tokio::select! {
             () = sleep(Duration::from_secs(2)) => {},
@@ -428,8 +430,9 @@ async fn follow_status(
         } else {
             rpc::Operation::Poll(handle.binding.clone())
         };
+        let phase = RpcPhase::of(&operation);
         match exchange(socket, provider, operation).await {
-            Ok(outcome) => status = Some(job(outcome, handle)?),
+            Ok(outcome) => status = Some(job_in_phase(outcome, handle, phase)?),
             Err(_) if now()? < handle.binding.expires_unix_seconds => {}
             Err(error) => return Err(error),
         }
