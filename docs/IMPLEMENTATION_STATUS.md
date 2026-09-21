@@ -4,6 +4,23 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Latest real-model results remain failures, not completed agent cooperation. The
+[model-selected graph run on `7de9448a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656629758)
+uses all 384 generation tokens without accepting a graph; no plan or peer tasks are enrolled.
+The rejected text was not exported, so its contents are not inferred from the failure code.
+The [two-subquestion run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656789632)
+records `compute_memory_pressure` for one provider; the decisive memory sample is absent, so
+low headroom and an unavailable measurement cannot be distinguished. The other provider executes
+but reaches its 256-token limit without EOS. Neither run proves a completed join or offline
+replay. Their original artifacts remain unchanged; private/network cleanup and identical host
+state pass. These failures are separate from the subsequent import-checkpoint improvement.
+
+The three fixtures that co-locate two 360M providers now select a 6-GiB disposable VM instead
+of 4 GiB, with a read-only host headroom preflight. Other fixtures remain at 4 GiB; four vCPUs,
+the per-worker 3-GiB RSS limit, 512-MiB spare-memory guard, threads and deadlines are unchanged.
+Static contract checks pass. This is a fixture-capacity candidate, not a verified cure for the
+observed cancellation, and cannot fix the independent generation-limit failures.
+
 New local-private execution candidate: `compute private-task` reads a strictly separate
 private question/context file, snapshots it into an owned ephemeral job tree and runs the
 existing isolated CPU backend with owner-priority controls. It has no publication, training,
@@ -14,7 +31,13 @@ original owner file remains untouched. Unconfirmed cleanup emits no answer and r
 the owned job tree. Partial/non-EOS answers cannot become complete outputs. Five focused Rust
 checks and 68 pure worker checks pass; live model/guest proof remains pending. This supplies a
 local privacy fallback, not confidential distributed execution, larger private-document task
-graphs, private training or B04 completion. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
+graphs, private training or B04 completion. A standalone `agent-private-task` KVM scenario now
+checks a real pinned 360M answer to an authorized synthetic private note, observed readonly
+snapshot/model mounts, owner acknowledgements and cleanup at the first stdout read. It also
+requires the public executor to reject that private input before acquiring the runtime. Pure
+fixture and static workflow checks pass; no live success is claimed. Only selected proof and
+the explicitly synthetic test answer may be exported, never a user's private input or internal
+worker report. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready

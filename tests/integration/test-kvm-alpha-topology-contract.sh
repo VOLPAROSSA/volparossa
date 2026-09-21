@@ -84,6 +84,54 @@ done
 [ -f "$GENERATOR" ] && [ -x "$GENERATOR" ] && [ ! -L "$GENERATOR" ]
 sh -n "$GENERATOR"
 
+# The private-input proof is standalone: no overlay roles, native MPQUIC or
+# public broker is started merely to exercise one owner-local model worker.
+"$HOST" --preview --scenario agent-private-task | grep -Fi 'Private-task:' >/dev/null
+"$HOST" --preview --scenario agent-private-task | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
+if "$HOST" --preview --scenario agent-private-task --scenario agent-model-planning \
+    | grep -Fi 'Private-task:' >/dev/null; then exit 1; fi
+if "$HOST" --preview --scenario agent-model-planning --scenario agent-private-task \
+    | grep -Ei 'Model-planning:' >/dev/null; then exit 1; fi
+sh -n "$HERE/agent-private-task-smoke.sh"
+sh "$HERE/agent-private-task-smoke.sh" --preview | grep -F 'PREVIEW ONLY:' >/dev/null
+grep -F 'exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"' "$HOST" >/dev/null
+grep -F '[ "$scenario" != agent-private-task ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-private-task'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-private-task-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-private-task-smoke.py self-test' "$WORKFLOW" >/dev/null
+python3 -B - "$HOST" <<'PYTHON_PRIVATE_EXPORT'
+from pathlib import Path
+import json
+import sys
+import tempfile
+
+text = Path(sys.argv[1]).read_text()
+driver = text.split("<<'GUEST_DRIVER_SCRIPT'\n", 1)[1].split('\nGUEST_DRIVER_SCRIPT', 1)[0]
+private = driver.index('if [ "$scenario" = agent-private-task ]; then')
+assert private < driver.index('printf \'%s  volparossa-mpquic\\n\'')
+code = text.split("<<'GUEST_DIAGNOSTICS_PYTHON'\n", 1)[1].split('\nGUEST_DIAGNOSTICS_PYTHON', 1)[0]
+module = dict(__name__='private_fixture_contract')
+exec(compile(code, 'private_fixture_diagnostics', 'exec'), module)
+with tempfile.TemporaryDirectory(prefix='volparossa-private-export-') as directory:
+    base = Path(directory)
+    home = base / 'home'; published = home / 'alpha-output'
+    published.mkdir(parents=True)
+    safe = ('agent-private-task-smoke.json', 'agent-private-task-snapshot.json',
+            'agent-private-task-answer.json', 'agent-private-task-owner_controls.json',
+            'agent-private-task-stdout_boundary.json', 'agent-private-task-provision.log')
+    unsafe = ('agent-private-task-input.json', 'agent-private-task-report.json',
+              'agent-private-task-arbitrary.json')
+    for name in safe + unsafe:
+        (published / name).write_text('{}')
+    archive = module['collect'](home, base / 'opt', 'a' * 40, 'agent-private-task', 1,
+                                cgroups=base / 'cgroups', proc=base / 'proc')
+    captured = json.loads((archive.parent / 'vm-incomplete.json').read_text())
+    names = {entry['file'] for entry in captured['diagnostics']['files']}
+    assert {f'published/{name}' for name in safe} <= names
+    assert not {f'published/{name}' for name in unsafe} & names
+    assert captured['success'] is False and captured['cleanup']['verified'] is False
+PYTHON_PRIVATE_EXPORT
+
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
 grep -F 'agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-public-collection-smoke.sh"' "$GUEST" >/dev/null
@@ -133,6 +181,14 @@ grep -F 'agent_model_planning_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_model_planning_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent-model-task-graph) scenario=agent-jobs; agent_model_planning=yes; agent_model_task_graph=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-model-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
+for model_scenario in agent-ready-dag agent-model-planning agent-model-task-graph; do
+    "$HOST" --preview --scenario "$model_scenario" | grep -F 'Guest resources: 4 vCPUs, 6144 MiB RAM;' >/dev/null
+done
+"$HOST" --preview --scenario alpha | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
+"$HOST" --preview --scenario agent-model-task-graph --scenario agent-task-graph \
+    | grep -F 'Guest resources: 4 vCPUs, 4096 MiB RAM;' >/dev/null
+grep -F -- '-machine q35,accel=kvm -cpu host -smp 4 -m "$guest_memory_mib"' "$HOST" >/dev/null
+grep -F 'runner_available_kib=$(awk' "$HOST" >/dev/null
 grep -F 'root.glob("agent-model-task-graph-*")' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-model-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-model-planning-smoke.py --task-graph report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null

@@ -18,13 +18,22 @@ output_directory=
 expected_commit=
 scenario=alpha
 
+guest_memory_for_scenario() {
+    # These fixtures co-locate two 360M providers in one guest. Production
+    # per-worker limits and the owner's spare-memory reserve stay unchanged.
+    case $scenario in
+        agent-ready-dag|agent-model-planning|agent-model-task-graph) printf '6144\n' ;;
+        *) printf '4096\n' ;;
+    esac
+}
+
 usage() {
     printf '%s\n' \
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving]' \
-        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training, agent-owner-priority and agent-owner-cancel.'
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving]' \
+        '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training, agent-owner-priority, agent-owner-cancel and agent-private-task.'
 }
 
 print_plan() {
@@ -39,7 +48,13 @@ print_plan() {
         '  retrieve bounded non-secret logs and its machine-readable result;' \
         '  power off and discard the overlay, keys, seed and source archive.' \
         'No TAP, bridge, host route, firewall, DNS, sysctl or VPN state is changed.'
-    if [ "$scenario" = agent-owner-cancel ]; then
+    printf 'Guest resources: 4 vCPUs, %s MiB RAM; model-worker limits are unchanged.\n' "$(guest_memory_for_scenario)"
+    if [ "$scenario" = agent-private-task ]; then
+        printf '%s\n' \
+            'Private-task: actual owner-local inference over explicitly private fixture input;' \
+            '  pinned 360M CPU worker with no peer/cache publication, unchanged device limits;' \
+            '  retain selected proof and the authorized synthetic test answer; remove guest job/model roots.'
+    elif [ "$scenario" = agent-owner-cancel ]; then
         printf '%s\n' \
             'Owner-cancel: explicitly provision an isolated guest model, begin actual training;' \
             '  owner sends SIGINT only to its exact live CLI and observes worker/process teardown;' \
@@ -303,7 +318,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -364,7 +379,7 @@ case $image_path:$output_directory in
     *) exit 64 ;;
 esac
 if [ "$scenario" = alpha ] && [ -z "$package_path" ]; then usage >&2; exit 64; fi
-if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
+if [ "$scenario" != wifi-mesh ] && [ "$scenario" != agent-training ] && [ "$scenario" != agent-owner-priority ] && [ "$scenario" != agent-owner-cancel ] && [ "$scenario" != agent-private-task ] && [ -z "$mpquic_path" ]; then usage >&2; exit 64; fi
 case $mpquic_path in ''|/*) ;; *) exit 64 ;; esac
 case $package_path in ''|/*) ;; *) exit 64 ;; esac
 case $expected_commit in ''|*[!0-9a-f]*) exit 64 ;; esac
@@ -717,6 +732,14 @@ def collect(home, opt, revision, scenario, guest_status,
         if scenario == "agent-successor-serving":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-successor-serving-*"))[:128]
                               if re.fullmatch(r"agent-successor-serving-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-private-task":
+            # Exact synthetic-fixture proof only, never arbitrary private input,
+            # model reports or a prefix glob over the owner's work area.
+            candidates.extend((root / name, f"{label}/{name}") for name in (
+                "agent-private-task-smoke.json", "agent-private-task-provision.json",
+                "agent-private-task-isolation.json", "agent-private-task-snapshot.json",
+                "agent-private-task-answer.json", "agent-private-task-owner_controls.json",
+                "agent-private-task-stdout_boundary.json", "agent-private-task-provision.log"))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
                           if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
@@ -776,7 +799,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-private-task", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-ready-dag", "agent-model-planning", "agent-model-task-graph", "agent-successor-serving"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -803,11 +826,19 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
 printf '%s  source.tar.gz\n' "$source_sha256" | sha256sum --check --strict -
+if [ "$scenario" = agent-private-task ]; then
+    guest_phase agent-private-task
+    test "$(hostname)" = volparossa-alpha
+    test "$(systemd-detect-virt)" = kvm
+    tar -xzf source.tar.gz
+    cd source
+    exec sh tests/integration/agent-private-task-smoke.sh --execute --yes --expected-commit "$expected_commit"
+fi
 if [ "$scenario" = agent-training ] || [ "$scenario" = agent-owner-priority ] || [ "$scenario" = agent-owner-cancel ]; then
     guest_phase agent-training
     test "$(hostname)" = volparossa-alpha
@@ -938,7 +969,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-private-task|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|agent-model-task-graph|agent-successor-serving) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
@@ -967,10 +998,21 @@ chmod 0700 "$GUEST_DRIVER"
 
 set -- -no-reboot
 case $scenario in wifi-mesh|wifi-link) set -- ;; esac
+guest_memory_mib=$(guest_memory_for_scenario)
+if [ "$guest_memory_mib" -gt 4096 ]; then
+    # A read-only preflight snapshot, not a host memory reservation. Refuse
+    # before spawning QEMU if the larger model fixture cannot fit plus 1 GiB.
+    runner_available_kib=$(awk '$1 == "MemAvailable:" && $3 == "kB" {print $2; found++} END {if (found != 1) exit 1}' /proc/meminfo)
+    case $runner_available_kib in ''|*[!0-9]*) exit 69 ;; esac
+    if [ "$runner_available_kib" -lt "$(((guest_memory_mib + 1024) * 1024))" ]; then
+        printf '%s\n' 'insufficient runner memory for two 360M fixture providers; worker protection remains enabled' >&2
+        exit 69
+    fi
+fi
 qemu-system-x86_64 \
     -name volparossa-alpha-topology \
     -no-user-config -nodefaults \
-    -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
+    -machine q35,accel=kvm -cpu host -smp 4 -m "$guest_memory_mib" \
     -device VGA,id=video0,bus=pcie.0,addr=0x1 \
     -drive "if=virtio,format=qcow2,file=$OVERLAY" \
     -drive "if=virtio,format=raw,readonly=on,file=$SEED" \
@@ -1081,6 +1123,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-model-planning ] || driver_time_bound=3600s
 [ "$scenario" != agent-model-task-graph ] || driver_time_bound=3600s
 [ "$scenario" != agent-successor-serving ] || driver_time_bound=3600s
+[ "$scenario" != agent-private-task ] || driver_time_bound=3600s
 ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?
