@@ -9,6 +9,9 @@ use super::{
     validate_enrollment, validate_expected_task,
 };
 
+mod dynamic;
+pub(crate) use dynamic::ReadyWork;
+
 struct PackageState {
     owner: usize,
     index: usize,
@@ -152,6 +155,17 @@ pub(super) async fn advance(
     socket: &Path,
     cancelled: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<Vec<serde_json::Value>> {
+    advance_reserved(owners, max_batches, &[], socket, cancelled).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn advance_reserved(
+    owners: &[(&Options, &Enrollment)],
+    max_batches: u16,
+    external: &[batch::ReadyPending],
+    socket: &Path,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<serde_json::Value>> {
     ensure!(
         !owners.is_empty() && owners.len() <= MAX_PACKAGES && (1..=32).contains(&max_batches),
         "compute_cohort_bound"
@@ -182,7 +196,8 @@ pub(super) async fn advance(
     let mut failure = None;
     if !options.is_empty() {
         let excluded = selected.iter().copied().collect();
-        let reservations = reservations(&states, &excluded, now()?);
+        let mut reservations = reservations(&states, &excluded, now()?);
+        reservations.extend_from_slice(external);
         let results =
             batch::report_ready_many_with_activity(&options, &reservations, socket, cancelled)
                 .await?;
@@ -215,9 +230,11 @@ pub(super) async fn advance(
         {
             continue;
         }
-        let held = reservations(&states, &BTreeSet::from([index]), now()?)
-            .into_iter()
-            .map(|pending| pending.handle.provider_key)
+        let at = now()?;
+        let held = reservations(&states, &BTreeSet::from([index]), at)
+            .iter()
+            .chain(external.iter().filter(|pending| held(pending, at)))
+            .map(|pending| pending.handle.provider_key.clone())
             .collect();
         let (args, enrollment) = owners[state.owner];
         let providers = enrollment

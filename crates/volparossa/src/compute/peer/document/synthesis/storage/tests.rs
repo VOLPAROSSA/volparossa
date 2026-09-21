@@ -2,6 +2,25 @@ use super::*;
 use crate::compute::document_plan::Part;
 use std::os::unix::fs::PermissionsExt as _;
 
+#[test]
+fn retained_file_presence_distinguishes_missing_files_and_rejects_other_types() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let file = root.path().join("retained.json");
+    assert!(!file_present(&file).unwrap());
+    task::write_bytes(&file, b"{}", false).unwrap();
+    assert!(file_present(&file).unwrap());
+    assert!(file_present(root.path()).is_err());
+    assert!(document_storage::present(&file).is_err());
+    assert!(document_storage::present(root.path()).unwrap());
+    let link = root.path().join("link.json");
+    std::os::unix::fs::symlink(&file, &link).unwrap();
+    assert!(file_present(&link).is_err());
+    let dangling = root.path().join("dangling.json");
+    std::os::unix::fs::symlink(root.path().join("absent.json"), &dangling).unwrap();
+    assert!(file_present(&dangling).is_err());
+}
+
 fn parent(text: &str, index: u16) -> Answer {
     Answer {
         text: text.into(),
@@ -178,9 +197,23 @@ fn historical_reduction(
     signer: &ed25519_dalek::SigningKey,
     parents: &[Answer],
 ) -> (std::path::PathBuf, DerivedDataset) {
+    historical_reduction_at(root, enrollment, original, signer, parents, 0)
+}
+
+fn historical_reduction_at(
+    root: &Path,
+    enrollment: &document_storage::Enrollment,
+    original: &Input,
+    signer: &ed25519_dalek::SigningKey,
+    parents: &[Answer],
+    offset: usize,
+) -> (std::path::PathBuf, DerivedDataset) {
     let directory_root = root.join("synthesis");
     directory(&directory_root).unwrap();
-    let group_root = directory_root.join("level-01-group-0000");
+    let group_root = directory_root.join(format!(
+        "level-01-group-{:04}",
+        offset / super::super::PARENTS_PER_GROUP
+    ));
     directory(&group_root).unwrap();
     let input = Input {
         version: 1,
@@ -196,7 +229,7 @@ fn historical_reduction(
     let group = Group {
         version: 1,
         level: 1,
-        parent_offset: 0,
+        parent_offset: offset,
         parents_sha256: sha(&serde_json::to_vec(parents).unwrap()),
         source_manifest_id: enrollment.source_manifest_id.clone(),
         created_at_unix_seconds: enrollment.selected_at_unix_seconds + 100,
@@ -211,7 +244,7 @@ fn historical_reduction(
         ),
         level: 1,
         claim_scope: DERIVED_CLAIM_SCOPE.into(),
-        inference: vec![row(&input, &plan.parts[0], parents, 0).unwrap()],
+        inference: vec![row(&input, &plan.parts[0], parents, offset).unwrap()],
     };
     dataset.validate_shape().unwrap();
     let prepared = Prepared {
@@ -263,6 +296,217 @@ fn historical_reduction(
     )
     .unwrap();
     (group_root, dataset)
+}
+
+#[tokio::test]
+async fn zero_budget_restore_does_not_finish_partially_prepared_groups() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (mut enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    let parents = vec![parent("First answer.", 0)];
+    let (root, _) = historical_reduction(temp.path(), &enrollment, &original, &signer, &parents);
+    let mut args = replay_options(temp.path());
+    args.max_batches = 0;
+    assert!(
+        restore(&args, &root, &enrollment, &original, &parents, 0, 1)
+            .unwrap()
+            .is_none()
+    );
+    let mut result = json!({"complete":false,"rounds_this_invocation":0});
+    let ready = super::super::prepare_frontier(
+        &args,
+        &cancelled,
+        &mut result,
+        &enrollment,
+        &original,
+        parents,
+        true,
+        &|_, _| panic!("No peer workflow exists in this parser fixture"),
+    )
+    .await
+    .unwrap();
+    assert!(ready.is_empty());
+    assert_eq!(result["complete"], false);
+    assert_eq!(result["synthesis"]["reason"], "invocation_round_budget");
+    assert!(!root.join("parents.json").exists());
+    assert!(!root.join("planner-input.json").exists());
+    assert!(!root.join("tokenizer").exists());
+    assert!(!root.join("package-0000/work").exists());
+}
+
+#[tokio::test]
+async fn external_frontier_keeps_one_parent_instruction_and_uses_owned_snapshot() {
+    use std::cell::Cell;
+    use std::os::unix::fs::MetadataExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (mut enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    let parents = vec![parent("First answer.", 0)];
+    let (root, _) = historical_reduction(temp.path(), &enrollment, &original, &signer, &parents);
+    let mut args = replay_options(temp.path());
+    prepare(
+        &args,
+        &root,
+        &enrollment,
+        &original,
+        &parents,
+        0,
+        1,
+        &cancelled,
+    )
+    .await
+    .unwrap();
+    args.max_batches = 0;
+    let file = root.join("package-0000/dataset.manifest");
+    let original_bytes = fs::read(&file).unwrap();
+    let inode = fs::metadata(&file).unwrap().ino();
+    let mut result = json!({"complete":false,"rounds_this_invocation":0});
+    let ready = super::super::prepare_frontier(
+        &args,
+        &cancelled,
+        &mut result,
+        &enrollment,
+        &original,
+        parents.clone(),
+        true,
+        &|_, _| panic!("Preparation must not dispatch or create a workflow"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(result["complete"], false);
+    assert!(result.get("synthesized_answer").is_none());
+    assert!(!root.join("package-0000/work").exists());
+
+    // Synthetic receipt callback proves collector control flow, not actual model work.
+    // Its directory intentionally has no workflow metadata: only the external owner's
+    // typed snapshot callback is used, never a second local workflow lock/read.
+    let work = root.join("package-0000/work");
+    directory(&work).unwrap();
+    let calls = Cell::new(0);
+    let output = json!({"complete":true,"outputs":[{
+        "sample_index":0,"text":"A distinct instructed answer.",
+        "provider_key":enrollment.provider_keys[0],"job_id":"7".repeat(32),
+        "report_sha256":"8".repeat(64),"model_fingerprint":"3".repeat(64),
+        "output_index":0,"generated_tokens":19,"text_truncated":false}]});
+    let snapshot = |path: &Path, expected: &workflow::ExpectedTask| {
+        calls.set(calls.get() + 1);
+        assert_eq!(path, work);
+        assert_eq!(expected.task.question().unwrap(), original.question);
+        assert_eq!(expected.manifest_id, sha(&original_bytes));
+        Ok(output.clone())
+    };
+    let ready = super::super::prepare_frontier(
+        &args,
+        &cancelled,
+        &mut result,
+        &enrollment,
+        &original,
+        parents.clone(),
+        true,
+        &snapshot,
+    )
+    .await
+    .unwrap();
+    assert!(ready.is_empty());
+    assert_eq!(calls.get(), 1);
+    assert_eq!(result["complete"], true);
+    assert_eq!(result["synthesized_answer"]["job_id"], "7".repeat(32));
+    assert_ne!(result["synthesized_answer"]["job_id"], parents[0].job_id);
+    assert_eq!(result["rounds_this_invocation"], 0);
+    assert!(!root.parent().unwrap().join("level-01-result.json").exists());
+    assert_eq!(fs::read(&file).unwrap(), original_bytes);
+    assert_eq!(fs::metadata(&file).unwrap().ino(), inode);
+    let mut changed = parents;
+    changed[0].report_sha256 = "9".repeat(64);
+    assert!(
+        super::super::prepare_frontier(
+            &args,
+            &cancelled,
+            &mut result,
+            &enrollment,
+            &original,
+            changed,
+            true,
+            &snapshot,
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn external_frontier_enumerates_independent_pending_groups_without_early_break() {
+    use std::cell::Cell;
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (mut enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    enrollment.scheduling = workflow::Scheduling::ReadyRowsV1;
+    let parents = (0..65)
+        .map(|index| {
+            let mut answer = parent("Answer.", index);
+            answer.source_start = 0;
+            answer.source_end = 100;
+            answer
+        })
+        .collect::<Vec<_>>();
+    let mut args = replay_options(temp.path());
+    for (index, group) in parents.chunks(super::super::PARENTS_PER_GROUP).enumerate() {
+        let offset = index * super::super::PARENTS_PER_GROUP;
+        let (root, _) =
+            historical_reduction_at(temp.path(), &enrollment, &original, &signer, group, offset);
+        prepare(
+            &args,
+            &root,
+            &enrollment,
+            &original,
+            group,
+            offset,
+            1,
+            &cancelled,
+        )
+        .await
+        .unwrap();
+        directory(&root.join("package-0000/work")).unwrap();
+    }
+    args.max_batches = 0;
+    let calls = Cell::new(0);
+    let snapshot = |_: &Path, _: &workflow::ExpectedTask| {
+        calls.set(calls.get() + 1);
+        Ok(json!({"complete":false,"outputs":[]}))
+    };
+    let mut result = json!({"complete":false,"rounds_this_invocation":0});
+    let ready = super::super::prepare_frontier(
+        &args,
+        &cancelled,
+        &mut result,
+        &enrollment,
+        &original,
+        parents,
+        false,
+        &snapshot,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(calls.get(), 2);
+    assert_eq!(
+        result["synthesis"]["levels"][0]["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(result["rounds_this_invocation"], 0);
+    assert_eq!(result["complete"], false);
 }
 
 #[tokio::test]

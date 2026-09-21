@@ -9,6 +9,8 @@ use super::*;
 
 mod ready_queue;
 
+pub(super) use ready_queue::cohort::ReadyCohort;
+
 #[derive(Clone, Debug)]
 pub(super) struct ReadyPending {
     pub(super) handle: JobHandle,
@@ -17,6 +19,7 @@ pub(super) struct ReadyPending {
 
 /// The owning workflow supplies only rows that have never acquired a retained handle.
 /// Previously attempted rows remain exact pending handles, never fresh queue entries.
+#[derive(Clone)]
 pub(super) struct ReadyOptions {
     pub(super) source: Source,
     pub(super) providers: Vec<VerifyingKey>,

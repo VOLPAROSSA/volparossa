@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use super::*;
 
+mod driver;
+pub(in crate::compute::peer) use driver::ReadyCohort;
+
 const MAX_PACKAGES: usize = 32;
 const MAX_ACTIVE_PROVIDERS: usize = 4;
 
@@ -87,15 +90,15 @@ impl Leases {
     }
 }
 
-struct Candidate<'a> {
-    args: &'a ReadyOptions,
+struct Candidate {
+    args: ReadyOptions,
     publication: rpc::PublicDataset,
     source: VerifiedPublicDataset,
     fingerprint: Option<String>,
 }
 
-struct Package<'a> {
-    args: &'a ReadyOptions,
+struct Package {
+    args: ReadyOptions,
     publication: Arc<rpc::PublicDataset>,
     source: VerifiedPublicDataset,
     plan: ReadyPlan,
@@ -106,9 +109,10 @@ struct Package<'a> {
     stop: watch::Sender<bool>,
     activity: watch::Receiver<bool>,
     error: Option<anyhow::Error>,
+    inflight: usize,
 }
 
-impl Package<'_> {
+impl Package {
     fn fail(&mut self, error: anyhow::Error) {
         self.error.get_or_insert(error);
         let _ = self.stop.send(true);
@@ -173,9 +177,9 @@ enum GroupEvent {
     },
 }
 
-fn prepare(args: &ReadyOptions) -> Result<Candidate<'_>> {
+fn prepare(args: ReadyOptions) -> Result<Candidate> {
     let (publication, source) = source(&args.source)?;
-    let fingerprint = inputs(args, &source)?;
+    let fingerprint = inputs(&args, &source)?;
     if let Some((authorization, selected)) = &args.executor_admission {
         ensure!(
             authorization.publisher_key == publication.publisher_key
@@ -235,10 +239,10 @@ async fn metadata(
     }
 }
 
-fn initialize<'a>(
-    candidate: Candidate<'a>,
+fn initialize(
+    candidate: Candidate,
     metadata: &BTreeMap<String, rpc::Capabilities>,
-) -> Result<Package<'a>> {
+) -> Result<Package> {
     let Candidate {
         args,
         publication,
@@ -264,10 +268,9 @@ fn initialize<'a>(
         }
     }
     let fingerprint = fingerprint.context("compute_distribute_capability_probe_unavailable")?;
-    let plan = create_plan(args, &publication, &source, &fingerprint)?;
+    let plan = create_plan(&args, &publication, &source, &fingerprint)?;
     let (stop, activity) = watch::channel(false);
     let mut package = Package {
-        args,
         publication: Arc::new(publication),
         outputs: vec![None; source.row_count()],
         source,
@@ -278,15 +281,17 @@ fn initialize<'a>(
         stop,
         activity,
         error: None,
+        inflight: 0,
+        args,
     };
-    for pending in &args.pending {
+    for pending in &package.args.pending {
         if let Some(status) = pending
             .verified_status
             .as_ref()
             .filter(|status| terminal(status))
         {
             package.parts.push(completed(
-                &args.output,
+                &package.args.output,
                 &pending.handle,
                 &Ok(status.clone()),
                 false,
@@ -309,7 +314,7 @@ fn next_ready(count: usize, cursor: &mut usize, eligible: impl Fn(usize) -> bool
 }
 
 fn start_probes(
-    packages: &mut [Option<Package<'_>>],
+    packages: &mut [Option<Package>],
     providers: &BTreeMap<String, VerifyingKey>,
     leases: &mut Leases,
     cursor: &mut usize,
@@ -339,6 +344,7 @@ fn start_probes(
         let provider = *provider;
         let key = key.clone();
         let activity = package.activity.clone();
+        package.inflight += 1;
         tasks.spawn(async move {
             let result = readiness::capabilities(&socket, &provider, activity).await;
             GroupEvent::Profile {
@@ -352,7 +358,7 @@ fn start_probes(
     Ok(())
 }
 
-fn stop_all(packages: &mut [Option<Package<'_>>]) {
+fn stop_all(packages: &mut [Option<Package>]) {
     for package in packages.iter_mut().flatten() {
         let _ = package.stop.send(true);
     }
@@ -388,7 +394,7 @@ fn accept_profile(
     row: u16,
     provider: &str,
     result: Result<rpc::Capabilities>,
-    packages: &mut [Option<Package<'_>>],
+    packages: &mut [Option<Package>],
     leases: &mut Leases,
     socket: &Path,
     tasks: &mut JoinSet<GroupEvent>,
@@ -400,7 +406,7 @@ fn accept_profile(
     let package = packages[index]
         .as_mut()
         .context("compute_cohort_package_missing")?;
-    if *package.activity.borrow() || package.error.is_some() {
+    if *package.activity.borrow() || package.error.is_some() || leases.held.contains_key(provider) {
         package.restore_row(row);
         return Ok(());
     }
@@ -416,7 +422,7 @@ fn accept_profile(
         .position(|key| key == provider)
         .context("compute_cohort_provider_not_authorized")?;
     let work = match dispatch(
-        package.args,
+        &package.args,
         &package.source,
         provider_index,
         row,
@@ -436,6 +442,7 @@ fn accept_profile(
     let socket = socket.to_owned();
     let publication = Arc::clone(&package.publication);
     let activity = package.activity.clone();
+    package.inflight += 1;
     tasks.spawn(async move {
         let result = execute(&socket, &work, &publication, activity.clone()).await;
         let Event::Finished(handle, result, new_submission) =
@@ -458,7 +465,7 @@ fn accept_finished(
     handle: &JobHandle,
     result: &Result<rpc::JobStatus>,
     new_submission: bool,
-    packages: &mut [Option<Package<'_>>],
+    packages: &mut [Option<Package>],
     leases: &mut Leases,
 ) -> Result<()> {
     let package = packages[index]
@@ -490,10 +497,6 @@ fn accept_finished(
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "One owner admits bounded source packages and drains all exact-handle futures against a global lease table"
-)]
 pub(in super::super) async fn report(
     args: &[ReadyOptions],
     reservations: &[ReadyPending],
@@ -508,205 +511,29 @@ pub(in super::super) async fn report(
     if args.len() == 1 && reservations.is_empty() {
         return Ok(vec![super::report(&args[0], socket, activity).await]);
     }
-    let mut outputs = BTreeSet::new();
-    ensure!(
-        args.iter().all(|options| outputs.insert(&options.output)),
-        "compute_cohort_duplicate_output"
-    );
-    let time = now()?;
-    let mut leases = Leases::default();
-    // Seed EVERY retained lease before any new source is even prepared. A bad source does
-    // not erase the authority of a worker that may already have received its old task.
-    for pending in reservations
-        .iter()
-        .chain(args.iter().flat_map(|options| &options.pending))
-    {
-        leases.observe(&pending.handle, pending.verified_status.as_ref(), time)?;
+    let mut driver = ReadyCohort::new(reservations, socket, activity)?;
+    let admitted = driver.append(args.to_vec()).await;
+    if let Err(error) = admitted {
+        let _ = driver.cancel_and_drain().await;
+        return Err(error);
     }
     let mut results: Vec<Option<Result<serde_json::Value>>> =
         (0..args.len()).map(|_| None).collect();
-    let mut candidates = Vec::new();
-    let mut providers = BTreeMap::new();
-    for (index, options) in args.iter().enumerate() {
-        match prepare(options) {
-            Ok(candidate) => {
-                for provider in &options.providers {
-                    providers.insert(hex::encode(provider.as_bytes()), *provider);
-                }
-                candidates.push((index, candidate));
-            }
-            Err(error) => {
-                results[index] = Some(Err(error));
-            }
-        }
-    }
-    if *activity.borrow() {
-        // Cancellation may already have arrived during the caller's executor discovery.
-        // Bounds, original leases and source validation still take precedence; no probe,
-        // attempt directory or remote submission has begun for any valid candidate.
-        return Ok(cancelled_packages(results));
-    }
-    let mut probes = JoinSet::new();
-    for (key, provider) in &providers {
-        let key = key.clone();
-        let provider = *provider;
-        let socket = socket.to_owned();
-        let activity = activity.clone();
-        probes.spawn(async move { (key, metadata(socket, provider, activity).await) });
-    }
-    let mut capabilities = BTreeMap::new();
-    while let Some(result) = probes.join_next().await {
-        let (key, result) = result?;
-        if let Ok(caps) = result {
-            capabilities.insert(key, caps);
-        }
-    }
-    if *activity.borrow() {
-        // All read-only metadata futures have drained. Nothing in this invocation
-        // was submitted or persisted yet; original handles retain their authority.
-        // Keep earlier source/admission errors instead of relabelling them cancelled.
-        return Ok(cancelled_packages(results));
-    }
-    let mut packages: Vec<Option<Package<'_>>> = (0..args.len()).map(|_| None).collect();
-    for (index, candidate) in candidates {
-        match initialize(candidate, &capabilities) {
-            Ok(package) => {
-                packages[index] = Some(package);
-            }
-            Err(error) => {
-                results[index] = Some(Err(error));
-            }
-        }
-    }
-    let mut tasks = JoinSet::new();
-    for (index, package) in packages.iter().enumerate() {
-        if let Some(package) = package {
-            for pending in package
-                .args
-                .pending
-                .iter()
-                .filter(|pending| !pending.verified_status.as_ref().is_some_and(terminal))
-            {
-                tasks.spawn(observe_pending(
-                    index,
-                    pending.clone(),
-                    socket.to_owned(),
-                    package.activity.clone(),
-                ));
-            }
-        }
-    }
-    let mut cursor = 0;
-    let mut owner = activity.clone();
-    let mut stopped = false;
-    let mut fatal = None;
+    let mut error = None;
     loop {
-        let time = match now() {
-            Ok(time) => time,
-            Err(error) => {
-                fatal.get_or_insert(error);
-                stop_all(&mut packages);
-                stopped = true;
-                0
+        match driver.next_completed().await {
+            Ok(Some((index, result))) => results[index] = Some(result),
+            Ok(None) => break,
+            Err(failure) => {
+                error = Some(failure);
+                break;
             }
-        };
-        if *owner.borrow() {
-            stop_all(&mut packages);
-            stopped = true;
-        }
-        leases.expire(time);
-        for package in packages.iter_mut().flatten() {
-            if package.error.is_none() && time >= package.source.expires() {
-                package.fail(anyhow::anyhow!("compute_peer_source_expired"));
-            }
-        }
-        if !stopped {
-            if let Err(error) = start_probes(
-                &mut packages,
-                &providers,
-                &mut leases,
-                &mut cursor,
-                socket,
-                &mut tasks,
-            ) {
-                fatal.get_or_insert(error);
-                stop_all(&mut packages);
-                stopped = true;
-            }
-        }
-        let unlock = leases.next_expiry(|provider| {
-            packages
-                .iter()
-                .flatten()
-                .any(|package| package.eligible(provider))
-        });
-        if tasks.is_empty() && (stopped || unlock.is_none()) {
-            break;
-        }
-        let source_expiry = packages
-            .iter()
-            .flatten()
-            .filter(|package| package.error.is_none())
-            .map(|package| package.source.expires())
-            .min();
-        let wake = unlock.into_iter().chain(source_expiry).min();
-        let delay = Duration::from_secs(wake.map_or(600, |at| at.saturating_sub(time).max(1)));
-        let event = tokio::select! {
-            biased;
-            changed = owner.changed(), if !stopped => {
-                if changed.is_err() || *owner.borrow() { stop_all(&mut packages); stopped = true; }
-                continue;
-            },
-            () = sleep(delay), if !stopped => continue,
-            event = tasks.join_next(), if !tasks.is_empty() => {
-                let Some(event) = event else { continue };
-                event
-            },
-        };
-        let handled = match event {
-            Err(error) => Err(anyhow::Error::from(error)),
-            Ok(GroupEvent::Profile {
-                package,
-                row,
-                provider,
-                result,
-            }) => accept_profile(
-                package,
-                row,
-                &provider,
-                result,
-                &mut packages,
-                &mut leases,
-                socket,
-                &mut tasks,
-            ),
-            Ok(GroupEvent::Finished {
-                package,
-                handle,
-                result,
-                new_submission,
-            }) => accept_finished(
-                package,
-                &handle,
-                &result,
-                new_submission,
-                &mut packages,
-                &mut leases,
-            ),
-        };
-        if let Err(error) = handled {
-            fatal.get_or_insert(error);
-            stop_all(&mut packages);
-            stopped = true;
         }
     }
-    // A local fault never drops another source's futures or removes its durable receipt.
-    for (index, package) in packages.iter_mut().enumerate() {
-        if let Some(package) = package {
-            results[index] = Some(package.report());
-        }
+    for (index, result) in driver.cancel_and_drain().await? {
+        results[index] = Some(result);
     }
-    if let Some(error) = fatal {
+    if let Some(error) = error {
         return Err(error);
     }
     results
@@ -738,7 +565,7 @@ mod tests {
         );
     }
 
-    fn handle(provider: u8, job: u8, expiry: u64) -> JobHandle {
+    pub(super) fn handle(provider: u8, job: u8, expiry: u64) -> JobHandle {
         let provider = ed25519_dalek::SigningKey::from_bytes(&[provider; 32]).verifying_key();
         let model = rpc::ModelIdentity {
             model_id: "lease-table-fixture".into(),

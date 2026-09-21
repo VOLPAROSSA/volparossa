@@ -339,7 +339,7 @@ def check_graph_summary(value, source_id, expiry, providers, answers, rounds, co
         and value["plan"]==PLAN and value["plan_sha256"]==sha(encoded(PLAN)) and value["source_manifest_id"]==source_id
         and value["source_expires_unix_seconds"]==expiry and value["provider_keys"]==providers
         and value["rounds_this_invocation"]==rounds and value["interrupted"] is False
-        and value["scheduling"]=="shared_source_queue_then_ordered_dependency_frontiers"
+        and value["scheduling"]=="shared_ready_dependency_queue_v1"
         and all(value[k] is False for k in ("private_data_supported","automatic_task_planning","external_actions_supported",
             "model_answer_correctness_proven","full_b03_claimed")),"graph result identity/scope changed")
     for index,node in enumerate(PLAN["nodes"]):
@@ -555,12 +555,14 @@ def self_test():
     complete=dict(version=1,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
         plan_sha256=sha(encoded(PLAN)),source_manifest_id="a"*64,source_expires_unix_seconds=7200,
         provider_keys=["b"*64,"c"*64],rounds_this_invocation=3,interrupted=False,
-        scheduling="shared_source_queue_then_ordered_dependency_frontiers",private_data_supported=False,
+        scheduling="shared_ready_dependency_queue_v1",private_data_supported=False,
         automatic_task_planning=False,external_actions_supported=False,model_answer_correctness_proven=False,
         full_b03_claimed=False,output=answers["refine"],nodes=[dict(n,complete=True,status="complete",answer=answers[n["id"]]) for n in PLAN["nodes"]])
     check_graph_summary(complete,"a"*64,7200,["b"*64,"c"*64],answers,3)
+    check_graph_summary(dict(complete,rounds_this_invocation=0),"a"*64,7200,["b"*64,"c"*64],answers,0)
     for change in (dict(automatic_task_planning=True),dict(rounds_this_invocation=0),dict(source_expires_unix_seconds=7201),
-                   dict(output=answers["compare"]),dict(private_data_supported=True)):
+                   dict(output=answers["compare"]),dict(private_data_supported=True),
+                   dict(scheduling="shared_source_queue_then_ordered_dependency_frontiers")):
         try:check_graph_summary(dict(complete,**change),"a"*64,7200,["b"*64,"c"*64],answers,3)
         except ValueError:pass
         else:raise AssertionError("changed graph summary accepted")

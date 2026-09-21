@@ -219,7 +219,11 @@ Source ranges are not proof that generated statements are true.
 
 An explicit **public task graph** lets peers answer different source questions, then feed their
 retained answers into dependent instructions. Its real four-task fork/join and offline-resume
-VM proof passes. The next opt-in mode asks the local model to propose the initial subquestions
+VM proof passes. A dependency-ready scheduler is now being integrated: a follow-up task can
+use its completed parents while unrelated work continues, sharing the same peer-capacity
+accounting. Focused checks pass; its live overlap proof is still pending.
+
+The next opt-in mode asks the local model to propose the initial subquestions
 automatically, preserving the original question in the final task. That goal-only decomposition
 passes focused local checks. Two real-model attempts reached the generation limit without an
 accepted plan. The next candidate lets the model generate two complementary questions while

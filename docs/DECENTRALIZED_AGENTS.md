@@ -1131,8 +1131,28 @@ parents' actual answers in the declared order. The owner verifies those answers 
 job receipts before constructing signed derived inputs. Original source identity and expiry
 are shared, not renewed for each question. A one-parent dependency still executes a new job.
 
-Initial source packages share one provider queue. This first scheduler finishes that source
-stage before ordered dependent steps; it does not yet overlap every ready DAG frontier.
+The verified first scheduler shares one provider queue for initial source packages, then finishes
+that source stage before ordered dependent steps. The current development candidate replaces
+that barrier with one incremental queue for the whole graph: a task becomes eligible when its own
+parents finish, even while an unrelated branch is still running. For example:
+
+```mermaid
+flowchart LR
+    A[Source task A] --> C[Refine A]
+    B[Source task B] --> D[Refine B]
+    C --> E[Combine C and D]
+    D --> E
+```
+
+C need not wait for B; E must wait for both C and D. The same owner accounts for all busy
+providers, so completing A does not free B's lease or authorize two jobs in B's occupied slot.
+Completed, receipt-checked work unlocks the next tasks. Cancellation drains admitted work before
+workflow locks are released, and original source expiry is not renewed on dependency changes.
+Forty-nine focused document tests, nine cohort tests and strict CLI Clippy pass. A separate
+five-node fixture is ready to observe real C execution while an exact disposable B worker
+is paused. That live dependency-ready proof is **pending**; the four-node proof below covers the
+earlier scheduler only.
+
 Individual token budgets, worker leases and per-invocation `--max-batches` remain bounded.
 `--enroll-only --execute` prepares without submitting peer work. Unfinished execution returns
 a nonzero status and retains its progress. Resume uses `--directory ... --resume --execute`;

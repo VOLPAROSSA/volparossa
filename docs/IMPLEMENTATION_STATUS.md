@@ -4,6 +4,16 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Current dependency-ready candidate: a single incremental provider queue now owns source and
+derived graph work. Each durable package completion triggers a dependency scan; newly ready
+tasks join that same queue while unrelated original worker leases remain occupied. Workflow
+locks survive until all admitted futures are drained, including preparation failures and
+cancellation. Source identity/expiry, signed parent inputs and zero-round offline reconstruction
+retain their existing contracts. Forty-nine focused document checks, nine cohort checks and
+strict CLI Clippy pass. A disposable five-node A→C, B→D, C+D→E fixture is ready to observe
+C completing while an actual B worker is paused under its original lease. **That live proof is
+pending**; this is neither verified fully dynamic scheduling nor completion of B03.
+
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated
 question data forms a fixed fork/join graph, with the original user question unchanged in the
@@ -51,8 +61,9 @@ two-round boundary; comparison and single-parent refinement then each run a dist
 Original input/plan removal and stopped brokers precede zero-round offline resume with unchanged
 history. Five captures contain 33,052 frames with zero drops/direct client-to-exit packets;
 private/network cleanup and unchanged host state pass. This verifies the explicitly enrolled plan.
-The current scheduler has a source-stage barrier and ordered dependent stages, not fully dynamic
-DAG scheduling or automatic task planning. This does not complete B03 or add private computation.
+That verified scheduler has a source-stage barrier and ordered dependent stages. The newer
+dependency-ready candidate above is not covered by that proof. Neither result completes B03
+or adds private computation or verified automatic task planning.
 
 Verified mixed network-source execution: source-plan v2 combines explicitly selected local files and
 native signed `text/plain` publications in the same public document task. Publisher key, name

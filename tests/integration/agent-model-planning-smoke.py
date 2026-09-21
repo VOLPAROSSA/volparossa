@@ -434,6 +434,7 @@ def check(value,revision):
             and result["plan"]==plan and result["plan_sha256"]==sha(encoded(plan)) and result["source_manifest_id"]==source_id
             and result["source_expires_unix_seconds"]==authority["expires_at_unix_seconds"] and result["provider_keys"]==authority["provider_keys"]
             and result["rounds_this_invocation"]==used and result["interrupted"] is False and result["planning"]==planning
+            and result["scheduling"]=="shared_ready_dependency_queue_v1"
             and result["automatic_task_planning"] is True and result["output"]==answers["answer"] and len(result["nodes"])==count+1
             and all(result[k] is False for k in ("private_data_supported","external_actions_supported","model_answer_correctness_proven","full_b03_claimed")),"planned graph completion/scope changed")
         require(result["nodes"]==[dict(n,complete=True,status="complete",answer=answers[n["id"]]) for n in plan["nodes"]],"planned graph answers changed")

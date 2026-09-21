@@ -22,6 +22,7 @@ agent_public_document=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
+agent_ready_dag=no
 agent_model_planning=no
 agent_train_cycle=no
 agent_train_loop=no
@@ -41,7 +42,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-ready-dag|agent-model-planning|dns-cache]'
 }
 
 print_plan() {
@@ -58,6 +59,17 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_ready_dag" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA ready-DAG dependency queue plan:' \
+                '  run A and B on two actual protected peers over one original signed public source;' \
+                '  fixture-pause only the exact B worker and complete C from A while B remains Running;' \
+                '  continue B under its original lease, then execute D and the final C/D join;' \
+                '  reuse complete receipts offline after removing originals and stopping brokers;' \
+                '  guest-only pidfd signals, real tokenizer/model execution, captures and full cleanup;' \
+                '  no fabricated results, model-quality or general autonomous-planning claim.'
+            return
+        fi
         if [ "$agent_model_planning" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA public model planning plan:' \
@@ -499,6 +511,7 @@ while [ "$#" -gt 0 ]; do
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
+            agent_ready_dag=no
             agent_model_planning=no
             agent_train_cycle=no
             agent_train_loop=no
@@ -517,6 +530,7 @@ while [ "$#" -gt 0 ]; do
                 agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-network-sources) scenario=agent-jobs; agent_public_collection=yes; agent_public_network_sources=yes; wifi_link=no; uplink_link=no ;;
                 agent-task-graph) scenario=agent-jobs; agent_task_graph=yes; wifi_link=no; uplink_link=no ;;
+                agent-ready-dag) scenario=agent-jobs; agent_ready_dag=yes; wifi_link=no; uplink_link=no ;;
                 agent-model-planning) scenario=agent-jobs; agent_model_planning=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
@@ -754,13 +768,20 @@ if [ "$agent_public_network_sources" = yes ]; then
         && [ ! -L "$source_directory/tests/integration/agent-train-loop-catalog.py" ] || exit 69
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
-if [ "$agent_task_graph" = yes ]; then
+if [ "$agent_task_graph" = yes ] || [ "$agent_ready_dag" = yes ]; then
     for graph_fixture in agent-task-graph-smoke.sh agent-task-graph-smoke.py \
         agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         [ -f "$source_directory/tests/integration/$graph_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$graph_fixture" ] || exit 69
     done
     command -v openssl >/dev/null 2>&1 || exit 69
+fi
+if [ "$agent_ready_dag" = yes ]; then
+    for dag_fixture in agent-ready-dag-smoke.sh agent-ready-dag-smoke.py \
+        agent-jobs-ready-queue-smoke.py agent-jobs-follow-smoke.py; do
+        [ -f "$source_directory/tests/integration/$dag_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$dag_fixture" ] || exit 69
+    done
 fi
 if [ "$agent_model_planning" = yes ]; then
     for planning_fixture in agent-model-planning-smoke.sh agent-model-planning-smoke.py \
@@ -2075,9 +2096,13 @@ if [ "$agent_public_collection" = yes ]; then
     # shellcheck source=tests/integration/agent-public-collection-smoke.sh
     . "$source_directory/tests/integration/agent-public-collection-smoke.sh"
 fi
-if [ "$agent_task_graph" = yes ]; then
+if [ "$agent_task_graph" = yes ] || [ "$agent_ready_dag" = yes ]; then
     # shellcheck source=tests/integration/agent-task-graph-smoke.sh
     . "$source_directory/tests/integration/agent-task-graph-smoke.sh"
+fi
+if [ "$agent_ready_dag" = yes ]; then
+    # shellcheck source=tests/integration/agent-ready-dag-smoke.sh
+    . "$source_directory/tests/integration/agent-ready-dag-smoke.sh"
 fi
 if [ "$agent_model_planning" = yes ]; then
     # shellcheck source=tests/integration/agent-model-planning-smoke.sh
@@ -2221,9 +2246,14 @@ fi
 if [ "$agent_public_network_sources" = yes ]; then
     install -o root -g root -m 0555 "$source_directory/tests/integration/agent-train-loop-catalog.py" "$WORK/bin/agent-train-loop-catalog.py"
 fi
-if [ "$agent_task_graph" = yes ]; then
+if [ "$agent_task_graph" = yes ] || [ "$agent_ready_dag" = yes ]; then
     for graph_script in agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$graph_script" "$WORK/bin/$graph_script"
+    done
+fi
+if [ "$agent_ready_dag" = yes ]; then
+    for dag_script in agent-ready-dag-smoke.py agent-jobs-ready-queue-smoke.py agent-jobs-follow-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$dag_script" "$WORK/bin/$dag_script"
     done
 fi
 if [ "$agent_model_planning" = yes ]; then

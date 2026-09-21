@@ -1,6 +1,9 @@
 //! Hierarchical public peer inference. Intermediate answers are not original excerpts.
 
+mod frontier;
 mod storage;
+
+pub(super) use frontier::{prepare, prepare_frontier};
 
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -65,11 +68,27 @@ fn leaf_answers(
     input: &super::Input,
     plan: &super::Plan,
 ) -> Result<Vec<Answer>> {
+    leaf_answers_with_snapshot(
+        root,
+        enrollment,
+        input,
+        plan,
+        &workflow::task_snapshot_detailed,
+    )
+}
+
+fn leaf_answers_with_snapshot(
+    root: &Path,
+    enrollment: &document_storage::Enrollment,
+    input: &super::Input,
+    plan: &super::Plan,
+    snapshot: &dyn Fn(&Path, &workflow::ExpectedTask) -> Result<Value>,
+) -> Result<Vec<Answer>> {
     let mut answers = Vec::new();
     for (index, package) in enrollment.packages.iter().enumerate() {
         let directory = root.join(format!("package-{index:04}"));
         let expected = document_storage::expected(&directory, enrollment, package, input, plan)?;
-        let snapshot = workflow::task_snapshot_detailed(&directory.join("work"), &expected)?;
+        let snapshot = snapshot(&directory.join("work"), &expected)?;
         ensure!(
             snapshot["complete"] == true,
             "compute_synthesis_incomplete_source"
@@ -118,6 +137,62 @@ fn unusable(answers: &[Answer]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn complete_answer(answer: &Answer, levels: &[Value], result: &mut Value) -> Result<()> {
+    result["complete"] = true.into();
+    result["joining"] = if levels.is_empty() {
+        "single_source_answer"
+    } else {
+        "hierarchical_peer_synthesis"
+    }
+    .into();
+    result["synthesized_answer"] = serde_json::to_value(answer)?;
+    result["synthesis"] = json!({"complete":true,"levels":levels,
+        "generation_limit_reached":answer.generated_tokens == 64,
+        "claim_scope":"coordinator_verified_local_rpc_status_not_portable_execution_attestation",
+        "model_answer_correctness_proven":false,"semantic_completeness_proven":false});
+    Ok(())
+}
+
+fn reduction_answers(
+    snapshot: &Value,
+    manifest: &str,
+    dataset: &volparossa_content::provider::compute::dataset::DerivedDataset,
+) -> Result<Vec<Answer>> {
+    ensure!(
+        snapshot["complete"] == true,
+        "compute_synthesis_incomplete_reduction"
+    );
+    let outputs = snapshot["outputs"]
+        .as_array()
+        .context("compute_synthesis_outputs")?;
+    ensure!(
+        outputs.len() == dataset.inference.len(),
+        "compute_synthesis_reduction_rows"
+    );
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(row, output)| {
+            ensure!(
+                output["sample_index"] == row,
+                "compute_synthesis_reduction_order"
+            );
+            let inputs = &dataset.inference[row].inputs;
+            let start = inputs
+                .iter()
+                .map(|i| i.source_start)
+                .min()
+                .context("compute_synthesis_ancestry")?;
+            let end = inputs
+                .iter()
+                .map(|i| i.source_end)
+                .max()
+                .context("compute_synthesis_ancestry")?;
+            Answer::from_output(output, manifest, start, end)
+        })
+        .collect()
 }
 
 #[allow(
@@ -174,19 +249,7 @@ pub(super) async fn advance_frontier(
             return Ok(());
         }
         if frontier.len() == 1 && (!force_first || level > 1) {
-            let answer = &frontier[0];
-            result["complete"] = true.into();
-            result["joining"] = if levels.is_empty() {
-                "single_source_answer"
-            } else {
-                "hierarchical_peer_synthesis"
-            }
-            .into();
-            result["synthesized_answer"] = serde_json::to_value(answer)?;
-            result["synthesis"] = json!({"complete":true,"levels":levels,
-                "generation_limit_reached":answer.generated_tokens == 64,
-                "claim_scope":"coordinator_verified_local_rpc_status_not_portable_execution_attestation",
-                "model_answer_correctness_proven":false,"semantic_completeness_proven":false});
+            complete_answer(&frontier[0], &levels, result)?;
             return Ok(());
         }
         if *cancelled.borrow() {
@@ -290,36 +353,11 @@ pub(super) async fn advance_frontier(
                             .and_then(|p| p.iter().find_map(|p| p.get("failure_code")))}));
                     break;
                 };
-                let outputs = snapshot["outputs"]
-                    .as_array()
-                    .context("compute_synthesis_outputs")?;
-                ensure!(
-                    outputs.len() == dataset.inference.len(),
-                    "compute_synthesis_reduction_rows"
-                );
-                for (row, output) in outputs.iter().enumerate() {
-                    ensure!(
-                        output["sample_index"] == row,
-                        "compute_synthesis_reduction_order"
-                    );
-                    let inputs = &dataset.inference[row].inputs;
-                    let start = inputs
-                        .iter()
-                        .map(|i| i.source_start)
-                        .min()
-                        .context("compute_synthesis_ancestry")?;
-                    let end = inputs
-                        .iter()
-                        .map(|i| i.source_end)
-                        .max()
-                        .context("compute_synthesis_ancestry")?;
-                    next.push(Answer::from_output(
-                        output,
-                        &expected.manifest_id,
-                        start,
-                        end,
-                    )?);
-                }
+                next.extend(reduction_answers(
+                    &snapshot,
+                    &expected.manifest_id,
+                    dataset,
+                )?);
             }
             groups.push(
                 json!({"group":group,"parents":parents.len(),"complete":group_complete,

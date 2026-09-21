@@ -139,6 +139,9 @@ agent_jobs_stop_unit() {
 }
 
 agent_jobs_stop() {
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-ready-dag-smoke.py" cleanup-worker "$WORK" || return 1
+    fi
     if [ "${agent_jobs_package_queue:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-package-queue-smoke.py" cleanup-worker "$WORK" || return 1
     fi
@@ -227,6 +230,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        agent_ready_dag_run
+        return
+    fi
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_run
         return
@@ -334,6 +341,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        agent_ready_dag_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_finalize_report "$jobs_status"
         return

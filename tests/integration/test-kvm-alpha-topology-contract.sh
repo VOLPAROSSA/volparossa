@@ -38,6 +38,11 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario agent-public-collection | grep -Fi 'collection' >/dev/null
     "$script" --preview --scenario agent-public-network-sources | grep -Ei 'network.sources' >/dev/null
     "$script" --preview --scenario agent-task-graph | grep -Ei 'task.graph' >/dev/null
+    "$script" --preview --scenario agent-ready-dag | grep -Ei 'ready.DAG' >/dev/null
+    if "$script" --preview --scenario agent-ready-dag --scenario agent-task-graph \
+        | grep -Ei 'ready.DAG' >/dev/null; then exit 1; fi
+    if "$script" --preview --scenario agent-task-graph --scenario agent-ready-dag \
+        | grep -Ei 'explicit public task graph|Agent-task-graph:' >/dev/null; then exit 1; fi
     "$script" --preview --scenario agent-model-planning | grep -Ei 'model.planning' >/dev/null
     if "$script" --preview --scenario agent-model-planning --scenario agent-task-graph \
         | grep -Ei 'model.planning' >/dev/null; then exit 1; fi
@@ -81,12 +86,23 @@ grep -F '. "$source_directory/tests/integration/agent-task-graph-smoke.sh"' "$GU
 grep -F 'agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null
 grep -F '[ "$scenario" != agent-task-graph ] || driver_time_bound=3600s' "$HOST" >/dev/null
 grep -F 'root.glob("agent-task-graph-*")' "$HOST" >/dev/null
-grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-model-planning") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
+grep -F 'file_count_limit = 128 if scenario in ("agent-task-graph", "agent-ready-dag", "agent-model-planning") else FILE_COUNT_LIMIT' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-task-graph'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-task-graph-smoke.py self-test' "$WORKFLOW" >/dev/null
 grep -F 'agent_task_graph_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent_task_graph_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent-ready-dag) scenario=agent-jobs; agent_ready_dag=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-ready-dag-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'agent-ready-dag-smoke.py agent-jobs-ready-queue-smoke.py agent-jobs-follow-smoke.py' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-ready-dag ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-ready-dag-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-ready-dag'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-ready-dag-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-ready-dag-smoke.py self-test' "$WORKFLOW" >/dev/null
+grep -F 'agent_ready_dag_run' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent_ready_dag_finalize_report "$jobs_status"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'agent-ready-dag-smoke.py" cleanup-worker "$WORK"' "$HERE/agent-jobs-smoke.sh" >/dev/null
 grep -F 'agent-model-planning) scenario=agent-jobs; agent_model_planning=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
 grep -F '. "$source_directory/tests/integration/agent-model-planning-smoke.sh"' "$GUEST" >/dev/null
 grep -F 'agent-model-planning-smoke.py agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py' "$GUEST" >/dev/null

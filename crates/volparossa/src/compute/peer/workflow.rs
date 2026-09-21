@@ -3,7 +3,7 @@
 
 mod cohort;
 
-pub(super) use cohort::report_group_with_activity;
+pub(super) use cohort::{ReadyWork, report_group_with_activity};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -105,6 +105,10 @@ pub(super) struct ExpectedTask {
 }
 
 impl Options {
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     pub(super) fn task(
         plan: Option<PathBuf>,
         directory: PathBuf,
