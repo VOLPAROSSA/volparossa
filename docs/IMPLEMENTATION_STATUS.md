@@ -4,7 +4,18 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
-Current public-source collection candidate: `compute peer document --source-plan` accepts
+Current network-source candidate: source-plan v2 combines explicitly selected local files and
+native signed `text/plain` publications in the same public document task. Publisher key, name
+and exact manifest ID are fixed before any cache lookup. Verified cached chunks are reused;
+missing content is fetched through the existing protected content path, never replaced by a
+different cached source. The owner retains original manifests and correlated local receipts,
+authenticates their exact bytes on resume and caps compilation validity at the earliest original
+source expiry. A publication signature is not a claim about authorship, licensing or answer truth.
+Twenty-eight focused document tests and five public-text tests pass without model/network
+execution. The mixed local/cache-hit/network-miss two-peer fixture is implemented, but its run is pending; it is not
+yet live evidence, automatic web research, private computation or a completed B03 checkpoint.
+
+Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly
 selected common license. It builds an owner-published compilation whose signed bytes bind
 each source label, original hash, byte length and exact ranges. A separately pinned ledger
@@ -14,8 +25,14 @@ tokenization, shared peer queues and optional synthesis process the compilation.
 retained compilation bytes and receipts, without reopening the original input files. Completed
 shared-queue synthesis also preserves its existing execution summaries instead of replacing
 them with a zero-round resume summary. The 19 focused document tests, the dedicated completed-resume
-regression and strict all-target CLI/agent Clippy pass; the new
-`agent-public-collection` disposable VM proof is pending. This does not complete B03.
+regression and strict all-target CLI/agent Clippy pass. The [disposable run on
+`e38b0c522`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35609419691) and reconstruction
+of its 145 original evidence files pass: three public sources feed seven fragment jobs and
+three real synthesis levels (4, 2, then 1 job), for fourteen actual isolated workers. Original
+input files and the source plan are removed before zero-round offline resume with unchanged
+receipts. Captures retain 70,144 frames with zero drops or direct client-to-exit packets;
+private/network cleanup and unchanged host state pass. This verifies local-source collection
+execution, not semantic answer quality, network-source retrieval or completion of B03.
 See [source-plan format and usage](DECENTRALIZED_AGENTS.md#working-with-several-public-sources).
 
 Verified single-package ready queue: new `compute peer workflow`, `task` and `document` enrollments
@@ -164,8 +181,13 @@ warnings. The [run on `bae0d736`](https://github.com/VOLPAROSSA/volparossa/actio
 was followed by selector I/O failure. Its retained evidence does prove the earlier signed NaN
 candidate's local quarantine and continued useful training in the same loop; that passing substep
 does not upgrade the full scenario. Production correction `f5258b7ad01590afec6e8e74720f246f9f8d8319`
-adds a bounded two-second metadata wait; the [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968)
-is pending. The earlier
+adds a bounded two-second metadata wait. The [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968)
+and reconstruction of its 206 original files **pass**, including the independent parent-update
+import and inference that previously failed. The same loop rejects the nonfinite candidate,
+continues four real model stages/eight updates and publishes its own successor. Fifteen captures
+retain 110,977 frames with zero drops or direct client-to-exit packets; all sixteen recorded
+peer processes end, private/network cleanup completes and host hashes match. PR #136 is merged
+normally into `main` at `08d510d1`. The earlier
 [run on `8a21d43d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600678484) and
 [run on `3240e278`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35602912581)
 remain failed at their fixture-layout guards, before invalid-candidate construction. Neither

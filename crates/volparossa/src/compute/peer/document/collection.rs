@@ -1,6 +1,8 @@
 //! Explicit owner-authorized source compilations, not assertions by original publishers.
 //! Every retained label and original-byte identity is embedded in the signed text itself.
 
+pub(super) mod network;
+
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context as _, Result, ensure};
@@ -14,6 +16,7 @@ const MAX_PLAN_BYTES: u64 = 256 * 1024;
 const MAX_SOURCES: usize = 32;
 const MAX_LABEL_BYTES: usize = 128;
 const MARKER: &str = "VOLPAROSSA owner-published public source collection v1\n";
+const NETWORK_MARKER: &str = "VOLPAROSSA owner-published public source collection v2\n";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,7 +29,8 @@ struct SourcePlan {
 #[serde(deny_unknown_fields)]
 struct SourceInput {
     label: String,
-    input: std::path::PathBuf,
+    input: Option<std::path::PathBuf>,
+    native: Option<network::Selection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +63,8 @@ pub(super) struct Source {
     pub(super) header: Range,
     pub(super) content: Range,
     pub(super) separator: Range,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native: Option<network::Selection>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -73,6 +79,7 @@ pub(super) struct Ledger {
 pub(super) struct Prepared {
     pub(super) document: String,
     pub(super) ledger: Ledger,
+    pub(super) network: Option<network::Proofs>,
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -97,10 +104,25 @@ fn digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn header(index: usize, label: &str, sha256: &str, bytes: u64) -> Result<String> {
-    let marker = if index == 0 { MARKER } else { "" };
+fn header(
+    version: u32,
+    index: usize,
+    label: &str,
+    sha256: &str,
+    bytes: u64,
+    native: Option<&network::Selection>,
+) -> Result<String> {
+    let marker = if index == 0 {
+        if version == 1 { MARKER } else { NETWORK_MARKER }
+    } else {
+        ""
+    };
+    let identity = native
+        .map(|selection| serde_json::to_string(selection).map(|json| format!("native: {json}\n")))
+        .transpose()?
+        .unwrap_or_default();
     Ok(format!(
-        "{marker}\n--- VOLPAROSSA source {} ---\nlabel: {}\nsha256: {sha256}\nbytes: {bytes}\n\n",
+        "{marker}\n--- VOLPAROSSA source {} ---\nlabel: {}\nsha256: {sha256}\nbytes: {bytes}\n{identity}\n",
         index + 1,
         serde_json::to_string(label)?,
     ))
@@ -124,11 +146,11 @@ fn append(document: &mut String, text: &str) -> Result<Range> {
     Ok(range)
 }
 
-pub(super) fn prepare(plan_path: &Path) -> Result<Prepared> {
+fn load_plan(plan_path: &Path) -> Result<SourcePlan> {
     let plan: SourcePlan =
         serde_json::from_slice(&crate::compute::read_file(plan_path, MAX_PLAN_BYTES)?)?;
     ensure!(
-        plan.version == 1 && (2..=MAX_SOURCES).contains(&plan.sources.len()),
+        matches!(plan.version, 1 | 2) && (2..=MAX_SOURCES).contains(&plan.sources.len()),
         "compute_collection_plan"
     );
     let mut labels = BTreeSet::new();
@@ -138,18 +160,151 @@ pub(super) fn prepare(plan_path: &Path) -> Result<Prepared> {
             labels.insert(&source.label),
             "compute_collection_duplicate_label"
         );
+        match (&source.input, &source.native) {
+            (Some(input), None) => {
+                ensure!(input.is_absolute(), "compute_collection_input_absolute");
+            }
+            (None, Some(native)) if plan.version == 2 => native.validate()?,
+            _ => anyhow::bail!("compute_collection_exactly_one_source"),
+        }
+    }
+    Ok(plan)
+}
+
+pub(super) struct Acquisition<'a> {
+    pub(super) socket: &'a Path,
+    pub(super) directory: &'a Path,
+    pub(super) cache: Option<&'a Path>,
+    pub(super) reuse_cache: bool,
+    pub(super) limits: &'a crate::content::Limits,
+    pub(super) cancelled: &'a tokio::sync::watch::Receiver<bool>,
+}
+
+pub(super) async fn acquire(plan_path: &Path, context: Acquisition<'_>) -> Result<Prepared> {
+    // Validate the entire explicit selection before cache lookup or network I/O.
+    let plan = load_plan(plan_path)?;
+    let needs_network = plan.sources.iter().any(|source| source.native.is_some());
+    ensure!(
+        needs_network || context.cache.is_none(),
+        "compute_collection_unneeded_cache"
+    );
+    if needs_network {
+        let cache = context
+            .cache
+            .context("compute_collection_source_cache_required")?;
         ensure!(
-            source.input.is_absolute(),
-            "compute_collection_input_absolute"
+            cache.is_absolute()
+                && !cache.starts_with(context.directory)
+                && !context.directory.starts_with(cache),
+            "compute_collection_cache_overlap"
         );
     }
+    let mut selected = Vec::with_capacity(plan.sources.len());
+    let mut proofs = Vec::new();
+    let mut reuse_cache = context.reuse_cache;
+    let mut source_bytes = 0_usize;
+    for (source_index, source) in plan.sources.into_iter().enumerate() {
+        ensure!(
+            !*context.cancelled.borrow(),
+            "compute_collection_cancelled_before_source"
+        );
+        let text = if let Some(native) = &source.native {
+            let query = crate::content::public_text::TextSource {
+                publisher_key: super::parse_key(&native.publisher_key)
+                    .map_err(anyhow::Error::msg)?,
+                name: native.name.clone(),
+                manifest_id: hex::decode(&native.manifest_id)?
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("compute_collection_manifest_id"))?,
+                cache: context
+                    .cache
+                    .context("compute_collection_source_cache_required")?
+                    .to_path_buf(),
+                reuse_cache,
+                limits: context.limits.clone(),
+            };
+            let mut activity = context.cancelled.clone();
+            let received = tokio::select! { biased;
+                _ = activity.changed() => anyhow::bail!("compute_collection_cancelled_during_source"),
+                received = crate::content::public_text::fetch_text_source(&query, context.socket, context.directory) => received?
+            };
+            reuse_cache = true;
+            proofs.push(network::Proof {
+                source_index,
+                selection: native.clone(),
+                verified_at: received.verified_at,
+                expires: received.expires,
+                signed_manifest_hex: hex::encode(received.signed_manifest),
+                sha256: hash(received.text.as_bytes()),
+                bytes: received.text.len() as u64,
+                receipt: received.receipt,
+            });
+            received.text
+        } else {
+            local_text(
+                source
+                    .input
+                    .as_deref()
+                    .context("compute_collection_local_source")?,
+            )?
+        };
+        ensure!(
+            !text.trim().is_empty() && !text.contains('\0'),
+            "compute_collection_source_text"
+        );
+        source_bytes = source_bytes
+            .checked_add(text.len())
+            .filter(|bytes| *bytes <= MAX_DOCUMENT_BYTES)
+            .context("compute_collection_compiled_size")?;
+        selected.push((source.label, text, source.native));
+    }
+    let mut prepared = compile(plan.version, selected)?;
+    if !proofs.is_empty() {
+        prepared.network = Some(network::Proofs {
+            version: 1,
+            sources: proofs,
+        });
+    }
+    Ok(prepared)
+}
+
+fn local_text(path: &Path) -> Result<String> {
+    Ok(String::from_utf8(crate::compute::read_file(
+        path,
+        MAX_DOCUMENT_BYTES as u64,
+    )?)?)
+}
+
+#[cfg(test)]
+pub(super) fn prepare(plan_path: &Path) -> Result<Prepared> {
+    let plan = load_plan(plan_path)?;
+    let sources = plan
+        .sources
+        .into_iter()
+        .map(|source| {
+            ensure!(
+                source.native.is_none(),
+                "compute_collection_network_acquisition_required"
+            );
+            let text = local_text(
+                source
+                    .input
+                    .as_deref()
+                    .context("compute_collection_local_source")?,
+            )?;
+            Ok((source.label, text, None))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    compile(plan.version, sources)
+}
+
+fn compile(
+    version: u32,
+    selected: Vec<(String, String, Option<network::Selection>)>,
+) -> Result<Prepared> {
     let mut document = String::new();
-    let mut sources = Vec::with_capacity(plan.sources.len());
-    for (index, source) in plan.sources.into_iter().enumerate() {
-        let text = String::from_utf8(crate::compute::read_file(
-            &source.input,
-            u64::try_from(MAX_DOCUMENT_BYTES)?,
-        )?)?;
+    let mut sources = Vec::with_capacity(selected.len());
+    for (index, (label, text, native)) in selected.into_iter().enumerate() {
         ensure!(
             !text.trim().is_empty() && !text.contains('\0'),
             "compute_collection_source_text"
@@ -158,33 +313,38 @@ pub(super) fn prepare(plan_path: &Path) -> Result<Prepared> {
         let bytes = u64::try_from(text.len())?;
         let header = append(
             &mut document,
-            &header(index, &source.label, &sha256, bytes)?,
+            &header(version, index, &label, &sha256, bytes, native.as_ref())?,
         )?;
         let content = append(&mut document, &text)?;
         let separator = append(&mut document, &separator(index))?;
         sources.push(Source {
-            label: source.label,
+            label,
             sha256,
             bytes,
             header,
             content,
             separator,
+            native,
         });
     }
     let ledger = Ledger {
-        version: 1,
+        version,
         document_sha256: hash(document.as_bytes()),
         document_bytes: u64::try_from(document.len())?,
         sources,
     };
     ledger.validate(&document)?;
-    Ok(Prepared { document, ledger })
+    Ok(Prepared {
+        document,
+        ledger,
+        network: None,
+    })
 }
 
 impl Ledger {
     fn validate_layout(&self) -> Result<()> {
         ensure!(
-            self.version == 1
+            matches!(self.version, 1 | 2)
                 && (2..=MAX_SOURCES).contains(&self.sources.len())
                 && self.document_bytes <= u64::try_from(MAX_DOCUMENT_BYTES)?
                 && digest(&self.document_sha256),
@@ -194,6 +354,10 @@ impl Ledger {
         let mut next = 0_u64;
         for (index, source) in self.sources.iter().enumerate() {
             label(&source.label)?;
+            if let Some(native) = &source.native {
+                ensure!(self.version == 2, "compute_collection_native_version");
+                native.validate()?;
+            }
             ensure!(
                 labels.insert(&source.label),
                 "compute_collection_duplicate_label"
@@ -202,7 +366,14 @@ impl Ledger {
                 digest(&source.sha256) && source.bytes > 0,
                 "compute_collection_source_identity"
             );
-            let expected_header = header(index, &source.label, &source.sha256, source.bytes)?;
+            let expected_header = header(
+                self.version,
+                index,
+                &source.label,
+                &source.sha256,
+                source.bytes,
+                source.native.as_ref(),
+            )?;
             for (range, bytes) in [
                 (&source.header, u64::try_from(expected_header.len())?),
                 (&source.content, source.bytes),
@@ -235,7 +406,14 @@ impl Ledger {
         for (index, source) in self.sources.iter().enumerate() {
             ensure!(
                 source.header.slice(document)?
-                    == header(index, &source.label, &source.sha256, source.bytes)?
+                    == header(
+                        self.version,
+                        index,
+                        &source.label,
+                        &source.sha256,
+                        source.bytes,
+                        source.native.as_ref()
+                    )?
                     && source.separator.slice(document)? == separator(index),
                 "compute_collection_embedded_metadata"
             );

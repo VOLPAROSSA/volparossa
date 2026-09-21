@@ -36,6 +36,9 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario agent-jobs-ready-queue | grep -Fi 'queue' >/dev/null
     "$script" --preview --scenario agent-jobs-package-queue | grep -Fi 'package' >/dev/null
     "$script" --preview --scenario agent-public-collection | grep -Fi 'collection' >/dev/null
+    "$script" --preview --scenario agent-public-network-sources | grep -Ei 'network.sources' >/dev/null
+    if "$script" --preview --scenario agent-public-network-sources --scenario agent-public-collection \
+        | grep -Ei 'network.sources' >/dev/null; then exit 1; fi
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -58,6 +61,13 @@ grep -F '[ "$scenario" != agent-public-collection ] || driver_time_bound=3600s' 
 grep -F 'root.glob("agent-public-collection-*")' "$HOST" >/dev/null
 grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-public-collection'" "$WORKFLOW" >/dev/null
 grep -F 'python3 -B tests/integration/agent-public-collection-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
+grep -F 'agent-public-network-sources) scenario=agent-jobs; agent_public_collection=yes; agent_public_network_sources=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-public-network-sources ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'if scenario in ("agent-public-collection", "agent-public-network-sources"):' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-public-network-sources'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-public-collection-smoke.py report "$report" "$GITHUB_SHA" --network' "$WORKFLOW" >/dev/null
+grep -F 'command -v openssl >/dev/null 2>&1 || exit 69' "$GUEST" >/dev/null
+grep -F 'install -o root -g root -m 0555 "$source_directory/tests/integration/agent-train-loop-catalog.py" "$WORK/bin/agent-train-loop-catalog.py"' "$GUEST" >/dev/null
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \

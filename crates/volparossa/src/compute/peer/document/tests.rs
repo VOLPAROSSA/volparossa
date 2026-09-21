@@ -99,6 +99,8 @@ fn resume_retains_inputs_and_lease_and_batch_budgets_stay_separate() {
     for field in [
         "--input",
         "--source-plan",
+        "--source-cache",
+        "--reuse-source-cache",
         "--public-question",
         "--license",
         "--synthesize",
@@ -168,10 +170,47 @@ async fn collection_preview_never_reads_sources_and_cannot_mix_or_reselect_input
         .await
         .unwrap();
     assert!(!directory.exists());
+    let mut native = args.to_vec();
+    native.extend([
+        "--source-cache",
+        "/missing/agent-cache",
+        "--reuse-source-cache",
+    ]);
+    let native = Command::try_parse_from(native).unwrap().options;
+    run(&native, &root.path().join("missing.sock"))
+        .await
+        .unwrap();
+    assert!(!directory.exists());
     let mut mixed = args.to_vec();
     mixed.extend(["--input", "/missing/other.txt"]);
     assert!(Command::try_parse_from(mixed).is_err());
     let mut resumed = args.to_vec();
     resumed.push("--resume");
     assert!(Command::try_parse_from(resumed).is_err());
+}
+
+#[test]
+fn native_source_deadlines_cap_new_compilations_without_renewing_authority() {
+    let proofs = |expires| collection::network::Proofs {
+        version: 1,
+        sources: vec![collection::network::Proof {
+            source_index: 0,
+            selection: collection::network::Selection {
+                publisher_key: String::new(),
+                name: String::new(),
+                manifest_id: String::new(),
+            },
+            verified_at: 90,
+            expires,
+            signed_manifest_hex: String::new(),
+            sha256: String::new(),
+            bytes: 0,
+            receipt: Value::Null,
+        }],
+    }; // Arithmetic only; not a signature, receipt or model-execution fixture.
+    assert_eq!(source_lifetime(600, 100, None).unwrap(), 600);
+    assert_eq!(source_lifetime(600, 100, Some(&proofs(150))).unwrap(), 50);
+    assert_eq!(source_lifetime(20, 100, Some(&proofs(150))).unwrap(), 20);
+    assert!(source_lifetime(600, 100, Some(&proofs(100))).is_err());
+    assert!(source_lifetime(600, 100, Some(&proofs(99))).is_err());
 }

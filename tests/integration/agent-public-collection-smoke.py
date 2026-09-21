@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Real public source compilation, singleton peer execution and source-byte provenance."""
 import copy
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,9 @@ import re
 import runpy
 import stat
 import sys
+import tempfile
 import time
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 DOC = runpy.run_path(str(HERE / "agent-public-document-smoke.py"))
@@ -31,6 +34,9 @@ SCOPE = ("three explicit public repository excerpts, an owner-signed compilation
     "synthesis levels over protected paths; completed resume needs no original files, brokers or route and "
     "retains exact receipts. Not authentication by original source publishers, semantic citations, answer "
     "correctness, private computation, automatic source discovery, full B03 or full alpha.")
+NETWORK_SCOPE = SCOPE + (" Additionally one local and two independently selected native publications: "
+    "one actual preferred-cache hit and one protected missing-source download; exact original signatures, "
+    "native identities and unextended expiry retained. Publisher signatures do not authenticate original authors.")
 
 
 def root_path(work):
@@ -45,7 +51,7 @@ def source_input(work, index):
     return work / f"state-client/compute-source/collection-input-{index}.txt"
 
 
-def prepare(work):
+def prepare(work, network=False):
     require(JOBS["TRAIN"]["socket"].gethostname() == "volparossa-alpha"
         and JOBS["subprocess"].check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
         and os.geteuid() != 0 and work.parent == Path("/opt") and work.name.startswith("va.")
@@ -70,7 +76,8 @@ def prepare(work):
         inputs.append(dict(label=label,original_repository_sha256=sha(raw),excerpt_hex=selected.hex(),
             excerpt_sha256=sha(selected),excerpt_bytes=len(selected),input_inode=[item.st_dev,item.st_ino]))
         plan.append(dict(label=label,input=str(target)))
-    write(source / "collection-source-plan.json",dict(version=1,sources=plan))
+    if not network:
+        write(source / "collection-source-plan.json",dict(version=1,sources=plan))
     owner_model = source / "collection-model/model.safetensors"
     peer_model = work / "agent-jobs-user/provision/model/model.safetensors"
     own,peer = owner_model.stat(),peer_model.stat()
@@ -81,7 +88,95 @@ def prepare(work):
                          peer_model_inode=[peer.st_dev,peer.st_ino],private_copies_no_hardlinks=True)))
 
 
-def enrolled(work):
+def verify_signature(body, signature, publisher, domain):
+    # Public-key-only verifier using the existing native signing domain; no private key,
+    # model execution or third-party Python cryptography package is involved.
+    with tempfile.TemporaryDirectory(prefix="volparossa-public-signature-") as name:
+        directory=Path(name)
+        (directory/"key.der").write_bytes(bytes.fromhex("302a300506032b6570032100")+publisher)
+        (directory/"message.bin").write_bytes(domain+body)
+        (directory/"signature.bin").write_bytes(signature)
+        verified=JOBS["subprocess"].run(["openssl","pkeyutl","-verify","-pubin","-keyform","DER",
+            "-inkey",str(directory/"key.der"),"-rawin","-in",str(directory/"message.bin"),
+            "-sigfile",str(directory/"signature.bin")],capture_output=True,timeout=5,check=False)
+        require(verified.returncode==0,"original Ed25519 signature failed")
+
+
+def native_manifest(manifest, text, selection):
+    """Independently inspect canonical bytes and verify the original Ed25519 signature."""
+    fields=CUSTODY["fields"]
+    envelope=fields(manifest,65536);body=fields(envelope[1],65536);payload=fields(body[8],65536)
+    require(set(envelope)=={1,2} and len(envelope[2])==64 and set(body)==set(range(1,9))
+        and body[1]==body[6]==1 and body[2].hex()==selection["publisher_key"]
+        and len(body[2])==len(body[5])==32 and 0<body[3]<body[4]
+        and body[4]-body[3]==7200 and body[7].hex()==sha(body[8])
+        and sha(manifest)==selection["manifest_id"],"original native manifest identity/expiry differs")
+    require(set(payload)==set(range(1,7)) and payload[1].decode()==selection["name"]
+        and payload[2]==1 and payload[3]==b"text/plain" and payload[4]==len(text)
+        and payload[6].hex()==sha(text),"signed original public text differs")
+    require(fields(payload[5],128)=={1:bytes.fromhex(sha(text)),2:len(text)},"native chunk differs")
+    verify_signature(envelope[1],envelope[2],body[2],b"VOLPAROSSA/native-content-manifest/v1\0")
+    return dict(created=body[3],expires=body[4],sha256=sha(text),bytes=len(text))
+
+
+def network_plan(work):
+    JOBS["guest_work"](work)
+    source=work/"state-client/compute-source";owner=source.stat()
+    inputs=read(record(work,"input"))
+    selected=[dict(label=LABELS[0],input=str(source_input(work,0)))];publications=[]
+    for index in (1,2):
+        published=read(record(work,f"network-publish-{index}"))
+        path=source/f"collection-native-{index}.pb";info=path.lstat();manifest=path.read_bytes()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==owner.st_uid!=0 and info.st_nlink==1
+            and stat.S_IMODE(info.st_mode)==0o600 and 0<info.st_size<=65536,"native source manifest ownership differs")
+        selection=dict(publisher_key=published["publisher_key_hex"],name=f"disposable-collection-source-{index}",manifest_id=sha(manifest))
+        text=bytes.fromhex(inputs["inputs"][index]["excerpt_hex"])
+        authority=native_manifest(manifest,text,selection)
+        require(selection["publisher_key"]!=read(work/"agent-jobs-publish.json")["publisher_key_hex"]
+            and published["name"]==selection["name"] and published["manifest_id"]==selection["manifest_id"]
+            and published["expires_unix_seconds"]==authority["expires"],"native and compilation publisher were conflated")
+        selected.append(dict(label=LABELS[index],native=selection))
+        publications.append(dict(source_index=index,selection=selection,manifest_hex=manifest.hex(),**authority))
+    require(publications[0]["selection"]["publisher_key"]==publications[1]["selection"]["publisher_key"]
+        and publications[0]["sha256"]!=publications[1]["sha256"],"native source identity/content collapsed")
+    plan=dict(version=2,sources=selected)
+    path=source/"collection-source-plan.json"
+    write(path,plan)
+    os.chown(path,owner.st_uid,owner.st_gid)
+    write(record(work,"network-plan"),dict(source_plan=plan,publications=publications,plan_sha256=sha(path.read_bytes())))
+
+
+def cache_before(work):
+    JOBS["guest_work"](work)
+    catalog=runpy.run_path(str(HERE/"agent-train-loop-catalog.py"))
+    path=work/"state-client/compute-source/collection-source-cache"
+    metadata=path.lstat();source=path.parent.stat()
+    require(stat.S_ISDIR(metadata.st_mode) and not path.is_symlink() and metadata.st_uid==source.st_uid!=0
+        and stat.S_IMODE(metadata.st_mode)==0o700,"wrong native consumer cache")
+    publications=read(record(work,"network-plan"))["publications"]
+    hit,miss=(p["sha256"] for p in publications)
+    for name,maximum in ((".volparossa-owner-v1",60),(".volparossa-index-v1",catalog["MAX_INDEX"])):
+        info=(path/name).lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==metadata.st_uid
+            and stat.S_IMODE(info.st_mode)==0o600 and 0<info.st_size<=maximum,"unsafe bounded native cache metadata")
+    with (path/".volparossa-owner-v1").open("rb") as owner:
+        fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        owner_bytes=owner.read(61);index=(path/".volparossa-index-v1").read_bytes()
+        count=catalog["index_absent"](owner_bytes,index,metadata,miss)
+        hit_path=path/hit;hit_info=hit_path.lstat()
+        require(count==1 and stat.S_ISREG(hit_info.st_mode) and hit_info.st_uid==metadata.st_uid
+            and hit_info.st_nlink==1 and stat.S_IMODE(hit_info.st_mode)==0o600
+            and JOBS["file_hash"](hit_path,768)==dict(bytes=publications[0]["bytes"],sha256=hit)
+            and not (path/miss).exists() and not (path/miss).is_symlink()
+            and not (path/".volparossa-index-next-v1").exists()
+            and not (path/".volparossa-chunk-next-v1").exists(),"native warm/cold split absent")
+        require(index[44:76].hex()==hit,"only warmed source must be indexed")
+        write(record(work,"network-cache-before"),dict(cache=dict(device=metadata.st_dev,inode=metadata.st_ino,uid=metadata.st_uid),
+            owner_hex=owner_bytes.hex(),index_hex=index.hex(),hit_sha256=hit,miss_sha256=miss,
+            hit_present=True,miss_absent=True,lock_acquired=True,observed_unix_seconds=int(time.time())))
+
+
+def enrolled(work, network=False):
     JOBS["guest_work"](work)
     root = root_path(work)
     enrollment = read(root / "document.json")
@@ -92,6 +187,8 @@ def enrolled(work):
         and not (root / "synthesis").exists()
         and all(not (root / f"package-{n:04d}/work").exists() for n in range(len(enrollment["packages"]))),
         "collection enrollment lacks multiple ready packages or already started jobs")
+    require(read(root/"collection.json")["version"]==(2 if network else 1)
+        and (root/"native-source-proofs.json").exists() is network,"enrollment changed local/native mode")
     write(record(work,"enrolled"),dict(snapshot=DOC["snapshot"](root),no_peer_work=True,owner_returned=True))
 
 
@@ -148,7 +245,7 @@ def collect(work):
     write(record(work,"files"),dict(snapshot=snapshot,raw=raw))
 
 
-def remove_inputs(work):
+def remove_inputs(work, network=False):
     JOBS["guest_work"](work)
     inputs = read(record(work,"input"))["inputs"]
     source = work / "state-client/compute-source"
@@ -162,16 +259,22 @@ def remove_inputs(work):
         targets.append(path)
     plan = source / "collection-source-plan.json"
     info=plan.lstat()
+    expected_plan=read(record(work,"network-plan"))["source_plan"] if network else dict(version=1,sources=read(record(work,"input"))["source_plan"])
     require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
-        and read(plan) == dict(version=1,sources=read(record(work,"input"))["source_plan"]),"source plan changed")
+        and read(plan) == expected_plan,"source plan changed")
     targets.append(plan)
-    print("Disposable guest only: remove these four explicitly owned fixture inputs before completed resume: "+", ".join(map(str,targets)),flush=True)
+    if network:
+        warmed=source/"collection-warmed-1.txt";info=warmed.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==uid and info.st_nlink==1
+            and stat.S_IMODE(info.st_mode)==0o600 and warmed.read_bytes().hex()==inputs[1]["excerpt_hex"],"warmup output changed")
+        targets.append(warmed)
+    print("Disposable guest only: remove these explicitly owned fixture inputs before completed resume: "+", ".join(map(str,targets)),flush=True)
     for path in targets: path.unlink()
     write(record(work,"inputs-removed"),dict(original_inputs_absent=True,source_plan_absent=True,
         removed=[str(p.relative_to(work)) for p in targets],signed_compilation_retained=(root_path(work)/"source.txt").is_file()))
 
 
-def stopped(work, resumed=False):
+def stopped(work, resumed=False, network=False):
     JOBS["guest_work"](work)
     original=read(work / "agent-jobs-observation.json")["workers"]
     observed=read(record(work,"observation"))["workers"]
@@ -179,6 +282,7 @@ def stopped(work, resumed=False):
             "observed collection process remains")
     require(all(not source_input(work,i).exists() for i in range(3))
         and not (work/"state-client/compute-source/collection-source-plan.json").exists(),"resume used original inputs")
+    if network:require(not (work/"state-client/compute-source/collection-warmed-1.txt").exists(),"resume used warmed original file")
     value=dict(all_owned_processes_ended=True,original_inputs_absent=True,source_plan_absent=True)
     if resumed:
         value["snapshot"]=DOC["snapshot"](root_path(work))
@@ -186,7 +290,9 @@ def stopped(work, resumed=False):
     write(record(work,"resumed" if resumed else "stopped"),value)
 
 
-def compile_expected(inputs):
+def compile_expected(inputs, native=None):
+    native=native or {}
+    version=2 if native else 1
     raw=b"";sources=[]
     def append(part):
         nonlocal raw
@@ -194,11 +300,14 @@ def compile_expected(inputs):
         return dict(start=start,end=len(raw))
     for index,item in enumerate(inputs):
         content=bytes.fromhex(item["excerpt_hex"])
-        marker="VOLPAROSSA owner-published public source collection v1\n" if index==0 else ""
-        header=f"{marker}\n--- VOLPAROSSA source {index+1} ---\nlabel: {json.dumps(item['label'],ensure_ascii=False)}\nsha256: {sha(content)}\nbytes: {len(content)}\n\n"
-        sources.append(dict(label=item["label"],sha256=sha(content),bytes=len(content),header=append(header.encode()),
-            content=append(content),separator=append(f"\n--- END VOLPAROSSA source {index+1} ---\n".encode())))
-    return raw,dict(version=1,document_sha256=sha(raw),document_bytes=len(raw),sources=sources)
+        marker=f"VOLPAROSSA owner-published public source collection v{version}\n" if index==0 else ""
+        identity="native: "+encoded(native[index]).decode()+"\n" if index in native else ""
+        header=f"{marker}\n--- VOLPAROSSA source {index+1} ---\nlabel: {json.dumps(item['label'],ensure_ascii=False)}\nsha256: {sha(content)}\nbytes: {len(content)}\n{identity}\n"
+        source=dict(label=item["label"],sha256=sha(content),bytes=len(content),header=append(header.encode()),
+            content=append(content),separator=append(f"\n--- END VOLPAROSSA source {index+1} ---\n".encode()))
+        if index in native:source["native"]=native[index]
+        sources.append(source)
+    return raw,dict(version=version,document_sha256=sha(raw),document_bytes=len(raw),sources=sources)
 
 
 def provenance(ledger,start,end):
@@ -307,23 +416,132 @@ def check_package(raw,prefix,data,manifest_id,enrollment,layout,executed,respons
     return answers
 
 
-def check_collection_binding(value,raw,enrollment):
+def check_collection_binding(value,raw,enrollment,network=False):
     inputs=value["input"]["inputs"]
     require(len(inputs)==3 and [i["label"] for i in inputs]==list(LABELS)
         and all(764<=i["excerpt_bytes"]<=768 and i["excerpt_bytes"]==len(bytes.fromhex(i["excerpt_hex"]))
             and i["excerpt_sha256"]==sha(bytes.fromhex(i["excerpt_hex"])) for i in inputs),"original public source excerpts changed")
-    source,ledger=compile_expected(inputs)
+    require(("network" in value) is network,"wrong requested local/native fixture variant")
+    native={}
+    if network:
+        plan=value["network"]["plan"]["source_plan"]
+        require(plan["version"]==2 and len(plan["sources"])==3
+            and value["network"]["plan"]["plan_sha256"]==sha((json.dumps(plan,indent=2,allow_nan=False)+"\n").encode())
+            and plan["sources"][0]==value["input"]["source_plan"][0]
+            and all(set(plan["sources"][i])=={"label","native"} and plan["sources"][i]["label"]==LABELS[i] for i in (1,2)),
+            "native collection changed explicitly selected plan")
+        native={i:plan["sources"][i]["native"] for i in (1,2)}
+    source,ledger=compile_expected(inputs,native)
     require(raw["source.txt"]==source and json.loads(raw["collection.json"])==ledger
         and raw["collection.json"]==encoded(ledger) and enrollment["collection_sha256"]==sha(encoded(ledger)),
         "signed compilation and exact ledger disagree")
     expected=dict(ledger=ledger,ledger_sha256=sha(encoded(ledger)),publication_scope="owner_authorized_public_compilation",
         original_publishers_authenticated=False,common_license="GPL-3.0-only",source_files_needed_for_resume=False,semantic_citations_proven=False)
+    if network:
+        proofs=json.loads(raw["native-source-proofs.json"])
+        require(raw["native-source-proofs.json"]==encoded(proofs)
+            and enrollment["native_source_proofs_sha256"]==sha(raw["native-source-proofs.json"]),"original native proof pin changed")
+        expected.update(native_publications=proofs,publication_signatures_verified=True,source_selection_uses_cache_inventory=False,
+            source_proofs_sha256=enrollment["native_source_proofs_sha256"],compilation_expires_unix_seconds=enrollment["expires_at_unix_seconds"])
+    else:
+        require("native-source-proofs.json" not in raw and enrollment.get("native_source_proofs_sha256") is None,
+            "legacy collection unexpectedly contains native-source claims")
     require(value["result"]["source_collection"]==expected and value["resume"]["source_collection"]==expected,
             "collection source identity/authorization scope changed")
     return source,ledger
 
 
-def check(value,revision):
+def check_named_receipt(receipt, selection, authority, peers, layout, provider, hit=False):
+    require(receipt["operation"]=="named_content_download" and receipt["publisher_key"]==selection["publisher_key"]
+        and receipt["name"]==selection["name"] and receipt["revision"]==1 and receipt["manifest_id"]==selection["manifest_id"]
+        and receipt["publication_expires_unix_seconds"]==authority["expires"] and receipt["sha256"]==authority["sha256"]
+        and receipt["bytes"]==authority["bytes"] and receipt["chunks"]==1
+        and receipt["local_delivery"] is True and receipt["output_mode"]=="0600" and receipt["cache_only"] is False
+        and all(receipt[k] is False for k in ("ownership_changed","origin_authenticated","globally_latest"))
+        and receipt["origin_body_bytes"]==receipt["origin_range_requests"]==0,"native same-operation receipt changed source/scope")
+    if hit:
+        require(receipt["peer_bytes"]==receipt["providers_used"]==0 and receipt["provider_peer_ids"]==[]
+            and receipt["control_relay_peer_id"]=="","preferred cache hit performed network retrieval")
+    else:
+        require(receipt["peer_bytes"]==authority["bytes"] and receipt["providers_used"]==1
+            and receipt["provider_peer_ids"]==[peers[provider]]
+            and receipt["control_relay_peer_id"]==layout["control_relay_peer_id"],"selected missing public source not fetched from protected provider")
+
+
+def check_native_deposit(receipt, selection, authority, provider_key):
+    require(receipt["operation"]=="content_custody_deposit" and receipt["manifest_id"]==selection["manifest_id"]
+        and receipt["publisher_key_hex"]==selection["publisher_key"] and receipt["object_bytes"]==authority["bytes"]
+        and receipt["original_expiry_unix_seconds"]==authority["expires"] and receipt["requested_providers"]==1
+        and receipt["failed_providers"]==0 and receipt["confirmed_complete_providers"]==1 and receipt["complete"] is True
+        and len(receipt["observations"])==1 and all(receipt[k] is False for k in
+            ("private_keys_transferred","direct_provider_dial","origin_authenticated","future_availability_guaranteed")),
+        "native custody deposit did not complete exactly one real provider")
+    observed=receipt["observations"][0]
+    require(observed["provider_key_hex"]==provider_key and observed["agent_handoff_complete"] is True
+        and observed["error"] is None and observed["state"]=="complete" and observed["unique_chunks"]==1
+        and observed["object_bytes"]==authority["bytes"] and observed["original_expiry_unix_seconds"]==authority["expires"],
+        "native custody observation unbound")
+    fields=CUSTODY["fields"];envelope=fields(bytes.fromhex(observed["signed_receipt_hex"]),2048)
+    body=fields(envelope[1],2048);payload=fields(body[8],1024)
+    require(set(envelope)=={1,2} and len(envelope[2])==64 and set(body)==set(range(1,9))
+        and body[1]==1 and body[6]==3 and body[2].hex()==provider_key and len(body[5])==32
+        and 0<body[4]-body[3]<=900 and body[4]<=authority["expires"] and body[7].hex()==sha(body[8])
+        and set(payload)==set(range(1,12))-{5} and payload[6]==2
+        and all(len(payload[k])==32 for k in (1,2,3,4,7,8))
+        and payload[3]==body[2] and payload[4].hex()==selection["publisher_key"]
+        and payload[7].hex()==selection["manifest_id"] and payload[8].hex()==authority["sha256"]
+        and payload[9]==authority["bytes"] and payload[10]==1 and payload[11]==authority["expires"],"original signed custody receipt differs")
+    verify_signature(envelope[1],envelope[2],body[2],b"VOLPAROSSA/public-custody/v1\0")
+
+
+def check_native_sources(value,raw,enrollment):
+    network=value["network"];layout=value["layout"];peers=value["peers"]
+    inputs=value["input"]["inputs"];selected=network["plan"]["source_plan"]["sources"]
+    originals=network["plan"]["publications"];proofs=json.loads(raw["native-source-proofs.json"])
+    require(proofs["version"]==1 and [p["source_index"] for p in proofs["sources"]]==[1,2]
+        and len(originals)==len(network["publications"])==len(network["deposits"])==2,
+        "missing/duplicated native original publication proofs")
+    catalog=runpy.run_path(str(HERE/"agent-train-loop-catalog.py"))
+    before=network["cache_before"];cache=before["cache"]
+    index=bytes.fromhex(before["index_hex"]);owner=bytes.fromhex(before["owner_hex"])
+    hit,miss=(inputs[i]["excerpt_sha256"] for i in (1,2))
+    require(before["hit_sha256"]==hit and before["miss_sha256"]==miss and hit!=miss
+        and before["hit_present"] is before["miss_absent"] is before["lock_acquired"] is True
+        and cache["uid"]>0 and catalog["index_absent"](owner,index,SimpleNamespace(st_dev=cache["device"],st_ino=cache["inode"],st_uid=cache["uid"]),miss)==1
+        and index[44:76].hex()==hit and int.from_bytes(index[76:80],"little")==inputs[1]["excerpt_bytes"],
+        "original consumer cache did not contain exactly selected source1 and exclude source2")
+    response_bytes=dict.fromkeys(layout["provider_nodes"],0)
+    for offset,source_index in enumerate((1,2)):
+        selection=selected[source_index]["native"];original=originals[offset];proof=proofs["sources"][offset]
+        require(set(selection)=={"publisher_key","name","manifest_id"} and selection["name"]==f"disposable-collection-source-{source_index}"
+            and selection["publisher_key"]!=enrollment["publisher_key"] and selection==original["selection"]==proof["selection"]
+            and original["source_index"]==proof["source_index"]==source_index
+            and original["manifest_hex"]==proof["signed_manifest_hex"],"independently selected original source changed")
+        text=bytes.fromhex(inputs[source_index]["excerpt_hex"])
+        authority=native_manifest(bytes.fromhex(original["manifest_hex"]),text,selection)
+        require(all(original[k]==authority[k] for k in authority) and proof["expires"]==authority["expires"]
+            and proof["bytes"]==authority["bytes"] and proof["sha256"]==authority["sha256"]
+            and authority["created"]<=before["observed_unix_seconds"]<=proof["verified_at"]<=enrollment["selected_at_unix_seconds"]
+            and enrollment["selected_at_unix_seconds"]<enrollment["expires_at_unix_seconds"]<=proof["expires"],"source authority was renewed or original bytes changed")
+        publication=network["publications"][offset]
+        require(publication["operation"]=="offline_content_publish" and publication["network_publication"] is False
+            and publication["publisher_key_hex"]==selection["publisher_key"] and publication["manifest_id"]==selection["manifest_id"]
+            and publication["name"]==selection["name"] and publication["revision"]==1 and publication["content_type"]=="text/plain"
+            and publication["bytes"]==len(text) and publication["chunks"]==1 and publication["expires_unix_seconds"]==authority["expires"],
+            "native original publication mismatch")
+        provider=layout["provider_nodes"][offset]
+        check_native_deposit(network["deposits"][offset],selection,authority,layout["provider_keys"][provider])
+        check_named_receipt(proof["receipt"],selection,authority,peers,layout,provider,hit=source_index==1)
+        if source_index==1:
+            check_named_receipt(network["warm"],selection,authority,peers,layout,provider)
+        response_bytes[provider]+=len(text)
+    require(originals[0]["selection"]["publisher_key"]==originals[1]["selection"]["publisher_key"],"native fixture publisher changed")
+    removed=value["inputs-removed"]["removed"]
+    require("state-client/compute-source/collection-warmed-1.txt" in removed,"warmup original was not removed before offline resume")
+    return response_bytes
+
+
+def check(value,revision,network=False):
     require(value["source_revision"]==revision,"wrong collection source snapshot")
     provision=value["provision"]
     require(provision["success"] is True and provision["installed_wheels"]==38
@@ -334,7 +552,7 @@ def check(value,revision):
         require(files["snapshot"][name]["bytes"]==len(data) and files["snapshot"][name]["sha256"]==sha(data),"retained file changed")
     load=lambda name:json.loads(raw[name])
     enrollment=load("document.json")
-    source,ledger=check_collection_binding(value,raw,enrollment)
+    source,ledger=check_collection_binding(value,raw,enrollment,network)
     plan=check_planner(raw,"",source)
     require(enrollment["version"]==1 and enrollment["scheduling"]=="ready_rows_v1" and enrollment["synthesize"] is True
         and enrollment["source_sha256"]==sha(source) and enrollment["source_bytes"]==len(source)
@@ -358,6 +576,8 @@ def check(value,revision):
         and all(w["input_inodes"]["model/model.safetensors"]==value["input"]["peer_model_inode"] for w in workers.values()),
         "actual worker/provider/model-copy lineage differs")
     executed,response_bytes,answers,parents={},dict.fromkeys(workers,0),[],[]
+    if network:
+        for node,size in check_native_sources(value,raw,enrollment).items():response_bytes[node]+=size
     for index,package in enumerate(enrollment["packages"]):
         prefix=f"package-{index:04d}"
         ranges=plan["parts"][index*4:index*4+4]
@@ -451,7 +671,7 @@ def check(value,revision):
         and all(value["cleanup"].values()),"protected complete reports/cleanup missing")
 
 
-def evidence(work,revision):
+def evidence(work,revision,network=False):
     JOBS["guest_work"](work)
     value={name:read(record(work,name),64*1048576) for name in
         ("input","enrollment","enrolled","observation","files","result","resume","inputs-removed","stopped","resumed")}
@@ -461,29 +681,33 @@ def evidence(work,revision):
         path=dict(selected_route=read(work/"content-custody-fetch-live-selection.json"),
         privacy={r:read(work/f"content-custody-fetch-privacy-{r}.json") for r in CUSTODY["ROLES"]},
         control_privacy=read(work/"content-provider-custody-fetch-control.json"),gates=read(work/"content-custody-fetch-gates.json")))
-    check(value,revision);write(record(work,"evidence"),value)
+    if network:
+        value["network"]=dict(plan=read(record(work,"network-plan")),cache_before=read(record(work,"network-cache-before")),
+            warm=read(record(work,"network-warm")),publications=[read(record(work,f"network-publish-{i}")) for i in (1,2)],
+            deposits=[read(record(work,f"network-deposit-{i}")) for i in (1,2)])
+    check(value,revision,network);write(record(work,"evidence"),value)
 
 
-def finalize(work,revision,status,complete,remaining,phase,blocker):
+def finalize(work,revision,status,complete,remaining,phase,blocker,network=False):
     path=record(work,"evidence");value=read(path,64*1048576) if path.is_file() else None
     host=read(work/"a15-evidence.json") if (work/"a15-evidence.json").is_file() else {}
-    write(record(work,"smoke"),dict(report_kind=KIND,source_revision=revision,scope=SCOPE,
+    write(record(work,"smoke"),dict(report_kind=KIND,source_revision=revision,scope=NETWORK_SCOPE if network else SCOPE,
         success=status==0 and complete and remaining==0 and value is not None,runner_exit_status=status,phase=phase,
         observed_blocker=None if blocker=="NONE" else blocker,evidence=value,cleanup=dict(complete=complete,remaining_owned_objects=remaining),host_state=host,
         original_publishers_authenticated=False,semantic_citations_proven=False,full_b03_claimed=False,full_alpha_claimed=False))
 
 
-def report(value,revision):
-    require(value["report_kind"]==KIND and value["source_revision"]==revision and value["scope"]==SCOPE
+def report(value,revision,network=False):
+    require(value["report_kind"]==KIND and value["source_revision"]==revision and value["scope"]==(NETWORK_SCOPE if network else SCOPE)
         and value["success"] is True and value["runner_exit_status"]==0 and value["observed_blocker"] is None
         and value["cleanup"]==dict(complete=True,remaining_owned_objects=0) and value["host_state"]["unchanged"] is True
         and value["host_state"]["before_sha256"]==value["host_state"]["after_sha256"]
         and all(value[k] is False for k in ("original_publishers_authenticated","semantic_citations_proven","full_b03_claimed","full_alpha_claimed")),
         "collection/cleanup/host proof incomplete")
-    check(value["evidence"],revision)
+    check(value["evidence"],revision,network)
 
 
-def self_test():
+def self_test(network=False):
     # Pure schema/byte-map controls only, never invented execution evidence.
     fragment=("Public protocol fixture. "*40).encode()[:768]
     inputs=[dict(label=label,excerpt_hex=fragment.hex(),excerpt_sha256=sha(fragment),excerpt_bytes=len(fragment)) for label in LABELS]
@@ -512,22 +736,70 @@ def self_test():
         try:check_collection_binding(item,data,selection)
         except (ValueError,KeyError):pass
         else:raise AssertionError("changed collection accepted")
+    if network:
+        selections={i:dict(publisher_key="ab"*32,name=f"source-{i}",manifest_id=str(i)*64) for i in (1,2)}
+        native, native_ledger=compile_expected(inputs,selections)
+        assert native_ledger["version"]==2 and native!=source and "native" not in native_ledger["sources"][0]
+        assert [native_ledger["sources"][i]["native"] for i in (1,2)]==list(selections.values())
+        assert all(b"native: "+encoded(selection)+b"\n" in native for selection in selections.values())
+        for field,replacement in (("publisher_key","cd"*32),("name","other"),("manifest_id","ff"*32)):
+            changed=copy.deepcopy(selections);changed[1][field]=replacement
+            changed_source,changed_ledger=compile_expected(inputs,changed)
+            assert sha(changed_source)!=sha(native) and encoded(changed_ledger)!=encoded(native_ledger)
+        try:check_collection_binding(value,raw,enrollment,True)
+        except ValueError:pass
+        else:raise AssertionError("network verifier accepted local-only evidence")
+        selected=selections[1];authority=dict(expires=900,sha256="ef"*32,bytes=768)
+        peers=dict(a="firstPeer",b="secondPeer");layout=dict(control_relay_peer_id="controlPeer")
+        receipt=dict(operation="named_content_download",publisher_key=selected["publisher_key"],name=selected["name"],
+            revision=1,manifest_id=selected["manifest_id"],publication_expires_unix_seconds=900,sha256=authority["sha256"],
+            bytes=768,chunks=1,local_delivery=True,output_mode="0600",cache_only=False,ownership_changed=False,
+            origin_authenticated=False,globally_latest=False,origin_body_bytes=0,origin_range_requests=0,
+            peer_bytes=768,providers_used=1,provider_peer_ids=[peers["a"]],control_relay_peer_id=layout["control_relay_peer_id"])
+        check_named_receipt(receipt,selected,authority,peers,layout,"a")
+        cached=dict(receipt,peer_bytes=0,providers_used=0,provider_peer_ids=[],control_relay_peer_id="")
+        check_named_receipt(cached,selected,authority,peers,layout,"a",True)
+        for item,is_hit in ((receipt,True),(cached,False),(dict(receipt,origin_authenticated=True),False),
+                            (dict(receipt,publication_expires_unix_seconds=901),False),
+                            (dict(receipt,manifest_id="ff"*32),False),(dict(receipt,provider_peer_ids=[peers["b"]]),False)):
+            try:check_named_receipt(item,selected,authority,peers,layout,"a",is_hit)
+            except ValueError:pass
+            else:raise AssertionError("wrong cache/miss/source receipt accepted")
+        # Inert crypto API control, not a fabricated worker/network execution report.
+        with tempfile.TemporaryDirectory(prefix="volparossa-fixture-signature-") as name:
+            directory=Path(name);key=directory/"key.pem";public=directory/"public.der";message=directory/"message";signature=directory/"signature"
+            domain=b"VOLPAROSSA/native-content-manifest/v1\0";body=b"inert verifier API control"
+            message.write_bytes(domain+body)
+            for command in (["openssl","genpkey","-algorithm","ED25519","-out",str(key)],
+                ["openssl","pkey","-in",str(key),"-pubout","-outform","DER","-out",str(public)],
+                ["openssl","pkeyutl","-sign","-inkey",str(key),"-rawin","-in",str(message),"-out",str(signature)]):
+                JOBS["subprocess"].run(command,check=True,capture_output=True,timeout=5)
+            raw_key=public.read_bytes();require(raw_key[:12]==bytes.fromhex("302a300506032b6570032100") and len(raw_key)==44,"wrong Ed25519 public DER")
+            verify_signature(body,signature.read_bytes(),raw_key[12:],domain)
+            try:verify_signature(body+b"changed",signature.read_bytes(),raw_key[12:],domain)
+            except ValueError:pass
+            else:raise AssertionError("changed signed bytes accepted")
+        print("network-mode exact native selection/header binding and local-v1 rejection controls PASS; no acquisition or inference executed")
     print("collection exact compilation/ledger/provenance pure checks PASS; no tokenizer, model or network executed")
 
 
 def main(args):
+    network=args[-1]=="--network"
+    if network:args=args[:-1]
     command=args[0]
-    if command=="self-test":self_test()
-    elif command=="prepare":prepare(Path(args[1]))
-    elif command=="enrolled":enrolled(Path(args[1]))
+    if command=="self-test":self_test(network)
+    elif command=="prepare":prepare(Path(args[1]),network)
+    elif command=="network-plan" and network:network_plan(Path(args[1]))
+    elif command=="cache-before" and network:cache_before(Path(args[1]))
+    elif command=="enrolled":enrolled(Path(args[1]),network)
     elif command=="observe":observe(Path(args[1]),int(args[2]))
     elif command=="collect":collect(Path(args[1]))
-    elif command=="remove-inputs":remove_inputs(Path(args[1]))
-    elif command=="stopped":stopped(Path(args[1]))
-    elif command=="resumed":stopped(Path(args[1]),True)
-    elif command=="evidence":evidence(Path(args[1]),args[2])
-    elif command=="finalize":finalize(Path(args[1]),args[2],int(args[3]),args[4]=="true",int(args[5]),args[6],args[7])
-    elif command=="report":report(read(Path(args[1]),64*1048576),args[2])
+    elif command=="remove-inputs":remove_inputs(Path(args[1]),network)
+    elif command=="stopped":stopped(Path(args[1]),network=network)
+    elif command=="resumed":stopped(Path(args[1]),True,network)
+    elif command=="evidence":evidence(Path(args[1]),args[2],network)
+    elif command=="finalize":finalize(Path(args[1]),args[2],int(args[3]),args[4]=="true",int(args[5]),args[6],args[7],network)
+    elif command=="report":report(read(Path(args[1]),64*1048576),args[2],network)
     else:raise ValueError("unknown fixed collection fixture command")
 
 

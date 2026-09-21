@@ -196,3 +196,47 @@ fn plan_and_compiled_size_bounds_include_the_synthetic_metadata() {
     fs::write(&fixture.plan, serde_json::to_vec(&changed_plan).unwrap()).unwrap();
     assert!(prepare(&fixture.plan).is_err());
 }
+
+#[test]
+fn native_selections_are_validated_before_acquisition_and_cannot_be_rebound() {
+    let fixture = fixture(&[("local", "A public source"), ("other", "Another source")]);
+    let publisher = hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[49; 32])
+            .verifying_key()
+            .as_bytes(),
+    );
+    let native =
+        json!({"publisher_key":publisher,"name":"public-proposal","manifest_id":"a".repeat(64)});
+    let selected = json!({"version":2,"sources":[
+        {"label":"Local","input":fixture.root.path().join("input-0.txt")},
+        {"label":"Published","native":native}
+    ]});
+    fs::write(&fixture.plan, serde_json::to_vec(&selected).unwrap()).unwrap();
+    assert!(load_plan(&fixture.plan).is_ok());
+    assert!(prepare(&fixture.plan).is_err()); // Synchronous local path never pretends to fetch.
+    for changed in [
+        json!({"version":1,"sources":selected["sources"]}),
+        json!({"version":2,"sources":[selected["sources"][0],{"label":"Both","input":"/local","native":native}]}),
+        json!({"version":2,"sources":[selected["sources"][0],{"label":"Neither"}]}),
+        json!({"version":2,"sources":[selected["sources"][0],{"label":"Bad","native":{"publisher_key":publisher,"name":"public-proposal","manifest_id":"0".repeat(64)}}]}),
+    ] {
+        fs::write(&fixture.plan, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(load_plan(&fixture.plan).is_err());
+    }
+    let identity: network::Selection = serde_json::from_value(native).unwrap();
+    let prepared = compile(
+        2,
+        vec![
+            ("local".into(), "Public one".into(), None),
+            ("native".into(), "Public two".into(), Some(identity)),
+        ],
+    )
+    .unwrap();
+    prepared.ledger.validate(&prepared.document).unwrap();
+    let mut changed = prepared.ledger.clone();
+    changed.sources[1].native.as_mut().unwrap().manifest_id = "b".repeat(64);
+    assert!(changed.validate(&prepared.document).is_err());
+    changed = prepared.ledger;
+    changed.version = 1;
+    assert!(changed.validate(&prepared.document).is_err());
+}

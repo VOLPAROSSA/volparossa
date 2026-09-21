@@ -1011,8 +1011,55 @@ need not remain present. An unfinished synthesis still needs the existing runtim
 publisher options described below. Once complete, `--directory ... --resume --execute` reuses
 the retained receipts without those options or new peer execution, preserving the original
 execution summaries. Nineteen focused document tests, a dedicated completed-resume regression
-and strict all-target CLI/agent Clippy pass; the `agent-public-collection` disposable
-tokenizer/two-peer/synthesis/offline-resume proof is pending. B03 remains incomplete.
+and strict all-target CLI/agent Clippy pass. The [local-source collection
+run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35609419691) and original artifact review
+pass: three public document excerpts, seven fragment jobs, three synthesis levels (4 → 2 → 1), fourteen
+actual isolated workers, and zero-round offline resume after original-input removal. Retained
+receipts, protected captures, cleanup and unchanged-host checks pass. This is execution and byte
+lineage evidence, not answer-quality evidence or completed B03.
+
+#### Mixing local and native network sources
+
+Version 2 also accepts explicitly selected native public `text/plain` publications. Each entry
+has exactly one `input` or `native` field:
+
+```json
+{
+  "version": 2,
+  "sources": [
+    { "label": "Local proposal", "input": "/absolute/public/proposal.txt" },
+    {
+      "label": "Published proposal",
+      "native": {
+        "publisher_key": "PREVIOUSLY_TRUSTED_64_HEX_KEY",
+        "name": "public-proposal",
+        "manifest_id": "EXACT_64_HEX_MANIFEST_ID"
+      }
+    }
+  ]
+}
+```
+
+Use the collection command above with this plan, adding
+`--source-cache /absolute/agent-owned-cache` and, if the cache already exists,
+`--reuse-source-cache`. The source cache must be separate from the task directory. Normal cache
+quota options apply. Sources are chosen before querying that cache: a hit reuses verified bytes,
+and a miss fetches the same signed object through the protected content path. There is no fallback
+to another source, raw web request or selection of only popular cached material.
+
+The original publisher key, name and manifest ID are embedded in the signed compilation.
+`native-source-proofs.json`, pinned by the enrollment, retains original signed manifests and
+local delivery receipts; signatures and every content hash are checked against the original
+bytes. `source_collection.native_publications` exposes this provenance. Publication-signature
+verification is distinct from verification of real-world authorship, permission to republish,
+semantic citations or answer correctness. The explicit public-content/common-license agreement
+still covers **every** input and the question; a signature alone does not grant those rights.
+
+The compilation and its jobs cannot extend the earliest original source expiry. Completed
+offline resume verifies retained history at its original observation time without fetching
+again or renewing authorization. Unfinished work remains subject to the original deadline.
+The mixed local/cache-hit/network-miss execution proof is pending; the targeted source and
+document checks pass, but do not substitute for the live two-peer/tokenizer/synthesis run.
 
 ### Synthesizing one public answer
 
@@ -1158,8 +1205,10 @@ retains passing evidence of a signed NaN candidate arriving over protected conte
 candidate-only quarantine and continued useful training in the same loop. The full run still
 **failed** at its later ordinary import (`CONTENT_PROVIDER_REGISTRY_BUSY`, then selector I/O).
 Correction `f5258b7ad01590afec6e8e74720f246f9f8d8319` adds a bounded two-second metadata wait;
-the [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968) is pending.
-Earlier fixture-layout failures remain failed. This scoped recovery
+the [new full run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35608519968) and original
+artifact review pass, including the independent import/inference stage and full cleanup with
+unchanged host state. The fix and executor-discovery work are merged in PR #136. Earlier
+fixture-layout and import failures remain failed. This scoped recovery
 does not complete B07 or detect all poisoned models.
 
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded

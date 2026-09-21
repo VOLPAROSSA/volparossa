@@ -34,6 +34,8 @@ pub(super) struct Enrollment {
     /// Its labels/hashes/ranges are also embedded in the signed original text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) collection_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_source_proofs_sha256: Option<String>,
     pub(super) source_manifest_id: String,
     source_sha256: String,
     source_bytes: u64,
@@ -280,6 +282,7 @@ pub(super) fn publish(
             .collect(),
         model_fingerprint: None,
         collection_sha256: None,
+        native_source_proofs_sha256: None,
         replace_peers: false,
         selected_at_unix_seconds: at,
         expires_at_unix_seconds: validity.expires,
@@ -372,7 +375,16 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
         super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
     }
     verify_original(root, &enrollment, &input)?;
-    load_collection(root, &enrollment, &input)?;
+    match load_collection(root, &enrollment, &input)? {
+        Some(ledger) => {
+            load_native_sources(root, &enrollment, &input, &ledger)?;
+        }
+        None => ensure!(
+            enrollment.native_source_proofs_sha256.is_none()
+                && !root.join("native-source-proofs.json").try_exists()?,
+            "compute_collection_unbound_sources"
+        ),
+    }
     let mut ids = BTreeSet::new();
     for (index, package) in enrollment.packages.iter().enumerate() {
         ensure!(
@@ -409,6 +421,39 @@ pub(super) fn load_collection(
     );
     ledger.validate(&input.document)?;
     Ok(Some(ledger))
+}
+
+pub(super) fn load_native_sources(
+    root: &Path,
+    enrollment: &Enrollment,
+    input: &Input,
+    ledger: &super::collection::Ledger,
+) -> Result<Option<super::collection::network::Proofs>> {
+    let path = root.join("native-source-proofs.json");
+    let Some(expected) = &enrollment.native_source_proofs_sha256 else {
+        ensure!(
+            ledger.sources.iter().all(|source| source.native.is_none()) && !path.try_exists()?,
+            "compute_collection_unbound_sources"
+        );
+        return Ok(None);
+    };
+    ensure!(
+        rpc::nonzero_hex(expected, 64),
+        "compute_collection_source_proofs_hash"
+    );
+    let bytes = read(&path, 128 * 1024)?;
+    let proofs: super::collection::network::Proofs = serde_json::from_slice(&bytes)?;
+    ensure!(
+        sha(&bytes) == *expected && proofs.sha256()? == *expected,
+        "compute_collection_sources_changed"
+    );
+    proofs.validate(
+        ledger,
+        &input.document,
+        enrollment.selected_at_unix_seconds,
+        enrollment.expires_at_unix_seconds,
+    )?;
+    Ok(Some(proofs))
 }
 
 pub(super) fn expected(
