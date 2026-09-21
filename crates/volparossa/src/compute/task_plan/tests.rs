@@ -117,8 +117,7 @@ fn grounded_execution_requires_exact_bounded_utf8_source_excerpt() {
     }
 }
 
-#[test]
-fn grounded_report_binds_actual_excerpt_and_never_accepts_eos_prose_as_a_question() {
+fn grounded_report() -> (Input, Vec<u8>, Questions, Vec<u8>, Value) {
     let source = "An explicitly public source for an inert validation fixture.";
     let mut input = input();
     input.version = 2;
@@ -162,6 +161,12 @@ fn grounded_report_binds_actual_excerpt_and_never_accepts_eos_prose_as_a_questio
         "artifacts":[{"relative_path":"task-questions.json","bytes":artifact.len(),"sha256":digest(&artifact)}],
         "supervisor":{"child_reaped":true,"network_access":false}
     });
+    (input, bytes, questions, artifact, report)
+}
+
+#[test]
+fn grounded_report_binds_actual_excerpt_and_never_accepts_eos_prose_as_a_question() {
+    let (input, bytes, questions, artifact, report) = grounded_report();
     validate_report(&report, &input, &bytes, &artifact).unwrap();
     for (pointer, replacement) in [
         ("/goal_only_planning", json!(true)),
@@ -187,6 +192,65 @@ fn grounded_report_binds_actual_excerpt_and_never_accepts_eos_prose_as_a_questio
     prose.version = 1;
     prose.validate().unwrap();
     assert!(validate_question_stats(&report, &prose).is_err());
+}
+
+#[test]
+fn v4_rejects_literal_goal_copies_without_reinterpreting_v3_history() {
+    let (mut input, _, questions, artifact, mut report) = grounded_report();
+    input.question.clone_from(&questions.questions[0]);
+    let bytes = serde_json::to_vec(&input).unwrap();
+    report["dataset"] = input.descriptor(&bytes);
+    let historical = serde_json::to_vec(&report).unwrap();
+    validate_report(&report, &input, &bytes, &artifact).unwrap();
+    report["planner_strategy"] = CURRENT_STRATEGY.into();
+    assert_eq!(
+        validate_report(&report, &input, &bytes, &artifact)
+            .unwrap_err()
+            .to_string(),
+        "compute_task_plan_goal_copy"
+    );
+    // Exact means exact UTF-8 bytes: no new normalization or inferred semantic equivalence.
+    input.question = format!(" {}", input.question);
+    let bytes = serde_json::to_vec(&input).unwrap();
+    report["dataset"] = input.descriptor(&bytes);
+    validate_report(&report, &input, &bytes, &artifact).unwrap();
+    let saved: Value = serde_json::from_slice(&historical).unwrap();
+    assert_eq!(saved["planner_strategy"], recovery::SOURCE_STRATEGY);
+}
+
+#[test]
+fn v4_binds_charged_rejected_goal_copy_to_the_original_question() {
+    let (mut input, _, _, artifact, mut report) = grounded_report();
+    input.question = "What requirements and risks does this public source describe?".into();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    report["dataset"] = input.descriptor(&bytes);
+    report["planner_strategy"] = CURRENT_STRATEGY.into();
+    let mut attempts = report["planner_attempts"].as_array().unwrap().clone();
+    attempts[0]["attempt"] = 2.into();
+    attempts[1]["attempt"] = 3.into();
+    let rejected = json!({"question_index":0,"attempt":1,"prompt_tokens":100,"generated_tokens":9,
+        "max_new_tokens":192,"stop_reason":"eos","accepted":false,"rejection_code":"GOAL_COPY",
+        "text_bytes":input.question.len(),"text_sha256":digest(input.question.as_bytes())});
+    attempts.insert(0, rejected);
+    report["planner_attempts"] = attempts.into();
+    report["planner_generated_tokens"] = 49.into();
+    validate_report(&report, &input, &bytes, &artifact).unwrap();
+    for (pointer, value) in [
+        (
+            "/planner_attempts/0/text_sha256",
+            json!(digest(b"Different text?")),
+        ),
+        ("/planner_attempts/0/text_bytes", json!(1)),
+        ("/planner_generated_tokens", json!(40)),
+        ("/planner_strategy", json!(recovery::SOURCE_STRATEGY)),
+    ] {
+        let mut changed = report.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            validate_report(&changed, &input, &bytes, &artifact).is_err(),
+            "{pointer}"
+        );
+    }
 }
 
 #[test]

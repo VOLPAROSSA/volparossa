@@ -679,7 +679,7 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual(stats, [dict(prompt_tokens=p, generated_tokens=3, stop_reason="eos") for p in (4, 5)])
                 diagnostic = session.planner_diagnostic
                 self.assertEqual(set(diagnostic), {"strategy", "attempts", "incomplete_attempt"})
-                self.assertEqual(diagnostic["strategy"], "model_questions_source_recovery_v3")
+                self.assertEqual(diagnostic["strategy"], "model_questions_source_recovery_v4")
                 self.assertFalse(diagnostic["incomplete_attempt"])
                 for index, (entry, text) in enumerate(zip(diagnostic["attempts"], [rejected] + accepted)):
                     raw = text.encode()
@@ -708,6 +708,52 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual([entry["question_index"] for entry in session.planner_diagnostic["attempts"]], [0, 1, 1])
         self.assertEqual([entry["rejection_code"] for entry in session.planner_diagnostic["attempts"]], [None, "DUPLICATE_TEXT", None])
         self.assertIn("Correction attempt 3", tokenizer.apply_chat_template.call_args_list[2].args[0][1]["content"])
+
+    def test_task_planner_goal_copy_ends_attempt_and_keeps_its_full_cost(self):
+        source = task_plan_input()
+        original = copy.deepcopy(source)
+        goal = source["question"]
+        accepted = ["Which hardware does the source require?", "Which risks does the source describe?"]
+        for generated, stop in (([21, 22], "question_boundary"), ([21, 22, 2], "eos")):
+            for index in (0, 1):
+                with self.subTest(stop=stop, question_index=index):
+                    texts = accepted[:index] + [goal] + accepted[index:]
+                    model, tokenizer, torch, transformers = task_planner_doubles(texts, generated)
+                    session = WORKER.Session(WORKER.validate_request(dict(request(), mode="plan_tasks")))
+                    started = session.started
+                    plan, _, cost, _ = WORKER.plan_tasks(model, tokenizer, torch, transformers, source, session)
+                    self.assertEqual(plan, dict(version=2, questions=accepted))
+                    self.assertEqual((cost, model.generate.call_count), (3 * len(generated), 3))
+                    self.assertEqual(session.started, started)
+                    rejected = session.planner_diagnostic["attempts"][index]
+                    self.assertEqual((rejected["question_index"], rejected["stop_reason"], rejected["rejection_code"]),
+                                     (index, stop, "GOAL_COPY"))
+                    self.assertFalse(rejected["accepted"])
+                    self.assertEqual((rejected["text_bytes"], rejected["text_sha256"]),
+                                     (len(goal.encode()), hashlib.sha256(goal.encode()).hexdigest()))
+                    retry = tokenizer.apply_chat_template.call_args_list[index + 1].args[0][1]["content"]
+                    self.assertIn("Correction attempt " + str(index + 2), retry)
+                    self.assertIn("do not repeat it", retry)
+                    self.assertEqual(source, original)
+
+    def test_task_planner_goal_copies_exhaust_attempts_without_replacement_questions(self):
+        source = task_plan_input()
+        model, tokenizer, torch, transformers = task_planner_doubles(source["question"], [21, 22])
+        session = mock.Mock()
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_GOAL_COPY"):
+            WORKER.plan_tasks(model, tokenizer, torch, transformers, source, session)
+        attempts = session.planner_diagnostic["attempts"]
+        self.assertEqual((model.generate.call_count, sum(a["generated_tokens"] for a in attempts)), (4, 8))
+        self.assertTrue(all(a["stop_reason"] == "question_boundary" and a["rejection_code"] == "GOAL_COPY"
+                            and not a["accepted"] for a in attempts))
+        self.assertFalse(session.planner_diagnostic["incomplete_attempt"])
+
+    def test_task_planner_goal_copy_rule_is_exact_not_semantic_or_normalized(self):
+        source = task_plan_input()
+        texts = [" " + source["question"], "What hardware is required?"]
+        model, tokenizer, torch, transformers = task_planner_doubles(texts)
+        result, _, _, _ = WORKER.plan_tasks(model, tokenizer, torch, transformers, source, mock.Mock())
+        self.assertEqual(result["questions"], texts)
 
     def test_task_planner_eos_nonquestions_are_rejected_without_text_repair(self):
         for text in ("An answer, not a question.", "Question? Then an answer."):
@@ -840,7 +886,7 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual(result["source_excerpt_complete"], complete)
                 self.assertFalse(result["generation_limit_reached"] or result["model_answer_correctness_proven"])
                 self.assertEqual(result["planner_stop_reason"], "two_questions")
-                self.assertEqual(result["planner_strategy"], "model_questions_source_recovery_v3")
+                self.assertEqual(result["planner_strategy"], "model_questions_source_recovery_v4")
                 self.assertEqual(result["planner_structure_generated_by"], "local_schema")
                 self.assertEqual(result["planner_question_stats"],
                                  [dict(prompt_tokens=3, generated_tokens=3, stop_reason="eos")] * 2)

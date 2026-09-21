@@ -4,7 +4,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{QuestionStats, Questions, digest};
+use super::{CURRENT_STRATEGY, QuestionStats, Questions, digest};
 
 pub(super) const STRATEGY: &str = "model_questions_scaffold_recovery_v2";
 pub(super) const SOURCE_STRATEGY: &str = "model_questions_source_recovery_v3";
@@ -38,11 +38,13 @@ impl PlanningDiagnostic {
         check_shape(&value["attempts"], 0)?;
         let diagnostic: Self = serde_json::from_value(value.clone())?;
         ensure!(
-            matches!(diagnostic.strategy.as_str(), STRATEGY | SOURCE_STRATEGY),
+            matches!(
+                diagnostic.strategy.as_str(),
+                STRATEGY | SOURCE_STRATEGY | CURRENT_STRATEGY
+            ),
             "compute_task_plan_strategy"
         );
-        let summary =
-            checked_attempts(&diagnostic.attempts, diagnostic.strategy == SOURCE_STRATEGY)?;
+        let summary = checked_attempts(&diagnostic.attempts, &diagnostic.strategy)?;
         if diagnostic.incomplete_attempt {
             // No fabricated token count for a generation whose result was not validated.
             ensure!(
@@ -73,7 +75,7 @@ struct Summary<'a> {
     prompt: u64,
 }
 
-fn rejection(attempt: &GenerationAttempt, grounded: bool) -> Result<()> {
+fn rejection(attempt: &GenerationAttempt, strategy: &str) -> Result<()> {
     ensure!(
         matches!(attempt.rejection_code.as_deref(),
             Some("EMPTY_TEXT") if attempt.text_bytes <= 512
@@ -84,7 +86,10 @@ fn rejection(attempt: &GenerationAttempt, grounded: bool) -> Result<()> {
         ) || matches!(attempt.rejection_code.as_deref(),
             Some("DUPLICATE_TEXT") if attempt.question_index == 1 && (1..=512).contains(&attempt.text_bytes)
         ) || matches!(attempt.rejection_code.as_deref(),
-            Some("NOT_A_QUESTION") if grounded && attempt.stop_reason == "eos" && (1..=512).contains(&attempt.text_bytes)
+            Some("NOT_A_QUESTION") if matches!(strategy, SOURCE_STRATEGY | CURRENT_STRATEGY)
+                && attempt.stop_reason == "eos" && (1..=512).contains(&attempt.text_bytes)
+        ) || matches!(attempt.rejection_code.as_deref(),
+            Some("GOAL_COPY") if strategy == CURRENT_STRATEGY && (1..=512).contains(&attempt.text_bytes)
         ) || matches!(attempt.rejection_code.as_deref(),
             Some("GENERATION_LIMIT") if attempt.stop_reason == "token_limit"
         ),
@@ -93,7 +98,7 @@ fn rejection(attempt: &GenerationAttempt, grounded: bool) -> Result<()> {
     Ok(())
 }
 
-fn checked_attempts(attempts: &[GenerationAttempt], grounded: bool) -> Result<Summary<'_>> {
+fn checked_attempts<'a>(attempts: &'a [GenerationAttempt], strategy: &str) -> Result<Summary<'a>> {
     ensure!(attempts.len() <= 4, "compute_task_plan_attempt_bound");
     let mut summary = Summary {
         accepted: Vec::new(),
@@ -128,7 +133,9 @@ fn checked_attempts(attempts: &[GenerationAttempt], grounded: bool) -> Result<Su
                     ensure!(
                         (1..=512).contains(&attempt.text_bytes)
                             && (attempt.accepted
-                                || attempt.rejection_code.as_deref() == Some("DUPLICATE_TEXT")),
+                                || attempt.rejection_code.as_deref() == Some("DUPLICATE_TEXT")
+                                || (strategy == CURRENT_STRATEGY
+                                    && attempt.rejection_code.as_deref() == Some("GOAL_COPY"))),
                         "compute_task_plan_question_boundary"
                     );
                 }
@@ -142,7 +149,7 @@ fn checked_attempts(attempts: &[GenerationAttempt], grounded: bool) -> Result<Su
             );
             summary.accepted.push(attempt);
         } else {
-            rejection(attempt, grounded)?;
+            rejection(attempt, strategy)?;
         }
         summary.tokens += attempt.generated_tokens;
         summary.prompt = summary.prompt.max(attempt.prompt_tokens);
@@ -158,7 +165,10 @@ pub(super) fn validate_success(
     check_shape(&report["planner_attempts"], 2)?;
     let attempts: Vec<GenerationAttempt> =
         serde_json::from_value(report["planner_attempts"].clone())?;
-    let summary = checked_attempts(&attempts, report["planner_strategy"] == SOURCE_STRATEGY)?;
+    let summary = checked_attempts(
+        &attempts,
+        report["planner_strategy"].as_str().unwrap_or_default(),
+    )?;
     ensure!(
         summary.accepted.len() == 2
             && summary.tokens < 384
@@ -176,6 +186,34 @@ pub(super) fn validate_success(
                 && stats.stop_reason == attempt.stop_reason,
             "compute_task_plan_attempt_artifact_binding"
         );
+    }
+    Ok(())
+}
+
+/// Only v4 successful reports apply this rule. Historical artifacts remain readable;
+/// a failure diagnostic alone neither certifies its rejected text nor enrolls work.
+pub(super) fn validate_goal_binding(
+    report: &Value,
+    questions: &Questions,
+    goal: &str,
+) -> Result<()> {
+    ensure!(
+        questions
+            .questions
+            .iter()
+            .all(|question| question.as_bytes() != goal.as_bytes()),
+        "compute_task_plan_goal_copy"
+    );
+    let attempts: Vec<GenerationAttempt> =
+        serde_json::from_value(report["planner_attempts"].clone())?;
+    for attempt in attempts {
+        if attempt.rejection_code.as_deref() == Some("GOAL_COPY") {
+            ensure!(
+                attempt.text_bytes == goal.len() as u64
+                    && attempt.text_sha256 == digest(goal.as_bytes()),
+                "compute_task_plan_goal_copy_binding"
+            );
+        }
     }
     Ok(())
 }

@@ -12,6 +12,7 @@ use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVI
 use volparossa_local_control::compute::PublicTask;
 
 pub(super) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024;
+pub(super) const CURRENT_STRATEGY: &str = "model_questions_source_recovery_v4";
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_EXCERPT_BYTES: usize = 1024;
 
@@ -194,7 +195,12 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
     ensure!(
         matches!(
             report["planner_strategy"].as_str(),
-            Some("model_questions_scaffold_v1" | recovery::STRATEGY | recovery::SOURCE_STRATEGY)
+            Some(
+                "model_questions_scaffold_v1"
+                    | recovery::STRATEGY
+                    | recovery::SOURCE_STRATEGY
+                    | CURRENT_STRATEGY
+            )
         ) && report["planner_structure_generated_by"] == "local_schema"
             && report["planner_stop_reason"] == "two_questions"
             && stats.len() == 2
@@ -214,12 +220,17 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
         );
     }
     ensure!(
-        (questions.version == 2) == (report["planner_strategy"] == recovery::SOURCE_STRATEGY),
+        (questions.version == 2)
+            == matches!(
+                report["planner_strategy"].as_str(),
+                Some(recovery::SOURCE_STRATEGY | CURRENT_STRATEGY)
+            ),
         "compute_task_plan_strategy_version"
     );
     questions.validate()?;
     if report["planner_strategy"] == recovery::STRATEGY
         || report["planner_strategy"] == recovery::SOURCE_STRATEGY
+        || report["planner_strategy"] == CURRENT_STRATEGY
     {
         return recovery::validate_success(report, questions, &stats);
     }
@@ -256,6 +267,9 @@ pub(super) fn validate_report(
         "compute_task_plan_artifact_version"
     );
     validate_question_stats(report, &questions)?;
+    if report["planner_strategy"] == CURRENT_STRATEGY {
+        recovery::validate_goal_binding(report, &questions, &input.question)?;
+    }
     if let Some(excerpt) = &input.source_excerpt {
         ensure!(
             report["source_contents_read_by_planner"] == true

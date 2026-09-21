@@ -158,3 +158,40 @@ fn nonquestion_retry_requires_source_strategy_and_is_charged_without_renewal() {
     report["planner_generated_tokens"] = 30.into(); // The rejected generation still costs 17.
     assert!(check(&report, &questions).is_err());
 }
+
+#[test]
+fn goal_copy_rejection_requires_v4_and_retains_both_question_indices_and_stop_costs() {
+    let (mut report, mut questions) = fixture();
+    questions.version = 2;
+    report["planner_strategy"] = CURRENT_STRATEGY.into();
+    report["planner_attempts"][1]["rejection_code"] = "GOAL_COPY".into();
+    report["planner_attempts"][1]["text_bytes"] = 64.into();
+    for stop in ["eos", "question_boundary"] {
+        report["planner_attempts"][1]["stop_reason"] = stop.into();
+        check(&report, &questions).unwrap();
+        let diagnostic = json!({"strategy":CURRENT_STRATEGY,
+            "attempts":report["planner_attempts"],"incomplete_attempt":false});
+        PlanningDiagnostic::from_value(&diagnostic).unwrap();
+        let mut first = report["planner_attempts"][1].clone();
+        first["question_index"] = 0.into();
+        first["attempt"] = 1.into();
+        let diagnostic =
+            json!({"strategy":CURRENT_STRATEGY,"attempts":[first],"incomplete_attempt":true});
+        PlanningDiagnostic::from_value(&diagnostic).unwrap();
+        for strategy in [STRATEGY, SOURCE_STRATEGY] {
+            let mut old = diagnostic.clone();
+            old["strategy"] = strategy.into();
+            assert!(PlanningDiagnostic::from_value(&old).is_err());
+        }
+    }
+    for (field, value) in [
+        ("stop_reason", json!("token_limit")),
+        ("text_bytes", json!(0)),
+        ("text_bytes", json!(513)),
+        ("generated_tokens", json!(192)),
+    ] {
+        let mut changed = report.clone();
+        changed["planner_attempts"][1][field] = value;
+        assert!(check(&changed, &questions).is_err(), "{field}");
+    }
+}

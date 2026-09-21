@@ -244,6 +244,9 @@ cut off by the token limit. The updated answer path retains the model's actual s
 and prevents unfinished outputs from becoming completed answers or new dependencies; its
 focused checks pass, with live execution of the updated contract still pending.
 Useful, source-faithful decomposition remains unfinished. The model does not choose task count or shape.
+The next planner revision explicitly asks for narrower questions and rejects an exact copy of
+the original question as a charged attempt. Local checks pass; this is not a semantic quality
+test and does not detect every paraphrase or whitespace variant. Its live model proof is pending.
 An explicit `smollm2-360m-v1` profile now connects the larger pinned model to planning,
 peer selection, inference and synthesis, with a larger per-answer budget. The existing 135M
 training/adapters remain separate. Its first VM run executes real 360M planning but stops at a

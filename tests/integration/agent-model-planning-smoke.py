@@ -22,7 +22,7 @@ MODEL_PROFILE = "smollm2-360m-v1"
 SELECTED_MODEL = TRAIN["inference_profile"](MODEL_PROFILE)
 MODEL, MODEL_ID = SELECTED_MODEL["fingerprint"], SELECTED_MODEL["model"]
 PREFIX = "agent-model-planning"
-STRATEGY = "model_questions_source_recovery_v3"
+STRATEGY = "model_questions_source_recovery_v4"
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
 SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates two public subquestions from a goal and "
@@ -321,16 +321,18 @@ def questions_plan(artifact):
     seen=set()
     for question in value["questions"]:
         require(type(question) is str and 1<=len(question.encode())<=512 and "\0" not in question
-            and question.rstrip().endswith("?") and question.strip() not in seen,"invalid/non-distinct model-generated question")
+            and question.rstrip().endswith("?") and question.strip() not in seen
+            and question.encode()!=QUESTION.encode(),"invalid/non-distinct or exact goal-copy model-generated question")
         seen.add(question.strip())
     nodes=[dict(id=f"question-{index:02d}",question=q,depends_on=[]) for index,q in enumerate(value["questions"])]
     nodes.append(dict(id="answer",question=QUESTION,depends_on=[n["id"] for n in nodes]))
     return dict(version=1,nodes=nodes,output="answer")
 
 
-def check_attempts(attempts,questions=None):
+def check_attempts(attempts,questions=None,goal=QUESTION):
     """Validate accounting and identities; rejected text is deliberately not retained."""
     require(type(attempts) is list and len(attempts)<=4,"invalid planner attempt bound")
+    goal_bytes=goal.encode();goal_sha=sha(goal_bytes)
     accepted,total,maximum,stats=0,0,0,[]
     for number,item in enumerate(attempts,1):
         require(type(item) is dict and item.keys()=={"question_index","attempt","prompt_tokens","generated_tokens",
@@ -345,21 +347,22 @@ def check_attempts(attempts,questions=None):
         total+=item["generated_tokens"];maximum=max(maximum,item["prompt_tokens"])
         if item["accepted"]:
             require(item["rejection_code"] is None and item["generated_tokens"]<cap
-                and item["stop_reason"] in ("question_boundary","eos") and 1<=item["text_bytes"]<=512,
+                and item["stop_reason"] in ("question_boundary","eos") and 1<=item["text_bytes"]<=512
+                and (item["text_bytes"],item["text_sha256"])!=(len(goal_bytes),goal_sha),
                 "accepted an incomplete or invalid planner attempt")
             if questions is not None:
                 require(accepted<len(questions),"extra accepted question")
                 text=questions[accepted]
                 require(item["text_bytes"]==len(text.encode()) and item["text_sha256"]==sha(text.encode())
-                    and text.rstrip().endswith("?"),
+                    and text.rstrip().endswith("?") and text.encode()!=goal_bytes,
                     "accepted question text differs from original model artifact")
             stats.append({k:item[k] for k in ("prompt_tokens","generated_tokens","stop_reason")});accepted+=1
         elif item["rejection_code"]=="GENERATION_LIMIT":
             require(item["generated_tokens"]==cap and item["stop_reason"]=="token_limit","uncharged generation limit")
         else:
-            require(item["rejection_code"] in ("EMPTY_TEXT","TEXT_TOO_LONG","NUL_TEXT","DUPLICATE_TEXT","NOT_A_QUESTION")
+            require(item["rejection_code"] in ("EMPTY_TEXT","TEXT_TOO_LONG","NUL_TEXT","DUPLICATE_TEXT","NOT_A_QUESTION","GOAL_COPY")
                 and item["generated_tokens"]<cap and item["stop_reason"] in ("question_boundary","eos")
-                and (item["stop_reason"]!="question_boundary" or item["rejection_code"]=="DUPLICATE_TEXT"),"invalid rejection category")
+                and (item["stop_reason"]!="question_boundary" or item["rejection_code"] in ("DUPLICATE_TEXT","GOAL_COPY")),"invalid rejection category")
             if item["rejection_code"]=="TEXT_TOO_LONG":require(item["text_bytes"]>512,"wrong long-text rejection")
             elif item["rejection_code"]=="EMPTY_TEXT":
                 require(item["text_bytes"]<=512,"wrong empty-text rejection bound")
@@ -367,6 +370,9 @@ def check_attempts(attempts,questions=None):
             else:
                 require(1<=item["text_bytes"]<=512,"wrong bounded-text rejection")
                 if item["rejection_code"]=="DUPLICATE_TEXT":require(accepted==1,"first question cannot duplicate an accepted question")
+                elif item["rejection_code"]=="GOAL_COPY":
+                    require(item["text_bytes"]==len(goal_bytes) and item["text_sha256"]==goal_sha,
+                        "goal-copy rejection is not bound to the exact original public question")
     return accepted,total,maximum,stats
 
 
@@ -384,7 +390,7 @@ def validate_failure(value,input_raw,source):
     diagnostic=value["planner_diagnostic"]
     require(type(diagnostic) is dict and diagnostic.keys()=={"strategy","attempts","incomplete_attempt"}
         and diagnostic["strategy"]==STRATEGY and type(diagnostic["incomplete_attempt"]) is bool,"invalid planner failure diagnostic")
-    accepted,total,_,_=check_attempts(diagnostic["attempts"])
+    accepted,total,_,_=check_attempts(diagnostic["attempts"],goal=expected["question"])
     # Accepted questions do not enroll a plan: later model-integrity or artifact
     # I/O checks can still fail. Only an incomplete generation needs another slot.
     require(accepted<=2 and total<=384,"failure exceeds planning budget")
@@ -421,7 +427,7 @@ def check_planning(raw,source):
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
     questions=strict_json(raw["planner-artifact.json"])["questions"]
     require(len(questions)==2,"two model-generated questions required")
-    accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions)
+    accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions,goal=expected["question"])
     require(accepted==2 and report["planner_question_stats"]==stats and report["planner_prompt_tokens"]==maximum
         and report["planner_generated_tokens"]==total<384,"planner aggregate budget or accepted stages differ")
     require(report["dataset"]==dict(version=2,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
@@ -724,7 +730,8 @@ def self_test():
                 b'```json\n{"version":2,"questions":["A?","B?"]}\n```',
                 b'{"version":2,"questions":["A?","B?"]} trailing',
                 b'{"version":1,"questions":["A?","B?"]}',
-                b'{"version":2,"questions":["A?","This is not a question."]}'):
+                b'{"version":2,"questions":["A?","This is not a question."]}',
+                encoded(dict(version=2,questions=[QUESTION,"Another question?"]))):
         try:questions_plan(raw)
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid/canned/extracted model question shape accepted")
@@ -745,6 +752,27 @@ def self_test():
     question_form=[attempt(0,1,"A declarative model response.",22,False,"NOT_A_QUESTION","eos"),
         attempt(0,2,questions[0],20,stop="eos"),attempt(1,3,questions[1],25)]
     assert check_attempts(question_form,questions)[:3]==(2,67,83)
+    for stop in ("question_boundary","eos"):
+        copied=[attempt(0,1,QUESTION,20,False,"GOAL_COPY",stop),
+            attempt(0,2,questions[0],20),attempt(1,3,questions[1],25)]
+        assert check_attempts(copied,questions)[:3]==(2,65,83)
+        # The same rejection is valid after the first accepted question too.
+        second_copy=[attempt(0,1,questions[0],20),attempt(1,2,QUESTION,20,False,"GOAL_COPY",stop),
+            attempt(1,3,questions[1],25)]
+        assert check_attempts(second_copy,questions)[:3]==(2,65,83)
+        for changed in (dict(text_sha256="f"*64),dict(text_bytes=len(QUESTION.encode())+1),
+                        dict(accepted=True,rejection_code=None),dict(stop_reason="token_limit")):
+            invalid=copy.deepcopy(copied);invalid[0].update(changed)
+            try:check_attempts(invalid)
+            except ValueError:pass
+            else:raise AssertionError("unbound or accepted goal-copy metadata accepted")
+        try:check_attempts([attempt(0,1,QUESTION,20,stop=stop)],[QUESTION])
+        except ValueError:pass
+        else:raise AssertionError("exact original goal accepted as a subquestion")
+    # Exact UTF-8 equality only: do not silently normalize or rewrite output.
+    variant=QUESTION+" "
+    assert check_attempts([attempt(0,1,variant,20)],[variant])[0]==1
+    assert questions_plan(encoded(dict(version=2,questions=[variant,questions[1]])))["nodes"][0]["question"]==variant
     for invalid in (
         [attempt(0,1,"A declarative model response.",22,True,None,"eos")],
         [attempt(0,1,"A question?",22,False,"NOT_A_QUESTION","question_boundary")],
@@ -774,6 +802,15 @@ def self_test():
             attempt(0,2,"y",192,False,"GENERATION_LIMIT","token_limit")],incomplete_attempt=False),
         child_reaped=True,plan_enrolled=False)
     validate_failure(failure,input_raw,b"public")
+    copy_failure=copy.deepcopy(failure)
+    copy_failure["code"]="TASK_PLAN_QUESTION_ONE_GOAL_COPY"
+    copy_failure["planner_diagnostic"]["attempts"]=[attempt(0,1,QUESTION,20,False,"GOAL_COPY")]
+    validate_failure(copy_failure,input_raw,b"public")
+    old_strategy=copy.deepcopy(copy_failure)
+    old_strategy["planner_diagnostic"]["strategy"]="model_questions_source_recovery_v3"
+    try:validate_failure(old_strategy,input_raw,b"public")
+    except ValueError:pass
+    else:raise AssertionError("historical strategy accepted as a new v4 execution")
     for mutate in (
         lambda value:value.update(version=1),
         lambda value:value.pop("model_profile"),
@@ -801,7 +838,7 @@ def self_test():
         try:validate_failure(invalid,input_raw,b"public")
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid/non-reaped planner failure accepted")
-    print("source-grounded model-planning proposal, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
+    print("source-grounded model-planning v4 proposal, exact goal-copy rejection, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
 
 
 def main(args):

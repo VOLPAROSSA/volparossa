@@ -237,6 +237,10 @@ pub(super) async fn run(
 }
 
 fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
+    ensure!(
+        result["planner_strategy"] == super::task_plan::CURRENT_STRATEGY,
+        "compute_task_plan_execution_strategy"
+    );
     let bytes = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
     let input = super::task_plan::Input::decode(&bytes)?;
     let artifact = super::read_file(
@@ -816,6 +820,38 @@ mod tests {
     }
 
     #[test]
+    fn new_planner_execution_does_not_accept_historical_strategy() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = Options {
+            mode: Mode::PlanTasks,
+            model_profile: crate::compute::ModelProfile::default(),
+            runtime_root: directory.path().join("unused-runtime"),
+            model_root: directory.path().join("unused-model"),
+            adapter_root: None,
+            dataset: directory.path().join("absent-input.json"),
+            output: directory.path().join("absent-output"),
+            steps: 1,
+            threads: 2,
+            max_seconds: 600,
+            spare_capacity: true,
+            execute: true,
+        };
+        for strategy in [
+            "model_questions_scaffold_v1",
+            "model_questions_scaffold_recovery_v2",
+            "model_questions_source_recovery_v3",
+        ] {
+            let report = serde_json::json!({"planner_strategy":strategy});
+            assert_eq!(
+                check_task_plan_result(&report, &options)
+                    .unwrap_err()
+                    .to_string(),
+                "compute_task_plan_execution_strategy"
+            );
+        }
+    }
+
+    #[test]
     fn fresh_inference_and_training_require_generation_metadata_but_keep_limited_jobs_terminal() {
         // Inert result-contract inputs, not model execution or answer-quality evidence.
         for mode in [Mode::Infer, Mode::Train] {
@@ -888,6 +924,7 @@ mod tests {
                 "INCOMPLETE_GENERATION",
                 "INVALID_TEXT",
                 "EMPTY_TEXT",
+                "GOAL_COPY",
             ] {
                 let code = format!("TASK_PLAN_QUESTION_{stage}_{cause}");
                 let error = reaped_failure(worker_failure(

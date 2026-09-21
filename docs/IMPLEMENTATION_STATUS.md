@@ -145,7 +145,7 @@ unchanged host state pass. However, the accepted texts describe an unrelated ele
 energy-storage project, are not useful VOLPAROSSA subquestions, and one echoes a shortening
 instruction. This is a concrete semantic shortfall, not successful task decomposition.
 
-The new `model_questions_source_recovery_v3` candidate supplies the actual public source prefix
+The preceding `model_questions_source_recovery_v3` candidate supplies the actual public source prefix
 and requires the entire accepted output to end in `?`, including EOS completions. A bounded
 `NOT_A_QUESTION` rejection can trigger another charged attempt; there is no question extraction,
 text repair or canned fallback. Four attempts, 512 prompt tokens, the shared 384 generated-token
@@ -205,6 +205,21 @@ Source-exact review of all 125 unchanged original files verifies pinned provisio
 isolated planner, 37 generated tokens in two question-boundary completions, signed-source
 lineage and exact enrollment. Worker/private/network cleanup and identical host bytes pass.
 The run admits zero peer jobs; its sixteen captured packets are not a complete datapath proof.
+The corrected-fixture [run on `8232944f`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35651436847)
+stops during pinned model provisioning with a connection reset, before any planner or peer job.
+Its thirteen original files retain that failure and passing private/network cleanup with
+unchanged host state. It therefore provides no new evidence for the corrected resume command
+or the complete model workflow; the original failed artifact remains unchanged.
+
+The new `model_questions_source_recovery_v4` asks for narrower subquestions and rejects an
+exact UTF-8 copy of the original user question as `GOAL_COPY`, after the normal question/EOS
+boundary. Every rejection retains its actual token cost in the same four-attempt, 384-token
+budget and original deadline. Successful reports bind the rejected hash and byte length to the
+original input and cannot accept that exact text; historical v1–v3 reports remain readable.
+No text normalization, semantic-equivalence detector, canned replacement question or larger
+budget is introduced. All 239 CLI compute tests, 56 pure worker protocol tests and the updated
+fixture's pure controls pass. This addresses the observed literal-copy failure, not general
+decomposition quality; actual v4 model-and-peer execution and answer review remain pending.
 
 Verified 135M learning-to-serving slice: an explicit shared `--serving-directory` connects the
 training loop's selected approved local/peer successor to an already running peer-inference

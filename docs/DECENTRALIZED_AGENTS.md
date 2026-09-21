@@ -1314,12 +1314,19 @@ before that total is exhausted. The software supplies only the
 `version`/`questions` JSON structure. It does not supply, extract, rewrite or repair the question
 text. Generation stops on the entire bounded question ending in `?`, or at model EOS; an EOS
 completion is accepted only if its entire bounded text also ends in `?`. Empty,
-overlong, NUL-containing, duplicate, non-question or limit-hit text may prompt another generation with fixed
+overlong, NUL-containing, duplicate, exact-original-question, non-question or limit-hit text may prompt another generation with fixed
 categorical feedback; backend, encoding, framing, owner and integrity failures remain fatal.
-The report records `model_questions_source_recovery_v3`, `local_schema`, every attempt's
+The current report records `model_questions_source_recovery_v4`, `local_schema`, every attempt's
 token cost, fixed rejection reason and text hash, and the two accepted questions' exact text
 binding and `question_boundary`/`eos` stop reasons. New inputs, question artifacts and planner
 authorities use version 2; earlier goal-only histories remain verifiable as their original version.
+V4 asks for a narrower subquestion and records `GOAL_COPY` only for exact UTF-8 equality with
+the original user question. Classification happens after the normal question boundary or EOS,
+so the rejected generation ends and is charged without changing its text or extending its
+budget. Successful reports bind each such rejection's length and hash to that original question
+and forbid accepting it as a subquestion. Historical v1–v3 reports remain readable; new
+execution requires v4. This guard is not a semantic-equivalence or answer-quality test: neither
+paraphrases nor whitespace variants are silently normalized or claimed to be detected.
 This is a fixed two-question fork/join strategy, not model-selected task count or graph shape.
 Model output remains question data: it cannot select tools, commands, paths or external actions.
 
