@@ -1088,6 +1088,60 @@ before cleanup. These changes expose the failing boundary; they do not repair di
 claim a successful network-source workflow. The failed run's original cleanup and unchanged
 host-state checks passed.
 
+### Cooperating public tasks
+
+Use `compute peer document --task-plan /absolute/public/tasks.json` in place of
+`--public-question` and `--synthesize`. Keep the same explicit source, license, permission,
+runtime, publisher and peer-selection options from the document examples. The task graph can
+use one `--input` or a local/native `--source-plan`; it does not acquire unselected sources.
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    { "id": "requirements", "question": "List the requirements.", "depends_on": [] },
+    { "id": "risks", "question": "Identify possible contradictions.", "depends_on": [] },
+    { "id": "compare", "question": "Compare these findings.", "depends_on": ["requirements", "risks"] },
+    { "id": "refine", "question": "State the main unresolved question.", "depends_on": ["compare"] }
+  ],
+  "output": "refine"
+}
+```
+
+```mermaid
+flowchart LR
+    S[Selected public sources] --> R[Requirements task]
+    S --> K[Contradictions task]
+    R --> C[Compare both real answers]
+    K --> C
+    C --> F[New refinement instruction]
+```
+
+The first bounded plan format admits 2–16 named nodes, rejects cycles and unused work, and
+retains the exact plan before execution. Every node must contribute to the selected output.
+An empty dependency list reads the original signed source; other nodes receive their named
+parents' actual answers in the declared order. The owner verifies those answers against retained
+job receipts before constructing signed derived inputs. Original source identity and expiry
+are shared, not renewed for each question. A one-parent dependency still executes a new job.
+
+Initial source packages share one provider queue. This first scheduler finishes that source
+stage before ordered dependent steps; it does not yet overlap every ready DAG frontier.
+Individual token budgets, worker leases and per-invocation `--max-batches` remain bounded.
+`--enroll-only --execute` prepares without submitting peer work. Unfinished execution returns
+a nonzero status and retains its progress. Resume uses `--directory ... --resume --execute`;
+unfinished new reductions still need the tokenizer runtime/model and publisher identity options.
+Once complete, neither those options nor the original input/plan files are needed to validate
+and return the retained result. Only explicitly public sources and questions are supported.
+
+The graph executor and forty focused document tests pass, including exact source reuse, plan
+validation and zero-round completion after a previously partial summary. The [real four-node
+run on `56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and replay of
+its 138 unchanged original evidence files also pass: two source questions complete first, then
+comparison and single-parent refinement each execute a distinct real worker job. Removing the
+original input/plan and stopping brokers still permits zero-round completed resume without
+changing retained files. Protected captures, cleanup and unchanged host state pass. This proves
+execution of the enrolled plan, not useful answers, general tool use or completion of B03.
+
 ### Synthesizing one public answer
 
 Add `--synthesize` to the initial document command to enroll a hierarchy of actual peer

@@ -218,6 +218,12 @@ A diagnostic run then failed earlier, while resolving the first cache provider's
 Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
+The next cooperation step is an explicit **public task graph**: different source questions
+can run across peers, then their retained answers feed a new dependent instruction. The
+implementation and its real four-task fork/join and offline-resume VM proof pass.
+This is coordinated execution of an enrolled plan, not yet autonomous planning.
+[How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
+
 Public work can be split across selected peers, with retained results and bounded recovery
 after worker loss. Private distributed computation, general autonomous planning, defended model
 aggregation and a complete self-maintaining “brain” remain work to do. More participants offer

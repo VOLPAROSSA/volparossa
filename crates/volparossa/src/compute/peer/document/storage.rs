@@ -211,7 +211,110 @@ pub(super) fn publish(
     cancelled: &watch::Receiver<bool>,
     synthesize: bool,
 ) -> Result<Enrollment> {
+    publish_internal(
+        root, input, plan, signer, providers, at, lifetime, cancelled, synthesize, None,
+    )
+}
+
+/// Publish another question's packages over one unchanged, still-live original source.
+/// Every leaf retains the same signed bytes and original validity, not fresh source authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn publish_with_source(
+    root: &Path,
+    input: &Input,
+    plan: &Plan,
+    signer: &SigningKey,
+    providers: &[VerifyingKey],
+    at: u64,
+    lifetime: u64,
+    cancelled: &watch::Receiver<bool>,
+    synthesize: bool,
+    source: &SignedManifest,
+) -> Result<Enrollment> {
+    publish_internal(
+        root,
+        input,
+        plan,
+        signer,
+        providers,
+        at,
+        lifetime,
+        cancelled,
+        synthesize,
+        Some(source),
+    )
+}
+
+fn validate_shared_source(
+    source: &SignedManifest,
+    input: &Input,
+    signer: &SigningKey,
+    validity: Validity,
+) -> Result<()> {
+    // This path enrolls new work, unlike historical load(). Old receipts do not
+    // authorize a fresh question or renew the original publication after expiry.
+    let verified = source.verify(&signer.verifying_key(), now()?)?;
+    ensure!(
+        verified.validity() == validity
+            && verified.metadata().name == "document-source"
+            && verified.metadata().revision == 1
+            && verified.metadata().content_type == "text/plain"
+            && verified.length() == input.document.len() as u64
+            && hex::encode(verified.object_sha256()) == sha(input.document.as_bytes()),
+        "compute_document_shared_source_identity"
+    );
+    let chunks = input.document.as_bytes().chunks(CHUNK_BYTES);
+    ensure!(
+        chunks.len() == verified.chunks().len()
+            && chunks.zip(verified.chunks()).all(|(bytes, chunk)| {
+                ChunkId::digest(bytes) == *chunk.id() && bytes.len() == chunk.length() as usize
+            }),
+        "compute_document_shared_source_chunks"
+    );
+    Ok(())
+}
+
+fn source_publication(
+    input: &Input,
+    signer: &SigningKey,
+    validity: Validity,
+    cache: &mut ChunkStore,
+    original: Option<&SignedManifest>,
+) -> Result<SignedManifest> {
+    if let Some(source) = original {
+        for bytes in input.document.as_bytes().chunks(CHUNK_BYTES) {
+            cache.put(bytes)?;
+        }
+        Ok(source.clone())
+    } else {
+        publish_object(
+            input.document.as_bytes(),
+            "document-source".into(),
+            "text/plain",
+            validity,
+            signer,
+            cache,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_internal(
+    root: &Path,
+    input: &Input,
+    plan: &Plan,
+    signer: &SigningKey,
+    providers: &[VerifyingKey],
+    at: u64,
+    lifetime: u64,
+    cancelled: &watch::Receiver<bool>,
+    synthesize: bool,
+    original: Option<&SignedManifest>,
+) -> Result<Enrollment> {
     let validity = admission(root, input, plan, providers, at, lifetime, cancelled)?;
+    if let Some(source) = original {
+        validate_shared_source(source, input, signer, validity)?;
+    }
     let mut cache = ChunkStore::create(
         &root.join("publication-cache"),
         CacheLimits {
@@ -220,14 +323,7 @@ pub(super) fn publish(
             min_free_bytes: 64 * 1024 * 1024,
         },
     )?;
-    let source = publish_object(
-        input.document.as_bytes(),
-        "document-source".into(),
-        "text/plain",
-        validity,
-        signer,
-        &mut cache,
-    )?;
+    let source = source_publication(input, signer, validity, &mut cache, original)?;
     let source_bytes = source.encode();
     task::write_bytes(&root.join("source.manifest"), &source_bytes, false)?;
     save(root, "document-plan.json", plan, false)?;
@@ -612,3 +708,6 @@ pub(super) fn join_answers(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shared_source_tests;

@@ -4,6 +4,24 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Verified public task graph: `compute peer document --task-plan` enrolls different
+questions and explicit dependencies over the same selected public source or source collection.
+Independent source tasks share the existing cross-package provider queue and the exact same
+original signed source, validity and peer selection. Once source work completes, ordered
+dependency frontiers consume receipt-reconstructed parent answers. Even a single-parent step
+runs its own new instruction; it cannot return the parent's answer as if it performed new work.
+Graph and per-node identities are retained, and completed replay preserves existing execution
+summaries. Forty focused document tests and strict all-target CLI Clippy pass. The [run on
+`56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and reconstruction
+of its 138 original evidence files pass: four distinct actual workers execute the two source
+questions, comparison and single-parent refinement. An intentionally partial first invocation
+resumes without changing original source authority. Removing the input/plan files and stopping
+both brokers still permits a zero-round offline completed resume with unchanged retained
+history. Five captures contain 33,052 frames with zero drops/direct client-to-exit packets;
+private/network cleanup and unchanged host state pass. This verifies the explicitly enrolled plan.
+The current scheduler has a source-stage barrier and ordered dependent stages, not fully dynamic
+DAG scheduling or automatic task planning. This does not complete B03 or add private computation.
+
 Current network-source candidate: source-plan v2 combines explicitly selected local files and
 native signed `text/plain` publications in the same public document task. Publisher key, name
 and exact manifest ID are fixed before any cache lookup. Verified cached chunks are reused;

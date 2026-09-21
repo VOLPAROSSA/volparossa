@@ -16,7 +16,7 @@ const PARENTS_PER_GROUP: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct Answer {
+pub(super) struct Answer {
     text: String,
     provider_key: String,
     job_id: String,
@@ -132,7 +132,33 @@ pub(super) async fn advance(
 ) -> Result<()> {
     let (enrollment, input, plan) = document_storage::load(&args.directory)?;
     ensure!(enrollment.synthesize, "compute_synthesis_not_enrolled");
-    let mut frontier = leaf_answers(&args.directory, &enrollment, &input, &plan)?;
+    let frontier = leaf_answers(&args.directory, &enrollment, &input, &plan)?;
+    advance_frontier(
+        args,
+        socket,
+        cancelled,
+        result,
+        &enrollment,
+        &input,
+        frontier,
+        false,
+    )
+    .await
+}
+
+/// A graph dependency is a new instruction, even when it has exactly one parent.
+/// Its parent answers have already been reconstructed from each node's original receipts.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(super) async fn advance_frontier(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+    result: &mut Value,
+    enrollment: &document_storage::Enrollment,
+    input: &super::Input,
+    mut frontier: Vec<Answer>,
+    force_first: bool,
+) -> Result<()> {
     let mut rounds = result["rounds_this_invocation"]
         .as_u64()
         .context("compute_synthesis_rounds")?;
@@ -147,7 +173,7 @@ pub(super) async fn advance(
             unfinished(reason, &levels, result);
             return Ok(());
         }
-        if frontier.len() == 1 {
+        if frontier.len() == 1 && (!force_first || level > 1) {
             let answer = &frontier[0];
             result["complete"] = true.into();
             result["joining"] = if levels.is_empty() {
@@ -185,8 +211,8 @@ pub(super) async fn advance(
             let prepared = storage::prepare(
                 args,
                 &directory,
-                &enrollment,
-                &input,
+                enrollment,
+                input,
                 parents,
                 group * PARENTS_PER_GROUP,
                 level,
@@ -198,13 +224,7 @@ pub(super) async fn advance(
                 rounds = rounds
                     .checked_add(
                         advance_group_packages(
-                            args,
-                            socket,
-                            cancelled,
-                            &directory,
-                            &enrollment,
-                            &prepared,
-                            rounds,
+                            args, socket, cancelled, &directory, enrollment, &prepared, rounds,
                         )
                         .await?,
                     )
@@ -215,7 +235,7 @@ pub(super) async fn advance(
             let mut pending_work = None;
             for (index, dataset) in prepared.datasets.iter().enumerate() {
                 let package = directory.join(format!("package-{index:04}"));
-                let expected = storage::expected(&package, &enrollment, &prepared, dataset, index)?;
+                let expected = storage::expected(&package, enrollment, &prepared, dataset, index)?;
                 let work = package.join("work");
                 let established = document_storage::present(&work)?;
                 let mut snapshot = if established {
@@ -326,7 +346,9 @@ pub(super) async fn advance(
             "generation_limit_reached":next.iter().any(|answer| answer.generated_tokens == 64)});
         storage::retain_json(&root, &format!("level-{level:02}-result.json"), &record)?;
         levels.push(record);
-        if next.len() >= frontier.len() {
+        // The first graph stage applies a different instruction and may split its
+        // inputs by token budget. Subsequent same-instruction reductions must shrink.
+        if next.len() >= frontier.len() && !(force_first && level == 1) {
             unfinished(
                 "reduction_did_not_shrink_no_inputs_discarded",
                 &levels,
