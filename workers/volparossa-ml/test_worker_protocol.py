@@ -112,6 +112,9 @@ def task_planner_doubles(text, generated=None, prompt=None):
         def tolist(self):
             return self.values
 
+        def numel(self):
+            return len(self.values)
+
     class Tensor:
         def __init__(self, rows):
             self.rows = rows
@@ -303,6 +306,37 @@ class WorkerProtocolTests(unittest.TestCase):
                 source.write_bytes(b" " * WORKER.MAX_TASK_PLAN_BYTES + raw)
                 with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
                     WORKER.prepare_files(value)
+
+    def test_inference_checks_owner_between_native_token_steps_without_changing_generation(self):
+        model, tokenizer, torch, transformers = task_planner_doubles("Retained model text.")
+        session = mock.Mock()
+        prompt = torch.tensor([[11, 12, 13]])
+
+        def generate(**kwargs):
+            self.assertEqual((kwargs["max_new_tokens"], kwargs["do_sample"], kwargs["use_cache"]), (64, False, True))
+            self.assertEqual(len(kwargs["stopping_criteria"]), 1)
+            for tokens in ([11, 12, 13, 21], [11, 12, 13, 21, 22], [11, 12, 13, 21, 22, 2]):
+                self.assertFalse(kwargs["stopping_criteria"][0](torch.tensor([tokens]), None))
+            return torch.tensor([[11, 12, 13, 21, 22, 2]])
+
+        model.generate.side_effect = generate
+        result = WORKER.generate(model, [prompt], tokenizer, torch, session, transformers)
+        self.assertEqual(result, [dict(sample_index=0, text="Retained model text.", generated_tokens=3, text_truncated=False)])
+        self.assertEqual(session.check.call_count, 5)  # Before, each token, after.
+        self.assertEqual(tokenizer.decode.call_args.args[0].tolist(), [21, 22, 2])
+        self.assertEqual(tokenizer.decode.call_args.kwargs, dict(skip_special_tokens=True))
+
+    def test_inference_owner_cancellation_or_deadline_cannot_emit_a_completed_answer(self):
+        for cause in ("JOB_CANCELLED", "JOB_DEADLINE_EXCEEDED", "OWNER_CONTROL_CLOSED"):
+            for failure_check in (2, 3):  # Inside generation, or just after its final token.
+                with self.subTest(cause=cause, check=failure_check):
+                    model, tokenizer, torch, transformers = task_planner_doubles("Never an accepted answer.")
+                    session = mock.Mock()
+                    session.check.side_effect = [None] * (failure_check - 1) + [WORKER.JobError(cause)]
+                    with self.assertRaisesRegex(WORKER.JobError, cause):
+                        WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, session, transformers)
+                    tokenizer.decode.assert_not_called()
+                    model.generate.assert_called_once()
 
     def test_task_planner_has_two_real_greedy_generations_with_one_shared_owner(self):
         expected = dict(version=2, questions=["Which requirements?", "Which risks?"])

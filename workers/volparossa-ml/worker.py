@@ -1050,7 +1050,15 @@ def evaluate(model, samples, torch, session):
     return {"loss": total / tokens, "target_tokens": tokens}
 
 
-def generate(model, samples, tokenizer, torch, session):
+def generate(model, samples, tokenizer, torch, session, transformers):
+    class OwnerCheckpoint(transformers.StoppingCriteria):
+        def __call__(self, _input_ids, _scores, **_kwargs):
+            # Service the original owner's controls on this execution thread after
+            # each native token step, not from a reader while model work still runs.
+            # Pause keeps the generation state; cancel/deadline remains an error.
+            session.check()
+            return False
+
     model.eval()
     results = []
     with torch.inference_mode():
@@ -1058,7 +1066,9 @@ def generate(model, samples, tokenizer, torch, session):
             session.check()
             output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
                                     max_new_tokens=MAX_NEW_TOKENS, do_sample=False, use_cache=True,
+                                    stopping_criteria=transformers.StoppingCriteriaList([OwnerCheckpoint()]),
                                     pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+            session.check()
             generated = output[0, input_ids.shape[1]:]
             require(generated.numel() <= MAX_NEW_TOKENS, "GENERATION_TOKEN_LIMIT_EXCEEDED")
             text = tokenizer.decode(generated, skip_special_tokens=True)
@@ -1167,7 +1177,7 @@ def execute_job(request, session):
                                              trainable=request["mode"] == "train")
     session.progress("baseline")
     baseline = evaluate(model, samples["heldout"], torch, session) if samples["heldout"] else None
-    baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session)
+    baseline_outputs = generate(model, samples["inference"], tokenizer, torch, session, transformers)
     result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": request["mode"],
               "backend_versions": versions, "device": "cpu", "threads": request["threads"],
               "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
@@ -1228,7 +1238,7 @@ def execute_job(request, session):
                       adapter_after=adapter_after, reloaded_base=reload_base, reloaded_adapter=reload_adapter,
                       base_weights_unchanged=True, adapter_weights_changed=True, checkpoint_reloaded=True,
                       lora={"rank": 4, "alpha": 8, "target_modules": ["q_proj", "v_proj"]},
-                      outputs=generate(reloaded, samples["inference"], tokenizer, torch, session), artifacts=artifacts)
+                      outputs=generate(reloaded, samples["inference"], tokenizer, torch, session, transformers), artifacts=artifacts)
     if prepared_adapter is not None:
         root, original_files, _ = prepared_adapter
         require(all(file_hash(root / name, maximum=ADAPTER_FILES[name]) == metadata
