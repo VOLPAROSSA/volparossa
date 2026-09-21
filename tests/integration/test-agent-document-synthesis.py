@@ -50,7 +50,8 @@ def fixture():
             status = receipt["status"]
             report = json.loads(status["report_json"])
             for local, output in enumerate(report["outputs"]):
-                output.update(sample_index=local, generated_tokens=12, text_truncated=False)
+                output.update(sample_index=local, generated_tokens=12, text_truncated=False,
+                    generation=dict(version=1, stop_reason="eos", max_new_tokens=64))
             status.update(report_json=encoded(report).decode(), report_sha256=sha(encoded(report)))
             part["report_sha256"] = status["report_sha256"]
             save(receipt_name, receipt)
@@ -122,11 +123,12 @@ def fixture():
             actual = copy.deepcopy(reports[slot])
             actual["dataset"] = dict(version=3, level=number, sha256=sha(encoded(derived)),
                                      source_manifest_sha256=enrollment["source_manifest_id"])
-            actual["outputs"] = [dict(sample_index=0, text=f"synthetic reduction {number}/{slot}", generated_tokens=12, text_truncated=False)]
+            actual["outputs"] = [dict(sample_index=0, text=f"synthetic reduction {number}/{slot}", generated_tokens=12,
+                text_truncated=False, generation=dict(version=1, stop_reason="eos", max_new_tokens=64))]
             status = dict(binding=binding, state="complete", report_json=encoded(actual).decode(), report_sha256=sha(encoded(actual)))
             batch["jobs"].append(dict(handle=handle, state="complete", report_sha256=status["report_sha256"]))
             batch["outputs"][slot] = dict(sample_index=slot, provider_key=handle["provider_key"],
-                job_id=binding["job_id"], text=actual["outputs"][0]["text"])
+                job_id=binding["job_id"], text=actual["outputs"][0]["text"], **SYN["generation_fields"](actual["outputs"][0]))
             attempt = package + "/" + ATTEMPT
             path = attempt + f"/job-{slot}.json"
             save(path, handle)
@@ -142,7 +144,7 @@ def fixture():
                 handle_file=dict(bytes=len(encoded(handle)), sha256=sha(encoded(handle))), worker=worker,
                 first_monotonic_ns=2000, last_monotonic_ns=2100, alive_before_and_after=True))
         save(package + "/" + ATTEMPT + "/result.json", batch)
-        level = dict(level=number, complete=True, parents=len(parents), outputs=len(following),
+        level = dict(level=number, complete=True, execution_complete=True, answer_complete=True, parents=len(parents), outputs=len(following),
             groups=[dict(group=0, parents=len(parents), complete=True, parts=count, input_sha256=sha(text))],
             answers=following, generation_limit_reached=False)
         save(f"synthesis/level-{number:02}-result.json", level)
@@ -206,10 +208,14 @@ def main():
             pass
         else:
             raise AssertionError("changed retained parent/prompt/source bytes accepted")
-    output = dict(sample_index=0, text="bounded", generated_tokens=64, text_truncated=False)
+    output = dict(sample_index=0, text="bounded", generated_tokens=64, text_truncated=False,
+        generation=dict(version=1, stop_reason="eos", max_new_tokens=64))
     handle = original["synthesis_observation"]["workers"][0]["handle"]
     SYN["answer"](output, handle, dict(report_sha256="a" * 64), "b" * 64, 0, 1, 0)
-    for field, wrong in (("text_truncated", True), ("generated_tokens", 65), ("sample_index", 1), ("text", "")):
+    assert SYN["generation_limited"](output) is False
+    for field, wrong in (("text_truncated", True), ("generated_tokens", 65), ("sample_index", 1), ("text", ""),
+                         ("generation", None), ("generation", dict(version=1, stop_reason="token_limit", max_new_tokens=64)),
+                         ("generation", dict(version=1, stop_reason="eos", max_new_tokens=65))):
         invalid = dict(output, **{field: wrong})
         try:
             SYN["answer"](invalid, handle, dict(report_sha256="a" * 64), "b" * 64, 0, 1, 0)

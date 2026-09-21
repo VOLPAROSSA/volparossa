@@ -3,6 +3,7 @@
 mod broker;
 mod device_capacity;
 mod document_plan;
+mod inference_output;
 mod owner_control;
 mod peer;
 mod sandbox;

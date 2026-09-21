@@ -1,5 +1,6 @@
 use super::*;
 use crate::compute::document_plan::Part;
+use crate::compute::inference_output::Generation;
 use std::os::unix::fs::PermissionsExt as _;
 
 fn parent(text: &str, index: u16) -> Answer {
@@ -19,6 +20,63 @@ fn parent(text: &str, index: u16) -> Answer {
         source_end: u64::from(index + 1) * 100,
         generated_tokens: 15,
         text_truncated: false,
+        generation: Some(Generation {
+            version: 1,
+            stop_reason: crate::compute::inference_output::StopReason::Eos,
+            max_new_tokens: 64,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn incomplete_or_unknown_parent_starts_no_dependency_work_even_with_follow() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (enrollment, original) = historical_original(temp.path(), &signer, &cancelled);
+    for (index, reason) in [
+        "legacy_generation_end_unknown",
+        "worker_output_hit_token_limit",
+        "worker_output_was_wire_truncated",
+        "worker_produced_empty_answer",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let target = temp.path().join(format!("never-started-{index}"));
+        let mut args = replay_options(&target);
+        args.follow.follow = true;
+        let mut answer = parent("public", 0);
+        match index {
+            0 => answer.generation = None,
+            1 => {
+                answer.generated_tokens = 64;
+                answer.generation.as_mut().unwrap().stop_reason =
+                    crate::compute::inference_output::StopReason::TokenLimit;
+            }
+            2 => answer.text_truncated = true,
+            _ => answer.text = " ".into(),
+        }
+        let mut result =
+            json!({"complete":false,"execution_complete":false,"rounds_this_invocation":0});
+        super::super::advance_frontier(
+            &args,
+            &temp.path().join("no-agent.sock"),
+            &cancelled,
+            &mut result,
+            &enrollment,
+            &original,
+            vec![answer],
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["execution_complete"], false);
+        assert_eq!(result["rounds_this_invocation"], 0);
+        assert_eq!(result["synthesis"]["reason"], reason);
+        assert!(!target.exists());
     }
 }
 

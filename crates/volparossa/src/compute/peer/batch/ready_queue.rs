@@ -370,10 +370,10 @@ fn completed(
             )?;
             let row = usize::from(handle.binding.row_indices[0]);
             ensure!(outputs[row].is_none(), "compute_distribute_duplicate_row");
-            outputs[row] = Some(
-                serde_json::json!({"sample_index":row,"provider_key":handle.provider_key,
-                "job_id":handle.binding.job_id,"text":report["outputs"][0]["text"]}),
-            );
+            let mut joined = serde_json::json!({"sample_index":row,"provider_key":handle.provider_key,
+                "job_id":handle.binding.job_id,"text":report["outputs"][0]["text"]});
+            output::retain(&report["outputs"][0], &mut joined)?;
+            outputs[row] = Some(joined);
         }
         Ok(
             serde_json::json!({"handle":handle,"state":status.state,"new_submission":new_submission,
@@ -696,7 +696,10 @@ pub(super) async fn report(
         .map(|part| part["handle"]["provider_key"].as_str())
         .collect::<BTreeSet<_>>()
         .len();
+    let answer_complete =
+        complete && output::all_complete(&outputs.iter().flatten().cloned().collect::<Vec<_>>())?;
     let report = serde_json::json!({"version":1,"operation":"compute_ready_queue","scheduling":SCHEDULING,
+        "execution_complete":complete,"answer_complete":answer_complete,
         "complete":complete,"dataset_manifest_id":plan.dataset_manifest_id,"model_fingerprint":fingerprint,
         "provider_count":args.providers.len(),"providers_used":providers_used,"outputs":outputs,"jobs":parts,"never_submitted_rows":queue.rows,
         "task":args.task,"private_data_supported":false,"model_layer_sharding":false,

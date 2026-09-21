@@ -441,7 +441,8 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
     require((1 if force or len(parents)>1 else 0)<=len(levels)<=16,"derived instruction or reduction was omitted")
     rounds=0
     for number,level in enumerate(levels,1):
-        require(level["level"]==number and level["complete"] is True and level["parents"]==len(parents)
+        require(level["level"]==number and level["complete"] is True
+            and level["execution_complete"] is True and level["answer_complete"] is True and level["parents"]==len(parents)
             and len(level["groups"])==(len(parents)+63)//64,"model-derived stage omitted original parents")
         following=[]
         for group_index,group in enumerate(level["groups"]):
@@ -465,10 +466,11 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
                 following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,node_index,number,len(rows)>4))
                 rounds+=1
         require(level["outputs"]==len(following) and ((force and number==1) or len(following)<len(parents))
-            and level["answers"]==following and level["generation_limit_reached"] is any(a["generated_tokens"]==64 for a in following)
+            and level["answers"]==following and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a) for a in following)
             and load(prefix+f"/synthesis/level-{number:02d}-result.json")==level,"derived results or reduction changed")
         parents=following
-    require(len(parents)==1 and result["complete"] is True and result["synthesized_answer"]==parents[0]
+    require(len(parents)==1 and result["version"]==2 and result["complete"] is True
+        and result["execution_complete"] is True and result["answer_complete"] is True and result["synthesized_answer"]==parents[0]
         and result["synthesis"]["complete"] is True and result["synthesis"]["claim_scope"]==SYNTH["CLAIM"]
         and result["synthesis"]["model_answer_correctness_proven"] is False
         and result["synthesis"]["semantic_completeness_proven"] is False,"node final result or scope changed")
@@ -552,13 +554,14 @@ def check(value,revision):
     require(count+1<=rounds<=16 and len({a["job_id"] for a in answers.values()})==count+1,"model join reused a source task")
     for phase,used in (("result",rounds),("resume",0)):
         result=value[phase]
-        require(result["operation"]=="compute_public_task_graph" and result["complete"] is True
+        require(result["version"]==2 and result["operation"]=="compute_public_task_graph" and result["complete"] is True
+            and result["execution_complete"] is True and result["answer_complete"] is True and result["semantic_completeness_proven"] is False
             and result["plan"]==plan and result["plan_sha256"]==sha(encoded(plan)) and result["source_manifest_id"]==source_id
             and result["source_expires_unix_seconds"]==authority["expires_at_unix_seconds"] and result["provider_keys"]==authority["provider_keys"]
             and result["rounds_this_invocation"]==used and result["interrupted"] is False and result["planning"]==planning
             and result["automatic_task_planning"] is True and result["output"]==answers["answer"] and len(result["nodes"])==count+1
             and all(result[k] is False for k in ("private_data_supported","external_actions_supported","model_answer_correctness_proven","full_b03_claimed")),"planned graph completion/scope changed")
-        require(result["nodes"]==[dict(n,complete=True,status="complete",answer=answers[n["id"]]) for n in plan["nodes"]],"planned graph answers changed")
+        require(result["nodes"]==[dict(n,complete=True,execution_complete=True,status="complete",answer_status="eos",answer=answers[n["id"]]) for n in plan["nodes"]],"planned graph answers changed")
     require(load("result.json")==value["result"] and {n for n in raw if HANDLE.fullmatch(n)}=={v["path"] for v in executed.values()},"extra/unverified planned jobs or replaced completed summary")
     seen,processes=set(),[observed["isolation"]["worker"]]
     require(value["observation"]["owner_reaped"] is True,"peer owner not reaped")

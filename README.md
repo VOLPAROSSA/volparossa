@@ -225,8 +225,12 @@ completed real model-and-peer execution, but the generated texts were unrelated 
 that is not useful task decomposition. The current candidate supplies an exact bounded public
 source excerpt, records how much of the source was read, and rejects non-question output.
 Up to four generations share the same token budget and deadline, charging rejected attempts
-too. It never repairs text or supplies replacement questions. This source-grounded version
-still needs real execution and content review. The model does not choose task count or shape.
+too. It never repairs text or supplies replacement questions. Real model-and-peer execution
+now passes, but content review still finds a repeated main question, invented facts and answers
+cut off by the token limit. The updated answer path retains the model's actual stop reason
+and prevents unfinished outputs from becoming completed answers or new dependencies; its
+focused checks pass, with live execution of the updated contract still pending.
+Useful, source-faithful decomposition remains unfinished. The model does not choose task count or shape.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

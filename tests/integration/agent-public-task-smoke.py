@@ -133,7 +133,9 @@ def stopped(work, name):
 
 
 def check_frontend(result, task, manifest, files, rounds):
-    require(result["operation"] == "compute_public_task" and result["complete"] is True
+    require(result["version"] == 2 and result["operation"] == "compute_public_task" and result["complete"] is True
+            and result["execution_complete"] is True and result["answer_complete"] is True
+            and result["semantic_completeness_proven"] is False
             and result["task"] == TASK == task["task"] and result["dataset_manifest_id"] == manifest
             and result["publisher_key"] == task["publisher_key"]
             and result["dataset_name"] == task["dataset_name"] == "disposable-agent-jobs",
@@ -162,6 +164,14 @@ def check_frontend(result, task, manifest, files, rounds):
                 and status["state"] == "complete" and handle["binding"]["task"] == TASK,
                 "retained authenticated receipt binding changed")
         report_json = status["report_json"]
+        actual_output = json.loads(report_json)["outputs"][0]
+        generation = JOBS["TRAIN"]["check_generation"](actual_output, require_eos=True)
+        require(actual_output["text_truncated"] is False and actual_output["text"].strip()
+                and answer["generation"] == output["generation"] == generation
+                and answer["generated_tokens"] == output["generated_tokens"] == actual_output["generated_tokens"]
+                and answer["text_truncated"] is output["text_truncated"] is False
+                and answer["answer_status"] == "eos" and answer["answer_complete"] is True,
+                "frontend accepted an incomplete answer or changed its ending metadata")
         digest = hashlib.sha256(report_json.encode()).hexdigest()
         require(status["report_sha256"] == digest and answer["report_sha256"] == output["report_sha256"] == digest,
                 "answer no longer matches the real report")
@@ -331,6 +341,10 @@ def self_test():
         jobs["observation"]["workers"][index]["dataset_json"] = derived
         output = json.loads(status["report_json"])
         output["dataset"]["sha256"] = binding["dataset_sha256"]
+        ending = dict(generated_tokens=12, text_truncated=False,
+            generation=dict(version=1, stop_reason="eos", max_new_tokens=64))
+        output["outputs"][0].update(ending)
+        jobs["result"]["outputs"][index].update(ending)
         status["report_json"] = json.dumps(output)
         status["report_sha256"] = part["report_sha256"] = hashlib.sha256(status["report_json"].encode()).hexdigest()
     manifest = jobs["source"]["manifest"]["sha256"]
@@ -365,8 +379,10 @@ def self_test():
     outputs = [dict(**output, report_sha256=jobs["statuses"][index]["report_sha256"])
                for index, output in enumerate(jobs["result"]["outputs"])]
     answers = [dict(source_row=index, context_sha256=hashlib.sha256(jobs["source"]["dataset"]["inference"][index]["context"].encode()).hexdigest(),
-                    **{key: output[key] for key in ("text", "provider_key", "job_id", "report_sha256")}) for index, output in enumerate(outputs)]
-    result = dict(operation="compute_public_task", complete=True, task=copy.deepcopy(TASK), dataset_manifest_id=manifest,
+                    **{key: output[key] for key in ("text", "provider_key", "job_id", "report_sha256", "generation", "generated_tokens", "text_truncated")},
+                    answer_complete=True, answer_status="eos") for index, output in enumerate(outputs)]
+    result = dict(version=2, operation="compute_public_task", complete=True,
+        execution_complete=True, answer_complete=True, semantic_completeness_proven=False, task=copy.deepcopy(TASK), dataset_manifest_id=manifest,
         publisher_key=task["publisher_key"], dataset_name=task["dataset_name"], answers=answers, question_authored_by_requester=True,
         publisher_signature_covers_original_source_not_question=True, joining="ordered_per_context_answers_not_neural_synthesis",
         private_data_supported=False, automatic_source_discovery=False, arbitrary_document_splitting=False,

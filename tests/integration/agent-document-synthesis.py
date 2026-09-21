@@ -29,14 +29,31 @@ def encoded(value):
 
 
 def answer(output, handle, status, manifest, start, end, index):
+    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=True)
     require(output["sample_index"] == index and isinstance(output["text"], str) and output["text"].strip()
             and len(output["text"].encode()) <= 1024 and "\0" not in output["text"]
-            and type(output["generated_tokens"]) is int and 0 <= output["generated_tokens"] <= 64
+            and type(output["generated_tokens"]) is int and 1 <= output["generated_tokens"] <= 64
             and output["text_truncated"] is False, "generated parent is missing, malformed or wire-truncated")
     return {"text": output["text"], "provider_key": handle["provider_key"], "job_id": handle["binding"]["job_id"],
             "report_sha256": status["report_sha256"], "package_manifest_id": manifest,
             "model_fingerprint": handle["binding"]["model_fingerprint"], "output_index": index,
-            "source_start": start, "source_end": end, "generated_tokens": output["generated_tokens"], "text_truncated": False}
+            "source_start": start, "source_end": end, "generated_tokens": output["generated_tokens"], "text_truncated": False,
+            "generation": generation}
+
+
+def generation_limited(output):
+    return JOBS["TRAIN"]["check_generation"](output)["stop_reason"] == "token_limit"
+
+
+def generation_fields(output, annotated=False):
+    generation = JOBS["TRAIN"]["check_generation"](output, require_eos=annotated)
+    require(type(output["text_truncated"]) is bool, "invalid wire truncation metadata")
+    result = dict(generation=generation, generated_tokens=output["generated_tokens"], text_truncated=output["text_truncated"])
+    if annotated:
+        require(output["text_truncated"] is False and isinstance(output["text"], str) and output["text"].strip(),
+                "incomplete output cannot be a complete frontend answer")
+        result.update(answer_status="eos", answer_complete=True)
+    return result
 
 
 def observe(work, pid):
@@ -126,7 +143,8 @@ def check(value, raw, enrollment, parents, response_bytes, job_ids, api):
     nodes, layout = {w["node"]: w for w in value["observation"]["workers"]}, value["layout"]
     executed, rounds = {}, 0
     for number, level in enumerate(levels, 1):
-        require(level["level"] == number and level["complete"] is True and level["parents"] == len(parents)
+        require(level["level"] == number and level["complete"] is True
+                and level["execution_complete"] is True and level["answer_complete"] is True and level["parents"] == len(parents)
                 and len(parents) > 1 and len(level["groups"]) == (len(parents) + 63) // 64,
                 "reduction level skipped or invented parents")
         following = []
@@ -233,21 +251,21 @@ def check(value, raw, enrollment, parents, response_bytes, job_ids, api):
                         output = actual["outputs"][local]
                         reported = batch["outputs"][row_index]
                         require(reported == {"sample_index": row_index, "provider_key": handle["provider_key"],
-                                "job_id": binding["job_id"], "text": output["text"]}, "synthesis returned another answer")
+                                "job_id": binding["job_id"], "text": output["text"], **generation_fields(output)}, "synthesis returned another answer")
                         inputs = package_rows[row_index]["inputs"]
                         joined[row_index] = answer(output, handle, status, manifest_id,
                             min(i["source_start"] for i in inputs), max(i["source_end"] for i in inputs), local)
                 require(all(joined), "a synthesis part has no actual model result")
                 following.extend(joined)
         require(level["outputs"] == len(following) < len(parents) and level["answers"] == following
-                and level["generation_limit_reached"] is any(item["generated_tokens"] == 64 for item in following)
+                and level["generation_limit_reached"] is any(generation_limited(item) for item in following)
                 and load(f"synthesis/level-{number:02}-result.json") == level,
                 "hierarchy did not shrink or changed completed results")
         parents = following
     final = value["result"]["synthesis"]
     require(len(parents) == 1 and value["result"]["synthesized_answer"] == parents[0]
             and final["complete"] is True and final["claim_scope"] == CLAIM
-            and final["generation_limit_reached"] is (parents[0]["generated_tokens"] == 64)
+            and final["generation_limit_reached"] is generation_limited(parents[0])
             and final["model_answer_correctness_proven"] is False and final["semantic_completeness_proven"] is False
             and value["resume"]["synthesis"] == final and value["resume"]["synthesized_answer"] == parents[0],
             "final answer is not the exact real last worker output or offline resume changed it")

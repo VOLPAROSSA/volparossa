@@ -1050,6 +1050,17 @@ def evaluate(model, samples, torch, session):
     return {"loss": total / tokens, "target_tokens": tokens}
 
 
+def generation_metadata(tokens, eos_token_id):
+    require(type(tokens) is list and 1 <= len(tokens) <= MAX_NEW_TOKENS
+            and all(type(token) is int for token in tokens), "INVALID_GENERATION_TOKENS")
+    if tokens[-1] == eos_token_id:
+        reason = "eos"
+    else:
+        require(len(tokens) == MAX_NEW_TOKENS, "GENERATION_STOP_UNCONFIRMED")
+        reason = "token_limit"
+    return {"version": 1, "stop_reason": reason, "max_new_tokens": MAX_NEW_TOKENS}
+
+
 def generate(model, samples, tokenizer, torch, session, transformers):
     class OwnerCheckpoint(transformers.StoppingCriteria):
         def __call__(self, _input_ids, _scores, **_kwargs):
@@ -1071,6 +1082,7 @@ def generate(model, samples, tokenizer, torch, session, transformers):
             session.check()
             generated = output[0, input_ids.shape[1]:]
             require(generated.numel() <= MAX_NEW_TOKENS, "GENERATION_TOKEN_LIMIT_EXCEEDED")
+            generation = generation_metadata(generated.tolist(), tokenizer.eos_token_id)
             text = tokenizer.decode(generated, skip_special_tokens=True)
             # Bound the escaped wire representation too: four multilingual responses must
             # not overflow a frame merely because JSON represents one character as \uXXXX.
@@ -1078,7 +1090,8 @@ def generate(model, samples, tokenizer, torch, session, transformers):
             while len(json.dumps(public_text, ensure_ascii=True).encode("ascii")) > 1024:
                 public_text = public_text[:-1]
             results.append({"sample_index": index, "text": public_text,
-                            "generated_tokens": int(generated.numel()), "text_truncated": public_text != text})
+                            "generated_tokens": int(generated.numel()), "text_truncated": public_text != text,
+                            "generation": generation})
     return results
 
 

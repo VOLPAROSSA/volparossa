@@ -74,10 +74,29 @@ text repair or canned fallback. Four attempts, 512 prompt tokens, the shared 384
 budget and original owner deadline are unchanged. The next disposable fixture uses the full
 literal README introduction before its navigation, rather than a truncated 128-byte slogan,
 with the same original question. Tokenized peer work is counted from actual retained plans,
-not assumed to fit three jobs. This source-grounded variant has no live model/peer result yet;
-source binding and question punctuation alone cannot establish relevance or answer quality.
+not assumed to fit three jobs. The [source-grounded run on
+`bebbc8ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35638510308) and source-exact
+review of its 137 original files pass mechanically: the literal 506-byte introduction feeds two
+question generations using 45 tokens, three real peer workers and unchanged zero-round offline
+resume. Protected captures, cleanup and unchanged host state pass. However, the first question
+repeats the main goal, a peer answer and the join invent an OpenVPN dependency, and all three
+answers stop mid-sentence at 64 tokens. Their `text_truncated=false` only describes the separate
+wire-text cap. This is not useful decomposition or source-faithful, finished output.
 Seventeen focused Rust tests, forty-two pure worker protocol tests, the updated fixture's
 pure controls, shell checks and strict CLI Clippy pass for this source-grounded change.
+
+The current answer-path correction adds actual token-level `generation` termination metadata:
+`eos` or `token_limit`, with a version and the unchanged 64-token profile bound. An EOS at the
+last permitted token remains EOS, not an inferred token-limit stop. New local inference and
+training reports require this contract; old receipts without it remain generation-unknown.
+Terminal job execution stays terminal, with no implicit resubmission or lease extension.
+Public task/document results distinguish execution completion from usable output, and new
+dependency/synthesis work requires nonempty, non-wire-truncated EOS output. Retained historical
+report/parent/result bytes stay unchanged rather than acquiring invented metadata. EOS alone
+does not prove correct, relevant or semantically complete answers. The 212 focused CLI compute
+tests, 47 pure worker protocol tests and seven targeted pure fixture checks pass. These checks
+do not execute a model; the updated termination contract still needs live execution. No new
+model-quality or complete-alpha claim is made.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

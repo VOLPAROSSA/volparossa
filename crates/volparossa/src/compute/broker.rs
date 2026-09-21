@@ -668,6 +668,14 @@ pub(super) fn checked_report(
                     .is_some_and(|text| text.len() <= 1024),
             "compute_broker_result_row"
         );
+        // The same validator reads retained historical receipts on the requester.
+        // Missing legacy metadata stays unknown; malformed new metadata is rejected.
+        if super::inference_output::Generation::from_output(output, false)?.is_some() {
+            ensure!(
+                output["text_truncated"].is_boolean(),
+                "compute_broker_result_truncation"
+            );
+        }
     }
     let json = serde_json::to_string(report)?;
     ensure!(

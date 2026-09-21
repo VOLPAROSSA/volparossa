@@ -685,12 +685,13 @@ pub(super) fn join_answers(
                 .context("compute_document_result_provider")?,
         )
         .map_err(anyhow::Error::msg)?;
-        joined.push(
-            json!({"source_part":index,"start":part.start,"end":part.end,
+        let mut answer = json!({"source_part":index,"start":part.start,"end":part.end,
             "context_sha256":sha(context.as_bytes()),"package_manifest_id":package.manifest_id,
             "text":output["text"],"provider_key":output["provider_key"],"job_id":output["job_id"],
-            "report_sha256":output["report_sha256"]}),
-        );
+            "report_sha256":output["report_sha256"]});
+        super::output::retain(output, &mut answer)?;
+        super::output::annotate(&mut answer)?;
+        joined.push(answer);
     }
     joined.sort_by_key(|value| value["source_part"].as_u64());
     ensure!(

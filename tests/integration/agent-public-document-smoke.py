@@ -361,7 +361,9 @@ def check_result(result, enrollment, plan, answers, complete, rounds, synthesis=
     joining = "hierarchical_peer_synthesis" if synthesis else "ordered_source_ranges_not_neural_synthesis"
     if enrollment.get("synthesize", False) and not complete:
         joining = "awaiting_fragments_before_peer_synthesis"
-    require(result["operation"] == "compute_public_document" and result["version"] == 1
+    require(result["operation"] == "compute_public_document" and result["version"] == 2
+            and result["execution_complete"] is complete and result["answer_complete"] is complete
+            and result["semantic_completeness_proven"] is False
             and result["complete"] is complete and result["rounds_this_invocation"] == rounds and result["interrupted"] is False
             and result["source_manifest_id"] == enrollment["source_manifest_id"]
             and result["source_sha256"] == plan["source_sha256"] and result["source_bytes"] == plan["source_bytes"]
@@ -521,12 +523,15 @@ def check_evidence(value, revision, discovered=False):
                 require(output["sample_index"] == row and output["job_id"] == binding["job_id"]
                         and output["provider_key"] == handle["provider_key"] and output["text"] == report["outputs"][local]["text"],
                         "result lost its exact execution report")
+                require(SYNTHESIS["generation_fields"](output) == SYNTHESIS["generation_fields"](report["outputs"][local]),
+                        "projected output lost its original termination metadata")
                 position = index * 4 + row
                 planpart = plan["parts"][position]
                 answers.append({"source_part": position, "start": planpart["start"], "end": planpart["end"],
                     "context_sha256": sha(source[planpart["start"]:planpart["end"]]), "package_manifest_id": manifest_id,
                     "text": output["text"], "provider_key": handle["provider_key"], "job_id": binding["job_id"],
-                    "report_sha256": status["report_sha256"]})
+                    "report_sha256": status["report_sha256"],
+                    **SYNTHESIS["generation_fields"](report["outputs"][local], annotated=True)})
                 if synthesis:
                     leaf_parents.append((position, SYNTHESIS["answer"](report["outputs"][local], handle, status,
                         manifest_id, planpart["start"], planpart["end"], local)))
@@ -701,7 +706,9 @@ def contract_fixture():
                            row_indices=selected, task=TASK)
             actual = json.loads(jobs["statuses"][n]["report_json"])
             actual["dataset"] = dict(version=2, sha256=sha(encoded), source_manifest_sha256=enrollment["source_manifest_id"])
-            actual.update(baseline_evaluation=None, outputs=[dict(text=f"synthetic output {index}/{p}") for p in selected])
+            actual.update(baseline_evaluation=None, outputs=[dict(text=f"synthetic output {index}/{p}",
+                sample_index=local, generated_tokens=12, text_truncated=False,
+                generation=dict(version=1, stop_reason="eos", max_new_tokens=64)) for local,p in enumerate(selected)])
             report_json = json.dumps(actual)
             status = dict(binding=binding, state="complete", report_json=report_json, report_sha256=sha(report_json.encode()))
             batch["jobs"].append(dict(handle=handle, state="complete", report_sha256=status["report_sha256"]))
@@ -713,11 +720,13 @@ def contract_fixture():
                 value["statuses"].append(status)
             for local, part_index in enumerate(selected):
                 part = parts[part_index]
-                output = dict(sample_index=part_index, provider_key=handle["provider_key"], job_id=binding["job_id"], text=actual["outputs"][local]["text"])
+                output = dict(sample_index=part_index, provider_key=handle["provider_key"], job_id=binding["job_id"],
+                    text=actual["outputs"][local]["text"], **SYNTHESIS["generation_fields"](actual["outputs"][local]))
                 batch["outputs"][part_index] = output
                 answers.append(dict(source_part=index*4+part_index, start=part["start"], end=part["end"],
                     context_sha256=sha(source[part["start"]:part["end"]]), package_manifest_id=manifest_id,
-                    **{k: output[k] for k in ("text", "provider_key", "job_id")}, report_sha256=status["report_sha256"]))
+                    **{k: output[k] for k in ("text", "provider_key", "job_id")}, report_sha256=status["report_sha256"],
+                    **SYNTHESIS["generation_fields"](actual["outputs"][local], annotated=True)))
         save(f"{prefix}/{ATTEMPT}/result.json", batch)
     save("document.json", enrollment)
     answers.sort(key=lambda x: x["source_part"])
@@ -734,7 +743,8 @@ def contract_fixture():
     value["stopped"] = dict(brokers=brokers, all_owned_processes_ended=True, observed_monotonic_ns=5000)
     value["resumed"] = dict(brokers=brokers, all_owned_processes_ended=True, observed_monotonic_ns=6000, snapshot=value["files"]["snapshot"])
     for key, complete, rounds in (("first", False, 1), ("result", True, 1), ("resume", True, 0)):
-        value[key] = dict(version=1, operation="compute_public_document", complete=complete, interrupted=False,
+        value[key] = dict(version=2, operation="compute_public_document", complete=complete, interrupted=False,
+            execution_complete=complete, answer_complete=complete, semantic_completeness_proven=False,
             source_manifest_id=enrollment["source_manifest_id"], source_sha256=sha(source), source_bytes=len(source),
             public_question=QUESTION, license="GPL-3.0-only", total_parts=len(plan["parts"]), rounds_this_invocation=rounds,
             answers=answers if complete else answers[:4], joining="ordered_source_ranges_not_neural_synthesis",

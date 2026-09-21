@@ -210,6 +210,20 @@ def observe(cli_pid, output, provision, dataset, canary):
     raise ValueError("actual isolated Python worker was not observed")
 
 
+def check_generation(output, require_eos=False):
+    """Current-source worker contract; an old report without metadata proves no EOS."""
+    generation = output.get("generation")
+    require(type(generation) is dict and set(generation) == {"version", "stop_reason", "max_new_tokens"}
+            and type(generation["version"]) is int and generation["version"] == 1
+            and type(generation["max_new_tokens"]) is int and generation["max_new_tokens"] == 64
+            and generation["stop_reason"] in ("eos", "token_limit")
+            and type(output["generated_tokens"]) is int and 1 <= output["generated_tokens"] <= 64
+            and (generation["stop_reason"] != "token_limit" or output["generated_tokens"] == 64),
+            "ordinary generation end metadata is missing or invalid")
+    require(not require_eos or generation["stop_reason"] == "eos", "token-limited answer is not a complete parent")
+    return generation
+
+
 def check_worker(worker, revision):
     require(worker.get("status") == "ok" and worker.get("mode") == "train"
             and worker.get("device") == "cpu" and worker.get("threads") == 2, "real CPU training result missing")

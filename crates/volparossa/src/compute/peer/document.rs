@@ -23,6 +23,7 @@ use super::super::{
     document_plan::{Input, MAX_DOCUMENT_BYTES, Plan},
     private_directory,
 };
+use super::batch::output;
 use super::{Cancellation, discovery, now, parse_key, read_file, rpc, task, workflow};
 
 const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
@@ -180,11 +181,25 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         if result["complete"] == true {
             synthesis::advance(args, socket, &cancellation.activity, &mut result).await?;
         } else {
-            result["joining"] = "awaiting_fragments_before_peer_synthesis".into();
+            result["joining"] = if result["execution_complete"] == true {
+                "incomplete_fragment_answers"
+            } else {
+                "awaiting_fragments_before_peer_synthesis"
+            }
+            .into();
         }
     }
     attach_collection(&args.directory, &mut result)?;
-    save(&args.directory, "result.json", &result, true)?;
+    if !output::preserve_legacy_result(
+        &args.directory.join("result.json"),
+        MAX_RESULT_BYTES as u64,
+        result["rounds_this_invocation"]
+            .as_u64()
+            .context("compute_document_rounds")?,
+        &result,
+    )? {
+        save(&args.directory, "result.json", &result, true)?;
+    }
     println!("{}", serde_json::to_string(&result)?);
     ensure!(
         result["complete"] == true,
@@ -576,10 +591,12 @@ async fn advance(
             "first_part":package.first_part,"parts":package.rows}),
         );
     }
-    let complete =
+    let execution_complete =
         packages.iter().all(|p| p["complete"] == true) && answers.len() == plan.parts.len();
+    let complete = execution_complete && output::all_complete(&answers)?;
     Ok(
-        json!({"version":1,"operation":"compute_public_document","complete":complete,
+        json!({"version":2,"operation":"compute_public_document","complete":complete,
+        "execution_complete":execution_complete,"answer_complete":complete,"semantic_completeness_proven":false,
         "source_manifest_id":enrollment.source_manifest_id,"source_sha256":plan.source_sha256,
         "source_bytes":plan.source_bytes,"public_question":input.question,"license":input.license,
         "total_parts":plan.parts.len(),"packages":packages,"answers":answers,"rounds_this_invocation":rounds,

@@ -321,10 +321,36 @@ class WorkerProtocolTests(unittest.TestCase):
 
         model.generate.side_effect = generate
         result = WORKER.generate(model, [prompt], tokenizer, torch, session, transformers)
-        self.assertEqual(result, [dict(sample_index=0, text="Retained model text.", generated_tokens=3, text_truncated=False)])
+        self.assertEqual(result, [dict(sample_index=0, text="Retained model text.", generated_tokens=3, text_truncated=False,
+                                      generation=dict(version=1, stop_reason="eos", max_new_tokens=64))])
         self.assertEqual(session.check.call_count, 5)  # Before, each token, after.
         self.assertEqual(tokenizer.decode.call_args.args[0].tolist(), [21, 22, 2])
         self.assertEqual(tokenizer.decode.call_args.kwargs, dict(skip_special_tokens=True))
+
+    def test_inference_reports_actual_eos_including_last_budget_token(self):
+        for tokens, reason in (([21, 2], "eos"), ([21] * 63 + [2], "eos"), ([21] * 64, "token_limit")):
+            with self.subTest(tokens=len(tokens), reason=reason):
+                model, tokenizer, torch, transformers = task_planner_doubles("Real result text.", generated=tokens)
+                result = WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)
+                self.assertEqual(result[0]["generation"], dict(version=1, stop_reason=reason, max_new_tokens=64))
+                self.assertEqual(result[0]["generated_tokens"], len(tokens))
+                self.assertFalse(result[0]["text_truncated"])
+
+    def test_inference_short_or_empty_generation_cannot_invent_eos(self):
+        for tokens in ([], [21], [21] * 63):
+            with self.subTest(tokens=len(tokens)):
+                model, tokenizer, torch, transformers = task_planner_doubles("Never decoded.", generated=tokens)
+                with self.assertRaises(WORKER.JobError):
+                    WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)
+                tokenizer.decode.assert_not_called()
+
+    def test_inference_wire_truncation_is_independent_of_generation_stop(self):
+        for tokens, reason in (([21, 2], "eos"), ([21] * 64, "token_limit")):
+            model, tokenizer, torch, transformers = task_planner_doubles("é" * 1024, generated=tokens)
+            result = WORKER.generate(model, [torch.tensor([[11, 12, 13]])], tokenizer, torch, mock.Mock(), transformers)[0]
+            self.assertEqual(result["generation"]["stop_reason"], reason)
+            self.assertTrue(result["text_truncated"])
+            self.assertLessEqual(len(json.dumps(result["text"], ensure_ascii=True).encode("ascii")), 1024)
 
     def test_inference_owner_cancellation_or_deadline_cannot_emit_a_completed_answer(self):
         for cause in ("JOB_CANCELLED", "JOB_DEADLINE_EXCEEDED", "OWNER_CONTROL_CLOSED"):

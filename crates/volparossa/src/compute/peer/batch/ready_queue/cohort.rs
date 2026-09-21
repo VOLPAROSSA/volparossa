@@ -146,7 +146,10 @@ impl Package<'_> {
             .map(|part| part["handle"]["provider_key"].as_str())
             .collect::<BTreeSet<_>>()
             .len();
+        let answer_complete = complete
+            && output::all_complete(&self.outputs.iter().flatten().cloned().collect::<Vec<_>>())?;
         let value = serde_json::json!({"version":1,"operation":"compute_ready_queue","scheduling":SCHEDULING,
+            "execution_complete":complete,"answer_complete":answer_complete,
             "complete":complete,"dataset_manifest_id":self.plan.dataset_manifest_id,
             "model_fingerprint":self.plan.model_fingerprint,"provider_count":self.args.providers.len(),
             "providers_used":used,"outputs":self.outputs,"jobs":self.parts,"never_submitted_rows":self.rows,

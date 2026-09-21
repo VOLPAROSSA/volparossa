@@ -1211,10 +1211,12 @@ passes its source-exact mechanical checker: four generations consume 380 tokens,
 peer workers execute the enrolled graph, and completed offline resume preserves all retained
 files with no new work. Its 137 original files also verify protected captures, cleanup and
 unchanged host state. But the accepted texts hallucinate an unrelated electric-vehicle project
-and echo a shortening instruction. That is not useful decomposition. The new source-grounded
-candidate has no live proof yet. Its next fixture uses the complete literal README introduction
-before the navigation, retains the same original question, and verifies every actual tokenized
-peer task rather than assuming a fixed job count. When a worker fails,
+and echo a shortening instruction. That is not useful decomposition. The source-grounded
+[run on `bebbc8ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35638510308) verifies the
+complete literal 506-byte README introduction, two question generations, three actual peer
+workers and unchanged offline resume. But a question repeats the main goal, the answer/join
+invent an OpenVPN dependency, and all three peer outputs hit their 64-token cap mid-sentence.
+Useful decomposition and answer quality remain unresolved. When a worker fails,
 its validated attempt metadata can be retained in `planner-failure.json` only after cleanup;
 no rejected text is exported and the diagnostic cannot authorize enrollment or another run.
 JSON validity and real execution would still not establish decomposition quality, answer
@@ -1255,10 +1257,19 @@ authenticated RPC statuses and signs that limited assertion. A parent model's an
 wrong. Encryption protects transport, not inputs from the selected executing peer.
 
 The result retains original `answers`, all intermediate level records and, on completion,
-`synthesized_answer`. Completion means the actual inference chain finished, not that the final
-answer is correct or semantically exhaustive. The worker's 64-token generation boundary is
-reported explicitly. Wire-truncated or empty parent outputs are not silently used; reductions
-that fail to shrink, or exceed 16 levels, stop incomplete without discarding source inputs.
+`synthesized_answer`. New worker outputs include a versioned `generation` object with the
+actual `stop_reason` (`eos` or `token_limit`) and `max_new_tokens`. EOS on the last permitted
+token is still EOS; token count alone cannot distinguish the two. `text_truncated` independently
+reports whether the wire-text cap removed text. A terminal job receipt remains terminal even
+when its answer is unusable: no automatic resubmission or renewed lease is authorized.
+
+The answer path distinguishes execution completion from finished output. New reductions and
+dependencies do not consume token-limited, wire-truncated, empty or generation-unknown answers.
+Historical receipts without termination metadata remain readable and unchanged, including
+exact retained parent/result files; they are not retroactively certified as EOS output. A new
+presentation can therefore report unfinished/unknown output for historically complete execution.
+EOS establishes only model termination, not correctness, relevance or semantic exhaustiveness.
+Reductions that fail to shrink, or exceed 16 levels, stop incomplete without discarding inputs.
 `--follow` continues bounded task windows, not unlimited per-device execution.
 
 The extended disposable document scenario must demonstrate at least two real reduction levels,
