@@ -11,6 +11,7 @@ use volparossa_local_control::compute::PublicTask;
 
 pub(super) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
+const MAX_EXCERPT_BYTES: usize = 1024;
 
 mod recovery;
 pub(super) use recovery::PlanningDiagnostic;
@@ -22,9 +23,36 @@ pub(super) struct Input {
     pub(super) visibility: String,
     pub(super) license: String,
     pub(super) question: String,
-    /// The planner sees the goal only. This binds the later source, not source understanding.
+    /// The entire retained public source, not only the bounded planner excerpt.
     pub(super) source_sha256: String,
     pub(super) source_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) source_excerpt: Option<SourceExcerpt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SourceExcerpt {
+    pub(super) start: u64,
+    pub(super) end: u64,
+    pub(super) text: String,
+    pub(super) sha256: String,
+}
+
+impl SourceExcerpt {
+    pub(super) fn prefix(source: &str) -> Self {
+        let mut end = MAX_EXCERPT_BYTES.min(source.len());
+        while !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        let text = source[..end].to_owned();
+        Self {
+            start: 0,
+            end: end as u64,
+            sha256: digest(text.as_bytes()),
+            text,
+        }
+    }
 }
 
 impl Input {
@@ -40,7 +68,7 @@ impl Input {
 
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && self.visibility == "public",
+            matches!(self.version, 1 | 2) && self.visibility == "public",
             "compute_task_plan_public_required"
         );
         ensure!(
@@ -57,7 +85,43 @@ impl Input {
                 && self.source_sha256.bytes().any(|byte| byte != b'0'),
             "compute_task_plan_source"
         );
+        match (self.version, &self.source_excerpt) {
+            (1, None) => (), // Retained historical reports only, never new execution.
+            (2, Some(excerpt)) => ensure!(
+                excerpt.start == 0
+                    && (1..=MAX_EXCERPT_BYTES).contains(&excerpt.text.len())
+                    && !excerpt.text.contains('\0')
+                    && excerpt.end == excerpt.text.len() as u64
+                    && excerpt.end <= self.source_bytes
+                    && excerpt.sha256 == digest(excerpt.text.as_bytes())
+                    && (excerpt.end != self.source_bytes || excerpt.sha256 == self.source_sha256),
+                "compute_task_plan_excerpt"
+            ),
+            _ => anyhow::bail!("compute_task_plan_excerpt_version"),
+        }
         Ok(())
+    }
+
+    pub(super) fn validate_execution(&self) -> Result<()> {
+        self.validate()?;
+        ensure!(self.version == 2, "compute_task_plan_source_required");
+        Ok(())
+    }
+
+    fn descriptor(&self, bytes: &[u8]) -> Value {
+        let mut descriptor = json!({
+            "version":self.version,"sha256":digest(bytes),"bytes":bytes.len(),
+            "visibility":"public","license":self.license,
+            "question_sha256":digest(self.question.as_bytes()),
+            "source_sha256":self.source_sha256,"source_bytes":self.source_bytes
+        });
+        if let Some(excerpt) = &self.source_excerpt {
+            descriptor["source_excerpt"] = json!({
+                "start":excerpt.start,"end":excerpt.end,"sha256":excerpt.sha256,
+                "bytes":excerpt.text.len()
+            });
+        }
+        descriptor
     }
 }
 
@@ -89,12 +153,16 @@ impl Questions {
 
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1 && (2..=4).contains(&self.questions.len()),
+            matches!(self.version, 1 | 2) && (2..=4).contains(&self.questions.len()),
             "compute_task_plan_question_count"
         );
         let mut seen = BTreeSet::new();
         for text in &self.questions {
             question(text)?;
+            ensure!(
+                self.version == 1 || text.trim_end().ends_with('?'),
+                "compute_task_plan_not_a_question"
+            );
             ensure!(
                 seen.insert(text.trim()),
                 "compute_task_plan_duplicate_question"
@@ -122,7 +190,7 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
     ensure!(
         matches!(
             report["planner_strategy"].as_str(),
-            Some("model_questions_scaffold_v1" | recovery::STRATEGY)
+            Some("model_questions_scaffold_v1" | recovery::STRATEGY | recovery::SOURCE_STRATEGY)
         ) && report["planner_structure_generated_by"] == "local_schema"
             && report["planner_stop_reason"] == "two_questions"
             && stats.len() == 2
@@ -141,7 +209,14 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
             "compute_task_plan_question_budget"
         );
     }
-    if report["planner_strategy"] == recovery::STRATEGY {
+    ensure!(
+        (questions.version == 2) == (report["planner_strategy"] == recovery::SOURCE_STRATEGY),
+        "compute_task_plan_strategy_version"
+    );
+    questions.validate()?;
+    if report["planner_strategy"] == recovery::STRATEGY
+        || report["planner_strategy"] == recovery::SOURCE_STRATEGY
+    {
         return recovery::validate_success(report, questions, &stats);
     }
     ensure!(
@@ -171,7 +246,24 @@ pub(super) fn validate_report(
         "compute_task_plan_input_changed"
     );
     let questions = Questions::decode(artifact)?;
+    ensure!(
+        questions.version == input.version,
+        "compute_task_plan_artifact_version"
+    );
     validate_question_stats(report, &questions)?;
+    if let Some(excerpt) = &input.source_excerpt {
+        ensure!(
+            report["source_contents_read_by_planner"] == true
+                && report["source_excerpt_complete"] == (excerpt.end == input.source_bytes),
+            "compute_task_plan_source_coverage"
+        );
+    } else {
+        ensure!(
+            report.get("source_contents_read_by_planner").is_none()
+                && report.get("source_excerpt_complete").is_none(),
+            "compute_task_plan_legacy_source_claim"
+        );
+    }
     ensure!(
         report["version"] == 1
             && report["kind"] == "result"
@@ -186,7 +278,7 @@ pub(super) fn validate_report(
                 .is_some_and(|n| (1..=2).contains(&n))
             && report["updates_completed"] == 0
             && report["model_weights_loaded"] == true
-            && report["goal_only_planning"] == true
+            && report["goal_only_planning"] == (input.version == 1)
             && report["generation_limit_reached"] == false
             && report["model_answer_correctness_proven"] == false
             && report["planner_prompt_tokens"]
@@ -205,13 +297,7 @@ pub(super) fn validate_report(
             && report["model"]["revision"] == MODEL_REVISION
             && report["model"]["files"]["model.safetensors"]["sha256"]
                 == hex::encode(BASE_MODEL_SHA256)
-            && report["dataset"]
-                == json!({
-                    "version":1,"sha256":digest(input_bytes),"bytes":input_bytes.len(),
-                    "visibility":"public","license":input.license,
-                    "question_sha256":digest(input.question.as_bytes()),
-                    "source_sha256":input.source_sha256,"source_bytes":input.source_bytes
-                })
+            && report["dataset"] == input.descriptor(input_bytes)
             && report["artifacts"]
                 == json!([{
                     "relative_path":"task-questions.json","bytes":artifact.len(),"sha256":digest(artifact)

@@ -8,6 +8,7 @@ fn input() -> Input {
         question: "Compare the public requirements and their risks.".into(),
         source_sha256: "a".repeat(64),
         source_bytes: 128,
+        source_excerpt: None,
     }
 }
 
@@ -16,7 +17,10 @@ fn task_input_requires_explicit_public_source_and_original_question() {
     let input = input();
     let bytes = serde_json::to_vec(&input).unwrap();
     assert_eq!(Input::decode(&bytes).unwrap(), input);
-    crate::compute::validate_dataset(super::super::Mode::PlanTasks, false, &bytes).unwrap();
+    // Legacy receipts stay readable, but goal-only inputs cannot start new work.
+    assert!(
+        crate::compute::validate_dataset(super::super::Mode::PlanTasks, false, &bytes).is_err()
+    );
     assert!(crate::compute::validate_dataset(super::super::Mode::PlanTasks, true, &bytes).is_err());
     let original = serde_json::to_value(&input).unwrap();
     for (key, value) in [
@@ -62,6 +66,125 @@ fn generated_questions_are_bounded_data_not_a_repaired_or_executable_plan() {
         let value = json!({"version":1,"questions":(0..count).map(|n| format!("Question {n}?")).collect::<Vec<_>>()});
         assert!(Questions::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     }
+}
+
+#[test]
+fn grounded_execution_requires_exact_bounded_utf8_source_excerpt() {
+    let source = format!("{}é末", "a".repeat(1023));
+    let excerpt = SourceExcerpt::prefix(&source);
+    assert_eq!(excerpt.end, 1023);
+    assert_eq!(excerpt.text, "a".repeat(1023));
+    let mut grounded = input();
+    grounded.version = 2;
+    grounded.source_sha256 = digest(source.as_bytes());
+    grounded.source_bytes = source.len() as u64;
+    grounded.source_excerpt = Some(excerpt);
+    let value = serde_json::to_value(&grounded).unwrap();
+    let bytes = serde_json::to_vec(&grounded).unwrap();
+    crate::compute::validate_dataset(super::super::Mode::PlanTasks, false, &bytes).unwrap();
+    for (pointer, replacement) in [
+        ("/version", json!(1)),
+        ("/source_excerpt", json!(null)),
+        ("/source_excerpt/start", json!(1)),
+        ("/source_excerpt/end", json!(1024)),
+        ("/source_excerpt/text", json!("Unrelated source")),
+        ("/source_excerpt/sha256", json!("a".repeat(64))),
+        ("/source_bytes", json!(1)),
+    ] {
+        let mut changed = value.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            Input::decode(&serde_json::to_vec(&changed).unwrap()).is_err(),
+            "{pointer}"
+        );
+    }
+    grounded.source_bytes = 1023;
+    assert!(grounded.validate_execution().is_err()); // Now full coverage, but wrong full hash.
+    grounded.source_sha256 = digest(grounded.source_excerpt.as_ref().unwrap().text.as_bytes());
+    grounded.validate_execution().unwrap();
+    for source in [String::new(), "\0".into(), "x".repeat(1025)] {
+        let mut excerpt = SourceExcerpt::prefix(&source);
+        // Validate the hard bound independently of the safe prefix constructor.
+        excerpt.text = source.clone();
+        excerpt.end = source.len() as u64;
+        excerpt.sha256 = digest(source.as_bytes());
+        grounded.source_bytes = source.len().max(1) as u64;
+        grounded.source_sha256 = digest(source.as_bytes());
+        grounded.source_excerpt = Some(excerpt);
+        assert!(grounded.validate_execution().is_err());
+    }
+}
+
+#[test]
+fn grounded_report_binds_actual_excerpt_and_never_accepts_eos_prose_as_a_question() {
+    let source = "An explicitly public source for an inert validation fixture.";
+    let mut input = input();
+    input.version = 2;
+    input.source_bytes = source.len() as u64;
+    input.source_sha256 = digest(source.as_bytes());
+    input.source_excerpt = Some(SourceExcerpt::prefix(source));
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let questions = Questions {
+        version: 2,
+        questions: vec![
+            "What is required?".into(),
+            "What constraints are stated?".into(),
+        ],
+    };
+    let artifact = serde_json::to_vec(&questions).unwrap();
+    let attempts: Vec<_> = questions
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            json!({
+                "question_index":index,"attempt":index+1,"prompt_tokens":100,"generated_tokens":20,
+                "max_new_tokens":192,"stop_reason":"eos","accepted":true,"rejection_code":null,
+                "text_bytes":text.len(),"text_sha256":digest(text.as_bytes())
+            })
+        })
+        .collect();
+    let report = json!({
+        "version":1,"id":"ab".repeat(16),"kind":"result","status":"ok","mode":"plan_tasks",
+        "device":"cpu","threads":2,"updates_completed":0,"model_weights_loaded":true,
+        "goal_only_planning":false,"source_contents_read_by_planner":true,"source_excerpt_complete":true,
+        "generation_limit_reached":false,"model_answer_correctness_proven":false,
+        "planner_prompt_tokens":100,"planner_generated_tokens":40,"planner_stop_reason":"two_questions",
+        "planner_strategy":recovery::SOURCE_STRATEGY,"planner_structure_generated_by":"local_schema",
+        "planner_question_stats":[
+            {"prompt_tokens":100,"generated_tokens":20,"stop_reason":"eos"},
+            {"prompt_tokens":100,"generated_tokens":20,"stop_reason":"eos"}],
+        "planner_attempts":attempts,
+        "model":{"id":MODEL_ID,"revision":MODEL_REVISION,"files":{"model.safetensors":{"sha256":hex::encode(BASE_MODEL_SHA256)}}},
+        "dataset":input.descriptor(&bytes),
+        "artifacts":[{"relative_path":"task-questions.json","bytes":artifact.len(),"sha256":digest(&artifact)}],
+        "supervisor":{"child_reaped":true,"network_access":false}
+    });
+    validate_report(&report, &input, &bytes, &artifact).unwrap();
+    for (pointer, replacement) in [
+        ("/goal_only_planning", json!(true)),
+        ("/source_contents_read_by_planner", json!(false)),
+        ("/source_excerpt_complete", json!(false)),
+        ("/dataset/source_excerpt/end", json!(0)),
+        ("/dataset/source_excerpt/sha256", json!("b".repeat(64))),
+        ("/dataset/version", json!(1)),
+        ("/planner_strategy", json!(recovery::STRATEGY)),
+    ] {
+        let mut changed = report.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            validate_report(&changed, &input, &bytes, &artifact).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut prose = questions;
+    prose.questions[0] = "An unrelated statement, not a question.".into();
+    assert!(prose.validate().is_err());
+    assert!(validate_question_stats(&report, &prose).is_err());
+    // Reading an old result must not retroactively label it source-grounded.
+    prose.version = 1;
+    prose.validate().unwrap();
+    assert!(validate_question_stats(&report, &prose).is_err());
 }
 
 #[test]

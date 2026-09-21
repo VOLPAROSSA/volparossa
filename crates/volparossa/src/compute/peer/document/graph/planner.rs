@@ -23,11 +23,35 @@ pub(super) struct Authority {
     question: String,
     source_sha256: String,
     source_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_excerpt: Option<Coverage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Coverage {
+    start: u64,
+    end: u64,
+    sha256: String,
+}
+
+impl From<&task_plan::SourceExcerpt> for Coverage {
+    fn from(excerpt: &task_plan::SourceExcerpt) -> Self {
+        Self {
+            start: excerpt.start,
+            end: excerpt.end,
+            sha256: excerpt.sha256.clone(),
+        }
+    }
 }
 
 fn proposal(input: &task_plan::Input, questions: &task_plan::Questions) -> Result<plan::Plan> {
     input.validate()?;
     questions.validate()?;
+    ensure!(
+        input.version == questions.version,
+        "compute_task_planner_proposal_version"
+    );
     let mut nodes: Vec<_> = questions
         .questions
         .iter()
@@ -54,8 +78,8 @@ fn proposal(input: &task_plan::Input, questions: &task_plan::Questions) -> Resul
 }
 
 fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
-    // Goal-only planning still binds the exact selected source. It neither reads
-    // the source content in the model prompt nor authorizes different sources.
+    // Bind the full selected source and include its exact bounded UTF-8 prefix.
+    // This is partial coverage for longer documents, never a fabricated summary.
     let input = Input {
         version: 1,
         synthesis: false,
@@ -69,14 +93,15 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
     };
     input.validate()?;
     let input = task_plan::Input {
-        version: 1,
+        version: 2,
         visibility: input.visibility,
         license: input.license,
         question: input.question,
         source_sha256: digest(document.as_bytes()),
         source_bytes: document.len() as u64,
+        source_excerpt: Some(task_plan::SourceExcerpt::prefix(document)),
     };
-    input.validate()?;
+    input.validate_execution()?;
     Ok(input)
 }
 
@@ -147,7 +172,7 @@ pub(super) async fn prepare(
         false,
     )?;
     let authority = Authority {
-        version: 1,
+        version: input.version,
         input_sha256: digest(&bytes),
         report_sha256: digest(&read_file(
             &args.directory.join("planner-report.json"),
@@ -157,6 +182,7 @@ pub(super) async fn prepare(
         question: input.question,
         source_sha256: input.source_sha256,
         source_bytes: input.source_bytes,
+        source_excerpt: input.source_excerpt.as_ref().map(Coverage::from),
     };
     Ok((plan, authority))
 }
@@ -193,7 +219,7 @@ fn verify_input(authority: &Authority, input: &task_plan::Input, source: &Input)
     input.validate()?;
     source.validate()?;
     ensure!(
-        authority.version == 1
+        authority.version == input.version
             && input.question == authority.question
             && input.license == source.license
             && input.source_sha256 == authority.source_sha256
@@ -201,6 +227,16 @@ fn verify_input(authority: &Authority, input: &task_plan::Input, source: &Input)
             && input.source_bytes == authority.source_bytes
             && input.source_bytes == source.document.len() as u64,
         "compute_task_planner_original_question_or_source_changed"
+    );
+    ensure!(
+        input.source_excerpt.is_none()
+            || input.source_excerpt.as_ref()
+                == Some(&task_plan::SourceExcerpt::prefix(&source.document)),
+        "compute_task_planner_excerpt_source_changed"
+    );
+    ensure!(
+        authority.source_excerpt == input.source_excerpt.as_ref().map(Coverage::from),
+        "compute_task_planner_excerpt_authority_changed"
     );
     Ok(())
 }
@@ -249,9 +285,16 @@ pub(super) fn verify_absent(root: &Path) -> Result<()> {
 
 pub(super) fn summary(authority: Option<&Authority>) -> Value {
     authority.map_or(Value::Null, |authority| {
-        json!({"kind":PLANNING_KIND,"authority":authority,"goal_only":true,
+        let mut summary = json!({"kind":PLANNING_KIND,"authority":authority,"goal_only":true,
             "source_contents_read_by_planner":false,"model_selected_tools":false,
-            "decomposition_quality_proven":false})
+            "decomposition_quality_proven":false});
+        if let Some(excerpt) = &authority.source_excerpt {
+            summary["goal_only"] = false.into();
+            summary["source_contents_read_by_planner"] = true.into();
+            summary["source_excerpt_complete"] = (excerpt.end == authority.source_bytes).into();
+            summary["source_coverage"] = json!(excerpt);
+        }
+        summary
     })
 }
 
