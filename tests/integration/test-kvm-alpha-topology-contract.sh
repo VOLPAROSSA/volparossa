@@ -35,6 +35,7 @@ for script in "$GUEST" "$HOST"; do
     "$script" --preview --scenario agent-artifact-quarantine | grep -Fi 'quarantine' >/dev/null
     "$script" --preview --scenario agent-jobs-ready-queue | grep -Fi 'queue' >/dev/null
     "$script" --preview --scenario agent-jobs-package-queue | grep -Fi 'package' >/dev/null
+    "$script" --preview --scenario agent-public-collection | grep -Fi 'collection' >/dev/null
     set +e
     "$script" --preview --scenario unsupported >/dev/null 2>&1
     invalid_scenario_status=$?
@@ -50,6 +51,13 @@ done
 sh -n "$GENERATOR"
 
 [ -f "$WORKFLOW" ] && [ ! -L "$WORKFLOW" ]
+grep -F 'agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;' "$GUEST" >/dev/null
+grep -F '. "$source_directory/tests/integration/agent-public-collection-smoke.sh"' "$GUEST" >/dev/null
+grep -F 'agent-public-collection-smoke.py agent-public-document-smoke.py agent-document-synthesis.py' "$GUEST" >/dev/null
+grep -F '[ "$scenario" != agent-public-collection ] || driver_time_bound=3600s' "$HOST" >/dev/null
+grep -F 'root.glob("agent-public-collection-*")' "$HOST" >/dev/null
+grep -F "if: always() && env.VOLPAROSSA_ALPHA_SCENARIO == 'agent-public-collection'" "$WORKFLOW" >/dev/null
+grep -F 'python3 -B tests/integration/agent-public-collection-smoke.py report "$report" "$GITHUB_SHA"' "$WORKFLOW" >/dev/null
 grep -Fx '  workflow_dispatch:' "$WORKFLOW" >/dev/null
 grep -Fx '  pull_request:' "$WORKFLOW" >/dev/null
 grep -F 'github.event.pull_request.head.repo.full_name == github.repository' "$WORKFLOW" \

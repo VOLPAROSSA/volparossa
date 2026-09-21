@@ -30,6 +30,10 @@ pub(super) struct Enrollment {
     pub(super) scheduling: workflow::Scheduling,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) synthesize: bool,
+    /// Exact canonical ledger for an owner-published multi-document compilation.
+    /// Its labels/hashes/ranges are also embedded in the signed original text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) collection_sha256: Option<String>,
     pub(super) source_manifest_id: String,
     source_sha256: String,
     source_bytes: u64,
@@ -275,6 +279,7 @@ pub(super) fn publish(
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
         model_fingerprint: None,
+        collection_sha256: None,
         replace_peers: false,
         selected_at_unix_seconds: at,
         expires_at_unix_seconds: validity.expires,
@@ -367,6 +372,7 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
         super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
     }
     verify_original(root, &enrollment, &input)?;
+    load_collection(root, &enrollment, &input)?;
     let mut ids = BTreeSet::new();
     for (index, package) in enrollment.packages.iter().enumerate() {
         ensure!(
@@ -379,6 +385,30 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
         );
     }
     Ok((enrollment, input, plan))
+}
+
+pub(super) fn load_collection(
+    root: &Path,
+    enrollment: &Enrollment,
+    input: &Input,
+) -> Result<Option<super::collection::Ledger>> {
+    let path = root.join("collection.json");
+    let Some(expected) = &enrollment.collection_sha256 else {
+        ensure!(!present(&path)?, "compute_collection_unbound_ledger");
+        return Ok(None);
+    };
+    ensure!(
+        rpc::nonzero_hex(expected, 64),
+        "compute_collection_ledger_hash"
+    );
+    let bytes = read(&path, 64 * 1024)?;
+    let ledger: super::collection::Ledger = serde_json::from_slice(&bytes)?;
+    ensure!(
+        sha(&bytes) == *expected && ledger.sha256()? == *expected,
+        "compute_collection_ledger_changed"
+    );
+    ledger.validate(&input.document)?;
+    Ok(Some(ledger))
 }
 
 pub(super) fn expected(

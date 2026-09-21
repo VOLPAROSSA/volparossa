@@ -19,6 +19,7 @@ agent_jobs_ready_queue=no
 agent_jobs_package_queue=no
 agent_public_task=no
 agent_public_document=no
+agent_public_collection=no
 agent_train_cycle=no
 agent_train_loop=no
 agent_artifact_quarantine=no
@@ -37,7 +38,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|dns-cache]'
 }
 
 print_plan() {
@@ -54,6 +55,16 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_public_collection" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA public source collection plan:' \
+                '  compile three explicitly public source documents with signed labels, hashes and exact byte ranges;' \
+                '  use the real isolated tokenizer, two explicit protected peers and shared ready queues;' \
+                '  synthesize one answer, retaining original-source versus synthetic-header provenance;' \
+                '  remove original input files and stop brokers, then reuse complete receipts offline;' \
+                '  bounded guest-only model execution and full cleanup; no discovery or answer-quality claim.'
+            return
+        fi
         if [ "$agent_public_document" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA exact-source public document plan:' \
@@ -450,6 +461,7 @@ while [ "$#" -gt 0 ]; do
             agent_jobs_package_queue=no
             agent_public_task=no
             agent_public_document=no
+            agent_public_collection=no
             agent_train_cycle=no
             agent_train_loop=no
             agent_artifact_quarantine=no
@@ -464,6 +476,7 @@ while [ "$#" -gt 0 ]; do
                 agent-jobs-package-queue) scenario=agent-jobs; agent_jobs_package_queue=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
+                agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -684,9 +697,15 @@ if [ "$agent_jobs_ready_queue" = yes ]; then
         [ -f "$source_directory/tests/integration/$ready_fixture" ] && [ ! -L "$source_directory/tests/integration/$ready_fixture" ] || exit 69
     done
 fi
-if [ "$agent_public_document" = yes ]; then
+if [ "$agent_public_document" = yes ] || [ "$agent_public_collection" = yes ]; then
     for document_fixture in agent-public-document-smoke.sh agent-public-document-smoke.py agent-document-synthesis.py; do
         [ -f "$source_directory/tests/integration/$document_fixture" ] && [ ! -L "$source_directory/tests/integration/$document_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_public_collection" = yes ]; then
+    for collection_fixture in tests/integration/agent-public-collection-smoke.sh tests/integration/agent-public-collection-smoke.py \
+        docs/PROTOCOL.md docs/DECENTRALIZED_AGENTS.md; do
+        [ -f "$source_directory/$collection_fixture" ] && [ ! -L "$source_directory/$collection_fixture" ] || exit 69
     done
 fi
 if [ "$scenario" = content-mailbox ]; then
@@ -1990,6 +2009,10 @@ if [ "$agent_public_document" = yes ]; then
     # shellcheck source=tests/integration/agent-public-document-smoke.sh
     . "$source_directory/tests/integration/agent-public-document-smoke.sh"
 fi
+if [ "$agent_public_collection" = yes ]; then
+    # shellcheck source=tests/integration/agent-public-collection-smoke.sh
+    . "$source_directory/tests/integration/agent-public-collection-smoke.sh"
+fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
     . "$source_directory/tests/integration/agent-artifact-smoke.sh"
@@ -2119,6 +2142,11 @@ if [ "$scenario" = agent-jobs ]; then
         install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-ready-queue-smoke.py" "$WORK/bin/agent-jobs-ready-queue-smoke.py"
     fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
+fi
+if [ "$agent_public_collection" = yes ]; then
+    for collection_script in agent-public-collection-smoke.py agent-public-document-smoke.py agent-document-synthesis.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$collection_script" "$WORK/bin/$collection_script"
+    done
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
