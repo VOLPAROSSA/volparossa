@@ -61,6 +61,7 @@ print_plan() {
         if [ "$agent_successor_serving" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA successor-serving plan:' \
+                '  explicitly start disposable learner relay4 with Client+Relay roles, and verify its own cache-only source;' \
                 '  complete a protected base-model inference before local learning;' \
                 '  train a real owner-approved adapter and activate an independently copied idle-broker snapshot;' \
                 '  serve a new protected inference using that exact successor while retaining the old binding and receipt;' \
@@ -2534,6 +2535,12 @@ write_config() {
     uplink=independent_internet; extra_listen=none
     dc_enabled=false; dc_upstream=null; dc_metrics=false
     [ "$node" != client ] || client_role=true
+    if [ "$agent_successor_serving" = yes ] && [ "$node" = relay4 ]; then
+        # Disposable learner only: the existing local cache API requires Client.
+        # Roles cannot be enabled dynamically without restarting discovery.
+        # Relay stays enabled; this is not a production participation configuration.
+        client_role=true
+    fi
     [ "$relay_role" = false ] || relay_capacity=32
     [ "$exit_role" = false ] || exit_capacity=32
     case $node in
@@ -4692,7 +4699,11 @@ grep -Fx 'client: false' "$WORK/roles-relay0.txt" >/dev/null || fail RELAY0_CLIE
 grep -Fx 'client: false' "$WORK/roles-relay1.txt" >/dev/null || fail RELAY1_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay2.txt" >/dev/null || fail RELAY2_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-relay3.txt" >/dev/null || fail RELAY3_CLIENT_ROLE_INVALID
-grep -Fx 'client: false' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+if [ "$agent_successor_serving" = yes ]; then
+    grep -Fx 'client: true' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+else
+    grep -Fx 'client: false' "$WORK/roles-relay4.txt" >/dev/null || fail RELAY4_CLIENT_ROLE_INVALID
+fi
 grep -Fx 'client: false' "$WORK/roles-relay5.txt" >/dev/null || fail RELAY5_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-exit.txt" >/dev/null || fail EXIT_CLIENT_ROLE_INVALID
 grep -Fx 'client: false' "$WORK/roles-exit2.txt" >/dev/null || fail EXIT2_CLIENT_ROLE_INVALID

@@ -28,6 +28,24 @@ The correction waits within a fixed bound for the actual expected broker/model t
 and parses the runner's boolean without relaxing capacity, ownership or cleanup checks.
 Training, activation and adapted peer inference still require a successful new execution.
 
+The [readiness-corrected run on
+`de3922b3`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35639387212) verifies actual
+base-model peer inference and a 1,005-byte public-source fetch. It then records an unsuccessful
+training-loop cycle before any training worker is observed. The missing `/proc` entry belongs
+to the loop owner, not an identified training worker. Its 125 unchanged original files contain
+no training report or specific cycle error, so they do not prove a worker crash, memory failure
+or expired lease. Cleanup and unchanged host-state checks pass; the failed run lacks the final
+selection records needed for full protected-path reconstruction.
+
+Source inspection identifies a blocking fixture mismatch: its selected learner is relay-only,
+but named-source retrieval requires the client role even for a complete local cache hit. The
+correction enables client capability in that disposable learner's startup configuration, keeps
+relay service enabled and validates its exact pre-provisioned source through the ordinary
+cache-only API before training. It does not bypass the download ACL or claim learner-side
+network acquisition. Training, approval and same-broker adapted inference still need live proof.
+Pure fixture checks and shell syntax/ShellCheck pass. Failure cleanup now retains only bounded
+fixed-file identities and cycle-state categories, not source text or arbitrary error chains.
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same

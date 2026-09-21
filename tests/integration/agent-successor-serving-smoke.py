@@ -11,6 +11,7 @@ import runpy
 import shutil
 import stat
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -24,7 +25,8 @@ KIND = "volparossa-selected-learning-to-peer-serving"
 SCOPE = ("one explicit public source, one real eight-update local train-loop and its source-heldout "
          "approval; the same idle broker copies the selected adapter and executes a protected peer job "
          "with exact learned weights while preserving its earlier base-model receipt. Public source-cache "
-         "provisioning is explicit fixture setup, not learner-side network discovery. An injected invalid "
+         "provisioning and the learner's statically enabled Client role are explicit fixture setup; "
+         "its exact source is checked through its own cache-only API, not learner-side network discovery. An injected invalid "
          "selection must not replace the approved copy. Not independent quality, automatic global model "
          "adoption, distributed optimization, expiry/restart proof, full B05 or full alpha.")
 FILES = ("README.md", "adapter_config.json", "adapter_model.safetensors")
@@ -110,6 +112,83 @@ def lock_observation(path):
     raise ValueError("actual worker did not hold shared runtime lock")
 
 
+def check_local_source(roles, receipt, publication, dataset):
+    require(roles == "client: true\nrelay: true\nexit: false\n", "static learner roles differ")
+    require(all(type(receipt[key]) is int for key in ("revision", "bytes", "peer_bytes", "providers_used",
+                "origin_body_bytes", "origin_range_requests", "publication_expires_unix_seconds")),
+            "invalid cache-only accounting")
+    require(receipt["operation"] == "named_content_download" and receipt["cache_only"] is True
+            and receipt["local_delivery"] is True and receipt["manifest_id"] == publication["manifest_id"]
+            and receipt["publisher_key"] == publication["publisher_key_hex"]
+            and receipt["name"] == publication["name"] == "disposable-successor-training"
+            and receipt["revision"] == publication["revision"] == 1
+            and receipt["publication_expires_unix_seconds"] == publication["expires_unix_seconds"]
+            and receipt["bytes"] == dataset["bytes"] and receipt["sha256"] == dataset["sha256"]
+            and receipt["peer_bytes"] == receipt["providers_used"] == 0
+            and receipt["provider_peer_ids"] == [] and receipt["control_relay_peer_id"] == ""
+            and receipt["origin_authenticated"] is False
+            and receipt["origin_body_bytes"] == receipt["origin_range_requests"] == 0,
+            "learner cache-only source differs or used network")
+
+
+def local_source(work):
+    JOBS["guest_work"](work)
+    layout, learner, original = roots(work)
+    require(layout["provider_nodes"][0] == "relay4", "static learner differs")
+    roles_path = work / f"{PREFIX}-learner-roles.log"
+    file_hash(roles_path, 128)
+    roles = roles_path.read_text()
+    publication = read(record(work, "publish"))
+    expected = file_hash(original / "dataset.json", 1048576)
+    require(file_hash(learner / "source-preflight.json", 1048576) == expected, "cached source bytes differ")
+    check_local_source(roles, read(record(work, "local-source")), publication, expected)
+    write(record(work, "learner-admission"), dict(node="relay4", roles_text=roles,
+        source=expected, static_fixture_roles=True, learner_network_retrieval_claimed=False))
+
+
+def training_owner_identity(pid, lookup=TRAIN["identity"]):
+    try:
+        return lookup(pid)
+    except FileNotFoundError:
+        raise ValueError("OWNER_EXITED_BEFORE_WORKER_OBSERVATION") from None
+
+
+def cycle_diagnostic(learner):
+    # Only fixed filenames, file identities and bounded state enums/counts leave
+    # the private store. No source/model text, paths or arbitrary error chains.
+    files = {}
+    names = ("state.json", f"{CYCLE}/selection.json", f"{CYCLE}/source-provenance.json",
+             f"{CYCLE}/dataset.json", f"{CYCLE}/dataset.manifest", f"{CYCLE}/training/report.json",
+             f"{CYCLE}/training-report.json", f"{CYCLE}/evaluation.json", f"{CYCLE}/result.json")
+    for name in names:
+        try:
+            files[name] = dict(present=True, **file_hash(learner / "loop" / name, 1048576))
+        except FileNotFoundError:
+            files[name] = dict(present=False)
+        except (OSError, ValueError):
+            files[name] = dict(present=None, observation="UNREADABLE_OR_INVALID_BOUNDED_FILE")
+    summary = None
+    if files["state.json"].get("present") is True:
+        try:
+            state = read(learner / "loop/state.json", 1048576)
+            counts = {key: state[key] for key in ("next_sequence", "completed", "promoted", "rejected")}
+            require(all(type(count) is int and 0 <= count <= 256 for count in counts.values()), "invalid cycle counts")
+            cycles = state["cycles"]
+            require(type(cycles) is list and len(cycles) <= 8, "invalid cycle count")
+            phases = []
+            for cycle in cycles:
+                require(type(cycle["sequence"]) is int and 1 <= cycle["sequence"] <= 256
+                        and cycle["phase"] in ("running", "failed", "evaluating", "rejected", "trained", "publish_pending",
+                                               "publication_expired", "complete"),
+                        "invalid cycle phase")
+                phases.append(dict(sequence=cycle["sequence"], phase=cycle["phase"]))
+            summary = dict(**counts, cycles=phases)
+        except (OSError, ValueError, KeyError, TypeError):
+            summary = dict(observation="UNREADABLE_OR_INVALID_BOUNDED_STATE")
+    return dict(version=1, operation="successor_fixture_cycle_diagnostic", files=files, state=summary,
+                exact_failure_cause_known=False, raw_error_or_source_text_exported=False)
+
+
 def inode(path):
     value = path.stat()
     return [value.st_dev, value.st_ino]
@@ -118,10 +197,10 @@ def inode(path):
 def observe_training(work, owner_pid):
     JOBS["guest_work"](work)
     layout, learner, _ = roots(work)
-    owner = TRAIN["identity"](owner_pid)
+    owner = training_owner_identity(owner_pid)
     write(record(work, "training-owner"), owner)
     for _ in range(1200):
-        require(TRAIN["alive"](owner), "training owner exited before observation")
+        require(TRAIN["alive"](owner), "OWNER_EXITED_BEFORE_WORKER_OBSERVATION")
         for member in TRAIN["descendants"](owner_pid):
             process = Path(f"/proc/{member['pid']}")
             try:
@@ -289,6 +368,11 @@ def cleanup_workers(work):
         processes.append(read(owner))
     require(not any(TRAIN["alive"](process) for process in processes),
             "owned training/inference process still alive before private-store cleanup")
+    diagnostic = record(work, "cycle-diagnostic")
+    # Early provisioning failures have no selected learner or loop to inspect.
+    if not diagnostic.exists() and (work / "agent-jobs-layout.json").exists():
+        _, learner, _ = roots(work)
+        write(diagnostic, cycle_diagnostic(learner))
     write(ended, dict(owned_processes=processes, all_recorded_processes_ended=True,
                      checked_before_private_store_removal=True))
 
@@ -391,6 +475,11 @@ def check_evidence(value, revision):
             "explicit original cached-source provisioning differs")
     layout = value["layout"]
     learner = layout["provider_nodes"][0]
+    admission = value["learner-admission"]
+    require(learner == admission["node"] == "relay4" and admission["static_fixture_roles"] is True
+            and admission["learner_network_retrieval_claimed"] is False and admission["source"] == digest(raw),
+            "static learner admission proof differs")
+    check_local_source(admission["roles_text"], value["local-source"], publication, digest(raw))
     require(publication["publisher_key_hex"] == layout["provider_keys"][layout["provider_nodes"][1]], "training source publisher differs")
     fetched = value["source-fetch"]
     require(fetched["operation"] == "named_content_download" and fetched["manifest_id"] == publication["manifest_id"]
@@ -459,7 +548,7 @@ def evidence(work, revision):
     JOBS["guest_work"](work)
     names = ("base-caps", "active-caps", "invalid-caps", "base-status", "adapted-status", "base-retained", "loop",
              "publish", "source-fetch", "invalid-control", "handles", "base-observation", "adapted-observation",
-             "training-observation", "workers-reaped", "process-cleanup")
+             "training-observation", "workers-reaped", "process-cleanup", "learner-admission", "local-source")
     value = {name: read(record(work, name), 4 * 1024 * 1024) for name in names}
     value.update(source_revision=revision, layout=read(work / "agent-jobs-layout.json"),
         source=read(work / "agent-jobs-source.json"), **{"job-publish": read(work / "agent-jobs-publish.json")},
@@ -494,6 +583,51 @@ def report(value, revision):
 
 def self_test():
     # Inert contract controls only: these are never accepted as real model/VM evidence.
+    roles = "client: true\nrelay: true\nexit: false\n"
+    publication = dict(manifest_id="a" * 64, publisher_key_hex="b" * 64,
+                       name="disposable-successor-training", revision=1, expires_unix_seconds=200)
+    dataset = digest(b"Explicit public inert test data.")
+    receipt = dict(operation="named_content_download", cache_only=True, local_delivery=True,
+        manifest_id=publication["manifest_id"], publisher_key=publication["publisher_key_hex"],
+        name=publication["name"], revision=1, publication_expires_unix_seconds=200, **dataset,
+        peer_bytes=0, providers_used=0, provider_peer_ids=[], control_relay_peer_id="",
+        origin_authenticated=False, origin_body_bytes=0, origin_range_requests=0)
+    check_local_source(roles, receipt, publication, dataset)
+    for change in (dict(cache_only=False), dict(peer_bytes=1), dict(peer_bytes=False), dict(providers_used=1),
+                   dict(manifest_id="c" * 64), dict(sha256="d" * 64), dict(publication_expires_unix_seconds=201),
+                   dict(publisher_key="e" * 64), dict(origin_body_bytes=1)):
+        try:
+            check_local_source(roles, dict(receipt, **change), publication, dataset)
+        except ValueError:
+            continue
+        raise AssertionError("incorrect learner cache-only proof accepted")
+    try:
+        check_local_source(roles.replace("client: true", "client: false"), receipt, publication, dataset)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("relay-only learner accepted")
+    assert training_owner_identity(123, lambda pid: dict(pid=pid, start_ticks=456)) == dict(pid=123, start_ticks=456)
+    def missing_owner(_pid):
+        raise FileNotFoundError("unretained private process path")
+    try:
+        training_owner_identity(123, missing_owner)
+    except ValueError as error:
+        assert str(error) == "OWNER_EXITED_BEFORE_WORKER_OBSERVATION"
+    else:
+        raise AssertionError("missing owner identity accepted")
+    with tempfile.TemporaryDirectory(prefix="volparossa-successor-inert-") as directory:
+        learner = Path(directory)
+        assert all(item == dict(present=False) for item in cycle_diagnostic(learner)["files"].values())
+        (learner / "loop" / CYCLE).mkdir(parents=True)
+        write(learner / "loop/state.json", dict(next_sequence=2, completed=0, promoted=0, rejected=0,
+              cycles=[dict(sequence=1, phase="failed")], private_unexported="Do not export this value"))
+        write(learner / "loop" / CYCLE / "selection.json", dict(private_unexported="Do not export this value"))
+        diagnostic = cycle_diagnostic(learner)
+        assert diagnostic["state"]["cycles"] == [dict(sequence=1, phase="failed")]
+        assert diagnostic["files"][f"{CYCLE}/selection.json"]["present"] is True
+        assert diagnostic["exact_failure_cause_known"] is False
+        assert "Do not export" not in json.dumps(diagnostic)
     model = dict(model_id="HuggingFaceTB/SmolLM2-135M-Instruct", model_revision=TRAIN["MODEL_REVISION"],
                  base_weights=dict(bytes=269060552, sha256=TRAIN["WEIGHT_HASH"]), adapter_files=None)
     adapter = {name: dict(bytes=1, sha256="b" * 64) for name in FILES}
@@ -553,7 +687,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("invalid transition contract accepted")
-    print("learning-serving readiness, strict cleanup booleans and transition controls passed; no model or network executed")
+    print("learning-serving static roles/cache-only, bounded diagnostics, readiness and transition controls passed; no model or network executed")
 
 
 def main():
@@ -561,6 +695,7 @@ def main():
     if command == "self-test": self_test()
     elif command == "source": source(Path(args[0]), args[1])
     elif command == "seed": seed(Path(args[0]))
+    elif command == "local-source": local_source(Path(args[0]))
     elif command == "observe-job": observe_job(Path(args[0]), args[1])
     elif command == "observe-training": observe_training(Path(args[0]), int(args[1]))
     elif command == "capture-loop": capture_loop(Path(args[0]))

@@ -634,6 +634,13 @@ The first disposable run stopped at base admission: the broker explicitly report
 was not accepting work, but the fixture attempted submission immediately. No training or
 adapted inference ran. The fixture now waits boundedly for real readiness and corrects its
 cleanup-boolean parsing; this neither bypasses spare-capacity decisions nor changes any job lease.
+The second run completes actual base-model peer inference and the public-source fetch, but its
+training-loop cycle fails before worker observation; the retained output omits the specific
+cycle error. Inspection finds that the fixture's relay-only learner cannot use the ordinary
+named-content API, even with its complete pre-provisioned cache. The corrected fixture starts
+that learner with client and relay roles, checks its own cache-only retrieval and then uses the
+same training-loop/approval/serving path. Product access checks stay unchanged. This remains
+explicit public fixture provisioning, not autonomous source discovery or a verified transition.
 
 ## Owner-first resource allocation
 

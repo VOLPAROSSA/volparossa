@@ -68,6 +68,7 @@ agent_successor_serving_job() {
 }
 
 agent_successor_serving_run() {
+    [ "$provider_node_a" = relay4 ] || fail SUCCESSOR_STATIC_LEARNER_MISMATCH
     successor_private=$WORK/state-$provider_node_a/compute
     successor_source=$WORK/state-$provider_node_b/compute/successor-source
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$successor_source"
@@ -89,6 +90,16 @@ agent_successor_serving_run() {
         2>"$WORK/agent-successor-serving-source-fetch.err" || fail SUCCESSOR_SOURCE_FETCH_FAILED
     # Explicit public fixture provisioning, not a claim that the learner fetched over its own route.
     python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" seed "$WORK" || fail SUCCESSOR_CACHE_PROVISION_FAILED
+    PHASE=agent-successor-serving-local-source
+    agent_jobs_cli "$provider_node_a" role show >"$WORK/agent-successor-serving-learner-roles.log" \
+        2>"$WORK/agent-successor-serving-learner-roles.err" || fail SUCCESSOR_LEARNER_ROLES_UNCONFIRMED
+    agent_jobs_cli "$provider_node_a" content fetch-name --publisher-key "$jobs_key_b" --name disposable-successor-training \
+        --min-revision 1 --cache "$successor_private/source-cache" --reuse-cache --cache-only \
+        --local-output "$successor_private/source-preflight.json" \
+        >"$WORK/agent-successor-serving-local-source.json" \
+        2>"$WORK/agent-successor-serving-local-source.err" || fail SUCCESSOR_LEARNER_LOCAL_SOURCE_UNAVAILABLE
+    python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" local-source "$WORK" \
+        || fail SUCCESSOR_LEARNER_LOCAL_SOURCE_INVALID
     PHASE=agent-successor-serving-train
     successor_node_pid=$(systemctl show --property=MainPID --value "volparossa-alpha-agent@$provider_node_a.service")
     case $successor_node_pid in ''|0|*[!0-9]*) fail SUCCESSOR_NODE_NOT_RUNNING ;; esac
