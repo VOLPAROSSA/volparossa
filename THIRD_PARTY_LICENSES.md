@@ -40,6 +40,22 @@ No weights or tokenizer were downloaded for this metadata check. The 360M profil
 not enable training or apply 135M adapters, and does not raise the native content-object
 ceiling or establish answer quality.
 
+The separate, explicit `--task-graph-decoder` provisioning option appends three original
+pure-Python wheels; neither the 38-wheel baseline nor its `requirements.lock` is changed.
+`graph-decoder-pins.json` and `graph-decoder-requirements.lock` retain their exact original
+PyPI URLs, byte lengths and SHA-256 values. The optional runtime has 41 wheels, adds
+235,780 download bytes, retains every original wheel including its unchanged MIT notices,
+and validates the actual merged dependency graph before offline installation. The retained
+merged pin file and requirements hashes describe the files actually installed. Installation
+and the optional core-import/version check run only in an explicitly acknowledged disposable
+environment; no model execution or successful constrained generation is implied.
+
+| Optional decoder component | Exact source / original distribution | License and notice provenance |
+| --- | --- | --- |
+| LM Format Enforcer `0.11.3` | [release source](https://github.com/noamgat/lm-format-enforcer/tree/05c7dc3a46305e39c1a67c8622c433d8deda48a2), commit `05c7dc3a46305e39c1a67c8622c433d8deda48a2`; [original PyPI metadata](https://pypi.org/pypi/lm-format-enforcer/0.11.3/json) | MIT, Copyright (c) 2023 Noam Gat; original source LICENSE SHA-256 `d1c02373f9da54abb40fb9fa5ca6c19136d10da76a1054ff1ee2528221ae1bfe`. Our separate tokenizer adapter retains this notice. |
+| Interegular `0.3.3` | [original release metadata](https://pypi.org/pypi/interegular/0.3.3/json); original source archive SHA-256 `d9b697b21b34884711399ba0f0376914b81899ce670032486d0d048344a76600`, 24,705 bytes, URL retained in decoder pins | MIT as declared by the original distribution; original wheel retained unchanged. No matching `0.3.3` upstream Git tag was found, so no Git-to-wheel equivalence is claimed. The source archive is provenance only, never installed. |
+| Pydantic `1.10.24` (pure Python wheel) | [release source](https://github.com/pydantic/pydantic/tree/ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c), commit `ebb3e81419f8a1c0b4976b91a22bfb17a3ddf23c`; [original PyPI metadata](https://pypi.org/pypi/pydantic/1.10.24/json) | MIT, Samuel Colvin and other contributors; original source LICENSE SHA-256 `9e3946690ac88b6b73e8f001a0586af13568be8852fd514e4393f39761764387`. The pinned optional artifact is not a compiled extension wheel. |
+
 The fixed Rust supervisor uses Debian's installed Bubblewrap and util-linux resource/priority
 tools as separate executables, not vendored copies. The sandbox argument vector is part of our
 source; [upstream Bubblewrap](https://github.com/containers/bubblewrap) explicitly makes its

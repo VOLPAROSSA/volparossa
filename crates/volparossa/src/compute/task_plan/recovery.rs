@@ -43,7 +43,10 @@ pub(in crate::compute) enum PlanningDiagnostic {
 
 impl PlanningDiagnostic {
     pub(in crate::compute) fn from_value(value: &Value) -> Result<Self> {
-        if value["strategy"] == super::GRAPH_STRATEGY {
+        if matches!(
+            value["strategy"].as_str(),
+            Some(super::GRAPH_STRATEGY | super::CONSTRAINED_GRAPH_STRATEGY)
+        ) {
             super::graph::GraphDiagnostic::from_value(value).map(Self::Graph)
         } else {
             QuestionDiagnostic::from_value(value).map(Self::Questions)

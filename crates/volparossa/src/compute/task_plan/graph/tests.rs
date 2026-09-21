@@ -214,3 +214,93 @@ fn graph_failure_diagnostics_preserve_shape_without_creating_graph_authority() {
         .remove("rejection_code");
     assert!(PlanningDiagnostic::from_value(&diagnostic).is_err());
 }
+
+fn decoder() -> Value {
+    json!({"implementation":"lm-format-enforcer","version":"0.11.3",
+        "adapter_version":1,"schema_version":3,
+        "dependencies":{"interegular":"0.3.3","pydantic":"1.10.24"}})
+}
+
+#[test]
+fn constrained_graph_pins_decoder_without_changing_raw_graph_or_original_budget() {
+    let input = input();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let raw = artifact();
+    let legacy = report(&input, &bytes, &raw);
+    let expected = validate_graph_report(&legacy, &input, &bytes, &raw).unwrap();
+    let mut current = legacy.clone();
+    current["planner_strategy"] = CONSTRAINED_GRAPH_STRATEGY.into();
+    assert!(validate_graph_report(&current, &input, &bytes, &raw).is_err());
+    current["planner_decoder"] = decoder();
+    assert_eq!(
+        validate_graph_report(&current, &input, &bytes, &raw).unwrap(),
+        expected
+    );
+    for (pointer, replacement) in [
+        ("/planner_decoder", Value::Null),
+        ("/planner_decoder/version", json!("0.11.2")),
+        ("/planner_decoder/adapter_version", json!(2)),
+        ("/planner_decoder/schema_version", json!(2)),
+        ("/planner_decoder/dependencies/interegular", json!("0.3.2")),
+        ("/planner_decoder/dependencies/pydantic", json!("2.0.0")),
+        ("/planner_attempts/0/max_new_tokens", json!(512)),
+        ("/planner_attempts/0/generated_tokens", json!(385)),
+        ("/planner_attempts/0/prompt_tokens", json!(513)),
+        ("/planner_attempts/0/text_sha256", json!("f".repeat(64))),
+        ("/planner_structure_generated_by", json!("local_schema")),
+    ] {
+        let mut changed = current.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            validate_graph_report(&changed, &input, &bytes, &raw).is_err(),
+            "{pointer}"
+        );
+    }
+    let mut extra = current.clone();
+    extra["planner_decoder"]["fallback"] = true.into();
+    assert!(validate_graph_report(&extra, &input, &bytes, &raw).is_err());
+    for claim in [decoder(), Value::Null] {
+        let mut changed = legacy.clone();
+        changed["planner_decoder"] = claim;
+        assert!(validate_graph_report(&changed, &input, &bytes, &raw).is_err());
+    }
+    let mut copied = serde_json::from_slice::<Value>(&raw).unwrap();
+    copied["tasks"][0]["question"] = input.question.clone().into();
+    assert!(
+        ModelTaskGraph::decode(&serde_json::to_vec(&copied).unwrap(), &input.question).is_err()
+    );
+}
+
+#[test]
+fn constrained_graph_diagnostic_requires_decoder_and_preserves_legacy_shape() {
+    let legacy = json!({"strategy":GRAPH_STRATEGY,
+        "attempts":[attempt(b"{}",false,Some("INVALID_GRAPH"))],"incomplete_attempt":true});
+    let checked = PlanningDiagnostic::from_value(&legacy).unwrap();
+    assert_eq!(serde_json::to_value(checked).unwrap(), legacy);
+    let mut current = legacy.clone();
+    current["strategy"] = CONSTRAINED_GRAPH_STRATEGY.into();
+    assert!(PlanningDiagnostic::from_value(&current).is_err());
+    current["planner_decoder"] = decoder();
+    let checked = PlanningDiagnostic::from_value(&current).unwrap();
+    assert_eq!(serde_json::to_value(checked).unwrap(), current);
+    for (pointer, replacement) in [
+        ("/planner_decoder", Value::Null),
+        ("/planner_decoder/implementation", json!("unknown")),
+        ("/planner_decoder/dependencies", json!({})),
+        ("/strategy", json!(GRAPH_STRATEGY)),
+        ("/attempts/0/max_new_tokens", json!(512)),
+        ("/attempts/0/prompt_tokens", json!(513)),
+    ] {
+        let mut changed = current.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            PlanningDiagnostic::from_value(&changed).is_err(),
+            "{pointer}"
+        );
+    }
+    current["attempts"] = json!([]);
+    PlanningDiagnostic::from_value(&current).unwrap();
+    let mut changed = legacy;
+    changed["planner_decoder"] = Value::Null;
+    assert!(PlanningDiagnostic::from_value(&changed).is_err());
+}

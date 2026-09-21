@@ -45,7 +45,10 @@ TASK_PLAN_QUESTION_TOKENS = 192
 TASK_PLAN_CONTEXT_TOKENS = 896
 TASK_PLAN_MAX_ATTEMPTS = 4
 TASK_PLAN_STRATEGY = "model_questions_source_recovery_v4"
-TASK_GRAPH_STRATEGY = "model_task_graph_v1"
+TASK_GRAPH_STRATEGY = "model_task_graph_constrained_v2"
+TASK_GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
+                      "adapter_version": 1, "schema_version": 3,
+                      "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 MAX_TASK_PLAN_BYTES = 16384
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 MODEL_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
@@ -920,6 +923,8 @@ def task_plan_diagnostic(session, strategy=TASK_PLAN_STRATEGY):
     if type(getattr(session, "planner_diagnostic", None)) is not dict:
         session.planner_diagnostic = {"strategy": strategy, "attempts": [],
                                       "incomplete_attempt": False}
+        if strategy == TASK_GRAPH_STRATEGY:
+            session.planner_diagnostic["planner_decoder"] = TASK_GRAPH_DECODER
     require(session.planner_diagnostic["strategy"] == strategy, "TASK_PLAN_STRATEGY_CHANGED")
     return session.planner_diagnostic
 
@@ -1097,7 +1102,53 @@ def task_graph_candidate(raw, goal):
         return None, "INVALID_GRAPH"
 
 
-def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, session, attempt, limit, feedback):
+def create_task_graph_decoder(tokenizer, dataset, session):
+    # The Rust sandbox embeds this trusted source before starting the worker.
+    # Never search the working directory, import an unbundled module or fetch it.
+    session.check()
+    module = sys.modules.get("volparossa_task_graph_decoder")
+    require(module is not None, "TASK_GRAPH_DECODER_UNAVAILABLE")
+    require(module.decoder_metadata() == TASK_GRAPH_DECODER, "TASK_GRAPH_DECODER_VERSION_MISMATCH")
+    fixed_errors = {
+        "TASK_GRAPH_DECODER_UNAVAILABLE", "TASK_GRAPH_DECODER_VERSION_MISMATCH",
+        "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS", "TASK_GRAPH_DECODER_PARSER_FAILED",
+        "TASK_GRAPH_DECODER_TOKENIZATION_CHANGED", "TASK_GRAPH_DECODER_TOKENIZER_INVALID",
+        "TASK_GRAPH_DECODER_ATTEMPT_INVALID", "TASK_GRAPH_DECODER_PREFIX_CHANGED",
+        "TASK_GRAPH_DECODER_ALLOWED_TOKENS_INVALID",
+    }
+
+    def failure(error):
+        code = str(error)
+        return JobError(code if code in fixed_errors else "TASK_GRAPH_DECODER_PARSER_FAILED")
+
+    def accepts(raw):
+        return task_graph_candidate(raw, dataset["question"])[1] is None
+
+    try:
+        decoder = module.GraphDecoder(tokenizer, session.check, accepts)
+    except module.DecoderError as error:
+        raise failure(error) from None
+    require(decoder.metadata == TASK_GRAPH_DECODER, "TASK_GRAPH_DECODER_VERSION_MISMATCH")
+
+    class CheckedDecoder:
+        def new_attempt(self, prompt, limit):
+            try:
+                callback = decoder.new_attempt(prompt, limit)
+            except module.DecoderError as error:
+                raise failure(error) from None
+
+            def allowed(batch_id, tokens):
+                try:
+                    return callback(batch_id, tokens)
+                except module.DecoderError as error:
+                    raise failure(error) from None
+
+            return allowed
+
+    return CheckedDecoder()
+
+
+def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, session, attempt, limit, feedback, decoder):
     code = "TASK_GRAPH_"
     diagnostic = task_plan_diagnostic(session, TASK_GRAPH_STRATEGY)
     session.check()
@@ -1107,6 +1158,7 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
     require(bounded_integer(limit, 1, TASK_PLAN_NEW_TOKENS), code + "ATTEMPT_BUDGET")
     require(1 <= len(prompt) <= TASK_PLAN_PROMPT_TOKENS and len(prompt) + limit <= TASK_PLAN_CONTEXT_TOKENS,
             code + "PROMPT_TOKEN_LIMIT_EXCEEDED")
+    allowed_tokens = decoder.new_attempt(prompt, limit)
     input_ids = torch.tensor([prompt], dtype=torch.long, device="cpu")
     complete_tokens = None
 
@@ -1135,6 +1187,7 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
         diagnostic["incomplete_attempt"] = True
         output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
             max_new_tokens=limit, do_sample=False, num_beams=1, num_return_sequences=1, use_cache=True,
+            prefix_allowed_tokens_fn=allowed_tokens,
             stopping_criteria=transformers.StoppingCriteriaList([OwnerBudget()]),
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
     session.check()
@@ -1170,11 +1223,12 @@ def plan_task_graph(model, tokenizer, torch, transformers, dataset, session, pro
             and diagnostic["incomplete_attempt"] is False, "TASK_PLAN_ALREADY_STARTED")
     session.planner_started = True
     model.eval()
+    decoder = create_task_graph_decoder(tokenizer, dataset, session)
     total, feedback = 0, None
     for attempt in range(1, TASK_PLAN_MAX_ATTEMPTS + 1):
         require(total < TASK_PLAN_NEW_TOKENS, "TASK_GRAPH_GENERATION_LIMIT_REACHED")
         plan, raw, record = plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, session,
-            attempt, TASK_PLAN_NEW_TOKENS - total, feedback)
+            attempt, TASK_PLAN_NEW_TOKENS - total, feedback, decoder)
         total += record["generated_tokens"]
         if record["accepted"]:
             return plan, raw, max(item["prompt_tokens"] for item in diagnostic["attempts"]), total
@@ -1195,6 +1249,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
     if graph:
         plan, raw, prompt_count, generated_count = plan_task_graph(model, tokenizer, torch, transformers, dataset, session, profile_name)
         planning = {"planner_stop_reason": "task_graph", "planner_strategy": TASK_GRAPH_STRATEGY,
+                    "planner_decoder": TASK_GRAPH_DECODER,
                     "planner_structure_generated_by": "model", "planner_task_count": len(plan["tasks"]),
                     "planner_dependency_count": sum(len(task["depends_on"]) for task in plan["tasks"])}
     else:

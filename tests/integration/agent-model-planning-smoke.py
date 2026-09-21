@@ -23,6 +23,8 @@ SELECTED_MODEL = TRAIN["inference_profile"](MODEL_PROFILE)
 MODEL, MODEL_ID = SELECTED_MODEL["fingerprint"], SELECTED_MODEL["model"]
 PREFIX = "agent-model-planning"
 STRATEGY = "model_questions_source_recovery_v4"
+DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3", "adapter_version": 1,
+           "schema_version": 3, "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
 SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates two public subquestions from a goal and "
@@ -41,11 +43,12 @@ def select_task_graph():
     global TASK_GRAPH, PREFIX, STRATEGY, KIND, SCOPE
     TASK_GRAPH = True
     PREFIX = "agent-model-task-graph"
-    STRATEGY = "model_task_graph_v1"
+    STRATEGY = "model_task_graph_constrained_v2"
     KIND = "volparossa-bounded-model-selected-public-task-graph"
     SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates an exact raw public task graph from "
         "the original goal and bounded literal source prefix, choosing at least two tasks and one internal dependency "
-        "within four attempts and 384 total generated tokens. Local translation adds only stable IDs and an exact "
+        "within four attempts and 384 total generated tokens, with pinned JSON-constrained decoding. "
+        "Local translation adds only stable IDs and an exact "
         "original-question terminal join over model-selected sinks. Actual protected peer jobs consume EOS-complete "
         "parents; original-free completed offline resume preserves planner and receipts. No required parallel shape, "
         "simultaneous-worker claim, task repair, canned fallback, semantic quality, private offload, model-selected tools, "
@@ -460,8 +463,11 @@ def validate_failure(value,input_raw,source):
         and type(value["source_bytes"]) is int and value["source_bytes"]==len(source)
         and value["child_reaped"] is True and value["plan_enrolled"] is False,"uncorrelated or unsafe planner failure metadata")
     diagnostic=value["planner_diagnostic"]
-    require(type(diagnostic) is dict and diagnostic.keys()=={"strategy","attempts","incomplete_attempt"}
+    fields={"strategy","attempts","incomplete_attempt"} | ({"planner_decoder"} if TASK_GRAPH else set())
+    require(type(diagnostic) is dict and diagnostic.keys()==fields
         and diagnostic["strategy"]==STRATEGY and type(diagnostic["incomplete_attempt"]) is bool,"invalid planner failure diagnostic")
+    if TASK_GRAPH:
+        require(diagnostic["planner_decoder"]==DECODER,"unbound graph decoder diagnostic")
     accepted,total,_,_=(check_graph_attempts(diagnostic["attempts"]) if TASK_GRAPH else
         check_attempts(diagnostic["attempts"],goal=expected["question"]))
     # Accepted questions do not enroll a plan: later model-integrity or artifact
@@ -501,6 +507,7 @@ def check_planning(raw,source):
         and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<=(384 if TASK_GRAPH else 383)
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
     if TASK_GRAPH:
+        require(report.get("planner_decoder")==DECODER,"unbound actual graph decoder")
         accepted,total,maximum,_=check_graph_attempts(report["planner_attempts"],raw["planner-artifact.json"])
         require(accepted==1 and "planner_question_stats" not in report
             and report["planner_task_count"]==len(plan["nodes"])-1
@@ -572,20 +579,34 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
     return parents[0],rounds
 
 
-def check_provision(provision):
+def provision_pins():
     pin_root=HERE/"ml" if (HERE/"ml").is_dir() else HERE.parent.parent/"workers/volparossa-ml"
     pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
+    lock=(pin_root/"requirements.lock").read_bytes()
+    if TASK_GRAPH:
+        extra=read(pin_root/"graph-decoder-pins.json")
+        require(extra["format_version"]==1 and extra["decoder"]==DECODER and len(extra["wheels"])==3,
+            "unexpected decoder provision pins")
+        pins["wheels"]+=extra["wheels"]
+        pins["task_graph_decoder"]=extra["decoder"]
+        lock+=(b"" if lock.endswith(b"\n") else b"\n")+(pin_root/"graph-decoder-requirements.lock").read_bytes()
+    return pins,lock
+
+
+def check_provision(provision):
+    pins,lock=provision_pins()
     weights=next(item for item in pins["files"] if item["path"]=="model.safetensors")
     require(pins["model_id"]==MODEL_ID["model_id"] and pins["revision"]==MODEL_ID["model_revision"]
         and {key:weights[key] for key in ("bytes","sha256")}==MODEL_ID["base_weights"],"selected provision pins changed")
-    require(provision["success"] is True and provision["installed_wheels"]==len(pins["wheels"])==38
+    require(provision["success"] is True and provision["installed_wheels"]==len(pins["wheels"])==(41 if TASK_GRAPH else 38)
         and provision["model_profile"]==MODEL_PROFILE and provision["model_id"]==MODEL_ID["model_id"]
         and provision["revision"]==MODEL_ID["model_revision"]
-        and provision["download_bytes"]==sum(item["bytes"] for item in pins["files"]+pins["wheels"])==977655758
+        and provision["download_bytes"]==sum(item["bytes"] for item in pins["files"]+pins["wheels"])==(977891538 if TASK_GRAPH else 977655758)
         and provision["model_pins_sha256"]==sha((json.dumps(pins,indent=2)+"\n").encode())
-        and provision["requirements_sha256"]==sha((pin_root/"requirements.lock").read_bytes())
+        and provision["requirements_sha256"]==sha(lock)
         and provision["budget_bytes"]==3*1024**3 and provision["runtime_autofetch_enabled"] is False
         and provision["training_performed"] is False,"unverified selected-model provision")
+    require(provision.get("task_graph_decoder")== (DECODER if TASK_GRAPH else None),"unverified decoder provision")
 
 
 def check(value,revision):
@@ -748,13 +769,14 @@ def report(value,revision):
 def profile_self_test():
     # Only inert provenance/report values: this exercises both checker branches,
     # never a tokenizer, model, worker or signed publication.
-    pin_root=HERE.parent.parent/"workers/volparossa-ml"
-    pins=read(pin_root/"model-pins.json");pins.update(read(pin_root/"model-pins-360m.json"))
-    provision=dict(success=True,installed_wheels=38,model_profile=MODEL_PROFILE,model_id=MODEL_ID["model_id"],
-        revision=MODEL_ID["model_revision"],download_bytes=977655758,budget_bytes=3*1024**3,
+    pins,lock=provision_pins()
+    provision=dict(success=True,installed_wheels=len(pins["wheels"]),model_profile=MODEL_PROFILE,model_id=MODEL_ID["model_id"],
+        revision=MODEL_ID["model_revision"],download_bytes=sum(x["bytes"] for k in ("files","wheels") for x in pins[k]),budget_bytes=3*1024**3,
         model_pins_sha256=sha((json.dumps(pins,indent=2)+"\n").encode()),
-        requirements_sha256=sha((pin_root/"requirements.lock").read_bytes()),
+        requirements_sha256=sha(lock),
         runtime_autofetch_enabled=False,training_performed=False)
+    if TASK_GRAPH:
+        provision["task_graph_decoder"]=DECODER
     check_provision(provision)
     for changed in (dict(model_profile="smollm2-135m-v1"),dict(download_bytes=523040250),
                     dict(model_pins_sha256="0"*64),dict(budget_bytes=4*1024**3)):
@@ -964,7 +986,7 @@ def graph_self_test():
         model_weights_loaded=True,source_contents_read_by_planner=True,base_weights_unchanged=True,
         goal_only_planning=False,source_excerpt_complete=True,base_before=dict(parameters=1,sha256="a"*64),
         base_after=dict(parameters=1,sha256="a"*64),generation_limit_reached=False,model_answer_correctness_proven=False,
-        planner_stop_reason="task_graph",planner_strategy=STRATEGY,planner_structure_generated_by="model",
+        planner_stop_reason="task_graph",planner_strategy=STRATEGY,planner_structure_generated_by="model",planner_decoder=DECODER,
         planner_prompt_tokens=128,planner_generated_tokens=144,planner_attempts=attempts,planner_task_count=3,planner_dependency_count=1,
         dataset=dict(version=3,sha256=sha(input_raw),bytes=len(input_raw),visibility="public",license="GPL-3.0-only",
             question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source),
@@ -1008,14 +1030,14 @@ def graph_self_test():
     input_raw=encoded(planning_input(source))
     failure=dict(version=1,operation="compute_public_task_planning_failure",request_id="a"*32,
         code="TASK_GRAPH_GENERATION_LIMIT",input_sha256=sha(input_raw),source_sha256=sha(source),source_bytes=len(source),
-        planner_diagnostic=dict(strategy=STRATEGY,attempts=[attempt(1,b'partial',384,accepted=False,
+        planner_diagnostic=dict(strategy=STRATEGY,planner_decoder=DECODER,attempts=[attempt(1,b'partial',384,accepted=False,
             code="GENERATION_LIMIT",stop="token_limit")],incomplete_attempt=False),child_reaped=True,plan_enrolled=False)
     validate_failure(failure,input_raw,source)
     failure["planner_diagnostic"]["incomplete_attempt"]=True
     try:validate_failure(failure,input_raw,source)
     except ValueError:pass
     else:raise AssertionError("extra generation after original budget accepted")
-    print("model-selected graph v1 exact task/edge translation, charged attempts and no-edge negative controls PASS; no model/network executed")
+    print("model-selected constrained graph v2 exact decoder/task/edge/budget controls PASS; no model/network executed")
 
 
 def main(args):

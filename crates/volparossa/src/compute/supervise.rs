@@ -254,7 +254,7 @@ fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
     input.validate_execution()?;
     let (strategy, name) = if input.version == 3 {
         (
-            super::task_plan::GRAPH_STRATEGY,
+            super::task_plan::CONSTRAINED_GRAPH_STRATEGY,
             super::task_plan::GRAPH_ARTIFACT_NAME,
         )
     } else {
@@ -890,6 +890,7 @@ mod tests {
                 "model_questions_scaffold_v1",
                 "model_questions_scaffold_recovery_v2",
                 "model_questions_source_recovery_v3",
+                crate::compute::task_plan::GRAPH_STRATEGY,
                 if version == 3 {
                     crate::compute::task_plan::CURRENT_STRATEGY
                 } else {

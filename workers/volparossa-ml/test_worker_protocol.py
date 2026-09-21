@@ -145,6 +145,9 @@ def task_planner_doubles(text, generated=None, prompt=None):
 
     def generate(**kwargs):
         actual_prompt = kwargs["input_ids"].rows[0]
+        if "prefix_allowed_tokens_fn" in kwargs:
+            # Explicit decoder doubles in graph tests; never a backend/model run.
+            kwargs["prefix_allowed_tokens_fn"](0, Vector(actual_prompt))
         for criterion in kwargs["stopping_criteria"]:
             criterion(Tensor([actual_prompt + generated]), None)
         return Tensor([actual_prompt + generated])
@@ -1065,7 +1068,52 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertIn("empty depends_on reads the original source", messages[0]["content"])
         self.assertNotIn(original["tasks"][0]["question"], json.dumps(messages))
 
-    def test_task_graph_preserves_full_model_json_and_model_selected_count_at_eos_or_boundary(self):
+    def test_task_graph_decoder_requires_embedded_module_and_never_falls_back(self):
+        model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(task_graph_fixture(1)))
+        session = mock.Mock()
+        with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": None}):
+            with self.assertRaisesRegex(WORKER.JobError, "^TASK_GRAPH_DECODER_UNAVAILABLE$"):
+                WORKER.plan_task_graph(model, tokenizer, torch, transformers, dict(task_plan_input(), version=3), session)
+        model.generate.assert_not_called()
+        self.assertEqual(session.planner_diagnostic, dict(strategy=WORKER.TASK_GRAPH_STRATEGY,
+            attempts=[], incomplete_attempt=False, planner_decoder=WORKER.TASK_GRAPH_DECODER))
+
+    def test_task_graph_decoder_factory_binds_validator_and_redacts_only_decoder_failures(self):
+        class DecoderFailure(Exception):
+            pass
+        module = mock.Mock()
+        module.DecoderError = DecoderFailure
+        module.decoder_metadata.return_value = WORKER.TASK_GRAPH_DECODER
+        module.GraphDecoder.return_value.metadata = WORKER.TASK_GRAPH_DECODER
+        source = dict(task_plan_input(), version=3)
+        tokenizer, session = mock.Mock(), mock.Mock()
+        with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": module}):
+            decoder = WORKER.create_task_graph_decoder(tokenizer, source, session)
+            args = module.GraphDecoder.call_args.args
+            self.assertIs(args[0], tokenizer)
+            self.assertEqual(args[1], session.check)
+            self.assertTrue(args[2](json.dumps(task_graph_fixture(1)).encode()))
+            copied = dict(version=3, tasks=[dict(question=source["question"], depends_on=[])])
+            self.assertFalse(args[2](json.dumps(copied).encode()))
+            self.assertFalse(args[2](b'prefix {"version":3,"tasks":[]}'))
+            callback = decoder.new_attempt([11, 12], 37)
+            module.GraphDecoder.return_value.new_attempt.assert_called_once_with([11, 12], 37)
+            core_callback = module.GraphDecoder.return_value.new_attempt.return_value
+            core_callback.return_value = [4, 5]
+            self.assertEqual(callback(0, "inert token double"), [4, 5])
+            for failure, code in ((DecoderFailure("PRIVATE PREFIX"), "TASK_GRAPH_DECODER_PARSER_FAILED"),
+                                  (DecoderFailure("TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS"),
+                                   "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS"),
+                                  (WORKER.JobError("JOB_CANCELLED"), "JOB_CANCELLED")):
+                core_callback.side_effect = failure
+                with self.assertRaisesRegex(WORKER.JobError, "^" + code + "$"):
+                    callback(0, "inert token double")
+            module.GraphDecoder.side_effect = DecoderFailure("TASK_GRAPH_DECODER_VERSION_MISMATCH")
+            with self.assertRaisesRegex(WORKER.JobError, "^TASK_GRAPH_DECODER_VERSION_MISMATCH$"):
+                WORKER.create_task_graph_decoder(tokenizer, source, session)
+
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_preserves_full_model_json_and_model_selected_count_at_eos_or_boundary(self, decoder_factory):
         for count in range(1, 5):
             for stop in ("eos", "graph_boundary"):
                 with self.subTest(count=count, stop=stop):
@@ -1089,8 +1137,13 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assertIsNone(record["rejection_code"])
                     model.generate.assert_called_once()
                     self.assertFalse(model.generate.call_args.kwargs["do_sample"])
+                    self.assertIs(model.generate.call_args.kwargs["prefix_allowed_tokens_fn"],
+                                  decoder_factory.return_value.new_attempt.return_value)
+                    decoder_factory.return_value.new_attempt.assert_called_with([11, 12, 13], 384)
+                    self.assertEqual(session.planner_diagnostic["planner_decoder"], WORKER.TASK_GRAPH_DECODER)
 
-    def test_task_graph_retries_only_charged_whole_json_or_schema_rejections(self):
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_retries_only_charged_whole_json_or_schema_rejections(self, decoder_factory):
         valid = json.dumps(task_graph_fixture())
         for bad, category, stop in (("```json\n" + valid + "\n```", "INVALID_JSON", "eos"),
             ("prose " + valid, "INVALID_JSON", "eos"), (valid + " trailing", "INVALID_JSON", "eos"),
@@ -1098,6 +1151,7 @@ class WorkerProtocolTests(unittest.TestCase):
             ('{"version":3,"tasks":[],"extra":NaN}', "INVALID_JSON", "eos"),
             ('{"version":3,"tasks":[]}', "INVALID_GRAPH", "graph_boundary")):
             with self.subTest(category=category, stop=stop):
+                decoder_factory.reset_mock()
                 model, tokenizer, torch, transformers = task_planner_doubles([bad, valid])
                 original = model.generate.side_effect
                 def generate(**kwargs):
@@ -1117,11 +1171,15 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual([a["rejection_code"] for a in attempts], [category, None])
                 self.assertEqual([a["max_new_tokens"] for a in attempts], [384, 384-attempts[0]["generated_tokens"]])
                 self.assertEqual(attempts[0]["text_sha256"], hashlib.sha256(bad.encode()).hexdigest())
+                decoder_factory.assert_called_once_with(tokenizer, dict(task_plan_input(), version=3), session)
+                self.assertEqual([call.args[1] for call in decoder_factory.return_value.new_attempt.call_args_list],
+                                 [384, 384-attempts[0]["generated_tokens"]])
                 with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ALREADY_STARTED"):
                     WORKER.plan_task_graph(model, tokenizer, torch, transformers,
                         dict(task_plan_input(), version=3), session)
 
-    def test_task_graph_cap_requires_real_eos_or_exact_online_boundary_and_never_renews_budget(self):
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_cap_requires_real_eos_or_exact_online_boundary_and_never_renews_budget(self, _decoder_factory):
         valid = json.dumps(task_graph_fixture(1))
         for tokens, success, expected_stop in (([21]*383+[2], True, "eos"),
                                                ([21]*384, True, "graph_boundary"),
@@ -1148,7 +1206,8 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual([r["max_new_tokens"] for r in session.planner_diagnostic["attempts"]], [384, 381, 378, 375])
         self.assertTrue(all(not r["accepted"] for r in session.planner_diagnostic["attempts"]))
 
-    def test_task_graph_stale_marker_and_owner_failure_are_fatal_without_retry(self):
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_stale_marker_and_owner_failure_are_fatal_without_retry(self, _decoder_factory):
         valid = json.dumps(task_graph_fixture(1))
         for returned in ([21, 23], [21, 22, 2], [21, 22, 23]):
             model, tokenizer, torch, transformers = task_planner_doubles(valid)
@@ -1169,7 +1228,8 @@ class WorkerProtocolTests(unittest.TestCase):
             tokenizer.decode.assert_not_called()
             model.generate.assert_called_once()
 
-    def test_task_graph_execution_retains_raw_object_profile_and_base_checks_without_fallback(self):
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_execution_retains_raw_object_profile_and_base_checks_without_fallback(self, _decoder_factory):
         for profile_name in (WORKER.DEFAULT_MODEL_PROFILE, WORKER.LARGE_MODEL_PROFILE):
             for valid in (True, False):
                 with self.subTest(profile=profile_name, valid=valid), tempfile.TemporaryDirectory() as directory:
@@ -1207,7 +1267,8 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assertEqual((root/"task-graph.json").stat().st_mode & 0o777, 0o600)
                     self.assertEqual(result["artifacts"], [dict(relative_path="task-graph.json", **real_hash(root/"task-graph.json"))])
                     self.assertEqual((result["planner_strategy"],result["planner_structure_generated_by"],result["planner_stop_reason"]),
-                        ("model_task_graph_v1","model","task_graph"))
+                        ("model_task_graph_constrained_v2","model","task_graph"))
+                    self.assertEqual(result["planner_decoder"], WORKER.TASK_GRAPH_DECODER)
                     self.assertEqual((result["planner_task_count"],result["planner_dependency_count"]), (4,5))
                     self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))
                     self.assertEqual(result["dataset"]["version"], 3)

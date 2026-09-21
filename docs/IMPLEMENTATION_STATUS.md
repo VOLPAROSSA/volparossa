@@ -2,7 +2,19 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-21
+Last updated: 2026-09-22
+
+The task-graph worker now uses `model_task_graph_constrained_v2`: a pinned, optional
+LM Format Enforcer adapter filters next-token choices to the JSON schema. The model still
+chooses one to four questions and their dependencies; the original raw output is never repaired
+or replaced. Independent graph validation and the original 512-prompt/384-total-token/four-attempt
+budget remain in force. Parser failures cannot log a prefix or manufacture EOS. Source-bundled
+adapter code runs only in the existing sandbox, and the three extra wheels require explicit
+guest provisioning; ordinary inference/training retain the original 38-wheel runtime. Historical
+v1 results remain readable without a decoder claim. The combined CLI passes 255 compute tests
+and strict Clippy; 70 pure worker, 10 decoder and 10 provisioning checks pass. This is an
+executable candidate awaiting real decoder/model/peer evidence, not a claim that the token-limit
+failure below is solved or that a syntactically valid graph is a useful decomposition.
 
 Latest real-model results remain failures, not completed agent cooperation. The
 [model-selected graph run on `7de9448a`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35656629758)

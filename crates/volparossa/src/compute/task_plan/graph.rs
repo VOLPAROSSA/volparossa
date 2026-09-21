@@ -6,7 +6,10 @@ use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{GRAPH_ARTIFACT_NAME, GRAPH_STRATEGY, Input, MAX_ARTIFACT_BYTES, digest, question};
+use super::{
+    CONSTRAINED_GRAPH_STRATEGY, GRAPH_ARTIFACT_NAME, GRAPH_STRATEGY, Input, MAX_ARTIFACT_BYTES,
+    digest, question,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -90,16 +93,15 @@ pub(in crate::compute) struct GraphDiagnostic {
     strategy: String,
     attempts: Vec<GraphAttempt>,
     incomplete_attempt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planner_decoder: Option<Value>,
 }
 
 impl GraphDiagnostic {
     pub(super) fn from_value(value: &Value) -> Result<Self> {
         check_shape(&value["attempts"], 0)?;
         let diagnostic: Self = serde_json::from_value(value.clone())?;
-        ensure!(
-            diagnostic.strategy == GRAPH_STRATEGY,
-            "compute_task_graph_strategy"
-        );
+        validate_decoder(&diagnostic.strategy, value.get("planner_decoder"))?;
         let summary = checked_attempts(&diagnostic.attempts)?;
         if diagnostic.incomplete_attempt {
             ensure!(
@@ -109,6 +111,24 @@ impl GraphDiagnostic {
         }
         Ok(diagnostic)
     }
+}
+
+/// A pinned decoder declaration does not replace graph, source or budget checks.
+fn validate_decoder(strategy: &str, decoder: Option<&Value>) -> Result<()> {
+    match strategy {
+        GRAPH_STRATEGY => ensure!(decoder.is_none(), "compute_task_graph_legacy_decoder"),
+        CONSTRAINED_GRAPH_STRATEGY => ensure!(
+            decoder
+                == Some(&json!({
+                    "implementation":"lm-format-enforcer","version":"0.11.3",
+                    "adapter_version":1,"schema_version":3,
+                    "dependencies":{"interegular":"0.3.3","pydantic":"1.10.24"}
+                })),
+            "compute_task_graph_decoder"
+        ),
+        _ => anyhow::bail!("compute_task_graph_strategy"),
+    }
+    Ok(())
 }
 
 fn check_shape(value: &Value, minimum: usize) -> Result<()> {
@@ -196,9 +216,12 @@ pub(in crate::compute) fn validate_graph_report(
         .source_excerpt
         .as_ref()
         .context("compute_task_graph_source_required")?;
+    validate_decoder(
+        report["planner_strategy"].as_str().unwrap_or_default(),
+        report.get("planner_decoder"),
+    )?;
     ensure!(
-        report["planner_strategy"] == GRAPH_STRATEGY
-            && report["planner_structure_generated_by"] == "model"
+        report["planner_structure_generated_by"] == "model"
             && report["planner_stop_reason"] == "task_graph"
             && report["planner_task_count"] == graph.tasks.len()
             && report["planner_dependency_count"] == graph.dependency_count()

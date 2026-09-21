@@ -1340,7 +1340,7 @@ distinct and cannot exactly copy the original goal. Local code supplies stable I
 terminal task with the user's unchanged question, joining only the model graph's terminal
 branches. No selected task is dropped and no missing edge or question is repaired.
 
-Strategy `model_task_graph_v1` generates the whole JSON under one original owner/deadline:
+Strategy `model_task_graph_constrained_v2` generates the whole JSON under one original owner/deadline:
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
 use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed
 whole-JSON boundary or model EOS may complete an accepted proposal, including at the last
@@ -1349,6 +1349,15 @@ on resume without replanning. Existing peer-capacity accounting, source expiry, 
 requirements, cancellation and offline receipts remain in force. This candidate needs a live
 model-and-peer proof of actual selected dependencies and useful output; pure graph validation
 is not evidence of autonomous reasoning, private computation or general tool use.
+The pinned optional LM Format Enforcer decoder constrains token selection to the JSON schema;
+it does not supply questions, task count or edges. The separate complete-graph validator still
+checks byte bounds, question shape, goal copies and earlier unique dependencies. Parser errors
+fail without printing a generated prefix or forcing EOS. Actual successful reports name the
+decoder versions; retained `model_task_graph_v1` results remain readable without that claim.
+Provisioning requires the explicit `--task-graph-decoder` option to add three pinned pure-Python
+wheels. The ordinary 38-wheel runtime stays unchanged, and a missing decoder refuses graph
+execution rather than silently reverting to unconstrained generation. There is no model or
+runtime download from the worker. Current pure/compile checks are not real-model proof.
 The disposable `agent-model-task-graph` scenario exercises that exact path separately from
 the fixed two-question test. It retains the original proposal before requiring an internal
 dependency, checks all actual peer jobs and completed offline replay, and does not force a

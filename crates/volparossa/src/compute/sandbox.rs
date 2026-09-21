@@ -10,6 +10,22 @@ pub(super) const ADDRESS_SPACE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 pub(super) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const TMPFS_BYTES: u64 = 16 * 1024 * 1024;
 
+fn worker_source() -> String {
+    // Both modules are fixed build inputs, not files supplied by a task or peer.
+    // -I deliberately excludes cwd/PYTHONPATH; install this bundled module only
+    // in this interpreter's module table, without creating a disk import path.
+    let decoder = serde_json::json!(include_str!(
+        "../../../../workers/volparossa-ml/task_graph_decoder.py"
+    ));
+    format!(
+        "import sys as _vp_sys, types as _vp_types\n\
+         _vp_decoder = _vp_types.ModuleType('volparossa_task_graph_decoder')\n\
+         exec({decoder}, _vp_decoder.__dict__)\n\
+         _vp_sys.modules['volparossa_task_graph_decoder'] = _vp_decoder\n{}",
+        include_str!("../../../../workers/volparossa-ml/worker.py")
+    )
+}
+
 // Keep the complete fixed sandbox argument vector reviewable in one place.
 #[allow(clippy::too_many_lines)]
 pub(super) fn command(options: &Options) -> Command {
@@ -110,11 +126,30 @@ pub(super) fn command(options: &Options) -> Command {
             "/runtime/bin/python3",
             "-I",
             "-c",
-            include_str!("../../../../workers/volparossa-ml/worker.py"),
+            &worker_source(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixed_worker_bundles_decoder_without_a_filesystem_import_or_oversized_argument() {
+        let source = super::worker_source();
+        assert!(source.len() < 128 * 1024 - 1);
+        assert!(source.contains("_vp_sys.modules['volparossa_task_graph_decoder'] = _vp_decoder"));
+        assert!(source.ends_with(include_str!("../../../../workers/volparossa-ml/worker.py")));
+        assert!(
+            source.contains(
+                &serde_json::json!(include_str!(
+                    "../../../../workers/volparossa-ml/task_graph_decoder.py"
+                ))
+                .to_string()
+            )
+        );
+    }
 }

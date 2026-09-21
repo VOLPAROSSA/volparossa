@@ -31,6 +31,9 @@ agent_jobs_prepare() {
     if [ "${agent_model_planning:-no}" = yes ] || [ "${agent_ready_dag:-no}" = yes ]; then
         set -- "$@" smollm2-360m-v1
     fi
+    if [ "${agent_model_task_graph:-no}" = yes ]; then
+        set -- "$@" --task-graph-decoder
+    fi
     agent_jobs_private prepare "$@" >"$WORK/agent-jobs-provision.log" \
         2>"$WORK/agent-jobs-provision.err" || fail JOBS_PROVISION_FAILED
     install -m 0600 "$jobs_root/provision/provision-report.json" "$WORK/agent-jobs-provision.json"

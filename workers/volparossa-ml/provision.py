@@ -30,6 +30,9 @@ DEFAULT_MODEL_PROFILE = "smollm2-135m-v1"
 LARGE_MODEL_PROFILE = "smollm2-360m-v1"
 PROFILES = {DEFAULT_MODEL_PROFILE: (MODEL_ID, REVISION),
             LARGE_MODEL_PROFILE: ("HuggingFaceTB/SmolLM2-360M-Instruct", "a10cc1512eabd3dde888204e902eca88bddb4951")}
+GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
+                 "adapter_version": 1, "schema_version": 3,
+                 "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 RESERVE_BYTES = 64 * 1024 * 1024
 ALLOWED_HOSTS = frozenset({
     "files.pythonhosted.org", "download.pytorch.org", "download-r2.pytorch.org",
@@ -62,7 +65,7 @@ class OfficialRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, msg, headers, newurl)
 
 
-def load_pins(model_profile=DEFAULT_MODEL_PROFILE):
+def load_pins(model_profile=DEFAULT_MODEL_PROFILE, task_graph_decoder=False):
     require(model_profile in PROFILES, "unsupported model profile")
     model_id, revision = PROFILES[model_profile]
     pins = json.loads((HERE / "model-pins.json").read_text())
@@ -110,7 +113,54 @@ def load_pins(model_profile=DEFAULT_MODEL_PROFILE):
     actual = [line for line in lock.splitlines() if line and not line.startswith("#")]
     expected = [f"{x['name']}=={x['version']} --hash=sha256:{x['sha256']}" for x in pins["wheels"]]
     require(actual == expected, "requirements.lock does not exactly match artifact pins")
+    if task_graph_decoder:
+        add_graph_decoder(pins)
     return pins
+
+
+def add_graph_decoder(pins):
+    """Append only explicit optional wheels; never replace the baseline runtime lock."""
+    extra = json.loads((HERE / "graph-decoder-pins.json").read_text())
+    require(extra["format_version"] == 1 and extra["decoder"] == GRAPH_DECODER
+            and len(extra["wheels"]) == 3, "unsupported optional graph decoder pins")
+    versions = {"lm-format-enforcer": "0.11.3", "interegular": "0.3.3", "pydantic": "1.10.24"}
+    canonical = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+    names = {canonical(item["name"]) for item in pins["wheels"]}
+    paths = {item["path"] for item in pins["wheels"]}
+    selected = set()
+    for item in extra["wheels"]:
+        name = canonical(item["name"])
+        require(name in versions and item["version"] == versions[name] and name not in names
+                and name not in selected and item["path"] not in paths,
+                "optional decoder overrides or duplicates a pinned distribution")
+        selected.add(name)
+        paths.add(item["path"])
+        require(re.fullmatch(r"[A-Za-z0-9_.+\-]+-py3(?:7)?-none-any\.whl", item["path"])
+                and type(item["bytes"]) is int and 0 < item["bytes"] <= 1048576
+                and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) and item["license"] == "MIT",
+                "invalid optional pure Python wheel pin")
+        parsed = urllib.parse.urlsplit(official_url(item["url"]))
+        require(parsed.hostname == "files.pythonhosted.org" and parsed.path.endswith("/" + item["path"]),
+                "optional decoder wheel is not from pinned PyPI")
+    require(selected == set(versions), "optional decoder distribution set differs")
+    lock = (HERE / "graph-decoder-requirements.lock").read_text()
+    actual = [line for line in lock.splitlines() if line and not line.startswith("#")]
+    expected = [f"{x['name']}=={x['version']} --hash=sha256:{x['sha256']}" for x in extra["wheels"]]
+    require(actual == expected, "optional graph decoder lock differs from pins")
+    pins["wheels"] += extra["wheels"]
+    pins["task_graph_decoder"] = extra["decoder"]
+
+
+def retained_pin_files(pins):
+    """Return exact retained bytes, including the original baseline without the opt-in."""
+    enabled = "task_graph_decoder" in pins
+    pin_bytes = ((HERE / "model-pins.json").read_bytes() if pins["model_id"] == MODEL_ID and not enabled
+                 else (json.dumps(pins, indent=2) + "\n").encode())
+    requirements = (HERE / "requirements.lock").read_bytes()
+    if enabled:
+        requirements += (b"" if requirements.endswith(b"\n") else b"\n")
+        requirements += (HERE / "graph-decoder-requirements.lock").read_bytes()
+    return pin_bytes, requirements
 
 
 def download_total(pins):
@@ -239,6 +289,16 @@ RUN_PINNED_PIP = (
     "sys.argv=['pip']+sys.argv[2:];runpy.run_module('pip',run_name='__main__')"
 )
 
+CHECK_GRAPH_DECODER = (
+    "import importlib.metadata;import interegular,pydantic;"
+    "from lmformatenforcer import JsonSchemaParser,TokenEnforcer,TokenEnforcerTokenizerData;"
+    "assert {n:importlib.metadata.version(n) for n in "
+    "('lm-format-enforcer','interegular','pydantic')}=="
+    "{'lm-format-enforcer':'0.11.3','interegular':'0.3.3','pydantic':'1.10.24'};"
+    "JsonSchemaParser({'type':'object','properties':{},'additionalProperties':False});"
+    "print('OFFLINE_PINNED_GRAPH_DECODER_IMPORT_OK')"
+)
+
 
 def run_checked(command, environment, root, deadline):
     remaining = deadline - time.monotonic()
@@ -260,10 +320,9 @@ def execute(args, pins):
         temporary = root / "tmp"
         for directory in (model, wheels, temporary, root / "cache"):
             directory.mkdir(mode=0o700)
-        pin_bytes = ((HERE / "model-pins.json").read_bytes() if pins["model_id"] == MODEL_ID else
-                     (json.dumps(pins, indent=2) + "\n").encode())
+        pin_bytes, requirements = retained_pin_files(pins)
         (root / "model-pins.json").write_bytes(pin_bytes)
-        (root / "requirements.lock").write_bytes((HERE / "requirements.lock").read_bytes())
+        (root / "requirements.lock").write_bytes(requirements)
         deadline = time.monotonic() + args.timeout_seconds
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), OfficialRedirect())
         for group, directory in ((pins["wheels"], wheels), (pins["files"], model)):
@@ -300,6 +359,8 @@ def execute(args, pins):
                      "assert torch.__version__=='2.14.0+cpu' and torch.version.cuda is None;"
                      "assert transformers.__version__=='5.16.1' and peft.__version__=='0.20.0';"
                      "print('OFFLINE_CPU_RUNTIME_IMPORT_OK')"], environment, root, deadline)
+        if "task_graph_decoder" in pins:
+            run_checked([python, "-I", "-B", "-c", CHECK_GRAPH_DECODER], environment, root, deadline)
         report = {
             "format_version": 1, "success": True, "guest": guest_kind,
             "runtime_root": str(runtime), "model_root": str(model),
@@ -312,6 +373,8 @@ def execute(args, pins):
         }
         if pins["model_id"] != MODEL_ID:
             report["model_profile"] = LARGE_MODEL_PROFILE
+        if "task_graph_decoder" in pins:
+            report["task_graph_decoder"] = pins["task_graph_decoder"]
         (root / "provision-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report), flush=True)
     except BaseException:
@@ -332,10 +395,12 @@ def main(argv=None):
     parser.add_argument("--budget-bytes", type=int, help="maximum downloads plus expanded runtime")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--model-profile", choices=PROFILES, default=DEFAULT_MODEL_PROFILE)
+    parser.add_argument("--task-graph-decoder", action="store_true",
+                        help="explicitly add the three pinned optional constrained-graph decoder wheels")
     args = parser.parse_args(argv)
     try:
         require(1 <= args.timeout_seconds <= 3600, "timeout must be 1..3600 seconds")
-        pins = load_pins(args.model_profile)
+        pins = load_pins(args.model_profile, args.task_graph_decoder)
         plan = {
             "mode": "execute" if args.execute else "preview", "root": args.root,
             "model_id": pins["model_id"], "revision": pins["revision"], "wheel_count": len(pins["wheels"]),
@@ -347,6 +412,8 @@ def main(argv=None):
         }
         if args.model_profile != DEFAULT_MODEL_PROFILE:
             plan["model_profile"] = args.model_profile
+        if args.task_graph_decoder:
+            plan["task_graph_decoder"] = pins["task_graph_decoder"]
         print(json.dumps(plan, indent=2), flush=True)
         if args.execute:
             execute(args, pins)
