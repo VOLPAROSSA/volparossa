@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
-# Disposable ready dependencies; all model execution and signals stay in the guest.
+# Disposable ready dependencies; the B-only CPU pressure fixture stays in the guest.
 # shellcheck disable=SC2154,SC2034
 
 agent_ready_dag_cli() {
@@ -12,7 +12,7 @@ agent_ready_dag_run() {
     dag_root=$jobs_source/ready-dag
     dag_script=$source_directory/tests/integration/agent-ready-dag-smoke.py
     PHASE=agent-ready-dag-owner-inputs
-    printf '%s\n' 'Disposable guest only: one literal public README excerpt, two source tasks A/B, C<-A, D<-B and E<-C,D. Observe real A/B workers, pidfd-pause only B, require real C completion under the same owner before the original B lease expires, poll its protected Running status, then continue B and finish D/E. Remove the two exact owned original inputs, stop route/brokers, verify unchanged offline resume and full cleanup.'
+    printf '%s\n' 'Disposable guest only: one literal public README excerpt, two source tasks A/B, C<-A, D<-B and E<-C,D. Verify B owns a mountnamespace distinct from the guest and every other broker; bind only a labelled CPU100 PSI floor in that namespace without shared-mount changes. Observe actual Pause ACK and live B, require real C completion before the original B lease expires, poll protected Running status, unmount the exact floor, wait for real quiet-hold Resume ACK and finish D/E. No SIGSTOP or synthetic low pressure. Remove the exact owned original inputs, stop route/brokers, verify unchanged offline resume and full cleanup.'
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/ready-dag-source-README.md"
     for dag_part in venv model; do
         dag_name=ready-dag-model
@@ -29,7 +29,7 @@ agent_ready_dag_run() {
     content_custody_phase_start fetch
     PHASE=agent-ready-dag-two-source-workers
     # Empty log/inode plus original broker/worker identity binds the upcoming
-    # first startup ACK; no historical broker progress can authorize SIGSTOP.
+    # first startup ACK; no historical broker progress can authorize the floor.
     python3 -B "$dag_script" fresh-brokers "$WORK" || fail READY_DAG_BROKERS_NOT_FRESH
     agent_ready_dag_cli compute peer document --task-plan "$jobs_source/ready-dag-task-plan.json" \
         --input "$jobs_source/ready-dag-input.txt" --public-content --license GPL-3.0-only \

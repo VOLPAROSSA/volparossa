@@ -139,8 +139,12 @@ agent_jobs_stop_unit() {
 }
 
 agent_jobs_stop() {
+    jobs_dag_pressure_cleanup_failed=no
     if [ "${agent_ready_dag:-no}" = yes ]; then
-        python3 -B "$source_directory/tests/integration/agent-ready-dag-smoke.py" cleanup-worker "$WORK" || return 1
+        # Preserve the floor-restoration failure, but still stop the original
+        # owner and every broker; a dead B must not prevent ordinary teardown.
+        python3 -B "$source_directory/tests/integration/agent-ready-dag-smoke.py" cleanup-worker "$WORK" \
+            || jobs_dag_pressure_cleanup_failed=yes
     fi
     if [ "${agent_jobs_package_queue:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-package-queue-smoke.py" cleanup-worker "$WORK" || return 1
@@ -160,6 +164,7 @@ agent_jobs_stop() {
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
+    [ "$jobs_dag_pressure_cleanup_failed" = no ]
 }
 
 agent_jobs_cleanup() {

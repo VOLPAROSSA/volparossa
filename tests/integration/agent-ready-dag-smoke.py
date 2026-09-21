@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import re
 import runpy
-import signal
 import stat
 import sys
 import time
@@ -28,12 +27,20 @@ PLAN = dict(version=1, nodes=[
     dict(id="d", question="Refine this risk briefly.", depends_on=["b"]),
     dict(id="e", question="Combine these findings briefly.", depends_on=["c", "d"])], output="e")
 SCOPE = ("One literal public README excerpt and an explicit five-node DAG: A and B are source tasks, "
-    "C depends only on A, D only on B, and E joins C and D. An exact pidfd-paused disposable B worker "
+    "C depends only on A, D only on B, and E joins C and D. A disposable B-only private CPU PSI floor "
+    "elicits a recorded cooperative Pause acknowledgement from the original live B worker, which "
     "retains its original live lease while A finishes and real C workers execute and complete on the "
     "freed broker under the same owner. Then B continues and D/E finish. All executed jobs, original "
     "signed inputs, retained receipts, protected paths and original-free offline resume are checked. "
     "Not automatic planning, answer quality, semantic completeness, private offload, external actions, "
-    "full B03 or full alpha. Pausing is an explicitly recorded fixture stimulus, not product behavior.")
+    "full B03 or full alpha. The CPU floor is an explicitly recorded fixture stimulus, not a measurement "
+    "of actual CPU load. Exact unmount restores real PSI and the normal owner quiet hold before Resume.")
+
+
+def pressure():
+    # Only root observer commands use this helper; installed public-input preparation
+    # and historical source-specific report checkers do not import it eagerly.
+    return runpy.run_path(str(HERE / "agent-ready-dag-pressure.py"))
 
 
 def root_path(work):
@@ -94,6 +101,35 @@ def startup_ack(raw):
         else:raise ValueError("unexpected prior or completed broker work")
     if baseline!=1 or phase_echo is not None or last_action!="resumed":return None
     return dict(acknowledged_sequence=acknowledged,last_action=last_action,baseline_observed=True)
+
+
+def next_ack(log, previous, sequence, action, allow_trailing=False):
+    """Bind the next paired ACK to the same original broker-log byte prefix."""
+    require(all(log[k]==previous[k] for k in ("inode","uid","mode")),"original B broker log replaced")
+    raw=bytes.fromhex(log["hex"]);prior=bytes.fromhex(previous["hex"])
+    require(raw.startswith(prior) and log["bytes"]==len(raw) and log["sha256"]==sha(raw),"B ACK prefix changed")
+    suffix=raw[len(prior):]
+    matched=re.match(rb"compute owner_ack phase=(paused|resumed) sequence=([0-9]+) step=([0-9]+) elapsed_ms=([0-9]+)\ncompute phase=(paused|resumed)\n",suffix)
+    if matched is None:
+        require(suffix.count(b"\n")<2,"unexpected progress before B owner ACK")
+        return None
+    require(matched[1].decode()==matched[5].decode()==action and int(matched[2])==sequence
+        and int(matched[3])==0 and int(matched[4])<600000
+        and (allow_trailing or matched.end()==len(suffix)),"uncorrelated B owner ACK")
+    prefix=raw[:len(prior)+matched.end()]
+    return dict(acknowledgement=dict(sequence=sequence,action=action,step=0,elapsed_ms=int(matched[4])),
+        log=dict(log,bytes=len(prefix),sha256=sha(prefix),hex=prefix.hex()))
+
+
+def wait_ack(work, plan, previous, sequence, action, timeout):
+    deadline=min(time.monotonic()+timeout,time.monotonic()+plan["slow"]["handle"]["binding"]["expires_unix_seconds"]-time.time())
+    while time.monotonic()<deadline:
+        require(JOBS["alive"](plan["owner"]),"original graph owner ended before B ACK")
+        value=next_ack(broker_log(work,plan["startup"]["node"]),previous,sequence,action,action=="resumed")
+        if value is not None:return value
+        require(JOBS["alive"](plan["slow"]["worker"]["worker"]),"original B worker ended before ACK")
+        time.sleep(0.025)
+    raise ValueError("original B did not acknowledge owner control within the existing lease")
 
 
 def prepare(work):
@@ -227,18 +263,17 @@ def pause(work, launcher):
             first_monotonic_ns=min(x["first_monotonic_ns"] for x in active), last_monotonic_ns=time.monotonic_ns())
         JOBS["check_overlap"](overlap); write(work/"agent-jobs-observation.json",overlap)
         plan = dict(owner=owner, brokers=brokers, initial=active, slow=active[1], fast=active[0],
-            signal="SIGSTOP", pidfd_bound=True, fixture_only=True,
+            method="cooperative-cpu-pressure-floor", fixture_only=True,
             startup=dict(node=node,log=log,acknowledgement=acknowledgement,
                 handle=active[1]["handle"],worker=active[1]["worker"]["worker"]))
         write(record(work,"pause-plan"),plan)
         member = active[1]["worker"]["worker"]
-        print(f"Disposable guest only: pidfd SIGSTOP observed B worker {member['pid']} after its first acknowledged startup and baseline; retain its original lease and owner.",flush=True)
-        READY["send_exact"](member,signal.SIGSTOP)
-        for _ in range(100):
-            if READY["stopped"](member): break
-            time.sleep(0.01)
-        require(READY["stopped"](member) and JOBS["alive"](active[0]["worker"]["worker"]), "only B was not paused before A finished")
-        write(record(work,"paused"),dict(plan=plan,observed_stopped=True,fast_alive=True,
+        require(JOBS["alive"](active[0]["worker"]["worker"]),"A ended before B pressure injection")
+        injected=pressure()["install"](work,brokers,node)
+        acknowledged=wait_ack(work,plan,log,acknowledgement["acknowledged_sequence"]+1,"paused",15)
+        require(JOBS["alive"](member) and not READY["stopped"](member),"B did not remain live and cooperatively paused")
+        write(record(work,"paused"),dict(plan=plan,cooperatively_paused=True,worker_alive=True,
+            worker_not_signal_stopped=True,fast_alive_at_injection=True,pressure=injected,**acknowledged,
             boottime_ns=JOBS["boot_ns"](),monotonic_ns=time.monotonic_ns(),unix_seconds=int(time.time())))
         return
     raise ValueError("two actual source workers did not overlap before pause")
@@ -246,11 +281,13 @@ def pause(work, launcher):
 
 def observe_ready(work):
     JOBS["guest_work"](work)
-    plan = read(record(work,"pause-plan")); slow = plan["slow"]; original = slow["handle"]
+    plan = read(record(work,"pause-plan")); slow = plan["slow"]; original = slow["handle"];paused=read(record(work,"paused"))
     seen = {x["handle"]["binding"]["job_id"] for x in plan["initial"]}; observed=[]
     deadline = min(time.monotonic()+540,time.monotonic()+original["binding"]["expires_unix_seconds"]-time.time()-15)
     while time.monotonic() < deadline:
-        require(JOBS["alive"](plan["owner"]) and READY["stopped"](slow["worker"]["worker"]), "original B worker or owner ended")
+        require(JOBS["alive"](plan["owner"]) and JOBS["alive"](slow["worker"]["worker"])
+            and not READY["stopped"](slow["worker"]["worker"])
+            and broker_log(work,plan["startup"]["node"])==paused["log"], "original B worker or owner ended/resumed")
         for item in active_workers(work,plan["brokers"],seen):
             require(item["graph_node"] == 2 and item["handle"]["provider_key"] == plan["fast"]["handle"]["provider_key"],
                 "unready dependency or wrong broker ran while B was paused")
@@ -265,7 +302,9 @@ def observe_ready(work):
                     "C completed without an observed new worker or B retained its receipt too early")
                 collect(work,"ready")
                 write(record(work,"ready"),dict(owner=plan["owner"],workers=observed,c_result=result,
-                    slow_still_stopped=READY["stopped"](slow["worker"]["worker"]),slow_receipt_absent=True,
+                    slow_cooperatively_paused=True,slow_worker_alive=JOBS["alive"](slow["worker"]["worker"]),
+                    slow_receipt_absent=True,acknowledgement=paused["acknowledgement"],
+                    pressure=pressure()["inspect"](work,paused["pressure"]["plan"]),
                     same_owner_alive=JOBS["alive"](plan["owner"]),boottime_ns=JOBS["boot_ns"](),unix_seconds=int(time.time())))
                 return
         except (FileNotFoundError,json.JSONDecodeError):
@@ -280,17 +319,20 @@ def continue_worker(work, cleanup=False):
     if cleanup and not path.is_file(): return
     plan=read(path); member=plan["slow"]["worker"]["worker"]
     if cleanup:
-        if JOBS["alive"](member): READY["send_exact"](member,signal.SIGCONT)
+        pressure()["release"](work,cleanup=True)
         return
-    status=read(record(work,"running-status")); original=plan["slow"]["handle"]; ready=read(record(work,"ready"))
+    status=read(record(work,"running-status")); original=plan["slow"]["handle"]; ready=read(record(work,"ready"));paused=read(record(work,"paused"))
     require(status["state"]=="running" and status["binding"]==original["binding"]
         and status["report_json"] is None and status["report_sha256"] is None
-        and READY["stopped"](member) and JOBS["alive"](plan["owner"])
+        and JOBS["alive"](member) and not READY["stopped"](member) and JOBS["alive"](plan["owner"])
+        and broker_log(work,plan["startup"]["node"])==paused["log"]
         and ready["unix_seconds"]<=int(time.time())<original["binding"]["expires_unix_seconds"],
         "original B no longer has its exact protected Running status and live lease")
-    before=JOBS["boot_ns"](); READY["send_exact"](member,signal.SIGCONT)
-    write(record(work,"continued"),dict(worker=member,owner=plan["owner"],signal="SIGCONT",pidfd_bound=True,
-        original_status=status,original_handle=original,boottime_ns=before,unix_seconds=int(time.time()),
+    restored=pressure()["release"](work)
+    acknowledged=wait_ack(work,plan,paused["log"],paused["acknowledgement"]["sequence"]+1,"resumed",120)
+    write(record(work,"continued"),dict(worker=member,owner=plan["owner"],method="cooperative-cpu-pressure-floor",
+        pressure=restored,**acknowledged,
+        original_status=status,original_handle=original,boottime_ns=JOBS["boot_ns"](),unix_seconds=int(time.time()),
         same_owner_alive=JOBS["alive"](plan["owner"])))
 
 
@@ -344,15 +386,16 @@ def stopped(work,resumed=False):
 
 def check_progress(value,raw,executed,answers):
     plan,paused,ready,continued=(value[k] for k in ("pause-plan","paused","ready","continued"))
-    require(plan["fixture_only"] is True and plan["pidfd_bound"] is True and plan["signal"]=="SIGSTOP"
-        and paused["plan"]==plan and paused["observed_stopped"] is True and paused["fast_alive"] is True,
+    require(plan["fixture_only"] is True and plan["method"]=="cooperative-cpu-pressure-floor"
+        and paused["plan"]==plan and paused["cooperatively_paused"] is True and paused["worker_alive"] is True
+        and paused["worker_not_signal_stopped"] is True and paused["fast_alive_at_injection"] is True,
         "pause was not exact recorded fixture-only action")
     slow,fast=plan["slow"],plan["fast"]; original=slow["handle"]
     require(slow["graph_node"]==1 and fast["graph_node"]==0 and plan["initial"]==[fast,slow]
         and slow["handle"]["provider_key"]!=fast["handle"]["provider_key"]
         and all(x["handle"]==executed[x["handle"]["binding"]["job_id"]]["handle"] for x in plan["initial"]),"paused another source job")
     require(ready["owner"]==continued["owner"]==plan["owner"] and ready["same_owner_alive"] is True
-        and ready["slow_still_stopped"] is True and ready["slow_receipt_absent"] is True
+        and ready["slow_cooperatively_paused"] is True and ready["slow_worker_alive"] is True and ready["slow_receipt_absent"] is True
         and paused["boottime_ns"]<ready["boottime_ns"]<=continued["boottime_ns"]
         and paused["unix_seconds"]<=ready["unix_seconds"]<=continued["unix_seconds"]<original["binding"]["expires_unix_seconds"],
         "C did not finish under the same owner before B resumed within original lease")
@@ -360,7 +403,7 @@ def check_progress(value,raw,executed,answers):
         and x["first_monotonic_ns"]>=paused["monotonic_ns"] for x in ready["workers"]),"C did not use the free broker")
     require(ready["c_result"]["complete"] is True and ready["c_result"]["synthesized_answer"]==answers["c"]
         and continued["original_handle"]==original and continued["worker"]==slow["worker"]["worker"]
-        and continued["pidfd_bound"] is True and continued["signal"]=="SIGCONT" and continued["same_owner_alive"] is True,
+        and continued["method"]=="cooperative-cpu-pressure-floor" and continued["same_owner_alive"] is True,
         "C completion or exact B continuation differs")
     status=continued["original_status"]
     require(status==value["running-status"] and status["state"]=="running" and status["binding"]==original["binding"]
@@ -382,6 +425,32 @@ def check_progress(value,raw,executed,answers):
     require(not any(HANDLE.fullmatch(name) and name.startswith(("node-0003/","node-0004/")) for name in prior["snapshot"])
         and not any(name.endswith(f"receipt-{original['binding']['job_id']}.json") for name in prior["snapshot"]),
         "unready D/E or B completion preceded the dependency boundary")
+
+
+def check_pressure(value,raw):
+    plan,paused,ready,continued=(value[k] for k in ("pause-plan","paused","ready","continued"))
+    initial=plan["startup"]["acknowledgement"]["acknowledged_sequence"]
+    require(next_ack(paused["log"],plan["startup"]["log"],initial+1,"paused")==
+        {k:paused[k] for k in ("log","acknowledgement")}
+        and next_ack(continued["log"],paused["log"],initial+2,"resumed")==
+        {k:continued[k] for k in ("log","acknowledgement")}
+        and ready["acknowledgement"]==paused["acknowledgement"],"exact original B Pause/Resume ACKs missing")
+    pressure()["validate"](paused["pressure"],ready["pressure"],continued["pressure"])
+    injected=paused["pressure"]["plan"]
+    require(injected["slow"]==plan["startup"]["node"] and
+        {n:v["process"] for n,v in injected["brokers"].items()}==plan["brokers"]
+        and paused["pressure"]["installed"]["boottime_ns"]<=paused["boottime_ns"]
+        and ready["pressure"]["boottime_ns"]<=ready["boottime_ns"]<=continued["pressure"]["boottime_ns"]
+        and continued["boottime_ns"]-continued["pressure"]["unmount_started_boottime_ns"]>=5_000_000_000,
+        "CPU floor/owner identity or real quiet-hold ordering differs")
+    handle=plan["slow"]["handle"];receipt_path=str(Path(plan["slow"]["handle_path"]).with_name(f"receipt-{handle['binding']['job_id']}.json"))
+    actual=json.loads(json.loads(raw[receipt_path])["status"]["report_json"])
+    control=actual["owner_control"];pause_ack=paused["acknowledgement"];resume_ack=continued["acknowledgement"]
+    require(control["enabled"] is True and control["records_received"]==control["last_sequence"]>=initial+2
+        and control["pause_count"]>=1 and control["resume_count"]>=2
+        and resume_ack["elapsed_ms"]>pause_ack["elapsed_ms"]
+        and control["paused_ms"]>=resume_ack["elapsed_ms"]-pause_ack["elapsed_ms"]-1,
+        "actual terminal worker report does not retain the observed cooperative pause")
 
 
 def check_startup(value):
@@ -520,7 +589,7 @@ def check(value,revision):
             and worker["worker_namespaces"]["net"]!=worker["node_namespace"],"actual DAG worker isolation missing")
         observed.add(identifier);processes.append(worker["worker"])
     require(observed==set(executed),"not every DAG worker was observed")
-    check_startup(value);check_progress(value,raw,executed,answers)
+    check_startup(value);check_progress(value,raw,executed,answers);check_pressure(value,raw)
     require(value["inputs-removed"]["original_input_absent"] is True and value["inputs-removed"]["original_plan_absent"] is True
         and value["inputs-removed"]["retained_graph_plan"] is True
         and all(value[phase][k] is True for phase in ("stopped","resumed") for k in
@@ -578,6 +647,23 @@ def self_test():
         try:startup_ack(invalid)
         except ValueError:pass
         else:raise AssertionError("historical or uncorrelated startup ACK accepted")
+    def log_of(raw):
+        return dict(inode=[1,2],uid=1,mode=0o600,bytes=len(raw),sha256=sha(raw),hex=raw.hex())
+    pause_suffix=b"compute owner_ack phase=paused sequence=2 step=0 elapsed_ms=100\ncompute phase=paused\n"
+    resume_suffix=b"compute owner_ack phase=resumed sequence=3 step=0 elapsed_ms=10100\ncompute phase=resumed\n"
+    startup_log=log_of(startup); paused_log=log_of(startup+pause_suffix)
+    assert next_ack(paused_log,startup_log,2,"paused")["acknowledgement"]==dict(sequence=2,action="paused",step=0,elapsed_ms=100)
+    resumed_log=log_of(startup+pause_suffix+resume_suffix)
+    assert next_ack(resumed_log,paused_log,3,"resumed")["acknowledgement"]["elapsed_ms"]==10100
+    assert next_ack(log_of(startup+pause_suffix[:12]),startup_log,2,"paused") is None
+    assert next_ack(log_of(bytes.fromhex(resumed_log["hex"])+b"compute phase=complete\n"),paused_log,3,"resumed",True)["log"]==resumed_log
+    for invalid in (dict(paused_log,inode=[5,6]),log_of(startup+pause_suffix.replace(b"sequence=2",b"sequence=3")),
+        log_of(startup+pause_suffix.replace(b"step=0",b"step=1")),log_of(startup+pause_suffix.replace(b"elapsed_ms=100",b"elapsed_ms=600000")),
+        log_of(startup+pause_suffix.replace(b"compute phase=paused",b"compute phase=resumed")),
+        log_of(startup+pause_suffix+resume_suffix),dict(paused_log,sha256="0"*64)):
+        try:next_ack(invalid,startup_log,2,"paused")
+        except ValueError:pass
+        else:raise AssertionError("uncorrelated cooperative ACK accepted")
     authority=dict(source_manifest_id="a"*64,expires_at_unix_seconds=7200,provider_keys=["b"*64,"c"*64])
     answers={n["id"]:dict(job_id=str(i)*32) for i,n in enumerate(PLAN["nodes"],1)}
     value=dict(version=1,operation="compute_public_task_graph",complete=True,plan=copy.deepcopy(PLAN),
@@ -598,20 +684,21 @@ def self_test():
         worker=dict(worker=dict(pid=101,start_ticks=2)))
     slow=dict(graph_node=1,handle=dict(provider_key="b",binding=dict(job_id="b",expires_unix_seconds=600)),
         worker=dict(worker=dict(pid=102,start_ticks=3)))
-    plan=dict(fixture_only=True,pidfd_bound=True,signal="SIGSTOP",owner=owner,initial=[fast,slow],fast=fast,slow=slow)
+    plan=dict(fixture_only=True,method="cooperative-cpu-pressure-floor",owner=owner,initial=[fast,slow],fast=fast,slow=slow)
     status=dict(state="running",binding=slow["handle"]["binding"],report_json=None,report_sha256=None)
     child=dict(graph_node=2,handle=dict(provider_key="a"),first_monotonic_ns=21)
-    progress={"pause-plan":plan,"paused":dict(plan=plan,observed_stopped=True,fast_alive=True,
+    progress={"pause-plan":plan,"paused":dict(plan=plan,cooperatively_paused=True,worker_alive=True,
+        worker_not_signal_stopped=True,fast_alive_at_injection=True,
         boottime_ns=1000,monotonic_ns=20,unix_seconds=100),
-        "ready":dict(owner=owner,same_owner_alive=True,slow_still_stopped=True,slow_receipt_absent=True,
+        "ready":dict(owner=owner,same_owner_alive=True,slow_cooperatively_paused=True,slow_worker_alive=True,slow_receipt_absent=True,
             boottime_ns=2000,unix_seconds=200,workers=[child],c_result=dict(complete=True,synthesized_answer=answers["c"])),
         "continued":dict(owner=owner,boottime_ns=3000,unix_seconds=300,original_handle=slow["handle"],
-            worker=slow["worker"]["worker"],pidfd_bound=True,signal="SIGCONT",same_owner_alive=True,original_status=status),
+            worker=slow["worker"]["worker"],method="cooperative-cpu-pressure-floor",same_owner_alive=True,original_status=status),
         "running-status":status,"ready-files":dict(raw={},snapshot={}),"result-files":dict(snapshot={})}
     executed={"a":dict(handle=fast["handle"]),"b":dict(handle=slow["handle"])}
     check_progress(progress,{},executed,answers)
     mutations=(
-        lambda p:p["ready"].update(slow_still_stopped=False),
+        lambda p:p["ready"].update(slow_cooperatively_paused=False),
         lambda p:p["ready"].update(same_owner_alive=False),
         lambda p:p["ready"].update(unix_seconds=601),
         lambda p:p["continued"].update(unix_seconds=600),
@@ -625,7 +712,34 @@ def self_test():
         try:check_progress(invalid,{},executed,answers)
         except ValueError:pass
         else:raise AssertionError("invalid paused-worker dependency boundary accepted")
-    print("ready-DAG startup ACK, schema/identity and ordering controls PASS (21 negatives); no model, network or signal executed")
+    injected,held,restored=pressure()["self_test"]()
+    # Exercise the complete ACK/mount/quiet-hold/terminal-report join using inert records.
+    flow=copy.deepcopy(progress);pause_ack=next_ack(paused_log,startup_log,2,"paused")
+    resume_ack=next_ack(resumed_log,paused_log,3,"resumed")
+    flow["pause-plan"]["startup"]=dict(node="b",log=startup_log,acknowledgement=startup_ack(startup))
+    flow["pause-plan"]["brokers"]={name:item["process"] for name,item in injected["plan"]["brokers"].items()}
+    flow["pause-plan"]["slow"]["handle_path"]="node-0001/job-0.json"
+    flow["paused"].update(pause_ack,pressure=injected,boottime_ns=2)
+    flow["ready"].update(acknowledgement=pause_ack["acknowledgement"],pressure=held,boottime_ns=3)
+    flow["continued"].update(resume_ack,pressure=restored,boottime_ns=5_000_000_004)
+    worker_report=dict(owner_control=dict(enabled=True,records_received=3,last_sequence=3,
+        pause_count=1,resume_count=2,paused_ms=10000))
+    receipt=encoded(dict(status=dict(report_json=json.dumps(worker_report))))
+    check_pressure(flow,{"node-0001/receipt-b.json":receipt})
+    for mutate in (
+        lambda p:p["ready"]["acknowledgement"].update(sequence=3),
+        lambda p:p["continued"].update(boottime_ns=5_000_000_003),
+        lambda p:p["pause-plan"]["startup"].update(node="a"),
+        lambda p:p["continued"]["pressure"].update(source_removed=False)):
+        invalid=copy.deepcopy(flow);mutate(invalid)
+        try:check_pressure(invalid,{"node-0001/receipt-b.json":receipt})
+        except ValueError:pass
+        else:raise AssertionError("unbound control/mount/quiet-hold accepted")
+    worker_report["owner_control"]["paused_ms"]=0
+    try:check_pressure(flow,{"node-0001/receipt-b.json":encoded(dict(status=dict(report_json=json.dumps(worker_report))))})
+    except ValueError:pass
+    else:raise AssertionError("worker result omitted observed pause")
+    print("ready-DAG startup/cooperative ACK, schema/identity and ordering controls PASS (33 negatives); no model, network or signal executed")
 
 
 def main(args):

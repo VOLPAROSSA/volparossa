@@ -1154,8 +1154,17 @@ is paused. Its [first run](https://github.com/VOLPAROSSA/volparossa/actions/runs
 lost the original paused B before C was observed complete. B had been stopped before its first
 owner-control acknowledgement, which can expire the unchanged ten-second control deadline.
 The precise terminal cause was not retained. Later completion through a replacement B does
-not satisfy the intended boundary. The next fixture waits for correlated acknowledgement and
-baseline progress before pausing, without extending product deadlines or leases.
+not satisfy the intended boundary. The startup-corrected [second run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35632573848)
+does retain the original ACK and baseline, but again loses the original-worker/owner condition
+before the dependency boundary. The terminal cause remains unrecorded. Stopping the whole worker
+also prevents later control acknowledgements, so the new fixture replaces `SIGSTOP` with an
+explicit CPU-pressure floor of 100 in only B's isolated guest mount namespace. The real owner
+must acknowledge Pause while retaining the same worker and lease. Once C completes, the fixture
+removes precisely that mount, restores the original pressure view and requires Resume after the
+ordinary quiet-time guard. This is controlled fixture pressure, not measured host CPU load.
+Ordinary inference checks its original owner's controls between token steps as well as before
+and after generation; a pause retains the same generation state, while cancellation or deadline
+remains terminal. Native token steps are not preempted mid-call, and no deadline is extended.
 That live dependency-ready proof is **pending**; the four-node proof below covers the
 earlier scheduler only.
 
@@ -1237,10 +1246,15 @@ passes its source-exact mechanical checker: four generations consume 380 tokens,
 peer workers execute the enrolled graph, and completed offline resume preserves all retained
 files with no new work. Its 137 original files also verify protected captures, cleanup and
 unchanged host state. But the accepted texts hallucinate an unrelated electric-vehicle project
-and echo a shortening instruction. That is not useful decomposition. The new source-grounded
-candidate has no live proof yet. Its next fixture uses the complete literal README introduction
-before the navigation, retains the same original question, and verifies every actual tokenized
-peer task rather than assuming a fixed job count. When a worker fails,
+and echo a shortening instruction. That is not useful decomposition. The source-grounded
+[run on `bebbc8ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35638510308) does verify
+actual ingestion of the complete literal 506-byte README introduction, two question generations
+(45 tokens), three real peer workers and unchanged zero-round offline resume. Its 137 original
+files also verify protected paths, cleanup and unchanged host state. However, the first question
+echoes the main goal; a peer answer and the final join falsely describe an OpenVPN dependency.
+All three peer answers reach 64 tokens mid-sentence. `text_truncated=false` describes only the
+wire-text cap, not EOS completion. Useful decomposition, source-faithful answers and output
+completion remain unresolved. When a worker fails,
 its validated attempt metadata can be retained in `planner-failure.json` only after cleanup;
 no rejected text is exported and the diagnostic cannot authorize enrollment or another run.
 JSON validity and real execution would still not establish decomposition quality, answer

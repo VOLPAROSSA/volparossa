@@ -221,8 +221,8 @@ An explicit **public task graph** lets peers answer different source questions, 
 retained answers into dependent instructions. Its real four-task fork/join and offline-resume
 VM proof passes. A dependency-ready scheduler is now being integrated: a follow-up task can
 use its completed parents while unrelated work continues, sharing the same peer-capacity
-accounting. Focused checks pass; the first live dependency-ready trial lost its paused test
-worker, so that proof remains pending while the fixture's startup coordination is corrected.
+accounting. Focused checks pass; live trials did not preserve the required original worker/owner
+condition. That proof remains pending while cooperative pause/resume replaces the fixture's process stop.
 
 The next opt-in mode asks the local model to propose the initial subquestions
 automatically, preserving the original question in the final task. Its goal-only predecessor
@@ -230,8 +230,10 @@ completed real model-and-peer execution, but the generated texts were unrelated 
 that is not useful task decomposition. The current candidate supplies an exact bounded public
 source excerpt, records how much of the source was read, and rejects non-question output.
 Up to four generations share the same token budget and deadline, charging rejected attempts
-too. It never repairs text or supplies replacement questions. This source-grounded version
-still needs real execution and content review. The model does not choose task count or shape.
+too. It never repairs text or supplies replacement questions. Its real model-and-peer execution
+and offline resume now pass, but content review still finds a repeated main question, invented
+facts and answers cut off by the token limit. Useful, source-faithful decomposition remains
+unfinished. The model does not choose task count or shape.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

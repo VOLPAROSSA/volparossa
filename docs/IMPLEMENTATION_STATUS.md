@@ -21,8 +21,21 @@ was not exported, so that mechanism is a source-backed diagnosis, not a captured
 All five tasks eventually completed in six rounds with a replacement B, but that does not
 prove C finished while the original B remained occupied. The 119 original files verify initial
 worker overlap and cleanup/unchanged host state, not the required dependency-ready boundary.
-The corrected fixture waits for correlated startup acknowledgement and baseline progress before
-pausing B; product deadlines and the original lease remain unchanged. A new live proof is required.
+The [startup-corrected run on
+`059b4a71`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35632573848) also fails: its
+120 unchanged original files prove the exact startup ACK and baseline before B was stopped,
+but the original worker/owner guard later fails without a retained terminal reason. All five
+tasks again complete with a replacement B, not the required original-lease boundary; cleanup
+and unchanged host state pass. `SIGSTOP` prevents any later control ACK, not only startup, so
+it is unsuitable for this fixture even though that is not a captured verdict on the old failure.
+The new disposable fixture uses a B-only, explicitly injected CPU-pressure floor in its private
+mount namespace to request a real cooperative Pause. It requires the original worker's ACK,
+then restores the original pressure view and waits for Resume under the unchanged lease and
+normal quiet-time guard. No actual CPU-load measurement or speedup is claimed from this injection.
+Ordinary inference now services owner controls between generated tokens and after generation,
+rather than only before an entire output. Its existing token budget, cancellation, original
+deadline and control-acknowledgement limit remain unchanged. The 44 pure worker protocol checks
+pass; this updated dependency-ready scenario still needs its own live proof.
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated
@@ -94,8 +107,16 @@ text repair or canned fallback. Four attempts, 512 prompt tokens, the shared 384
 budget and original owner deadline are unchanged. The next disposable fixture uses the full
 literal README introduction before its navigation, rather than a truncated 128-byte slogan,
 with the same original question. Tokenized peer work is counted from actual retained plans,
-not assumed to fit three jobs. This source-grounded variant has no live model/peer result yet;
-source binding and question punctuation alone cannot establish relevance or answer quality.
+not assumed to fit three jobs. The [source-grounded run on
+`bebbc8ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35638510308) and source-exact
+reconstruction of 137 original files pass mechanically: the literal 506-byte introduction feeds
+two generations using 45 tokens, followed by three actual peer workers and unchanged zero-round
+offline resume. Protected captures, full cleanup and unchanged host state pass. Content review
+still finds concrete failures: the first question repeats the original goal, and a peer answer
+and the final join invent an OpenVPN dependency absent from the source. All three peer answers
+hit the 64-token limit mid-sentence; their `text_truncated=false` reports only the separate wire
+text cap, not generation completeness. These are unresolved usefulness/completeness gaps,
+not a verified source-faithful answer or a complete task decomposition.
 Seventeen focused Rust tests, forty-two pure worker protocol tests, the updated fixture's
 pure controls, shell checks and strict CLI Clippy pass for this source-grounded change.
 
