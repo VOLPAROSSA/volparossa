@@ -2205,18 +2205,21 @@ fn startup_and_command_recovery_receive_the_exact_outer_deadline() {
     let command_directory = tempdir().expect("command temporary directory");
     let command_config = test_config(command_directory.path());
     let command_observations = Arc::new(Mutex::new(ExecutorObservations::default()));
-    let actor = spawn_actor(
+    let command_capture = Arc::clone(&command_observations);
+    // These fsync-heavy setup operations are not the deadline-propagation subject.
+    // In particular, arm_prepare persists two transitions under one deadline; do
+    // not make their setup race the separate 500 ms default-timeout test budget.
+    let actor = DurableOwnershipActor::spawn_with_executor_factory_until(
         command_config,
-        ExecutorMode::Exact,
-        &command_observations,
-        None,
+        move || executor(ExecutorMode::Exact, &command_capture, None),
+        io_deadline(),
     )
     .expect("start command actor");
     let key = actor
-        .register_intent(durable_intent(29))
+        .register_intent_until(durable_intent(29), io_deadline())
         .expect("register command fixture");
     actor
-        .arm_prepare(&key, durable_anchor(29))
+        .arm_prepare_until(&key, durable_anchor(29), io_deadline())
         .expect("arm command fixture");
     let command_deadline = HardDeadline::after(TEST_WAIT).expect("command deadline");
     actor
