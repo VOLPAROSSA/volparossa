@@ -50,6 +50,13 @@ requires the public executor to reject that private input before acquiring the r
 fixture and static workflow checks pass; no live success is claimed. Only selected proof and
 the explicitly synthetic test answer may be exported, never a user's private input or internal
 worker report. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
+The [first private run on `75dcc9ad`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35660153750)
+executes the actual 360M worker, returns the generated synthetic identifier with EOS after
+12 tokens, and records cleanup and unchanged host state. Its overall check nevertheless fails:
+the cleanup tracker aliased the embedded observed-process list and appended the same identities
+again, so the final bundle disagrees with the separate original isolation record. The fixture
+now copies that list before tracking cleanup; neither the original artifacts nor the strict
+bundle-equality check are changed. A fresh run must verify the correction before claiming PASS.
 
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready

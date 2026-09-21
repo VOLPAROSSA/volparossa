@@ -261,7 +261,9 @@ def execute(output, revision):
                 require(observer.wait(timeout=70) == 0, "actual private worker isolation observation failed")
             result["isolation"] = read(output / f"{NAME}-isolation.json")
             result["snapshot"] = read(output / f"{NAME}-snapshot.json")
-            members = result["isolation"]["owned_processes"]
+            # Cleanup tracking may append later observations; never mutate the
+            # original evidence retained separately in the isolation record.
+            members = list(result["isolation"]["owned_processes"])
             result["answer"], result["stdout_boundary"], code = answer(
                 process, deadline, work_parent, original, initial, result["isolation"])
             # Preserve an actual incomplete answer honestly for diagnosis, not as PASS.
