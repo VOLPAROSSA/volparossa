@@ -6,6 +6,7 @@ mod document_plan;
 mod inference_output;
 mod owner_control;
 mod peer;
+mod private_task;
 mod sandbox;
 mod serving_snapshot;
 mod spare_capacity;
@@ -38,6 +39,8 @@ pub(crate) enum Command {
     Capacity,
     /// Preview or explicitly run an isolated job on an already provisioned open model.
     Run(Box<Options>),
+    /// Answer one private local question without publishing inputs or using peer executors.
+    PrivateTask(Box<private_task::Options>),
     /// Fetch one explicitly selected signed public training source, train, and pack an adapter.
     TrainCycle(Box<train_cycle::Options>),
     /// Autonomously cycle through explicitly selected public sources using spare capacity.
@@ -60,6 +63,9 @@ pub(crate) enum Mode {
     PlanDocument,
     #[serde(rename = "plan_tasks")]
     PlanTasks,
+    #[value(skip)]
+    #[serde(rename = "private_infer")]
+    PrivateInfer,
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +131,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
     let options = match command {
         Command::Capacity => return spare_capacity::diagnostic(),
         Command::Run(options) => options,
+        Command::PrivateTask(options) => return private_task::run(&options).await,
         Command::TrainCycle(options) => return train_cycle::run(&options, socket).await,
         Command::TrainLoop(options) => return train_loop::run(&options, socket).await,
         Command::Serve(options) => return broker::run(*options).await,
@@ -223,6 +230,12 @@ async fn execute(options: &Options, activity: watch::Receiver<bool>) -> Result<V
 
 impl Options {
     fn validate(&self) -> Result<()> {
+        if self.mode == Mode::PrivateInfer {
+            ensure!(
+                self.adapter_root.is_none() && self.steps == 1 && self.spare_capacity,
+                "compute_private_execution_scope"
+            );
+        }
         ensure!((1..=64).contains(&self.steps), "compute_steps");
         ensure!((1..=2).contains(&self.threads), "compute_threads");
         ensure!((1..=600).contains(&self.max_seconds), "compute_deadline");
@@ -272,6 +285,10 @@ impl Options {
 // Shared by direct execution and Broker::start before a worker is created. Inference-only
 // profiles must pass their strict validator here as well as at the signed RPC boundary.
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    if mode == Mode::PrivateInfer {
+        ensure!(!has_adapter, "compute_private_adapter_forbidden");
+        return private_task::validate_input(dataset);
+    }
     if mode == Mode::PlanTasks {
         ensure!(!has_adapter, "compute_task_plan_adapter");
         return task_plan::Input::decode(dataset)?.validate_execution();

@@ -269,6 +269,11 @@ Ordinary remote inference exposes inputs to the executing device: encrypted tran
 does not make private offload safe. Current distributed experiments use explicitly public,
 authorized data. The owner's activity has priority, with bounded worker resources, pause/resume
 and cancellation; broader device-activity integration remains incomplete.
+An explicit `compute private-task` candidate keeps a short sensitive question and document
+entirely local: no peer execution, publication, cache admission or training. It uses the same
+isolated model worker and removes its temporary input/report before printing the owner's answer.
+Local contract checks pass; real-model verification is pending. This is a local privacy fallback,
+not confidential distributed computation. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-private-questions)
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
 

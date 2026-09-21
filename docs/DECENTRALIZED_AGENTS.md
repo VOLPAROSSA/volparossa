@@ -1482,6 +1482,47 @@ extraction threat model; evaluate an actual confidential-computation approach an
 Where that protection is unavailable, keep sensitive execution local or refuse remote execution
 with an explicit reason. Do not silently send it to an ordinary untrusted peer.
 
+### Local-only private questions
+
+The `compute private-task` development candidate implements that local fallback with a separate
+input contract. It cannot publish, train, use adapters or submit a peer job; public admission
+continues to reject its private format. The question is read from a file rather than exposing
+its text in process arguments or shell history:
+
+```json
+{"version":1,"visibility":"private_local","question":"Which meeting time is recorded?","context":"The meeting is at 14:30."}
+```
+
+```sh
+volparossa compute private-task \
+  --input /absolute/private/request.json \
+  --work-parent /absolute/private/work \
+  --runtime-root /absolute/private/venv \
+  --model-root /absolute/private/model \
+  --execute
+```
+
+The input must be an owned regular mode-0600 file; all three directories must already be owned,
+canonical mode-0700 directories. The default is the already provisioned pinned 360M profile;
+this command never downloads a model/runtime. Omit `--execute` for an input-free scope preview.
+Questions are at most 512 UTF-8 bytes, context at most 4096 bytes, and the **complete** tokenized
+prompt must fit the selected profile. Oversized inputs are rejected, never silently shortened.
+This first local lane does not yet split larger private documents into cooperating tasks.
+
+Actual execution uses the existing network-isolated CPU sandbox, original deadline and
+owner-priority controls. Only an EOS-terminated, nonempty, untruncated output is labeled
+complete; partial text remains explicitly incomplete and the command exits nonzero. EOS is
+not an answer-correctness guarantee. The owned temporary input/report tree is removed after
+confirmed worker reaping and before answer output. The user's original file is left untouched.
+Unconfirmed reaping retains the owned tree and emits no answer. Abrupt process/host failure
+can also leave temporary data; deletion is not secure erasure or protection against a hostile
+local administrator. The owner can choose to retain stdout, but no private text is published
+or added to the network cache by this command.
+
+Strict admission, private-file lifecycle, unchanged public prompts and incomplete-answer
+controls pass locally. Real private-model/guest-isolation evidence remains pending. This is
+not confidential remote execution, private training, secure aggregation or completion of B04.
+
 Secure aggregation and differential privacy are candidate building blocks, not installed
 features or blanket guarantees. The [Bonawitz et al. secure-aggregation protocol](https://research.google/pubs/practical-secure-aggregation-for-privacy-preserving-machine-learning/)
 protects aggregation under stated assumptions and uses a server role; it is not by itself a

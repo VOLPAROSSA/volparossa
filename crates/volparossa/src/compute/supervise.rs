@@ -202,13 +202,7 @@ pub(super) async fn run(
         }
     }.await;
     if result.is_err() {
-        // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
-        // PID namespace teardown kills/reaps descendants; no host process-group scan.
-        let _ = child.start_kill();
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .context("compute_reap_deadline")?
-            .context("compute_reap")?;
+        reap_failed_child(&mut child, options.mode).await?;
     }
     // Only this post-cleanup boundary can expose typed worker failure evidence to callers.
     let mut result = result.map_err(reaped_failure)?;
@@ -232,8 +226,26 @@ pub(super) async fn run(
     });
     if options.mode == Mode::PlanTasks {
         check_task_plan_result(&result, options)?;
+    } else if options.mode == Mode::PrivateInfer {
+        let input = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+        super::private_task::validate_report(&result, &input, options.model_profile)?;
     }
     Ok(result)
+}
+
+async fn reap_failed_child(child: &mut Child, mode: Mode) -> Result<()> {
+    // Killing the exact live bwrap parent kills its sandbox child (die-with-parent).
+    // PID namespace teardown kills/reaps descendants; no host process-group scan.
+    let _ = child.start_kill();
+    let reaped = tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .context("compute_reap_deadline")
+        .and_then(|result| result.context("compute_reap"));
+    if mode == Mode::PrivateInfer && reaped.is_err() {
+        return Err(super::private_task::CleanupUnconfirmed.into());
+    }
+    reaped?;
+    Ok(())
 }
 
 fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
@@ -289,7 +301,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer | Mode::PlanDocument | Mode::PlanTasks => {
+        Mode::Infer | Mode::PrivateInfer | Mode::PlanDocument | Mode::PlanTasks => {
             ensure!(updates == Some(0), "compute_unrequested_training");
         }
         Mode::Train => {
@@ -309,7 +321,19 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
             }
         }
     }
-    if matches!(request.mode, Mode::Infer | Mode::Train) {
+    if request.mode == Mode::PrivateInfer {
+        ensure!(
+            value["private_data_supported"] == true
+                && value["distributed_execution_claimed"] == false
+                && value["private_training_claimed"] == false
+                && value["dataset"]["visibility"] == "private_local"
+                && value["outputs"]
+                    .as_array()
+                    .is_some_and(|outputs| outputs.len() == 1),
+            "compute_private_result_scope"
+        );
+    }
+    if matches!(request.mode, Mode::Infer | Mode::PrivateInfer | Mode::Train) {
         let outputs = value["outputs"]
             .as_array()
             .context("compute_result_outputs")?;
@@ -370,7 +394,7 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .get("artifacts")
         .and_then(Value::as_array)
         .context("compute_artifacts")?;
-    if mode == Mode::Infer {
+    if matches!(mode, Mode::Infer | Mode::PrivateInfer) {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
         return Ok(());
     }

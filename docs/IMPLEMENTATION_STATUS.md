@@ -4,6 +4,18 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+New local-private execution candidate: `compute private-task` reads a strictly separate
+private question/context file, snapshots it into an owned ephemeral job tree and runs the
+existing isolated CPU backend with owner-priority controls. It has no publication, training,
+adapter, cache or peer-job path. Public admission still rejects the private format. Input is
+not truncated; one context must fit the selected model's actual tokenizer budget. Temporary
+input/report deletion follows confirmed worker reaping and precedes answer stdout, while the
+original owner file remains untouched. Unconfirmed cleanup emits no answer and retains only
+the owned job tree. Partial/non-EOS answers cannot become complete outputs. Five focused Rust
+checks and 68 pure worker checks pass; live model/guest proof remains pending. This supplies a
+local privacy fallback, not confidential distributed execution, larger private-document task
+graphs, private training or B04 completion. See [usage](DECENTRALIZED_AGENTS.md#local-only-private-questions).
+
 Current dependency-ready candidate: a single incremental provider queue now owns source and
 derived graph work. Each durable package completion triggers a dependency scan; newly ready
 tasks join that same queue while unrelated original worker leases remain occupied. Workflow
