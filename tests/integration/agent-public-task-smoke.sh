@@ -17,7 +17,7 @@ agent_public_task_run() {
         --cache "$jobs_source/cache" --provider-key "$jobs_key_a" \
         >"$WORK/agent-public-task-deposit.json" 2>"$WORK/agent-public-task-deposit.err" || fail PUBLIC_TASK_SOURCE_DEPOSIT_FAILED
     PHASE=agent-public-task-admission-and-execution
-    agent_jobs_cli client compute peer task --publisher-key "$jobs_publisher" \
+    agent_jobs_cli client compute peer task --batch-barrier --publisher-key "$jobs_publisher" \
         --dataset-name disposable-agent-jobs --dataset-manifest-id "$task_manifest" \
         --cache "$jobs_source/task-agent-cache" --public-question "$task_question" \
         --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \

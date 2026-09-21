@@ -4,6 +4,32 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Current ready-queue candidate: new `compute peer workflow`, `task` and `document` enrollments
+use `ready_rows_v1`. Within one signed source package, a free compatible peer receives the
+next never-submitted row without waiting for other peers' running rows. Immutable queue plans
+and exact per-row handles precede submissions; completed receipts are saved before slot reuse.
+Resume preserves completed results, unconfirmed leases and the original source/model/expiry.
+Already attempted rows use the existing lease-safe reconciliation path, not a new queue entry.
+Retained histories without a scheduling field keep their grouped-batch contract; `--batch-barrier`
+is an explicit enrollment-only compatibility option. All 138 focused CLI compute tests and strict
+all-target CLI Clippy pass without loading a model. The `agent-jobs-ready-queue` disposable scenario
+is wired through the guest, outer runner and CI; its pure positive/negative checker, script syntax,
+YAML and existing non-mutating scenario contracts pass. These do not substitute for the live proof;
+its real fast-peer/slow-peer overlap is not yet proven. Cross-package scheduling, general task
+planning, comparative throughput and full B03 remain incomplete.
+
+The corrected executor-discovery checkpoints on `8a21d43d` now **pass**: the
+[document/synthesis run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600666064)
+and [third-peer recovery run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600672677)
+were reconstructed from their unchanged original uploads with source-exact checkers. The document
+artifact retains all eight previously missing discovery files and proves the real
+`10 -> 5 -> 3 -> 2 -> 1` inference chain; 92,786 captured frames show no forbidden direct
+client-to-exit packets or drops. Recovery preserves completed work and executes the missing row
+on an actual third peer under the same owner, with two attempts and admission before submission;
+44,982 captured frames likewise pass. Both private/network cleanup checks and unchanged host-state
+checks pass. Quality and CodeQL on this head also pass. These are scoped execution/recovery
+proofs, not answer-quality evidence or completion of B03. Earlier failed runs stay failed.
+
 Current executor-discovery candidate: `compute peer workflow`, `task` and `document` accept
 `--discover-peers` in place of manually supplied provider keys. Authenticated, protected probes
 check actual broker availability, supported inference profiles and permission for the explicitly
@@ -21,7 +47,7 @@ replies explain why no eligible cohort was selected. Final route/policy rejectio
 `CONTENT_POLICY`, not the observed code; offer expiry also does not fit the observed startup
 timing. Temporary startup readiness remains a hypothesis, not a proven cause. Cleanup completed
 with zero owned objects and unchanged guest-host state. Exact-head Quality and CodeQL passed; they do not turn the live run
-green. Live automatic-selection proof remains pending.
+green. The corrected live automatic-selection proof is recorded above.
 
 The [follow-up document run on `66b70e3d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597171441)
 also **failed**, this time at the post-run evidence check. The guest completed automatic
@@ -32,7 +58,7 @@ do not replace those originals. The finalizer now exports both bounded executor-
 JSON prefixes alongside the existing execution evidence; a local export regression exercises
 the actual shell function, checks byte retention and private permissions, and excludes symlinks
 and unrelated private files. The historical run remains failed; complete live evidence from
-the corrected source is still required.
+the corrected source is recorded above.
 
 Discovery now retries temporary unavailable/busy observations with fresh offers and nonces,
 within one original 150-second deadline. Fixed diagnostic categories separate query, probe,
@@ -46,7 +72,7 @@ immutable `executor-admission.json` before any new handle or submission. Origina
 publisher, expiry and completed receipts remain unchanged; uncertain unexpired jobs are not
 duplicated. Recovery can use one available peer without weakening the two-peer initial discovery
 requirement. Synthetic protocol/coordinator checks are not real-model recovery evidence; the
-new-third-peer disposable proof is pending. This is not general planning, unlimited pool growth,
+new-third-peer disposable proof is recorded above. This is not general planning, unlimited pool growth,
 a capacity reservation or quality-based model selection. The 123 focused CLI compute tests,
 three local-control discovery tests, six agent discovery tests, formatting and strict Clippy
 for all targets of those three packages pass. No local model execution was used.
@@ -65,7 +91,8 @@ submission, actual model execution, both protected paths, complete cleanup and u
 state. All 124 CLI compute tests, strict CLI Clippy, the synthetic positive/negative checker
 contracts, script syntax and non-mutating scenario previews pass. ShellCheck passes for the
 new helper and modified jobs helper; the outer wrappers still report existing baseline/source
-context warnings. The scenario and synthetic fixtures are not yet live success evidence.
+context warnings. The scenario and synthetic fixtures alone are not live success evidence;
+the corrected original live proof is recorded above.
 
 The [first third-peer recovery run on `5e3ca90d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597876075)
 **failed** during private cleanup, after the owner completed its second attempt on the new
@@ -93,6 +120,11 @@ Four successful model stages are observed; rejection before candidate inference 
 as a fifth. Its pure positive/negative checker, shell syntax, new-helper ShellCheck and topology
 preview contracts pass; the modified existing training helper retains two baseline SC2015
 warnings. Live protected-transfer, real-model and cleanup evidence remains pending.
+The [first quarantine run on `8a21d43d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600678484)
+failed before constructing/publishing the invalid candidate: its setup guard incorrectly required
+the source-tree location although that command runs from the copied guest `WORK/bin`. The fix
+binds that copy to its exact private fixture root while retaining dedicated-VM, KVM and non-root
+checks. Positive/negative layout checks pass; the original failed run proves no quarantine.
 
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate

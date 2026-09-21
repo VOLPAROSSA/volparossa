@@ -62,7 +62,7 @@ agent_jobs_peer_recovery_run() {
     agent_jobs_peer_recovery_phase_start initial
     # A single unchanged owner command discovers the initial two peers and later
     # a new third peer. No provider list or resume command is supplied after launch.
-    agent_jobs_peer_recovery_cli compute peer workflow --plan "$jobs_source/follow-plan.json" \
+    agent_jobs_peer_recovery_cli compute peer workflow --batch-barrier --plan "$jobs_source/follow-plan.json" \
         --discover-peers --replace-peers --directory "$jobs_source/follow" \
         --follow --follow-poll-seconds 30 --max-batches 1 --max-seconds 600 --execute \
         >"$WORK/agent-jobs-peer-recovery-output.jsonl" 2>"$WORK/agent-jobs-peer-recovery-result.err" &

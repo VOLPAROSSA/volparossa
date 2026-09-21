@@ -47,7 +47,7 @@ agent_public_document_run() {
     PHASE=agent-public-document-executor-discovery
     content_custody_phase_start executor-discovery
     python3 -B "$document_script" enrollment-start "$WORK" || fail DOCUMENT_ENROLLMENT_START_UNAVAILABLE
-    agent_public_document_cli compute peer document --input "$jobs_source/document-input.txt" \
+    agent_public_document_cli compute peer document --batch-barrier --input "$jobs_source/document-input.txt" \
         --public-content --license GPL-3.0-only --public-question 'Summarize the provided public context.' \
         --runtime-root "$jobs_source/document-runtime" --model-root "$jobs_source/document-model" \
         --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \

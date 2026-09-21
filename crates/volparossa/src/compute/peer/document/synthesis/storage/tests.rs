@@ -102,6 +102,7 @@ fn replay_options(root: &Path) -> Options {
         discovery: crate::compute::peer::discovery::Options::default(),
         directory: root.into(),
         resume: true,
+        batch_barrier: false,
         synthesize: false,
         input: None,
         public_content: false,

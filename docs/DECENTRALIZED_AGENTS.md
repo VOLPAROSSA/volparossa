@@ -692,8 +692,12 @@ peer submission with `CONTENT_UNAVAILABLE` during enrollment. Offers and two com
 flows were observed, but no retained eligibility/budget replies establish why the eligible cohort
 was insufficient. Final route/policy rejection would have produced a different error code;
 temporary readiness remains an unproved hypothesis. The run remains failed; the earlier live
-document proofs used explicitly selected peers. Live automatic discovery and recovery onto a
-newly discovered third peer remain pending.
+document proofs used explicitly selected peers. The corrected automatic-discovery
+[document run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600666064) and
+[third-peer recovery run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35600672677)
+on `8a21d43d` now pass, including reconstruction from their unchanged original artifacts,
+protected-path captures, private/network cleanup and unchanged guest-host state. This is scoped
+execution/recovery evidence, not answer-quality evidence or a complete B03 scheduler.
 The new `agent-jobs-peer-recovery` disposable scenario exercises that third-peer transition with
 one unchanged owner command. It records a fixture-controlled pause while replacing the original
 brokers, then requires a genuinely new node, saved admission, actual inference and preserved
@@ -755,9 +759,26 @@ enrollment bounds, not a promise of arbitrary natural-language task planning. A 
 retains exact original source bytes, signed manifests, peer selection and per-attempt handles.
 `compute peer workflow --directory EXISTING_PRIVATE_DIRECTORY --resume --max-batches 1 --execute`
 continues that same enrollment. Each invocation advances only its explicitly bounded number of
-ordinary distribute/reconcile rounds; `Busy` or ambiguous work stays pending instead of an
+ready-queue/reconcile rounds; `Busy` or ambiguous work stays pending instead of an
 unbounded retry loop. Each new executor still receives its own bounded lease, so the complete
 sequence can span longer than 600 seconds without extending an old lease.
+
+New workflow, task and document enrollments record `ready_rows_v1`: each source row is a
+separate job, and a free compatible peer can take the next unsubmitted row while another peer
+is still working. A private immutable queue plan binds the source, model, peer cohort, pending
+job IDs and exact never-submitted rows. Each handle is saved before Submit; its checked result
+is saved before that peer takes more work. A missing reply does not release an unexpired lease
+or reclassify an attempted row as new. Resume reconciles existing handles, retains completed
+outputs and submits only the remaining unleased rows; eligible failed-row retries retain the
+ordinary stopped/expired-job admission checks.
+
+Old enrollments without a scheduling field retain the previous grouped-batch behavior.
+`--batch-barrier` selects it explicitly for a new enrollment; resume cannot change the recorded
+mode. Standalone `distribute` is unchanged. This queue currently operates **within one signed
+source package**: the outer document-package and synthesis-level loops remain sequential.
+The focused coordinator tests cover refill/lease/persistence logic, not real-model speedup.
+The separate `agent-jobs-ready-queue` VM proof requires an actual free peer to execute another
+row while an original worker remains running; that live proof is pending.
 
 Previously completed parts are reconstructed from full input/model/handle-bound receipts saved
 after authenticated RPC validation, not from an unchecked `complete` flag. These private local

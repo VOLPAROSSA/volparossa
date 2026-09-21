@@ -26,6 +26,8 @@ use super::{save, task, workflow};
 #[serde(deny_unknown_fields)]
 pub(super) struct Enrollment {
     version: u32,
+    #[serde(default, skip_serializing_if = "workflow::Scheduling::is_legacy")]
+    pub(super) scheduling: workflow::Scheduling,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) synthesize: bool,
     pub(super) source_manifest_id: String,
@@ -261,6 +263,7 @@ pub(super) fn publish(
         });
     }
     Ok(Enrollment {
+        scheduling: workflow::Scheduling::BatchBarrierV1,
         version: 1,
         synthesize,
         source_manifest_id: sha(&source_bytes),
@@ -433,6 +436,7 @@ pub(super) fn expected(
         provider_keys: enrollment.provider_keys.clone(),
         model_fingerprint: enrollment.model_fingerprint.clone(),
         replace_peers: enrollment.replace_peers,
+        scheduling: enrollment.scheduling,
         selected_at_unix_seconds: enrollment.selected_at_unix_seconds,
     })
 }

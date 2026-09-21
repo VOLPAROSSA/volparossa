@@ -139,6 +139,9 @@ agent_jobs_stop_unit() {
 }
 
 agent_jobs_stop() {
+    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-jobs-ready-queue-smoke.py" cleanup-worker "$WORK" || return 1
+    fi
     if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" cleanup-owner "$WORK" || return 1
     fi
@@ -166,7 +169,11 @@ agent_jobs_setup() {
     PHASE=agent-jobs-source
     jobs_source=$WORK/state-client/compute-source
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source"
-    agent_jobs_private source "$jobs_source" "$expected_commit" || fail JOBS_PUBLIC_SOURCE_FAILED
+    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+        agent_jobs_ready_queue_private source "$jobs_source" "$expected_commit" || fail JOBS_PUBLIC_SOURCE_FAILED
+    else
+        agent_jobs_private source "$jobs_source" "$expected_commit" || fail JOBS_PUBLIC_SOURCE_FAILED
+    fi
     agent_jobs_cli client init --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
         >"$WORK/agent-jobs-init.log" 2>"$WORK/agent-jobs-init.err" || fail JOBS_PUBLISHER_FAILED
     agent_jobs_cli client content publish --input "$jobs_source/dataset.json" \
@@ -217,6 +224,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+        agent_jobs_ready_queue_run
+        return
+    fi
     if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         agent_jobs_peer_recovery_run
         return
@@ -305,6 +316,10 @@ agent_jobs_finalize_report() {
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_jobs_ready_queue:-no}" = yes ]; then
+        agent_jobs_ready_queue_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         agent_jobs_peer_recovery_finalize_report "$jobs_status"
         return
