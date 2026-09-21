@@ -110,6 +110,7 @@ fn replay_options(root: &Path) -> Options {
         batch_barrier: false,
         synthesize: false,
         task_plan: None,
+        plan_tasks: false,
         input: None,
         source_plan: None,
         source_cache: None,

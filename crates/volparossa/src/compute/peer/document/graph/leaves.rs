@@ -6,11 +6,12 @@ use tokio::sync::watch;
 use volparossa_content::SignedManifest;
 
 use super::super::{
-    MAX_SAVED_BYTES, collection, discovery, now, read_file, retain_selected_sources,
-    selected_input, source_lifetime, task, tokenize, workflow,
+    MAX_SAVED_BYTES, SelectedInput, collection, discovery, now, read_file, retain_selected_sources,
+    source_lifetime, task, tokenize, workflow,
 };
 use super::{
-    DocumentPlan, Enrollment, Input, Leaf, Options, Path, digest, node_root, plan, save, storage,
+    DocumentPlan, Enrollment, Input, Leaf, Options, Path, digest, node_root, plan, planner, save,
+    storage,
 };
 
 async fn providers(
@@ -47,6 +48,8 @@ pub(super) async fn prepare(
     socket: &Path,
     cancelled: &watch::Receiver<bool>,
     plan: &plan::Plan,
+    source_input: &SelectedInput,
+    planner: Option<planner::Authority>,
 ) -> Result<()> {
     ensure!(
         args.public_content && !args.batch_barrier && !args.synthesize,
@@ -67,7 +70,7 @@ pub(super) async fn prepare(
                 == provider_keys.len(),
         "compute_document_independent_peers"
     );
-    let (document, collection, network) = selected_input(args, socket, cancelled).await?;
+    let (document, collection, network) = source_input;
     save(&args.directory, "graph-plan.json", plan, false)?;
     let mut prepared = Vec::new();
     // Finish the real tokenization first. No unlocked publication key crosses an await.
@@ -104,12 +107,12 @@ pub(super) async fn prepare(
     );
     let at = now()?;
     let lifetime = source_lifetime(args.lifetime_seconds, at, network.as_ref())?;
-    if let Some(proofs) = &network {
+    if let Some(proofs) = network {
         proofs.validate(
             collection
                 .as_ref()
                 .context("compute_collection_missing_ledger")?,
-            &document,
+            document,
             at,
             at + lifetime,
         )?;
@@ -177,6 +180,7 @@ pub(super) async fn prepare(
             version: 1,
             plan_sha256: plan.fingerprint()?,
             leaves,
+            planner,
         },
         false,
     )

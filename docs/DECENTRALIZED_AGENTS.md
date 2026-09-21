@@ -1065,7 +1065,10 @@ The complete workflow failed; its final synthesis and offline resume are not ver
 A targeted broker correction separates the single execution slot from bounded receipt history
 (256 records and a 32 MiB retained-data budget, reserving space before each new job), without
 changing original receipt expiry or deleting unfinished/retained work. Its thirteen focused
-broker tests pass; the corrected end-to-end run is still pending.
+broker tests pass. The [corrected run on `dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632)
+also failed, this time after eight completed fragment jobs: another submitted job remained
+unconfirmed without a terminal receipt. It did not reach synthesis; this is a separate unresolved
+submission/confirmation failure, not evidence that the complete native-source workflow works.
 
 ### Cooperating public tasks
 
@@ -1112,11 +1115,40 @@ unfinished new reductions still need the tokenizer runtime/model and publisher i
 Once complete, neither those options nor the original input/plan files are needed to validate
 and return the retained result. Only explicitly public sources and questions are supported.
 
-The graph executor and forty focused document tests currently pass, including exact source
-reuse, plan validation and zero-round completion after a previously partial summary. Its real
-four-node fork/join/one-parent/offline-resume VM proof is pending. These local controls are not
-model execution evidence. This is a user-enrolled cooperating task plan, not automatic planning,
-general tool use, a guarantee of sensible answers, or completion of B03.
+The graph executor and forty focused document tests pass, including exact source reuse, plan
+validation and zero-round completion after a previously partial summary. The [real four-node
+run on `56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and replay of
+its 138 unchanged original evidence files also pass: two source questions complete first, then
+comparison and single-parent refinement each execute a distinct real worker job. Removing the
+original input/plan and stopping brokers still permits zero-round completed resume without
+changing retained files. Protected captures, cleanup and unchanged host state pass. This proves
+execution of the enrolled plan, not useful answers, general tool use or completion of B03.
+
+### Model-proposed public subquestions
+
+The next development mode uses `compute peer document --plan-tasks --public-question "…"`
+with the same explicit public source, license, runtime, identity and peer options. Do not add
+`--task-plan` or `--synthesize`: the isolated pinned model proposes 2–4 short, distinct questions,
+and Rust validates them before enrolling a fixed fork/join graph. Each question reads the same
+selected source. A final task receives all of their retained answers and uses the **exact original
+user question**, not a model-rewritten goal. Sources are selected once; planning does not fetch
+other documents or replace a missing source with convenient cached content.
+
+This first planner sees the public question only, not the source text. Its source hash and byte
+count bind subsequent work, but are not evidence of source understanding. The model has one
+bounded generation attempt with at most 512 prompt tokens and 384 generated tokens; existing
+inference limits remain unchanged. Fenced prose, malformed/duplicate JSON, duplicate questions
+or an incomplete/limit-hit generation fail instead of becoming a repaired or canned plan.
+Model output remains question data: it cannot select tools, commands, paths or external actions.
+
+The original planner input, report, questions and hashes are retained with the graph. Once
+enrolled, resume verifies that same plan and cannot ask the model to generate a different one.
+`--enroll-only --execute` **does run local model planning and tokenization**, but does not submit
+peer jobs. Completed execution can later be reconstructed offline without another model run.
+Private goals and documents are not supported. The 48 focused Rust checks and 29 pure worker
+protocol tests pass, along with strict CLI Clippy; the real model-planning/peer-execution VM
+proof is pending. Small-model JSON validity and real execution would still not establish
+decomposition quality, answer correctness, general autonomous planning or full B03.
 
 ### Synthesizing one public answer
 

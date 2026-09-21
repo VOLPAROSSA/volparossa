@@ -38,6 +38,10 @@ MAX_CONTROL_LINE = 1024
 MAX_CONTROLS = 128
 MAX_CONTEXT = 256
 MAX_NEW_TOKENS = 64
+TASK_PLAN_PROMPT_TOKENS = 512
+TASK_PLAN_NEW_TOKENS = 384
+TASK_PLAN_CONTEXT_TOKENS = 896
+MAX_TASK_PLAN_BYTES = 16384
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 MODEL_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
 MODEL_WEIGHT_BYTES = 269060552
@@ -125,8 +129,9 @@ def validate_request(value):
             and value.keys() <= required | optional, "INVALID_REQUEST_FIELDS")
     require(type(value["version"]) is int and value["version"] == VERSION, "UNSUPPORTED_VERSION")
     require(type(value["id"]) is str and HEX32.fullmatch(value["id"]), "INVALID_REQUEST_ID")
-    require(value["mode"] in ("infer", "train", "plan_document"), "INVALID_JOB_MODE")
+    require(value["mode"] in ("infer", "train", "plan_document", "plan_tasks"), "INVALID_JOB_MODE")
     require(value["mode"] != "plan_document" or "adapter_root" not in value, "DOCUMENT_PLAN_ADAPTER_UNSUPPORTED")
+    require(value["mode"] != "plan_tasks" or "adapter_root" not in value, "TASK_PLAN_ADAPTER_UNSUPPORTED")
     require("owner_control" not in value or type(value["owner_control"]) is bool,
             "INVALID_OWNER_CONTROL")
     for field in ("model_root", "dataset_path", "output_root", "adapter_root"):
@@ -156,6 +161,8 @@ def validate_sample(sample, answered):
 def validate_dataset(dataset, mode):
     if mode == "plan_document":
         return validate_document(dataset)
+    if mode == "plan_tasks":
+        return validate_task_plan_input(dataset)
     if type(dataset) is dict and dataset.get("version") == 2:
         return validate_document_inference(dataset, mode)
     if type(dataset) is dict and dataset.get("version") == 3:
@@ -208,6 +215,36 @@ def validate_document(dataset):
     public_text(dataset["question"], 512, "INVALID_DOCUMENT_QUESTION")
     require(dataset["question"].strip(), "INVALID_DOCUMENT_QUESTION")
     return dataset
+
+
+def validate_task_plan_input(dataset):
+    require(type(dataset) is dict and dataset.keys() == {
+        "version", "visibility", "license", "question", "source_sha256", "source_bytes"},
+        "INVALID_TASK_PLAN_INPUT_FIELDS")
+    require(type(dataset["version"]) is int and dataset["version"] == 1
+            and dataset["visibility"] == "public" and public_license(dataset["license"]),
+            "TASK_PLAN_NOT_EXPLICIT_PUBLIC")
+    public_text(dataset["question"], 512, "INVALID_TASK_PLAN_QUESTION")
+    require(dataset["question"].strip(), "INVALID_TASK_PLAN_QUESTION")
+    require(type(dataset["source_sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", dataset["source_sha256"])
+            and dataset["source_sha256"] != "0" * 64
+            and bounded_integer(dataset["source_bytes"], 1, MAX_DATASET), "INVALID_TASK_PLAN_SOURCE_BINDING")
+    return dataset
+
+
+def validate_task_questions(value):
+    require(type(value) is dict and value.keys() == {"version", "questions"}
+            and type(value["version"]) is int and value["version"] == 1,
+            "INVALID_TASK_PLAN_OUTPUT_FIELDS")
+    questions = value["questions"]
+    require(type(questions) is list and 2 <= len(questions) <= 4, "INVALID_TASK_PLAN_QUESTION_COUNT")
+    seen = set()
+    for question in questions:
+        public_text(question, 512, "INVALID_TASK_PLAN_QUESTION")
+        identity = question.strip()
+        require(identity and identity not in seen, "DUPLICATE_OR_EMPTY_TASK_PLAN_QUESTION")
+        seen.add(identity)
+    return value
 
 
 def validate_document_inference(dataset, mode):
@@ -342,7 +379,9 @@ def prepare_files(request):
     require(type(config) is dict and all(config.get(key) == value for key, value in expected.items())
             and "auto_map" not in config and "quantization_config" not in config,
             "UNSUPPORTED_MODEL_ARCHITECTURE")
-    raw_dataset = read_bounded(dataset_path, MAX_DOCUMENT_REQUEST if request["mode"] == "plan_document" else MAX_DATASET)
+    maximum = (MAX_DOCUMENT_REQUEST if request["mode"] == "plan_document" else
+               MAX_TASK_PLAN_BYTES if request["mode"] == "plan_tasks" else MAX_DATASET)
+    raw_dataset = read_bounded(dataset_path, maximum)
     dataset = validate_dataset(parse_json(raw_dataset), request["mode"])
     identity = {
         "sha256": hashlib.sha256(raw_dataset).hexdigest(), "bytes": len(raw_dataset),
@@ -353,6 +392,9 @@ def prepare_files(request):
                         document_bytes=len(dataset["document"].encode()))
         if dataset.get("synthesis", False):
             identity["synthesis"] = True
+    elif request["mode"] == "plan_tasks":
+        identity.update(version=1, question_sha256=hashlib.sha256(dataset["question"].encode()).hexdigest(),
+                        source_sha256=dataset["source_sha256"], source_bytes=dataset["source_bytes"])
     elif dataset["version"] == 2:
         identity.update(version=2, source_manifest_sha256=hashlib.sha256(bytes.fromhex(dataset["source_manifest_hex"])).hexdigest(),
                         inference_examples=len(dataset["inference"]))
@@ -731,6 +773,96 @@ def plan_document(tokenizer, dataset, session):
     return result
 
 
+def task_plan_messages(dataset):
+    # The model sees the public goal, not the original source contents. The hash
+    # and size bind enrollment only and must never be presented as source ingestion.
+    return [{"role": "system", "content":
+             "Plan how to answer a public question using a document that you have not seen. "
+             "Return only one JSON object with exactly version and questions: "
+             "version is 1; questions is an array of two to four distinct short questions. "
+             "Each question will be answered independently from that document. "
+             "Do not answer them. Do not assume facts about the unseen document. "
+             "Do not use tools, actions, code blocks or any text outside the JSON object."},
+            {"role": "user", "content": "Public question:\n" + dataset["question"]}]
+
+
+def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
+    validate_task_plan_input(dataset)
+    session.check()
+    prompt = tokenizer.apply_chat_template(task_plan_messages(dataset), tokenize=True,
+                                           add_generation_prompt=True, return_dict=False)
+    require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
+    require(1 <= len(prompt) <= TASK_PLAN_PROMPT_TOKENS
+            and len(prompt) + TASK_PLAN_NEW_TOKENS <= TASK_PLAN_CONTEXT_TOKENS,
+            "TASK_PLAN_PROMPT_TOKEN_LIMIT_EXCEEDED")
+    input_ids = torch.tensor([prompt], dtype=torch.long, device="cpu")
+
+    class OwnerBudget(transformers.StoppingCriteria):
+        def __call__(self, _input_ids, _scores, **_kwargs):
+            # The actual generation thread checks pause/cancel/deadline between
+            # tokens. No owner control is acknowledged while native work runs.
+            session.check()
+            return False
+
+    model.eval()
+    session.check()
+    with torch.inference_mode():
+        output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
+                                max_new_tokens=TASK_PLAN_NEW_TOKENS, do_sample=False, num_beams=1,
+                                num_return_sequences=1, use_cache=True,
+                                stopping_criteria=transformers.StoppingCriteriaList([OwnerBudget()]),
+                                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+    session.check()
+    require(len(output.shape) == 2 and output.shape[0] == 1
+            and len(prompt) < output.shape[1] <= TASK_PLAN_CONTEXT_TOKENS,
+            "INVALID_TASK_PLAN_GENERATION_SHAPE")
+    require(output[0, :len(prompt)].tolist() == prompt, "TASK_PLAN_PROMPT_CHANGED")
+    generated = output[0, len(prompt):].tolist()
+    require(1 <= len(generated) < TASK_PLAN_NEW_TOKENS, "TASK_PLAN_GENERATION_LIMIT_REACHED")
+    # Only a single final model EOS is framing, not output text. Never strip
+    # fences, extract a JSON substring, drop other special tokens or repair text.
+    require(generated[-1] == tokenizer.eos_token_id
+            and tokenizer.eos_token_id not in generated[:-1], "TASK_PLAN_INCOMPLETE_GENERATION")
+    text = tokenizer.decode(generated[:-1], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+    public_text(text, MAX_TASK_PLAN_BYTES, "TASK_PLAN_OUTPUT_TOO_LARGE")
+    plan = validate_task_questions(parse_json(text))
+    return plan, len(prompt), len(generated)
+
+
+def execute_task_plan(request, session, tokenizer, torch, transformers, versions,
+                      model_root, output_root, dataset, data_identity, model_files):
+    model = load_model(transformers, torch, model_root)
+    session.check()
+    session.progress("baseline")
+    base_before = parameter_hash(model, False, session)
+    plan, prompt_count, generated_count = plan_tasks(model, tokenizer, torch, transformers, dataset, session)
+    base_after = parameter_hash(model, False, session)
+    require(base_before == base_after, "BASE_WEIGHTS_CHANGED")
+    require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
+            "MODEL_WEIGHTS_CHANGED_ON_DISK")
+    raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
+    require(len(raw) <= MAX_TASK_PLAN_BYTES, "TASK_PLAN_OUTPUT_TOO_LARGE")
+    session.check()
+    path = output_root / "task-questions.json"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(raw)
+        output.flush()
+        os.fsync(output.fileno())
+    artifact = {"relative_path": "task-questions.json", **file_hash(path, maximum=MAX_TASK_PLAN_BYTES)}
+    require(artifact["sha256"] == hashlib.sha256(raw).hexdigest(), "TASK_PLAN_OUTPUT_CHANGED")
+    result = {"version": VERSION, "id": request["id"], "kind": "result", "status": "ok", "mode": "plan_tasks",
+              "backend_versions": versions, "device": "cpu", "threads": request["threads"],
+              "model": {"id": MODEL_ID, "revision": MODEL_REVISION, "files": model_files},
+              "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
+              "model_weights_loaded": True, "goal_only_planning": True,
+              "planner_prompt_tokens": prompt_count, "planner_generated_tokens": generated_count,
+              "generation_limit_reached": False, "model_answer_correctness_proven": False,
+              "base_before": base_before, "base_after": base_after, "base_weights_unchanged": True,
+              "network_policy_changed": False}
+    return finish_result(result, output_root, session)
+
+
 def encode_dataset(tokenizer, torch, dataset):
     result = {"train": [], "heldout": [], "inference": []}
     synthesis = dataset["version"] == 3
@@ -884,6 +1016,9 @@ def execute_job(request, session):
                   "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
                   "model_weights_loaded": False, "network_policy_changed": False}
         return finish_result(result, output_root, session)
+    if request["mode"] == "plan_tasks":
+        return execute_task_plan(request, session, tokenizer, torch, transformers, versions,
+                                 model_root, output_root, dataset, data_identity, model_files)
     samples = encode_dataset(tokenizer, torch, dataset)
     session.check()
     model = load_model(transformers, torch, model_root)

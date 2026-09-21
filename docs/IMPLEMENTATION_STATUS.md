@@ -4,15 +4,31 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
-Current public task-graph candidate: `compute peer document --task-plan` enrolls different
+Current model-planning candidate: `compute peer document --plan-tasks --public-question`
+runs one isolated pinned-model attempt to propose 2–4 public subquestions. Strictly validated
+question data forms a fixed fork/join graph, with the original user question unchanged in the
+terminal join. The model sees the goal only; original source hash/size bind later execution,
+without claiming source understanding. Source acquisition occurs once, and the exact planner
+input, report, artifact and enrollment hashes are checked on resume without replanning. Invalid
+or generation-limit output fails, with no repaired/canned plan, tool authority or private offload.
+Forty-eight focused Rust checks, twenty-nine pure Python protocol tests and strict CLI Clippy
+pass. The separate real-model/peer/offline-resume fixture is integrated; no live autonomous
+decomposition or answer-quality proof is claimed yet. This does not complete B03.
+
+Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same
 original signed source, validity and peer selection. Once source work completes, ordered
 dependency frontiers consume receipt-reconstructed parent answers. Even a single-parent step
 runs its own new instruction; it cannot return the parent's answer as if it performed new work.
 Graph and per-node identities are retained, and completed replay preserves existing execution
-summaries. Forty focused document tests and strict all-target CLI Clippy pass. The new four-node
-fork/join/one-parent continuation fixture is wired; no live task-graph proof is claimed yet.
+summaries. Forty focused document tests and strict all-target CLI Clippy pass. The [four-node
+run on `56a7c374`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616745770) and replay of
+all 138 unchanged original evidence files **pass**: two real initial workers finish under the
+two-round boundary; comparison and single-parent refinement then each run a distinct worker.
+Original input/plan removal and stopped brokers precede zero-round offline resume with unchanged
+history. Five captures contain 33,052 frames with zero drops/direct client-to-exit packets;
+private/network cleanup and unchanged host state pass. This verifies the explicitly enrolled plan.
 The current scheduler has a source-stage barrier and ordered dependent stages, not fully dynamic
 DAG scheduling or automatic task planning. This does not complete B03 or add private computation.
 
@@ -32,8 +48,12 @@ final synthesis or offline resume. Both executors retained eight terminal jobs u
 original expiry and consequently refused further admission. The corrective broker change
 separates its unchanged single active worker from a bounded 256-record/32 MiB retained history,
 including a worst-case space reservation for the next job. Original receipts and expiry remain
-unchanged; thirteen focused broker tests pass. The corrected full run is pending. This is not
-automatic web research, private computation or a completed B03 checkpoint.
+unchanged; thirteen focused broker tests pass. The [corrected run on
+`dd405d9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35616445632) **also failed**, now
+after eight completed fragment jobs: a new retained job handle remained unconfirmed with
+`COMPUTE_RPC_UNCONFIRMED`, without a terminal receipt. Synthesis did not start. This is a
+separate submission/confirmation failure under investigation; there is no complete workflow
+proof, automatic web research, private computation or completed B03 checkpoint.
 
 Verified public-source collections: `compute peer document --source-plan` accepts
 2–32 explicitly public local UTF-8 documents with absolute input paths and one explicitly

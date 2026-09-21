@@ -212,7 +212,20 @@ pub(super) async fn run(
         "distributed_execution_claimed": false,
         "private_training_claimed": false
     });
+    if options.mode == Mode::PlanTasks {
+        check_task_plan_result(&result, options)?;
+    }
     Ok(result)
+}
+
+fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
+    let bytes = super::read_file(&options.dataset, super::MAX_DATASET_BYTES)?;
+    let input = super::task_plan::Input::decode(&bytes)?;
+    let artifact = super::read_file(
+        &options.output.join("task-questions.json"),
+        super::task_plan::MAX_ARTIFACT_BYTES,
+    )?;
+    super::task_plan::validate_report(result, &input, &bytes, &artifact).map(|_| ())
 }
 
 fn pressure_action(budget: &mut Budget) -> Result<Action> {
@@ -241,7 +254,7 @@ fn check_result(value: &Value, request: &WorkerRequest, status: ExitStatus) -> R
     );
     let updates = value.get("updates_completed").and_then(Value::as_u64);
     match request.mode {
-        Mode::Infer | Mode::PlanDocument => {
+        Mode::Infer | Mode::PlanDocument | Mode::PlanTasks => {
             ensure!(updates == Some(0), "compute_unrequested_training");
         }
         Mode::Train => {
@@ -295,6 +308,25 @@ fn check_artifacts(value: &Value, mode: Mode, output: &Path) -> Result<()> {
         .context("compute_artifacts")?;
     if mode == Mode::Infer {
         ensure!(artifacts.is_empty(), "compute_inference_artifacts");
+        return Ok(());
+    }
+    if mode == Mode::PlanTasks {
+        ensure!(
+            value["model_weights_loaded"] == true
+                && artifacts.len() == 1
+                && artifacts[0]["relative_path"] == "task-questions.json",
+            "compute_task_plan_artifact"
+        );
+        let bytes = super::read_file(
+            &output.join("task-questions.json"),
+            super::task_plan::MAX_ARTIFACT_BYTES,
+        )?;
+        ensure!(
+            artifacts[0]["bytes"] == bytes.len() as u64
+                && artifacts[0]["sha256"] == hex::encode(Sha256::digest(&bytes)),
+            "compute_task_plan_artifact_hash"
+        );
+        super::task_plan::Questions::decode(&bytes)?;
         return Ok(());
     }
     if mode == Mode::PlanDocument {

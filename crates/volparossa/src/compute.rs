@@ -8,6 +8,7 @@ mod peer;
 mod sandbox;
 mod spare_capacity;
 mod supervise;
+mod task_plan;
 mod train_cycle;
 mod train_loop;
 
@@ -54,6 +55,8 @@ pub(crate) enum Mode {
     Train,
     #[serde(rename = "plan_document")]
     PlanDocument,
+    #[serde(rename = "plan_tasks")]
+    PlanTasks,
 }
 
 #[derive(Debug, Args)]
@@ -255,6 +258,10 @@ impl Options {
 // Shared by direct execution and Broker::start before a worker is created. Inference-only
 // profiles must pass their strict validator here as well as at the signed RPC boundary.
 fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()> {
+    if mode == Mode::PlanTasks {
+        ensure!(!has_adapter, "compute_task_plan_adapter");
+        return task_plan::Input::decode(dataset).map(|_| ());
+    }
     let public: Value = serde_json::from_slice(dataset).context("compute_dataset_json")?;
     if mode == Mode::PlanDocument {
         ensure!(!has_adapter, "compute_document_plan_adapter");

@@ -1,7 +1,8 @@
-//! Explicit public task dependencies; no automatic planning, tools or private offload.
+//! Enrolled public task dependencies, including bounded model-proposed fork/join questions.
 
 mod leaves;
 mod plan;
+mod planner;
 
 use std::{
     collections::BTreeMap,
@@ -25,6 +26,8 @@ struct Enrollment {
     version: u32,
     plan_sha256: String,
     leaves: Vec<Leaf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planner: Option<planner::Authority>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -46,6 +49,7 @@ fn node_options(args: &Options, index: usize) -> Options {
     let mut options = args.clone();
     options.directory = node_root(&args.directory, index);
     options.task_plan = None;
+    options.plan_tasks = false;
     options.enroll_only = false;
     options.synthesize = true;
     options.batch_barrier = false;
@@ -88,6 +92,11 @@ fn load(root: &Path) -> Result<Loaded> {
         &anchor_root.join("source.manifest"),
         volparossa_content::MAX_MANIFEST_BYTES,
     )?;
+    if let Some(planner) = &enrollment.planner {
+        planner::verify(root, planner, &plan, &input)?;
+    } else {
+        planner::verify_absent(root)?;
+    }
     for leaf in &enrollment.leaves {
         let directory = node_root(root, leaf.node);
         ensure!(
@@ -131,18 +140,40 @@ pub(super) async fn run(
     cancelled: &watch::Receiver<bool>,
 ) -> Result<()> {
     if !args.resume {
-        let plan = plan::Plan::load(args.task_plan.as_deref().context("compute_graph_plan")?)?;
-        leaves::prepare(args, socket, cancelled, &plan).await?;
+        let manual = if args.plan_tasks {
+            ensure!(
+                args.task_plan.is_none(),
+                "compute_graph_planning_modes_conflict"
+            );
+            None
+        } else {
+            Some(plan::Plan::load(
+                args.task_plan.as_deref().context("compute_graph_plan")?,
+            )?)
+        };
+        let selected = super::selected_input(args, socket, cancelled).await?;
+        let (plan, authority) = if let Some(plan) = manual {
+            (plan, None)
+        } else {
+            let (plan, authority) = planner::prepare(args, &selected.0, cancelled).await?;
+            (plan, Some(authority))
+        };
+        leaves::prepare(args, socket, cancelled, &plan, &selected, authority).await?;
     }
     let loaded = load(&args.directory)?;
     if args.enroll_only {
-        println!(
-            "{}",
-            json!({"operation":"compute_graph_enrolled", "execution_started":false,
+        let mut result = json!({"operation":"compute_graph_enrolled", "execution_started":false,
             "task_complete":false,"plan_sha256":loaded.enrollment.plan_sha256,"nodes":loaded.plan.nodes.len(),
             "source_tasks":loaded.enrollment.leaves.len(),"source_manifest_id":loaded.authority.source_manifest_id,
-            "provider_keys":loaded.authority.provider_keys,"private_data_supported":false})
-        );
+            "provider_keys":loaded.authority.provider_keys,"private_data_supported":false});
+        if loaded.enrollment.planner.is_some() {
+            result["execution_started"] = true.into();
+            result["automatic_task_planning"] = true.into();
+            result["planning"] = planner::summary(loaded.enrollment.planner.as_ref());
+            result["model_planning_performed"] = true.into();
+            result["peer_execution_started"] = false.into();
+        }
+        println!("{result}");
         return Ok(());
     }
     let result = advance(args, socket, cancelled, &loaded).await?;
@@ -351,6 +382,10 @@ async fn advance(
         "scheduling":"shared_source_queue_then_ordered_dependency_frontiers",
         "private_data_supported":false,"automatic_task_planning":false,"external_actions_supported":false,
         "model_answer_correctness_proven":false,"full_b03_claimed":false});
+    if loaded.enrollment.planner.is_some() {
+        result["automatic_task_planning"] = true.into();
+        result["planning"] = planner::summary(loaded.enrollment.planner.as_ref());
+    }
     attach_provenance(&args.directory, loaded, output, &mut result)?;
     Ok(result)
 }

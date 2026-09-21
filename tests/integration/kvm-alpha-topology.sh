@@ -22,6 +22,7 @@ agent_public_document=no
 agent_public_collection=no
 agent_public_network_sources=no
 agent_task_graph=no
+agent_model_planning=no
 agent_train_cycle=no
 agent_train_loop=no
 agent_artifact_quarantine=no
@@ -40,7 +41,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|dns-cache]'
 }
 
 print_plan() {
@@ -57,6 +58,16 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-jobs ]; then
+        if [ "$agent_model_planning" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA public model planning plan:' \
+                '  one isolated owner model generates two through four actual public subquestions;' \
+                '  validate and retain the original proposal before any peer job is submitted;' \
+                '  execute its source questions on protected peers and join under the exact original goal;' \
+                '  preserve planner and worker receipts across completed offline resume and full cleanup;' \
+                '  no supplied task graph, canned fallback, model-selected tools or answer-quality claim.'
+            return
+        fi
         if [ "$agent_task_graph" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA explicit public task graph plan:' \
@@ -488,6 +499,7 @@ while [ "$#" -gt 0 ]; do
             agent_public_collection=no
             agent_public_network_sources=no
             agent_task_graph=no
+            agent_model_planning=no
             agent_train_cycle=no
             agent_train_loop=no
             agent_artifact_quarantine=no
@@ -505,6 +517,7 @@ while [ "$#" -gt 0 ]; do
                 agent-public-collection) scenario=agent-jobs; agent_public_collection=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-network-sources) scenario=agent-jobs; agent_public_collection=yes; agent_public_network_sources=yes; wifi_link=no; uplink_link=no ;;
                 agent-task-graph) scenario=agent-jobs; agent_task_graph=yes; wifi_link=no; uplink_link=no ;;
+                agent-model-planning) scenario=agent-jobs; agent_model_planning=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
                 wifi-link) scenario=local-link; wifi_link=yes; uplink_link=no ;;
                 uplink-link) scenario=local-link; wifi_link=no; uplink_link=yes ;;
@@ -746,6 +759,14 @@ if [ "$agent_task_graph" = yes ]; then
         agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         [ -f "$source_directory/tests/integration/$graph_fixture" ] \
             && [ ! -L "$source_directory/tests/integration/$graph_fixture" ] || exit 69
+    done
+    command -v openssl >/dev/null 2>&1 || exit 69
+fi
+if [ "$agent_model_planning" = yes ]; then
+    for planning_fixture in agent-model-planning-smoke.sh agent-model-planning-smoke.py \
+        agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
+        [ -f "$source_directory/tests/integration/$planning_fixture" ] \
+            && [ ! -L "$source_directory/tests/integration/$planning_fixture" ] || exit 69
     done
     command -v openssl >/dev/null 2>&1 || exit 69
 fi
@@ -2058,6 +2079,10 @@ if [ "$agent_task_graph" = yes ]; then
     # shellcheck source=tests/integration/agent-task-graph-smoke.sh
     . "$source_directory/tests/integration/agent-task-graph-smoke.sh"
 fi
+if [ "$agent_model_planning" = yes ]; then
+    # shellcheck source=tests/integration/agent-model-planning-smoke.sh
+    . "$source_directory/tests/integration/agent-model-planning-smoke.sh"
+fi
 if [ "$scenario" = agent-artifact ]; then
     # shellcheck source=tests/integration/agent-artifact-smoke.sh
     . "$source_directory/tests/integration/agent-artifact-smoke.sh"
@@ -2199,6 +2224,11 @@ fi
 if [ "$agent_task_graph" = yes ]; then
     for graph_script in agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$graph_script" "$WORK/bin/$graph_script"
+    done
+fi
+if [ "$agent_model_planning" = yes ]; then
+    for planning_script in agent-model-planning-smoke.py agent-task-graph-smoke.py agent-public-document-smoke.py agent-document-synthesis.py agent-public-collection-smoke.py; do
+        install -o root -g root -m 0555 "$source_directory/tests/integration/$planning_script" "$WORK/bin/$planning_script"
     done
 fi
 if [ "$agent_train_loop" = yes ]; then

@@ -95,6 +95,49 @@ def dataset():
             "inference": [{"question": "Which Debian release?", "context": "Debian 13 is supported."}]}
 
 
+def task_plan_input():
+    return dict(version=1, visibility="public", license="CC0-1.0", question="What are the requirements and risks?",
+                source_sha256="a" * 64, source_bytes=128)
+
+
+def task_planner_doubles(text, generated=None, prompt=None):
+    # Pure branch doubles only. Never import a real tokenizer, tensor library or model.
+    class Vector:
+        def __init__(self, values):
+            self.values = values
+
+        def tolist(self):
+            return self.values
+
+    class Tensor:
+        def __init__(self, rows):
+            self.rows = rows
+            self.shape = (len(rows), len(rows[0]))
+
+        def __getitem__(self, index):
+            return Vector(self.rows[index[0]][index[1]])
+
+    prompt = [11, 12, 13] if prompt is None else prompt
+    generated = [21, 22, 2] if generated is None else generated
+    tokenizer, torch, transformers, model = (mock.Mock() for _ in range(4))
+    tokenizer.pad_token_id = tokenizer.eos_token_id = 2
+    tokenizer.apply_chat_template.return_value = prompt
+    tokenizer.decode.return_value = text
+    torch.tensor.side_effect = lambda rows, **_kwargs: Tensor(rows)
+    torch.inference_mode.side_effect = contextlib.nullcontext
+    transformers.StoppingCriteria = object
+    transformers.StoppingCriteriaList.side_effect = lambda items: items
+    transformers.AutoTokenizer.from_pretrained.return_value = tokenizer
+
+    def generate(**kwargs):
+        for criterion in kwargs["stopping_criteria"]:
+            assert criterion(None, None) is False
+        return Tensor([prompt + generated])
+
+    model.generate.side_effect = generate
+    return model, tokenizer, torch, transformers
+
+
 def adapter_config():
     return {"base_model_name_or_path": WORKER.MODEL_ID, "revision": WORKER.MODEL_REVISION,
             "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 4, "lora_alpha": 8,
@@ -128,6 +171,160 @@ def adapter_bytes(header_change=None, last_float=0.0):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_task_planning_admission_is_explicit_public_goal_only_and_has_no_adapter(self):
+        source = task_plan_input()
+        self.assertEqual(WORKER.validate_request(dict(request(), mode="plan_tasks"))["mode"], "plan_tasks")
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ADAPTER_UNSUPPORTED"):
+            WORKER.validate_request(dict(request(), mode="plan_tasks", adapter_root="/adapter"))
+        for license_value in WORKER.PUBLIC_LICENSES:
+            value = dict(source, license=license_value)
+            self.assertEqual(WORKER.validate_dataset(value, "plan_tasks"), value)
+        for changes in ({"version": True}, {"version": 2}, {"visibility": "private"}, {"license": "unknown"},
+                        {"question": " "}, {"question": "a\0b"}, {"question": "\ud800"}, {"question": "é" * 257},
+                        {"source_sha256": "0" * 64}, {"source_sha256": "A" * 64}, {"source_sha256": "a" * 63},
+                        {"source_bytes": True}, {"source_bytes": 0}, {"source_bytes": 1048577}, {"document": "not admitted"},
+                        {"tools": []}, {"train": []}):
+            with self.subTest(changes=list(changes)), self.assertRaises(WORKER.JobError):
+                WORKER.validate_dataset(dict(source, **changes), "plan_tasks")
+        messages = WORKER.task_plan_messages(source)
+        self.assertIn(source["question"], messages[1]["content"])
+        self.assertNotIn(source["source_sha256"], json.dumps(messages))
+        self.assertIn("have not seen", messages[0]["content"])
+
+    def test_task_questions_require_whole_strict_json_and_preserve_original_strings(self):
+        valid = dict(version=1, questions=[" Which requirements? ", "Which risks?"])
+        self.assertEqual(WORKER.validate_task_questions(WORKER.parse_json(json.dumps(valid))), valid)
+        # Same trim-only distinctness as the Rust consumer, not an extra Unicode casefold policy.
+        WORKER.validate_task_questions(dict(version=1, questions=["Question?", "question?"]))
+        for changes in ({"version": True}, {"version": 1.0}, {"version": 2}, {"tools": []},
+                        {"questions": ["Only one?"]}, {"questions": [str(i) for i in range(5)]},
+                        {"questions": ["Repeated?", " Repeated? "]}, {"questions": [" ", "Other?"]},
+                        {"questions": ["é" * 257, "Other?"]}, {"questions": ["\ud800", "Other?"]},
+                        {"questions": ["a\0b", "Other?"]}, {"questions": [1, "Other?"]}):
+            with self.subTest(changes=list(changes)), self.assertRaises(WORKER.JobError):
+                WORKER.validate_task_questions(dict(valid, **changes))
+        for text in ('```json\n{"version":1,"questions":["A?","B?"]}\n```',
+                     '{"version":1,"questions":["A?","B?"]} extra',
+                     '{"version":1,"version":1,"questions":["A?","B?"]}',
+                     '{"version":1,"questions":["A?","B?"],"questions":["C?","D?"]}',
+                     '{"version":1,"questions":["A?","B?"]', 'null',
+                     '{"version":NaN,"questions":["A?","B?"]}'):
+            with self.subTest(text=text), self.assertRaises(WORKER.JobError):
+                WORKER.validate_task_questions(WORKER.parse_json(text))
+
+    def test_task_input_identity_binds_goal_hash_source_hash_size_and_exact_public_bytes(self):
+        # Inert file/hash doubles exercise prepare_files' identity branch only.
+        # No model contents are provisioned or claimed to match these placeholder files.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, output, source = root/"model", root/"output", root/"input.json"
+            model.mkdir(mode=0o700)
+            output.mkdir(mode=0o700)
+            for name in WORKER.MODEL_FILES:
+                (model/name).touch(mode=0o600)
+            config = dict(architectures=["LlamaForCausalLM"], model_type="llama", hidden_size=576,
+                num_hidden_layers=30, num_attention_heads=9, num_key_value_heads=3, intermediate_size=1536,
+                vocab_size=49152, max_position_embeddings=8192, tie_word_embeddings=True)
+            (model/"config.json").write_text(json.dumps(config))
+            dataset = task_plan_input()
+            raw = json.dumps(dataset, separators=(",", ":")).encode()
+            source.write_bytes(raw)
+            value = WORKER.validate_request(dict(request(), mode="plan_tasks", model_root=str(model),
+                dataset_path=str(source), output_root=str(output)))
+
+            def file_hash(path, **_kwargs):
+                return dict(bytes=WORKER.MODEL_FILES[path.name], sha256=WORKER.MODEL_HASHES[path.name])
+
+            with mock.patch.object(WORKER, "file_hash", side_effect=file_hash):
+                prepared = WORKER.prepare_files(value)
+                self.assertEqual(prepared[2], dataset)
+                self.assertEqual(prepared[3], dict(version=1, sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw),
+                    visibility="public", license=dataset["license"],
+                    question_sha256=hashlib.sha256(dataset["question"].encode()).hexdigest(),
+                    source_sha256=dataset["source_sha256"], source_bytes=dataset["source_bytes"]))
+                source.write_bytes(b" " * WORKER.MAX_TASK_PLAN_BYTES + raw)
+                with self.assertRaisesRegex(WORKER.JobError, "ARTIFACT_TOO_LARGE"):
+                    WORKER.prepare_files(value)
+
+    def test_task_planner_is_one_greedy_bounded_generation_with_owner_checkpoints(self):
+        expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
+        model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected))
+        session = mock.Mock()
+        result, prompts, generated = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual((result, prompts, generated), (expected, 3, 3))
+        model.generate.assert_called_once()
+        arguments = model.generate.call_args.kwargs
+        self.assertEqual((arguments["max_new_tokens"], arguments["do_sample"], arguments["num_beams"],
+                          arguments["num_return_sequences"]), (384, False, 1, 1))
+        tokenizer.decode.assert_called_once_with([21, 22], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        self.assertGreaterEqual(session.check.call_count, 4)
+        self.assertEqual((WORKER.MAX_CONTEXT, WORKER.MAX_NEW_TOKENS), (256, 64))
+        self.assertEqual((WORKER.TASK_PLAN_PROMPT_TOKENS, WORKER.TASK_PLAN_CONTEXT_TOKENS), (512, 896))
+        tokenizer.apply_chat_template.assert_called_once_with(WORKER.task_plan_messages(task_plan_input()),
+            tokenize=True, add_generation_prompt=True, return_dict=False)
+
+    def test_task_planning_never_truncates_repairs_retries_or_falls_back(self):
+        valid = '{"version":1,"questions":["A?","B?"]}'
+        for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*383+[2], valid),
+                                       ([1], [21, 22], valid), ([1], [2, 21, 2], valid),
+                                       ([1], [21, 2], valid+" trailing"), ([1], [21, 2], "```json\n"+valid+"\n```")):
+            model, tokenizer, torch, transformers = task_planner_doubles(text, generated, prompt)
+            with self.subTest(prompt=len(prompt), generated=len(generated)), self.assertRaises(WORKER.JobError):
+                WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
+            self.assertLessEqual(model.generate.call_count, 1)
+        model, tokenizer, torch, transformers = task_planner_doubles(valid)
+        session = mock.Mock()
+        session.check.side_effect = [None, None, WORKER.JobError("JOB_CANCELLED")]
+        with self.assertRaisesRegex(WORKER.JobError, "JOB_CANCELLED"):
+            WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        model.generate.assert_called_once()  # Cancellation propagated from the generation-thread criterion.
+        tokenizer.decode.assert_not_called()
+
+    def test_task_plan_branch_loads_weights_and_retains_only_valid_hashed_questions(self):
+        expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
+        source = task_plan_input()
+        for valid in (True, False):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                value = WORKER.validate_request(dict(request(), mode="plan_tasks", output_root=str(root)))
+                model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected) if valid else "not JSON")
+                digest = dict(sha256="b"*64, parameters=123)
+                real_hash = WORKER.file_hash
+
+                def file_hash(path, *args, **kwargs):
+                    if path.name == "model.safetensors":
+                        return dict(sha256=WORKER.MODEL_WEIGHT_SHA, bytes=WORKER.MODEL_WEIGHT_BYTES)
+                    return real_hash(path, *args, **kwargs)
+
+                with mock.patch.object(WORKER, "prepare_files", return_value=(root/"model", root, source, {"sha256":"a"*64}, {})), \
+                     mock.patch.object(WORKER, "configure_offline"), \
+                     mock.patch.object(WORKER, "load_backend", return_value=(torch, transformers, mock.Mock(), WORKER.BACKENDS)), \
+                     mock.patch.object(WORKER, "load_model", return_value=model) as loader, \
+                     mock.patch.object(WORKER, "parameter_hash", return_value=digest) as parameter_hash, \
+                     mock.patch.object(WORKER, "file_hash", side_effect=file_hash), \
+                     mock.patch.object(WORKER, "encode_dataset", side_effect=AssertionError("planner used ordinary inference rows")), \
+                     mock.patch.object(WORKER, "new_lora", side_effect=AssertionError("planner created adapter")), \
+                     mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()):
+                    if not valid:
+                        with self.assertRaises(WORKER.JobError):
+                            WORKER.execute_job(value, WORKER.Session(value))
+                        self.assertEqual(list(root.iterdir()), [])
+                        continue
+                    result = WORKER.execute_job(value, WORKER.Session(value))
+                    loader.assert_called_once()
+                    self.assertEqual(parameter_hash.call_count, 2)
+                self.assertEqual(json.loads((root/"task-questions.json").read_text()), expected)
+                self.assertEqual(result["artifacts"], [dict(relative_path="task-questions.json", **real_hash(root/"task-questions.json"))])
+                self.assertEqual({p.name for p in root.iterdir()}, {"task-questions.json", "report.json"})
+                self.assertEqual((root/"task-questions.json").stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads((root/"report.json").read_text()), result)
+                self.assertEqual((result["mode"],result["updates_completed"]), ("plan_tasks",0))
+                self.assertTrue(result["goal_only_planning"] and result["model_weights_loaded"] and result["base_weights_unchanged"])
+                self.assertFalse(result["generation_limit_reached"] or result["model_answer_correctness_proven"])
+                self.assertEqual(result["base_before"], result["base_after"])
+                for field in ("outputs","baseline_evaluation","input_adapter","adapter_after"):
+                    self.assertNotIn(field,result)
+
     def test_derived_v3_is_inference_only_and_preserves_exact_generated_pieces(self):
         value = derived_dataset("é")
         before = json.dumps(value).encode()
