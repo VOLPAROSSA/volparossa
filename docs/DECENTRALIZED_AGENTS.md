@@ -16,20 +16,48 @@ training, task-dispatch or decision authority is part of the target.
 
 The requested positive principles are **Humilitas, Humanitas, Mansuetudo, Diligentia,
 Liberalitas, Temperantia and Castitas**. The negative principles are **Superbia, Invidia,
-Ira, Acedia, Avaritia, Gula and Luxuria**. The user clarified their two distinct applications:
-**concrete allowed/prohibited content rules** for the whitelist/blacklist, and **general
-behavioral principles** for agents and their training. The user supplied the concrete examples
-below on 2026-09-14. Jurisdiction, category boundaries and conflict rules still need specification;
+Ira, Acedia, Avaritia, Gula and Luxuria**. These are the primary basis for agents' reasoning in
+both applications: **concrete allowed/prohibited content decisions** for the whitelist/blacklist,
+and **behavior and training** of agents themselves. The examples supplied on 2026-09-14 illustrate
+intended applications; they are not an independent rulebook or the source of that reasoning.
+Jurisdiction, assessment boundaries and conflict rules still need specification;
 no numerical virtue score or automatic "good person/bad person" classification is implied.
 Describing or critically discussing a vice is distinct from facilitating harmful conduct;
 naming a principle is not yet a reproducible classifier or an implemented policy rule.
 
+### Principles guide rules, not the other way around
+
+The user clarified on 2026-09-21 that these Latin concepts were chosen as a higher-level ethical
+framework, not as decorative labels for an exhaustive list of literal prohibitions. Enumerating
+thousands of rules can leave gaps; literal compliance can also undermine the reason a rule
+exists. The intended agent reasoning must consider purpose, context and consequences in new
+situations, rather than treating an unlisted case or a verbal loophole as sufficient permission.
+
+This applies both to agent behavior/training and to automatic whitelist/blacklist maintenance.
+The required direction is **principles -> contextual reasoning -> decisions**. Concrete content
+decisions are applications and recorded outcomes of the principles, not their complete definition.
+Examples may illustrate and test the intended reasoning; matching a listed example is not the
+decision procedure, and adding more examples is not a substitute for applying the framework to
+unforeseen situations. Independent assessments should explain the relevant principles, the
+observed evidence, competing interpretations and why a proposed decision serves their purpose;
+mutual checking must test that reasoning, not merely count matching labels. Uncertainty and
+conflicting interpretations remain explicit inputs to automatic reconsideration.
+
+The framework does not grant agents permission to waive agreed legal or privacy constraints,
+invent personal moral scores or silently replace the governing principles with their own. Nor does
+an abstract vocabulary itself prevent deception, bias or conflicting judgments. Consistent
+interpretation, evidence-bound decisions and correction remain implementation requirements;
+this clarification changes the design description, not the active destination whitelist or the
+completion status of the automatic governance system.
+
 ## Agreed content-policy examples
 
-The intended distinctions are concrete, not a blanket ban on every activity described as a
-vice. These are requirements for the future automatic engine, not new active destination rules.
+These historical examples preserve the user's intended outcomes and distinctions. They illustrate
+reasoning from the seven virtues/vices; they are not foundational rules, an exhaustive taxonomy
+or a template that substitutes example-matching for assessment. They do not activate destination
+rules. The legal and privacy constraints remain independently applicable.
 
-| Treatment | User examples | Required distinction |
+| Illustrative assessment | User examples | Distinction to explain from the principles |
 | --- | --- | --- |
 | Prohibited | Illegal content/conduct, unauthorized piracy, scams/fraud and child sexual abuse material (CSAM) | Refuse the prohibited material and tasks facilitating that conduct. Lawful reporting, prevention, victim support, legal education and critical discussion are not the conduct itself; this does not authorize distributing illegal source material as "research". |
 | Requires contextual assessment; no blanket verdict agreed yet | Lawful adult pornography, gambling, harmful compulsive/low-value social-media use and radicalizing forums/chat groups | Distinguish legal consensual adult material from exploitation; licensed lawful activity from prohibited activity; ordinary discussion from incitement, threats or recruitment to violence. A platform name, unpopular opinion or political/religious identity is not enough evidence. |
@@ -39,8 +67,8 @@ An assessment must distinguish the **content or requested action** from a **patt
 A short video is not inherently evidence of harmful compulsive use. Personalized wellbeing
 suggestions require an explicit local feature; they must not introduce default browsing-history
 retention, cross-node behavior dossiers or a model inferring moral worth from private activity.
-Agent principles guide honesty, restraint, diligence and non-exploitation while following these
-content boundaries; they do not grant authority to punish disagreement.
+Agents should derive and explain these distinctions from the principles, rather than using the
+examples as their foundation; the principles do not grant authority to punish disagreement.
 
 "Outside the law" needs an applicable, versioned legal basis, not whichever country's law a
 peer happens to assert. EU and national laws can differ, as the
@@ -982,9 +1010,16 @@ typed scopes; allowing a domain is not approval of every page it serves. Relays 
 not gain general HTTPS plaintext access for this extension. No interception CA or browsing
 catalogue is introduced.
 
-The proposed automatic pipeline is:
+The proposed automatic pipeline begins with reasoning from the seven virtues/vices, not from
+the example categories above:
 
-`scoped proposal -> independent evaluations -> conflict resolution -> signed decision -> activation`
+`subject and context -> principle-based assessment -> independent evaluations -> conflict resolution -> signed decision -> activation`
+
+Prior decisions can supply relevant context, but neither a matching example nor an existing list
+entry replaces assessment against the framework when a decision is made or reconsidered.
+Mutual evaluation checks that connection to the principles and evidence, not just consistency
+with memorized examples. The whitelist and blacklist retain scoped outcomes for enforcement;
+they do not become a separate source of values or an immutable substitute for reasoning.
 
 Each decision binds the exact subject/version, principle-policy version, evidence scope,
 assessment/model versions, validity and authorized decision epoch. Conflicting assessments
