@@ -45,6 +45,19 @@ unchanged host state pass, but the private-cleanup record is missing. The helper
 the exact runner layout, retaining all original KVM/root/ownership checks. Three valid path
 shapes and 33 negative path/pressure/isolation/restoration controls pass without executing
 mounts or namespaces; the corrected scenario still needs a fresh live run.
+Its [run on `066f46de`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35644724074)
+passes that work-directory guard but rejects a CPU-covering mount with shared propagation,
+before creating the pressure source, plan or bind mount. Review of 119 unchanged original
+files verifies both original workers, overlap and B's startup acknowledgement, plus process,
+private-state and network cleanup and unchanged host state. It does not identify which broker
+or mount failed, and does not prove cooperative Pause or C-before-B under the original lease.
+The fixture now retains a bounded, root-private isolation record before that unchanged guard:
+guest and original broker identities, mount namespaces, CPU file identities and exact relevant
+mountinfo lines, including propagation fields and the first shared-mount rejection. The guard
+uses those same observed bytes; diagnostics do not permit a previously forbidden mount.
+Existing failure export retains this record even without a pressure plan. Pure parser, record,
+size-limit and rejection checks pass alongside the existing helper controls; live diagnosis and
+the required dependency-ready proof remain pending.
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated

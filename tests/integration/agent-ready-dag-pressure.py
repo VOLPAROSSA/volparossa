@@ -72,7 +72,8 @@ def pressure_text(raw):
     return (text[:start] + "100.00" + text[end:]).encode("ascii")
 
 
-def covering_mounts(raw):
+def mount_records(raw):
+    """Parse relevant original lines without treating an observation as permission."""
     require(len(raw) <= 1048576, "mountinfo bound")
     entries = []
     for line in raw.decode("ascii").splitlines():
@@ -81,23 +82,65 @@ def covering_mounts(raw):
         require(len(parts) >= 6 and len(trailing) >= 3, "invalid mountinfo")
         target = parts[4]
         if target == "/" or TARGET == target or TARGET.startswith(target.rstrip("/") + "/"):
-            require(not any(flag.startswith("shared:") for flag in parts[6:]),
-                "CPU covering mount could propagate to another namespace")
             entries.append(dict(id=int(parts[0]), parent=int(parts[1]), root=parts[3],
-                target=target, options=parts[5], propagation=parts[6:], filesystem=trailing[0]))
+                target=target, options=parts[5], propagation=parts[6:], filesystem=trailing[0],
+                line=line))
+    return entries
+
+
+def shared_mount(entries):
+    return next((item for item in entries
+        if any(flag.startswith("shared:") for flag in item["propagation"])), None)
+
+
+def checked_mounts(records):
+    require(shared_mount(records) is None,
+        "CPU covering mount could propagate to another namespace")
+    entries = [{key: value for key, value in item.items() if key != "line"} for item in records]
     require(entries and any(item["target"] == "/proc" and item["filesystem"] == "proc" for item in entries),
         "missing private proc mount")
     return entries
 
 
-def view(member):
+def covering_mounts(raw):
+    return checked_mounts(mount_records(raw))
+
+
+def mount_observation(member):
     require(live(member), "broker identity changed")
     pid = member["pid"]
+    with Path(f"/proc/{pid}/mountinfo").open("rb") as source:
+        raw = source.read(1048577)
     result = dict(process=member, namespace=namespace(pid),
         cpu_inode=inode(f"/proc/{pid}/root{TARGET}"),
-        mounts=covering_mounts(Path(f"/proc/{pid}/mountinfo").read_bytes()))
+        mounts=mount_records(raw))
     require(live(member), "broker changed during mount observation")
     return result
+
+
+def checked_view(observation):
+    result = dict(observation, mounts=checked_mounts(observation["mounts"]))
+    require(live(observation["process"]), "broker changed during mount observation")
+    return result
+
+
+def view(member):
+    return checked_view(mount_observation(member))
+
+
+def isolation_record(guest, brokers, slow):
+    # Describe the exact predicate's first rejection, then persist before executing
+    # it. All views use these same observed bytes, never a later replacement read.
+    rejected = None
+    for name, observation in brokers.items():
+        entry = shared_mount(observation["mounts"])
+        if entry is not None:
+            rejected = dict(phase="covering_mounts", code="SHARED_CPU_COVERING_MOUNT",
+                broker=name, process=observation["process"], mount=entry)
+            break
+    return dict(version=1, phase="before_covering_mount_guard", target=TARGET, slow=slow,
+        guest=guest, brokers=brokers, broker_check_order=list(brokers),
+        shared_guard_rejection=rejected, pressure_source_created=False, bind_mount_started=False)
 
 
 def check_isolation(guest, brokers, slow):
@@ -109,9 +152,14 @@ def check_isolation(guest, brokers, slow):
         "CPU pressure already has a dedicated mount")
 
 
-def save(path, value):
+def record_bytes(value):
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     require(len(raw) <= 65536, "pressure record bound")
+    return raw
+
+
+def save(path, value):
+    raw = record_bytes(value)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(raw); stream.flush(); os.fsync(stream.fileno())
@@ -169,7 +217,11 @@ def install(work, brokers, slow):
         if pid:
             actual[name] = identity(pid)
     require(actual == brokers, "the recorded cohort does not cover every disposable peer broker")
-    observed = {name: view(member) for name, member in brokers.items()}
+    guest_observation = mount_observation(identity(1))
+    observations = {name: mount_observation(member) for name, member in brokers.items()}
+    save(work / "agent-ready-dag-pressure-isolation.json",
+        isolation_record(guest_observation, observations, slow))
+    observed = {name: checked_view(observation) for name, observation in observations.items()}
     check_isolation(guest, observed, slow)
     directory = work / "agent-ready-dag-pressure"
     directory.mkdir(mode=0o700)
@@ -302,6 +354,41 @@ def validate(pressure, held, restored):
         "kernel CPU pressure was not exactly restored after C")
 
 
+def isolation_self_test(mounts):
+    records = mount_records(mounts + b"3 1 0:3 / /unrelated rw shared:9 - tmpfs tmpfs rw\n")
+    assert records == mount_records(mounts)
+    assert [item["line"] for item in records] == mounts.decode("ascii").splitlines()
+    assert checked_mounts(records) == covering_mounts(mounts)
+    shared = mount_records(mounts.replace(b"master:1", b"shared:7 master:1"))
+    guest = dict(process=dict(pid=1, start_ticks=1), namespace="mnt:[1]",
+        cpu_inode=[3, 4], mounts=shared)
+    brokers = dict(relay4=dict(guest, process=dict(pid=10, start_ticks=2), namespace="mnt:[2]",
+        mounts=records), relay5=dict(guest, process=dict(pid=11, start_ticks=3), namespace="mnt:[3]"))
+    diagnostic = isolation_record(guest, brokers, "relay5")
+    assert diagnostic["broker_check_order"] == ["relay4", "relay5"]
+    assert diagnostic["shared_guard_rejection"] == dict(phase="covering_mounts",
+        code="SHARED_CPU_COVERING_MOUNT", broker="relay5", process=brokers["relay5"]["process"],
+        mount=shared[1])
+    assert diagnostic["shared_guard_rejection"]["mount"]["propagation"] == ["shared:7", "master:1"]
+    assert diagnostic["pressure_source_created"] is diagnostic["bind_mount_started"] is False
+    assert json.loads(record_bytes(diagnostic)) == diagnostic
+    try: checked_mounts(shared)
+    except ValueError as error: assert str(error) == "CPU covering mount could propagate to another namespace"
+    else: raise AssertionError("recording diagnostics bypassed the shared-mount guard")
+    brokers["relay5"]["mounts"] = records
+    assert isolation_record(guest, brokers, "relay5")["shared_guard_rejection"] is None
+    for malformed in (b"invalid mountinfo\n", b" " * 1048577):
+        try: mount_records(malformed)
+        except ValueError: pass
+        else: raise AssertionError("unbounded or malformed mountinfo recorded")
+    oversized = copy.deepcopy(diagnostic)
+    oversized["guest"]["mounts"][0]["line"] = "x" * 65536
+    try: record_bytes(oversized)
+    except ValueError as error: assert str(error) == "pressure record bound"
+    else: raise AssertionError("oversized isolation diagnostic accepted")
+    print("ready-DAG isolation diagnostic parser/identity/record bounds and unchanged rejection PASS; no proc or mount execution")
+
+
 def self_test():
     run_id = "0123456789abcdef" * 2
     for suffix in ("abc123", "ABCdef", "09azAZ"):
@@ -320,6 +407,7 @@ def self_test():
     assert pressure_text(raw) == raw.replace(b"avg10=6.21", b"avg10=100.00")
     mounts = b"1 0 0:1 / / rw - ext4 /dev/x rw\n2 1 0:2 / /proc rw master:1 - proc proc rw\n"
     assert len(covering_mounts(mounts)) == 2
+    isolation_self_test(mounts)
     for invalid in (raw.replace(b"6.21", b"100.01"), raw.replace(b"some", b"unknown"), b"", raw + raw):
         try: pressure_text(invalid)
         except ValueError: pass
