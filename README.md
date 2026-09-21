@@ -214,6 +214,7 @@ provenance through the existing peer-execution and synthesis pipeline. The local
 passes. The first native-network-source run verified cache reuse and protected retrieval,
 but stalled when both executors filled their retained-job history. After a targeted fix, the
 next run stopped on an unconfirmed peer submission; this combined workflow is not yet verified.
+A diagnostic run then failed earlier, while resolving the first cache provider's address.
 Source ranges are not proof that generated statements are true.
 [Compare several public sources →](docs/DECENTRALIZED_AGENTS.md#working-with-several-public-sources)
 
