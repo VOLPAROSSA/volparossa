@@ -17,6 +17,17 @@ all-target CLI/agent/local-control Clippy pass; the actual trained-model/protect
 disposable VM proof. This is not a B03/B05 completion or evidence of general model improvement.
 See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
 
+The [first learning-to-serving run on
+`98ce45bf`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35636907319) fails before
+base-model inference or training. Its 115 unchanged original files show
+`accepting_work=false`, followed by an immediate `compute_peer_busy` refusal before any job
+handle or Submit RPC. The exact capacity constraint is not recorded. The fixture also parses
+the runner's cleanup flag as `yes` instead of `true`; its original report therefore remains
+failed despite independently recorded zero remaining objects and identical host-state hashes.
+The correction waits within a fixed bound for the actual expected broker/model to admit work
+and parses the runner's boolean without relaxing capacity, ownership or cleanup checks.
+Training, activation and adapted peer inference still require a successful new execution.
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same

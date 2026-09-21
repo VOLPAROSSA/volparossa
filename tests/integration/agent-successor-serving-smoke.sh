@@ -9,8 +9,40 @@ agent_successor_serving_private() {
         -- python3 -B "$WORK/bin/agent-successor-serving-smoke.py" "$@"
 }
 
+agent_successor_serving_wait_ready() {
+    case $successor_label in base) successor_caps=base-caps ;; adapted) successor_caps=active-caps ;; invalid) successor_caps=invalid-caps ;; *) return 1 ;; esac
+    # Readiness is only a hint, never a reserved slot. One fixed monotonic bound
+    # covers all probes; no job exists yet and no accepted lease is retried.
+    successor_deadline=$(python3 -c 'import time; print(time.monotonic() + 120)') || return 1
+    while :; do
+        successor_client=$(timeout --kill-after=1s 2s systemctl show --property=MainPID --value volparossa-alpha-agent@client.service) || return 1
+        case $successor_client in ''|0|*[!0-9]*) return 1 ;; esac
+        successor_remaining=$(python3 -c 'import sys,time; print(min(10.0, max(0.0, float(sys.argv[1]) - time.monotonic())))' "$successor_deadline") || return 1
+        [ "$successor_remaining" != 0.0 ] || fail SUCCESSOR_READINESS_DEADLINE
+        # Same protected client namespace and unprivileged CLI as agent_jobs_cli,
+        # with each probe capped at 10s and by the remaining 120s readiness budget.
+        timeout --signal=INT --kill-after=2s "${successor_remaining}s" nsenter --target "$successor_client" --mount --net \
+            setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+            --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+            -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+            compute peer capabilities --provider-key "$jobs_key_a" \
+            >"$WORK/agent-successor-serving-$successor_caps.json" \
+            2>"$WORK/agent-successor-serving-$successor_caps.err" || fail SUCCESSOR_CAPABILITIES_UNCONFIRMED
+        successor_ready=$(python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" ready \
+            "$WORK" "$successor_label") || fail SUCCESSOR_CAPABILITIES_INVALID
+        python3 -c 'import sys,time; sys.exit(0 if time.monotonic() < float(sys.argv[1]) else 1)' \
+            "$successor_deadline" || fail SUCCESSOR_READINESS_DEADLINE
+        if [ "$successor_ready" = true ]; then return 0; fi
+        [ "$successor_ready" = false ] || fail SUCCESSOR_CAPABILITIES_INVALID
+        sleep 0.5
+    done
+}
+
 agent_successor_serving_job() {
     successor_label=$1
+    agent_successor_serving_wait_ready || fail SUCCESSOR_READINESS_FAILED
+    # Submit stays concurrent with the observer, so observing a fast real worker
+    # never depends on waiting for the submit command to return first.
     agent_jobs_cli client compute peer submit --provider-key "$jobs_key_a" \
         --dataset "$jobs_source/dataset.json" --dataset-manifest "$jobs_source/manifest.pb" \
         --publisher-key "$jobs_publisher" --row 0 --max-seconds 600 \
@@ -41,8 +73,6 @@ agent_successor_serving_run() {
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$successor_source"
     PHASE=agent-successor-serving-base
     content_custody_phase_start fetch
-    agent_jobs_cli client compute peer capabilities --provider-key "$jobs_key_a" \
-        >"$WORK/agent-successor-serving-base-caps.json" || fail SUCCESSOR_BASE_CAPABILITIES_FAILED
     agent_successor_serving_job base
     PHASE=agent-successor-serving-public-source
     agent_successor_serving_private source "$successor_source" "$expected_commit" || fail SUCCESSOR_SOURCE_FAILED
@@ -80,24 +110,14 @@ agent_successor_serving_run() {
     python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" capture-loop "$WORK" \
         || fail SUCCESSOR_APPROVED_SELECTION_MISSING
     PHASE=agent-successor-serving-activation
-    successor_attempt=0
-    while [ "$successor_attempt" -lt 60 ]; do
-        agent_jobs_cli client compute peer capabilities --provider-key "$jobs_key_a" \
-            >"$WORK/agent-successor-serving-active-caps.json" \
-            2>"$WORK/agent-successor-serving-active-caps.err" || fail SUCCESSOR_CAPABILITIES_UNCONFIRMED
-        if python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" active "$WORK"; then break; fi
-        sleep 0.5
-        successor_attempt=$((successor_attempt + 1))
-    done
-    [ "$successor_attempt" -lt 60 ] || fail SUCCESSOR_NOT_ACTIVATED
     agent_successor_serving_job adapted
     agent_jobs_cli client compute peer poll --handle "$jobs_source/successor-base.json" \
         >"$WORK/agent-successor-serving-base-retained.json" || fail SUCCESSOR_OLD_RECEIPT_UNAVAILABLE
     PHASE=agent-successor-serving-invalid-selection
     python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" invalidate "$WORK" || fail SUCCESSOR_INVALID_CONTROL_FAILED
     sleep 2.1
-    agent_jobs_cli client compute peer capabilities --provider-key "$jobs_key_a" \
-        >"$WORK/agent-successor-serving-invalid-caps.json" || fail SUCCESSOR_INVALID_CAPABILITIES_FAILED
+    successor_label=invalid
+    agent_successor_serving_wait_ready || fail SUCCESSOR_INVALID_CAPABILITIES_FAILED
     python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" capture "$WORK" \
         || fail SUCCESSOR_TRANSITION_INVALID
     content_custody_phase_finish 4

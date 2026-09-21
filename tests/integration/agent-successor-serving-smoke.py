@@ -217,11 +217,41 @@ def capture_loop(work):
     write(record(work, "loop"), value)
 
 
-def active(work):
-    caps = read(record(work, "active-caps"))
-    current = read(record(work, "loop"))["current"]
-    require(caps.get("successor_activation_v1") is True and caps["accepting_work"] is True
-            and caps["model"]["adapter_files"] == current["adapter_files"], "approved model not active yet")
+def capability_ready(caps, adapter, allow_pending_base=False):
+    expected = dict(model_id="HuggingFaceTB/SmolLM2-135M-Instruct", model_revision=TRAIN["MODEL_REVISION"],
+                    base_weights=dict(bytes=269060552, sha256=TRAIN["WEIGHT_HASH"]), adapter_files=adapter)
+    base = dict(expected, adapter_files=None)
+    require(type(caps["accepting_work"]) is bool and caps.get("successor_activation_v1") is True
+            and caps["public_inference_only"] is True and caps["runtime_slots"] == 1
+            and caps["max_threads"] == 2 and caps["max_dataset_bytes"] == 1048576 and caps["max_rows"] == 4
+            and type(caps["max_job_seconds"]) is int and 1 <= caps["max_job_seconds"] <= 600
+            and all(caps.get(name) is True for name in ("task_derivation_v1", "document_inference_v2", "derived_inference_v3")),
+            "unexpected successor broker capability contract")
+    # An idle broker may still expose the pinned base while waiting to activate
+    # the approved copy. A different base or unselected adapter is never ready.
+    require(caps["model"] == expected or (allow_pending_base and caps["model"] == base),
+            "capabilities selected an unexpected model")
+    selected = expected if caps["model"] == expected else base
+    ordered = dict(selected)
+    if selected["adapter_files"] is not None:
+        ordered["adapter_files"] = {name: dict(bytes=selected["adapter_files"][name]["bytes"],
+            sha256=selected["adapter_files"][name]["sha256"]) for name in sorted(selected["adapter_files"])}
+    require(caps["model_fingerprint"] == sha(json.dumps(ordered, separators=(",", ":")).encode()),
+            "readiness model fingerprint differs from exact weights")
+    return caps["accepting_work"] and caps["model"] == expected
+
+
+def ready(work, label):
+    JOBS["guest_work"](work)
+    require(label in ("base", "adapted", "invalid"), "unknown successor readiness phase")
+    name = {"base": "base-caps", "adapted": "active-caps", "invalid": "invalid-caps"}[label]
+    adapter = None if label == "base" else read(record(work, "loop"))["current"]["adapter_files"]
+    print("true" if capability_ready(read(record(work, name)), adapter, label == "adapted") else "false")
+
+
+def cleanup_flag(value):
+    require(value in ("true", "false"), "invalid runner cleanup boolean")
+    return value == "true"
 
 
 def invalidate(work):
@@ -278,7 +308,8 @@ def capture(work):
 def check_transition(value):
     before, after, invalid = (value[name] for name in ("base-caps", "active-caps", "invalid-caps"))
     current = value["loop"]["current"]
-    require(before["successor_activation_v1"] is True and before["model"]["adapter_files"] is None
+    require(before["successor_activation_v1"] is True and before["accepting_work"] is True
+            and before["model"]["adapter_files"] is None
             and after["successor_activation_v1"] is True and after["accepting_work"] is True
             and after["model"]["adapter_files"] == current["adapter_files"]
             and before["model_fingerprint"] != after["model_fingerprint"], "no actual base-to-selected model transition")
@@ -463,12 +494,42 @@ def report(value, revision):
 
 def self_test():
     # Inert contract controls only: these are never accepted as real model/VM evidence.
-    model = dict(model_id="test", model_revision="r", base_weights=dict(bytes=1, sha256="a" * 64), adapter_files=None)
+    model = dict(model_id="HuggingFaceTB/SmolLM2-135M-Instruct", model_revision=TRAIN["MODEL_REVISION"],
+                 base_weights=dict(bytes=269060552, sha256=TRAIN["WEIGHT_HASH"]), adapter_files=None)
     adapter = {name: dict(bytes=1, sha256="b" * 64) for name in FILES}
     def caps(files):
         selected = dict(model, adapter_files=files)
         return dict(model=selected, model_fingerprint=sha(json.dumps(selected, separators=(",", ":")).encode()),
-                    successor_activation_v1=True, accepting_work=True)
+                    successor_activation_v1=True, accepting_work=True, public_inference_only=True,
+                    runtime_slots=1, max_threads=2, max_job_seconds=600, max_dataset_bytes=1048576, max_rows=4,
+                    task_derivation_v1=True, document_inference_v2=True, derived_inference_v3=True)
+    assert capability_ready(caps(None), None)
+    assert not capability_ready(dict(caps(None), accepting_work=False), None)
+    assert not capability_ready(caps(None), adapter, allow_pending_base=True)
+    assert capability_ready(caps(adapter), adapter)
+    assert not capability_ready(dict(caps(adapter), accepting_work=False), adapter)
+    try:
+        capability_ready(caps(None), adapter)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid candidate caused a ready base fallback")
+    for change in (dict(successor_activation_v1=False), dict(accepting_work="true"),
+                   dict(model_fingerprint="f" * 64), dict(max_job_seconds=601),
+                   dict(model=dict(model, model_revision="wrong")), dict(model=dict(model, adapter_files=adapter))):
+        invalid = dict(caps(None), **change)
+        try:
+            capability_ready(invalid, None)
+        except ValueError:
+            continue
+        raise AssertionError("invalid ready capability accepted")
+    assert cleanup_flag("true") is True and cleanup_flag("false") is False
+    for invalid in ("yes", "no", "", "True", "1"):
+        try:
+            cleanup_flag(invalid)
+        except ValueError:
+            continue
+        raise AssertionError("invalid cleanup boolean accepted")
     selected = caps(adapter)
     fixture = {"base-caps": caps(None), "active-caps": selected, "invalid-caps": copy.deepcopy(selected),
         "loop": dict(current=dict(adapter_files=adapter, expires_unix_seconds=200)),
@@ -482,7 +543,8 @@ def self_test():
                  ("invalid-caps", "model_fingerprint", "f" * 64), ("invalid-caps", "accepting_work", False),
                  ("base-retained", "state", "running"), ("invalid-control", "original_expiry", 201),
                  ("invalid-control", "model_quality_rejection_claimed", True),
-                 ("invalid-control", "injected_unix_seconds", 200), ("active-caps", "successor_activation_v1", False))
+                 ("invalid-control", "injected_unix_seconds", 200), ("active-caps", "successor_activation_v1", False),
+                 ("base-caps", "accepting_work", False))
     for group, key, value in mutations:
         bad = copy.deepcopy(fixture)
         bad[group][key] = value
@@ -491,7 +553,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("invalid transition contract accepted")
-    print("learning-serving transition contract: positive + 8 negative controls passed; no model or network executed")
+    print("learning-serving readiness, strict cleanup booleans and transition controls passed; no model or network executed")
 
 
 def main():
@@ -502,12 +564,12 @@ def main():
     elif command == "observe-job": observe_job(Path(args[0]), args[1])
     elif command == "observe-training": observe_training(Path(args[0]), int(args[1]))
     elif command == "capture-loop": capture_loop(Path(args[0]))
-    elif command == "active": active(Path(args[0]))
+    elif command == "ready": ready(Path(args[0]), args[1])
     elif command == "invalidate": invalidate(Path(args[0]))
     elif command == "capture": capture(Path(args[0]))
     elif command == "cleanup-workers": cleanup_workers(Path(args[0]))
     elif command == "evidence": evidence(Path(args[0]), args[1])
-    elif command == "finalize": finalize(Path(args[0]), args[1], int(args[2]), args[3] == "yes", int(args[4]), args[5], args[6])
+    elif command == "finalize": finalize(Path(args[0]), args[1], int(args[2]), cleanup_flag(args[3]), int(args[4]), args[5], args[6])
     elif command == "report": report(read(Path(args[0]), 8 * 1024 * 1024), args[1])
     else: raise ValueError("unknown fixture command")
 

@@ -630,6 +630,10 @@ not add private offload, defended aggregation or network-policy authority.
 
 Focused filesystem, broker lifecycle, protocol and agent-attachment checks pass. The real
 trained-adapter transition followed by protected peer inference is not yet a verified checkpoint.
+The first disposable run stopped at base admission: the broker explicitly reported that it
+was not accepting work, but the fixture attempted submission immediately. No training or
+adapted inference ran. The fixture now waits boundedly for real readiness and corrects its
+cleanup-boolean parsing; this neither bypasses spare-capacity decisions nor changes any job lease.
 
 ## Owner-first resource allocation
 
