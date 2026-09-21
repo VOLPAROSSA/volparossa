@@ -1516,6 +1516,7 @@ mod tests {
             task_derivation_v1: true,
             document_inference_v2: false,
             derived_inference_v3: false,
+            successor_activation_v1: false,
         };
         let handles = (0..2)
             .map(|index| JobHandle {

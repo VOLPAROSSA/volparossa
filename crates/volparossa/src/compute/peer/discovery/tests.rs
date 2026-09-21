@@ -27,6 +27,7 @@ fn fixture() -> (Options, rpc::EligibilityQuery, ComputeDiscovered) {
         task_derivation_v1: true,
         document_inference_v2: true,
         derived_inference_v3: true,
+        successor_activation_v1: false,
     };
     let options = Options {
         discover_peers: true,

@@ -610,6 +610,81 @@ not averaging/merging weights, private offload, poisoning-resistant aggregation,
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
 
+### Using approved successors for new peer jobs
+
+For the supported 135M training/adapter profile, pass the same existing private `--serving-directory` to
+`compute train-loop` and `compute serve`. Both must use the **same existing runtime directory**;
+the training and inference workers retain its single-worker lock. Enabling this option does
+not start a broker, attach it to a network agent, trust another publisher or download a model.
+For example, add it to the training command above and start the broker separately:
+
+```sh
+volparossa compute serve --socket /OWNER/broker.sock \
+  --runtime-root /OWNER/existing-runtime --model-root /OWNER/existing-model \
+  --work-root /OWNER/existing-job-directory \
+  --serving-directory /OWNER/existing-serving-directory --execute
+```
+
+These illustrative directories must already be private and separate from the training-loop,
+model and cache directories. The broker's `--adapter-root` cannot be combined with this mode.
+The inference-only 360M profile rejects `--serving-directory`; its weights cannot accept 135M adapters.
+Attach its protected socket and independently selected dataset publishers through the existing
+`compute peer attach` workflow. Without `--serving-directory`, the broker's fixed-model
+behavior is unchanged; the protocol advertises successor activation only for an opted-in broker.
+
+The producer exports only the current selected **approved** local successor or approved peer
+update, after rechecking its retained evaluation and exact adapter bytes. Merely caching an
+adapter, completing a rejected training cycle or receiving a publisher's quality claim cannot
+activate it. The selection retains the original minimum dataset, catalog, validation and/or
+import expiry applicable to that selection; neither publication nor restart extends it.
+The small benchmark's approval is not a claim of general answer quality or poison resistance.
+
+An idle executor with spare capacity makes its own checked copy of the three fixed adapter
+files before advertising the new model fingerprint. The producer retains at most two publication
+copies; its pruning cannot erase weights used by an active inference. Active jobs finish with
+their original model, source, requester and lease. New jobs must name the currently advertised
+model and end no later than its approval expiry; historical polling/cancellation keeps the
+complete original binding. Old receipts are not relabelled as output from the new model.
+Already enrolled workflows also retain their original model requirement: changing a broker
+does not silently migrate their remaining rows to a different model. Such work still needs a
+compatible executor; this option is not cross-model workflow migration.
+
+Before any successor exists, a successfully checked empty directory permits the pinned base
+model. An expired or invalid selection does not silently restore the base model, including on
+broker restart. A bad new selection cannot overwrite an already copied valid one; its original
+expiry still stops new work. The broker's existing storage budget includes its adapter copies
+and retained job reservations. This connects local selection to new public peer jobs; it does
+not add private offload, defended aggregation or network-policy authority.
+
+Focused filesystem, broker lifecycle, protocol and agent-attachment checks pass. The real
+trained-adapter transition followed by protected peer inference now passes the corrected run below.
+The first disposable run stopped at base admission: the broker explicitly reported that it
+was not accepting work, but the fixture attempted submission immediately. No training or
+adapted inference ran. The fixture now waits boundedly for real readiness and corrects its
+cleanup-boolean parsing; this neither bypasses spare-capacity decisions nor changes any job lease.
+The second run completes actual base-model peer inference and the public-source fetch, but its
+training-loop cycle fails before worker observation; the retained output omits the specific
+cycle error. Inspection finds that the fixture's relay-only learner cannot use the ordinary
+named-content API, even with its complete pre-provisioned cache. The corrected fixture starts
+that learner with client and relay roles, checks its own cache-only retrieval and then uses the
+same training-loop/approval/serving path. Product access checks stay unchanged. This remains
+explicit public fixture provisioning, not autonomous source discovery; that failed run proves no transition.
+That role-corrected run reaches preflight but rejects the copied cache's inode-bound ownership
+marker before any training begins. The next fixture uses the store's supported same-owner,
+same-filesystem directory relocation instead, preserving the exact marker, cache bytes and
+directory identity. Cache-only admission must then verify the original source and expiry;
+no ownership-marker repair or product-validation bypass is used.
+
+The [corrected `4718cb1c` run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35645297213)
+passes, including reconstruction of all 151 original files. Eight actual optimizer updates
+produce the exact adapter parameters applied to a subsequent job by the same broker, through
+its independent retained copy. Original base-model receipts remain unchanged. Local approval
+uses only four held-out target tokens and does not establish general model quality. The
+learner reads the explicitly provisioned cache locally; a separate client demonstrates protected
+source retrieval. Invalid new selection metadata is refused, both protected relay legs and
+cleanup pass, and the development milestone is merged through PR #146. Restart/expiry practice,
+global adoption and full B05 are still open.
+
 ## Owner-first resource allocation
 
 Training and opportunistic model redistribution use only the node's available contribution

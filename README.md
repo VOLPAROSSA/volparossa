@@ -206,6 +206,14 @@ trained a successor and published that successor for reuse. Public document frag
 been combined into one answer through four real peer-inference levels. These scoped results
 prove execution, not answer quality, general intelligence or universally better updates.
 
+**Learning into live service** now has a real disposable-network proof: an explicitly enabled training loop
+can publish its approved selection to a running peer executor. The executor changes models
+between jobs; existing jobs and receipts keep their original identity, and approval expiry is
+not renewed. The same executor served a base-model job, then a new protected peer job with the
+exact locally trained and approved adapter. This proves the 135M execution chain, not general
+answer quality or automatic network-wide adoption.
+[Use approved successors for new peer jobs →](docs/DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs)
+
 Public work now has verified cross-package peer scheduling: a free worker can take work from
 another signed package while a slower worker continues. **Source collections** now
 add comparisons across explicitly public local documents and selected signed network publications,

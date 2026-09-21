@@ -23,7 +23,7 @@ usage() {
         'usage: tests/integration/run-alpha-topology-vm.sh --preview' \
         '       tests/integration/run-alpha-topology-vm.sh --execute --yes' \
         '         --image PATH --mpquic PATH --package PATH --output DIRECTORY' \
-        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning]' \
+        '         --expected-commit SHA [--scenario alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|agent-successor-serving]' \
         '       --package is required only for alpha; --mpquic is unnecessary for wifi-mesh, agent-training, agent-owner-priority and agent-owner-cancel.'
 }
 
@@ -63,6 +63,13 @@ print_plan() {
             '  join the generated leaves under the exact original owner question;' \
             '  retain original planner/worker receipts across completed offline resume and cleanup;' \
             '  1800s owner within 3600s driver; no manual task plan, tools, private offload or quality claim.'
+    elif [ "$scenario" = agent-successor-serving ]; then
+        printf '%s\n' \
+            'Agent-successor-serving: real local learning activates an approved adapter for new protected peer work;' \
+            '  require actual base and successor inference, independently copied immutable weights and exact model bindings;' \
+            '  retain the original completed job receipt across idle-only activation and preserve original expiry;' \
+            '  isolated guest execution, privacy captures and full private/network cleanup;' \
+            '  3600s driver bound; no model-quality, global-trust or full-alpha claim.'
     elif [ "$scenario" = agent-task-graph ]; then
         printf '%s\n' \
             'Agent-task-graph: distinct public instructions share one signed original source;' \
@@ -283,7 +290,7 @@ while [ "$#" -gt 0 ]; do
         --scenario)
             [ "$#" -ge 2 ] || { usage >&2; exit 64; }
             scenario=$2
-            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning) ;; *) usage >&2; exit 64 ;; esac
+            case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|agent-successor-serving) ;; *) usage >&2; exit 64 ;; esac
             shift
             ;;
         --image)
@@ -554,6 +561,7 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "agent-public-collection-smoke.json", "agent-public-collection-evidence.json",
               "agent-task-graph-smoke.json", "agent-task-graph-evidence.json",
               "agent-model-planning-smoke.json", "agent-model-planning-evidence.json",
+              "agent-successor-serving-smoke.json", "agent-successor-serving-evidence.json",
               "agent-public-document-first.json", "agent-public-document-first.err",
               "agent-public-document-result.json", "agent-public-document-result.err",
               "agent-public-document-resume.json", "agent-public-document-resume.err",
@@ -648,7 +656,7 @@ def collect(home, opt, revision, scenario, guest_status,
     entries = []
     seen_sources = set()
     total = 0
-    file_count_limit = 128 if scenario in ("agent-task-graph", "agent-model-planning") else FILE_COUNT_LIMIT
+    file_count_limit = 128 if scenario in ("agent-task-graph", "agent-model-planning", "agent-successor-serving") else FILE_COUNT_LIMIT
     candidates = [(home / name, f"driver/{name}") for name in
                   ("guest-phase.txt", "cargo-build.log", "egress-netns-test.log",
                    "package-lifecycle.stdout", "package-lifecycle.stderr")]
@@ -685,6 +693,9 @@ def collect(home, opt, revision, scenario, guest_status,
         if scenario == "agent-model-planning":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-model-planning-*"))[:128]
                               if re.fullmatch(r"agent-model-planning-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
+        if scenario == "agent-successor-serving":
+            candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-successor-serving-*"))[:128]
+                              if re.fullmatch(r"agent-successor-serving-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("wifi-link-*"))[:64]
                           if re.fullmatch(r"wifi-link-[a-z0-9-]+\.(json|txt|log)", path.name))
         candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("download-sharing-*"))[:64]
@@ -744,7 +755,7 @@ if __name__ == "__main__":
     if len(sys.argv) != 4 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sys.argv[1]):
         raise SystemExit(64)
     if sys.argv[2] not in ("alpha", "datapath", "reciprocity", "local-link", "mixed-link", "mpquic-growth", "mptcp-growth",
-                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-model-planning"):
+                           "sharing", "download-sharing", "wifi-mesh", "wifi-link", "uplink-link", "crash-recovery", "content", "content-message", "content-https", "content-provider", "content-custody", "content-repair", "content-replication", "content-mailbox", "dns-cache", "agent-training", "agent-owner-priority", "agent-owner-cancel", "agent-artifact", "agent-train-cycle", "agent-train-loop", "agent-artifact-quarantine", "agent-jobs", "agent-jobs-loss", "agent-jobs-follow", "agent-jobs-peer-recovery", "agent-jobs-ready-queue", "agent-jobs-package-queue", "agent-public-task", "agent-public-document", "agent-public-collection", "agent-public-network-sources", "agent-task-graph", "agent-model-planning", "agent-successor-serving"):
         raise SystemExit(64)
     status_code = int(sys.argv[3])
     if not 0 <= status_code <= 255 or socket.gethostname() != "volparossa-alpha" or os.geteuid() != 0:
@@ -771,7 +782,7 @@ source_sha256=$2
 mpquic_sha256=$3
 package_sha256=$4
 scenario=$5
-case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning) ;; *) exit 64 ;; esac
+case $scenario in alpha|datapath|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-mesh|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|agent-successor-serving) ;; *) exit 64 ;; esac
 cd /home/vpci
 guest_phase() { printf '%s\n' "$1" >/home/vpci/guest-phase.txt; }
 guest_phase verify-source
@@ -810,13 +821,13 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install \
     --yes --no-install-recommends \
     build-essential ca-certificates cargo cmake dbus git iproute2 iputils-ping jq \
     nftables pkg-config python3 rustc sudo util-linux wireguard-tools
-if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-model-planning ]; then
+if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-train-cycle ] || [ "$scenario" = agent-train-loop ] || [ "$scenario" = agent-artifact-quarantine ] || [ "$scenario" = agent-jobs ] || [ "$scenario" = agent-jobs-loss ] || [ "$scenario" = agent-jobs-follow ] || [ "$scenario" = agent-jobs-peer-recovery ] || [ "$scenario" = agent-jobs-ready-queue ] || [ "$scenario" = agent-jobs-package-queue ] || [ "$scenario" = agent-public-task ] || [ "$scenario" = agent-public-document ] || [ "$scenario" = agent-public-collection ] || [ "$scenario" = agent-public-network-sources ] || [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-model-planning ] || [ "$scenario" = agent-successor-serving ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-venv bubblewrap
 fi
 if [ "$scenario" = agent-public-network-sources ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
-if [ "$scenario" = agent-task-graph ]; then
+if [ "$scenario" = agent-task-graph ] || [ "$scenario" = agent-successor-serving ]; then
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends openssl
 fi
 if [ "$scenario" = agent-model-planning ]; then
@@ -906,7 +917,7 @@ printf '%s\n' "$package_status" >/home/vpci/alpha-output/package/guest-exit-stat
 fi
 
 topology_scenario=alpha
-case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning) topology_scenario=$scenario ;; esac
+case $scenario in reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-custody|content-repair|content-replication|content-mailbox|dns-cache|agent-training|agent-owner-priority|agent-owner-cancel|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-jobs-ready-queue|agent-jobs-package-queue|agent-public-task|agent-public-document|agent-public-collection|agent-public-network-sources|agent-task-graph|agent-model-planning|agent-successor-serving) topology_scenario=$scenario ;; esac
 guest_phase topology
 set +e
 sudo -n -- ./tests/integration/kvm-alpha-topology.sh \
@@ -1046,6 +1057,7 @@ driver_time_bound=2400s
 [ "$scenario" != agent-public-network-sources ] || driver_time_bound=3600s
 [ "$scenario" != agent-task-graph ] || driver_time_bound=3600s
 [ "$scenario" != agent-model-planning ] || driver_time_bound=3600s
+[ "$scenario" != agent-successor-serving ] || driver_time_bound=3600s
 ssh_bounded "$driver_time_bound" /home/vpci/guest-driver.sh "$expected_commit" "$SOURCE_SHA256" \
     "$MPQUIC_SHA256" "$PACKAGE_SHA256" "$scenario"
 GUEST_STATUS=$?

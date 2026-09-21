@@ -199,6 +199,10 @@ pub struct Capabilities {
     /// This is not an attestation of the parent workers or permission to train on their answers.
     #[serde(default, skip_serializing_if = "is_false")]
     pub derived_inference_v3: bool,
+    /// This owner broker may activate validated local successors for new jobs.
+    /// Existing job bindings stay immutable and pollable through the same broker.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub successor_activation_v1: bool,
 }
 
 /// A content-free suitability query, not publisher authority or a capacity reservation.
@@ -646,10 +650,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn eligibility_matches_only_current_capacity_and_requested_profiles() {
-        let mut query = eligibility_query();
-        let mut caps = Capabilities {
+    fn capabilities() -> Capabilities {
+        Capabilities {
             model: ModelIdentity {
                 model_id: "fixture".into(),
                 model_revision: "pinned".into(),
@@ -670,7 +672,40 @@ mod tests {
             task_derivation_v1: false,
             document_inference_v2: false,
             derived_inference_v3: false,
-        };
+            successor_activation_v1: false,
+        }
+    }
+
+    #[test]
+    fn successor_activation_is_opt_in_and_legacy_capability_bytes_omit_it() {
+        let caps = capabilities();
+        let legacy = serde_json::to_string(&caps).unwrap();
+        assert!(!legacy.contains("successor_activation_v1"));
+        let decoded: Capabilities = serde_json::from_str(&legacy).unwrap();
+        assert!(!decoded.successor_activation_v1);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+        let mut enabled = caps;
+        enabled.successor_activation_v1 = true;
+        let encoded = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(encoded["successor_activation_v1"], true);
+        assert_eq!(
+            serde_json::from_value::<Capabilities>(encoded.clone()).unwrap(),
+            enabled
+        );
+        let mut invalid = encoded.clone();
+        invalid["successor_activation_v1"] = "true".into();
+        assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
+        for forbidden in ["model_path", "command", "url"] {
+            let mut invalid = encoded.clone();
+            invalid[forbidden] = "not authorized".into();
+            assert!(serde_json::from_value::<Capabilities>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn eligibility_matches_only_current_capacity_and_requested_profiles() {
+        let mut query = eligibility_query();
+        let mut caps = capabilities();
         assert!(query.matches(&caps));
         query.require_task_derivation_v1 = true;
         assert!(!query.matches(&caps));

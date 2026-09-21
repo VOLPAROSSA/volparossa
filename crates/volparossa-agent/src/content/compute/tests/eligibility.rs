@@ -2,16 +2,16 @@
 
 use super::*;
 
-struct Fixture {
-    _root: tempfile::TempDir,
-    listener: UnixListener,
-    service: Arc<Mutex<Option<Service>>>,
-    backend: Arc<Attachment>,
-    request: Request,
-    requester: SigningKey,
+pub(super) struct Fixture {
+    pub(super) root: tempfile::TempDir,
+    pub(super) listener: UnixListener,
+    pub(super) service: Arc<Mutex<Option<Service>>>,
+    pub(super) backend: Arc<Attachment>,
+    pub(super) request: Request,
+    pub(super) requester: SigningKey,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.path().join("broker.sock");
@@ -55,7 +55,7 @@ fn fixture() -> Fixture {
         }),
     };
     Fixture {
-        _root: root,
+        root,
         listener,
         service,
         backend,
@@ -97,7 +97,7 @@ async fn serve_capability_hints(
 #[tokio::test]
 async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment() {
     let Fixture {
-        _root,
+        root: _root,
         listener,
         service,
         backend,
@@ -188,7 +188,7 @@ async fn eligibility_checks_all_publishers_profiles_capacity_and_live_attachment
 #[tokio::test]
 async fn eligibility_rejects_malformed_query_and_foreign_requester_before_broker_io() {
     let Fixture {
-        _root,
+        root: _root,
         listener: _listener,
         service,
         backend,

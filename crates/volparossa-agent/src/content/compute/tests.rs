@@ -2,6 +2,7 @@
 
 mod derived;
 mod eligibility;
+mod successor;
 
 use super::*;
 use ed25519_dalek::SigningKey;
@@ -41,6 +42,7 @@ fn capabilities() -> Capabilities {
         task_derivation_v1: true,
         document_inference_v2: false,
         derived_inference_v3: false,
+        successor_activation_v1: false,
     }
 }
 
@@ -101,6 +103,29 @@ fn capability_profiles_bind_exact_base_identity_rows_and_adapter_compatibility()
     larger.model.adapter_files = old.model.adapter_files;
     bind(&mut larger);
     assert!(validate_capabilities(&larger).is_err());
+}
+
+#[test]
+fn successor_activation_cannot_authorize_a_different_base_profile() {
+    let mut caps = capabilities();
+    caps.successor_activation_v1 = true;
+    validate_capabilities(&caps).unwrap();
+    let spec = ModelProfile::Smol360.spec();
+    caps.model.model_id = spec.model_id.into();
+    caps.model.model_revision = spec.revision.into();
+    caps.model.base_weights = FileIdentity {
+        bytes: spec.weights_bytes,
+        sha256: spec.weights_sha256.into(),
+    };
+    caps.max_rows = spec.max_rows;
+    caps.model_fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&caps.model).unwrap()));
+    // Even before an adapter exists, a 360M broker cannot opt into 135M successors.
+    assert!(matches!(
+        validate_capabilities(&caps),
+        Err(ComputeError::Authentication)
+    ));
+    caps.successor_activation_v1 = false;
+    validate_capabilities(&caps).unwrap();
 }
 
 fn original() -> String {
@@ -210,6 +235,7 @@ fn attachment(
         task_derivation_v1: true,
         document_inference_v2: false,
         derived_inference_v3: false,
+        successor_activation_v1: false,
         enabled: AtomicBool::new(true),
     });
     backend.registry.set(Arc::downgrade(registry)).unwrap();

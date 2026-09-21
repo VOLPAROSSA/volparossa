@@ -7,6 +7,7 @@ mod inference_output;
 mod owner_control;
 mod peer;
 mod sandbox;
+mod serving_snapshot;
 mod spare_capacity;
 mod supervise;
 mod task_plan;

@@ -71,6 +71,10 @@ agent_jobs_broker() {
     if [ "${agent_model_planning:-no}" = yes ]; then
         set -- --model-profile smollm2-360m-v1
     fi
+    if [ "${agent_successor_serving:-no}" = yes ] && [ "$jobs_node" = "$provider_node_a" ]; then
+        install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
+        set -- "$@" --serving-directory "$jobs_private/serving"
+    fi
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
@@ -165,6 +169,9 @@ agent_jobs_stop() {
         agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-successor-serving-smoke.py" cleanup-workers "$WORK" || return 1
+    fi
 }
 
 agent_jobs_cleanup() {
@@ -237,6 +244,10 @@ agent_jobs_run() {
     agent_jobs_setup
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_run
+        return
+    fi
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_run
         return
     fi
     if [ "${agent_task_graph:-no}" = yes ]; then
@@ -344,6 +355,10 @@ agent_jobs_finalize_report() {
     done
     if [ "${agent_model_planning:-no}" = yes ]; then
         agent_model_planning_finalize_report "$jobs_status"
+        return
+    fi
+    if [ "${agent_successor_serving:-no}" = yes ]; then
+        agent_successor_serving_finalize_report "$jobs_status"
         return
     fi
     if [ "${agent_task_graph:-no}" = yes ]; then
