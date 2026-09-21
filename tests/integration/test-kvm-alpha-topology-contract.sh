@@ -14,6 +14,12 @@ WORKFLOW=$HERE/../../.github/workflows/alpha-topology.yml
 RECIPROCITY=$HERE/reciprocity-smoke.sh
 RECIPROCITY_PY=$HERE/reciprocity-smoke.py
 
+# This pressure fixture requires actual nonshared mounts; PrivateMounts alone
+# intentionally keeps systemd's inbound/slave propagation. Other fixtures do not.
+grep -F 'jobs_mount_flags=shared' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F 'jobs_mount_flags=private' "$HERE/agent-jobs-smoke.sh" >/dev/null
+grep -F -- '--property="MountFlags=$jobs_mount_flags"' "$HERE/agent-jobs-smoke.sh" >/dev/null
+
 for script in "$GUEST" "$HOST"; do
     [ -f "$script" ] && [ -x "$script" ] && [ ! -L "$script" ]
     sh -n "$script"

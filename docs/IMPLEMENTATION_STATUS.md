@@ -58,6 +58,19 @@ uses those same observed bytes; diagnostics do not permit a previously forbidden
 Existing failure export retains this record even without a pressure plan. Pure parser, record,
 size-limit and rejection checks pass alongside the existing helper controls; live diagnosis and
 the required dependency-ready proof remain pending.
+The [diagnostic run on `750420e2`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35649817352)
+identifies relay4's root mount as the first rejection (`shared:1923 master:1`); its `/proc`
+is also shared/slave, as are relay5's mounts with different peer-group IDs. Both brokers have
+distinct mount namespaces, but that alone does not meet this fixture's nonshared-mount guard.
+The record confirms no pressure source or bind mount was created; cleanup and unchanged host
+state pass. This is not evidence that outward propagation or host modification occurred.
+For this disposable scenario only, broker units now select `MountFlags=private` alongside
+their existing sandbox settings. Systemd 257 otherwise finishes `PrivateMounts` setup with
+shared propagation after first making mounts slave; see its [execution documentation](https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml#L2182).
+The original mount guard still verifies actual topology before injection. No production unit
+or host mount is changed; other scenarios retain systemd's shared default. The private setting
+also stops incoming mount events, so it is limited to these short-lived, fully torn-down units.
+The updated fixture still requires a fresh live run.
 The combined candidate keeps that single dynamic queue while integrating the 360M profile and
 actual generation-end contract. Source and derived frontiers retain the enrolled profile;
 terminal empty, wire-truncated, token-limited or generation-unknown answers cannot create new

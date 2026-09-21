@@ -75,12 +75,21 @@ agent_jobs_broker() {
         install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_private/serving"
         set -- "$@" --serving-directory "$jobs_private/serving"
     fi
+    # PrivateMounts alone ends in shared/slave mounts in systemd 257. Only the
+    # disposable DAG pressure fixture needs recursive private propagation; all
+    # other scenarios retain systemd's shared default. Keep the live mount guard.
+    # https://github.com/systemd/systemd/blob/v257/man/systemd.exec.xml#L2182
+    jobs_mount_flags=shared
+    if [ "${agent_ready_dag:-no}" = yes ]; then
+        jobs_mount_flags=private
+    fi
     systemd-run --no-block --unit="$jobs_unit" --slice=system.slice --service-type=exec \
         --property=CollectMode=inactive --property=Restart=no \
         --property=User=volparossa --property=Group=volparossa --property=UMask=0077 \
         --property=NoNewPrivileges=yes --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
         --property="NetworkNamespacePath=/run/netns/$jobs_namespace" \
         --property=PrivateMounts=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
+        --property="MountFlags=$jobs_mount_flags" \
         --property=ProtectSystem=strict --property=ProtectHome=yes \
         --property="ReadWritePaths=$jobs_private" --property="InaccessiblePaths=$jobs_hidden" \
         --property=KillMode=control-group --property=TimeoutStopSec=20s \
