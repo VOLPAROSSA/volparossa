@@ -131,7 +131,7 @@ def task_planner_doubles(text, generated=None, prompt=None):
 
     def generate(**kwargs):
         for criterion in kwargs["stopping_criteria"]:
-            assert criterion(None, None) is False
+            criterion(Tensor([prompt + generated]), None)
         return Tensor([prompt + generated])
 
     model.generate.side_effect = generate
@@ -250,8 +250,8 @@ class WorkerProtocolTests(unittest.TestCase):
         expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
         model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected))
         session = mock.Mock()
-        result, prompts, generated = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
-        self.assertEqual((result, prompts, generated), (expected, 3, 3))
+        result, prompts, generated, stop_reason = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual((result, prompts, generated, stop_reason), (expected, 3, 3, "eos"))
         model.generate.assert_called_once()
         arguments = model.generate.call_args.kwargs
         self.assertEqual((arguments["max_new_tokens"], arguments["do_sample"], arguments["num_beams"],
@@ -263,10 +263,70 @@ class WorkerProtocolTests(unittest.TestCase):
         tokenizer.apply_chat_template.assert_called_once_with(WORKER.task_plan_messages(task_plan_input()),
             tokenize=True, add_generation_prompt=True, return_dict=False)
 
+    def test_task_planner_stops_on_whole_valid_json_before_an_extra_token(self):
+        expected = dict(version=1, questions=[" Which requirements? ", "Which risks?"])
+        model, tokenizer, torch, transformers = task_planner_doubles(json.dumps(expected), [21, 22])
+        tokenizer.decode.side_effect = ['{"version":1,"questions":[', json.dumps(expected), json.dumps(expected)]
+        session = mock.Mock()
+
+        def generate(**kwargs):
+            criterion, = kwargs["stopping_criteria"]
+            self.assertFalse(criterion(torch.tensor([[11, 12, 13, 21]]), None))
+            completed = torch.tensor([[11, 12, 13, 21, 22]])
+            self.assertTrue(criterion(completed, None))
+            return completed
+
+        model.generate.side_effect = generate
+        self.assertEqual(WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session),
+                         (expected, 3, 2, "complete_json"))
+        model.generate.assert_called_once()
+        self.assertEqual(session.check.call_count, 5)
+        self.assertEqual(tokenizer.decode.call_args_list,
+                         [mock.call(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+                          for tokens in ([21], [21, 22], [21, 22])])
+
+    def test_task_planner_online_stop_never_repairs_or_extracts_json(self):
+        valid = '{"version":1,"questions":["A?","B?"]}'
+        for text in ('{"version":1,"questions":[', valid + " trailing", "prefix " + valid,
+                     "```json\n" + valid + "\n```", '{"version":1,"version":1,"questions":["A?","B?"]}',
+                     '{"version":1,"questions":["A?","A?"]}', '{"version":1,"questions":["Only one?"]}'):
+            model, tokenizer, torch, transformers = task_planner_doubles(text, [21, 22])
+
+            def generate(**kwargs):
+                criterion, = kwargs["stopping_criteria"]
+                incomplete = torch.tensor([[11, 12, 13, 21, 22]])
+                self.assertFalse(criterion(incomplete, None))
+                return incomplete
+
+            model.generate.side_effect = generate
+            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_INCOMPLETE_GENERATION"):
+                WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
+            model.generate.assert_called_once()
+
+    def test_task_planner_complete_marker_is_bound_to_exact_returned_tokens(self):
+        valid = '{"version":1,"questions":["A?","B?"]}'
+        for returned in ([21, 23], [21, 22, 23], [21], [21, 22, 2]):
+            model, tokenizer, torch, transformers = task_planner_doubles(valid)
+
+            def generate(**kwargs):
+                criterion, = kwargs["stopping_criteria"]
+                self.assertTrue(criterion(torch.tensor([[11, 12, 13, 21, 22]]), None))
+                return torch.tensor([[11, 12, 13] + returned])
+
+            model.generate.side_effect = generate
+            with self.subTest(returned=returned), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_COMPLETION_TOKENS_CHANGED"):
+                WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
+        # Even valid final text without EOS needs its own in-generation marker.
+        model, tokenizer, torch, transformers = task_planner_doubles(valid)
+        model.generate.side_effect = None
+        model.generate.return_value = torch.tensor([[11, 12, 13, 21, 22]])
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_INCOMPLETE_GENERATION"):
+            WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
+
     def test_task_planning_never_truncates_repairs_retries_or_falls_back(self):
         valid = '{"version":1,"questions":["A?","B?"]}'
         for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*383+[2], valid),
-                                       ([1], [21, 22], valid), ([1], [2, 21, 2], valid),
+                                       ([1], [21]*384, valid), ([1], [2, 21, 2], valid),
                                        ([1], [21, 2], valid+" trailing"), ([1], [21, 2], "```json\n"+valid+"\n```")):
             model, tokenizer, torch, transformers = task_planner_doubles(text, generated, prompt)
             with self.subTest(prompt=len(prompt), generated=len(generated)), self.assertRaises(WORKER.JobError):
@@ -321,6 +381,7 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertEqual((result["mode"],result["updates_completed"]), ("plan_tasks",0))
                 self.assertTrue(result["goal_only_planning"] and result["model_weights_loaded"] and result["base_weights_unchanged"])
                 self.assertFalse(result["generation_limit_reached"] or result["model_answer_correctness_proven"])
+                self.assertEqual(result["planner_stop_reason"], "eos")
                 self.assertEqual(result["base_before"], result["base_after"])
                 for field in ("outputs","baseline_evaluation","input_adapter","adapter_after"):
                     self.assertNotIn(field,result)

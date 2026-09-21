@@ -30,6 +30,7 @@ fn report(input: &task_plan::Input, bytes: &[u8], artifact: &[u8]) -> Value {
         "mode":"plan_tasks","device":"cpu","threads":2,"updates_completed":0,
         "model_weights_loaded":true,"goal_only_planning":true,"generation_limit_reached":false,
         "model_answer_correctness_proven":false,"planner_prompt_tokens":100,"planner_generated_tokens":80,
+        "planner_stop_reason":"eos",
         "model":{"id":MODEL_ID,"revision":MODEL_REVISION,
             "files":{"model.safetensors":{"sha256":hex::encode(BASE_MODEL_SHA256)}}},
         "dataset":{"version":1,"sha256":digest(bytes),"bytes":bytes.len(),

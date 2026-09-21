@@ -11,9 +11,21 @@ terminal join. The model sees the goal only; original source hash/size bind late
 without claiming source understanding. Source acquisition occurs once, and the exact planner
 input, report, artifact and enrollment hashes are checked on resume without replanning. Invalid
 or generation-limit output fails, with no repaired/canned plan, tool authority or private offload.
-Forty-eight focused Rust checks, twenty-nine pure Python protocol tests and strict CLI Clippy
-pass. The separate real-model/peer/offline-resume fixture is integrated; no live autonomous
-decomposition or answer-quality proof is claimed yet. This does not complete B03.
+The initial implementation passed forty-eight focused Rust checks, twenty-nine pure Python
+protocol tests and strict CLI Clippy. The [first real run on
+`086761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35619669855) **failed** at
+`TASK_PLAN_GENERATION_LIMIT_REACHED`: an actual isolated pinned-model worker reached the fixed
+384-new-token limit before any plan was accepted. No peer task started. The 109 original
+artifact files retain the real worker observation and successful cleanup/unchanged host state;
+the generated token sequence was not retained, so its text and reason for continuing are unknown.
+The next candidate shortens the format instruction and stops generation as soon as the entire
+generated text is a valid proposal, without extracting, repairing or inventing any questions.
+It records `complete_json` or `eos` as the stopping reason; budgets and one-attempt behavior
+are unchanged. This is an improvement to generation control, not proof that the old run had a
+valid JSON prefix. No complete model/peer/offline-resume proof or answer-quality claim yet;
+B03 remains incomplete.
+The revised stop passes eight focused Rust checks, thirty-two pure Python protocol tests,
+the fixture's pure checks and strict all-target CLI Clippy; its actual VM run remains pending.
 
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.

@@ -1144,18 +1144,28 @@ other documents or replace a missing source with convenient cached content.
 This first planner sees the public question only, not the source text. Its source hash and byte
 count bind subsequent work, but are not evidence of source understanding. The model has one
 bounded generation attempt with at most 512 prompt tokens and 384 generated tokens; existing
-inference limits remain unchanged. Fenced prose, malformed/duplicate JSON, duplicate questions
-or an incomplete/limit-hit generation fail instead of becoming a repaired or canned plan.
+inference limits remain unchanged. Generation can stop online when the **entire** generated
+text validates as a complete proposal, or at the model's EOS token. Its report records
+`planner_stop_reason` as `complete_json` or `eos`. Fenced prose, malformed/duplicate JSON,
+duplicate questions or an incomplete/limit-hit generation fail instead of becoming a repaired
+or canned plan. The parser does not select a JSON substring from a longer model response.
 Model output remains question data: it cannot select tools, commands, paths or external actions.
 
 The original planner input, report, questions and hashes are retained with the graph. Once
 enrolled, resume verifies that same plan and cannot ask the model to generate a different one.
 `--enroll-only --execute` **does run local model planning and tokenization**, but does not submit
 peer jobs. Completed execution can later be reconstructed offline without another model run.
-Private goals and documents are not supported. The 48 focused Rust checks and 29 pure worker
-protocol tests pass, along with strict CLI Clippy; the real model-planning/peer-execution VM
-proof is pending. Small-model JSON validity and real execution would still not establish
-decomposition quality, answer correctness, general autonomous planning or full B03.
+Private goals and documents are not supported. The initial 48 focused Rust checks, 29 pure
+worker protocol tests and strict CLI Clippy passed, but the [first real model run on
+`086761c`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35619669855) hit the fixed
+384-new-token limit without an accepted plan. Its real isolated worker and cleanup were
+observed, but peer execution did not start; its generated text was not retained. The shortened
+prompt and online whole-proposal stop are the next candidate, not a claim that the old model
+had already emitted valid JSON. Complete model-planning/peer-execution proof remains pending.
+The revised candidate passes eight focused Rust checks, thirty-two pure worker protocol tests
+and strict CLI Clippy without loading a model on the development host.
+JSON validity and real execution would still not establish decomposition quality, answer
+correctness, general autonomous planning or full B03.
 
 ### Synthesizing one public answer
 

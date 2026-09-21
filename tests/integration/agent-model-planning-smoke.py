@@ -286,6 +286,7 @@ def check_planning(raw,source):
         and report["base_before"]==report["base_after"] and report["base_before"]["parameters"]>0
         and re.fullmatch(r"[0-9a-f]{64}",report["base_before"]["sha256"])
         and report["generation_limit_reached"] is report["model_answer_correctness_proven"] is False
+        and report["planner_stop_reason"] in ("complete_json","eos")
         and type(report["planner_prompt_tokens"]) is int and 1<=report["planner_prompt_tokens"]<=512
         and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<384
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")

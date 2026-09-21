@@ -777,12 +777,10 @@ def task_plan_messages(dataset):
     # The model sees the public goal, not the original source contents. The hash
     # and size bind enrollment only and must never be presented as source ingestion.
     return [{"role": "system", "content":
-             "Plan how to answer a public question using a document that you have not seen. "
-             "Return only one JSON object with exactly version and questions: "
-             "version is 1; questions is an array of two to four distinct short questions. "
-             "Each question will be answered independently from that document. "
-             "Do not answer them. Do not assume facts about the unseen document. "
-             "Do not use tools, actions, code blocks or any text outside the JSON object."},
+             "Split the user's question into two to four distinct short research questions. "
+             "Each will be answered from a document you have not seen. Do not answer them. "
+             'Return only JSON: {"version":1,"questions":["...","..."]}. '
+             "Replace the placeholders with your own questions. No other text or code blocks."},
             {"role": "user", "content": "Public question:\n" + dataset["question"]}]
 
 
@@ -796,13 +794,27 @@ def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
             and len(prompt) + TASK_PLAN_NEW_TOKENS <= TASK_PLAN_CONTEXT_TOKENS,
             "TASK_PLAN_PROMPT_TOKEN_LIMIT_EXCEEDED")
     input_ids = torch.tensor([prompt], dtype=torch.long, device="cpu")
+    complete_json_tokens = None
 
     class OwnerBudget(transformers.StoppingCriteria):
-        def __call__(self, _input_ids, _scores, **_kwargs):
+        def __call__(self, current_ids, _scores, **_kwargs):
+            nonlocal complete_json_tokens
             # The actual generation thread checks pause/cancel/deadline between
             # tokens. No owner control is acknowledged while native work runs.
             session.check()
-            return False
+            tokens = current_ids[0, len(prompt):].tolist()
+            if not 1 <= len(tokens) < TASK_PLAN_NEW_TOKENS or tokenizer.eos_token_id in tokens:
+                return False
+            text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            try:
+                public_text(text, MAX_TASK_PLAN_BYTES, "TASK_PLAN_OUTPUT_TOO_LARGE")
+                validate_task_questions(parse_json(text))
+            except JobError:
+                return False
+            # Stop only on the whole valid object, before another model token.
+            # Retain the exact token sequence, not a flag that later output can reuse.
+            complete_json_tokens = tuple(tokens)
+            return True
 
     model.eval()
     session.check()
@@ -819,14 +831,22 @@ def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
     require(output[0, :len(prompt)].tolist() == prompt, "TASK_PLAN_PROMPT_CHANGED")
     generated = output[0, len(prompt):].tolist()
     require(1 <= len(generated) < TASK_PLAN_NEW_TOKENS, "TASK_PLAN_GENERATION_LIMIT_REACHED")
-    # Only a single final model EOS is framing, not output text. Never strip
-    # fences, extract a JSON substring, drop other special tokens or repair text.
-    require(generated[-1] == tokenizer.eos_token_id
-            and tokenizer.eos_token_id not in generated[:-1], "TASK_PLAN_INCOMPLETE_GENERATION")
-    text = tokenizer.decode(generated[:-1], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+    if complete_json_tokens is not None:
+        require(tuple(generated) == complete_json_tokens, "TASK_PLAN_COMPLETION_TOKENS_CHANGED")
+        stop_reason = "complete_json"
+        text_tokens = generated
+    else:
+        # A single terminal EOS is framing, not output text. A non-EOS ending is
+        # accepted only with the exact full-object completion recorded above.
+        require(generated[-1] == tokenizer.eos_token_id
+                and tokenizer.eos_token_id not in generated[:-1], "TASK_PLAN_INCOMPLETE_GENERATION")
+        stop_reason = "eos"
+        text_tokens = generated[:-1]
+    # Never strip fences, extract a JSON substring, drop special tokens or repair text.
+    text = tokenizer.decode(text_tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
     public_text(text, MAX_TASK_PLAN_BYTES, "TASK_PLAN_OUTPUT_TOO_LARGE")
     plan = validate_task_questions(parse_json(text))
-    return plan, len(prompt), len(generated)
+    return plan, len(prompt), len(generated), stop_reason
 
 
 def execute_task_plan(request, session, tokenizer, torch, transformers, versions,
@@ -835,7 +855,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
     session.check()
     session.progress("baseline")
     base_before = parameter_hash(model, False, session)
-    plan, prompt_count, generated_count = plan_tasks(model, tokenizer, torch, transformers, dataset, session)
+    plan, prompt_count, generated_count, stop_reason = plan_tasks(model, tokenizer, torch, transformers, dataset, session)
     base_after = parameter_hash(model, False, session)
     require(base_before == base_after, "BASE_WEIGHTS_CHANGED")
     require(file_hash(model_root / "model.safetensors", MODEL_WEIGHT_BYTES)["sha256"] == MODEL_WEIGHT_SHA,
@@ -857,6 +877,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
               "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
               "model_weights_loaded": True, "goal_only_planning": True,
               "planner_prompt_tokens": prompt_count, "planner_generated_tokens": generated_count,
+              "planner_stop_reason": stop_reason,
               "generation_limit_reached": False, "model_answer_correctness_proven": False,
               "base_before": base_before, "base_after": base_after, "base_weights_unchanged": True,
               "network_policy_changed": False}

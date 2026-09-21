@@ -134,6 +134,10 @@ pub(super) fn validate_report(
             && report["model_weights_loaded"] == true
             && report["goal_only_planning"] == true
             && report["generation_limit_reached"] == false
+            && matches!(
+                report["planner_stop_reason"].as_str(),
+                Some("complete_json" | "eos")
+            )
             && report["model_answer_correctness_proven"] == false
             && report["planner_prompt_tokens"]
                 .as_u64()

@@ -74,7 +74,7 @@ fn retained_planner_report_binds_original_input_artifact_model_and_cleanup() {
         "version":1,"id":"ab".repeat(16),"kind":"result","status":"ok","mode":"plan_tasks",
         "device":"cpu","threads":2,"updates_completed":0,"model_weights_loaded":true,
         "goal_only_planning":true,"generation_limit_reached":false,"model_answer_correctness_proven":false,
-        "planner_prompt_tokens":100,"planner_generated_tokens":40,
+        "planner_prompt_tokens":100,"planner_generated_tokens":40,"planner_stop_reason":"eos",
         "model":{"id":MODEL_ID,"revision":MODEL_REVISION,"files":{"model.safetensors":{"sha256":hex::encode(BASE_MODEL_SHA256)}}},
         "dataset":{"version":1,"sha256":digest(&bytes),"bytes":bytes.len(),"visibility":"public","license":input.license,
             "question_sha256":digest(input.question.as_bytes()),"source_sha256":input.source_sha256,"source_bytes":input.source_bytes},
@@ -82,12 +82,17 @@ fn retained_planner_report_binds_original_input_artifact_model_and_cleanup() {
         "supervisor":{"child_reaped":true,"network_access":false}
     });
     validate_report(&report, &input, &bytes, artifact).unwrap();
+    let mut complete_json = report.clone();
+    complete_json["planner_stop_reason"] = json!("complete_json");
+    validate_report(&complete_json, &input, &bytes, artifact).unwrap();
     for (path, value) in [
         ("/mode", json!("infer")),
         ("/updates_completed", json!(1)),
         ("/model_weights_loaded", json!(false)),
         ("/goal_only_planning", json!(false)),
         ("/generation_limit_reached", json!(true)),
+        ("/planner_stop_reason", json!("length")),
+        ("/planner_stop_reason", json!(null)),
         ("/planner_generated_tokens", json!(384)),
         ("/planner_prompt_tokens", json!(513)),
         ("/dataset/source_sha256", json!("b".repeat(64))),
