@@ -304,3 +304,93 @@ fn constrained_graph_diagnostic_requires_decoder_and_preserves_legacy_shape() {
     changed["planner_decoder"] = Value::Null;
     assert!(PlanningDiagnostic::from_value(&changed).is_err());
 }
+
+#[test]
+fn detailed_graph_rejections_are_versioned_fixed_and_bound_to_original_budget() {
+    for code in [
+        "GRAPH_FIELDS",
+        "GRAPH_TASK_COUNT",
+        "GRAPH_TASK_FIELDS",
+        "GRAPH_QUESTION_TEXT",
+        "GRAPH_QUESTION_FORM",
+        "GRAPH_GOAL_COPY",
+        "GRAPH_DUPLICATE_QUESTION",
+        "GRAPH_DEPENDENCIES",
+    ] {
+        for stop in ["eos", "graph_boundary"] {
+            let mut rejected = attempt(b"{}", false, Some(code));
+            rejected["stop_reason"] = stop.into();
+            let mut diagnostic = json!({"strategy":CONSTRAINED_GRAPH_STRATEGY,
+                "planner_decoder":decoder(),"attempts":[rejected],"incomplete_attempt":false});
+            let checked = PlanningDiagnostic::from_value(&diagnostic).unwrap();
+            assert_eq!(serde_json::to_value(checked).unwrap(), diagnostic);
+            for (pointer, replacement) in [
+                ("/attempts/0/text_bytes", json!(0)),
+                ("/attempts/0/text_bytes", json!(MAX_ARTIFACT_BYTES + 1)),
+                (
+                    "/attempts/0/rejection_code",
+                    json!("unknown generated text"),
+                ),
+                ("/attempts/0/stop_reason", json!("token_limit")),
+                ("/attempts/0/generated_tokens", json!(385)),
+                ("/attempts/0/accepted", json!(true)),
+            ] {
+                let mut changed = diagnostic.clone();
+                *changed.pointer_mut(pointer).unwrap() = replacement;
+                assert!(
+                    PlanningDiagnostic::from_value(&changed).is_err(),
+                    "{code}:{pointer}"
+                );
+            }
+            diagnostic["strategy"] = GRAPH_STRATEGY.into();
+            diagnostic
+                .as_object_mut()
+                .unwrap()
+                .remove("planner_decoder");
+            assert!(PlanningDiagnostic::from_value(&diagnostic).is_err());
+        }
+    }
+
+    let input = input();
+    let input_bytes = serde_json::to_vec(&input).unwrap();
+    let raw = artifact();
+    let mut report = report(&input, &input_bytes, &raw);
+    report["planner_strategy"] = CONSTRAINED_GRAPH_STRATEGY.into();
+    report["planner_decoder"] = decoder();
+    let rejected = attempt(b"{}", false, Some("GRAPH_TASK_COUNT"));
+    let mut accepted = report["planner_attempts"][0].clone();
+    accepted["attempt"] = 2.into();
+    accepted["max_new_tokens"] = 284.into();
+    report["planner_attempts"] = json!([rejected, accepted]);
+    report["planner_generated_tokens"] = 200.into();
+    validate_graph_report(&report, &input, &input_bytes, &raw).unwrap();
+    report["planner_attempts"][1]["max_new_tokens"] = 384.into();
+    assert!(validate_graph_report(&report, &input, &input_bytes, &raw).is_err());
+}
+
+#[test]
+fn detailed_oversize_category_requires_real_eos_and_oversize_bytes() {
+    let mut rejected = attempt(
+        b"oversize metadata only",
+        false,
+        Some("GRAPH_OUTPUT_TOO_LARGE"),
+    );
+    rejected["text_bytes"] = (MAX_ARTIFACT_BYTES + 1).into();
+    rejected["stop_reason"] = "eos".into();
+    let mut diagnostic = json!({"strategy":CONSTRAINED_GRAPH_STRATEGY,"planner_decoder":decoder(),
+        "attempts":[rejected],"incomplete_attempt":false});
+    PlanningDiagnostic::from_value(&diagnostic).unwrap();
+    for (pointer, replacement) in [
+        ("/attempts/0/text_bytes", json!(MAX_ARTIFACT_BYTES)),
+        ("/attempts/0/stop_reason", json!("graph_boundary")),
+        ("/attempts/0/rejection_code", json!("INVALID_JSON")),
+    ] {
+        let mut changed = diagnostic.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        assert!(PlanningDiagnostic::from_value(&changed).is_err());
+    }
+    // Already retained generic v2 failures remain readable without rewriting them.
+    diagnostic["attempts"][0]["rejection_code"] = "INVALID_GRAPH".into();
+    let checked = PlanningDiagnostic::from_value(&diagnostic).unwrap();
+    assert_eq!(serde_json::to_value(checked).unwrap(), diagnostic);
+}

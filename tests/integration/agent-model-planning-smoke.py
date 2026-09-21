@@ -399,8 +399,14 @@ def check_graph_attempts(attempts,artifact=None):
         elif item["rejection_code"]=="GENERATION_LIMIT":
             require(item["stop_reason"]=="token_limit" and item["generated_tokens"]==cap,"graph limit not fully charged")
         else:
-            require((item["rejection_code"]=="INVALID_JSON" and item["stop_reason"]=="eos")
-                or (item["rejection_code"]=="INVALID_GRAPH" and item["stop_reason"] in ("eos","graph_boundary")),"graph rejection category")
+            require((item["rejection_code"]=="INVALID_JSON" and item["stop_reason"]=="eos" and item["text_bytes"]<=16384)
+                or (item["rejection_code"]=="INVALID_GRAPH" and item["stop_reason"] in ("eos","graph_boundary"))
+                or (item["rejection_code"] in {"GRAPH_FIELDS", "GRAPH_TASK_COUNT", "GRAPH_TASK_FIELDS",
+                    "GRAPH_QUESTION_TEXT", "GRAPH_QUESTION_FORM", "GRAPH_GOAL_COPY", "GRAPH_DUPLICATE_QUESTION",
+                    "GRAPH_DEPENDENCIES"} and 1<=item["text_bytes"]<=16384
+                    and item["stop_reason"] in ("eos","graph_boundary"))
+                or (item["rejection_code"]=="GRAPH_OUTPUT_TOO_LARGE" and item["stop_reason"]=="eos"
+                    and item["text_bytes"]>16384),"graph rejection category")
     return accepted,total,maximum,[]
 
 

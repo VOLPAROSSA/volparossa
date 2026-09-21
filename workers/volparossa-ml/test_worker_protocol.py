@@ -1149,7 +1149,7 @@ class WorkerProtocolTests(unittest.TestCase):
             ("prose " + valid, "INVALID_JSON", "eos"), (valid + " trailing", "INVALID_JSON", "eos"),
             ('{"version":3,"version":3,"tasks":[]}', "INVALID_JSON", "eos"),
             ('{"version":3,"tasks":[],"extra":NaN}', "INVALID_JSON", "eos"),
-            ('{"version":3,"tasks":[]}', "INVALID_GRAPH", "graph_boundary")):
+            ('{"version":3,"tasks":[]}', "GRAPH_TASK_COUNT", "graph_boundary")):
             with self.subTest(category=category, stop=stop):
                 decoder_factory.reset_mock()
                 model, tokenizer, torch, transformers = task_planner_doubles([bad, valid])
@@ -1177,6 +1177,66 @@ class WorkerProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ALREADY_STARTED"):
                     WORKER.plan_task_graph(model, tokenizer, torch, transformers,
                         dict(task_plan_input(), version=3), session)
+
+    def test_task_graph_semantic_rejections_have_fixed_categories_and_specific_advice(self):
+        source = dict(task_plan_input(), version=3)
+        original = task_graph_fixture(2)
+        cases = (
+            (lambda value: value.update(version=True), "GRAPH_FIELDS"),
+            (lambda value: value.update(tasks=[]), "GRAPH_TASK_COUNT"),
+            (lambda value: value["tasks"][0].update(tool="not allowed"), "GRAPH_TASK_FIELDS"),
+            (lambda value: value["tasks"][0].update(question="\0?"), "GRAPH_QUESTION_TEXT"),
+            (lambda value: value["tasks"][0].update(question="é" * 256 + "?"), "GRAPH_QUESTION_TEXT"),
+            (lambda value: value["tasks"][0].update(question=" "), "GRAPH_QUESTION_TEXT"),
+            (lambda value: value["tasks"][0].update(question="Statement without question mark"), "GRAPH_QUESTION_FORM"),
+            (lambda value: value["tasks"][0].update(question=source["question"]), "GRAPH_GOAL_COPY"),
+            (lambda value: value["tasks"][1].update(question=" " + value["tasks"][0]["question"] + " "),
+             "GRAPH_DUPLICATE_QUESTION"),
+            (lambda value: value["tasks"][0].update(depends_on=[0]), "GRAPH_DEPENDENCIES"),
+            (lambda value: value["tasks"][1].update(depends_on=[True]), "GRAPH_DEPENDENCIES"),
+        )
+        for mutate, expected in cases:
+            value = copy.deepcopy(original)
+            mutate(value)
+            raw = json.dumps(value).encode()
+            with self.subTest(code=expected):
+                self.assertEqual(WORKER.task_graph_candidate(raw, source["question"]), (None, expected))
+                messages = WORKER.task_graph_messages(source, expected, 2)
+                self.assertIn(WORKER.TASK_GRAPH_CORRECTIONS[expected], messages[0]["content"])
+                self.assertIn("Correction attempt 2", messages[0]["content"])
+                self.assertNotIn(raw.decode(), messages[0]["content"])
+                self.assertEqual(json.loads(messages[1]["content"])["goal"], source["question"])
+                self.assertRegex(expected, r"^[A-Z_]{1,64}$")
+        self.assertEqual(WORKER.task_graph_candidate(b"x" * (WORKER.MAX_TASK_PLAN_BYTES + 1), source["question"]),
+                         (None, "GRAPH_OUTPUT_TOO_LARGE"))
+        with self.assertRaisesRegex(WORKER.JobError, "^TASK_GRAPH_FEEDBACK_INVALID$"):
+            WORKER.task_graph_messages(source, "unknown generated text", 2)
+
+    @mock.patch.object(WORKER, "create_task_graph_decoder")
+    def test_task_graph_specific_corrections_change_next_prompt_but_charge_same_budget(self, decoder_factory):
+        source = dict(task_plan_input(), version=3)
+        copied = task_graph_fixture(1)
+        copied["tasks"][0]["question"] = source["question"]
+        invalid_edges = task_graph_fixture(1)
+        invalid_edges["tasks"][0]["depends_on"] = [0]
+        valid = task_graph_fixture(2)
+        texts = [json.dumps(value) for value in (copied, invalid_edges, valid)]
+        model, tokenizer, torch, transformers = task_planner_doubles(texts, [21, 22])
+        session = mock.Mock()
+        result = WORKER.plan_task_graph(model, tokenizer, torch, transformers, source, session)
+        self.assertEqual(result, (valid, texts[-1].encode(), 3, 6))
+        self.assertEqual([a["rejection_code"] for a in session.planner_diagnostic["attempts"]],
+                         ["GRAPH_GOAL_COPY", "GRAPH_DEPENDENCIES", None])
+        self.assertEqual([a["max_new_tokens"] for a in session.planner_diagnostic["attempts"]], [384, 382, 380])
+        self.assertEqual([a["text_sha256"] for a in session.planner_diagnostic["attempts"]],
+                         [hashlib.sha256(value.encode()).hexdigest() for value in texts])
+        prompts = [call.args[0] for call in tokenizer.apply_chat_template.call_args_list]
+        self.assertNotIn("Correction attempt", prompts[0][0]["content"])
+        self.assertIn(WORKER.TASK_GRAPH_CORRECTIONS["GRAPH_GOAL_COPY"], prompts[1][0]["content"])
+        self.assertIn(WORKER.TASK_GRAPH_CORRECTIONS["GRAPH_DEPENDENCIES"], prompts[2][0]["content"])
+        self.assertEqual([p[1] for p in prompts], [prompts[0][1]] * 3)
+        decoder_factory.assert_called_once_with(tokenizer, source, session)
+        self.assertEqual(decoder_factory.return_value.new_attempt.call_count, 3)
 
     @mock.patch.object(WORKER, "create_task_graph_decoder")
     def test_task_graph_cap_requires_real_eos_or_exact_online_boundary_and_never_renews_budget(self, _decoder_factory):

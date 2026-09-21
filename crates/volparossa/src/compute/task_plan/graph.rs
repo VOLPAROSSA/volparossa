@@ -102,7 +102,7 @@ impl GraphDiagnostic {
         check_shape(&value["attempts"], 0)?;
         let diagnostic: Self = serde_json::from_value(value.clone())?;
         validate_decoder(&diagnostic.strategy, value.get("planner_decoder"))?;
-        let summary = checked_attempts(&diagnostic.attempts)?;
+        let summary = checked_attempts(&diagnostic.attempts, &diagnostic.strategy)?;
         if diagnostic.incomplete_attempt {
             ensure!(
                 diagnostic.attempts.len() < 4 && summary.accepted.is_none() && summary.tokens < 384,
@@ -150,7 +150,37 @@ struct Summary<'a> {
     prompt: u64,
 }
 
-fn checked_attempts(attempts: &[GraphAttempt]) -> Result<Summary<'_>> {
+fn semantic_rejection(attempt: &GraphAttempt, strategy: &str) -> bool {
+    let code = attempt.rejection_code.as_deref();
+    // Older v1 and early constrained-v2 records used this generic category.
+    // Their source-exact history remains readable; new workers emit fixed detail.
+    if code == Some("INVALID_GRAPH") {
+        return true;
+    }
+    if strategy != CONSTRAINED_GRAPH_STRATEGY {
+        return false;
+    }
+    if code == Some("GRAPH_OUTPUT_TOO_LARGE") {
+        // The online boundary checker never records an oversized JSON boundary.
+        return attempt.stop_reason == "eos" && attempt.text_bytes > MAX_ARTIFACT_BYTES;
+    }
+    (1..=MAX_ARTIFACT_BYTES).contains(&attempt.text_bytes)
+        && matches!(
+            code,
+            Some(
+                "GRAPH_FIELDS"
+                    | "GRAPH_TASK_COUNT"
+                    | "GRAPH_TASK_FIELDS"
+                    | "GRAPH_QUESTION_TEXT"
+                    | "GRAPH_QUESTION_FORM"
+                    | "GRAPH_GOAL_COPY"
+                    | "GRAPH_DUPLICATE_QUESTION"
+                    | "GRAPH_DEPENDENCIES"
+            )
+        )
+}
+
+fn checked_attempts<'a>(attempts: &'a [GraphAttempt], strategy: &str) -> Result<Summary<'a>> {
     ensure!(attempts.len() <= 4, "compute_task_graph_attempt_bound");
     let mut summary = Summary {
         accepted: None,
@@ -185,9 +215,11 @@ fn checked_attempts(attempts: &[GraphAttempt]) -> Result<Summary<'_>> {
                     summary.accepted = Some(attempt);
                 } else {
                     ensure!(
-                        attempt.rejection_code.as_deref() == Some("INVALID_GRAPH")
+                        semantic_rejection(attempt, strategy)
                             || (attempt.stop_reason == "eos"
-                                && attempt.rejection_code.as_deref() == Some("INVALID_JSON")),
+                                && attempt.rejection_code.as_deref() == Some("INVALID_JSON")
+                                && (strategy == GRAPH_STRATEGY
+                                    || attempt.text_bytes <= MAX_ARTIFACT_BYTES)),
                         "compute_task_graph_rejection"
                     );
                 }
@@ -230,7 +262,10 @@ pub(in crate::compute) fn validate_graph_report(
     );
     check_shape(&report["planner_attempts"], 1)?;
     let attempts: Vec<GraphAttempt> = serde_json::from_value(report["planner_attempts"].clone())?;
-    let summary = checked_attempts(&attempts)?;
+    let summary = checked_attempts(
+        &attempts,
+        report["planner_strategy"].as_str().unwrap_or_default(),
+    )?;
     let accepted = summary
         .accepted
         .context("compute_task_graph_no_accepted_attempt")?;

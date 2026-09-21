@@ -49,6 +49,20 @@ TASK_GRAPH_STRATEGY = "model_task_graph_constrained_v2"
 TASK_GRAPH_DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3",
                       "adapter_version": 1, "schema_version": 3,
                       "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
+TASK_GRAPH_CORRECTIONS = {
+    "INVALID_JSON": "Return a complete JSON object only, without prose, fences or duplicate keys.",
+    "INVALID_GRAPH": "Return a concise complete object obeying every part of the stated schema.",
+    "GENERATION_LIMIT": "Use a more concise complete object within the remaining generation budget.",
+    "GRAPH_FIELDS": "Use exactly the top-level fields version (integer 3) and tasks; no other fields.",
+    "GRAPH_TASK_COUNT": "Choose between one and four tasks, in a JSON array.",
+    "GRAPH_TASK_FIELDS": "Each task must be an object with exactly question and depends_on fields.",
+    "GRAPH_QUESTION_TEXT": "Use nonempty UTF-8 question strings without NUL, at most 512 UTF-8 bytes each.",
+    "GRAPH_QUESTION_FORM": "Phrase every task as a question ending with a question mark.",
+    "GRAPH_GOAL_COPY": "Write narrower research questions; do not repeat the original goal verbatim.",
+    "GRAPH_DUPLICATE_QUESTION": "Give each task a different question, ignoring only outer whitespace.",
+    "GRAPH_DEPENDENCIES": "Use only distinct integer indices of earlier tasks, never names, self or future indices.",
+    "GRAPH_OUTPUT_TOO_LARGE": "Return a compact complete object no larger than 16384 UTF-8 bytes.",
+}
 MAX_TASK_PLAN_BYTES = 16384
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 MODEL_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
@@ -318,21 +332,22 @@ def validate_task_questions(value):
 
 def validate_task_graph(value, goal):
     require(type(value) is dict and value.keys() == {"version", "tasks"}
-            and type(value["version"]) is int and value["version"] == 3
-            and type(value["tasks"]) is list and 1 <= len(value["tasks"]) <= 4,
-            "INVALID_TASK_GRAPH")
+            and type(value["version"]) is int and value["version"] == 3, "GRAPH_FIELDS")
+    require(type(value["tasks"]) is list and 1 <= len(value["tasks"]) <= 4, "GRAPH_TASK_COUNT")
     seen = set()
     for index, task in enumerate(value["tasks"]):
-        require(type(task) is dict and task.keys() == {"question", "depends_on"}, "INVALID_TASK_GRAPH")
+        require(type(task) is dict and task.keys() == {"question", "depends_on"}, "GRAPH_TASK_FIELDS")
         question = task["question"]
-        public_text(question, 512, "INVALID_TASK_GRAPH")
-        require(question.rstrip().endswith("?") and question.strip() not in seen
-                and question != goal, "INVALID_TASK_GRAPH")
+        public_text(question, 512, "GRAPH_QUESTION_TEXT")
+        require(question.strip(), "GRAPH_QUESTION_TEXT")
+        require(question.rstrip().endswith("?"), "GRAPH_QUESTION_FORM")
+        require(question != goal, "GRAPH_GOAL_COPY")
+        require(question.strip() not in seen, "GRAPH_DUPLICATE_QUESTION")
         seen.add(question.strip())
         parents = task["depends_on"]
         require(type(parents) is list and len(parents) <= index
                 and all(type(parent) is int and 0 <= parent < index for parent in parents)
-                and len(set(parents)) == len(parents), "INVALID_TASK_GRAPH")
+                and len(set(parents)) == len(parents), "GRAPH_DEPENDENCIES")
     return value
 
 
@@ -1081,9 +1096,9 @@ def task_graph_messages(dataset, feedback=None, attempt=1):
         "Choose the task count and dependencies yourself. Questions must be narrower than the goal, "
         "must not copy it, and must be at most 512 UTF-8 bytes. No tools, extra fields or examples.")
     if feedback is not None:
-        require(feedback in ("INVALID_JSON", "INVALID_GRAPH", "GENERATION_LIMIT"), "TASK_GRAPH_FEEDBACK_INVALID")
+        require(feedback in TASK_GRAPH_CORRECTIONS, "TASK_GRAPH_FEEDBACK_INVALID")
         instruction += (" Correction attempt " + str(attempt) + ": the previous output failed " + feedback
-                        + ". Produce a concise complete object obeying that schema.")
+                        + ". " + TASK_GRAPH_CORRECTIONS[feedback])
     return [{"role": "system", "content": instruction},
             {"role": "user", "content": json.dumps({"goal": dataset["question"],
                 "untrusted_source_excerpt": dataset["source_excerpt"]["text"]}, ensure_ascii=False)}]
@@ -1091,15 +1106,17 @@ def task_graph_messages(dataset, feedback=None, attempt=1):
 
 def task_graph_candidate(raw, goal):
     if len(raw) > MAX_TASK_PLAN_BYTES:
-        return None, "INVALID_GRAPH"
+        return None, "GRAPH_OUTPUT_TOO_LARGE"
     try:
         value = parse_json(raw)
     except JobError:
         return None, "INVALID_JSON"
     try:
         return validate_task_graph(value, goal), None
-    except JobError:
-        return None, "INVALID_GRAPH"
+    except JobError as error:
+        code = str(error)
+        require(code.startswith("GRAPH_") and code in TASK_GRAPH_CORRECTIONS, "TASK_GRAPH_VALIDATOR_FAILED")
+        return None, code
 
 
 def create_task_graph_decoder(tokenizer, dataset, session):
