@@ -79,6 +79,179 @@ fn broker(root: &Path) -> Broker {
     }
 }
 
+// Retention fixtures are cancelled protocol jobs, never manufactured model results.
+fn terminal_job(index: usize) -> Job {
+    let mut original = binding();
+    original.job_id = format!("{:032x}", index + 1);
+    let (activity, _) = watch::channel(false);
+    Job {
+        requester: "b".repeat(64),
+        status: JobStatus {
+            binding: original,
+            state: JobState::Cancelled,
+            cancellation_requested: true,
+            report_json: None,
+            report_sha256: None,
+            error: None,
+        },
+        activity,
+        execution: None,
+        terminal_retain_until: Some(1600),
+        directory: None,
+        retained_bytes: JOB_RECORD_BYTES,
+    }
+}
+
+#[tokio::test]
+async fn sixteen_terminal_receipts_do_not_block_new_work_or_change_original_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.jobs.extend((0..16).map(terminal_job));
+    let originals: Vec<_> = broker.jobs.iter().map(|job| job.status.clone()).collect();
+    let caps = broker.handle(request(Operation::Capabilities), 1000).await;
+    assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if caps.accepting_work));
+    for original in &originals {
+        assert_eq!(
+            broker
+                .handle(request(Operation::Poll(original.binding.clone())), 1500)
+                .await
+                .outcome,
+            Outcome::Job(original.clone())
+        );
+    }
+    let mut next = binding();
+    next.job_id = "4".repeat(32);
+    // Admission passes history checks, then fails at the deliberately absent runtime.
+    // No host model is invoked and no successful inference receipt is fabricated.
+    assert!(matches!(
+        broker
+            .handle(
+                request(Operation::Submit(Submit {
+                    binding: next,
+                    dataset_json: data(),
+                    publication: publication(),
+                })),
+                1500,
+            )
+            .await
+            .outcome,
+        Outcome::Error(ErrorCode::Unavailable)
+    ));
+    assert_eq!(broker.jobs.len(), 16);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert_eq!(
+        broker
+            .handle(
+                request(Operation::Submit(Submit {
+                    binding: originals[0].binding.clone(),
+                    dataset_json: data(),
+                    publication: publication(),
+                })),
+                1599,
+            )
+            .await
+            .outcome,
+        Outcome::Job(originals[0].clone())
+    );
+    assert!(broker.jobs.iter().all(|job| {
+        job.terminal_retain_until == Some(1600) && job.status.binding.expires_unix_seconds == 1600
+    }));
+    broker.refresh(1600).await;
+    assert!(broker.jobs.is_empty());
+}
+
+#[tokio::test]
+async fn retained_count_and_bytes_reserve_the_next_job_and_fail_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    broker.jobs.extend((0..RETAINED_JOBS).map(terminal_job));
+    let original = broker.jobs[0].status.clone();
+    let caps = broker.handle(request(Operation::Capabilities), 1000).await;
+    assert!(matches!(caps.outcome, Outcome::Capabilities(caps) if !caps.accepting_work));
+    let submit = request(Operation::Submit(Submit {
+        binding: binding(),
+        dataset_json: data(),
+        publication: publication(),
+    }));
+    assert!(matches!(
+        broker.handle(submit.clone(), 1000).await.outcome,
+        Outcome::Error(ErrorCode::Busy)
+    ));
+    assert_eq!(
+        broker
+            .handle(request(Operation::Poll(original.binding.clone())), 1000)
+            .await
+            .outcome,
+        Outcome::Job(original)
+    );
+    broker.jobs.truncate(1);
+    broker.jobs[0].retained_bytes = MAX_RETAINED_BYTES - JOB_RESERVATION_BYTES;
+    assert!(broker.available());
+    broker.jobs[0].retained_bytes += 1;
+    assert!(!broker.available());
+    assert!(matches!(
+        broker.handle(submit, 1000).await.outcome,
+        Outcome::Error(ErrorCode::Busy)
+    ));
+    broker.jobs[0].retained_bytes = u64::MAX;
+    assert!(!broker.available());
+    assert_eq!(broker.jobs[0].terminal_retain_until, Some(1600));
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn reaped_accounting_keeps_owned_files_and_releases_only_unused_reservation() {
+    let root = tempfile::tempdir().unwrap();
+    let mut broker = broker(root.path());
+    let directory = tempfile::tempdir_in(root.path()).unwrap();
+    let path = directory.path().to_owned();
+    fs::write(path.join("dataset.json"), b"retained public input").unwrap();
+    fs::create_dir(path.join("output")).unwrap();
+    fs::write(path.join("output/diagnostic"), b"bounded diagnostic").unwrap();
+    let mut job = terminal_job(0);
+    job.status.state = JobState::Running;
+    job.status.cancellation_requested = false;
+    job.terminal_retain_until = None;
+    job.directory = Some(directory);
+    job.retained_bytes = JOB_RESERVATION_BYTES;
+    job.execution = Some(tokio::spawn(async {
+        anyhow::bail!("protocol task failed")
+    }));
+    broker.jobs.push_back(job);
+    assert!(!broker.available());
+    tokio::task::yield_now().await;
+    broker.refresh(1000).await;
+    assert_eq!(broker.jobs[0].status.state, JobState::Failed);
+    assert_eq!(
+        broker.jobs[0].retained_bytes,
+        JOB_RECORD_BYTES
+            + b"retained public input".len() as u64
+            + b"bounded diagnostic".len() as u64
+    );
+    assert!(broker.available());
+    assert!(path.join("dataset.json").is_file());
+    assert!(path.join("output/diagnostic").is_file());
+    assert_eq!(broker.jobs[0].terminal_retain_until, Some(1600));
+    broker.refresh(1600).await;
+    assert!(broker.jobs.is_empty());
+    assert!(!path.exists());
+}
+
+#[test]
+fn retained_accounting_does_not_follow_unknown_file_types() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in(root.path()).unwrap();
+    std::os::unix::fs::symlink(root.path(), directory.path().join("outside")).unwrap();
+    let mut job = terminal_job(0);
+    job.directory = Some(directory);
+    assert!(retained_job_bytes(&job).is_err());
+    job.retained_bytes = retained_job_bytes(&job).unwrap_or(MAX_RETAINED_BYTES);
+    let mut broker = broker(root.path());
+    broker.jobs.push_back(job);
+    assert!(!broker.available());
+    assert_eq!(broker.jobs[0].terminal_retain_until, Some(1600));
+}
+
 #[tokio::test]
 async fn pressure_admission_refuses_work_without_spawning_or_touching_job_files() {
     let root = tempfile::tempdir().unwrap();
@@ -454,6 +627,7 @@ async fn owner_and_full_binding_gate_cancel_slot_and_cleanup_after_task_returns(
         execution: Some(execution),
         terminal_retain_until: None,
         directory: Some(directory),
+        retained_bytes: JOB_RESERVATION_BYTES,
     });
     let caps = broker.handle(request(Operation::Capabilities), 1000).await;
     assert!(matches!(
@@ -600,6 +774,7 @@ async fn expired_owner_can_observe_cancel_while_task_is_still_being_reaped() {
         execution: Some(execution),
         terminal_retain_until: None,
         directory: Some(directory),
+        retained_bytes: JOB_RESERVATION_BYTES,
     });
     for operation in [Operation::Poll(binding()), Operation::Cancel(binding())] {
         let response = broker.handle(request(operation), 1600).await;

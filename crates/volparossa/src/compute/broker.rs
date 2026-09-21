@@ -34,7 +34,17 @@ use volparossa_local_control::compute::{
 use super::spare_capacity::{Budget, Decision};
 use super::{Mode, Options, execute, private_directory};
 
-const RETAINED_JOBS: usize = 8;
+// Terminal receipts do not occupy the one execution slot. Retain bounded history
+// through its original lease/grace so a long workflow need not wait for old leases.
+const RETAINED_JOBS: usize = 256;
+const MAX_RETAINED_BYTES: u64 = 32 * 1024 * 1024;
+const JOB_RECORD_BYTES: u64 = 4096;
+const JOB_RESERVATION_BYTES: u64 = compute::MAX_DATASET_BYTES as u64
+    + super::supervise::MAX_OUTPUT_BYTES
+    + compute::MAX_REPORT_BYTES as u64
+    + JOB_RECORD_BYTES;
+// The worker output permits 64 entries, plus the owned input and output directory.
+const MAX_RETAINED_DIRECTORY_ENTRIES: usize = 66;
 const TERMINAL_GRACE_SECONDS: u64 = 60;
 const EXCHANGE_SECONDS: u64 = 3;
 
@@ -70,6 +80,9 @@ struct Job {
     // This exact newly created directory is retained until the worker has returned.
     // Its RAII cleanup never traverses an operator-supplied or pre-existing job directory.
     directory: Option<TempDir>,
+    // Reserve bounded input/output/report space while active; after reap retain the
+    // actual files and receipt without deleting them or extending their lifetime.
+    retained_bytes: u64,
 }
 
 struct Broker {
@@ -109,6 +122,8 @@ pub(super) async fn run(options: Serve) -> Result<()> {
                 "model_root": options.model_root, "adapter_root": options.adapter_root,
                 "work_root": options.work_root, "mode": "public_inference_only",
                 "runtime_slots": 1, "pending_queue": 0, "retained_jobs": RETAINED_JOBS,
+                "retained_data_budget_bytes": MAX_RETAINED_BYTES,
+                "next_job_reservation_bytes": JOB_RESERVATION_BYTES,
                 "terminal_receipt_grace_seconds": TERMINAL_GRACE_SECONDS,
                 "spare_capacity": true, "pressure_action": "cooperative-pause-resume-memory-cancel",
                 "pause_extends_deadline": false,
@@ -330,6 +345,13 @@ impl Broker {
         self.budget.current() == Decision::Run
             && self.jobs.len() < RETAINED_JOBS
             && self.jobs.iter().all(|job| job.execution.is_none())
+            && self
+                .jobs
+                .iter()
+                .try_fold(JOB_RESERVATION_BYTES, |total, job| {
+                    total.checked_add(job.retained_bytes)
+                })
+                .is_some_and(|total| total <= MAX_RETAINED_BYTES)
     }
 
     fn submit(&mut self, requester: &str, submit: &Submit, time: u64) -> Outcome {
@@ -448,6 +470,7 @@ impl Broker {
             execution: Some(execution),
             terminal_retain_until: None,
             directory: Some(directory),
+            retained_bytes: JOB_RESERVATION_BYTES,
         })
     }
 
@@ -481,6 +504,9 @@ impl Broker {
             };
             let result = execution.await;
             finish_job(job, result, &self.capabilities);
+            // Failed/uncertain accounting withholds new work, never the existing
+            // receipt. The owned directory still lives until normal expiry/grace.
+            job.retained_bytes = retained_job_bytes(job).unwrap_or(MAX_RETAINED_BYTES);
             job.terminal_retain_until = Some(
                 job.status
                     .binding
@@ -519,6 +545,48 @@ impl Broker {
         self.jobs.clear();
         Ok(())
     }
+}
+
+fn retained_job_bytes(job: &Job) -> Result<u64> {
+    let mut bytes = JOB_RECORD_BYTES
+        + job
+            .status
+            .report_json
+            .as_ref()
+            .map_or(0, |report| report.len() as u64);
+    let Some(root) = &job.directory else {
+        return Ok(bytes);
+    };
+    ensure!(
+        fs::symlink_metadata(root.path())?.is_dir(),
+        "compute_broker_retained_directory"
+    );
+    let mut pending = vec![root.path().to_owned()];
+    let mut entries = 0;
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory)? {
+            entries += 1;
+            ensure!(
+                entries <= MAX_RETAINED_DIRECTORY_ENTRIES,
+                "compute_broker_retained_entries"
+            );
+            let entry = entry?;
+            let info = fs::symlink_metadata(entry.path())?;
+            if info.is_dir() {
+                pending.push(entry.path());
+            } else {
+                ensure!(info.is_file(), "compute_broker_retained_file");
+                bytes = bytes
+                    .checked_add(info.len())
+                    .context("compute_broker_retained_size")?;
+                ensure!(
+                    bytes <= MAX_RETAINED_BYTES,
+                    "compute_broker_retained_budget"
+                );
+            }
+        }
+    }
+    Ok(bytes)
 }
 
 fn finish_job(
