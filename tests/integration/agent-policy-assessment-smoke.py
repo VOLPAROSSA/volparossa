@@ -97,11 +97,11 @@ def check_dataset(dataset, stage, context, manifest):
 def check_output(output, stage, assessment):
     generation = output["generation"]
     require(set(generation) == {"version", "stop_reason", "max_new_tokens", "model_profile", "output_contract"}
-            and generation["version"] == 2 and generation["max_new_tokens"] == 256
+            and generation["version"] == 3 and generation["max_new_tokens"] == 512
             and generation["model_profile"] == "smollm2-360m-v1"
             and generation["output_contract"] == stage_contract(stage)
             and generation["stop_reason"] in ("json_boundary", "eos")
-            and type(output["generated_tokens"]) is int and 0 < output["generated_tokens"] <= 256
+            and type(output["generated_tokens"]) is int and 0 < output["generated_tokens"] <= 512
             and output["text_truncated"] is False, "incomplete/mismatched structured model generation")
     raw = output["text"].encode()
     payload = strict_json(raw)
@@ -653,19 +653,26 @@ def self_test():
         text = json.dumps(expected, separators=(",", ":"))
         assertion = {"review" if stage.startswith("review-") else "assessment": expected, "output_sha256": sha(text.encode())}
         output = {"text": text, "text_truncated": False, "generated_tokens": 120,
-            "generation": {"version": 2, "stop_reason": "json_boundary", "max_new_tokens": 256,
+            "generation": {"version": 3, "stop_reason": "json_boundary", "max_new_tokens": 512,
                            "model_profile": "smollm2-360m-v1", "output_contract": stage_contract(stage)}}
         check_output(output, stage, assertion)
         check_output({**output, "generation": {**output["generation"], "stop_reason": "eos"}}, stage, assertion)
+        for stop_reason in ("json_boundary", "eos"):
+            check_output({**output, "generated_tokens": 512,
+                          "generation": {**output["generation"], "stop_reason": stop_reason}}, stage, assertion)
+        # Historical v2/256 and mixed version/budget pairs cannot prove this new execution.
+        for version, budget in ((2, 256), (2, 512), (3, 256)):
+            rejects(check_output, {**output, "generation": {**output["generation"],
+                    "version": version, "max_new_tokens": budget}}, stage, assertion)
         for key, value in (("version", 1), ("stop_reason", "token_limit"), ("stop_reason", "graph_boundary"),
                            ("max_new_tokens", 384), ("model_profile", "smollm2-135m-v1"),
                            ("output_contract", CONTRACTS[1 if stage.startswith("assessment-") else 0])):
             bad = deepcopy(output)
             bad["generation"][key] = value
             if value == "token_limit":
-                bad["generated_tokens"] = 256
+                bad["generated_tokens"] = 512
             rejects(check_output, bad, stage, assertion)
-        for key, value in (("text_truncated", True), ("generated_tokens", 0), ("generated_tokens", 257),
+        for key, value in (("text_truncated", True), ("generated_tokens", 0), ("generated_tokens", 513),
                            ("generated_tokens", True), ("text", text + " extra"), ("text", text[:-1])):
             rejects(check_output, {**output, key: value}, stage, assertion)
         duplicate = text[:-1] + ',"version":1}'

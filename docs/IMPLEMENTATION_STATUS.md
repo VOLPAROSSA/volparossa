@@ -30,10 +30,19 @@ The incomplete schema-like outputs are not repaired or adopted. Neither cross-re
 the result remains incomplete/undetermined. Original cleanup and unchanged host state pass.
 This is a model-output failure, not evidence of a failed content path or a peer memory-pressure event.
 
-The next functional candidate addresses that failure with an explicit signed public principle
-dataset v4 and fixed assessment/review JSON decoding, not an outcome chosen by the coordinator.
-Owner-enabled `--principle-inference-v4` brokers use the pinned optional decoder with the same
-360M model, one source row, 1024 prompt tokens and 256 generation tokens. Complete JSON has its
+The [structured-decoder run on `ca766405`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35667596187)
+also **fails**. Both distinct 360M peers execute, but their original outputs each reach 256 tokens
+without EOS or a valid JSON boundary. They quote framework prose rather than the actual subject
+and repeat a principle; more tokens alone would not validate those judgments. No cross-review,
+portable bundle or completed offline replay is reached. Review of all 126 original exported files
+checks the provider and content signatures, 41 pinned wheels, observed isolation, cleanup and
+identical host-state bytes. A real cooperative pause/resume is observed on one worker; this is
+not a worker-execution, transport or memory-pressure failure. The concept remains undetermined.
+
+That structured candidate introduced an explicit signed public principle dataset v4 and fixed
+assessment/review JSON decoding, not an outcome chosen by the coordinator. Owner-enabled
+`--principle-inference-v4` brokers used the pinned optional decoder with the same 360M model,
+one source row, 1024 prompt tokens and 256 generation tokens. Complete JSON has its
 own `json_boundary` ending; it is not relabeled EOS. All source quotes, uncertainty and opposite
 reviews remain independently checked. New enrollments are version 2; original version-1 jobs
 keep their old document inputs and receipts. Real four-job success and B06 remain unproven until
@@ -41,7 +50,21 @@ the updated disposable fixture passes. No network-policy authority or activation
 Verification: 270 CLI compute checks, the additional v4 four-stage signed transfer/replay test,
 seven content/protocol/agent admission checks, 91 pure worker/decoder checks, scoped strict Clippy,
 the compiled inert CLI smoke and the static disposable-topology contract pass. These are not
-evidence that the real model now produces usable judgments; the next VM run must establish that.
+evidence of usable real-model judgments, as the subsequent failed run above demonstrates.
+
+The next generation candidate separates the unchanged framework from the exact untrusted subject
+and review text. Its quote choices comprise every nonblank original-source substring up to 128
+UTF-8 bytes, without choosing a principle or verdict for the model. Fixed field order asks for
+evidence and reasoning before the outcome; all fourteen principles, three outcomes, counterarguments
+and uncertainty remain available. The explicit generation-v3 envelope permits up to 512 answer tokens
+for this structured task only. Ordinary inference and original generation-v2 receipts keep their
+256-token contract. Completed output must still fit 1024 bytes and pass independent source-grounding
+and opposite-peer checks; no partial answer is repaired, accepted or relabeled EOS. This is a new
+functional candidate, not a passing four-stage assessment or a claim of semantic reliability.
+Verification: six generation-envelope tests, six coordinator/transfer tests, 102 pure worker/decoder
+checks, scoped strict CLI Clippy, compiled inert policy CLI checks and the 56-negative-case fixture
+self-test pass. The marked literal parser covers escaped quotes, backslashes, controls, Unicode and
+literal whitespace; these checks do not execute the upstream decoder or model on the development host.
 
 The next B06 transfer slice adds opt-in original provider-signed Poll transcripts, `policy-pack`
 and `policy-fetch`. A completed four-stage public judgment can be packaged as an inert signed

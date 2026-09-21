@@ -1695,11 +1695,22 @@ The owner must explicitly provision the existing pinned optional decoder (`--tas
 and enable `compute serve --model-profile smollm2-360m-v1 --principle-inference-v4` with the usual
 runtime/model/work/socket options. Other brokers do not advertise this capability. The decoder
 constrains JSON structure, not allow/deny/undetermined, principles or the model's reasoning.
-One generation keeps the existing 1024-prompt/256-generation budget. A fully validated JSON
+The current generation-v3 envelope permits 1024 prompt tokens and up to 512 answer tokens for
+these structured judgments only; original generation-v2 receipts still mean 256 answer tokens,
+and ordinary inference is unchanged. A fully validated JSON
 boundary is reported as `json_boundary`, separately from actual EOS and incomplete `token_limit`.
 The fixed question no longer asks the model to imitate a schema-placeholder string. Quote
 grounding and opposite-peer review still apply; well-formed JSON does not prove sound judgment.
 Original enrollment-version-1 workflows remain bound to their original inputs and outputs.
+
+The [first structured run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35667596187)
+still fails: both real peers quote the framework instead of the subject, repeat a principle and
+hit the old 256-token cap before completing JSON. No cross-review or portable judgment is proved.
+The next candidate separates framework instructions from exact source/review data, constrains
+quotes to all literal source substrings within the existing 128-byte limit, and generates reasoning,
+counterarguments and uncertainty before the outcome. This restriction selects no moral conclusion:
+all fourteen principles and all outcomes remain open. Source-quote matching still does not prove
+that a quote supports the argument. Real four-stage completion and sound judgment remain unproven.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

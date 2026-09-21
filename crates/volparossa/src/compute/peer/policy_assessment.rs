@@ -155,7 +155,8 @@ fn preview(args: &Options) -> Result<Value> {
         "dataset_version":if args.resume {None} else {Some(4)},
         "structured_output":if args.resume {None} else {Some(true)},
         "model_profile":"smollm2-360m-v1","resume":args.resume,
-        "subject_limit_bytes":512,"prompt_limit_tokens":1024,"generation_limit_tokens":256,
+        "subject_limit_bytes":512,"prompt_limit_tokens":1024,
+        "generation_limit_tokens":if args.resume { None } else { Some(512) },
         "framework":assessment::framework(),"private_data_supported":false,
         "independent_semantic_judgment_proven":false}),
     )

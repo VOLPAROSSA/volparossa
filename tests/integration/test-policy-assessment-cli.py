@@ -65,11 +65,12 @@ def main():
                 and preview["planned_jobs"] == 4
                 and preview["dataset_version"] == 4 and preview["structured_output"] is True
                 and preview["model_profile"] == "smollm2-360m-v1"
-                and preview["generation_limit_tokens"] == 256, "wrong public assessment preview scope")
+                and preview["generation_limit_tokens"] == 512, "wrong public assessment preview scope")
         resumed = json.loads(run(binary, root, ["--output", output, "--resume"], True).stdout)
         require(resumed["execute"] is False and resumed["network_policy_activation"] is False,
                 "resume preview acquired execution authority")
-        require(resumed["dataset_version"] is None and resumed["structured_output"] is None,
+        require(resumed["dataset_version"] is None and resumed["structured_output"] is None
+                and resumed["generation_limit_tokens"] is None,
                 "resume preview guessed the version of an unread historical enrollment")
         portable = json.loads(run(binary, root, [*flags, "--portable-receipts"], True).stdout)
         require(portable["portable_receipts"] is True, "portable opt-in missing")

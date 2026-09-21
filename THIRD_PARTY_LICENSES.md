@@ -50,6 +50,13 @@ merged pin file and requirements hashes describe the files actually installed. I
 and the optional core-import/version check run only in an explicitly acknowledged disposable
 environment; no model execution or successful constrained generation is implied.
 
+The separate source-bundled `task_graph_decoder.py` adapter also supports explicitly ordered
+principle JSON. Its marked source-quote scalar uses canonical JSON string lexemes: upstream
+0.11.3's [string-enum state](https://github.com/noamgat/lm-format-enforcer/blob/05c7dc3a46305e39c1a67c8622c433d8deda48a2/lmformatenforcer/jsonschemaparser.py#L476)
+does not preserve general escaped source strings as enum values. This is a process-local adapter,
+not an edit to the original wheel or its notices. Original output still requires independent
+source/UTF-8 validation; constrained syntax does not establish sound model reasoning.
+
 | Optional decoder component | Exact source / original distribution | License and notice provenance |
 | --- | --- | --- |
 | LM Format Enforcer `0.11.3` | [release source](https://github.com/noamgat/lm-format-enforcer/tree/05c7dc3a46305e39c1a67c8622c433d8deda48a2), commit `05c7dc3a46305e39c1a67c8622c433d8deda48a2`; [original PyPI metadata](https://pypi.org/pypi/lm-format-enforcer/0.11.3/json) | MIT, Copyright (c) 2023 Noam Gat; original source LICENSE SHA-256 `d1c02373f9da54abb40fb9fa5ca6c19136d10da76a1054ff1ee2528221ae1bfe`. Our separate tokenizer adapter retains this notice. |

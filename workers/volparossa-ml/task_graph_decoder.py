@@ -33,8 +33,10 @@ SOFTWARE.
 """
 
 import copy
+from bisect import bisect_left
 import importlib
 import importlib.metadata
+import json
 
 
 class DecoderError(Exception):
@@ -83,6 +85,172 @@ def _load_backend(check):
                 modules[1].TokenEnforcer, modules[2].TokenList)
     except Exception:
         raise DecoderError("TASK_GRAPH_DECODER_UNAVAILABLE") from None
+
+
+class _SourceQuoteTable:
+    """Sorted canonical lexemes: no allocation of a trie node for every prefix."""
+
+    def __init__(self, values, check):
+        if type(values) is not list or not 1 <= len(values) <= 65536:
+            raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+        pairs, total = [], 0
+        for value in values:
+            check()
+            if type(value) is not str or not value.strip() or "\0" in value:
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+            try:
+                size = len(value.encode("utf-8"))
+            except UnicodeError:
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED") from None
+            total += size
+            if not 1 <= size <= 128 or total > 8 * 1024 * 1024:
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+            pairs.append((json.dumps(value, ensure_ascii=False), value))
+        check()
+        pairs.sort()
+        self.lexemes, self.values = tuple(zip(*pairs))
+        self.original = tuple(values)
+        check()
+
+
+def _source_quote_tables(schema, check):
+    tables = []
+
+    def visit(value):
+        if type(value) is dict:
+            if "x-volparossa-source-quotes" in value:
+                if value["x-volparossa-source-quotes"] is not True or value.get("type") != "string":
+                    raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+                tables.append(_SourceQuoteTable(value.get("enum"), check))
+            for key, child in value.items():
+                if key != "enum":
+                    visit(child)
+        elif type(value) is list:
+            for child in value:
+                visit(child)
+
+    visit(schema)
+    return tables
+
+
+def _source_quote_state(base):
+    class SourceQuoteState(base):
+        # Remain a StringParsingState so the pinned parent retains exact decoded
+        # last_parsed_string and recognizes strings when popping its stack.
+        def __init__(self, root, table):
+            super().__init__(root, table.original, require_opening_quote=True)
+            self.table, self.prefix = table, ""
+            self.low, self.high = 0, len(table.lexemes)
+            self._allowed = None
+
+        def get_allowed_characters(self):
+            if self.seen_closing_quote:
+                return ""
+            if not self.seen_opening_quote:
+                return '" \t\r\n'
+            if self._allowed is None:
+                offset = len(self.prefix)
+                self._allowed = "".join(sorted({self.table.lexemes[index][offset]
+                    for index in range(self.low, self.high)}))
+            return self._allowed
+
+        def add_character(self, character):
+            if not self.seen_opening_quote and character in " \t\r\n":
+                return self
+            if character not in self.get_allowed_characters():
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+            updated = copy.copy(self)
+            updated.prefix += character
+            # Every lexeme begins with a quote, so an exclusive lexical upper
+            # bound always exists, including for a literal U+10FFFF codepoint.
+            upper = updated.prefix
+            while ord(upper[-1]) == 0x10FFFF:
+                upper = upper[:-1]
+            upper = upper[:-1] + chr(ord(upper[-1]) + 1)
+            updated.low = bisect_left(self.table.lexemes, updated.prefix, self.low, self.high)
+            updated.high = bisect_left(self.table.lexemes, upper, updated.low, self.high)
+            updated.seen_opening_quote = True
+            updated.seen_closing_quote = self.table.lexemes[updated.low] == updated.prefix
+            updated.parsed_string = self.table.values[updated.low] if updated.seen_closing_quote else ""
+            updated._allowed = None
+            return updated
+
+        def can_end(self):
+            return self.seen_closing_quote
+
+    return SourceQuoteState
+
+
+def _install_source_quote_parser(module, tables):
+    original = getattr(module.get_parser, "_volparossa_original", module.get_parser)
+    state = _source_quote_state(module.StringParsingState)
+    cached = {}
+
+    def get_parser(root, schema):
+        extras = schema.extras or {}
+        if "x-volparossa-source-quotes" not in extras:
+            return original(root, schema)
+        if extras["x-volparossa-source-quotes"] is not True or schema.type != "string":
+            raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+        known = cached.get(id(schema))
+        if known is None:
+            values = tuple(schema.enum or ())
+            table = next((table for table in tables if table.original == values), None)
+            if table is None:
+                raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+            cached[id(schema)] = (schema, table)
+        else:
+            table = known[1]
+        return state(root, table)
+
+    get_parser._volparossa_original = original
+    module.get_parser = get_parser
+
+
+class _CompactJsonParser:
+    """Ordered policy JSON only: remove formatting, never whitespace inside strings."""
+
+    def __init__(self, inner, string_type):
+        self.inner, self.string_type = inner, string_type
+
+    def _inside_string(self):
+        return any(isinstance(state, self.string_type) and state.seen_opening_quote
+                   and not state.seen_closing_quote for state in self.inner.object_stack)
+
+    @property
+    def config(self):
+        return self.inner.config
+
+    @config.setter
+    def config(self, config):
+        # TokenEnforcer replaces parser.config to add the tokenizer alphabet.
+        # Preserve our explicit field order through that pinned upstream step.
+        config = copy.copy(config)
+        config.force_json_field_order = True
+        self.inner.config = config
+        self.inner.context.alphabet_without_quotes = config.alphabet.replace('"', '')
+
+    def add_character(self, character):
+        inner = self.inner.add_character(character)
+        result = _CompactJsonParser(inner, self.string_type)
+        if result._inside_string():
+            # Upstream counts whitespace globally, even inside a JSON string.
+            # It is source data here; structural formatting remains forbidden.
+            inner.num_consecutive_whitespaces = 0
+        return result
+
+    def get_allowed_characters(self):
+        allowed = self.inner.get_allowed_characters()
+        return allowed if self._inside_string() else "".join(c for c in allowed if c not in " \t\r\n")
+
+    def can_end(self):
+        return self.inner.can_end()
+
+    def cache_key(self):
+        return self.inner.cache_key()
+
+    def shortcut_key(self):
+        return self.inner.shortcut_key()
 
 
 def _strict_enforcer(base, token_list):
@@ -145,11 +313,14 @@ class GraphDecoder:
     """
 
     def __init__(self, tokenizer, check, accepts_graph_bytes, *, schema=None,
-                 prompt_limit=512, output_limit=16384):
+                 prompt_limit=512, output_limit=16384, generation_limit=384,
+                 ordered_json=False):
         # Only compiled worker code supplies this schema/limits, never a dataset.
         # Defaults preserve the original graph profile and historical contract.
         if (type(prompt_limit) is not int or not 1 <= prompt_limit <= 1024
                 or type(output_limit) is not int or not 1 <= output_limit <= 16384
+                or type(generation_limit) is not int or not 1 <= generation_limit <= 512
+                or type(ordered_json) is not bool
                 or schema is not None and type(schema) is not dict):
             raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
         self.check = check
@@ -157,8 +328,24 @@ class GraphDecoder:
         self.accepts_graph_bytes = accepts_graph_bytes
         self.schema = graph_schema() if schema is None else schema
         self.prompt_limit, self.output_limit = prompt_limit, output_limit
+        self.generation_limit = generation_limit
         parser, data, base, token_list = _load_backend(check)
         self.parser = parser
+        self.parser_options = {}
+        self.ordered_string_type = None
+        if ordered_json:
+            check()
+            try:
+                config_type = importlib.import_module(
+                    "lmformatenforcer.characterlevelparser").CharacterLevelParserConfig
+                self.parser_options["config"] = config_type(force_json_field_order=True)
+                parser_module = importlib.import_module("lmformatenforcer.jsonschemaparser")
+                self.ordered_string_type = parser_module.StringParsingState
+            except Exception:
+                raise DecoderError("TASK_GRAPH_DECODER_UNAVAILABLE") from None
+            tables = _source_quote_tables(self.schema, check)
+            if tables:
+                _install_source_quote_parser(parser_module, tables)
         self.enforcer = _strict_enforcer(base, token_list)
         check()
         try:
@@ -206,10 +393,13 @@ class GraphDecoder:
         self.check()
         if (type(prompt_ids) is not list or not 1 <= len(prompt_ids) <= self.prompt_limit
                 or any(type(token) is not int or not 0 <= token < self.vocab_size for token in prompt_ids)
-                or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= 384):
+                or type(max_new_tokens) is not int or not 1 <= max_new_tokens <= self.generation_limit):
             raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
         try:
-            enforcer = self.enforcer(self.data, self.parser(copy.deepcopy(self.schema)))
+            parser = self.parser(copy.deepcopy(self.schema), **self.parser_options)
+            if self.ordered_string_type is not None:
+                parser = _CompactJsonParser(parser, self.ordered_string_type)
+            enforcer = self.enforcer(self.data, parser)
         except Exception:
             raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED") from None
         self.check()

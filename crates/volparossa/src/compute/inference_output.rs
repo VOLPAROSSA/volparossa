@@ -39,12 +39,19 @@ impl Generation {
         let tokens = output["generated_tokens"]
             .as_u64()
             .context("compute_generation_token_count")?;
-        let limit = generation.model_profile.spec().max_new_tokens;
+        // Structured principle judgments carry quotes, reasoning, a counterargument
+        // and uncertainty. Their explicit v3 envelope has its own bounded budget;
+        // ordinary inference keeps its profile limit, and v2 principle receipts keep 256.
+        let limit = if generation.version == 3 {
+            512
+        } else {
+            generation.model_profile.spec().max_new_tokens
+        };
         ensure!(
             ((generation.version == 1
                 && generation.output_contract.is_none()
                 && generation.stop_reason != StopReason::JsonBoundary)
-                || (generation.version == 2
+                || (matches!(generation.version, 2 | 3)
                     && generation.output_contract.is_some()
                     && generation.model_profile == ModelProfile::Smol360))
                 && generation.max_new_tokens == limit
@@ -229,6 +236,48 @@ mod tests {
                 .unwrap()
                 .is_json_boundary()
         );
+        assert!(
+            super::check_dataset_contract(&json!({"outputs":[row]}), br#"{"version":2}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn principle_v3_has_an_explicit_budget_without_reinterpreting_older_receipts() {
+        let text = json!({"version":1,"outcome":"undetermined",
+            "reasoning":[{"principle":"Humilitas","quote":"public","reason":"Evidence is limited."}],
+            "counterargument":"Further context could change this.",
+            "uncertainty":{"material":true,"reason":"Insufficient context."}}).to_string();
+        let row = json!({"text":text,"text_truncated":false,"generated_tokens":400,
+            "generation":{"version":3,"stop_reason":"json_boundary","max_new_tokens":512,
+            "model_profile":"smollm2-360m-v1","output_contract":"principle_assessment_v1"}});
+        assert!(
+            Generation::from_output(&row, true)
+                .unwrap()
+                .unwrap()
+                .is_json_boundary()
+        );
+        for (pointer, value) in [
+            ("/generation/version", json!(2)),
+            ("/generation/version", json!(4)),
+            ("/generation/max_new_tokens", json!(256)),
+            ("/generation/model_profile", json!("smollm2-135m-v1")),
+            ("/generation/output_contract", json!(null)),
+            ("/generated_tokens", json!(513)),
+            ("/text_truncated", json!(true)),
+        ] {
+            let mut changed = row.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                Generation::from_output(&changed, true).is_err(),
+                "{pointer}"
+            );
+        }
+        let mut limited = row.clone();
+        limited["generation"]["stop_reason"] = json!("token_limit");
+        assert!(Generation::from_output(&limited, true).is_err());
+        limited["generated_tokens"] = json!(512);
+        let generation = Generation::from_output(&limited, true).unwrap().unwrap();
+        assert!(!generation.is_json_boundary() && !generation.is_eos());
         assert!(
             super::check_dataset_contract(&json!({"outputs":[row]}), br#"{"version":2}"#).is_err()
         );

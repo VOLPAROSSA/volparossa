@@ -316,7 +316,9 @@ async fn stage(
     if let Some(contract) = contract {
         report["dataset"]["version"] = 4.into();
         report["dataset"]["output_contract"] = serde_json::to_value(contract).unwrap();
-        report["outputs"][0]["generation"]["version"] = 2.into();
+        report["outputs"][0]["generation"]["version"] = 3.into();
+        report["outputs"][0]["generation"]["max_new_tokens"] = 512.into();
+        report["outputs"][0]["generated_tokens"] = 400.into();
         report["outputs"][0]["generation"]["stop_reason"] = "json_boundary".into();
         report["outputs"][0]["generation"]["output_contract"] =
             serde_json::to_value(contract).unwrap();

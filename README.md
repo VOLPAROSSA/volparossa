@@ -256,6 +256,8 @@ A larger model alone is not proof of better answers.
 The new opt-in `--plan-task-graph` goes beyond the fixed two-question layout: the model proposes
 one to four subtasks and their dependencies as one complete JSON object. The existing executor
 runs the accepted graph and joins its terminal branches under the unchanged original question.
+Add `--plan-structure dependent` to explicitly request tasks that build on other tasks' results;
+the model still chooses the questions and dependencies, without supplied answers or repaired plans.
 This candidate still needs real model-and-peer verification; choosing a valid graph is not proof
 of choosing useful work. The existing `--plan-tasks` mode and retained histories remain available.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
@@ -342,8 +344,10 @@ The new `compute peer policy-assess` development candidate fetches one exact pub
 asks two selected peers for principle-led judgments, and has each peer examine the other's
 reasoning. It retains the original answers, evidence and disagreements; its concept outcome is
 **allow, deny or undetermined**. The first real-model run fetched the source and executed both
-assessors, but their answers hit the token limit without complete JSON; cross-review remains
-unproven. An opt-in transfer path now preserves the original provider-signed replies and can
+assessors, but their answers hit the token limit without complete JSON. A later structured run
+also quoted the framework instead of the subject. The next candidate constrains quotes to the
+actual source and separates that source from the framework; cross-review remains unproven.
+An opt-in transfer path now preserves the original provider-signed replies and can
 package/retrieve completed judgments through the shared cache. This verifies who signed each
 answer, not that the answer is correct. These concepts do not change network policy or establish legality.
 [Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)

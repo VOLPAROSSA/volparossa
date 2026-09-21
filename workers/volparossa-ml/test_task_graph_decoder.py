@@ -3,6 +3,7 @@
 """Adapter contract tests with tiny core doubles; no LMFE/model execution claim."""
 
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -70,19 +71,57 @@ class Data:
 
 
 class Parser:
-    def __init__(self, schema, text=""):
-        self.schema, self.text = schema, text
+    def __init__(self, schema, text="", config=None):
+        self.schema, self.text, self.config = schema, text, config
 
     def add_character(self, character):
         if character == "!":
             raise ValueError("PRIVATE PARSER CONTENT")
-        return Parser(self.schema, self.text + character)
+        return Parser(self.schema, self.text + character, self.config)
 
     def can_end(self):
         try:
             return isinstance(json.loads(self.text), dict)
         except ValueError:
             return False
+
+    def cache_key(self):
+        return None
+
+    def shortcut_key(self):
+        return None
+
+
+class StringState:
+    """Pinned StringParsingState initialization shape, not its enum algorithm."""
+
+    def __init__(self, root, allowed_strings, require_opening_quote):
+        self.root, self.allowed_strings = root, allowed_strings
+        self.seen_opening_quote, self.seen_closing_quote = not require_opening_quote, False
+        self.parsed_string = ""
+
+
+class ScalarRoot:
+    """Only pinned root stack/config/whitespace behavior around one scalar."""
+
+    def __init__(self):
+        self.object_stack = []
+        self.config = SimpleNamespace(force_json_field_order=False, alphabet=' abc"')
+        self.context = SimpleNamespace(alphabet_without_quotes=" abc")
+        self.num_consecutive_whitespaces = 0
+
+    def add_character(self, character):
+        updated = copy.copy(self)
+        updated.object_stack = [self.object_stack[0].add_character(character)]
+        updated.num_consecutive_whitespaces = self.num_consecutive_whitespaces + 1 if character in " \t\r\n" else 0
+        return updated
+
+    def get_allowed_characters(self):
+        result = self.object_stack[0].get_allowed_characters()
+        return "".join(c for c in result if c not in " \t\r\n") if self.num_consecutive_whitespaces >= 12 else result
+
+    def can_end(self):
+        return self.object_stack[0].can_end()
 
     def cache_key(self):
         return None
@@ -137,6 +176,113 @@ def decoder(check=lambda: None, accepts=lambda raw: raw == RAW, tokenizer=None):
 
 
 class DecoderTests(unittest.TestCase):
+    def test_explicit_ordered_principle_budget_does_not_change_graph_defaults(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module) as importing:
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda raw: raw == RAW,
+                schema={"type": "object"}, prompt_limit=1024, output_limit=1024,
+                generation_limit=512, ordered_json=True)
+        self.assertEqual(importing.call_args_list, [mock.call("lmformatenforcer.characterlevelparser"),
+                                                   mock.call("lmformatenforcer.jsonschemaparser")])
+        module.CharacterLevelParserConfig.assert_called_once_with(force_json_field_order=True)
+        callback = value.new_attempt([0], 512)
+        self.assertIs(callback.enforcer.root_parser.config, module.CharacterLevelParserConfig.return_value)
+        self.assertIsNone(decoder().new_attempt([0], 384).enforcer.root_parser.config)
+        for instance, limit in ((value, 513), (decoder(), 385)):
+            with self.assertRaisesRegex(DECODER.DecoderError, "ATTEMPT_INVALID"):
+                instance.new_attempt([0], limit)
+
+    def test_source_literal_roundtrips_escapes_unicode_and_long_literal_whitespace(self):
+        values = ['a"b', 'a\\b', 'a\nb', 'a\tb', 'a\rb', 'a\fb', 'a\bb', 'a\x01b',
+                  'é🙂漢字', '\U0010ffffz', ' ' * 20 + 'leading', 'trailing' + ' ' * 20, 'a', 'ab']
+        table = DECODER._SourceQuoteTable(values, lambda: None)
+        state_type = DECODER._source_quote_state(StringState)
+        for value in values:
+            with self.subTest(value=repr(value)):
+                root = ScalarRoot()
+                root.object_stack = [state_type(root, table)]
+                parser = DECODER._CompactJsonParser(root, StringState)
+                self.assertEqual(parser.get_allowed_characters(), '"')
+                for character in json.dumps(value, ensure_ascii=False):
+                    previous = parser.inner.object_stack[0]
+                    prefix = previous.prefix
+                    self.assertIn(character, parser.get_allowed_characters())
+                    parser = parser.add_character(character)
+                    self.assertEqual(previous.prefix, prefix)  # Immutable branching state.
+                self.assertTrue(parser.can_end())
+                self.assertEqual(parser.inner.object_stack[0].parsed_string, value)
+                self.assertEqual(parser.get_allowed_characters(), "")
+
+    def test_source_literal_rejects_wrong_escape_and_raw_control_without_repair(self):
+        state_type = DECODER._source_quote_state(StringState)
+        for value, wrong, prefix in [('a"b', '"', '"a'), ('a\\b', 'n', '"a\\'),
+                                     ('a\nb', '\n', '"a'), ('é', '\\', '"')]:
+            table = DECODER._SourceQuoteTable([value], lambda: None)
+            state = state_type(ScalarRoot(), table)
+            for character in prefix:
+                state = state.add_character(character)
+            self.assertNotIn(wrong, state.get_allowed_characters())
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                    state.add_character(wrong)
+            self.assertEqual(output.getvalue(), "")
+
+    def test_quote_hook_is_marker_only_and_keeps_original_string_class(self):
+        original = mock.Mock(return_value=object())
+        original._volparossa_original = original
+        module = SimpleNamespace(get_parser=original, StringParsingState=StringState)
+        schema = {"type": "object", "properties": {"quote": {"type": "string", "enum": ['say "yes"'],
+                  "x-volparossa-source-quotes": True}}}
+        tables = DECODER._source_quote_tables(schema, lambda: None)
+        DECODER._install_source_quote_parser(module, tables)
+        unmarked = SimpleNamespace(type="string", extras={}, enum=['say "yes"'])
+        root = ScalarRoot()
+        self.assertIs(module.get_parser(root, unmarked), original.return_value)
+        original.assert_called_once_with(root, unmarked)
+        marked = SimpleNamespace(type="string", extras={"x-volparossa-source-quotes": True}, enum=['say "yes"'])
+        state = module.get_parser(root, marked)
+        self.assertIsInstance(state, StringState)
+        self.assertIs(module.StringParsingState, StringState)
+        self.assertIs(module.get_parser(root, marked).table, state.table)
+        for bad in (SimpleNamespace(type="string", extras={"x-volparossa-source-quotes": False}, enum=marked.enum),
+                    SimpleNamespace(type="string", extras=marked.extras, enum=["not the compiled source"])):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                module.get_parser(root, bad)
+
+    def test_compact_wrapper_preserves_open_key_escape_and_value_spaces_and_order(self):
+        root = ScalarRoot()
+        root.get_allowed_characters = lambda: ' \t\r\n"}x'
+        wrapper = DECODER._CompactJsonParser(root, StringState)
+        self.assertEqual(wrapper.get_allowed_characters(), '"}x')
+        state = StringState(root, [], require_opening_quote=False)
+        root.object_stack = [state, object()]  # Escape subparser above an open string.
+        self.assertEqual(wrapper.get_allowed_characters(), ' \t\r\n"}x')
+        state.seen_closing_quote = True
+        self.assertEqual(wrapper.get_allowed_characters(), '"}x')
+        replacement = SimpleNamespace(force_json_field_order=False, alphabet='é "')
+        wrapper.config = replacement  # Actual TokenEnforcer constructor does this.
+        self.assertTrue(wrapper.config.force_json_field_order)
+        self.assertFalse(replacement.force_json_field_order)
+        self.assertEqual(wrapper.config.alphabet, replacement.alphabet)
+        self.assertEqual(root.context.alphabet_without_quotes, 'é ')
+
+    def test_source_table_bounds_and_owner_cancellation_before_backend_work(self):
+        for values in ([], [' '], ['\0'], ['é' * 65], ['\ud800'], [True], ['a'] * 65537):
+            with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                DECODER._SourceQuoteTable(values, lambda: None)
+        class Cancelled(Exception):
+            pass
+        calls = []
+        def check():
+            calls.append(True)
+            if len(calls) == 2:
+                raise Cancelled('JOB_CANCELLED')
+        with self.assertRaises(Cancelled):
+            DECODER._SourceQuoteTable(['a', 'b', 'c'], check)
+        self.assertEqual(len(calls), 2)
+
     def test_compiled_policy_schema_uses_same_strict_core_with_explicit_prompt_bound(self):
         schema = {"type": "object", "properties": {"outcome": {"enum": ["allow", "deny", "undetermined"]}}}
         with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)):
