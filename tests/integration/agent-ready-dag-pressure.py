@@ -48,10 +48,16 @@ def namespace(pid):
     return os.readlink(f"/proc/{pid}/ns/mnt")
 
 
+def work_path_shape(work):
+    # kvm-alpha-topology.sh creates /opt/va.<32 lowercase UUID hex>.<mktemp suffix>.
+    return work.parent == Path("/opt") and re.fullmatch(
+        r"va\.[0-9a-f]{32}\.[A-Za-z0-9]{6}", work.name) is not None
+
+
 def guard(work):
     require(os.geteuid() == 0 and socket.gethostname() == "volparossa-alpha"
         and subprocess.check_output(["systemd-detect-virt"], text=True).strip() == "kvm"
-        and work.parent == Path("/opt") and re.fullmatch(r"va\.[A-Za-z0-9]+", work.name)
+        and work_path_shape(work)
         and work.resolve() == work and work.stat().st_uid == 0,
         "pressure injection requires the original disposable root-owned KVM work area")
 
@@ -297,6 +303,19 @@ def validate(pressure, held, restored):
 
 
 def self_test():
+    run_id = "0123456789abcdef" * 2
+    for suffix in ("abc123", "ABCdef", "09azAZ"):
+        assert work_path_shape(Path(f"/opt/va.{run_id}.{suffix}"))
+    for invalid in (
+        f"/tmp/va.{run_id}.abc123", f"opt/va.{run_id}.abc123",
+        f"/opt/nested/va.{run_id}.abc123", f"/opt/../opt/va.{run_id}.abc123",
+        "/opt/va.abc123", f"/opt/va.{run_id}",
+        f"/opt/va.{run_id[:-1]}.abc123", f"/opt/va.{run_id}0.abc123",
+        f"/opt/va.{run_id.upper()}.abc123", f"/opt/va.{run_id}.abc12",
+        f"/opt/va.{run_id}.abc1234", f"/opt/va.{run_id}.abc_12",
+        f"/opt/va.{run_id}.abc123\n", f"/opt/va.{run_id}.abc.12",
+    ):
+        assert not work_path_shape(Path(invalid)), invalid
     raw = b"some avg10=6.21 avg60=4.10 avg300=3.00 total=123\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
     assert pressure_text(raw) == raw.replace(b"avg10=6.21", b"avg10=100.00")
     mounts = b"1 0 0:1 / / rw - ext4 /dev/x rw\n2 1 0:2 / /proc rw master:1 - proc proc rw\n"
@@ -349,7 +368,7 @@ def self_test():
         try: validate(candidate, current, final)
         except ValueError: pass
         else: raise AssertionError("invalid floor identity/restoration accepted")
-    print("ready-DAG pressure parsing/isolation/restoration controls PASS (19 negatives); no mount or namespace execution")
+    print("ready-DAG work-path/pressure/isolation/restoration controls PASS (3 valid paths, 33 negatives); no mount or namespace execution")
     return proof, held, restored
 
 

@@ -1165,6 +1165,11 @@ ordinary quiet-time guard. This is controlled fixture pressure, not measured hos
 Ordinary inference checks its original owner's controls between token steps as well as before
 and after generation; a pause retains the same generation state, while cancellation or deadline
 remains terminal. Native token steps are not preempted mid-call, and no deadline is extended.
+The [first cooperative-fixture run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35641415889)
+stops before injecting pressure: a path-pattern error rejects the runner's two-dot workdir.
+The correction matches that exact existing layout without weakening its KVM or ownership
+guards. This failure does not establish a cooperative-pause defect or the C-before-B boundary;
+network cleanup passes, but its missing private-cleanup record is not independently proved.
 That live dependency-ready proof is **pending**; the four-node proof below covers the
 earlier scheduler only.
 

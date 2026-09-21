@@ -36,6 +36,15 @@ Ordinary inference now services owner controls between generated tokens and afte
 rather than only before an entire output. Its existing token budget, cancellation, original
 deadline and control-acknowledgement limit remain unchanged. The 44 pure worker protocol checks
 pass; this updated dependency-ready scenario still needs its own live proof.
+Its [run on `66abf863`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35641415889)
+fails before pressure injection: the helper rejects the runner's actual
+`/opt/va.<32-lowercase-hex>.<6-mktemp-characters>` work directory because its old expression
+accepts only one dot. Original workers, overlap and startup acknowledgement are observed;
+cooperative Pause, C-before-B and restored pressure are not proved. Network cleanup and
+unchanged host state pass, but the private-cleanup record is missing. The helper now accepts
+the exact runner layout, retaining all original KVM/root/ownership checks. Three valid path
+shapes and 33 negative path/pressure/isolation/restoration controls pass without executing
+mounts or namespaces; the corrected scenario still needs a fresh live run.
 
 Current model-planning candidate: `compute peer document --plan-tasks --public-question`
 runs an isolated pinned model to propose two public subquestions. Strictly validated
