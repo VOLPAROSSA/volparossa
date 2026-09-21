@@ -22,7 +22,7 @@ agent_jobs_follow_run() {
         || fail JOBS_FOLLOW_PLAN_FAILED
     content_custody_phase_start fetch
     PHASE=agent-jobs-follow-worker-loss
-    agent_jobs_follow_cli compute peer workflow --plan "$jobs_source/follow-plan.json" \
+    agent_jobs_follow_cli compute peer workflow --batch-barrier --plan "$jobs_source/follow-plan.json" \
         --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" \
         --directory "$jobs_source/follow" --follow --max-batches 1 --max-seconds 600 --execute \
         >"$WORK/agent-jobs-follow-output.jsonl" 2>"$WORK/agent-jobs-follow-result.err" &

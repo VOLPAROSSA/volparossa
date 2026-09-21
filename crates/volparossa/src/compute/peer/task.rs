@@ -22,6 +22,10 @@ use crate::{
 };
 
 #[derive(Debug, Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent explicit CLI enrollment and execution switches"
+)]
 pub(crate) struct Options {
     /// Independently trusted publisher of the original public dataset, not of your question.
     #[arg(long, value_parser=parse_key, required_unless_present="resume", conflicts_with="resume")]
@@ -52,6 +56,9 @@ pub(crate) struct Options {
     directory: PathBuf,
     #[arg(long)]
     resume: bool,
+    /// Opt into legacy grouped batches when enrolling; resume keeps the recorded mode.
+    #[arg(long, conflicts_with = "resume")]
+    batch_barrier: bool,
     /// Worker rounds per invocation, or per continuation window with --follow.
     #[arg(long, default_value_t=8, value_parser=clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
@@ -70,6 +77,8 @@ pub(crate) struct Options {
 #[serde(deny_unknown_fields)]
 struct Enrollment {
     version: u32,
+    #[serde(default, skip_serializing_if = "workflow::Scheduling::is_legacy")]
+    scheduling: workflow::Scheduling,
     selected_at_unix_seconds: u64,
     publisher_key: String,
     dataset_name: String,
@@ -93,6 +102,7 @@ fn selection(args: &Options) -> Result<Enrollment> {
     };
     let selected = Enrollment {
         version: 1,
+        scheduling: workflow::Scheduling::from_batch_barrier(args.batch_barrier),
         selected_at_unix_seconds: now()?,
         publisher_key: hex::encode(publisher.as_bytes()),
         dataset_name: args.dataset_name.clone().context("compute_task_name")?,
@@ -487,6 +497,7 @@ fn expected_work(
         provider_keys: selected.provider_keys.clone(),
         model_fingerprint: selected.model_fingerprint.clone(),
         replace_peers: selected.replace_peers,
+        scheduling: selected.scheduling,
         selected_at_unix_seconds: selected.selected_at_unix_seconds,
     })
 }
@@ -622,6 +633,7 @@ mod tests {
         .unwrap();
         let selected = Enrollment {
             version: 1,
+            scheduling: workflow::Scheduling::BatchBarrierV1,
             selected_at_unix_seconds: at,
             publisher_key: hex::encode(publisher.verifying_key().as_bytes()),
             dataset_name: "selected".into(),

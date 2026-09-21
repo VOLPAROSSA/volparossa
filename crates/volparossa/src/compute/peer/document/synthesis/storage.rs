@@ -401,6 +401,7 @@ pub(super) fn expected(
         provider_keys: enrollment.provider_keys.clone(),
         model_fingerprint: enrollment.model_fingerprint.clone(),
         replace_peers: enrollment.replace_peers,
+        scheduling: enrollment.scheduling,
         selected_at_unix_seconds: at,
     })
 }

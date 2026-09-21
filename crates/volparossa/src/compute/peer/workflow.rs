@@ -16,7 +16,38 @@ const MAX_ATTEMPTS: usize = 128;
 // A bounded RPC response plus the additional exact handle and local verification metadata.
 const MAX_RECEIPT_BYTES: usize = rpc::MAX_RESPONSE_BYTES + 32 * 1024;
 
+/// Absent in retained histories means the original grouped-batch contract.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Scheduling {
+    #[default]
+    BatchBarrierV1,
+    ReadyRowsV1,
+}
+
+impl Scheduling {
+    pub(super) const fn from_batch_barrier(barrier: bool) -> Self {
+        if barrier {
+            Self::BatchBarrierV1
+        } else {
+            Self::ReadyRowsV1
+        }
+    }
+
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Serde skip_serializing_if takes a reference"
+    )]
+    pub(super) const fn is_legacy(&self) -> bool {
+        matches!(self, Self::BatchBarrierV1)
+    }
+}
+
 #[derive(Debug, Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent explicit CLI enrollment and execution switches"
+)]
 pub(crate) struct Options {
     /// Version-1 JSON with explicit dataset, `dataset_manifest` and `publisher_key` packages.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
@@ -27,6 +58,9 @@ pub(crate) struct Options {
     /// Resume the exact stored sources and peer list; never replace their authorization.
     #[arg(long)]
     resume: bool,
+    /// Retain grouped batches for a new enrollment; default refills free peers per source row.
+    #[arg(long, conflicts_with = "resume")]
+    batch_barrier: bool,
     /// Two to four explicit peers at enrollment; stored unchanged for subsequent invocations.
     #[arg(long, value_parser = parse_key, required_unless_present_any = ["resume", "discover_peers"], conflicts_with_all = ["resume", "discover_peers"])]
     provider_key: Vec<VerifyingKey>,
@@ -62,6 +96,7 @@ pub(super) struct ExpectedTask {
     pub(super) provider_keys: Vec<String>,
     pub(super) model_fingerprint: Option<String>,
     pub(super) replace_peers: bool,
+    pub(super) scheduling: Scheduling,
     pub(super) selected_at_unix_seconds: u64,
 }
 
@@ -76,6 +111,7 @@ impl Options {
     ) -> Self {
         Self {
             resume: plan.is_none(),
+            batch_barrier: false,
             plan,
             directory,
             provider_key: provider_keys,
@@ -125,6 +161,8 @@ struct PackageInput {
 #[serde(deny_unknown_fields)]
 struct Enrollment {
     version: u32,
+    #[serde(default, skip_serializing_if = "Scheduling::is_legacy")]
+    scheduling: Scheduling,
     verified_at_unix_seconds: u64,
     provider_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -164,9 +202,36 @@ struct Progress {
     parts: BTreeMap<Vec<u16>, Part>,
     attempts: usize,
     rows: usize,
+    model_fingerprint: Option<String>,
 }
 
 impl Progress {
+    fn ready_rows(&self) -> Result<Vec<u16>> {
+        (0..self.rows)
+            .map(u16::try_from)
+            .filter_map(|row| match row {
+                Ok(row) if self.parts.contains_key(&vec![row]) => None,
+                result => Some(result.map_err(anyhow::Error::from)),
+            })
+            .collect()
+    }
+
+    fn ready_pending(&self) -> Vec<batch::ReadyPending> {
+        self.parts
+            .values()
+            .filter(|part| {
+                !part
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.state == rpc::JobState::Complete)
+            })
+            .map(|part| batch::ReadyPending {
+                handle: part.handle.clone(),
+                verified_status: part.status.clone(),
+            })
+            .collect()
+    }
+
     fn complete(&self) -> bool {
         self.parts
             .values()
@@ -327,6 +392,7 @@ pub(super) async fn report_with_activity(
                 "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory,
                 "discover_peers":args.discovery.discover_peers,
                 "replace_peers":args.discovery.replace_peers,
+                "scheduling":enrollment.scheduling,
                 "pending_failure":false,"follow":args.follow.follow}),
             );
         }
@@ -380,6 +446,10 @@ fn prepare(args: &Options) -> Result<(Enrollment, Vec<rpc::PublicDataset>)> {
     }
     let enrollment = Enrollment {
         version: 1,
+        scheduling: args.expected_task.as_ref().map_or_else(
+            || Scheduling::from_batch_barrier(args.batch_barrier),
+            |expected| expected.scheduling,
+        ),
         verified_at_unix_seconds: at,
         provider_keys: args
             .provider_key
@@ -449,6 +519,7 @@ fn validate_expected_task(enrollment: &Enrollment, expected: &ExpectedTask) -> R
             && enrollment.provider_keys == expected.provider_keys
             && enrollment.model_fingerprint == expected.model_fingerprint
             && enrollment.replace_peers == expected.replace_peers
+            && enrollment.scheduling == expected.scheduling
             && enrollment.verified_at_unix_seconds >= expected.selected_at_unix_seconds,
         "compute_task_workflow_selection"
     );
@@ -681,6 +752,42 @@ async fn initial_round(
     .await
 }
 
+async fn ready_round(
+    mut options: batch::ReadyOptions,
+    authorization: Option<&executors::Authorization>,
+    later_attempt: bool,
+    socket: &Path,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
+    // New rows have never been leased. A fresh authorized cohort may accept them without
+    // retargeting any old handle; those handles are still observed under their original lease.
+    if later_attempt {
+        if let Some(authorization) = authorization {
+            if let Ok(selected) = executors::discover(authorization, socket, cancelled).await {
+                options.providers.clone_from(&selected.providers);
+                options.executor_admission = Some((authorization.clone(), selected));
+            }
+        }
+    }
+    let first = batch::report_ready_with_activity(&options, socket, cancelled).await;
+    let Some(authorization) = authorization else {
+        return first;
+    };
+    if options.executor_admission.is_some()
+        || !first.as_ref().is_err_and(follow::transient_preflight)
+        || options.output.try_exists()?
+        || *cancelled.borrow()
+    {
+        return first;
+    }
+    let Ok(selected) = executors::discover(authorization, socket, cancelled).await else {
+        return first;
+    };
+    options.providers.clone_from(&selected.providers);
+    options.executor_admission = Some((authorization.clone(), selected));
+    batch::report_ready_with_activity(&options, socket, cancelled).await
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep one bounded admission/reconciliation window and its retained progress together"
@@ -734,7 +841,31 @@ async fn advance(
                 );
                 let output = directory.join(format!("attempt-{:04}", progress.attempts));
                 rounds += 1;
-                let result = if progress.attempts == 0 {
+                let ready_rows = if enrollment.scheduling == Scheduling::ReadyRowsV1 {
+                    progress.ready_rows()?
+                } else {
+                    Vec::new()
+                };
+                let result = if !ready_rows.is_empty() {
+                    ready_round(
+                        batch::ReadyOptions {
+                            source: source_args.clone(),
+                            providers: providers.clone(),
+                            output: output.clone(),
+                            max_seconds: args.max_seconds,
+                            task: package.task.clone(),
+                            model_fingerprint: progress.model_fingerprint.clone(),
+                            ready_rows,
+                            pending: progress.ready_pending(),
+                            executor_admission: None,
+                        },
+                        authorization.as_ref(),
+                        progress.attempts > 0,
+                        socket,
+                        cancelled,
+                    )
+                    .await
+                } else if progress.attempts == 0 {
                     initial_round(
                         &batch::Options::workflow(
                             source_args.clone(),
@@ -810,6 +941,9 @@ async fn advance(
         let mut package_report = serde_json::json!({"package_index":index,"dataset_manifest_id":package.manifest_id,
             "complete":progress.complete(),"attempts":progress.attempts,"outputs":progress.outputs()?,
             "pending_handles":progress.pending(),"task":package.task});
+        if enrollment.scheduling == Scheduling::ReadyRowsV1 {
+            package_report["ready_rows"] = serde_json::json!(progress.ready_rows()?);
+        }
         if let Some(code) = package_failure {
             package_report["failure_code"] = code.into();
         }
@@ -822,7 +956,7 @@ async fn advance(
         stopped = "interrupted_handles_retained";
     }
     let mut report = serde_json::json!({"version":1,"operation":"compute_workflow","execute":args.execute,
-        "complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
+        "scheduling":enrollment.scheduling,"complete":complete,"completed_packages":completed,"package_count":enrollment.packages.len(),
         "rounds_this_invocation":rounds,"maximum_seconds_per_worker":args.max_seconds,"stopped":stopped,
         "packages":packages,"receipt_scope":"locally_retained_authenticated_rpc_status",
         "private_data_supported":false,"automatic_source_discovery":false,"general_task_planning":false,
@@ -921,6 +1055,7 @@ fn load_progress(
         parts: BTreeMap::new(),
         attempts: attempts.len(),
         rows: verified.row_count(),
+        model_fingerprint: enrollment.model_fingerprint.clone(),
     };
     let peers = enrollment.provider_keys.len().min(progress.rows);
     let package = enrollment
@@ -937,9 +1072,10 @@ fn load_progress(
     let peers = first_admission.as_ref().map_or(peers, |admission| {
         admission.provider_keys.len().min(progress.rows)
     });
-    let mut expected = vec![vec![]; peers];
+    let ready = enrollment.scheduling == Scheduling::ReadyRowsV1;
+    let mut expected = vec![vec![]; if ready { progress.rows } else { peers }];
     for row in 0..progress.rows {
-        expected[row % peers].push(u16::try_from(row)?);
+        expected[if ready { row } else { row % peers }].push(u16::try_from(row)?);
     }
     let mut identifiers = BTreeSet::new();
     let mut admitted = BTreeSet::new();
@@ -947,6 +1083,35 @@ fn load_progress(
         if let Some(admission) = executors::load(attempt, authorization.as_ref())? {
             admitted.extend(admission.provider_keys);
         }
+        let plan = if attempt.join("queue-plan.json").try_exists()? {
+            ensure!(ready, "compute_workflow_unexpected_ready_queue");
+            let plan = batch::verify_ready_plan(
+                attempt,
+                args,
+                verified,
+                &progress.ready_rows()?,
+                &progress.ready_pending(),
+            )?;
+            ensure!(
+                plan.task == package.task
+                    && plan.planned_at_unix_seconds >= enrollment.verified_at_unix_seconds
+                    && plan
+                        .provider_keys
+                        .iter()
+                        .all(|key| enrollment.provider_keys.contains(key) || admitted.contains(key))
+                    && progress
+                        .model_fingerprint
+                        .as_ref()
+                        .is_none_or(|model| model == &plan.model_fingerprint),
+                "compute_workflow_ready_plan_changed"
+            );
+            progress.model_fingerprint = Some(plan.model_fingerprint.clone());
+            Some(plan)
+        } else {
+            // An interrupted mkdir/admission before the immutable plan cannot have submitted
+            // anything. Handles in such an attempt are rejected below, never guessed away.
+            None
+        };
         let mut originals = BTreeSet::new();
         for index in 0..4 {
             let path = attempt.join(format!("original-{index}.json"));
@@ -983,7 +1148,15 @@ fn load_progress(
                     && new_groups.insert(rows.clone()),
                 "compute_workflow_assignment_changed"
             );
-            if number > 0 {
+            if let Some(plan) = &plan {
+                ensure!(
+                    rows == [u16::try_from(index)?]
+                        && plan.ready_rows.contains(&u16::try_from(index)?)
+                        && plan.provider_keys.contains(&handle.provider_key)
+                        && !progress.parts.contains_key(&rows),
+                    "compute_workflow_ready_assignment_changed"
+                );
+            } else if number > 0 || ready {
                 ensure!(
                     originals.contains(&rows),
                     "compute_workflow_retry_without_original"
@@ -1000,12 +1173,13 @@ fn load_progress(
                     "compute_workflow_completed_or_changed_retry"
                 );
             }
-            if let Some(previous) = progress.parts.values().next() {
+            if let Some(model) = &progress.model_fingerprint {
                 ensure!(
-                    previous.handle.binding.model_fingerprint == handle.binding.model_fingerprint,
+                    model == &handle.binding.model_fingerprint,
                     "compute_workflow_mixed_models"
                 );
             }
+            progress.model_fingerprint = Some(handle.binding.model_fingerprint.clone());
             progress.parts.insert(
                 rows,
                 Part {
@@ -1017,7 +1191,7 @@ fn load_progress(
         }
         read_receipts(attempt, &mut progress, enrollment)?;
         ensure!(
-            progress.parts.len() == expected.len(),
+            ready || progress.parts.len() == expected.len(),
             "compute_workflow_incomplete_initial_handles_preserved"
         );
     }
@@ -1162,6 +1336,7 @@ mod tests {
             plan: Some(plan),
             directory: root.path().join("workflow"),
             resume: false,
+            batch_barrier: true,
             provider_key: vec![publisher.verifying_key(), peer.verifying_key()],
             discovery: discovery::Options::default(),
             max_batches: 1,
@@ -1294,11 +1469,11 @@ mod tests {
         .unwrap();
         // Synthetic metadata tests local persistence/validation only, never ML execution.
         let model = rpc::ModelIdentity {
-            model_id: "coordinator-codec-fixture".into(),
-            model_revision: "fixture".into(),
+            model_id: volparossa_content::agent_artifact::MODEL_ID.into(),
+            model_revision: volparossa_content::agent_artifact::MODEL_REVISION.into(),
             base_weights: rpc::FileIdentity {
-                bytes: 1,
-                sha256: "a".repeat(64),
+                bytes: 269_060_552,
+                sha256: hex::encode(volparossa_content::agent_artifact::BASE_MODEL_SHA256),
             },
             adapter_files: None,
         };
@@ -1355,6 +1530,191 @@ mod tests {
             report_json: Some(report),
             error: None,
         }
+    }
+
+    fn ready_plan(
+        fixture: &Fixture,
+        source: &VerifiedPublicDataset,
+        model: &str,
+        rows: Vec<u16>,
+        pending: &[JobHandle],
+    ) -> batch::ReadyPlan {
+        batch::ReadyPlan {
+            version: 1,
+            scheduling: "ready_rows_v1".into(),
+            publisher_key: fixture.enrollment.packages[0].publisher_key.clone(),
+            dataset_manifest_id: hex::encode(source.manifest_id()),
+            dataset_sha256: fixture.enrollment.packages[0].dataset_sha256.clone(),
+            source_expires_unix_seconds: source.expires(),
+            model_fingerprint: model.into(),
+            task: fixture.enrollment.packages[0].task.clone(),
+            provider_keys: fixture.enrollment.provider_keys.clone(),
+            ready_rows: rows,
+            pending_job_ids: pending
+                .iter()
+                .map(|handle| handle.binding.job_id.clone())
+                .collect(),
+            planned_at_unix_seconds: now().unwrap(),
+        }
+    }
+
+    #[test]
+    fn new_enrollments_default_to_ready_rows_without_changing_legacy_histories() {
+        let mut fixture = fixture(1);
+        let legacy = serde_json::to_value(&fixture.enrollment).unwrap();
+        assert!(legacy.get("scheduling").is_none());
+        let restored: Enrollment = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.scheduling, Scheduling::BatchBarrierV1);
+        fixture.options.batch_barrier = false;
+        let (selected, _) = prepare(&fixture.options).unwrap();
+        assert_eq!(selected.scheduling, Scheduling::ReadyRowsV1);
+        assert_eq!(
+            serde_json::to_value(selected).unwrap()["scheduling"],
+            "ready_rows_v1"
+        );
+    }
+
+    #[test]
+    fn partial_ready_attempt_retains_original_lease_and_dispatches_only_the_unsent_row() {
+        let mut fixture = fixture(1);
+        fixture.enrollment.scheduling = Scheduling::ReadyRowsV1;
+        let (args, source, original) = handles(&fixture, 0);
+        let directory = fixture.options.directory.join("package-0000");
+        let first = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+        save_new(
+            &first.join("queue-plan.json"),
+            &ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![0, 1],
+                &[],
+            ),
+        )
+        .unwrap();
+        // A crash before the first handle leaves both rows ready, with the model still pinned.
+        let plan_only = load_progress(&directory, &args, &source, &fixture.enrollment).unwrap();
+        assert_eq!(plan_only.ready_rows().unwrap(), vec![0, 1]);
+        assert_eq!(
+            plan_only.model_fingerprint.as_deref(),
+            Some(original[0].binding.model_fingerprint.as_str())
+        );
+        save_new(&first.join("job-0.json"), &original[0]).unwrap();
+        let partial = load_progress(&directory, &args, &source, &fixture.enrollment).unwrap();
+        assert_eq!(partial.ready_rows().unwrap(), vec![1]);
+        assert_eq!(partial.ready_pending().len(), 1);
+        assert!(partial.ready_pending()[0].verified_status.is_none());
+        let next = directory.join("attempt-0001");
+        fs::DirBuilder::new().mode(0o700).create(&next).unwrap();
+        save_new(&next.join("original-0.json"), &original[0]).unwrap();
+        save_new(
+            &next.join("queue-plan.json"),
+            &ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![1],
+                &original[..1],
+            ),
+        )
+        .unwrap();
+        save_new(&next.join("job-1.json"), &original[1]).unwrap();
+        batch::save_status(&next, &original[0], &synthetic_status(&original[0])).unwrap();
+        batch::save_status(&next, &original[1], &synthetic_status(&original[1])).unwrap();
+        let complete = load_progress(&directory, &args, &source, &fixture.enrollment).unwrap();
+        assert!(complete.complete());
+        assert!(complete.ready_rows().unwrap().is_empty());
+        assert_eq!(complete.outputs().unwrap().len(), 2);
+        assert_eq!(complete.parts[&vec![0]].path, first.join("job-0.json"));
+        assert_eq!(complete.parts[&vec![1]].path, next.join("job-1.json"));
+    }
+
+    #[test]
+    fn ready_plan_rejects_reclassification_source_model_or_provider_changes() {
+        for mutation in 0..5 {
+            let mut fixture = fixture(1);
+            fixture.enrollment.scheduling = Scheduling::ReadyRowsV1;
+            let (args, source, original) = handles(&fixture, 0);
+            let directory = fixture.options.directory.join("package-0000");
+            let first = directory.join("attempt-0000");
+            fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+            let mut plan = ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![0, 1],
+                &[],
+            );
+            save_new(&first.join("queue-plan.json"), &plan).unwrap();
+            save_new(&first.join("job-0.json"), &original[0]).unwrap();
+            let next = directory.join("attempt-0001");
+            fs::DirBuilder::new().mode(0o700).create(&next).unwrap();
+            save_new(&next.join("original-0.json"), &original[0]).unwrap();
+            plan.ready_rows = vec![1];
+            plan.pending_job_ids = vec![original[0].binding.job_id.clone()];
+            match mutation {
+                0 => plan.ready_rows = vec![0, 1],
+                1 => plan.dataset_sha256 = "bb".repeat(32),
+                2 => plan.model_fingerprint = "cc".repeat(32),
+                3 => {
+                    plan.provider_keys = vec![hex::encode(
+                        ed25519_dalek::SigningKey::from_bytes(&[39; 32])
+                            .verifying_key()
+                            .as_bytes(),
+                    )];
+                }
+                _ => plan.source_expires_unix_seconds += 1,
+            }
+            save_new(&next.join("queue-plan.json"), &plan).unwrap();
+            assert!(
+                load_progress(&directory, &args, &source, &fixture.enrollment).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_first_submission_requires_plan_and_completed_rows_cannot_be_queued_again() {
+        let mut fixture = fixture(1);
+        fixture.enrollment.scheduling = Scheduling::ReadyRowsV1;
+        let (args, source, original) = handles(&fixture, 0);
+        let directory = fixture.options.directory.join("package-0000");
+        let first = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+        assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_ok());
+        save_new(&first.join("job-0.json"), &original[0]).unwrap();
+        assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_err());
+        save_new(
+            &first.join("queue-plan.json"),
+            &ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![0, 1],
+                &[],
+            ),
+        )
+        .unwrap();
+        batch::save_status(&first, &original[0], &synthetic_status(&original[0])).unwrap();
+        let next = directory.join("attempt-0001");
+        fs::DirBuilder::new().mode(0o700).create(&next).unwrap();
+        save_new(
+            &next.join("queue-plan.json"),
+            &ready_plan(
+                &fixture,
+                &source,
+                &original[0].binding.model_fingerprint,
+                vec![1],
+                &[],
+            ),
+        )
+        .unwrap();
+        // Correctly bound model/source does not allow relabeling completed row 0 as new work.
+        let mut duplicate = original[0].clone();
+        duplicate.binding.job_id = "ab".repeat(16);
+        save_new(&next.join("job-0.json"), &duplicate).unwrap();
+        assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_err());
     }
 
     #[test]

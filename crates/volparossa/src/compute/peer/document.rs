@@ -39,6 +39,9 @@ pub(crate) struct Options {
     directory: PathBuf,
     #[arg(long)]
     resume: bool,
+    /// Opt into legacy grouped batches when enrolling; resume keeps the recorded mode.
+    #[arg(long, conflicts_with = "resume")]
+    batch_barrier: bool,
     /// Combine all fragment answers through further peer inference; retains every intermediate receipt.
     #[arg(long, conflicts_with = "resume")]
     synthesize: bool,
@@ -245,6 +248,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
     )?;
     enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
     enrollment.replace_peers = args.discovery.replace_peers;
+    enrollment.scheduling = workflow::Scheduling::from_batch_barrier(args.batch_barrier);
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
 }

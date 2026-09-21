@@ -7,6 +7,63 @@ use volparossa_content::provider::compute::dataset::VerifiedPublicDataset;
 
 use super::*;
 
+mod ready_queue;
+
+#[derive(Clone, Debug)]
+pub(super) struct ReadyPending {
+    pub(super) handle: JobHandle,
+    pub(super) verified_status: Option<rpc::JobStatus>,
+}
+
+/// The owning workflow supplies only rows that have never acquired a retained handle.
+/// Previously attempted rows remain exact pending handles, never fresh queue entries.
+pub(super) struct ReadyOptions {
+    pub(super) source: Source,
+    pub(super) providers: Vec<VerifyingKey>,
+    pub(super) output: PathBuf,
+    pub(super) max_seconds: u16,
+    pub(super) task: Option<rpc::PublicTask>,
+    pub(super) model_fingerprint: Option<String>,
+    pub(super) ready_rows: Vec<u16>,
+    pub(super) pending: Vec<ReadyPending>,
+    pub(super) executor_admission: Option<(executors::Authorization, discovery::Selected)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReadyPlan {
+    pub(super) version: u32,
+    pub(super) scheduling: String,
+    pub(super) publisher_key: String,
+    pub(super) dataset_manifest_id: String,
+    pub(super) dataset_sha256: String,
+    pub(super) source_expires_unix_seconds: u64,
+    pub(super) model_fingerprint: String,
+    pub(super) task: Option<rpc::PublicTask>,
+    pub(super) provider_keys: Vec<String>,
+    pub(super) ready_rows: Vec<u16>,
+    pub(super) pending_job_ids: Vec<String>,
+    pub(super) planned_at_unix_seconds: u64,
+}
+
+pub(super) async fn report_ready_with_activity(
+    args: &ReadyOptions,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
+    ready_queue::report(args, socket, activity).await
+}
+
+pub(super) fn verify_ready_plan(
+    attempt: &Path,
+    source_args: &Source,
+    verified: &VerifiedPublicDataset,
+    expected_ready_rows: &[u16],
+    pending: &[ReadyPending],
+) -> Result<ReadyPlan> {
+    ready_queue::verify_plan(attempt, source_args, verified, expected_ready_rows, pending)
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct Options {
     #[command(flatten)]
@@ -289,7 +346,7 @@ pub(super) async fn execute(
     socket: &Path,
     work: &Prepared,
     publication: &rpc::PublicDataset,
-    mut cancelled: watch::Receiver<bool>,
+    cancelled: watch::Receiver<bool>,
 ) -> Result<rpc::JobStatus> {
     if *cancelled.borrow() {
         anyhow::bail!("compute_distribute_cancelled_before_submit");
@@ -301,38 +358,68 @@ pub(super) async fn execute(
     });
     let first = exchange(socket, &work.provider, submission).await;
     // A broken Submit reply is ambiguous; poll the same retained job, never submit a new ID.
-    let mut status = match first {
+    let status = match first {
         Ok(outcome) => Some(job(outcome, &work.handle)?),
         Err(_) => None,
     };
+    follow_status(socket, &work.handle, &work.provider, status, cancelled).await
+}
+
+/// Observe a previously persisted job without ever repeating its Submit.
+async fn observe_existing(
+    socket: &Path,
+    handle: &JobHandle,
+    cancelled: watch::Receiver<bool>,
+) -> Result<rpc::JobStatus> {
+    let provider = parse_key(&handle.provider_key).map_err(anyhow::Error::msg)?;
+    let operation = if *cancelled.borrow() {
+        rpc::Operation::Cancel(handle.binding.clone())
+    } else {
+        rpc::Operation::Poll(handle.binding.clone())
+    };
+    let first = exchange(socket, &provider, operation).await;
+    let status = match first {
+        Ok(outcome) => Some(job(outcome, handle)?),
+        Err(_) => None,
+    };
+    follow_status(socket, handle, &provider, status, cancelled).await
+}
+
+async fn follow_status(
+    socket: &Path,
+    handle: &JobHandle,
+    provider: &VerifyingKey,
+    mut status: Option<rpc::JobStatus>,
+    mut cancelled: watch::Receiver<bool>,
+) -> Result<rpc::JobStatus> {
     loop {
         if let Some(current) = &status {
             if current.state != rpc::JobState::Running {
                 return Ok(current.clone());
             }
         }
-        let cancel = *cancelled.borrow() || now()? >= work.handle.binding.expires_unix_seconds;
+        let cancel = *cancelled.borrow() || now()? >= handle.binding.expires_unix_seconds;
         if cancel {
             let outcome = exchange(
                 socket,
-                &work.provider,
-                rpc::Operation::Cancel(work.handle.binding.clone()),
+                provider,
+                rpc::Operation::Cancel(handle.binding.clone()),
             )
             .await?;
-            return job(outcome, &work.handle); // Running remains explicitly nonterminal.
+            return job(outcome, handle); // Running remains explicitly nonterminal.
         }
         tokio::select! {
             () = sleep(Duration::from_secs(2)) => {},
             _ = cancelled.changed() => {},
         }
         let operation = if *cancelled.borrow() {
-            rpc::Operation::Cancel(work.handle.binding.clone())
+            rpc::Operation::Cancel(handle.binding.clone())
         } else {
-            rpc::Operation::Poll(work.handle.binding.clone())
+            rpc::Operation::Poll(handle.binding.clone())
         };
-        match exchange(socket, &work.provider, operation).await {
-            Ok(outcome) => status = Some(job(outcome, &work.handle)?),
-            Err(_) if now()? < work.handle.binding.expires_unix_seconds => {}
+        match exchange(socket, provider, operation).await {
+            Ok(outcome) => status = Some(job(outcome, handle)?),
+            Err(_) if now()? < handle.binding.expires_unix_seconds => {}
             Err(error) => return Err(error),
         }
     }
