@@ -228,8 +228,12 @@ automatically, preserving the original question in the final task. That goal-onl
 passes focused local checks. Two real-model attempts reached the generation limit without an
 accepted plan. The next candidate lets the model generate two complementary questions while
 the software supplies only the file structure. Complete model-and-peer execution proof is
-still pending: its real run failed before enrollment, and incompatible diagnostic codes hid
-the precise stage. Those codes are corrected; the model does not yet choose task count or shape.
+still pending: after correcting incompatible diagnostic codes, the latest real run identifies
+a second-question text-validation failure before enrollment. The original text was not retained,
+so the exact rejected condition is not yet known. The current recovery candidate allows up to
+four model generations within the same total token budget and deadline, charging rejected
+attempts too. It never repairs text or supplies replacement questions. This recovery still
+needs its real model-and-peer proof. The model does not choose task count or shape.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

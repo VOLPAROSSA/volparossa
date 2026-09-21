@@ -42,6 +42,8 @@ TASK_PLAN_PROMPT_TOKENS = 512
 TASK_PLAN_NEW_TOKENS = 384
 TASK_PLAN_QUESTION_TOKENS = 192
 TASK_PLAN_CONTEXT_TOKENS = 896
+TASK_PLAN_MAX_ATTEMPTS = 4
+TASK_PLAN_STRATEGY = "model_questions_scaffold_recovery_v2"
 MAX_TASK_PLAN_BYTES = 16384
 MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
 MODEL_REVISION = "83212e1e2b3cfd6958f3707877bb878945dea8ee"
@@ -586,6 +588,8 @@ class Session:
         self.resume_count = 0
         self.paused_since = None
         self.paused_seconds = 0.0
+        self.planner_diagnostic = None
+        self.planner_started = False
 
     def elapsed(self):
         return int((time.monotonic() - self.started) * 1000)
@@ -774,13 +778,23 @@ def plan_document(tokenizer, dataset, session):
     return result
 
 
-def task_plan_messages(dataset, previous=None):
+def task_plan_messages(dataset, previous=None, feedback=None, attempt=1):
     # The model sees the public goal, not the original source contents. The hash
     # and size bind enrollment only and must never be presented as source ingestion.
     content = "Public question:\n" + dataset["question"]
     if previous is not None:
         content += "\nAlready selected research question:\n" + previous
         content += "\nWrite a different, complementary research question."
+    if feedback is not None:
+        corrections = {
+            "EMPTY_TEXT": "The previous attempt was empty. Write one nonempty question.",
+            "TEXT_TOO_LONG": "The previous attempt exceeded 512 UTF-8 bytes. Write a much shorter question.",
+            "NUL_TEXT": "The previous attempt contained a NUL character. Write a question without it.",
+            "DUPLICATE_TEXT": "The previous attempt repeated the selected question. Write a different question.",
+            "GENERATION_LIMIT": "The previous attempt reached its token limit. Write a much shorter question.",
+        }
+        require(feedback in corrections, "TASK_PLAN_FEEDBACK_INVALID")
+        content += "\nCorrection attempt " + str(attempt) + ": " + corrections[feedback]
     return [{"role": "system", "content":
              "Write one short research question that helps answer the user's public question. "
              "It will be answered from a document you have not seen. Do not answer it. "
@@ -788,14 +802,46 @@ def task_plan_messages(dataset, previous=None):
             {"role": "user", "content": content}]
 
 
-def plan_task_question(model, tokenizer, torch, transformers, dataset, session, previous):
+def task_plan_diagnostic(session):
+    if type(getattr(session, "planner_diagnostic", None)) is not dict:
+        session.planner_diagnostic = {"strategy": TASK_PLAN_STRATEGY, "attempts": [],
+                                      "incomplete_attempt": False}
+    return session.planner_diagnostic
+
+
+def task_question_bytes(text, code):
+    require(type(text) is str, code + "INVALID_TEXT_ENCODING")
+    try:
+        return text.encode("utf-8")
+    except UnicodeError as error:
+        raise JobError(code + "INVALID_TEXT_ENCODING") from error
+
+
+def task_question_rejection(text, raw, previous):
+    # These are content rejections only. Encoding, model/framing and owner failures
+    # never enter the recovery loop. Byte limits precede whitespace normalization.
+    if len(raw) > 512:
+        return "TEXT_TOO_LONG"
+    if b"\x00" in raw:
+        return "NUL_TEXT"
+    if not text.strip():
+        return "EMPTY_TEXT"
+    if previous is not None and text.strip() == previous.strip():
+        return "DUPLICATE_TEXT"
+    return None
+
+
+def plan_task_question(model, tokenizer, torch, transformers, dataset, session, previous,
+                       attempt=1, max_new_tokens=TASK_PLAN_QUESTION_TOKENS, feedback=None):
     code = "TASK_PLAN_QUESTION_" + ("ONE_" if previous is None else "TWO_")
+    diagnostic = task_plan_diagnostic(session)
     session.check()
-    prompt = tokenizer.apply_chat_template(task_plan_messages(dataset, previous), tokenize=True,
+    prompt = tokenizer.apply_chat_template(task_plan_messages(dataset, previous, feedback, attempt), tokenize=True,
                                            add_generation_prompt=True, return_dict=False)
     require(type(prompt) is list, "MODEL_TOKENIZER_RETURN_TYPE")
+    require(bounded_integer(max_new_tokens, 1, TASK_PLAN_QUESTION_TOKENS), "TASK_PLAN_ATTEMPT_BUDGET")
     require(1 <= len(prompt) <= TASK_PLAN_PROMPT_TOKENS
-            and len(prompt) + TASK_PLAN_QUESTION_TOKENS <= TASK_PLAN_CONTEXT_TOKENS,
+            and len(prompt) + max_new_tokens <= TASK_PLAN_CONTEXT_TOKENS,
             code + "PROMPT_TOKEN_LIMIT_EXCEEDED")
     input_ids = torch.tensor([prompt], dtype=torch.long, device="cpu")
     complete_question_tokens = None
@@ -807,12 +853,11 @@ def plan_task_question(model, tokenizer, torch, transformers, dataset, session, 
             # tokens. No owner control is acknowledged while native work runs.
             session.check()
             tokens = current_ids[0, len(prompt):].tolist()
-            if not 1 <= len(tokens) < TASK_PLAN_QUESTION_TOKENS or tokenizer.eos_token_id in tokens:
+            if not 1 <= len(tokens) < max_new_tokens or tokenizer.eos_token_id in tokens:
                 return False
             text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-            try:
-                public_text(text, 512, code + "INVALID_TEXT")
-            except JobError:
+            raw = task_question_bytes(text, code)
+            if task_question_rejection(text, raw, None) is not None:
                 return False
             if not text.rstrip().endswith("?"):
                 return False
@@ -824,8 +869,9 @@ def plan_task_question(model, tokenizer, torch, transformers, dataset, session, 
 
     session.check()
     with torch.inference_mode():
+        diagnostic["incomplete_attempt"] = True
         output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
-                                max_new_tokens=TASK_PLAN_QUESTION_TOKENS, do_sample=False, num_beams=1,
+                                max_new_tokens=max_new_tokens, do_sample=False, num_beams=1,
                                 num_return_sequences=1, use_cache=True,
                                 stopping_criteria=transformers.StoppingCriteriaList([OwnerBudget()]),
                                 pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
@@ -835,7 +881,8 @@ def plan_task_question(model, tokenizer, torch, transformers, dataset, session, 
             code + "INVALID_GENERATION_SHAPE")
     require(output[0, :len(prompt)].tolist() == prompt, code + "PROMPT_CHANGED")
     generated = output[0, len(prompt):].tolist()
-    require(1 <= len(generated) < TASK_PLAN_QUESTION_TOKENS, code + "GENERATION_LIMIT_REACHED")
+    require(1 <= len(generated) <= max_new_tokens, code + "INVALID_GENERATION_SHAPE")
+    require(tokenizer.eos_token_id not in generated[:-1], code + "INCOMPLETE_GENERATION")
     if complete_question_tokens is not None:
         require(tuple(generated) == complete_question_tokens, code + "COMPLETION_TOKENS_CHANGED")
         stop_reason = "question_boundary"
@@ -843,36 +890,60 @@ def plan_task_question(model, tokenizer, torch, transformers, dataset, session, 
     else:
         # A single terminal EOS is framing, not output text. A non-EOS ending is
         # accepted only with the exact whole-question boundary recorded above.
-        require(generated[-1] == tokenizer.eos_token_id
-                and tokenizer.eos_token_id not in generated[:-1], code + "INCOMPLETE_GENERATION")
-        stop_reason = "eos"
-        text_tokens = generated[:-1]
+        eos = generated[-1] == tokenizer.eos_token_id
+        require(eos or len(generated) == max_new_tokens, code + "INCOMPLETE_GENERATION")
+        stop_reason = "eos" if eos else "token_limit"
+        text_tokens = generated[:-1] if eos else generated
     # Never remove formatting, extract a substring, drop special tokens or repair text.
     text = tokenizer.decode(text_tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-    public_text(text, 512, code + "INVALID_TEXT")
-    require(text.strip(), code + "EMPTY_TEXT")
-    return text, {"prompt_tokens": len(prompt), "generated_tokens": len(generated), "stop_reason": stop_reason}
+    raw = task_question_bytes(text, code)
+    if len(generated) == max_new_tokens:
+        stop_reason, rejection = "token_limit", "GENERATION_LIMIT"
+    else:
+        rejection = task_question_rejection(text, raw, previous)
+    record = {"question_index": 0 if previous is None else 1, "attempt": attempt,
+              "prompt_tokens": len(prompt), "generated_tokens": len(generated),
+              "max_new_tokens": max_new_tokens, "stop_reason": stop_reason,
+              "accepted": rejection is None, "rejection_code": rejection,
+              "text_bytes": len(raw), "text_sha256": hashlib.sha256(raw).hexdigest()}
+    diagnostic["attempts"].append(record)
+    diagnostic["incomplete_attempt"] = False
+    return text, record
 
 
 def plan_tasks(model, tokenizer, torch, transformers, dataset, session):
     validate_task_plan_input(dataset)
+    diagnostic = task_plan_diagnostic(session)
+    require(getattr(session, "planner_started", False) is not True and not diagnostic["attempts"]
+            and diagnostic["incomplete_attempt"] is False, "TASK_PLAN_ALREADY_STARTED")
+    session.planner_started = True
     model.eval()
-    questions, stats = [], []
+    questions, stats, total, feedback = [], [], 0, None
     # The two-node scaffold is local policy, not a model-selected task count.
     # Each question is a separate real generation under the SAME owner/deadline.
-    for _index in range(2):
-        question, counts = plan_task_question(model, tokenizer, torch, transformers, dataset, session,
-                                              questions[0] if questions else None)
-        questions.append(question)
-        stats.append(counts)
-    plan = validate_task_questions({"version": 1, "questions": questions})
-    total = sum(stage["generated_tokens"] for stage in stats)
-    require(total < TASK_PLAN_NEW_TOKENS, "TASK_PLAN_GENERATION_LIMIT_REACHED")
-    return plan, max(stage["prompt_tokens"] for stage in stats), total, stats
+    for attempt in range(1, TASK_PLAN_MAX_ATTEMPTS + 1):
+        require(total < TASK_PLAN_NEW_TOKENS, "TASK_PLAN_GENERATION_LIMIT_REACHED")
+        question, record = plan_task_question(
+            model, tokenizer, torch, transformers, dataset, session,
+            questions[0] if questions else None, attempt,
+            min(TASK_PLAN_QUESTION_TOKENS, TASK_PLAN_NEW_TOKENS - total), feedback)
+        total += record["generated_tokens"]
+        require(total < TASK_PLAN_NEW_TOKENS, "TASK_PLAN_GENERATION_LIMIT_REACHED")
+        feedback = record["rejection_code"]
+        if record["accepted"]:
+            questions.append(question)
+            stats.append({name: record[name] for name in ("prompt_tokens", "generated_tokens", "stop_reason")})
+            if len(questions) == 2:
+                plan = validate_task_questions({"version": 1, "questions": questions})
+                return plan, max(stage["prompt_tokens"] for stage in diagnostic["attempts"]), total, stats
+    if feedback is not None:
+        raise JobError("TASK_PLAN_QUESTION_" + ("ONE_" if not questions else "TWO_") + feedback)
+    raise JobError("TASK_PLAN_ATTEMPTS_EXHAUSTED")
 
 
 def execute_task_plan(request, session, tokenizer, torch, transformers, versions,
                       model_root, output_root, dataset, data_identity, model_files):
+    task_plan_diagnostic(session)
     model = load_model(transformers, torch, model_root)
     session.check()
     session.progress("baseline")
@@ -899,8 +970,9 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
               "dataset": data_identity, "updates_completed": 0, "artifacts": [artifact],
               "model_weights_loaded": True, "goal_only_planning": True,
               "planner_prompt_tokens": prompt_count, "planner_generated_tokens": generated_count,
-              "planner_stop_reason": "two_questions", "planner_strategy": "model_questions_scaffold_v1",
+              "planner_stop_reason": "two_questions", "planner_strategy": TASK_PLAN_STRATEGY,
               "planner_structure_generated_by": "local_schema", "planner_question_stats": stats,
+              "planner_attempts": session.planner_diagnostic["attempts"],
               "generation_limit_reached": False, "model_answer_correctness_proven": False,
               "base_before": base_before, "base_after": base_after, "base_weights_unchanged": True,
               "network_policy_changed": False}
@@ -1209,6 +1281,8 @@ def main():
                "elapsed_ms": session.elapsed() if session else 0}
     if session is not None and session.frames is not None:
         failure["owner_control"] = session.owner_stats()
+    if session is not None and session.planner_diagnostic is not None:
+        failure["planner_diagnostic"] = session.planner_diagnostic
     emit(failure)
     return 1
 

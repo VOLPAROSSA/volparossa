@@ -27,6 +27,10 @@ agent_model_planning_wait() {
     jobs_batch_pid=
     if [ "$planning_observer_status" -ne 0 ] || [ "$planning_owner_status" -ne 0 ]; then
         # Exact error output remains diagnostic, never substituted with a canned task plan.
+        # A failed planner has no graph authority: retain its bounded, text-free
+        # original metadata independently, before the ordinary private cleanup.
+        python3 -B "$planning_script" collect-failure "$WORK" \
+            2>"$WORK/agent-model-planning-planner-failure-export.err" || true
         python3 -B "$planning_script" collect "$WORK" "$2" \
             2>"$WORK/agent-model-planning-$2-partial-files.err" || true
         [ "$planning_observer_status" -eq 0 ] || fail MODEL_PLANNING_REAL_WORKER_NOT_OBSERVED
@@ -39,7 +43,7 @@ agent_model_planning_run() {
     planning_root=$jobs_source/model-planning
     planning_script=$source_directory/tests/integration/agent-model-planning-smoke.py
     PHASE=agent-model-planning-owner-inputs
-    printf '%s\n' 'Disposable guest only: stage a literal public README prefix and one original question, copy pinned owner assets, observe one real isolated model proposing two to four subquestions, enroll those exact questions without peer work, execute real protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Invalid model output fails; there is no canned-plan fallback.'
+    printf '%s\n' 'Disposable guest only: stage a literal public README prefix and one original question, copy pinned owner assets, observe one real isolated model proposing two subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute real protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback.'
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/model-planning-source-README.md"
     install -d -o "$AGENT_UID" -g "$AGENT_GID" -m 0700 "$jobs_source/planner-provision"
     for planning_part in venv model; do

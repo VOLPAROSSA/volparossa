@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 """Actual bounded model-proposed public fork/join tasks; no answer-quality claim."""
+import copy
 import fcntl
 import json
 import os
@@ -18,10 +19,11 @@ TRAIN = JOBS["TRAIN"]
 read, write, require, sha, encoded = (GRAPH[k] for k in ("read", "write", "require", "sha", "encoded"))
 ATTEMPT, MODEL, MODEL_ID = (GRAPH[k] for k in ("ATTEMPT", "MODEL", "MODEL_ID"))
 PREFIX = "agent-model-planning"
+STRATEGY = "model_questions_scaffold_recovery_v2"
 QUESTION = "What requirements and risks does this project describe?"
 KIND = "volparossa-bounded-model-public-task-planning"
 SCOPE = ("One actual isolated pinned-model owner generates two public subquestions from a goal, "
-    "with only their JSON structure supplied locally and both generation stages bounded, "
+    "with only their JSON structure supplied locally and at most four charged attempts within 384 generated tokens, "
     "without seeing the source contents. The exact proposal is enrolled against one signed public README "
     "excerpt, then actual protected peers execute its source questions and an exact original-question join. "
     "Every peer execution and the separate owner planner are observed. Original-free completed offline "
@@ -171,6 +173,37 @@ def collect(work,phase):
     write(record(work,phase+"-files"),dict(snapshot=saved,raw=raw))
 
 
+def collect_failure(work):
+    """Retain only validated, text-free failure metadata before private cleanup."""
+    JOBS["guest_work"](work)
+    root=root_path(work);path=root/"planner-failure.json"
+    if not path.exists():return
+    owner=root.lstat()
+    require(stat.S_ISDIR(owner.st_mode) and owner.st_uid!=0 and stat.S_IMODE(owner.st_mode)==0o700
+        and not root.is_symlink(),"invalid private failed-planner root")
+    retained={}
+    for name in ("planner-failure.json","planner-input.json"):
+        selected=root/name;info=selected.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==owner.st_uid and info.st_nlink==1
+            and stat.S_IMODE(info.st_mode)==0o600 and 0<info.st_size<=16384,"invalid bounded planner diagnostic")
+        raw=selected.read_bytes()
+        require(len(raw)==info.st_size,"planner diagnostic changed during export")
+        retained[name]=raw
+    original=read(record(work,"input"));source=bytes.fromhex(original["excerpt_hex"])
+    validate_failure(strict_json(retained["planner-failure.json"]),retained["planner-input.json"],source)
+    require(not any((root/name).exists() for name in ("graph.json","graph-plan.json","planner-artifact.json")),
+        "failure export unexpectedly contains an enrolled plan")
+    observation=record(work,"planner-observation")
+    if observation.is_file():
+        require(all(not JOBS["alive"](p) for p in read(observation)["isolation"]["owned_processes"]),
+            "planner diagnostic exported before observed child cleanup")
+    for name,raw in retained.items():
+        suffix="planner-failure" if name=="planner-failure.json" else "planner-failure-input"
+        destination=record(work,suffix)
+        with destination.open("xb") as stream:stream.write(raw)
+        destination.chmod(0o600)
+
+
 def observe_peers(work,launcher):
     JOBS["guest_work"](work)
     owner=JOBS["identity"](launcher);root=root_path(work);layout=read(work/"agent-jobs-layout.json")
@@ -270,6 +303,70 @@ def questions_plan(artifact):
     return dict(version=1,nodes=nodes,output="answer")
 
 
+def check_attempts(attempts,questions=None):
+    """Validate accounting and identities; rejected text is deliberately not retained."""
+    require(type(attempts) is list and len(attempts)<=4,"invalid planner attempt bound")
+    accepted,total,maximum,stats=0,0,0,[]
+    for number,item in enumerate(attempts,1):
+        require(type(item) is dict and item.keys()=={"question_index","attempt","prompt_tokens","generated_tokens",
+            "max_new_tokens","stop_reason","accepted","rejection_code","text_bytes","text_sha256"},"invalid attempt fields")
+        cap=min(192,384-total)
+        require(all(type(item[k]) is int for k in ("question_index","attempt","prompt_tokens","generated_tokens","max_new_tokens","text_bytes"))
+            and item["question_index"]==accepted<2 and item["attempt"]==number
+            and 1<=item["prompt_tokens"]<=512 and cap>0 and item["max_new_tokens"]==cap
+            and 1<=item["generated_tokens"]<=cap and type(item["accepted"]) is bool
+            and 0<=item["text_bytes"]<=1048576 and type(item["text_sha256"]) is str
+            and re.fullmatch(r"[0-9a-f]{64}",item["text_sha256"]),"attempt budget/order/digest changed")
+        total+=item["generated_tokens"];maximum=max(maximum,item["prompt_tokens"])
+        if item["accepted"]:
+            require(item["rejection_code"] is None and item["generated_tokens"]<cap
+                and item["stop_reason"] in ("question_boundary","eos") and 1<=item["text_bytes"]<=512,
+                "accepted an incomplete or invalid planner attempt")
+            if questions is not None:
+                require(accepted<len(questions),"extra accepted question")
+                text=questions[accepted]
+                require(item["text_bytes"]==len(text.encode()) and item["text_sha256"]==sha(text.encode())
+                    and (item["stop_reason"]!="question_boundary" or text.rstrip().endswith("?")),
+                    "accepted question text differs from original model artifact")
+            stats.append({k:item[k] for k in ("prompt_tokens","generated_tokens","stop_reason")});accepted+=1
+        elif item["rejection_code"]=="GENERATION_LIMIT":
+            require(item["generated_tokens"]==cap and item["stop_reason"]=="token_limit","uncharged generation limit")
+        else:
+            require(item["rejection_code"] in ("EMPTY_TEXT","TEXT_TOO_LONG","NUL_TEXT","DUPLICATE_TEXT")
+                and item["generated_tokens"]<cap and item["stop_reason"] in ("question_boundary","eos")
+                and (item["stop_reason"]!="question_boundary" or item["rejection_code"]=="DUPLICATE_TEXT"),"invalid rejection category")
+            if item["rejection_code"]=="TEXT_TOO_LONG":require(item["text_bytes"]>512,"wrong long-text rejection")
+            elif item["rejection_code"]=="EMPTY_TEXT":
+                require(item["text_bytes"]<=512,"wrong empty-text rejection bound")
+                if item["text_bytes"]==0:require(item["text_sha256"]==sha(b""),"wrong empty-text digest")
+            else:
+                require(1<=item["text_bytes"]<=512,"wrong bounded-text rejection")
+                if item["rejection_code"]=="DUPLICATE_TEXT":require(accepted==1,"first question cannot duplicate an accepted question")
+    return accepted,total,maximum,stats
+
+
+def validate_failure(value,input_raw,source):
+    expected=dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(source),source_bytes=len(source))
+    require(strict_json(input_raw)==expected and input_raw==encoded(expected),"failure input/source changed")
+    require(type(value) is dict and value.keys()=={"version","operation","request_id","code","input_sha256",
+        "source_sha256","source_bytes","planner_diagnostic","child_reaped","plan_enrolled"}
+        and type(value["version"]) is int and value["version"]==1 and value["operation"]=="compute_public_task_planning_failure"
+        and type(value["request_id"]) is str and re.fullmatch(r"[0-9a-f]{32}",value["request_id"])
+        and type(value["code"]) is str and re.fullmatch(r"[A-Z_]{1,64}",value["code"])
+        and value["input_sha256"]==sha(input_raw) and value["source_sha256"]==sha(source)
+        and type(value["source_bytes"]) is int and value["source_bytes"]==len(source)
+        and value["child_reaped"] is True and value["plan_enrolled"] is False,"uncorrelated or unsafe planner failure metadata")
+    diagnostic=value["planner_diagnostic"]
+    require(type(diagnostic) is dict and diagnostic.keys()=={"strategy","attempts","incomplete_attempt"}
+        and diagnostic["strategy"]==STRATEGY and type(diagnostic["incomplete_attempt"]) is bool,"invalid planner failure diagnostic")
+    accepted,total,_,_=check_attempts(diagnostic["attempts"])
+    # Accepted questions do not enroll a plan: later model-integrity or artifact
+    # I/O checks can still fail. Only an incomplete generation needs another slot.
+    require(accepted<=2 and total<=384,"failure exceeds planning budget")
+    if diagnostic["incomplete_attempt"]:
+        require(accepted<2 and len(diagnostic["attempts"])<4 and total<384,"incomplete attempt was outside original budget")
+
+
 def check_planning(raw,source):
     load=lambda name:strict_json(raw[name])
     expected=dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(source),source_bytes=len(source))
@@ -288,22 +385,16 @@ def check_planning(raw,source):
         and re.fullmatch(r"[0-9a-f]{64}",report["base_before"]["sha256"])
         and report["generation_limit_reached"] is report["model_answer_correctness_proven"] is False
         and report["planner_stop_reason"]=="two_questions"
-        and report["planner_strategy"]=="model_questions_scaffold_v1"
+        and report["planner_strategy"]==STRATEGY
         and report["planner_structure_generated_by"]=="local_schema"
         and type(report["planner_prompt_tokens"]) is int and 1<=report["planner_prompt_tokens"]<=512
         and type(report["planner_generated_tokens"]) is int and 1<=report["planner_generated_tokens"]<384
         and all(k not in report for k in ("outputs","baseline_evaluation","input_adapter")),"not an actual bounded pinned-model planner result")
-    stats=report["planner_question_stats"]
     questions=strict_json(raw["planner-artifact.json"])["questions"]
-    require(type(stats) is list and len(stats)==len(questions)==2,"two model-generated question stages required")
-    for item,question in zip(stats,questions):
-        require(type(item) is dict and item.keys()=={"prompt_tokens","generated_tokens","stop_reason"}
-            and type(item["prompt_tokens"]) is int and 1<=item["prompt_tokens"]<=512
-            and type(item["generated_tokens"]) is int and 1<=item["generated_tokens"]<192
-            and item["stop_reason"] in ("question_boundary","eos")
-            and (item["stop_reason"]!="question_boundary" or question.rstrip().endswith("?")),"invalid model question stage")
-    require(report["planner_prompt_tokens"]==max(s["prompt_tokens"] for s in stats)
-        and report["planner_generated_tokens"]==sum(s["generated_tokens"] for s in stats),"planner aggregate budget differs")
+    require(len(questions)==2,"two model-generated questions required")
+    accepted,total,maximum,stats=check_attempts(report["planner_attempts"],questions)
+    require(accepted==2 and report["planner_question_stats"]==stats and report["planner_prompt_tokens"]==maximum
+        and report["planner_generated_tokens"]==total<384,"planner aggregate budget or accepted stages differ")
     require(report["dataset"]==dict(version=1,sha256=sha(raw["planner-input.json"]),bytes=len(raw["planner-input.json"]),
         visibility="public",license="GPL-3.0-only",question_sha256=sha(QUESTION.encode()),source_sha256=sha(source),source_bytes=len(source))
         and report["artifacts"]==[dict(relative_path="task-questions.json",bytes=len(raw["planner-artifact.json"]),sha256=sha(raw["planner-artifact.json"]))]
@@ -514,7 +605,58 @@ def self_test():
         try:questions_plan(raw)
         except (ValueError,KeyError):pass
         else:raise AssertionError("invalid/canned/extracted model question shape accepted")
-    print("model-planning exact proposal/fork-join pure controls PASS; no tokenizer/model/network executed")
+    # Synthetic accounting only: rejected output consumes the same token budget.
+    questions=["Inert first question?","Inert second question?"]
+    def attempt(index,number,text,tokens,accepted=True,code=None,stop="question_boundary",cap=192):
+        return dict(question_index=index,attempt=number,prompt_tokens=80+number,generated_tokens=tokens,max_new_tokens=cap,
+            stop_reason=stop,accepted=accepted,rejection_code=code,text_bytes=len(text.encode()),text_sha256=sha(text.encode()))
+    attempts=[attempt(0,1,questions[0],20),attempt(1,2,questions[0],18,False,"DUPLICATE_TEXT"),
+        attempt(1,3,questions[1],25)]
+    accepted,total,maximum,stats=check_attempts(attempts,questions)
+    assert (accepted,total,maximum)==(2,63,83) and stats==[{k:attempts[i][k] for k in
+        ("prompt_tokens","generated_tokens","stop_reason")} for i in (0,2)]
+    # A fully charged rejected attempt leaves a smaller exact allowance later.
+    limited=[attempt(0,1,"x",192,False,"GENERATION_LIMIT","token_limit"),
+        attempt(0,2,questions[0],20),attempt(1,3,questions[1],25,cap=172)]
+    assert check_attempts(limited,questions)[:3]==(2,237,83)
+    mutations=(
+        lambda a:a[1].update(attempt=1),lambda a:a[1].update(question_index=0),
+        lambda a:a[1].update(accepted=True,rejection_code=None),lambda a:a[2].update(text_sha256="0"*64),
+        lambda a:a[2].update(text_bytes=1),lambda a:a[0].update(max_new_tokens=191),
+        lambda a:a[0].update(generated_tokens=192),lambda a:a[0].update(accepted=1),
+        lambda a:a[0].update(prompt_tokens=True),lambda a:a[1].update(rejection_code="NUL_TEXT"),
+        lambda a:a[1].update(rejection_code="TEXT_TOO_LONG",stop_reason="eos"),
+        lambda a:a[1].update(rejection_code="GENERATION_LIMIT",stop_reason="token_limit"),
+        lambda a:a[0].update(rejection_code="DUPLICATE_TEXT",accepted=False),
+        lambda a:a[0].update(raw_text="forbidden diagnostic text"))
+    for mutate in mutations:
+        invalid=copy.deepcopy(attempts);mutate(invalid)
+        try:check_attempts(invalid,questions)
+        except (ValueError,KeyError):pass
+        else:raise AssertionError("invalid recovery attempt metadata accepted")
+    input_raw=encoded(dict(version=1,visibility="public",license="GPL-3.0-only",question=QUESTION,source_sha256=sha(b"public"),source_bytes=6))
+    failure=dict(version=1,operation="compute_public_task_planning_failure",request_id="a"*32,
+        code="TASK_PLAN_GENERATION_LIMIT_REACHED",input_sha256=sha(input_raw),source_sha256=sha(b"public"),source_bytes=6,
+        planner_diagnostic=dict(strategy=STRATEGY,attempts=[attempt(0,1,"x",192,False,"GENERATION_LIMIT","token_limit"),
+            attempt(0,2,"y",192,False,"GENERATION_LIMIT","token_limit")],incomplete_attempt=False),
+        child_reaped=True,plan_enrolled=False)
+    validate_failure(failure,input_raw,b"public")
+    after_generation=copy.deepcopy(failure)
+    after_generation["code"]="BASE_WEIGHTS_CHANGED"
+    after_generation["planner_diagnostic"]["attempts"]=attempts
+    validate_failure(after_generation,input_raw,b"public")
+    failure_mutations=(lambda f:f.update(child_reaped=False),lambda f:f.update(plan_enrolled=True),
+        lambda f:f.update(input_sha256="b"*64),lambda f:f.update(source_bytes=7),
+        lambda f:f.update(request_id="BAD"),lambda f:f.update(code="raw failed text"),
+        lambda f:f["planner_diagnostic"].update(incomplete_attempt=True),
+        lambda f:f["planner_diagnostic"].update(raw_text="not exported"),
+        lambda f:f["planner_diagnostic"].update(attempts=attempts,incomplete_attempt=True))
+    for mutate in failure_mutations:
+        invalid=copy.deepcopy(failure);mutate(invalid)
+        try:validate_failure(invalid,input_raw,b"public")
+        except (ValueError,KeyError):pass
+        else:raise AssertionError("invalid/non-reaped planner failure accepted")
+    print("model-planning proposal, recovery accounting and failure export controls PASS; no tokenizer/model/network executed")
 
 
 def main(args):
@@ -524,6 +666,7 @@ def main(args):
     elif command=="observe-planner":observe_planner(Path(args[1]),int(args[2]))
     elif command=="observe-peers":observe_peers(Path(args[1]),int(args[2]))
     elif command=="collect":collect(Path(args[1]),args[2])
+    elif command=="collect-failure":collect_failure(Path(args[1]))
     elif command=="remove-input":remove_input(Path(args[1]))
     elif command=="stopped":stopped(Path(args[1]))
     elif command=="resumed":stopped(Path(args[1]),True)

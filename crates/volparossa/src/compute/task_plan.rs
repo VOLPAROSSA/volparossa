@@ -12,6 +12,9 @@ use volparossa_local_control::compute::PublicTask;
 pub(super) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 
+mod recovery;
+pub(super) use recovery::PlanningDiagnostic;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
@@ -105,7 +108,7 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct QuestionStats {
     prompt_tokens: u64,
@@ -117,8 +120,10 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
     let stats: Vec<QuestionStats> =
         serde_json::from_value(report["planner_question_stats"].clone())?;
     ensure!(
-        report["planner_strategy"] == "model_questions_scaffold_v1"
-            && report["planner_structure_generated_by"] == "local_schema"
+        matches!(
+            report["planner_strategy"].as_str(),
+            Some("model_questions_scaffold_v1" | recovery::STRATEGY)
+        ) && report["planner_structure_generated_by"] == "local_schema"
             && report["planner_stop_reason"] == "two_questions"
             && stats.len() == 2
             && questions.questions.len() == 2,
@@ -136,6 +141,13 @@ fn validate_question_stats(report: &Value, questions: &Questions) -> Result<()> 
             "compute_task_plan_question_budget"
         );
     }
+    if report["planner_strategy"] == recovery::STRATEGY {
+        return recovery::validate_success(report, questions, &stats);
+    }
+    ensure!(
+        report.get("planner_attempts").is_none(),
+        "compute_task_plan_legacy_attempts"
+    );
     ensure!(
         report["planner_prompt_tokens"].as_u64()
             == stats.iter().map(|stat| stat.prompt_tokens).max()

@@ -122,7 +122,7 @@ def task_planner_doubles(text, generated=None, prompt=None):
     tokenizer, torch, transformers, model = (mock.Mock() for _ in range(4))
     tokenizer.pad_token_id = tokenizer.eos_token_id = 2
     tokenizer.apply_chat_template.return_value = prompt
-    texts = text if isinstance(text, (list, tuple)) else [text, text]
+    texts = text if isinstance(text, (list, tuple)) else [text] * WORKER.TASK_PLAN_MAX_ATTEMPTS
     tokenizer.decode.side_effect = lambda *_args, **_kwargs: texts[model.generate.call_count - 1]
     torch.tensor.side_effect = lambda rows, **_kwargs: Tensor(rows)
     torch.inference_mode.side_effect = contextlib.nullcontext
@@ -307,7 +307,8 @@ class WorkerProtocolTests(unittest.TestCase):
                 return incomplete
 
             model.generate.side_effect = generate
-            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_INCOMPLETE_GENERATION"):
+            cause = "INVALID_TEXT_ENCODING" if text == "\ud800?" else "INCOMPLETE_GENERATION"
+            with self.subTest(text=text), self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_" + cause):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
             model.generate.assert_called_once()
 
@@ -331,11 +332,11 @@ class WorkerProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_ONE_INCOMPLETE_GENERATION"):
             WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
 
-    def test_task_planning_never_truncates_repairs_retries_or_falls_back(self):
+    def test_task_planning_hard_failures_never_retry_or_repair(self):
         valid = "What does the source require?"
-        for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*191+[2], valid),
-                                       ([1], [21]*192, valid), ([1], [2, 21, 2], valid),
-                                       ([1], [21, 2], " "), ([1], [21, 2], "é"*257)):
+        for prompt, generated, text in (([1]*513, [21, 2], valid), ([1], [21]*192+[2], valid),
+                                       ([1], [2, 21, 2], valid), ([1], [21, 2], "\ud800"),
+                                       ([1], [21, 2], 123)):
             model, tokenizer, torch, transformers = task_planner_doubles(text, generated, prompt)
             with self.subTest(prompt=len(prompt), generated=len(generated)), self.assertRaises(WORKER.JobError):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
@@ -349,14 +350,14 @@ class WorkerProtocolTests(unittest.TestCase):
         tokenizer.decode.assert_not_called()
 
     def test_task_planner_rejects_duplicate_model_questions_and_does_not_restart_budget(self):
-        model, tokenizer, torch, transformers = task_planner_doubles(["Same question?", " Same question? "])
-        with self.assertRaisesRegex(WORKER.JobError, "DUPLICATE_OR_EMPTY_TASK_PLAN_QUESTION"):
+        model, tokenizer, torch, transformers = task_planner_doubles(["Same question?"] + [" Same question? "] * 3)
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_QUESTION_TWO_DUPLICATE_TEXT"):
             WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
-        self.assertEqual(model.generate.call_count, 2)
+        self.assertEqual(model.generate.call_count, 4)
         for change, error in (("prompt", "TASK_PLAN_QUESTION_TWO_PROMPT_TOKEN_LIMIT_EXCEEDED"),
-                              ("tokens", "TASK_PLAN_QUESTION_TWO_GENERATION_LIMIT_REACHED"),
+                              ("tokens", "TASK_PLAN_GENERATION_LIMIT_REACHED"),
                               ("owner", "JOB_DEADLINE_EXCEEDED")):
-            model, tokenizer, torch, transformers = task_planner_doubles(["First question?", "Second question?"])
+            model, tokenizer, torch, transformers = task_planner_doubles(["First question?"] + ["Second question?"] * 3)
             session = mock.Mock()
             if change == "prompt":
                 tokenizer.apply_chat_template.side_effect = [[11, 12, 13], [11] * 513]
@@ -366,26 +367,146 @@ class WorkerProtocolTests(unittest.TestCase):
                 def generate(**kwargs):
                     if model.generate.call_count == 1:
                         return original(**kwargs)
-                    return torch.tensor([kwargs["input_ids"].rows[0] + [21] * 191 + [2]])
+                    return torch.tensor([kwargs["input_ids"].rows[0] + [21] * (kwargs["max_new_tokens"] - 1) + [2]])
 
                 model.generate.side_effect = generate
             else:
                 session.check.side_effect = [None] * 4 + [WORKER.JobError("JOB_DEADLINE_EXCEEDED")]
             with self.subTest(change=change), self.assertRaisesRegex(WORKER.JobError, error):
                 WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
-            self.assertEqual(model.generate.call_count, 2 if change == "tokens" else 1)
+            self.assertEqual(model.generate.call_count, 3 if change == "tokens" else 1)
+            if change == "tokens":
+                self.assertEqual([call.kwargs["max_new_tokens"] for call in model.generate.call_args_list], [192, 192, 189])
+                self.assertEqual(sum(a["generated_tokens"] for a in session.planner_diagnostic["attempts"]), 384)
+                self.assertFalse(session.planner_diagnostic["incomplete_attempt"])
 
     def test_task_question_failure_codes_match_supervisor_fixed_alphabet(self):
         # The Rust supervisor deliberately accepts only [A-Z_]{1,64}; digits
         # would hide either stage behind UNKNOWN_FIXED_FAILURE.
         for previous, stage in ((None, "ONE"), ("Earlier model question?", "TWO")):
-            model, tokenizer, torch, transformers = task_planner_doubles(" ")
+            texts = [previous, " ", " ", " "] if previous else " "
+            model, tokenizer, torch, transformers = task_planner_doubles(texts)
             with self.subTest(stage=stage), self.assertRaises(WORKER.JobError) as failure:
-                WORKER.plan_task_question(model, tokenizer, torch, transformers,
-                                          task_plan_input(), mock.Mock(), previous)
+                WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), mock.Mock())
             code = str(failure.exception)
             self.assertEqual(code, "TASK_PLAN_QUESTION_" + stage + "_EMPTY_TEXT")
             self.assertRegex(code, r"\A[A-Z_]{1,64}\Z")
+
+    def test_task_planner_content_recovery_preserves_exact_bytes_and_charges_every_attempt(self):
+        cases = (("", "EMPTY_TEXT"), (" \n", "EMPTY_TEXT"), ("é" * 257, "TEXT_TOO_LONG"),
+                 ("\0" + "x" * 512, "TEXT_TOO_LONG"), ("a\0?", "NUL_TEXT"))
+        accepted = [" First public question? ", "Second public question?"]
+        for rejected, code in cases:
+            with self.subTest(code=code, bytes=len(rejected.encode())):
+                model, tokenizer, torch, transformers = task_planner_doubles([rejected] + accepted)
+                tokenizer.apply_chat_template.side_effect = [[11] * 500, [12] * 4, [13] * 5]
+                session = WORKER.Session(WORKER.validate_request(dict(request(), mode="plan_tasks")))
+                started = session.started
+                plan, prompt, cost, stats = WORKER.plan_tasks(
+                    model, tokenizer, torch, transformers, task_plan_input(), session)
+                self.assertEqual(plan, dict(version=1, questions=accepted))
+                self.assertEqual((prompt, cost, model.generate.call_count), (500, 9, 3))
+                self.assertEqual(session.started, started)
+                self.assertEqual(stats, [dict(prompt_tokens=p, generated_tokens=3, stop_reason="eos") for p in (4, 5)])
+                diagnostic = session.planner_diagnostic
+                self.assertEqual(set(diagnostic), {"strategy", "attempts", "incomplete_attempt"})
+                self.assertEqual(diagnostic["strategy"], "model_questions_scaffold_recovery_v2")
+                self.assertFalse(diagnostic["incomplete_attempt"])
+                for index, (entry, text) in enumerate(zip(diagnostic["attempts"], [rejected] + accepted)):
+                    raw = text.encode()
+                    self.assertEqual(set(entry), {"question_index", "attempt", "prompt_tokens", "generated_tokens",
+                        "max_new_tokens", "stop_reason", "accepted", "rejection_code", "text_bytes", "text_sha256"})
+                    self.assertEqual((entry["question_index"], entry["attempt"]), ((0 if index < 2 else 1), index + 1))
+                    self.assertEqual((entry["text_bytes"], entry["text_sha256"]), (len(raw), hashlib.sha256(raw).hexdigest()))
+                    self.assertEqual(entry["rejection_code"], code if index == 0 else None)
+                    self.assertIs(entry["accepted"], index != 0)
+                messages = tokenizer.apply_chat_template.call_args_list
+                self.assertNotEqual(messages[0].args[0], messages[1].args[0])
+                self.assertIn("Correction attempt 2", messages[1].args[0][1]["content"])
+                self.assertNotIn("Correction attempt", messages[2].args[0][1]["content"])
+                self.assertIn(accepted[0], messages[2].args[0][1]["content"])
+                with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ALREADY_STARTED"):
+                    WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+                self.assertEqual(model.generate.call_count, 3)
+
+    def test_task_planner_duplicate_recovery_keeps_the_first_accepted_question(self):
+        texts = ["First?", " First? ", "A different question?"]
+        model, tokenizer, torch, transformers = task_planner_doubles(texts)
+        session = mock.Mock()
+        plan, _, cost, stats = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual(plan["questions"], [texts[0], texts[2]])
+        self.assertEqual((cost, len(stats)), (9, 2))
+        self.assertEqual([entry["question_index"] for entry in session.planner_diagnostic["attempts"]], [0, 1, 1])
+        self.assertEqual([entry["rejection_code"] for entry in session.planner_diagnostic["attempts"]], [None, "DUPLICATE_TEXT", None])
+        self.assertIn("Correction attempt 3", tokenizer.apply_chat_template.call_args_list[2].args[0][1]["content"])
+
+    def test_task_planner_token_limit_recovery_shrinks_the_same_total_budget(self):
+        texts = ["Whole rejected generation?", "First accepted question?", "Second accepted question?"]
+        model, tokenizer, torch, transformers = task_planner_doubles(texts)
+        original = model.generate.side_effect
+
+        def generate(**kwargs):
+            if model.generate.call_count == 1:
+                return torch.tensor([kwargs["input_ids"].rows[0] + [21] * 191 + [2]])
+            return original(**kwargs)
+
+        model.generate.side_effect = generate
+        session = mock.Mock()
+        plan, _, cost, _ = WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual(plan["questions"], texts[1:])
+        self.assertEqual(cost, 198)
+        self.assertEqual([call.kwargs["max_new_tokens"] for call in model.generate.call_args_list], [192, 192, 189])
+        rejected = session.planner_diagnostic["attempts"][0]
+        self.assertEqual((rejected["stop_reason"], rejected["rejection_code"], rejected["generated_tokens"]),
+                         ("token_limit", "GENERATION_LIMIT", 192))
+        self.assertEqual(tokenizer.decode.call_args_list[0].args[0], [21] * 191)  # Exactly one EOS is framing.
+
+    def test_task_planner_attempt_limit_never_creates_an_unmodeled_second_question(self):
+        model, tokenizer, torch, transformers = task_planner_doubles([" ", " ", " ", "Only accepted question?"])
+        session = mock.Mock()
+        with self.assertRaisesRegex(WORKER.JobError, "TASK_PLAN_ATTEMPTS_EXHAUSTED"):
+            WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+        self.assertEqual(model.generate.call_count, 4)
+        self.assertEqual([entry["accepted"] for entry in session.planner_diagnostic["attempts"]], [False, False, False, True])
+        self.assertEqual(sum(entry["generated_tokens"] for entry in session.planner_diagnostic["attempts"]), 12)
+        prompts = [call.args[0][1]["content"] for call in tokenizer.apply_chat_template.call_args_list]
+        self.assertEqual(len(set(prompts)), 4)
+        self.assertFalse(session.planner_diagnostic["incomplete_attempt"])
+
+    def test_task_planner_error_envelope_retains_costs_without_text_for_backend_or_content_failure(self):
+        for failure in (None, RuntimeError("private backend detail"), MemoryError("private memory detail"),
+                        WORKER.JobError("JOB_CANCELLED"), WORKER.JobError("JOB_DEADLINE_EXCEEDED")):
+            with self.subTest(failure=type(failure).__name__):
+                model, tokenizer, torch, transformers = task_planner_doubles("\0private rejected candidate")
+                original = model.generate.side_effect
+
+                def generate(**kwargs):
+                    if model.generate.call_count == 2 and failure is not None:
+                        raise failure
+                    return original(**kwargs)
+
+                model.generate.side_effect = generate
+                frames = mock.Mock()
+                frames.request.return_value = json.dumps(dict(request(), mode="plan_tasks"))
+                output = io.StringIO()
+
+                def execute(_request, session):
+                    return WORKER.plan_tasks(model, tokenizer, torch, transformers, task_plan_input(), session)
+
+                with mock.patch.object(WORKER, "InputFrames", return_value=frames), \
+                     mock.patch.object(WORKER, "execute_job", side_effect=execute), \
+                     mock.patch.object(WORKER, "WIRE_OUTPUT", output), \
+                     mock.patch.object(WORKER.os, "umask"), mock.patch.object(WORKER.signal, "signal"):
+                    self.assertEqual(WORKER.main(), 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual((result["id"], result["status"]), ("a" * 32, "error"))
+                diagnostic = result["planner_diagnostic"]
+                self.assertEqual(len(diagnostic["attempts"]), 4 if failure is None else 1)
+                self.assertEqual(diagnostic["incomplete_attempt"], failure is not None)
+                self.assertTrue(all(entry["rejection_code"] == "NUL_TEXT" for entry in diagnostic["attempts"]))
+                self.assertNotIn("private", output.getvalue())
+                self.assertRegex(result["code"], r"\A[A-Z_]{1,64}\Z")
+                self.assertEqual(model.generate.call_count, 4 if failure is None else 2)
 
     def test_task_plan_branch_loads_weights_and_retains_only_valid_hashed_questions(self):
         expected = dict(version=1, questions=["Which requirements?", "Which risks?"])
@@ -429,10 +550,12 @@ class WorkerProtocolTests(unittest.TestCase):
                 self.assertTrue(result["goal_only_planning"] and result["model_weights_loaded"] and result["base_weights_unchanged"])
                 self.assertFalse(result["generation_limit_reached"] or result["model_answer_correctness_proven"])
                 self.assertEqual(result["planner_stop_reason"], "two_questions")
-                self.assertEqual(result["planner_strategy"], "model_questions_scaffold_v1")
+                self.assertEqual(result["planner_strategy"], "model_questions_scaffold_recovery_v2")
                 self.assertEqual(result["planner_structure_generated_by"], "local_schema")
                 self.assertEqual(result["planner_question_stats"],
                                  [dict(prompt_tokens=3, generated_tokens=3, stop_reason="eos")] * 2)
+                self.assertEqual(len(result["planner_attempts"]), 2)
+                self.assertTrue(all(attempt["accepted"] for attempt in result["planner_attempts"]))
                 self.assertEqual(result["base_before"], result["base_after"])
                 for field in ("outputs","baseline_evaluation","input_adapter","adapter_after"):
                     self.assertNotIn(field,result)
