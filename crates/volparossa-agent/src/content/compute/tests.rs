@@ -1,6 +1,7 @@
 //! Real signed provider framing and protected Unix I/O; no model execution is simulated.
 
 mod derived;
+mod eligibility;
 
 use super::*;
 use ed25519_dalek::SigningKey;

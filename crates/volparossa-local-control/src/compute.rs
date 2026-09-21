@@ -5,7 +5,7 @@
 //! original signed publications and explicit public-data authorization. No paths or commands
 //! can be supplied. JSON is bounded and rejects unknown and duplicate typed fields.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -81,6 +81,9 @@ pub struct Request {
 pub enum Operation {
     /// Inspect this explicitly enabled broker's fixed model and current capacity.
     Capabilities,
+    /// Ask the provider agent about selected public publishers and fixed execution profiles.
+    /// Only the agent can answer publisher eligibility; this never admits a worker job.
+    Eligibility(EligibilityQuery),
     /// Admit one real inference job, or report busy; there is no pending queue.
     Submit(Submit),
     /// Observe a job with its complete original binding and authenticated owner.
@@ -198,6 +201,78 @@ pub struct Capabilities {
     pub derived_inference_v3: bool,
 }
 
+/// A content-free suitability query, not publisher authority or a capacity reservation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EligibilityQuery {
+    /// One through 32 distinct, independently selected public-data publisher keys.
+    pub publisher_keys: Vec<String>,
+    /// Optional exact frozen model fingerprint; absence does not select a model by itself.
+    pub model_fingerprint: Option<String>,
+    /// Require the existing explicit public-question derivation profile.
+    pub require_task_derivation_v1: bool,
+    /// Require signed original public-document inference.
+    pub require_document_inference_v2: bool,
+    /// Require signed generated-intermediate public inference.
+    pub require_derived_inference_v3: bool,
+}
+
+impl EligibilityQuery {
+    /// Check canonical, valid Ed25519 publisher identities and bounded profile requirements.
+    ///
+    /// # Errors
+    /// Rejects empty, duplicate, excessive or invalid keys and invalid model fingerprints.
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if !(1..=32).contains(&self.publisher_keys.len())
+            || self
+                .model_fingerprint
+                .as_ref()
+                .is_some_and(|value| !nonzero_hex(value, 64))
+        {
+            return Err(ProtocolError::Invalid);
+        }
+        let mut seen = BTreeSet::new();
+        for key in &self.publisher_keys {
+            if !nonzero_hex(key, 64) || !seen.insert(key) {
+                return Err(ProtocolError::Invalid);
+            }
+            let mut bytes = [0; 32];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&key[index * 2..index * 2 + 2], 16)
+                    .map_err(|_| ProtocolError::Invalid)?;
+            }
+            ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| ProtocolError::Invalid)?;
+        }
+        Ok(())
+    }
+
+    /// Match this valid query against current capacity and the requested fixed profiles.
+    /// The caller must authenticate/validate capabilities and independently check publisher trust.
+    /// A positive result is only an observation; actual Submit still decides admission.
+    pub fn matches(&self, capabilities: &Capabilities) -> bool {
+        self.validate().is_ok()
+            && capabilities.accepting_work
+            && capabilities.public_inference_only
+            && self
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|expected| expected == &capabilities.model_fingerprint)
+            && (!self.require_task_derivation_v1 || capabilities.task_derivation_v1)
+            && (!self.require_document_inference_v2 || capabilities.document_inference_v2)
+            && (!self.require_derived_inference_v3 || capabilities.derived_inference_v3)
+    }
+}
+
+/// Provider-checked suitability at one instant, never a lease or an execution receipt.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Eligibility {
+    /// Actual owner-broker model/profile/capacity observation.
+    pub capabilities: Capabilities,
+    /// All requested publishers are locally trusted and all requested constraints currently match.
+    pub eligible: bool,
+}
+
 #[allow(
     clippy::trivially_copy_pass_by_ref,
     reason = "Serde skip predicate requires a reference"
@@ -233,6 +308,8 @@ pub struct Response {
 pub enum Outcome {
     /// Supported provisioned identity and owner-constrained resource availability.
     Capabilities(Capabilities),
+    /// Provider agent's publisher/profile suitability observation, not execution permission.
+    Eligibility(Eligibility),
     /// Exact retained job state.
     Job(JobStatus),
     /// A fixed diagnostic without prompts, paths or backend exception details.
@@ -318,6 +395,7 @@ impl Request {
         }
         let binding = match &self.operation {
             Operation::Capabilities => return Ok(()),
+            Operation::Eligibility(query) => return query.validate(),
             Operation::Submit(submit) => {
                 if submit.dataset_json.is_empty()
                     || submit.dataset_json.len() > MAX_DATASET_BYTES
@@ -449,6 +527,152 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        let mut encoded = String::new();
+        for byte in bytes {
+            write!(encoded, "{byte:02x}").unwrap();
+        }
+        encoded
+    }
+
+    fn eligibility_query() -> EligibilityQuery {
+        EligibilityQuery {
+            publisher_keys: vec![key_hex(
+                ed25519_dalek::SigningKey::from_bytes(&[1; 32])
+                    .verifying_key()
+                    .as_bytes(),
+            )],
+            model_fingerprint: None,
+            require_task_derivation_v1: false,
+            require_document_inference_v2: false,
+            require_derived_inference_v3: false,
+        }
+    }
+
+    #[test]
+    fn eligibility_query_bounds_distinct_valid_publishers_and_optional_model() {
+        let mut query = eligibility_query();
+        query.validate().unwrap();
+        query.publisher_keys = (1..=32)
+            .map(|seed| {
+                key_hex(
+                    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                        .verifying_key()
+                        .as_bytes(),
+                )
+            })
+            .collect();
+        query.model_fingerprint = Some("a".repeat(64));
+        query.validate().unwrap();
+        query.publisher_keys.push(key_hex(
+            ed25519_dalek::SigningKey::from_bytes(&[33; 32])
+                .verifying_key()
+                .as_bytes(),
+        ));
+        assert!(query.validate().is_err());
+        let original = eligibility_query();
+        let invalid_point = (1..=255)
+            .find(|byte| ed25519_dalek::VerifyingKey::from_bytes(&[*byte; 32]).is_err())
+            .unwrap();
+        for keys in [
+            vec![],
+            vec![original.publisher_keys[0].clone(); 2],
+            vec![original.publisher_keys[0].to_uppercase()],
+            vec!["0".repeat(64)],
+            vec!["1".repeat(63)],
+            vec![key_hex(&[invalid_point; 32])],
+        ] {
+            query = original.clone();
+            query.publisher_keys = keys;
+            assert!(query.validate().is_err());
+        }
+        for model in ["0".repeat(64), "A".repeat(64), "a".repeat(63)] {
+            query = original.clone();
+            query.model_fingerprint = Some(model);
+            assert!(query.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn eligibility_matches_only_current_capacity_and_requested_profiles() {
+        let mut query = eligibility_query();
+        let mut caps = Capabilities {
+            model: ModelIdentity {
+                model_id: "fixture".into(),
+                model_revision: "pinned".into(),
+                base_weights: FileIdentity {
+                    bytes: 1,
+                    sha256: "a".repeat(64),
+                },
+                adapter_files: None,
+            },
+            model_fingerprint: "b".repeat(64),
+            accepting_work: true,
+            public_inference_only: true,
+            runtime_slots: 1,
+            max_threads: 2,
+            max_job_seconds: 600,
+            max_dataset_bytes: 1_048_576,
+            max_rows: 4,
+            task_derivation_v1: false,
+            document_inference_v2: false,
+            derived_inference_v3: false,
+        };
+        assert!(query.matches(&caps));
+        query.require_task_derivation_v1 = true;
+        assert!(!query.matches(&caps));
+        caps.task_derivation_v1 = true;
+        assert!(query.matches(&caps));
+        query.require_document_inference_v2 = true;
+        assert!(!query.matches(&caps));
+        caps.document_inference_v2 = true;
+        assert!(query.matches(&caps));
+        query.require_derived_inference_v3 = true;
+        assert!(!query.matches(&caps));
+        caps.derived_inference_v3 = true;
+        assert!(query.matches(&caps));
+        query.model_fingerprint = Some("c".repeat(64));
+        assert!(!query.matches(&caps));
+        query.model_fingerprint = Some(caps.model_fingerprint.clone());
+        assert!(query.matches(&caps));
+        caps.accepting_work = false;
+        assert!(!query.matches(&caps));
+        caps.accepting_work = true;
+        caps.public_inference_only = false;
+        assert!(!query.matches(&caps));
+        caps.public_inference_only = true;
+        query.publisher_keys.clear();
+        assert!(!query.matches(&caps));
+    }
+
+    #[test]
+    fn eligibility_request_is_strict_and_has_no_task_or_path_fields() {
+        let query = eligibility_query();
+        let request = Request {
+            version: VERSION,
+            request_id: "a".repeat(32),
+            requester_key: query.publisher_keys[0].clone(),
+            operation: Operation::Eligibility(query.clone()),
+        };
+        request.validate(1000).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Request>(&serde_json::to_vec(&request).unwrap()).unwrap(),
+            request
+        );
+        for field in ["dataset_json", "manifest_id", "url", "path", "command"] {
+            let mut value = serde_json::to_value(&query).unwrap();
+            value[field] = "not permitted".into();
+            assert!(serde_json::from_value::<EligibilityQuery>(value).is_err());
+        }
+        let duplicate = serde_json::to_string(&query).unwrap().replacen(
+            "\"publisher_keys\":",
+            "\"publisher_keys\":[],\"publisher_keys\":",
+            1,
+        );
+        assert!(serde_json::from_str::<EligibilityQuery>(&duplicate).is_err());
+    }
 
     #[test]
     fn versioned_public_tasks_bound_exact_requester_questions_and_reject_unknown_types() {

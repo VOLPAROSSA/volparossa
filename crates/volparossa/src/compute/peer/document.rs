@@ -21,7 +21,7 @@ use super::super::{
     document_plan::{Input, MAX_DOCUMENT_BYTES, Plan},
     private_directory,
 };
-use super::{Cancellation, now, parse_key, read_file, rpc, task, workflow};
+use super::{Cancellation, discovery, now, parse_key, read_file, rpc, task, workflow};
 
 const MAX_SAVED_BYTES: usize = 16 * 1024 * 1024;
 // Up to MAX_PARTS independently checked 1024-byte answers, including worst-case
@@ -67,8 +67,10 @@ pub(crate) struct Options {
     #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
     publisher_key: Option<VerifyingKey>,
     /// Independently selected peers, already configured to trust this publisher.
-    #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, value_parser = parse_key, required_unless_present_any = ["resume", "discover_peers"], conflicts_with_all = ["resume", "discover_peers"])]
     provider_key: Vec<VerifyingKey>,
+    #[command(flatten)]
+    discovery: discovery::Options,
     #[arg(long, default_value_t = 86400, value_parser = clap::value_parser!(u64).range(1..=2678400))]
     lifetime_seconds: u64,
     /// Package rounds per invocation, or per continuation window with --follow.
@@ -83,6 +85,9 @@ pub(crate) struct Options {
     threads: u16,
     #[arg(long)]
     execute: bool,
+    /// Prepare the public source, tokenizer plan and immutable peer selection without submitting jobs.
+    #[arg(long, requires = "execute", conflicts_with = "resume")]
+    enroll_only: bool,
 }
 
 pub(super) fn save(
@@ -108,6 +113,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             json!({"operation":"compute_document_plan", "execute":false,
             "input":args.input,"directory":args.directory,"resume":args.resume,
             "synthesize":args.synthesize,
+            "discover_peers":args.discovery.discover_peers,
+            "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
             "maximum_document_bytes":MAX_DOCUMENT_BYTES,"private_data_supported":false,
             "tokenizer_execution":false,"network_execution":false})
@@ -125,7 +132,18 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     );
     let _lock = task::open_directory(&args.directory, args.resume)?;
     if !args.resume {
-        prepare(args, &cancellation.activity).await?;
+        prepare(args, socket, &cancellation.activity).await?;
+    }
+    if args.enroll_only {
+        let (enrollment, _, _) = storage::load(&args.directory)?;
+        println!(
+            "{}",
+            json!({"operation":"compute_document_enrolled", "execution_started":false,
+            "task_complete":false, "source_manifest_id":enrollment.source_manifest_id,
+            "provider_keys":enrollment.provider_keys, "model_fingerprint":enrollment.model_fingerprint,
+            "package_count":enrollment.packages.len(), "private_data_supported":false})
+        );
+        return Ok(());
     }
     let mut result = advance(args, socket, &cancellation.activity).await?;
     if result["synthesis_requested"] == true {
@@ -144,21 +162,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()> {
+async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
     ensure!(
         args.public_content,
         "compute_document_public_permission_required"
-    );
-    ensure!(
-        (2..=4).contains(&args.provider_key.len())
-            && args
-                .provider_key
-                .iter()
-                .map(VerifyingKey::to_bytes)
-                .collect::<BTreeSet<_>>()
-                .len()
-                == args.provider_key.len(),
-        "compute_document_independent_peers"
     );
     let input = Input {
         version: 1,
@@ -175,6 +182,35 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
             .context("compute_document_question")?,
     };
     input.validate()?;
+    let selected = if args.discovery.discover_peers {
+        ensure!(
+            args.provider_key.is_empty(),
+            "compute_discovery_conflicting_providers"
+        );
+        let publisher = args.publisher_key.context("compute_document_publisher")?;
+        let query = args.discovery.query(
+            [hex::encode(publisher.as_bytes())],
+            true,
+            true,
+            args.synthesize,
+        )?;
+        Some(args.discovery.select(socket, query, cancelled).await?)
+    } else {
+        None
+    };
+    let providers = selected
+        .as_ref()
+        .map_or(&args.provider_key, |selected| &selected.providers);
+    ensure!(
+        (2..=4).contains(&providers.len())
+            && providers
+                .iter()
+                .map(VerifyingKey::to_bytes)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == providers.len(),
+        "compute_document_independent_peers"
+    );
     ensure!(
         !*cancelled.borrow(),
         "compute_document_cancelled_before_planning"
@@ -196,17 +232,19 @@ async fn prepare(args: &Options, cancelled: &watch::Receiver<bool>) -> Result<()
         Some(signer.verifying_key()) == args.publisher_key,
         "compute_document_publisher_identity"
     );
-    let enrollment = storage::publish(
+    let mut enrollment = storage::publish(
         &args.directory,
         &input,
         &plan,
         &signer,
-        &args.provider_key,
+        providers,
         now()?,
         args.lifetime_seconds,
         cancelled,
         args.synthesize,
     )?;
+    enrollment.model_fingerprint = selected.map(|selected| selected.model_fingerprint);
+    enrollment.replace_peers = args.discovery.replace_peers;
     drop(signer); // No identity/private key is retained during any peer exchange.
     save(&args.directory, "document.json", &enrollment, false)
 }

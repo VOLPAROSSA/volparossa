@@ -33,6 +33,10 @@ pub(super) struct Enrollment {
     source_bytes: u64,
     pub(super) publisher_key: String,
     pub(super) provider_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) model_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) replace_peers: bool,
     pub(super) selected_at_unix_seconds: u64,
     pub(super) expires_at_unix_seconds: u64,
     license: String,
@@ -267,6 +271,8 @@ pub(super) fn publish(
             .iter()
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
+        model_fingerprint: None,
+        replace_peers: false,
         selected_at_unix_seconds: at,
         expires_at_unix_seconds: validity.expires,
         license: input.license.clone(),
@@ -350,6 +356,13 @@ pub(super) fn load(root: &Path) -> Result<(Enrollment, Input, Plan)> {
     for provider in &enrollment.provider_keys {
         parse_key(provider).map_err(anyhow::Error::msg)?;
     }
+    ensure!(
+        !enrollment.replace_peers || enrollment.model_fingerprint.is_some(),
+        "compute_executor_replacement_requires_pinned_model"
+    );
+    if let Some(fingerprint) = &enrollment.model_fingerprint {
+        super::discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
+    }
     verify_original(root, &enrollment, &input)?;
     let mut ids = BTreeSet::new();
     for (index, package) in enrollment.packages.iter().enumerate() {
@@ -418,6 +431,8 @@ pub(super) fn expected(
         rows: package.rows,
         task: instruction(input),
         provider_keys: enrollment.provider_keys.clone(),
+        model_fingerprint: enrollment.model_fingerprint.clone(),
+        replace_peers: enrollment.replace_peers,
         selected_at_unix_seconds: enrollment.selected_at_unix_seconds,
     })
 }

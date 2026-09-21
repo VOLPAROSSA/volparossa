@@ -1,7 +1,9 @@
 //! Explicit public tasks on independently selected peers, never private prompt offload.
 
 mod batch;
+mod discovery;
 mod document;
+mod executors;
 mod follow;
 mod readiness;
 mod resume;
@@ -326,12 +328,17 @@ fn derive(
 }
 
 async fn capabilities(socket: &Path, provider: &VerifyingKey) -> Result<rpc::Capabilities> {
-    use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
     let rpc::Outcome::Capabilities(caps) =
         exchange(socket, provider, rpc::Operation::Capabilities).await?
     else {
         anyhow::bail!("compute_peer_capabilities_unavailable");
     };
+    validate_profile(&caps)?;
+    Ok(caps)
+}
+
+fn validate_profile(caps: &rpc::Capabilities) -> Result<()> {
+    use volparossa_content::agent_artifact::{BASE_MODEL_SHA256, MODEL_ID, MODEL_REVISION};
     ensure!(
         caps.public_inference_only
             && caps.runtime_slots == 1
@@ -344,7 +351,7 @@ async fn capabilities(socket: &Path, provider: &VerifyingKey) -> Result<rpc::Cap
             && caps.model_fingerprint == sha(&serde_json::to_vec(&caps.model)?),
         "compute_peer_profile"
     );
-    Ok(caps)
+    Ok(())
 }
 
 async fn exchange(

@@ -119,11 +119,11 @@ def stage_paths(root):
             (cycle / "validation/dataset.json", cycle / "validation/candidate", cycle / "training/adapter"))
 
 
-def observe(pid, path, namespace, service):
+def observe(pid, path, namespace, service, stages=STAGES, paths=None):
     TRAIN["guest_guard"](root=True)
     root, namespace = Path(path), Path(namespace)
     owner = TRAIN["identity"](pid)
-    for label, (dataset, output, adapter) in zip(STAGES, stage_paths(root)):
+    for label, (dataset, output, adapter) in zip(stages, stage_paths(root) if paths is None else paths):
         deadline = time.monotonic() + 90
         while not output.is_dir():
             require(TRAIN["alive"](owner) and time.monotonic() < deadline, "expected real peer-learning stage was not admitted")
@@ -182,9 +182,9 @@ def collect_tree(root):
     return result
 
 
-def collect(path):
+def collect(path, stages=STAGES):
     root = ART["private_root"](path)
-    observations = {label: read(root / f"peer-{label}-isolation.json") for label in STAGES}
+    observations = {label: read(root / f"peer-{label}-isolation.json") for label in stages}
     require(all(not TRAIN["alive"](member) for value in observations.values()
                 for member in value["raw"]["owned_processes"]), "actual peer-learning processes remain")
     return dict(files=collect_tree(root / "peer-learning"), observations=observations,
@@ -205,11 +205,11 @@ def compared(baseline, candidate):
     return candidate["loss"] < baseline["loss"] - 1e-6
 
 
-def check_observations(values, selected):
-    require(set(values) == set(STAGES), "five actual worker observations missing")
+def check_observations(values, selected, stages=STAGES, cold_stages=("peer-baseline",)):
+    require(set(values) == set(stages), "actual worker observations missing")
     workers, lineage = set(), None
-    for label in STAGES:
-        value, cold = values[label], label == "peer-baseline"
+    for label in stages:
+        value, cold = values[label], label in cold_stages
         raw = value["raw"]
         TRAIN["check_isolation"](raw)
         require(value["stage"] == label and value["output_exact_inode"] is True
@@ -222,7 +222,7 @@ def check_observations(values, selected):
                 and (lineage is None or current == lineage), "peer learning not on the distinct R3 contributor")
         lineage = current
         workers.add((raw["worker"]["pid"], raw["worker"]["start_ticks"]))
-    require(len(workers) == 5, "model worker identity reused between stages")
+    require(len(workers) == len(stages), "model worker identity reused between stages")
 
 
 def check(value, revision):
@@ -394,7 +394,7 @@ def check(value, revision):
     REP["validate_phase"](value["phase"], "peer-learning", peers, total)
 
 
-def evidence(work, revision):
+def evidence_value(work, revision):
     work = Path(work)
     value = dict(source_revision=revision, peers=read(work / "a01-expected-peers.json"),
         selected=read(work / "agent-peer-learning-selected.json", MAX_EXPORT),
@@ -412,7 +412,13 @@ def evidence(work, revision):
         phase=dict(route=read(work / "agent-peer-learning-transfer-live-selection.json"),
             layout=read(work / "agent-peer-learning-transfer-layout.json"),
             captures={role: read(work / f"agent-peer-learning-transfer-{role}.json") for role in REP["ROLES"]}))
+    return value
+
+
+def evidence(work, revision):
+    value = evidence_value(work, revision)
     check(value, revision)
+    work = Path(work)
     write(work / "agent-peer-learning-evidence.json", value)
 
 

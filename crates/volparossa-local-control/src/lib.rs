@@ -10,7 +10,10 @@
 pub mod compute;
 mod compute_control;
 mod content;
-pub use compute_control::{ComputeAttachRequest, ComputeReady, ComputeRemoteRequest};
+pub use compute_control::{
+    ComputeAttachRequest, ComputeDiscoverRequest, ComputeDiscovered, ComputeDiscoveredProvider,
+    ComputeReady, ComputeRemoteRequest,
+};
 mod custody;
 mod mailbox;
 pub use content::{
@@ -49,7 +52,7 @@ pub struct ControlRequest {
     /// One allowlisted operation.
     #[prost(
         oneof = "control_request::Operation",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34"
     )]
     pub operation: Option<control_request::Operation>,
 }
@@ -59,10 +62,10 @@ pub mod control_request {
     use prost::Oneof;
 
     use super::{
-        ComputeAttachRequest, ComputeRemoteRequest, ConnectRequest, ContentCustodyRequest,
-        ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest, ContentImportRequest,
-        ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery, MailboxRemoteRequest,
-        MailboxServeRequest, RoleChange,
+        ComputeAttachRequest, ComputeDiscoverRequest, ComputeRemoteRequest, ConnectRequest,
+        ContentCustodyRequest, ContentExportRequest, ContentFetchNameRequest, ContentFetchRequest,
+        ContentImportRequest, ContentServeRequest, Empty, HttpsContentFetchRequest, LogQuery,
+        MailboxRemoteRequest, MailboxServeRequest, RoleChange,
     };
 
     /// Exactly one supported CLI-to-agent operation.
@@ -140,6 +143,9 @@ pub mod control_request {
         /// Upgrade this same local connection for one signed protected peer job RPC.
         #[prost(message, tag = "33")]
         ComputeRemote(ComputeRemoteRequest),
+        /// Discover a bounded compatible pool through protected, content-free eligibility RPCs.
+        #[prost(message, tag = "34")]
+        ComputeDiscover(ComputeDiscoverRequest),
     }
 }
 
@@ -225,7 +231,7 @@ pub struct ControlResponse {
     /// Typed response body.
     #[prost(
         oneof = "control_response::Payload",
-        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24"
+        tags = "10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25"
     )]
     pub payload: Option<control_response::Payload>,
 }
@@ -235,9 +241,9 @@ pub mod control_response {
     use prost::Oneof;
 
     use super::{
-        ComputeReady, ContentCustodyReady, ContentReceipt, ContentTransferReady, Empty,
-        HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady, PathList,
-        PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
+        ComputeDiscovered, ComputeReady, ContentCustodyReady, ContentReceipt, ContentTransferReady,
+        Empty, HttpsContentTransferReady, LogList, MailboxReady, NamedContentTransferReady,
+        PathList, PeerList, PolicySnapshot, RoleSnapshot, SessionList, StatusSnapshot,
     };
 
     /// Exactly one response body.
@@ -288,6 +294,9 @@ pub mod control_response {
         /// Same-socket compute request readiness, never a completed task.
         #[prost(message, tag = "24")]
         ComputeReady(ComputeReady),
+        /// Compatible capacity observations, not reservations or execution receipts.
+        #[prost(message, tag = "25")]
+        ComputeDiscovered(ComputeDiscovered),
     }
 }
 
@@ -691,6 +700,9 @@ fn validate_request(request: &ControlRequest) -> Result<(), ControlProtocolError
         control_request::Operation::ContentServe(request) => request.validate()?,
         control_request::Operation::ComputeAttach(request) => request.validate()?,
         control_request::Operation::ComputeRemote(request) => request.validate()?,
+        control_request::Operation::ComputeDiscover(request) => {
+            request.eligibility()?;
+        }
         control_request::Operation::ContentFetch(request) => request.validate()?,
         control_request::Operation::ContentFetchHttps(request) => request.validate()?,
         control_request::Operation::ContentDownloadHttps(request) => request.validate_download()?,
@@ -797,6 +809,7 @@ fn validate_response(response: &ControlResponse) -> Result<(), ControlProtocolEr
         control_response::Payload::MailboxReady(ready) => ready.validate()?,
         control_response::Payload::ContentCustodyReady(ready) => ready.validate()?,
         control_response::Payload::ComputeReady(ready) => ready.validate()?,
+        control_response::Payload::ComputeDiscovered(discovered) => discovered.validate()?,
         control_response::Payload::Ack(_)
         | control_response::Payload::Status(_)
         | control_response::Payload::Roles(_) => {}

@@ -312,6 +312,8 @@ impl Broker {
                     caps.accepting_work = self.available();
                     Outcome::Capabilities(caps)
                 }
+                // Only the authenticated provider attachment owns publisher trust decisions.
+                Operation::Eligibility(_) => Outcome::Error(ErrorCode::Invalid),
                 Operation::Submit(submit) => self.submit(&request.requester_key, submit, time),
                 Operation::Poll(binding) => self.observe(&request.requester_key, binding, false),
                 Operation::Cancel(binding) => self.observe(&request.requester_key, binding, true),

@@ -14,10 +14,12 @@ mode=preview
 scenario=alpha
 agent_jobs_loss=no
 agent_jobs_follow=no
+agent_jobs_peer_recovery=no
 agent_public_task=no
 agent_public_document=no
 agent_train_cycle=no
 agent_train_loop=no
+agent_artifact_quarantine=no
 wifi_link=no
 uplink_link=no
 download_sharing=no
@@ -33,7 +35,7 @@ usage() {
         'usage: tests/integration/kvm-alpha-topology.sh --preview' \
         '       tests/integration/kvm-alpha-topology.sh --execute --yes' \
         '         --source DIRECTORY --bin DIRECTORY --output DIRECTORY' \
-        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-public-task|agent-public-document|dns-cache]'
+        '         --mpquic PATH --expected-commit SHA [--scenario alpha|reciprocity|local-link|mixed-link|mpquic-growth|mptcp-growth|sharing|download-sharing|wifi-link|uplink-link|crash-recovery|content|content-message|content-https|content-provider|content-replication|content-repair|content-mailbox|content-custody|agent-artifact|agent-train-cycle|agent-train-loop|agent-artifact-quarantine|agent-jobs|agent-jobs-loss|agent-jobs-follow|agent-jobs-peer-recovery|agent-public-task|agent-public-document|dns-cache]'
 }
 
 print_plan() {
@@ -71,6 +73,17 @@ print_plan() {
                 '  no arbitrary-document, private-task, answer-quality or complete-B03 claim.'
             return
         fi
+        if [ "$agent_jobs_peer_recovery" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA discovered public executor replacement plan:' \
+                '  one workflow discovers two real workers and explicitly permits compatible replacement peers;' \
+                '  lose one exact guest worker, retain terminal originals and the completed result;' \
+                '  pause the same owner only for deterministic fixture cutover; stop both original brokers;' \
+                '  start a real third node with its unchanged identity, then resume the same owner command;' \
+                '  require actual new-peer execution, exact preserved receipts, separate captures and complete cleanup;' \
+                '  no survivor-only reassignment, private offload, exactly-once or full-B03 claim.'
+            return
+        fi
         if [ "$agent_jobs_follow" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA automatic public peer-job continuation plan:' \
@@ -101,6 +114,15 @@ print_plan() {
         return
     fi
     if [ "$scenario" = agent-artifact ]; then
+        if [ "$agent_artifact_quarantine" = yes ]; then
+            printf '%s\n' \
+                'VOLPAROSSA agent-artifact-quarantine plan:' \
+                '  preserve the ordinary signed source/training setup, then publish an explicit NaN adapter fixture;' \
+                '  another node retrieves the original signed artifact over protected paths and refuses its invalid weights;' \
+                '  retain correlated artifact-local quarantine and continue useful training from the valid base;' \
+                '  require actual model workers, original captures and complete owned cleanup; no network-wide ban claim.'
+            return
+        fi
         if [ "$agent_train_loop" = yes ]; then
             printf '%s\n' \
                 'VOLPAROSSA owner-enabled autonomous public train-loop plan:' \
@@ -401,15 +423,19 @@ while [ "$#" -gt 0 ]; do
             download_sharing=no
             agent_jobs_loss=no
             agent_jobs_follow=no
+            agent_jobs_peer_recovery=no
             agent_public_task=no
             agent_public_document=no
             agent_train_cycle=no
             agent_train_loop=no
+            agent_artifact_quarantine=no
             case $2 in
+                agent-artifact-quarantine) scenario=agent-artifact; agent_train_loop=yes; agent_artifact_quarantine=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-loop) scenario=agent-artifact; agent_train_loop=yes; wifi_link=no; uplink_link=no ;;
                 agent-train-cycle) scenario=agent-artifact; agent_train_cycle=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-loss) scenario=agent-jobs; agent_jobs_loss=yes; wifi_link=no; uplink_link=no ;;
                 agent-jobs-follow) scenario=agent-jobs; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
+                agent-jobs-peer-recovery) scenario=agent-jobs; agent_jobs_peer_recovery=yes; agent_jobs_follow=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-task) scenario=agent-jobs; agent_public_task=yes; wifi_link=no; uplink_link=no ;;
                 agent-public-document) scenario=agent-jobs; agent_public_document=yes; wifi_link=no; uplink_link=no ;;
                 download-sharing) scenario=sharing; download_sharing=yes; wifi_link=no; uplink_link=no ;;
@@ -593,6 +619,11 @@ if [ "$agent_train_loop" = yes ]; then
         [ -f "$source_directory/tests/integration/$loop_fixture" ] && [ ! -L "$source_directory/tests/integration/$loop_fixture" ] || exit 69
     done
 fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    for quarantine_fixture in agent-artifact-quarantine-smoke.sh agent-artifact-quarantine-smoke.py; do
+        [ -f "$source_directory/tests/integration/$quarantine_fixture" ] && [ ! -L "$source_directory/tests/integration/$quarantine_fixture" ] || exit 69
+    done
+fi
 if [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ]; then
     for artifact_fixture in tests/integration/agent-artifact-smoke.sh tests/integration/agent-artifact-smoke.py \
         tests/integration/agent-training-smoke.py workers/volparossa-ml/provision.py \
@@ -610,6 +641,11 @@ fi
 if [ "$agent_public_task" = yes ]; then
     for task_fixture in agent-public-task-smoke.sh agent-public-task-smoke.py; do
         [ -f "$source_directory/tests/integration/$task_fixture" ] && [ ! -L "$source_directory/tests/integration/$task_fixture" ] || exit 69
+    done
+fi
+if [ "$agent_jobs_peer_recovery" = yes ]; then
+    for recovery_fixture in agent-jobs-peer-recovery-smoke.sh agent-jobs-peer-recovery-smoke.py; do
+        [ -f "$source_directory/tests/integration/$recovery_fixture" ] && [ ! -L "$source_directory/tests/integration/$recovery_fixture" ] || exit 69
     done
 fi
 if [ "$agent_public_document" = yes ]; then
@@ -1897,6 +1933,10 @@ if [ "$scenario" = agent-jobs ]; then
         # shellcheck source=tests/integration/agent-jobs-follow-smoke.sh
         . "$source_directory/tests/integration/agent-jobs-follow-smoke.sh"
     fi
+    if [ "$agent_jobs_peer_recovery" = yes ]; then
+        # shellcheck source=tests/integration/agent-jobs-peer-recovery-smoke.sh
+        . "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.sh"
+    fi
 fi
 if [ "$agent_public_task" = yes ]; then
     # shellcheck source=tests/integration/agent-public-task-smoke.sh
@@ -1918,6 +1958,10 @@ if [ "$agent_train_loop" = yes ]; then
     . "$source_directory/tests/integration/agent-train-loop-smoke.sh"
     # shellcheck source=tests/integration/agent-peer-learning-smoke.sh
     . "$source_directory/tests/integration/agent-peer-learning-smoke.sh"
+fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    # shellcheck source=tests/integration/agent-artifact-quarantine-smoke.sh
+    . "$source_directory/tests/integration/agent-artifact-quarantine-smoke.sh"
 fi
 if [ "$scenario" = content-mailbox ]; then
     # Only reusable control-link utilities, not the public-provider scenario itself.
@@ -2021,12 +2065,18 @@ if [ "$scenario" = agent-jobs ]; then
     if [ "$agent_jobs_follow" = yes ]; then
         install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-follow-smoke.py" "$WORK/bin/agent-jobs-follow-smoke.py"
     fi
+    if [ "$agent_jobs_peer_recovery" = yes ]; then
+        install -o root -g root -m 0555 "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" "$WORK/bin/agent-jobs-peer-recovery-smoke.py"
+    fi
     install -o root -g root -m 0444 "$source_directory/README.md" "$WORK/bin/agent-jobs-README.md"
 fi
 if [ "$agent_train_loop" = yes ]; then
     for loop_script in agent-train-loop-smoke.py agent-train-loop-catalog.py agent-peer-learning-smoke.py content-replication-smoke.py content-replication-capture.py; do
         install -o root -g root -m 0555 "$source_directory/tests/integration/$loop_script" "$WORK/bin/$loop_script"
     done
+fi
+if [ "$agent_artifact_quarantine" = yes ]; then
+    install -o root -g root -m 0555 "$source_directory/tests/integration/agent-artifact-quarantine-smoke.py" "$WORK/bin/agent-artifact-quarantine-smoke.py"
 fi
 if [ "$scenario" = content-repair ]; then
     # Capless owned-store snapshots must not depend on traversing the checkout owner's home.
@@ -2931,6 +2981,9 @@ launch_agent() {
         "$binary_directory/volparossa-agent" >/dev/null
 }
 
+if [ "$agent_jobs_peer_recovery" = yes ]; then
+    agent_jobs_peer_recovery_filter || fail PEER_RECOVERY_CONTROL_FILTER_FAILED
+fi
 if [ "$wifi_link" = yes ]; then wifi_link_observe_start; fi
 launch_agent client "$CLIENT"
 if [ "$wifi_link" != yes ]; then
@@ -5018,6 +5071,10 @@ start_privacy_observers() {
             [ "$scenario" = content-mailbox ] || return 1 ;;
         content-custody-deposit-privacy|content-custody-inspect-privacy|content-custody-fetch-privacy)
             [ "$scenario" = content-custody ] || [ "$scenario" = agent-artifact ] || [ "$scenario" = agent-jobs ] || return 1 ;;
+        content-custody-executor-discovery-privacy)
+            [ "$scenario" = agent-jobs ] && [ "$agent_public_document" = yes ] || return 1 ;;
+        content-custody-peer-initial-privacy|content-custody-peer-replacement-privacy)
+            [ "$scenario" = agent-jobs ] && [ "$agent_jobs_peer_recovery" = yes ] || return 1 ;;
         *) return 1 ;;
     esac
     set --

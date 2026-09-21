@@ -4,9 +4,11 @@
 # shellcheck disable=SC2154,SC2034
 
 agent_peer_learning_private() {
+    peer_learning_fixture=agent-peer-learning-smoke.py
+    [ "${agent_artifact_quarantine:-no}" != yes ] || peer_learning_fixture=agent-artifact-quarantine-smoke.py
     setpriv --reuid="$WORKER_UID" --regid="$WORKER_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
-        -- python3 -B "$WORK/bin/agent-peer-learning-smoke.py" "$@"
+        -- python3 -B "$WORK/bin/$peer_learning_fixture" "$@"
 }
 
 agent_peer_learning_link() {
@@ -153,6 +155,9 @@ agent_peer_learning_run() {
     [ "$loop_latest" != none ] || fail PEER_LEARNING_NO_APPROVED_PROVIDER_UPDATE
     agent_peer_learning_private setup "$artifact_user" "$loop_publisher" \
         >"$WORK/agent-peer-learning-selected.json" || fail PEER_LEARNING_SELECTION_FAILED
+    if [ "${agent_artifact_quarantine:-no}" = yes ]; then
+        agent_artifact_quarantine_publish || fail ARTIFACT_QUARANTINE_PUBLICATION_FAILED
+    fi
     agent_artifact_cli relay3 init --identity "$artifact_user/peer-identity.key" \
         --passphrase-file "$artifact_user/peer-passphrase" >"$WORK/agent-peer-learning-identity.log" \
         || fail PEER_LEARNING_IDENTITY_FAILED
@@ -190,7 +195,7 @@ agent_peer_learning_run() {
         sleep 0.01; peer_learning_poll=$((peer_learning_poll + 1))
     done
     peer_learning_service=$(systemctl show --property=MainPID --value volparossa-alpha-agent@relay3.service)
-    python3 -B "$source_directory/tests/integration/agent-peer-learning-smoke.py" observe "$artifact_job_pid" \
+    python3 -B "$source_directory/tests/integration/$peer_learning_fixture" observe "$artifact_job_pid" \
         "$artifact_user" "/run/netns/$R3" "$peer_learning_service" \
         >"$WORK/agent-peer-learning-observer.log" 2>"$WORK/agent-peer-learning-observer.err" \
         || fail PEER_LEARNING_ACTUAL_WORKERS_MISSING
@@ -206,7 +211,7 @@ agent_peer_learning_run() {
     agent_artifact_cli relay3 content stop >"$WORK/agent-peer-learning-service-stop.json" || fail PEER_LEARNING_SERVICE_STOP_FAILED
     content_replication_disconnect relay3 agent-peer-learning-transfer || fail PEER_LEARNING_ROUTE_CLEANUP_FAILED
     agent_peer_learning_network_cleanup || fail PEER_LEARNING_NETWORK_CLEANUP_FAILED
-    python3 -B "$source_directory/tests/integration/agent-peer-learning-smoke.py" evidence "$WORK" "$expected_commit" \
+    python3 -B "$source_directory/tests/integration/$peer_learning_fixture" evidence "$WORK" "$expected_commit" \
         || fail PEER_LEARNING_PROOF_INVALID
 }
 
@@ -224,6 +229,10 @@ agent_peer_learning_finalize() {
         [ ! -f "$peer_log" ] || [ -L "$peer_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$peer_log" "$output_directory/$(basename -- "$peer_log")"
     done
+    if [ "${agent_artifact_quarantine:-no}" = yes ]; then
+        agent_artifact_quarantine_finalize "$1"
+        return
+    fi
     python3 -B "$source_directory/tests/integration/agent-peer-learning-smoke.py" finalize "$WORK" "$expected_commit" \
         "$1" "$CLEANUP_COMPLETE" "$REMAINING_OWNED_OBJECTS" "$PHASE" "$OBSERVED_BLOCKER" || return 1
     install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$WORK/agent-peer-learning-smoke.json" "$output_directory/agent-peer-learning-smoke.json"

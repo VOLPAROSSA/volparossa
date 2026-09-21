@@ -201,9 +201,10 @@ Missing eligible data must remain fetchable; an available cache is not automatic
 training corpus, nor is everything in it authorized for training.
 
 Successor selection has live evidence on a small same-source held-out set and a separately
-pinned validation source. Automatic local comparison and adoption of peer updates is the next
-development candidate. These narrow checks do not prove general intelligence or that every
-update is universally better.
+pinned validation source. A separate node has fetched a peer update, compared and adopted it,
+trained a successor and published that successor for reuse. Public document fragments have also
+been combined into one answer through four real peer-inference levels. These scoped results
+prove execution, not answer quality, general intelligence or universally better updates.
 
 Public work can be split across selected peers, with retained results and bounded recovery
 after worker loss. Private distributed computation, general autonomous planning, defended model

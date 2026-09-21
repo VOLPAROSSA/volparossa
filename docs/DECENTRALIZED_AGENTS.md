@@ -572,9 +572,13 @@ The corrected fixture uses R3's existing authorized `provider-c` contribution se
 its own agent/cache and actual learner workers in R3's namespace. It consumes through two
 selected protected relay paths to R4; its separate Exit-facing TCP18080 link only serves
 content. R3's agent and temporary neighbor links are removed before the original independent
-Client import gate. This correction has focused local checks, not yet a passing combined
-live proof; production policy checks are unchanged. Full cross-node continued learning and republication therefore
-remain a development candidate. This is selection and reuse of compatible adapters,
+Client import gate. The corrected combined
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914384494)
+passes, including full reconstruction of the unchanged original evidence: actual R3 import,
+comparison/adoption, eight further updates, validation and successor republication, followed
+by independent Client named import and inference. Both training-catalog rounds and the separately
+pinned validation comparisons also complete; capture and cleanup gates pass. Production policy
+checks are unchanged, and earlier failed runs remain failed. This is selection and reuse of compatible adapters,
 not averaging/merging weights, private offload, poisoning-resistant aggregation, general agent
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
@@ -625,11 +629,75 @@ questions across explicitly selected compatible peers, sends the tasks concurren
 results in their original row order. It saves immutable handles before submission, retains
 partial/ambiguous failures, checks model/input/result bindings, and supports explicit follow-up
 poll/cancel. The scoped two-executor raw-evidence proof below now passes; this is not a proven full B03
-checkpoint. General automatic peer selection, task planning,
+checkpoint. Initial automatic executor selection for enrolled workflows is described below; general task planning,
 distributed optimizer/model-layer execution, confidential private tasks and
 correctness of a remote model's answers remain unimplemented or unproved. A signature establishes
 who reported a result, not whether the result is true. Explicit recovery and the new
 owner-enabled continuation candidate are described below.
+
+### Automatic executor selection
+
+For a new `compute peer workflow`, `task` or `document`, use `--discover-peers` instead of
+explicit `--provider-key` arguments. Source publishers and public-input authorization remain
+explicit. Discovery exchanges only publisher eligibility and required model/profile metadata,
+not prompts, content bodies or arbitrary remote commands. It uses signed provider offers and
+authenticated TLS over the existing protected relay paths, not direct peer dataplane connections.
+
+The receiving node checks its publisher allowlist and actual attached broker capabilities.
+The coordinator chooses the largest compatible observed group, retaining two through four
+distinct peers with the same exact model fingerprint. `--model-fingerprint` optionally requires
+a particular model; `--max-peers 2..4` limits this job's enrolled pool, not the size of the network.
+Without an explicit model pin this is compatibility selection, not a claim to choose the smartest
+model or fastest workers. Generic content providers without an eligible broker are not executors.
+Temporary busy/unavailable observations are retried every two seconds within one 150-second
+window, including initial route setup and probes; retries do not renew that deadline. Policy
+and protocol failures stop selection. Fixed diagnostic categories retain no task or publisher
+body and do not turn an unsuccessful query into proof of available workers.
+
+The original peer keys and model fingerprint are saved before any task submission. Fresh
+pre-submit capabilities and retained job bindings must match that fingerprint. Discovery observes
+availability; it does not reserve capacity, and a peer may become busy or leave afterward.
+By default, resume retains the enrolled group and model, including across synthesis levels.
+Existing bounded recovery within the enrolled pool still applies. To permit automatic discovery
+of replacements, also supply `--replace-peers` when first enrolling with `--discover-peers`:
+
+```sh
+volparossa --control-socket /absolute/agent.sock compute peer workflow \
+  --plan /absolute/plan.json --directory /absolute/private-parent/workflow-002 \
+  --discover-peers --replace-peers --follow --execute
+```
+
+This permission is retained with the original enrollment, not added by a later resume. If the
+original pool is unavailable, eligible unfinished work can move to newly discovered peers with
+the same exact model and required source profile. Recovery may use one available peer; initial
+discovery still needs at least two. Completed results are reused, and an unconfirmed job with
+an unexpired lease is not duplicated. Each fresh attempt retains `executor-admission.json`
+binding the additional peer keys to the original workflow, publisher, source, model and expiry
+before saving new handles or submitting work. These are private coordinator records, not
+independent execution attestations. Source authority and original leases are never extended.
+This is failure recovery, not arbitrary mid-task model changes or unbounded worker growth.
+Previously checked terminal failure/cancellation receipts remain usable after a broker leaves;
+the workflow does not downgrade that recorded termination to uncertainty. A running status or
+requested-but-unconfirmed cancellation never grants replacement permission.
+
+A preview without `--execute` remains networkless. For documents,
+`--enroll-only --execute` performs discovery, public-document preparation and durable enrollment,
+but submits no inference jobs. Continue with the ordinary `document --resume --execute` command.
+This is useful when preparation and execution need separate scheduling or observation;
+without `--enroll-only`, a new document command proceeds directly to execution.
+
+Focused local protocol and CLI checks pass. The [first automatic-discovery run on
+`a65a3242`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34916523136) failed before any
+peer submission with `CONTENT_UNAVAILABLE` during enrollment. Offers and two completed protected
+flows were observed, but no retained eligibility/budget replies establish why the eligible cohort
+was insufficient. Final route/policy rejection would have produced a different error code;
+temporary readiness remains an unproved hypothesis. The run remains failed; the earlier live
+document proofs used explicitly selected peers. Live automatic discovery and recovery onto a
+newly discovered third peer remain pending.
+The new `agent-jobs-peer-recovery` disposable scenario exercises that third-peer transition with
+one unchanged owner command. It records a fixture-controlled pause while replacing the original
+brokers, then requires a genuinely new node, saved admission, actual inference and preserved
+completed output. The pause is test orchestration, not a dependency or claimed product feature.
 
 `compute peer resume` now explicitly reopens supplied task handles against the same original
 signed public source, reconciles completed/running/missing/failed observations, and can retry
@@ -902,8 +970,13 @@ The corrected gate strictly validates v3 inference and still refuses derived tra
 Incomplete synthesis also retains `last-workflow-report.json` with fixed failure categories;
 an unconfirmed job is not treated as a stopped worker. The fixture exports only explicitly
 public partial files on failure, never relabelling them as complete execution evidence.
-The corrected live result remains pending. General autonomous planning, confidential offload
-and full B03 remain open.
+The corrected [run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914382572)
+and unchanged original raw reconstruction pass: ten fragments from 5,120 public-source bytes
+are reduced through `10 -> 5 -> 3 -> 2 -> 1`, with eight actual v3 workers and a final
+50-token answer. All nine publication signatures verify; offline completed resume preserves
+receipts without new work. Both protected relay legs, privacy captures and complete cleanup
+pass. This proves multi-level execution, not answer quality. General autonomous planning,
+confidential offload and full B03 remain open.
 
 ## Private tasks and training data
 
@@ -978,6 +1051,19 @@ documents model poisoning and limitations of mitigations.
 
 Local workers can automatically quarantine an artifact that violates its runtime contract,
 stop assigning it work, revoke its scoped lease and fall back to a known accepted version.
+An executable development candidate implements a narrower local part: `compute train-loop`
+retains a candidate-only fixed adapter violation after the correlated worker has been reaped,
+binds it to the original imported manifest, source, exact bytes and successful baseline, and
+excludes that manifest from adoption in the enrolled loop. Restart rechecks the retained
+evidence without extending its original deadlines. The accepted warmstart is not replaced;
+later signed revisions remain eligible. Operational failures, a defective baseline and finite
+quality differences cannot mint this quarantine. It is not a finding that a publisher is
+malicious, a content-cache serving revocation, or a restriction on every explicit CLI command.
+Pure tests cover exact-artifact retirement and retention of an accepted update. The disposable
+`agent-artifact-quarantine` fixture is ready to require an actual signed NaN candidate arriving
+over protected content and the same loop continuing useful base-model training. Its live proof
+is pending; neither this fixture nor format checking completes B07 or detects all poisoned models.
+
 Network-wide quarantine/replacement follows the automatic decision protocol, with bounded
 evidence, expiry and re-evaluation. A peer cannot erase another user's files or repair their
 host; removal means withdrawing execution/serving authority and deleting only locally owned

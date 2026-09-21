@@ -101,18 +101,54 @@ agent_jobs_broker() {
         2>"$WORK/agent-jobs-$jobs_node-attach.err" || return 1
 }
 
+agent_jobs_cgroup_empty() {
+    # cgroup.events covers descendants too; an empty cgroup.procs alone does not.
+    [ -d "$(dirname -- "$1")" ] && [ ! -L "$1" ] || return 1
+    [ -e "$1" ] || return 0
+    if [ -d "$1" ] && [ -f "$1/cgroup.events" ] && [ ! -L "$1/cgroup.events" ] \
+        && grep -Fx 'populated 0' "$1/cgroup.events" >/dev/null; then
+        return 0
+    fi
+    # A collected empty cgroup may disappear between these read-only checks.
+    [ -d "$(dirname -- "$1")" ] && [ ! -L "$1" ] && [ ! -e "$1" ]
+}
+
+agent_jobs_stop_unit() {
+    jobs_stop_unit=$1
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service) ;; *) return 1 ;; esac
+    jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
+    case $jobs_load_state in
+        loaded)
+            if ! systemctl stop "$jobs_stop_unit"; then
+                # Collection can race the first query. A failed stop is not
+                # proof of cleanup: accept only collection, then check below.
+                jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
+                [ "$jobs_load_state" = not-found ] || return 1
+            fi
+            ;;
+        # CollectMode=inactive can unload a broker stopped at the earlier cutover.
+        not-found) ;;
+        *) return 1 ;;
+    esac
+    jobs_stop_state=$(systemctl show --property=ActiveState --value "$jobs_stop_unit") || return 1
+    case $jobs_stop_state in inactive|failed) ;; *) return 1 ;; esac
+    jobs_stop_pid=$(systemctl show --property=MainPID --value "$jobs_stop_unit") || return 1
+    [ "$jobs_stop_pid" = 0 ] || return 1
+    agent_jobs_cgroup_empty "/sys/fs/cgroup/system.slice/$jobs_stop_unit" || return 1
+    systemctl reset-failed "$jobs_stop_unit" >/dev/null 2>&1 || true
+}
+
 agent_jobs_stop() {
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        python3 -B "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" cleanup-owner "$WORK" || return 1
+    fi
     if [ -n "${jobs_batch_pid:-}" ] && kill -0 "$jobs_batch_pid" 2>/dev/null; then
         kill -INT "$jobs_batch_pid" || return 1
         wait "$jobs_batch_pid" || true
         jobs_batch_pid=
     fi
     for jobs_stop_unit in ${jobs_units:-}; do
-        case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service) ;; *) return 1 ;; esac
-        systemctl stop "$jobs_stop_unit" || return 1
-        jobs_stop_state=$(systemctl show --property=ActiveState --value "$jobs_stop_unit")
-        case $jobs_stop_state in inactive|failed) ;; *) return 1 ;; esac
-        systemctl reset-failed "$jobs_stop_unit" >/dev/null 2>&1 || true
+        agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
 }
@@ -149,7 +185,13 @@ agent_jobs_setup() {
         | map(select($p[.] != $control)) | .[:2] | select(length == 2)' "$WORK/a01-expected-peers.json") || fail JOBS_PEERS_INVALID
     provider_node_a=$(printf '%s\n' "$provider_nodes" | jq -er '.[0]')
     provider_node_b=$(printf '%s\n' "$provider_nodes" | jq -er '.[1]')
-    content_provider_control_underlay
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        jq -e --arg control "$provider_control_peer" '[.relay0,.relay1,.relay2] | index($control) != null' \
+            "$WORK/a01-expected-peers.json" >/dev/null || fail PEER_RECOVERY_CONTROL_NOT_INDEPENDENT
+        content_provider_adaptive_control_underlay "$provider_control_peer" || fail PEER_RECOVERY_CONTROL_UNDERLAY_FAILED
+    else
+        content_provider_control_underlay
+    fi
     for jobs_node in "$provider_node_a" "$provider_node_b"; do
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
             --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
@@ -160,6 +202,13 @@ agent_jobs_setup() {
     done
     jobs_key_a=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_a-public.json")
     jobs_key_b=$(jq -er '.identity_public_key_hex' "$WORK/agent-jobs-$provider_node_b-public.json")
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        # Product discovery orders a same-model cohort by the actual public key.
+        # Preserve real node identities, never assume R4 sorts before R5.
+        provider_nodes=$(jq -cn --arg a "$provider_node_a" --arg b "$provider_node_b" \
+            --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
+            '[{node:$a,key:$ka},{node:$b,key:$kb}] | sort_by(.key) | map(.node)')
+    fi
     jq -n --argjson nodes "$provider_nodes" --arg context "$custody_context" --arg control "$provider_control_peer" \
         --arg a "$provider_node_a" --arg b "$provider_node_b" --arg ka "$jobs_key_a" --arg kb "$jobs_key_b" \
         '{provider_nodes:$nodes,route_context_id:$context,control_relay_peer_id:$control,
@@ -168,6 +217,10 @@ agent_jobs_setup() {
 
 agent_jobs_run() {
     agent_jobs_setup
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        agent_jobs_peer_recovery_run
+        return
+    fi
     if [ "${agent_jobs_follow:-no}" = yes ]; then
         agent_jobs_follow_run
         return
@@ -246,10 +299,16 @@ agent_jobs_finalize_report() {
     jobs_status=$1
     for jobs_log in "$WORK"/agent-jobs-*.json "$WORK"/agent-jobs-*.err "$WORK"/agent-jobs-*.log \
         "$WORK"/content-custody-fetch-*.json "$WORK"/content-provider-custody-fetch-*.json \
+        "$WORK"/content-custody-executor-discovery-*.json \
+        "$WORK"/content-provider-custody-executor-discovery-*.json \
         "$WORK"/content-provider-control-*.json; do
         [ ! -f "$jobs_log" ] || [ -L "$jobs_log" ] || \
             install -o "$OUTPUT_UID" -g "$OUTPUT_GID" -m 0600 "$jobs_log" "$output_directory/$(basename -- "$jobs_log")"
     done
+    if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
+        agent_jobs_peer_recovery_finalize_report "$jobs_status"
+        return
+    fi
     if [ "${agent_jobs_follow:-no}" = yes ]; then
         agent_jobs_follow_finalize_report "$jobs_status"
         return

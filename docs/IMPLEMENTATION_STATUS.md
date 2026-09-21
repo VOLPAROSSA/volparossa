@@ -2,9 +2,99 @@
 
 This is the repository's source of truth for implementation progress. A checked item means the repository contains the implementation and its stated verification has passed. Architecture documents, interfaces, disabled tests, mocks, simulations, and single-path fallbacks do **not** satisfy dataplane requirements.
 
-Last updated: 2026-09-15
+Last updated: 2026-09-21
 
-Current public-document synthesis candidate: `compute peer document --synthesize` chains
+Current executor-discovery candidate: `compute peer workflow`, `task` and `document` accept
+`--discover-peers` in place of manually supplied provider keys. Authenticated, protected probes
+check actual broker availability, supported inference profiles and permission for the explicitly
+selected public-source publishers. The coordinator selects two through four compatible peers
+with one exact model fingerprint and durably pins that selection before submitting work.
+Resume retains the original selection and model; additional peers require replacement permission
+recorded at enrollment. A fresh capability check cannot silently change the model.
+Discovery contains no prompt or source body and does not admit a worker. Source choice remains
+independent of cache availability. `document --enroll-only --execute` explicitly separates this
+preparation from later execution. The [first automatic-discovery run on
+`a65a3242`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34916523136) **failed** during
+executor enrollment with `CONTENT_UNAVAILABLE`, before any peer job or synthesis. Its retained
+logs show provider offers and two completed protected flows, but no retained capability/budget
+replies explain why no eligible cohort was selected. Final route/policy rejection would produce
+`CONTENT_POLICY`, not the observed code; offer expiry also does not fit the observed startup
+timing. Temporary startup readiness remains a hypothesis, not a proven cause. Cleanup completed
+with zero owned objects and unchanged guest-host state. Exact-head Quality and CodeQL passed; they do not turn the live run
+green. Live automatic-selection proof remains pending.
+
+The [follow-up document run on `66b70e3d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597171441)
+also **failed**, this time at the post-run evidence check. The guest completed automatic
+enrollment, document execution and four synthesis levels, with cleanup and unchanged host
+state reported. Independent replay of the unchanged uploaded artifact cannot verify the
+discovery path: eight original discovery-capture files were not exported. Embedded summaries
+do not replace those originals. The finalizer now exports both bounded executor-discovery
+JSON prefixes alongside the existing execution evidence; a local export regression exercises
+the actual shell function, checks byte retention and private permissions, and excludes symlinks
+and unrelated private files. The historical run remains failed; complete live evidence from
+the corrected source is still required.
+
+Discovery now retries temporary unavailable/busy observations with fresh offers and nonces,
+within one original 150-second deadline. Fixed diagnostic categories separate query, probe,
+readiness and final-check failures without storing publisher identities or task bodies.
+Policy/protocol failures are not converted into readiness waits.
+
+The recovery candidate adds explicit `--discover-peers --replace-peers` enrollment permission
+for workflow, task and document commands. Eligible unfinished parts can discover new peers in
+the same exact model cohort when the original pool is unavailable. Each attempt saves an
+immutable `executor-admission.json` before any new handle or submission. Original source bytes,
+publisher, expiry and completed receipts remain unchanged; uncertain unexpired jobs are not
+duplicated. Recovery can use one available peer without weakening the two-peer initial discovery
+requirement. Synthetic protocol/coordinator checks are not real-model recovery evidence; the
+new-third-peer disposable proof is pending. This is not general planning, unlimited pool growth,
+a capacity reservation or quality-based model selection. The 123 focused CLI compute tests,
+three local-control discovery tests, six agent discovery tests, formatting and strict Clippy
+for all targets of those three packages pass. No local model execution was used.
+See [automatic executor selection](DECENTRALIZED_AGENTS.md#automatic-executor-selection).
+
+The follow-up recovery slice preserves previously checked terminal failure/cancellation receipts
+even after their broker disappears. The owning workflow passes the exact retained handle/status
+to reconciliation; a running job or a cancellation request cannot use this shortcut. This avoids
+waiting out a lease for a worker already observed stopped, without turning an unreachable worker
+into proof of termination. Its focused no-agent-socket regression and strict CLI Clippy pass.
+The `agent-jobs-peer-recovery` disposable scenario now covers two discovered initial workers,
+one actual worker loss, both original brokers leaving, and a real third-node replacement under
+the same owner command. A recorded fixture-only owner pause makes broker cutover deterministic;
+it is not product behavior. The checker requires original receipts, new-peer admission before
+submission, actual model execution, both protected paths, complete cleanup and unchanged host
+state. All 124 CLI compute tests, strict CLI Clippy, the synthetic positive/negative checker
+contracts, script syntax and non-mutating scenario previews pass. ShellCheck passes for the
+new helper and modified jobs helper; the outer wrappers still report existing baseline/source
+context warnings. The scenario and synthetic fixtures are not yet live success evidence.
+
+The [first third-peer recovery run on `5e3ca90d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597876075)
+**failed** during private cleanup, after the owner completed its second attempt on the new
+peer. The retained source, original receipts, new-peer admission, real replacement worker and
+path captures pass the partial reconstruction; the absent private-cleanup receipt prevents
+a complete pass. Both old brokers had intentionally stopped and systemd had unloaded their
+transient units; the finalizer incorrectly treated stopping them again as an error. Cleanup
+now accepts an already unloaded owned broker only after checking inactive state, no main PID
+and no populated descendant cgroup. Loaded-unit stop failures are still errors unless a fresh
+query proves collection. Three inert cleanup regressions cover these cases and collection
+races; they do not replace the corrected live run. Original network cleanup and host-state
+evidence remain preserved, without upgrading the failed run to success.
+
+Local model-update recovery candidate: the enrolled public training loop can now quarantine
+an exact imported adapter after a correlated fixed-worker format/value failure and successful
+worker cleanup. Only candidate-stage adapter violations qualify; baseline faults, network
+failure, resource pressure, cancellation and ordinary quality regressions do not. Original
+signed import, baseline, hashes and deadlines remain checked on restart. The accepted warmstart
+is unchanged and later revisions remain eligible. This is local adoption/execution exclusion
+inside that loop, not a publisher ban, cache-wide revocation or the complete B07 immune system.
+All 131 CLI compute tests and strict all-target CLI Clippy pass without local model execution.
+The new `agent-artifact-quarantine` scenario fetches a separately signed NaN adapter on R3 and
+requires the same loop to continue with real base-model training and successor validation.
+Four successful model stages are observed; rejection before candidate inference is not counted
+as a fifth. Its pure positive/negative checker, shell syntax, new-helper ShellCheck and topology
+preview contracts pass; the modified existing training helper retains two baseline SC2015
+warnings. Live protected-transfer, real-model and cleanup evidence remains pending.
+
+Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate
 inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;
 it never presents that text as an original document excerpt or portable execution attestation.
@@ -19,8 +109,18 @@ retained-file export was not reached. The concrete cause is a missing v3 branch 
 the same strict, inference-only derived-data validator as the RPC boundary. Targeted admission
 and compute tests pass. Incomplete workflows retain fixed diagnostic categories without
 upstream text, and the fixture now exports bounded public partial evidence after its owner
-returns, before cleanup; this never satisfies the success gates. The corrected live multi-level
-scenario remains unproven. General task planning, private offload and B03 remain incomplete.
+returns, before cleanup; this never satisfies the success gates. The corrected
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914382572)
+and full reconstruction of its unchanged original evidence **pass**: 5,120 public-source bytes
+produce ten fragment answers, then four real synthesis levels (`10 -> 5 -> 3 -> 2 -> 1`),
+with eight observed v3 workers and nine independently verified publication signatures.
+The final answer has 50 generated tokens and 256 UTF-8 bytes, without wire truncation.
+Completed resume after the brokers stop creates no new jobs and leaves retained receipts intact.
+Six captures / 28 interfaces / 73,953 frames show no forbidden or direct-exit traffic or drops;
+cleanup leaves zero owned objects and unchanged guest-host state. Canonical raw-evidence SHA-256:
+`d4968cbbf0f4d13e363dfc87a5c3d2d69069001a5a3883659a7ead6f8dd701ca`.
+This proves the inference chain, not answer quality. The original `342b8a80` run stays failed.
+General task planning, private offload and B03 remain incomplete.
 See [public answer synthesis](DECENTRALIZED_AGENTS.md#synthesizing-one-public-answer).
 
 Current publication-retry correction: a finite training loop no longer stops immediately
@@ -50,9 +150,19 @@ attempts to known fixture peers on a dummy `underlay`, not TCP18080 content tran
 corrected classifier records only those exact phase/interface/source/destination/port tuples
 as `underlay_control_attempt_packets`; this proves neither delivery nor authentication and
 does not count as WireGuard or content bytes. Direct-exit, direct content and unknown-tuple
-rejection remain unchanged. Focused positive and negative capture checks pass; the new combined
-live scenario remains pending. Cleanup removed all owned objects and preserved guest-host
-state. No product publication or privacy guard was relaxed, and the original run stays failed.
+rejection remain unchanged. The corrected combined
+[run on `998b79ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/34914384494)
+and full original raw reconstruction **pass**, including catalog growth to an uncached source,
+both real training rounds and their second-source comparisons, protected R3 import/adoption,
+eight further updates, validation and actual successor publication with no pending handoff.
+The separate original Client named-import gate now also passes with actual received-parameter
+inference. The loop's ten captures / 79 interfaces and the learner's five captures / 41 interfaces
+contain no forbidden or direct-exit traffic or drops. Cleanup leaves zero owned objects and
+unchanged guest-host state. Canonical loop-evidence SHA-256:
+`d03fb608d6f6d32f38af189195cad6163ccacf958d9223f5779acfae963112c2`.
+No product publication or privacy guard was relaxed, and the original `68314466` run stays failed.
+This establishes scoped cross-node continued learning and sharing, not general quality,
+defended aggregation or full B05.
 
 Current public-task continuation candidate: `compute peer workflow`, `task` and `document`
 accept `--follow` to automatically continue enrolled work across bounded rounds. Completed
@@ -80,8 +190,8 @@ reached actual peer import, two comparison inferences, adoption, an eight-update
 cycle and two further validation inferences. It **failed** the final peer-learning check: the
 new local publication remained `publish_pending` after the one-cycle invocation ended. The
 original catalog's later independent Client import was not reached, so its earlier failure is
-not claimed fixed. Cleanup completed with unchanged guest-host state. Completed cross-node
-learning and republication remain unproven.
+not claimed fixed by that run. Cleanup completed with unchanged guest-host state. The later
+`998b79ed` run above supplies the completed cross-node learning and republication proof.
 See [peer update enrollment and scope](DECENTRALIZED_AGENTS.md#learning-from-peer-updates).
 
 The preceding version-2 `compute train-loop` enrollment now follows

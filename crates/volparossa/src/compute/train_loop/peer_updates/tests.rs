@@ -116,3 +116,130 @@ fn fixed_owned_retention_does_not_erase_unrelated_files_or_follow_links() {
     prune(&root).unwrap();
     assert!(!root.exists());
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the complete registry retention transaction together.
+fn quarantine_consumes_only_exact_revision_and_preserves_accepted_warmstart() {
+    use clap::Parser as _;
+    // State/filesystem fixture only: completed evaluation records are tested
+    // independently; no worker or accepted-model quality is asserted here.
+    let temporary = tempfile::tempdir().unwrap();
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut arguments = vec![
+        "volparossa".to_owned(),
+        "compute".into(),
+        "train-loop".into(),
+    ];
+    for (flag, name) in [
+        ("--plan", "plan"),
+        ("--directory", "coordinator"),
+        ("--runtime-root", "runtime"),
+        ("--model-root", "model"),
+        ("--cache", "cache"),
+    ] {
+        arguments.extend([
+            flag.into(),
+            temporary.path().join(name).to_str().unwrap().into(),
+        ]);
+    }
+    let cli = crate::Cli::try_parse_from(arguments).unwrap();
+    let crate::CliCommand::Compute {
+        command: crate::compute::Command::TrainLoop(args),
+    } = cli.command
+    else {
+        panic!("train-loop options")
+    };
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&args.directory)
+        .unwrap();
+    let at = now().unwrap();
+    let accepted = Round {
+        sequence: 1,
+        channel: 0,
+        revision: 1,
+        manifest_id: "11".repeat(32),
+        dataset_manifest_id: "aa".repeat(32),
+        observed_at: at,
+        expires: at + 1200,
+        next_attempt: 0,
+        phase: Phase::Approved,
+        source: None,
+        imported_at: None,
+        baseline: None,
+        snapshot: Some(Snapshot::new()),
+    };
+    let mut pending = accepted.clone();
+    pending.sequence = 2;
+    pending.revision = 2;
+    pending.manifest_id = "22".repeat(32);
+    pending.phase = Phase::Evaluating;
+    pending.snapshot = None;
+    let root = round_root(&args, 2).unwrap();
+    fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join("comparison"))
+        .unwrap();
+    let path = root.join("comparison/quarantine.json");
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"explicit synthetic retention fixture, not worker evidence")
+        .unwrap();
+    drop(file);
+    let enrollment = Enrollment {
+        version: 1,
+        channels: vec![channel()],
+    };
+    let mut registry = Registry {
+        version: 1,
+        next_sequence: 3,
+        cursor: 0,
+        feeds: vec![Feed {
+            channel: channel(),
+            revision: Some(2),
+            manifest_id: Some(pending.manifest_id.clone()),
+            processed_manifest: Some(accepted.manifest_id.clone()),
+            next_poll: 0,
+        }],
+        pending: Some(pending.clone()),
+        completed: vec![accepted],
+        active: Some(1),
+        garbage: vec![],
+    };
+    finish(&args, &mut registry, Phase::Quarantined).unwrap();
+    registry.validate(&enrollment, at).unwrap();
+    assert_eq!(registry.active, Some(1));
+    assert!(registry.pending.is_none());
+    assert_eq!(registry.completed[1].phase, Phase::Quarantined);
+    assert_eq!(
+        registry.feeds[0].processed_manifest.as_ref(),
+        Some(&pending.manifest_id)
+    );
+    assert!(
+        registry.completed[1]
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .contains_key("comparison/quarantine.json")
+    );
+    let mut reopened: Registry =
+        serde_json::from_slice(&serde_json::to_vec(&registry).unwrap()).unwrap();
+    reopened.validate(&enrollment, at).unwrap();
+    assert_eq!(reopened.active, Some(1));
+    // The same publisher remains eligible at the next version; an unrelated
+    // changed artifact cannot masquerade as the already processed revision.
+    assert!(admit_revision(&mut reopened.feeds[0], 2, &"33".repeat(32)).is_err());
+    admit_revision(&mut reopened.feeds[0], 3, &"33".repeat(32)).unwrap();
+    assert_ne!(
+        reopened.feeds[0].processed_manifest,
+        reopened.feeds[0].manifest_id
+    );
+    assert_eq!(reopened.active, Some(1));
+    prune(&root).unwrap();
+    assert!(!root.exists());
+}

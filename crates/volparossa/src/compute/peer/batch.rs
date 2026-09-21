@@ -24,6 +24,12 @@ pub(crate) struct Options {
     execute: bool,
     #[arg(skip)]
     task: Option<rpc::PublicTask>,
+    #[arg(skip)]
+    model_fingerprint: Option<String>,
+    #[arg(skip)]
+    allow_single_provider: bool,
+    #[arg(skip)]
+    executor_admission: Option<(executors::Authorization, discovery::Selected)>,
 }
 
 impl Options {
@@ -41,7 +47,29 @@ impl Options {
             max_seconds,
             execute: true,
             task,
+            model_fingerprint: None,
+            allow_single_provider: false,
+            executor_admission: None,
         }
+    }
+
+    pub(super) fn with_model_fingerprint(mut self, fingerprint: Option<String>) -> Self {
+        self.model_fingerprint = fingerprint;
+        self
+    }
+
+    pub(super) fn allow_single_provider(mut self, enabled: bool) -> Self {
+        self.allow_single_provider = enabled;
+        self
+    }
+
+    pub(super) fn executor_admission(
+        mut self,
+        authorization: executors::Authorization,
+        selected: discovery::Selected,
+    ) -> Self {
+        self.executor_admission = Some((authorization, selected));
+        self
     }
 }
 
@@ -76,7 +104,18 @@ pub(super) async fn report_with_activity(
     activity: &watch::Receiver<bool>,
 ) -> Result<serde_json::Value> {
     let (publication, source) = source(&args.source)?;
-    let assignments = assignments_for(&source, &args.provider_key)?;
+    if let Some((authorization, _)) = &args.executor_admission {
+        ensure!(
+            authorization.publisher_key == hex::encode(args.source.publisher_key.as_bytes())
+                && authorization.dataset_sha256 == sha(publication.dataset_json.as_bytes()),
+            "compute_distribute_executor_source"
+        );
+    }
+    let assignments = if args.allow_single_provider {
+        assignments(source.row_count(), &args.provider_key, true)?
+    } else {
+        assignments_for(&source, &args.provider_key)?
+    };
     if !args.execute {
         return Ok(
             serde_json::json!({"operation":"compute_distribute_plan","execute":false,
@@ -113,7 +152,7 @@ pub(super) async fn report_with_activity(
         "compute_distribute_cancelled_before_submit"
     );
     let mut prepared = Vec::new();
-    let mut fingerprint = None;
+    let mut fingerprint = args.model_fingerprint.clone();
     for (index, rows) in assignments.into_iter().enumerate() {
         let caps = profiles[index]
             .take()
@@ -156,6 +195,17 @@ pub(super) async fn report_with_activity(
             .context("compute_distribute_output_parent")?,
     )?;
     fs::DirBuilder::new().mode(0o700).create(&args.output)?;
+    if let Some((authorization, selected)) = &args.executor_admission {
+        ensure!(
+            selected.providers == args.provider_key
+                && args.model_fingerprint.as_ref() == Some(&selected.model_fingerprint),
+            "compute_distribute_executor_selection"
+        );
+        for work in &prepared {
+            authorization.validate_handle(&source, &work.handle)?;
+        }
+        executors::admit(&args.output, authorization, selected)?;
+    }
     for (index, work) in prepared.iter().enumerate() {
         save_new(&args.output.join(format!("job-{index}.json")), &work.handle)?;
     }
@@ -295,13 +345,18 @@ pub(super) fn assignments_for(
     if source.is_document() && source.row_count() == 1 && providers.len() == 1 {
         Ok(vec![vec![0]])
     } else {
-        assignments(source.row_count(), providers)
+        assignments(source.row_count(), providers, false)
     }
 }
 
-fn assignments(rows: usize, providers: &[VerifyingKey]) -> Result<Vec<Vec<u16>>> {
+fn assignments(
+    rows: usize,
+    providers: &[VerifyingKey],
+    allow_single_provider: bool,
+) -> Result<Vec<Vec<u16>>> {
+    let minimum = if allow_single_provider { 1 } else { 2 };
     ensure!(
-        (2..=rows).contains(&providers.len()) && rows <= 4,
+        (minimum..=rows).contains(&providers.len()) && rows <= 4,
         "compute_distribute_requires_distinct_peers_and_rows"
     );
     let distinct: BTreeSet<_> = providers.iter().map(VerifyingKey::to_bytes).collect();
@@ -324,11 +379,25 @@ mod tests {
         let a = ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key();
         let b = ed25519_dalek::SigningKey::from_bytes(&[2; 32]).verifying_key();
         assert_eq!(
-            assignments(4, &[a, b]).unwrap(),
+            assignments(4, &[a, b], false).unwrap(),
             vec![vec![0, 2], vec![1, 3]]
         );
-        assert!(assignments(2, &[a, a]).is_err());
-        assert!(assignments(1, &[a, b]).is_err());
-        assert!(assignments(4, &[a]).is_err());
+        assert!(assignments(2, &[a, a], false).is_err());
+        assert!(assignments(1, &[a, b], false).is_err());
+        assert!(assignments(4, &[a], false).is_err());
+    }
+
+    #[test]
+    fn internal_single_provider_recovery_covers_every_row_without_changing_manual_default() {
+        let peer = ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key();
+        assert_eq!(
+            assignments(4, &[peer], true).unwrap(),
+            vec![vec![0, 1, 2, 3]]
+        );
+        assert_eq!(assignments(1, &[peer], true).unwrap(), vec![vec![0]]);
+        assert!(assignments(4, &[peer], false).is_err());
+        assert!(assignments(4, &[], true).is_err());
+        assert!(assignments(5, &[peer], true).is_err());
+        assert!(assignments(2, &[peer, peer], true).is_err());
     }
 }

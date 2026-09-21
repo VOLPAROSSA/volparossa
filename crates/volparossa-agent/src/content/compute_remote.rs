@@ -14,7 +14,7 @@ use volparossa_local_control::{
 use volparossa_policy::VerifiedManifest as VerifiedPolicy;
 
 use super::{ContentError, ContentRuntime, now, tls};
-use crate::{control::ControlContext, unix_millis};
+use crate::{control::ControlContext, discovery::DiscoveredContentProvider, unix_millis};
 
 impl ContentRuntime {
     pub(crate) async fn compute_remote(
@@ -123,7 +123,7 @@ pub(super) fn validate_request(
     Ok(())
 }
 
-async fn checked_policy(
+pub(super) async fn checked_policy(
     context: &ControlContext,
     original: Option<&VerifiedPolicy>,
 ) -> Result<VerifiedPolicy, ContentError> {
@@ -175,19 +175,35 @@ async fn exchange(
     }
     let provider = providers.pop().ok_or(ContentError::Unavailable)?;
     *stage = "COMPUTE_RPC_OFFER_BINDING_FAILED";
-    if provider.peer_id != peer
-        || provider.offer.provider_key() != &provider_key
+    if provider.peer_id != peer || provider.offer.provider_key() != &provider_key {
+        return Err(ContentError::Invalid);
+    }
+    exchange_offer(context, control, &provider, policy, signer, request, stage).await
+}
+
+/// Use an already verified CONTENT offer, never a direct provider dial or second lookup.
+pub(super) async fn exchange_offer(
+    context: &ControlContext,
+    control: PeerId,
+    provider: &DiscoveredContentProvider,
+    policy: &VerifiedPolicy,
+    signer: &SigningKey,
+    request: &compute::Request,
+    stage: &mut &'static str,
+) -> Result<compute::Response, ContentError> {
+    let peer = provider.peer_id;
+    let provider_key = *provider.offer.provider_key();
+    let public = identity::ed25519::PublicKey::try_from_bytes(&provider_key)
+        .map_err(|_| ContentError::Invalid)?;
+    *stage = "COMPUTE_RPC_OFFER_BINDING_FAILED";
+    if PeerId::from_public_key(&identity::PublicKey::from(public)) != peer
+        || provider_key == signer.verifying_key().to_bytes()
         || provider.offer.validity().expires <= now()
     {
         return Err(ContentError::Invalid);
     }
     *stage = "COMPUTE_RPC_ROUTE_BINDING_FAILED";
-    checked_policy(context, Some(policy)).await?;
-    if context.routes.content_discovery_control().await != Some(control)
-        || !context.routes.content_provider_is_distinct(&peer).await
-    {
-        return Err(ContentError::Policy);
-    }
+    checked_route(context, policy, control, peer).await?;
     let endpoint = provider.offer.endpoint();
     *stage = "COMPUTE_RPC_ROUTE_FLOW_FAILED";
     let mut flow = context
@@ -204,7 +220,7 @@ async fn exchange(
         .await
         .map_err(|_| ContentError::Unavailable)?;
     *stage = "COMPUTE_RPC_PREEXPORT_CHECK_FAILED";
-    checked_policy(context, Some(policy)).await?;
+    checked_route(context, policy, control, peer).await?;
     validate_request(request, signer)?;
     if provider.offer.validity().expires <= now() {
         return Err(ContentError::Unavailable);
@@ -231,11 +247,26 @@ async fn exchange(
         .map_err(|_| ContentError::Unavailable)?;
     flow.shutdown();
     *stage = "COMPUTE_RPC_FINAL_POLICY_FAILED";
-    checked_policy(context, Some(policy)).await?;
+    checked_route(context, policy, control, peer).await?;
     if provider.offer.validity().expires <= now() {
         return Err(ContentError::Unavailable);
     }
     Ok(response)
+}
+
+pub(super) async fn checked_route(
+    context: &ControlContext,
+    policy: &VerifiedPolicy,
+    control: PeerId,
+    provider: PeerId,
+) -> Result<(), ContentError> {
+    checked_policy(context, Some(policy)).await?;
+    if context.routes.content_discovery_control().await != Some(control)
+        || !context.routes.content_provider_is_distinct(&provider).await
+    {
+        return Err(ContentError::Policy);
+    }
+    Ok(())
 }
 
 async fn send(

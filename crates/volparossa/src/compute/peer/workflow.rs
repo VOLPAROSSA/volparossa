@@ -28,8 +28,10 @@ pub(crate) struct Options {
     #[arg(long)]
     resume: bool,
     /// Two to four explicit peers at enrollment; stored unchanged for subsequent invocations.
-    #[arg(long, value_parser = parse_key, required_unless_present = "resume", conflicts_with = "resume")]
+    #[arg(long, value_parser = parse_key, required_unless_present_any = ["resume", "discover_peers"], conflicts_with_all = ["resume", "discover_peers"])]
     provider_key: Vec<VerifyingKey>,
+    #[command(flatten)]
+    discovery: discovery::Options,
     /// New rounds per invocation, or per continuation window with --follow; not a worker lease.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=32))]
     max_batches: u16,
@@ -43,6 +45,10 @@ pub(crate) struct Options {
     follow: follow::Options,
     #[arg(skip)]
     expected_task: Option<ExpectedTask>,
+    #[arg(skip)]
+    expected_model_fingerprint: Option<String>,
+    #[arg(skip)]
+    expected_replace_peers: bool,
 }
 
 /// Exact frontend selection, checked under the workflow lock before any dispatch.
@@ -54,6 +60,8 @@ pub(super) struct ExpectedTask {
     pub(super) rows: usize,
     pub(super) task: rpc::PublicTask,
     pub(super) provider_keys: Vec<String>,
+    pub(super) model_fingerprint: Option<String>,
+    pub(super) replace_peers: bool,
     pub(super) selected_at_unix_seconds: u64,
 }
 
@@ -71,15 +79,21 @@ impl Options {
             plan,
             directory,
             provider_key: provider_keys,
+            discovery: discovery::Options::default(),
             max_batches,
             max_seconds,
             execute,
             follow: follow::Options::default(),
             expected_task: None,
+            expected_model_fingerprint: None,
+            expected_replace_peers: false,
         }
     }
 
     pub(super) fn expect_task(mut self, expected: ExpectedTask) -> Self {
+        self.expected_replace_peers = expected.replace_peers;
+        self.expected_model_fingerprint
+            .clone_from(&expected.model_fingerprint);
         self.expected_task = Some(expected);
         self
     }
@@ -113,6 +127,10 @@ struct Enrollment {
     version: u32,
     verified_at_unix_seconds: u64,
     provider_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replace_peers: bool,
     packages: Vec<Package>,
 }
 
@@ -177,6 +195,23 @@ impl Progress {
 
     fn outputs(&self) -> Result<Vec<serde_json::Value>> {
         self.output_rows(false)
+    }
+
+    fn stopped_receipts(&self) -> Vec<(JobHandle, rpc::JobStatus)> {
+        self.parts
+            .values()
+            .filter_map(|part| {
+                part.status
+                    .as_ref()
+                    .filter(|status| {
+                        matches!(
+                            status.state,
+                            rpc::JobState::Failed | rpc::JobState::Cancelled
+                        )
+                    })
+                    .map(|status| (part.handle.clone(), status.clone()))
+            })
+            .collect()
     }
 
     fn output_rows(&self, detailed: bool) -> Result<Vec<serde_json::Value>> {
@@ -248,7 +283,36 @@ pub(super) async fn report_with_activity(
         )?)?;
         (enrollment, lock)
     } else {
-        let (enrollment, sources) = prepare(args)?;
+        let (mut enrollment, sources) = prepare(args)?;
+        if args.discovery.discover_peers && args.execute {
+            let versions = sources
+                .iter()
+                .map(|source| {
+                    serde_json::from_str::<serde_json::Value>(&source.dataset_json)
+                        .map(|value| value["version"].as_u64().unwrap_or(0))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let query = args.discovery.query(
+                enrollment
+                    .packages
+                    .iter()
+                    .map(|package| package.publisher_key.clone()),
+                enrollment
+                    .packages
+                    .iter()
+                    .any(|package| package.task.is_some()),
+                versions.contains(&2),
+                versions.contains(&3),
+            )?;
+            let selected = args.discovery.select(socket, query, cancelled).await?;
+            enrollment.provider_keys = selected
+                .providers
+                .iter()
+                .map(|key| hex::encode(key.as_bytes()))
+                .collect();
+            enrollment.model_fingerprint = Some(selected.model_fingerprint);
+            validate_enrollment(&enrollment)?;
+        }
         if let Some(expected) = &args.expected_task {
             validate_expected_task(&enrollment, expected)?;
         }
@@ -261,6 +325,8 @@ pub(super) async fn report_with_activity(
                 "package_count":enrollment.packages.len(),"total_rows":enrollment.packages.iter().map(|value|value.rows).sum::<usize>(),
                 "maximum_rounds_this_invocation":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,
                 "private_data_supported":false,"automatic_source_discovery":false,"new_directory":args.directory,
+                "discover_peers":args.discovery.discover_peers,
+                "replace_peers":args.discovery.replace_peers,
                 "pending_failure":false,"follow":args.follow.follow}),
             );
         }
@@ -320,13 +386,27 @@ fn prepare(args: &Options) -> Result<(Enrollment, Vec<rpc::PublicDataset>)> {
             .iter()
             .map(|key| hex::encode(key.as_bytes()))
             .collect(),
+        model_fingerprint: args.expected_model_fingerprint.clone(),
+        replace_peers: args.discovery.replace_peers || args.expected_replace_peers,
         packages,
     };
-    validate_enrollment(&enrollment)?;
+    if args.discovery.discover_peers {
+        ensure!(
+            args.provider_key.is_empty(),
+            "compute_discovery_conflicting_providers"
+        );
+        validate_packages(&enrollment.packages)?;
+    } else {
+        validate_enrollment(&enrollment)?;
+    }
     Ok((enrollment, sources))
 }
 
 fn validate_enrollment(enrollment: &Enrollment) -> Result<()> {
+    ensure!(
+        !enrollment.replace_peers || enrollment.model_fingerprint.is_some(),
+        "compute_executor_replacement_requires_pinned_model"
+    );
     ensure!(
         enrollment.version == 1
             && enrollment.verified_at_unix_seconds > 0
@@ -343,8 +423,15 @@ fn validate_enrollment(enrollment: &Enrollment) -> Result<()> {
     for key in &enrollment.provider_keys {
         parse_key(key).map_err(anyhow::Error::msg)?;
     }
+    if let Some(fingerprint) = &enrollment.model_fingerprint {
+        discovery::parse_fingerprint(fingerprint).map_err(anyhow::Error::msg)?;
+    }
+    validate_packages(&enrollment.packages)
+}
+
+fn validate_packages(packages: &[Package]) -> Result<()> {
     let mut ids = BTreeSet::new();
-    for package in &enrollment.packages {
+    for package in packages {
         if let Some(task) = &package.task {
             task.question()?;
         }
@@ -360,6 +447,8 @@ fn validate_expected_task(enrollment: &Enrollment, expected: &ExpectedTask) -> R
     ensure!(
         enrollment.packages.len() == 1
             && enrollment.provider_keys == expected.provider_keys
+            && enrollment.model_fingerprint == expected.model_fingerprint
+            && enrollment.replace_peers == expected.replace_peers
             && enrollment.verified_at_unix_seconds >= expected.selected_at_unix_seconds,
         "compute_task_workflow_selection"
     );
@@ -535,6 +624,63 @@ fn round_failure(result: &Result<serde_json::Value>) -> Option<&'static str> {
     }
 }
 
+fn replacement_authorization(
+    enrollment: &Enrollment,
+    package: &Package,
+    source: &VerifiedPublicDataset,
+) -> Result<Option<executors::Authorization>> {
+    if !enrollment.replace_peers {
+        return Ok(None);
+    }
+    Ok(Some(executors::Authorization {
+        workflow_sha256: sha(&serde_json::to_vec(enrollment)?),
+        publisher_key: package.publisher_key.clone(),
+        dataset_manifest_id: package.manifest_id.clone(),
+        dataset_sha256: package.dataset_sha256.clone(),
+        model_fingerprint: enrollment
+            .model_fingerprint
+            .clone()
+            .context("compute_executor_replacement_requires_pinned_model")?,
+        task: package.task.clone(),
+        document: source.is_document(),
+        derived: source.is_derived(),
+        enrolled_at: enrollment.verified_at_unix_seconds,
+        source_expires: source.expires(),
+    }))
+}
+
+async fn initial_round(
+    options: &batch::Options,
+    output: &Path,
+    authorization: Option<&executors::Authorization>,
+    replacement_options: impl FnOnce(&executors::Authorization, discovery::Selected) -> batch::Options,
+    socket: &Path,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+) -> Result<serde_json::Value> {
+    let first = batch::report_with_activity(options, socket, cancelled).await;
+    let Some(authorization) = authorization else {
+        return first;
+    };
+    if !first.as_ref().is_err_and(follow::transient_preflight)
+        || output.try_exists()?
+        || *cancelled.borrow()
+    {
+        return first;
+    }
+    // No handle or output directory exists: the failed preflight could not have submitted.
+    // The original source/model permission is unchanged, and the fresh batch retains its
+    // admission record and every handle before sending the first real job.
+    let Ok(selected) = executors::discover(authorization, socket, cancelled).await else {
+        return first;
+    };
+    batch::report_with_activity(
+        &replacement_options(authorization, selected),
+        socket,
+        cancelled,
+    )
+    .await
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep one bounded admission/reconciliation window and its retained progress together"
@@ -567,6 +713,7 @@ async fn advance(
         let (source_args, verified) =
             stored_source(&directory, package, enrollment.verified_at_unix_seconds)?;
         let mut progress = load_progress(&directory, &source_args, &verified, enrollment)?;
+        let authorization = replacement_authorization(enrollment, package, &verified)?;
         let mut package_failure = None;
         if !progress.complete()
             && args.execute
@@ -588,32 +735,48 @@ async fn advance(
                 let output = directory.join(format!("attempt-{:04}", progress.attempts));
                 rounds += 1;
                 let result = if progress.attempts == 0 {
-                    batch::report_with_activity(
+                    initial_round(
                         &batch::Options::workflow(
                             source_args.clone(),
                             providers[..providers.len().min(package.rows)].to_vec(),
-                            output,
+                            output.clone(),
                             args.max_seconds,
                             package.task.clone(),
-                        ),
+                        )
+                        .with_model_fingerprint(enrollment.model_fingerprint.clone()),
+                        &output,
+                        authorization.as_ref(),
+                        |authorization, mut selected| {
+                            selected.providers.truncate(package.rows);
+                            batch::Options::workflow(
+                                source_args.clone(),
+                                selected.providers.clone(),
+                                output.clone(),
+                                args.max_seconds,
+                                package.task.clone(),
+                            )
+                            .with_model_fingerprint(enrollment.model_fingerprint.clone())
+                            .allow_single_provider(true)
+                            .executor_admission(authorization.clone(), selected)
+                        },
                         socket,
                         cancelled,
                     )
                     .await
                 } else {
-                    resume::report_with_activity(
-                        &resume::Options::workflow(
-                            source_args.clone(),
-                            progress.pending(),
-                            providers.clone(),
-                            output,
-                            args.max_seconds,
-                        )
-                        .prefer_other_provider(args.follow.follow),
-                        socket,
-                        cancelled,
+                    let mut retry = resume::Options::workflow(
+                        source_args.clone(),
+                        progress.pending(),
+                        providers.clone(),
+                        output,
+                        args.max_seconds,
                     )
-                    .await
+                    .prefer_other_provider(args.follow.follow)
+                    .with_verified_stopped_receipts(progress.stopped_receipts());
+                    if let Some(authorization) = authorization {
+                        retry = retry.discover_replacements(authorization);
+                    }
+                    resume::report_with_activity(&retry, socket, cancelled).await
                 };
                 progress = load_progress(&directory, &source_args, &verified, enrollment)?;
                 package_failure = round_failure(&result);
@@ -707,6 +870,7 @@ fn checked_handle(
     args: &Source,
     verified: &VerifiedPublicDataset,
     enrollment: &Enrollment,
+    admitted: &BTreeSet<String>,
 ) -> Result<JobHandle> {
     let options = resume::Options::workflow(
         args.clone(),
@@ -722,7 +886,12 @@ fn checked_handle(
         .find(|package| package.manifest_id == hex::encode(verified.manifest_id()))
         .context("compute_workflow_handle_package")?;
     ensure!(
-        enrollment.provider_keys.contains(&handle.provider_key)
+        (enrollment.provider_keys.contains(&handle.provider_key)
+            || admitted.contains(&handle.provider_key))
+            && enrollment
+                .model_fingerprint
+                .as_ref()
+                .is_none_or(|expected| expected == &handle.binding.model_fingerprint)
             && handle.binding.task == package.task
             && handle.binding.job_id.len() == 32
             && handle
@@ -737,6 +906,10 @@ fn checked_handle(
     Ok(handle)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Reconcile each immutable executor admission, original handle and receipt in attempt order"
+)]
 fn load_progress(
     directory: &Path,
     args: &Source,
@@ -750,19 +923,37 @@ fn load_progress(
         rows: verified.row_count(),
     };
     let peers = enrollment.provider_keys.len().min(progress.rows);
+    let package = enrollment
+        .packages
+        .iter()
+        .find(|package| package.manifest_id == hex::encode(verified.manifest_id()))
+        .context("compute_workflow_handle_package")?;
+    let authorization = replacement_authorization(enrollment, package, verified)?;
+    let first_admission = attempts
+        .first()
+        .map(|attempt| executors::load(attempt, authorization.as_ref()))
+        .transpose()?
+        .flatten();
+    let peers = first_admission.as_ref().map_or(peers, |admission| {
+        admission.provider_keys.len().min(progress.rows)
+    });
     let mut expected = vec![vec![]; peers];
     for row in 0..progress.rows {
         expected[row % peers].push(u16::try_from(row)?);
     }
     let mut identifiers = BTreeSet::new();
+    let mut admitted = BTreeSet::new();
     for (number, attempt) in attempts.iter().enumerate() {
+        if let Some(admission) = executors::load(attempt, authorization.as_ref())? {
+            admitted.extend(admission.provider_keys);
+        }
         let mut originals = BTreeSet::new();
         for index in 0..4 {
             let path = attempt.join(format!("original-{index}.json"));
             if !path.try_exists()? {
                 continue;
             }
-            let original = checked_handle(&path, args, verified, enrollment)?;
+            let original = checked_handle(&path, args, verified, enrollment, &admitted)?;
             let part = progress
                 .parts
                 .get(&original.binding.row_indices)
@@ -784,7 +975,7 @@ fn load_progress(
             if !path.try_exists()? {
                 continue;
             }
-            let handle = checked_handle(&path, args, verified, enrollment)?;
+            let handle = checked_handle(&path, args, verified, enrollment, &admitted)?;
             let rows = handle.binding.row_indices.clone();
             ensure!(
                 expected.contains(&rows)
@@ -972,11 +1163,14 @@ mod tests {
             directory: root.path().join("workflow"),
             resume: false,
             provider_key: vec![publisher.verifying_key(), peer.verifying_key()],
+            discovery: discovery::Options::default(),
             max_batches: 1,
             max_seconds: 600,
             execute: true,
             follow: follow::Options::default(),
             expected_task: None,
+            expected_model_fingerprint: None,
+            expected_replace_peers: false,
         };
         let (enrollment, sources) = prepare(&options).unwrap();
         persist_enrollment(&options.directory, &enrollment, &sources).unwrap();
@@ -1170,7 +1364,8 @@ mod tests {
         let (args, source, handles) = handles(&fixture, 0);
         let path = fixture.root.path().join("task-handle.json");
         save_new(&path, &handles[0]).unwrap();
-        let checked = checked_handle(&path, &args, &source, &fixture.enrollment).unwrap();
+        let checked =
+            checked_handle(&path, &args, &source, &fixture.enrollment, &BTreeSet::new()).unwrap();
         assert_eq!(checked.binding.task, fixture.enrollment.packages[0].task);
         let mut altered = handles[0].clone();
         altered.binding.task = Some(rpc::PublicTask::AnswerPublicQuestionV1 {
@@ -1185,7 +1380,16 @@ mod tests {
         .as_bytes());
         let other = fixture.root.path().join("other-task.json");
         save_new(&other, &altered).unwrap();
-        assert!(checked_handle(&other, &args, &source, &fixture.enrollment).is_err());
+        assert!(
+            checked_handle(
+                &other,
+                &args,
+                &source,
+                &fixture.enrollment,
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
         let mut unsupported = checked.capabilities;
         unsupported.task_derivation_v1 = false;
         assert!(
@@ -1251,6 +1455,145 @@ mod tests {
         drop(first);
         assert!(lock_directory(&fixture.options.directory).is_ok());
         assert!(persist_enrollment(&fixture.options.directory, &record, &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn vanished_broker_does_not_erase_checked_terminal_failure() {
+        let fixture = fixture(1);
+        let (args, source, original) = handles(&fixture, 0);
+        let directory = fixture.options.directory.join("package-0000");
+        let first = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+        for (index, handle) in original.iter().enumerate() {
+            save_new(&first.join(format!("job-{index}.json")), handle).unwrap();
+        }
+        let failed = rpc::JobStatus {
+            binding: original[0].binding.clone(),
+            state: rpc::JobState::Failed,
+            cancellation_requested: false,
+            report_json: None,
+            report_sha256: None,
+            error: Some(rpc::ErrorCode::WorkerFailed),
+        };
+        batch::save_status(&first, &original[0], &failed).unwrap();
+        batch::save_status(&first, &original[1], &synthetic_status(&original[1])).unwrap();
+        let progress = load_progress(&directory, &args, &source, &fixture.enrollment).unwrap();
+        assert_eq!(progress.stopped_receipts().len(), 1);
+        assert_eq!(progress.pending().len(), 1);
+        let output = fixture.root.path().join("reconciled");
+        let options = resume::Options::workflow(
+            args.clone(),
+            progress.pending(),
+            vec![],
+            output.clone(),
+            600,
+        )
+        .with_verified_stopped_receipts(progress.stopped_receipts());
+        let (_sender, activity) = tokio::sync::watch::channel(false);
+        let socket = fixture.root.path().join("no-agent.sock");
+        let result = resume::report_with_activity(&options, &socket, &activity)
+            .await
+            .unwrap();
+        assert_eq!(result["complete"], false); // No replacement is available in this protocol fixture.
+        assert_eq!(result["jobs"][0]["state"], "stopped");
+        let retained: serde_json::Value = serde_json::from_slice(
+            &read_file(&output.join("observation-0.json"), MAX_RECEIPT_BYTES).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained["status"], serde_json::to_value(&failed).unwrap());
+        assert_eq!(
+            retained["handle"],
+            serde_json::to_value(&original[0]).unwrap()
+        );
+        assert!(original[0].binding.expires_unix_seconds > now().unwrap());
+        // A mere cancellation request/running status or another executor cannot grant this shortcut.
+        for index in 0..2 {
+            let mut receipts = progress.stopped_receipts();
+            if index == 0 {
+                receipts[0].1.state = rpc::JobState::Running;
+                receipts[0].1.cancellation_requested = true;
+            } else {
+                receipts[0]
+                    .0
+                    .provider_key
+                    .clone_from(&original[1].provider_key);
+            }
+            let rejected = resume::Options::workflow(
+                args.clone(),
+                progress.pending(),
+                vec![],
+                fixture.root.path().join(format!("rejected-{index}")),
+                600,
+            )
+            .with_verified_stopped_receipts(receipts);
+            assert!(
+                resume::report_with_activity(&rejected, &socket, &activity)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_new_peer_preserves_completed_original_and_reopens_without_network() {
+        let mut fixture = fixture(1);
+        let (args, source, original) = handles(&fixture, 0);
+        fixture.enrollment.replace_peers = true;
+        fixture.enrollment.model_fingerprint = Some(original[0].binding.model_fingerprint.clone());
+        fs::write(
+            fixture.options.directory.join("workflow.json"),
+            serde_json::to_vec(&fixture.enrollment).unwrap(),
+        )
+        .unwrap();
+        let directory = fixture.options.directory.join("package-0000");
+        let first = directory.join("attempt-0000");
+        fs::DirBuilder::new().mode(0o700).create(&first).unwrap();
+        for (index, handle) in original.iter().enumerate() {
+            save_new(&first.join(format!("job-{index}.json")), handle).unwrap();
+        }
+        batch::save_status(&first, &original[0], &synthetic_status(&original[0])).unwrap();
+        let completed_file = first.join(format!("receipt-{}.json", original[0].binding.job_id));
+        let completed_bytes = fs::read(&completed_file).unwrap();
+        let second = directory.join("attempt-0001");
+        fs::DirBuilder::new().mode(0o700).create(&second).unwrap();
+        save_new(&second.join("original-0.json"), &original[1]).unwrap();
+        let mut replacement = original[1].clone();
+        let provider = ed25519_dalek::SigningKey::from_bytes(&[99; 32]).verifying_key();
+        replacement.provider_key = hex::encode(provider.as_bytes());
+        replacement.binding.job_id = "a9".repeat(16);
+        save_new(&second.join("job-0.json"), &replacement).unwrap();
+        assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_err());
+        let authorization = replacement_authorization(
+            &fixture.enrollment,
+            &fixture.enrollment.packages[0],
+            &source,
+        )
+        .unwrap()
+        .unwrap();
+        executors::admit(
+            &second,
+            &authorization,
+            &discovery::Selected {
+                providers: vec![provider],
+                model_fingerprint: replacement.binding.model_fingerprint.clone(),
+            },
+        )
+        .unwrap();
+        batch::save_status(&second, &replacement, &synthetic_status(&replacement)).unwrap();
+        assert!(
+            load_progress(&directory, &args, &source, &fixture.enrollment)
+                .unwrap()
+                .complete()
+        );
+        fixture.options.resume = true;
+        let result = report(&fixture.options, &fixture.root.path().join("no-agent.sock"))
+            .await
+            .unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["rounds_this_invocation"], 0);
+        assert_eq!(fs::read(completed_file).unwrap(), completed_bytes);
+        fixture.enrollment.replace_peers = false;
+        assert!(load_progress(&directory, &args, &source, &fixture.enrollment).is_err());
     }
 
     #[tokio::test]
