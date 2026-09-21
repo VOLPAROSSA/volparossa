@@ -7,6 +7,7 @@ mod peer_evaluation;
 mod peer_updates;
 mod publication;
 mod seed;
+mod serving;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -97,6 +98,9 @@ pub(crate) struct Options {
     /// Existing owner-owned cache for new signed publications, separate from the agent cache.
     #[arg(long, requires = "publish_name")]
     publish_cache: Option<PathBuf>,
+    /// Existing private directory for owner-approved serving snapshots; never enables a broker itself.
+    #[arg(long)]
+    serving_directory: Option<PathBuf>,
     #[arg(long, default_value_t=1, value_parser=clap::value_parser!(u64).range(1..))]
     first_publication_revision: u64,
     /// Explicitly start the persistent background service; default only previews its enrollment.
@@ -315,6 +319,7 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
     .chain(args.identity.iter())
     .chain(args.passphrase_file.iter())
     .chain(args.publish_cache.iter())
+    .chain(args.serving_directory.iter())
     {
         ensure!(path.is_absolute(), "train_loop_absolute_paths");
         if path != &args.directory {
@@ -332,6 +337,18 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
         "first_publication_revision":args.first_publication_revision,"seed":seed::selection(args)?,"source_choice_uses_cache_inventory":false,
         "quality_policy":"source-heldout-loss-v1",
         "private_data_supported":false,"code_or_model_downloads":false,"automatic_model_quality_claimed":false});
+    if let Some(directory) = &args.serving_directory {
+        for other in [&args.runtime_root, &args.model_root, &args.cache]
+            .into_iter()
+            .chain(args.publish_cache.iter())
+        {
+            ensure!(
+                !directory.starts_with(other) && !other.starts_with(directory),
+                "train_loop_serving_directory_overlap"
+            );
+        }
+        selection["serving_directory"] = serde_json::to_value(directory)?;
+    }
     if !plan.catalogs.is_empty() {
         selection["catalogs"] = serde_json::to_value(&plan.catalogs)?;
         selection["source_discovery"] = json!("signed-same-publisher-catalogs-v1");
@@ -383,6 +400,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         private_directory(root)?;
     }
     let store = Store::open(&args.directory, &selection, args.resume)?;
+    let mut serving = serving::Serving::open(args, &selection)?;
     let mut state: State = store
         .load_state()?
         .map(serde_json::from_value)
@@ -409,6 +427,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     {
         finish_cycle(args, &store, &mut state, sequence, &activity.receiver).await?;
     }
+    if let Some(serving) = &mut serving {
+        serving.reconcile(args, &store, &state)?;
+    }
     let mut budget = Budget::new();
     let mut attempts = 0_u64;
     let mut publication_drain = None;
@@ -429,6 +450,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
                 pool = source_pool(&plan, &state);
             }
             peer_updates::tick(args, socket, &pool, &store, &mut state, &activity.receiver).await?;
+            if let Some(serving) = &mut serving {
+                serving.reconcile(args, &store, &state)?;
+            }
             if let Some(source) = state.select(&pool, args.repeat_sources, now()?) {
                 if make_room(&store, &mut state)? {
                     attempt(
@@ -441,6 +465,9 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
                         &activity.receiver,
                     )
                     .await?;
+                    if let Some(serving) = &mut serving {
+                        serving.reconcile(args, &store, &state)?;
+                    }
                     attempts = attempts
                         .checked_add(1)
                         .context("train_loop_attempt_counter")?;

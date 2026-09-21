@@ -4,6 +4,19 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-21
 
+Current learning-to-serving candidate: an explicit shared `--serving-directory` connects the
+training loop's selected approved local/peer successor to an already running peer-inference
+broker. Publication binds the original approval, exact three adapter files, runtime and expiry;
+idle-only activation copies those bytes into broker-owned bounded storage. Active work and old
+receipts keep their original bindings. The agent attachment follows changing model fingerprints
+only with an explicit broker capability, while preserving its socket, base-model and task-profile
+checks. Static brokers retain their prior behavior. Expired/corrupt selections cannot become
+base-model admission after restart; a retained valid copy stops at its original expiry.
+Thirty-three focused storage, selection, broker, protocol and attachment checks plus strict
+all-target CLI/agent/local-control Clippy pass; the actual trained-model/protected-peer-job transition still awaits a
+disposable VM proof. This is not a B03/B05 completion or evidence of general model improvement.
+See [usage and limits](DECENTRALIZED_AGENTS.md#using-approved-successors-for-new-peer-jobs).
+
 Verified public task graph: `compute peer document --task-plan` enrolls different
 questions and explicit dependencies over the same selected public source or source collection.
 Independent source tasks share the existing cross-package provider queue and the exact same

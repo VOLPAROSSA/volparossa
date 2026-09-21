@@ -2,6 +2,7 @@
 
 mod derived;
 mod eligibility;
+mod successor;
 
 use super::*;
 use ed25519_dalek::SigningKey;
@@ -40,6 +41,7 @@ fn capabilities() -> Capabilities {
         task_derivation_v1: true,
         document_inference_v2: false,
         derived_inference_v3: false,
+        successor_activation_v1: false,
     }
 }
 
@@ -150,6 +152,7 @@ fn attachment(
         task_derivation_v1: true,
         document_inference_v2: false,
         derived_inference_v3: false,
+        successor_activation_v1: false,
         enabled: AtomicBool::new(true),
     });
     backend.registry.set(Arc::downgrade(registry)).unwrap();

@@ -583,6 +583,54 @@ not averaging/merging weights, private offload, poisoning-resistant aggregation,
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
 
+### Using approved successors for new peer jobs
+
+Development candidate: pass the same existing private `--serving-directory` to
+`compute train-loop` and `compute serve`. Both must use the **same existing runtime directory**;
+the training and inference workers retain its single-worker lock. Enabling this option does
+not start a broker, attach it to a network agent, trust another publisher or download a model.
+For example, add it to the training command above and start the broker separately:
+
+```sh
+volparossa compute serve --socket /OWNER/broker.sock \
+  --runtime-root /OWNER/existing-runtime --model-root /OWNER/existing-model \
+  --work-root /OWNER/existing-job-directory \
+  --serving-directory /OWNER/existing-serving-directory --execute
+```
+
+These illustrative directories must already be private and separate from the training-loop,
+model and cache directories. The broker's `--adapter-root` cannot be combined with this mode.
+Attach its protected socket and independently selected dataset publishers through the existing
+`compute peer attach` workflow. Without `--serving-directory`, the broker's fixed-model
+behavior is unchanged; the protocol advertises successor activation only for an opted-in broker.
+
+The producer exports only the current selected **approved** local successor or approved peer
+update, after rechecking its retained evaluation and exact adapter bytes. Merely caching an
+adapter, completing a rejected training cycle or receiving a publisher's quality claim cannot
+activate it. The selection retains the original minimum dataset, catalog, validation and/or
+import expiry applicable to that selection; neither publication nor restart extends it.
+The small benchmark's approval is not a claim of general answer quality or poison resistance.
+
+An idle executor with spare capacity makes its own checked copy of the three fixed adapter
+files before advertising the new model fingerprint. The producer retains at most two publication
+copies; its pruning cannot erase weights used by an active inference. Active jobs finish with
+their original model, source, requester and lease. New jobs must name the currently advertised
+model and end no later than its approval expiry; historical polling/cancellation keeps the
+complete original binding. Old receipts are not relabelled as output from the new model.
+Already enrolled workflows also retain their original model requirement: changing a broker
+does not silently migrate their remaining rows to a different model. Such work still needs a
+compatible executor; this option is not cross-model workflow migration.
+
+Before any successor exists, a successfully checked empty directory permits the pinned base
+model. An expired or invalid selection does not silently restore the base model, including on
+broker restart. A bad new selection cannot overwrite an already copied valid one; its original
+expiry still stops new work. The broker's existing storage budget includes its adapter copies
+and retained job reservations. This connects local selection to new public peer jobs; it does
+not add private offload, defended aggregation or network-policy authority.
+
+Focused filesystem, broker lifecycle, protocol and agent-attachment checks pass. The real
+trained-adapter transition followed by protected peer inference is not yet a verified checkpoint.
+
 ## Owner-first resource allocation
 
 Training and opportunistic model redistribution use only the node's available contribution
