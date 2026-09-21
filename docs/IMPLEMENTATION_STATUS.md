@@ -67,6 +67,18 @@ contracts, script syntax and non-mutating scenario previews pass. ShellCheck pas
 new helper and modified jobs helper; the outer wrappers still report existing baseline/source
 context warnings. The scenario and synthetic fixtures are not yet live success evidence.
 
+The [first third-peer recovery run on `5e3ca90d`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35597876075)
+**failed** during private cleanup, after the owner completed its second attempt on the new
+peer. The retained source, original receipts, new-peer admission, real replacement worker and
+path captures pass the partial reconstruction; the absent private-cleanup receipt prevents
+a complete pass. Both old brokers had intentionally stopped and systemd had unloaded their
+transient units; the finalizer incorrectly treated stopping them again as an error. Cleanup
+now accepts an already unloaded owned broker only after checking inactive state, no main PID
+and no populated descendant cgroup. Loaded-unit stop failures are still errors unless a fresh
+query proves collection. Three inert cleanup regressions cover these cases and collection
+races; they do not replace the corrected live run. Original network cleanup and host-state
+evidence remain preserved, without upgrading the failed run to success.
+
 Public-document synthesis: `compute peer document --synthesize` chains
 real peer inference over the checked fragment answers until one answer remains. A separate
 inference-only v3 profile labels generated intermediate text and coordinator-verified lineage;

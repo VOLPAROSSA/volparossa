@@ -101,6 +101,43 @@ agent_jobs_broker() {
         2>"$WORK/agent-jobs-$jobs_node-attach.err" || return 1
 }
 
+agent_jobs_cgroup_empty() {
+    # cgroup.events covers descendants too; an empty cgroup.procs alone does not.
+    [ -d "$(dirname -- "$1")" ] && [ ! -L "$1" ] || return 1
+    [ -e "$1" ] || return 0
+    if [ -d "$1" ] && [ -f "$1/cgroup.events" ] && [ ! -L "$1/cgroup.events" ] \
+        && grep -Fx 'populated 0' "$1/cgroup.events" >/dev/null; then
+        return 0
+    fi
+    # A collected empty cgroup may disappear between these read-only checks.
+    [ -d "$(dirname -- "$1")" ] && [ ! -L "$1" ] && [ ! -e "$1" ]
+}
+
+agent_jobs_stop_unit() {
+    jobs_stop_unit=$1
+    case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service) ;; *) return 1 ;; esac
+    jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
+    case $jobs_load_state in
+        loaded)
+            if ! systemctl stop "$jobs_stop_unit"; then
+                # Collection can race the first query. A failed stop is not
+                # proof of cleanup: accept only collection, then check below.
+                jobs_load_state=$(systemctl show --property=LoadState --value "$jobs_stop_unit") || return 1
+                [ "$jobs_load_state" = not-found ] || return 1
+            fi
+            ;;
+        # CollectMode=inactive can unload a broker stopped at the earlier cutover.
+        not-found) ;;
+        *) return 1 ;;
+    esac
+    jobs_stop_state=$(systemctl show --property=ActiveState --value "$jobs_stop_unit") || return 1
+    case $jobs_stop_state in inactive|failed) ;; *) return 1 ;; esac
+    jobs_stop_pid=$(systemctl show --property=MainPID --value "$jobs_stop_unit") || return 1
+    [ "$jobs_stop_pid" = 0 ] || return 1
+    agent_jobs_cgroup_empty "/sys/fs/cgroup/system.slice/$jobs_stop_unit" || return 1
+    systemctl reset-failed "$jobs_stop_unit" >/dev/null 2>&1 || true
+}
+
 agent_jobs_stop() {
     if [ "${agent_jobs_peer_recovery:-no}" = yes ]; then
         python3 -B "$source_directory/tests/integration/agent-jobs-peer-recovery-smoke.py" cleanup-owner "$WORK" || return 1
@@ -111,11 +148,7 @@ agent_jobs_stop() {
         jobs_batch_pid=
     fi
     for jobs_stop_unit in ${jobs_units:-}; do
-        case $jobs_stop_unit in volparossa-alpha-compute@relay[345].service) ;; *) return 1 ;; esac
-        systemctl stop "$jobs_stop_unit" || return 1
-        jobs_stop_state=$(systemctl show --property=ActiveState --value "$jobs_stop_unit")
-        case $jobs_stop_state in inactive|failed) ;; *) return 1 ;; esac
-        systemctl reset-failed "$jobs_stop_unit" >/dev/null 2>&1 || true
+        agent_jobs_stop_unit "$jobs_stop_unit" || return 1
     done
     jobs_units=
 }
