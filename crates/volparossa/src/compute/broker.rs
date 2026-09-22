@@ -739,6 +739,7 @@ fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &'static str
     }
     let message = error.to_string();
     let code = [
+        "compute_sandbox_spawn",
         "compute_control_ack_deadline",
         "compute_control_write_deadline",
         "compute_control_write",

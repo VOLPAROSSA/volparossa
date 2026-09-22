@@ -4,6 +4,26 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-22
 
+The [graph-v3 run on `2a565506`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35671611820)
+**fails before the worker starts**: the original enrollment error is `compute_sandbox_spawn`
+with `Argument list too long (os error 7)`. Exact source reconstruction yields a 136,410-byte
+single Python argument, exceeding Linux's individual-argument bound. All 109 original files
+remain unchanged; provisioning, cleanup and unchanged host-state checks pass, but no graph-v3
+model behavior or peer execution is established. The concurrent
+[policy run on the same source](https://github.com/VOLPAROSSA/volparossa/actions/runs/35671618254)
+also fails before observed worker execution: both brokers record `supervisor_unknown`, both
+assessment jobs fail, and cross-reviews do not start. Its artifact does not retain the OS error;
+the common bootstrap problem is a possible explanation, not independently proved policy evidence.
+
+The bootstrap correction splits only the fixed, compiled-in Python source into UTF-8-safe
+32-KiB arguments and reassembles the identical source inside the existing isolated interpreter.
+No files, mounts, shell, network access or task-controlled executable code are added. Private
+inputs remain outside argv. Local diagnostics also preserve the fixed `compute_sandbox_spawn`
+category without exposing arbitrary exception text. Three focused sandbox tests (including an
+actual inert, standard-library-only >128-KiB Python bootstrap), three diagnostic tests and scoped
+strict CLI Clippy pass. This proves the corrected argument handoff, not real-model success;
+both complete disposable-VM workflows still require a new run.
+
 The [graph run on `7309b266`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663652657)
 now produces a valid model-selected plan after one `GRAPH_GOAL_COPY` correction (55 + 52 tokens).
 It chooses only one source question, without an internal dependency. The unchanged

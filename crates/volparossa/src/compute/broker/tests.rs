@@ -11,6 +11,7 @@ fn execution_failure_diagnostic_preserves_known_typed_and_supervisor_classes() {
         ("worker", "BACKEND_IMPORT_FAILED")
     );
     for code in [
+        "compute_sandbox_spawn",
         "compute_control_ack_deadline",
         "compute_memory_budget",
         "compute_deadline",
