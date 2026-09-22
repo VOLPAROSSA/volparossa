@@ -41,6 +41,55 @@ fn execution_failure_diagnostic_redacts_unknown_text_and_unlisted_worker_codes()
     );
 }
 
+#[test]
+fn execution_failure_diagnostic_preserves_only_literal_principle_and_decoder_codes() {
+    for code in [
+        "TASK_GRAPH_DECODER_UNAVAILABLE",
+        "TASK_GRAPH_DECODER_VERSION_MISMATCH",
+        "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS",
+        "TASK_GRAPH_DECODER_PARSER_FAILED",
+        "TASK_GRAPH_DECODER_TOKENIZATION_CHANGED",
+        "TASK_GRAPH_DECODER_TOKENIZER_INVALID",
+        "TASK_GRAPH_DECODER_ATTEMPT_INVALID",
+        "TASK_GRAPH_DECODER_PREFIX_CHANGED",
+        "TASK_GRAPH_DECODER_ALLOWED_TOKENS_INVALID",
+        "PRINCIPLE_CONTEXT_INVALID",
+        "PRINCIPLE_CONTRACT_INVALID",
+        "PRINCIPLE_DATASET_FIELDS",
+        "PRINCIPLE_GENERATION_FRAMING",
+        "PRINCIPLE_GENERATION_PREFIX_CHANGED",
+        "PRINCIPLE_OUTPUT_BOUND",
+        "PRINCIPLE_OUTPUT_FIELDS",
+        "PRINCIPLE_OUTPUT_INVALID",
+        "PRINCIPLE_OUTPUT_OUTCOME",
+        "PRINCIPLE_OUTPUT_REASONING",
+        "PRINCIPLE_OUTPUT_SOURCE_QUOTE",
+        "PRINCIPLE_OUTPUT_TEXT",
+        "PRINCIPLE_OUTPUT_UNCERTAINTY",
+        "PRINCIPLE_PROFILE_INFERENCE_ONLY",
+        "PRINCIPLE_QUOTE_BOUND",
+    ] {
+        let worker = super::super::supervise::test_worker_failure(code);
+        assert_eq!(execution_failure_class(&worker), ("worker", code));
+        // Matching text without a correlated, reaped worker reply is not typed evidence.
+        assert_eq!(
+            execution_failure_class(&anyhow::anyhow!(code)),
+            ("supervisor", "supervisor_unknown")
+        );
+    }
+    for code in [
+        "PRINCIPLE_PRIVATE_PAYLOAD",
+        "TASK_GRAPH_DECODER_SECRET_SOURCE",
+        "PRINCIPLE_OUTPUT_INVALID_PRIVATE_TEXT",
+    ] {
+        let worker = super::super::supervise::test_worker_failure(code);
+        assert_eq!(
+            execution_failure_class(&worker),
+            ("worker", "worker_unknown")
+        );
+    }
+}
+
 fn data() -> String {
     serde_json::json!({"version":1,"visibility":"public","license":"GPL-3.0-only",
         "source_revision":"a".repeat(40),"train":[],

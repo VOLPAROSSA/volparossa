@@ -88,6 +88,18 @@ checks, scoped strict CLI Clippy, compiled inert policy CLI checks and the 56-ne
 self-test pass. The marked literal parser covers escaped quotes, backslashes, controls, Unicode and
 literal whitespace; these checks do not execute the upstream decoder or model on the development host.
 
+The [generation-v3 run on `729c9817`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35670300014)
+**fails before any assessment is retained**. Two isolated workers reach the baseline phase, then
+return failed jobs with no report/output and more than 550 seconds left before their respective
+expiry. The broker records `worker_unknown`: its fixed diagnostic allowlist omitted the new
+decoder/principle errors. The original exception code and any generated text/token count are not
+recoverable; this is not evidence of a token-limit failure or a specific parser bug. The 126
+original files verify source/dataset/custody bindings, 41-wheel provision, cleanup and unchanged
+host-state bytes, but contain no complete judgments, cross-reviews or portable roundtrip. The
+follow-up preserves only the existing literal decoder/principle error categories in local broker
+diagnostics; arbitrary codes, source text and traceback content remain suppressed. This enables
+the next diagnosis, not a retroactive explanation or a four-stage pass.
+
 The next B06 transfer slice adds opt-in original provider-signed Poll transcripts, `policy-pack`
 and `policy-fetch`. A completed four-stage public judgment can be packaged as an inert signed
 native publication, retrieved through a fresh cache and reconstructed against independently
