@@ -23,6 +23,28 @@ Verification: 22 task-plan and ten graph-planner Rust checks, 95 pure worker/dec
 scoped strict CLI Clippy, both fixture checkers and the compiled inert CLI smoke pass. The CLI
 rejects the dependent option outside graph planning, before acquiring source or runtime state.
 
+The [explicit dependent run on `28e96eab`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35669098540)
+**fails before enrollment**. Two complete generated JSON objects are rejected as `GRAPH_GOAL_COPY`
+(137 and 139 tokens, identical 539-byte hashes); the last 108 tokens exhaust the original 384-token
+budget. Rejected text was not retained, so its questions, edges and the location of the copied goal
+cannot be reconstructed from the hash. No graph or peer execution is proved. All 112 original files
+are checked against the exact input, synthetic 444-byte source, requested dependency contract,
+41-wheel provision, observed isolation, cleanup and unchanged host-state bytes. The next correction
+must distinguish intermediate tasks from the original terminal question added by the coordinator;
+the original no-copy rule and dependency proof have not been relaxed.
+
+The new `model_task_graph_constrained_v3` candidate explicitly requests intermediate questions,
+leaving the unchanged terminal goal to the coordinator. Its decoder blocks malformed question
+endings, trim-equivalent goal/duplicate copies and invalid dependency indices during generation.
+The requested dependent-analysis shape must be satisfied before a graph can close. The model still
+chooses all questions, task count and valid edges; no answer or dependency is inserted to obtain a
+pass. The supervisor and independent Rust/fixture readers recognize v3, while historical v1/v2
+readers retain their original meaning. The original 512-prompt/384-total-token/four-attempt budget
+is unchanged. Real-model execution and useful dependent cooperation remain unproven.
+Verification: 24 task-plan Rust tests, 107 pure worker/decoder/principle tests, scoped strict CLI
+Clippy, the compiled inert graph CLI smoke and both planning-fixture self-tests pass. No model
+or pinned backend was executed on the development host.
+
 The [first principle-assessment run on `db2f0776`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35663659331)
 also **fails**: the original 128-byte public subject is fetched from its selected peer, and both
 real 360M assessors run on distinct peers, but each reaches 256 generated tokens without EOS.
@@ -79,8 +101,8 @@ protocol tests, two agent handoff tests, strict Clippy for the four affected cra
 compiled CLI preview smoke pass. The four-stage transfer test uses real signatures over
 explicitly synthetic reports; it proves binding/reconstruction and rejection, not model work.
 
-The task-graph worker now uses `model_task_graph_constrained_v2`: a pinned, optional
-LM Format Enforcer adapter filters next-token choices to the JSON schema. The model still
+The earlier `model_task_graph_constrained_v2` worker introduced a pinned, optional
+LM Format Enforcer adapter that filters next-token choices to the JSON schema. The model still
 chooses one to four questions and their dependencies; the original raw output is never repaired
 or replaced. Independent graph validation and the original 512-prompt/384-total-token/four-attempt
 budget remain in force. Parser failures cannot log a prefix or manufacture EOS. Source-bundled

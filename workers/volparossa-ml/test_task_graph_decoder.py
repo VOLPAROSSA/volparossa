@@ -130,6 +130,29 @@ class ScalarRoot:
         return None
 
 
+class GraphSyntaxDouble:
+    """Broad alphabet plus whole-JSON completion, deliberately no graph semantics."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.config = None
+
+    def add_character(self, character):
+        return GraphSyntaxDouble(self.text + character)
+
+    def get_allowed_characters(self):
+        return "".join(chr(value) for value in range(128)) + 'é🙂漢字\U0010ffff'
+
+    def can_end(self):
+        try:
+            return isinstance(json.loads(self.text), dict)
+        except ValueError:
+            return False
+
+    def shortcut_key(self):
+        return ('json_freetext', 0, 1, 512)
+
+
 class Core:
     """Only LMFE's state-dispatch interface; deliberately not a schema parser."""
 
@@ -176,6 +199,134 @@ def decoder(check=lambda: None, accepts=lambda raw: raw == RAW, tokenizer=None):
 
 
 class DecoderTests(unittest.TestCase):
+    def graph_parser(self, tasks, requirement=None, goal="Main goal?", ascii_only=False):
+        raw = json.dumps({"version": 3, "tasks": tasks}, ensure_ascii=ascii_only, separators=(",", ":"))
+        parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), DECODER._GraphRules(goal, requirement))
+        for character in raw:
+            previous, text = parser.rules, parser.inner.text
+            self.assertIn(character, parser.get_allowed_characters())
+            parser = parser.add_character(character)
+            self.assertEqual(previous.phase == "done", False)
+            self.assertEqual(parser.inner.text, text + character)
+        self.assertTrue(parser.can_end())
+        self.assertEqual(parser.inner.text, raw)
+        self.assertIsNone(parser.shortcut_key())
+        self.assertIsNone(parser.cache_key())
+        return parser
+
+    def test_guarded_graph_accepts_model_selected_counts_and_arbitrary_valid_branches(self):
+        def task(question, parents=()):
+            return {"question": question, "depends_on": list(parents)}
+        alternatives = [
+            [task("Which source fact applies?")],
+            [task("Which fact applies?"), task("What remains unknown?")],
+            [task("Which fact applies?"), task("What follows?", [0]), task("What else?", [0])],
+            [task('What does "é🙂" imply?'), task("What follows?", [0]),
+             task("Which assumption remains?"), task("How do these results compare?", [2, 0])],
+        ]
+        for tasks in alternatives:
+            self.graph_parser(tasks)
+        for tasks in alternatives[2:]:
+            self.graph_parser(tasks, "dependent_analysis_v1")
+        # Alternate legal JSON escaping remains untouched, not rewritten.
+        self.graph_parser([task('  What about "é🙂" and \\ paths?  ')], ascii_only=True)
+
+    def test_guarded_graph_masks_bad_questions_and_dependency_edges_before_completion(self):
+        def task(question, parents=()):
+            return {"question": question, "depends_on": list(parents)}
+        invalid = [
+            [task("Main goal?")], [task("  Main goal?  ")], [task("Not a question")],
+            [task("Same?"), task(" Same? ")], [task("Null\0?")],
+            [task("First?", [0])], [task("First?"), task("Second?", [1])],
+            [task("First?"), task("Second?", [2])],
+            [task("First?"), task("Second?"), task("Third?", [0, 0])],
+            [task("First?"), task("Second?", [True])],
+        ]
+        for tasks in invalid:
+            raw = json.dumps({"version": 3, "tasks": tasks}, separators=(",", ":"))
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), DECODER._GraphRules("Main goal?", None))
+            rejected = False
+            for index, character in enumerate(raw):
+                if character not in parser.get_allowed_characters():
+                    with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_PARSER_FAILED$'):
+                        parser.add_character(character)
+                    self.assertLess(index, len(raw) - 1)
+                    rejected = True
+                    break
+                parser = parser.add_character(character)
+            self.assertTrue(rejected, repr(tasks))
+        # Escaping does not hide a duplicate or a copy of the original question.
+        for raw in ('{"version":3,"tasks":[{"question":"\\u004dain goal?","depends_on":[]}]}',
+                    '{"version":3,"tasks":[{"question":"Same?","depends_on":[]},'
+                    '{"question":"\\u0053ame?","depends_on":[]}]}'):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in raw:
+                following = rules.advance(character)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("escaped duplicate/copy reached the completed graph")
+
+    def test_guarded_dependency_requirement_keeps_edge_choice_with_model(self):
+        prefix = '{"version":3,"tasks":[{"question":"First?","depends_on":[]}'
+        rules = DECODER._GraphRules("Main goal?", "dependent_analysis_v1")
+        for character in prefix:
+            rules = rules.advance(character)
+            self.assertIsNotNone(rules)
+        self.assertIsNone(rules.advance("]"))
+        self.assertIsNotNone(rules.advance(","))
+        # With no earlier edge, the final task must choose one, not receive one.
+        for suffix in (',{"question":"Second?","depends_on":[]}',
+                       ',{"question":"Third?","depends_on":[]}',
+                       ',{"question":"Fourth?","depends_on":['):
+            for character in suffix:
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules)
+        self.assertIsNone(rules.advance("]"))
+        for index in ("0", "1", "2"):
+            self.assertEqual(rules.advance(index).parents, (int(index),))
+        self.assertEqual(rules.parents, ())
+        self.assertFalse(rules.has_dependency)
+
+    def test_guarded_questions_obey_utf8_bound_and_surrogate_pair_identity(self):
+        self.graph_parser([{"question": "é" * 255 + "?", "depends_on": []}], ascii_only=True)
+        self.graph_parser([{"question": "x" * 511 + "?", "depends_on": []}])
+        opening = '{"version":3,"tasks":[{"question":"'
+        for content in ("x" * 512, "é" * 256, "\\ud800?", "\\udc00", "\\u0000"):
+            rules = DECODER._GraphRules("Main goal?", None)
+            for character in opening + content:
+                following = rules.advance(character)
+                if following is None:
+                    break
+                rules = following
+            else:
+                self.fail("irrecoverable question prefix remained admissible")
+
+    def test_guarded_options_bind_goal_requirement_schema_and_original_budgets(self):
+        module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
+        with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \
+                mock.patch.object(DECODER.importlib, "import_module", return_value=module):
+            value = DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True,
+                graph_goal="Main goal?", graph_requirement="dependent_analysis_v1")
+        first, second = value.new_attempt([0], 384), value.new_attempt([0], 12)
+        self.assertIsInstance(first.enforcer.root_parser, DECODER._GraphJsonParser)
+        self.assertIsNot(first.enforcer.root_parser.rules, second.enforcer.root_parser.rules)
+        self.assertEqual(first.enforcer.root_parser.rules.questions, ())
+        self.assertEqual(value.schema["properties"]["tasks"]["minItems"], 2)
+        self.assertEqual((value.prompt_limit, value.generation_limit), (512, 384))
+        self.assertNotIsInstance(decoder().new_attempt([0], 384).enforcer.root_parser, DECODER._GraphJsonParser)
+        for options in ({"graph_goal": " "}, {"graph_goal": "x" * 513}, {"graph_goal": "\ud800"},
+                        {"graph_requirement": "dependent_analysis_v1"},
+                        {"graph_goal": "Main?", "graph_requirement": "arbitrary"},
+                        {"graph_goal": "Main?", "generation_limit": 512},
+                        {"graph_goal": "Main?", "prompt_limit": 1024},
+                        {"graph_goal": "Main?", "schema": {"type": "object"}}):
+            with mock.patch.object(DECODER, "_load_backend") as loading:
+                with self.assertRaisesRegex(DECODER.DecoderError, '^TASK_GRAPH_DECODER_ATTEMPT_INVALID$'):
+                    DECODER.GraphDecoder(Tokenizer(), lambda: None, lambda _raw: True, **options)
+                loading.assert_not_called()
+
     def test_explicit_ordered_principle_budget_does_not_change_graph_defaults(self):
         module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)
         with mock.patch.object(DECODER, "_load_backend", return_value=(Parser, Data, Core, TokenList)), \

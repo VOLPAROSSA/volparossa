@@ -52,7 +52,7 @@ def select_task_graph():
     global TASK_GRAPH, PREFIX, STRATEGY, KIND, SCOPE, QUESTION
     TASK_GRAPH = True
     PREFIX = "agent-model-task-graph"
-    STRATEGY = "model_task_graph_constrained_v2"
+    STRATEGY = "model_task_graph_constrained_v3"
     QUESTION = GRAPH_QUESTION
     KIND = "volparossa-bounded-model-selected-dependent-public-task-graph"
     SCOPE = ("One actual isolated pinned SmolLM2-360M owner generates an exact raw public task graph from "
@@ -403,7 +403,7 @@ def model_graph_plan(artifact,require_edge=True):
         question=task["question"];deps=task["depends_on"]
         require(type(question) is str and 1<=len(question.encode())<=512 and "\0" not in question
             and question.rstrip().endswith("?") and question.strip() not in seen
-            and question.encode()!=QUESTION.encode(),"model graph question invalid/duplicate/goal-copy")
+            and question.strip()!=QUESTION.strip(),"model graph question invalid/duplicate/goal-copy")
         require(type(deps) is list and all(type(n) is int and 0<=n<index for n in deps)
             and len(set(deps))==len(deps),"model graph dependencies invalid")
         seen.add(question.strip());consumed.update(deps)
@@ -1084,6 +1084,7 @@ def graph_self_test():
     for tasks in ([dict(question="One?",depends_on=[])],
         [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[])],
         [dict(question=QUESTION,depends_on=[]),dict(question="Two?",depends_on=[0])],
+        [dict(question=" "+QUESTION+" ",depends_on=[]),dict(question="Two?",depends_on=[0])],
         [dict(question="One?",depends_on=[0]),dict(question="Two?",depends_on=[0])],
         [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[0,0])],
         [dict(question="One?",depends_on=[]),dict(question="Two?",depends_on=[True])],

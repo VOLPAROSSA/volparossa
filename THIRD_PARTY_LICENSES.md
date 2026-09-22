@@ -56,6 +56,9 @@ principle JSON. Its marked source-quote scalar uses canonical JSON string lexeme
 does not preserve general escaped source strings as enum values. This is a process-local adapter,
 not an edit to the original wheel or its notices. Original output still requires independent
 source/UTF-8 validation; constrained syntax does not establish sound model reasoning.
+Graph strategy v3 also wraps the pinned parser with per-prefix question/dependency constraints
+and ordered compact JSON. This remains separate source-bundled adapter code; no original wheel,
+notice or model asset is changed.
 
 | Optional decoder component | Exact source / original distribution | License and notice provenance |
 | --- | --- | --- |

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    CONSTRAINED_GRAPH_STRATEGY, GRAPH_ARTIFACT_NAME, GRAPH_STRATEGY, Input, MAX_ARTIFACT_BYTES,
-    digest, question,
+    CONSTRAINED_GRAPH_STRATEGY, GRAPH_ARTIFACT_NAME, GRAPH_STRATEGY, GUARDED_GRAPH_STRATEGY, Input,
+    MAX_ARTIFACT_BYTES, digest, question,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -127,7 +127,7 @@ impl GraphDiagnostic {
 fn validate_decoder(strategy: &str, decoder: Option<&Value>) -> Result<()> {
     match strategy {
         GRAPH_STRATEGY => ensure!(decoder.is_none(), "compute_task_graph_legacy_decoder"),
-        CONSTRAINED_GRAPH_STRATEGY => ensure!(
+        CONSTRAINED_GRAPH_STRATEGY | GUARDED_GRAPH_STRATEGY => ensure!(
             decoder
                 == Some(&json!({
                     "implementation":"lm-format-enforcer","version":"0.11.3",
@@ -167,7 +167,10 @@ fn semantic_rejection(attempt: &GraphAttempt, strategy: &str) -> bool {
     if code == Some("INVALID_GRAPH") {
         return true;
     }
-    if strategy != CONSTRAINED_GRAPH_STRATEGY {
+    if !matches!(
+        strategy,
+        CONSTRAINED_GRAPH_STRATEGY | GUARDED_GRAPH_STRATEGY
+    ) {
         return false;
     }
     if code == Some("GRAPH_OUTPUT_TOO_LARGE") {
@@ -256,6 +259,15 @@ pub(in crate::compute) fn validate_graph_report(
     );
     let graph = ModelTaskGraph::decode(artifact, &input.question)?;
     graph.validate_requirement(input)?;
+    if report["planner_strategy"] == GUARDED_GRAPH_STRATEGY {
+        ensure!(
+            graph
+                .tasks
+                .iter()
+                .all(|task| task.question.trim() != input.question.trim()),
+            "compute_task_graph_goal_copy"
+        );
+    }
     let excerpt = input
         .source_excerpt
         .as_ref()

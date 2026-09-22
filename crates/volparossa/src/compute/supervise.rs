@@ -255,7 +255,7 @@ fn check_task_plan_result(result: &Value, options: &Options) -> Result<()> {
     input.validate_execution()?;
     let (strategy, name) = if input.version == 3 {
         (
-            super::task_plan::CONSTRAINED_GRAPH_STRATEGY,
+            super::task_plan::GUARDED_GRAPH_STRATEGY,
             super::task_plan::GRAPH_ARTIFACT_NAME,
         )
     } else {

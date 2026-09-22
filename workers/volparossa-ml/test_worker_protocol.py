@@ -1058,6 +1058,7 @@ class WorkerProtocolTests(unittest.TestCase):
             lambda x:x.update(version=True), lambda x:x.update(version=2), lambda x:x.update(tools=[]),
             lambda x:x.update(tasks=[]), lambda x:x.update(tasks=task_graph_fixture(5)["tasks"]),
             lambda x:x["tasks"][0].update(question=source["question"]),
+            lambda x:x["tasks"][0].update(question=" \n" + source["question"] + " \t"),
             lambda x:x["tasks"][0].update(question="not a question"),
             lambda x:x["tasks"][0].update(question="é" * 256 + "?"),
             lambda x:x["tasks"][0].update(question="\0?"), lambda x:x["tasks"][0].update(question="\ud800?"),
@@ -1075,6 +1076,13 @@ class WorkerProtocolTests(unittest.TestCase):
             untrusted_source_excerpt=source["source_excerpt"]["text"]))
         self.assertIn("untrusted data", messages[0]["content"])
         self.assertIn("empty depends_on reads the original source", messages[0]["content"])
+        self.assertIn("only INTERMEDIATE research or analysis questions", messages[0]["content"])
+        self.assertIn("coordinator adds the exact original goal as a final question afterwards", messages[0]["content"])
+        self.assertIn("Do not include that final question as a task, and do not answer it", messages[0]["content"])
+        self.assertIn("Choose the task count and dependencies yourself", messages[0]["content"])
+        self.assertEqual(WORKER.TASK_GRAPH_STRATEGY, "model_task_graph_constrained_v3")
+        self.assertEqual((WORKER.TASK_PLAN_PROMPT_TOKENS, WORKER.TASK_PLAN_NEW_TOKENS,
+                          WORKER.TASK_PLAN_MAX_ATTEMPTS), (512, 384, 4))
         self.assertNotIn(original["tasks"][0]["question"], json.dumps(messages))
 
     def test_task_graph_decoder_requires_embedded_module_and_never_falls_back(self):
@@ -1128,6 +1136,9 @@ class WorkerProtocolTests(unittest.TestCase):
         copied["tasks"][1]["question"] = goal
         self.assertEqual(WORKER.task_graph_candidate(json.dumps(copied).encode(), goal, requirement),
                          (None, "GRAPH_GOAL_COPY"))
+        copied["tasks"][1]["question"] = "\n" + goal + "\t"
+        self.assertEqual(WORKER.task_graph_candidate(json.dumps(copied).encode(), " " + goal + " ", requirement),
+                         (None, "GRAPH_GOAL_COPY"))
 
     def test_dependent_analysis_decoder_keeps_schema_version_and_does_not_choose_edges(self):
         module = mock.Mock()
@@ -1140,7 +1151,10 @@ class WorkerProtocolTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": module}):
             WORKER.create_task_graph_decoder(mock.Mock(), source, mock.Mock())
         args, options = module.GraphDecoder.call_args
-        self.assertEqual(options, {"schema": {"properties": {"tasks": {"minItems": 2, "maxItems": 4}}}})
+        self.assertEqual(options, {"schema": {"properties": {"tasks": {"minItems": 2, "maxItems": 4}}},
+                                  "graph_goal": source["question"],
+                                  "graph_requirement": WORKER.DEPENDENT_ANALYSIS_REQUIREMENT,
+                                  "ordered_json": True})
         self.assertEqual(WORKER.TASK_GRAPH_DECODER["schema_version"], 3)
         self.assertFalse(args[2](json.dumps(task_graph_fixture(2)).encode()))
         self.assertTrue(args[2](json.dumps(task_graph_fixture(3)).encode()))
@@ -1184,6 +1198,8 @@ class WorkerProtocolTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"volparossa_task_graph_decoder": module}):
             decoder = WORKER.create_task_graph_decoder(tokenizer, source, session)
             args = module.GraphDecoder.call_args.args
+            self.assertEqual(module.GraphDecoder.call_args.kwargs,
+                             {"graph_goal": source["question"], "graph_requirement": None, "ordered_json": True})
             self.assertIs(args[0], tokenizer)
             self.assertEqual(args[1], session.check)
             self.assertTrue(args[2](json.dumps(task_graph_fixture(1)).encode()))
@@ -1421,7 +1437,7 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assertEqual((root/"task-graph.json").stat().st_mode & 0o777, 0o600)
                     self.assertEqual(result["artifacts"], [dict(relative_path="task-graph.json", **real_hash(root/"task-graph.json"))])
                     self.assertEqual((result["planner_strategy"],result["planner_structure_generated_by"],result["planner_stop_reason"]),
-                        ("model_task_graph_constrained_v2","model","task_graph"))
+                        ("model_task_graph_constrained_v3","model","task_graph"))
                     self.assertEqual(result["planner_decoder"], WORKER.TASK_GRAPH_DECODER)
                     self.assertEqual((result["planner_task_count"],result["planner_dependency_count"]), (4,5))
                     self.assertEqual(result["model"], dict(id=profile["id"], revision=profile["revision"], files=files))

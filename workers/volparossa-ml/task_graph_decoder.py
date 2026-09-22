@@ -2,8 +2,8 @@
 """Strict LMFE 0.11.3 adapter for a single greedy task-graph generation.
 
 Only GraphDecoder construction imports the pinned optional backend. The worker
-must still validate the complete original output independently: this schema does
-not enforce earlier/unique dependencies, UTF-8 byte lengths or question meaning.
+must still validate the complete original output independently. Opt-in graph
+rules constrain question form and prior dependencies, never question meaning.
 No generated text is returned, rewritten, logged or saved by this module.
 
 The tokenizer adaptation and two TokenEnforcer overrides derive from:
@@ -208,7 +208,7 @@ def _install_source_quote_parser(module, tables):
 
 
 class _CompactJsonParser:
-    """Ordered policy JSON only: remove formatting, never whitespace inside strings."""
+    """Explicit ordered JSON: remove formatting, never whitespace inside strings."""
 
     def __init__(self, inner, string_type):
         self.inner, self.string_type = inner, string_type
@@ -251,6 +251,153 @@ class _CompactJsonParser:
 
     def shortcut_key(self):
         return self.inner.shortcut_key()
+
+
+class _GraphRules:
+    """Immutable prefix state for the one fixed graph schema, not a JSON repairer."""
+
+    def __init__(self, goal, requirement):
+        self.goal, self.requirement = goal.strip(), requirement
+        self.questions, self.parents = (), ()
+        self.has_dependency = False
+        self.text, self.text_bytes, self.escape, self.high_surrogate = "", 0, "", None
+        self._literal('{"version":3,"tasks":[{"question":"', "question")
+
+    def _literal(self, text, after):
+        self.phase, self.literal, self.after = "literal", text, after
+
+    def _question_complete(self):
+        value = self.text.strip()
+        return (bool(value) and value.endswith("?") and value != self.goal
+                and value not in self.questions and self.escape == "" and self.high_surrogate is None)
+
+    def _append_text(self, character):
+        if character == "\0" or 0xD800 <= ord(character) <= 0xDFFF:
+            return False
+        size = self.text_bytes + len(character.encode("utf-8"))
+        if size > 512:
+            return False
+        self.text += character
+        self.text_bytes = size
+        # Do not enter an irreversibly overfull/non-question scalar.
+        return size < 512 or self._question_complete()
+
+    def _question_character(self, character):
+        if self.escape == "\\":
+            self.escape = ""
+            if character == "u":
+                self.escape = "u"
+                return True
+            escaped = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+            return (self.high_surrogate is None and character in escaped
+                    and self._append_text(escaped[character]))
+        if self.escape.startswith("u"):
+            if character not in "0123456789abcdefABCDEF":
+                return False
+            self.escape += character
+            if len(self.escape) < 5:
+                return True
+            codepoint = int(self.escape[1:], 16)
+            self.escape = ""
+            if self.high_surrogate is not None:
+                if not 0xDC00 <= codepoint <= 0xDFFF:
+                    return False
+                codepoint = 0x10000 + ((self.high_surrogate - 0xD800) << 10) + codepoint - 0xDC00
+                self.high_surrogate = None
+            elif 0xD800 <= codepoint <= 0xDBFF:
+                if self.text_bytes + 4 > 512:
+                    return False
+                self.high_surrogate = codepoint
+                return True
+            return self._append_text(chr(codepoint))
+        if character == "\\":
+            self.escape = "\\"
+            return True
+        if self.high_surrogate is not None:
+            return False
+        if character == '"':
+            if not self._question_complete():
+                return False
+            self.questions += (self.text.strip(),)
+            self.parents = ()
+            self._literal(',"depends_on":[', "parents")
+            return True
+        return ord(character) >= 0x20 and self._append_text(character)
+
+    def advance(self, character):
+        if type(character) is not str or len(character) != 1:
+            return None
+        updated = copy.copy(self)
+        if self.phase == "literal":
+            if character != self.literal[0]:
+                return None
+            updated.literal = self.literal[1:]
+            if not updated.literal:
+                updated.phase = self.after
+        elif self.phase == "question":
+            if not updated._question_character(character):
+                return None
+        elif self.phase in ("parents", "parent_required", "parent_after"):
+            available = {str(index) for index in range(len(self.questions) - 1) if index not in self.parents}
+            if self.phase != "parent_after" and character in available:
+                updated.parents += (int(character),)
+                updated.has_dependency = True
+                updated.phase = "parent_after"
+            elif self.phase == "parent_after" and character == "," and available:
+                updated.phase = "parent_required"
+            elif self.phase != "parent_required" and character == "]":
+                if self.requirement and len(self.questions) == 4 and not self.has_dependency:
+                    return None
+                updated._literal("}", "tasks_after")
+            else:
+                return None
+        elif self.phase == "tasks_after":
+            if character == "," and len(self.questions) < 4:
+                updated.text, updated.text_bytes, updated.escape, updated.high_surrogate = "", 0, "", None
+                updated._literal('{"question":"', "question")
+            elif character == "]" and (not self.requirement or len(self.questions) >= 2 and self.has_dependency):
+                updated._literal("}", "done")
+            else:
+                return None
+        else:
+            return None
+        return updated
+
+
+class _GraphJsonParser:
+    """Intersect pinned JSON syntax with branch-local graph contract constraints."""
+
+    def __init__(self, inner, rules):
+        self.inner, self.rules = inner, rules
+
+    @property
+    def config(self):
+        return self.inner.config
+
+    @config.setter
+    def config(self, config):
+        self.inner.config = config
+
+    def add_character(self, character):
+        rules = self.rules.advance(character)
+        if rules is None:
+            raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED")
+        return _GraphJsonParser(self.inner.add_character(character), rules)
+
+    def get_allowed_characters(self):
+        return "".join(character for character in dict.fromkeys(self.inner.get_allowed_characters())
+                       if self.rules.advance(character) is not None)
+
+    def can_end(self):
+        return self.rules.phase == "done" and self.inner.can_end()
+
+    def cache_key(self):
+        return None
+
+    def shortcut_key(self):
+        # LMFE's free-text shortcut bypasses per-character filtering, including
+        # a question's closing quote. These graph constraints must see each one.
+        return None
 
 
 def _strict_enforcer(base, token_list):
@@ -314,7 +461,7 @@ class GraphDecoder:
 
     def __init__(self, tokenizer, check, accepts_graph_bytes, *, schema=None,
                  prompt_limit=512, output_limit=16384, generation_limit=384,
-                 ordered_json=False):
+                 ordered_json=False, graph_goal=None, graph_requirement=None):
         # Only compiled worker code supplies this schema/limits, never a dataset.
         # Defaults preserve the original graph profile and historical contract.
         if (type(prompt_limit) is not int or not 1 <= prompt_limit <= 1024
@@ -327,6 +474,24 @@ class GraphDecoder:
         self.tokenizer = tokenizer
         self.accepts_graph_bytes = accepts_graph_bytes
         self.schema = graph_schema() if schema is None else schema
+        self.graph_goal, self.graph_requirement = graph_goal, graph_requirement
+        if graph_goal is not None or graph_requirement is not None:
+            try:
+                valid_goal = (type(graph_goal) is str and bool(graph_goal.strip()) and "\0" not in graph_goal
+                              and 1 <= len(graph_goal.encode("utf-8")) <= 512)
+            except UnicodeError:
+                valid_goal = False
+            if (not valid_goal or graph_requirement not in (None, "dependent_analysis_v1")
+                    or (prompt_limit, output_limit, generation_limit) != (512, 16384, 384)):
+                raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
+            expected = graph_schema()
+            if graph_requirement:
+                expected["properties"]["tasks"]["minItems"] = 2
+            if schema is None:
+                self.schema = expected
+            elif schema != expected:
+                raise DecoderError("TASK_GRAPH_DECODER_ATTEMPT_INVALID")
+            ordered_json = True
         self.prompt_limit, self.output_limit = prompt_limit, output_limit
         self.generation_limit = generation_limit
         parser, data, base, token_list = _load_backend(check)
@@ -399,6 +564,8 @@ class GraphDecoder:
             parser = self.parser(copy.deepcopy(self.schema), **self.parser_options)
             if self.ordered_string_type is not None:
                 parser = _CompactJsonParser(parser, self.ordered_string_type)
+            if self.graph_goal is not None:
+                parser = _GraphJsonParser(parser, _GraphRules(self.graph_goal, self.graph_requirement))
             enforcer = self.enforcer(self.data, parser)
         except Exception:
             raise DecoderError("TASK_GRAPH_DECODER_PARSER_FAILED") from None

@@ -1349,7 +1349,7 @@ An absent option preserves the historical one-to-four-task contract. `--resume` 
 the requirement or replan. Fixed dependency feedback uses the same four-attempt/384-token budget.
 Structural dependency alone is not proof of useful reasoning or correct answers.
 
-Strategy `model_task_graph_constrained_v2` generates the whole JSON under one original owner/deadline:
+Strategy `model_task_graph_constrained_v3` generates the whole JSON under one original owner/deadline:
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
 use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed
 whole-JSON boundary or model EOS may complete an accepted proposal, including at the last
@@ -1358,11 +1358,15 @@ on resume without replanning. Existing peer-capacity accounting, source expiry, 
 requirements, cancellation and offline receipts remain in force. This candidate needs a live
 model-and-peer proof of actual selected dependencies and useful output; pure graph validation
 is not evidence of autonomous reasoning, private computation or general tool use.
-The pinned optional LM Format Enforcer decoder constrains token selection to the JSON schema;
-it does not supply questions, task count or edges. The separate complete-graph validator still
-checks byte bounds, question shape, goal copies and earlier unique dependencies. Parser errors
-fail without printing a generated prefix or forcing EOS. Actual successful reports name the
-decoder versions; retained `model_task_graph_v1` results remain readable without that claim.
+The prompt explicitly requests intermediate questions: the coordinator adds the unchanged original
+goal as the terminal task. The pinned optional LM Format Enforcer adapter constrains JSON syntax
+and rejects invalid question endings, duplicate/trim-equivalent goal copies and non-earlier or
+repeated dependencies during generation. Only explicitly requested dependent analysis prevents
+closing a graph without two tasks and an internal edge. The model still supplies the wording,
+task count and valid edge choices; syntax constraints do not prove useful decomposition. A separate
+complete-graph validator checks the original bytes again. Parser errors fail without printing a
+generated prefix or forcing EOS. Reports name the decoder versions; retained v1/v2 reports remain
+readable under their original contracts, without reinterpreting their old failed runs as success.
 Provisioning requires the explicit `--task-graph-decoder` option to add three pinned pure-Python
 wheels. The ordinary 38-wheel runtime stays unchanged, and a missing decoder refuses graph
 execution rather than silently reverting to unconstrained generation. There is no model or

@@ -278,6 +278,66 @@ fn decoder() -> Value {
 }
 
 #[test]
+fn guarded_graph_preserves_selected_work_and_original_budget() {
+    let input = input();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let raw = artifact();
+    let legacy = report(&input, &bytes, &raw);
+    let expected = validate_graph_report(&legacy, &input, &bytes, &raw).unwrap();
+    let mut current = legacy;
+    current["planner_strategy"] = GUARDED_GRAPH_STRATEGY.into();
+    assert!(validate_graph_report(&current, &input, &bytes, &raw).is_err());
+    current["planner_decoder"] = decoder();
+    assert_eq!(
+        validate_graph_report(&current, &input, &bytes, &raw).unwrap(),
+        expected
+    );
+    for (pointer, value) in [
+        ("/planner_decoder/version", json!("0.11.2")),
+        ("/planner_attempts/0/max_new_tokens", json!(512)),
+        ("/planner_attempts/0/generated_tokens", json!(385)),
+        ("/planner_attempts/0/prompt_tokens", json!(513)),
+        ("/planner_attempts/0/text_sha256", json!("f".repeat(64))),
+        ("/planner_dependency_count", json!(0)),
+    ] {
+        let mut changed = current.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            validate_graph_report(&changed, &input, &bytes, &raw).is_err(),
+            "{pointer}"
+        );
+    }
+    let diagnostic = json!({"strategy":GUARDED_GRAPH_STRATEGY,
+        "planner_decoder":decoder(),"attempts":[attempt(b"{}",false,Some("GRAPH_GOAL_COPY"))],
+        "incomplete_attempt":true});
+    let checked = PlanningDiagnostic::from_value(&diagnostic).unwrap();
+    assert_eq!(serde_json::to_value(checked).unwrap(), diagnostic);
+}
+
+#[test]
+fn guarded_graph_rejects_trimmed_goal_copy_without_reinterpreting_old_reports() {
+    let input = input();
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let raw = serde_json::to_vec(&json!({"version":3,"tasks":[
+        {"question":format!(" {} ", input.question),"depends_on":[]}
+    ]}))
+    .unwrap();
+    let mut report = report(&input, &bytes, &raw);
+    // Old workers used exact-byte comparison. Their retained reports stay readable.
+    validate_graph_report(&report, &input, &bytes, &raw).unwrap();
+    report["planner_strategy"] = CONSTRAINED_GRAPH_STRATEGY.into();
+    report["planner_decoder"] = decoder();
+    validate_graph_report(&report, &input, &bytes, &raw).unwrap();
+    report["planner_strategy"] = GUARDED_GRAPH_STRATEGY.into();
+    assert_eq!(
+        validate_graph_report(&report, &input, &bytes, &raw)
+            .unwrap_err()
+            .to_string(),
+        "compute_task_graph_goal_copy"
+    );
+}
+
+#[test]
 fn constrained_graph_pins_decoder_without_changing_raw_graph_or_original_budget() {
     let input = input();
     let bytes = serde_json::to_vec(&input).unwrap();

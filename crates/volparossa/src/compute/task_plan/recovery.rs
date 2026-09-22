@@ -45,7 +45,11 @@ impl PlanningDiagnostic {
     pub(in crate::compute) fn from_value(value: &Value) -> Result<Self> {
         if matches!(
             value["strategy"].as_str(),
-            Some(super::GRAPH_STRATEGY | super::CONSTRAINED_GRAPH_STRATEGY)
+            Some(
+                super::GRAPH_STRATEGY
+                    | super::CONSTRAINED_GRAPH_STRATEGY
+                    | super::GUARDED_GRAPH_STRATEGY
+            )
         ) {
             super::graph::GraphDiagnostic::from_value(value).map(Self::Graph)
         } else {
