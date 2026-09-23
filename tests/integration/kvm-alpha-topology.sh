@@ -4223,7 +4223,9 @@ def stop(*_unused):
 
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
-deadline = time.monotonic() + 1800
+# Public compute cycles can use four worker leases plus an authority round.
+# Keep observing their whole finite owner window; normal teardown still stops us early.
+deadline = time.monotonic() + (3300 if content_provider_mode else 1800)
 
 
 def is_ipv4_multicast(address):

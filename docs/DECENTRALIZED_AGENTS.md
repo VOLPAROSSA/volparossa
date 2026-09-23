@@ -2123,9 +2123,49 @@ The completed quorum is normally contributed locally. Repeated `--publication-pr
 instead selects protected custody providers for the **same original wrapper**, allowing a
 coordinator without a local content service. Existing `policy-follow` subscribers can fetch it
 by its original publisher/name and verify their own authority before applying it. Retained
-receipts describe completed historical handoffs, not guaranteed current availability. The new
-separate-authority network proof remains pending; configured authority membership, partition
-governance and reliable semantic judgment are not solved by these commands.
+receipts describe completed historical handoffs, not guaranteed current availability. The
+[separate-authority trial on `75e7ff52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35907082514)
+retains actual four-job assessment evidence, three independently owned endorsements, verified
+quorum publication, cold follower delivery and Client restart persistence. It **failed overall**:
+the receiving peer's post-restart cache probe returned `CONTENT_INVALID`, not the required
+`CONTENT_POLICY`. Its unchanged original evidence is not promoted to a full pass. A subsequent
+candidate checks signed-object policy before cache I/O, preventing cache admission errors from
+masking a valid withholding decision. The original trial does not prove which cache error occurred.
+Privacy capture and cleanup checks pass, while reasoning errors and an `undetermined` outcome
+remain visible. Configured authority membership, partition governance and reliable semantic
+judgment are not solved by these commands.
+
+#### A complete selected-object policy cycle (development candidate)
+
+`compute peer policy-cycle` joins public-source acquisition, two real peer assessments, their
+two cross-reviews and the authority round in one finite owner. It takes the original source
+publisher/name/exact manifest, public republishing licence, requester, two providers, model,
+policy configuration and authority/publication selections directly. No pre-existing
+`--assessment-bundle`, caller-supplied verdict or authority private key is required. The
+four original provider-signed transcripts are replayed into the exact bundle handed to the
+existing round; incomplete assessment evidence cannot reach the signing stage.
+
+The private `--directory` retains the enrollment, original deadline, `assessment/`, exact
+`assessment.bundle` and `round/`. `--worker-seconds` limits each worker lease,
+`--round-seconds` limits the authority round, and `--total-seconds` bounds the entire cycle.
+`--resume` requires the same selections and preserves existing job handles. It can start a
+previously unstarted subsequent stage, but cannot replace an existing job or renew the original
+deadline. Ambiguous partial submissions remain incomplete. Cancellation uses the original
+job cancellation/observation path, with a finite cleanup grace; an unavailable cancellation
+is never reported as proof that a remote worker stopped. Expired completed work retains its
+result but gains no new execution or publication authority.
+
+Without `--execute`, the command only previews public selections and the fixed framework
+fingerprint; it does not fetch content, create directories or contact peers. The cycle ends
+at quorum publication; independently enrolled `policy-follow` consumers still apply their own
+trust checks. This is not a global content crawler, automatic authority membership, reliable
+legal judgment or completion of B06. Its combined live-network proof is still pending.
+Concurrent named-content requests, including the cycle's source fetch and a follower's refresh,
+queue behind the current retrieval owner within the existing total download deadline. Leaving
+the request removes the waiter; waiting itself starts no cache or peer work. Policy admission of
+a signed transferred object precedes cache I/O, so a withheld object remains withheld even while
+its cache is occupied. Focused local checks cover these interactions; they do not replace the
+pending combined network/restart trial.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

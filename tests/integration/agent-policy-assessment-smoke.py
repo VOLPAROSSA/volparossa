@@ -30,8 +30,9 @@ SCOPE = ("one exact synthetic public native object fetched through its protected
          "360M peer assessments and opposite-peer cross-reviews under the seven virtues/vices, bound "
          "to signed dataset-v4 contracts and original provider-signed JSON-boundary/EOS receipts, "
          "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
-         "a new cache and directory on the same client, unchanged completed offline replay, an automatic finite "
-         "round and three node-local development authority owners replaying and separately endorsing its original "
+         "a new cache and directory on the same client, unchanged completed offline replay, one finite policy-cycle "
+         "owner executing those four jobs and its automatic round, with three node-local development authority owners "
+         "replaying and separately endorsing its original "
          "canonical request without policy private keys on the Client, protected original-quorum custody publication, "
          "an explicitly enrolled automatic Client follower started with an empty cache before that publication, "
          "actual peer retrieval and exact-object quorum activation with cached-access and Client-restart checks, "
@@ -126,8 +127,16 @@ def record(work, suffix):
     return work / f"{NAME}-{suffix}.json"
 
 
+def source_path(work):
+    return work / "state-client/compute-source"
+
+
+def cycle_root(work):
+    return source_path(work) / "policy-cycle"
+
+
 def root_path(work):
-    return work / "state-client/compute-source/policy-assessment"
+    return cycle_root(work) / "assessment"
 
 
 def prepare(work):
@@ -215,7 +224,7 @@ def observe(work, pid):
                 # Preserve useful original observations even when a later model answer is invalid.
                 write(record(work, "observed-" + stage), observed[stage])
         time.sleep(0.025)
-    write(record(work, "observation"), {"stages": observed})
+    write(record(work, "observation"), {"owner": owner, "stages": observed})
     require(set(observed) == set(STAGES), "four actual assessment/review workers were not observed")
 
 
@@ -332,7 +341,7 @@ def bundle_projection(files, requester):
 
 def bundle_before(work):
     JOBS["guest_work"](work)
-    source = root_path(work).parent
+    source = source_path(work)
     require(all(not os.path.lexists(source / name) for name in ("policy-bundle-fetch", "policy-bundle-cache")),
             "bundle consumer directory/cache were not fresh")
     require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
@@ -353,7 +362,7 @@ def public_file(path, owner):
 
 def transfer(work):
     JOBS["guest_work"](work)
-    source = root_path(work).parent
+    source = source_path(work)
     owner = source.stat().st_uid
     pack, fetched = source / "policy-bundle-publication", source / "policy-bundle-fetch"
     require(set(path.name for path in fetched.iterdir()) == {
@@ -553,12 +562,135 @@ def object_envelope(raw, public_keys, expected_signers, policy_epoch=False):
 
 
 def round_root(work):
-    return root_path(work).parent / "policy-round"
+    return cycle_root(work) / "round"
 
 
 def round_file(path, owner):
     raw = public_file(path, owner)
     return dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
+
+
+def cycle_source_ready(work, pid):
+    JOBS["guest_work"](work)
+    owner = JOBS["identity"](pid)
+    node_owner = source_path(work).stat().st_uid
+    deadline = time.monotonic() + 180
+    while JOBS["alive"](owner) and time.monotonic() < deadline:
+        if all((root_path(work) / name).is_file() for name in ("enrollment.json", "subject-download.json")):
+            require(not os.path.lexists(round_root(work)), "original source was not observed before authority round")
+            files = {name: round_file(root_path(work) / name, node_owner)
+                     for name in ("enrollment.json", "subject-download.json")}
+            source = decode_file(files, "subject-download.json")
+            enrolled = decode_file(files, "enrollment.json")
+            state = round_file(cycle_root(work) / "state.json", node_owner)
+            require(decode_file({"state": state}, "state")["phase"] == "assessment"
+                    and source["manifest_id"] == enrolled["scope"]["source_manifest_id"]
+                    and source["sha256"] == sha(SUBJECT.encode()) and source["peer_bytes"] == len(SUBJECT.encode())
+                    and strict_json(public_file(work / "state-client/object-policy/journal.json", node_owner))
+                        == {"version": 1, "entries": []}, "source probe did not precede original policy activation")
+            write(record(work, "cycle-source-ready"), dict(owner=owner, files=files, state=state,
+                observed_at_ms=time.time_ns() // 1000000, round_absent=True))
+            return
+        time.sleep(.025)
+    raise ValueError("cycle did not fetch its original source while observed")
+
+
+def cycle_collect(work, pid, exit_status):
+    JOBS["guest_work"](work)
+    observation = read(record(work, "round-observation"))
+    require(exit_status == 0 and observation["owner"]["pid"] == pid
+            and not JOBS["alive"](observation["owner"]) and not JOBS["alive"](observation["process"]),
+            "original cycle owner did not finish and reap")
+    owner = source_path(work).stat().st_uid
+    files = {name: round_file(cycle_root(work) / name, owner)
+             for name in ("enrollment.json", "state.json", "status.json", "result.json", "assessment.bundle")}
+    originals = read(record(work, "files"), 32 * 1048576)
+    rounds = read(record(work, "round-proof"), 32 * 1048576)
+    # These retained aliases are literal original files, not synthesized legacy command output.
+    require(record(work, "result").read_bytes() == decode_file(originals, "result.json", False)
+            and record(work, "round").read_bytes() == decode_file(rounds["files"], "result.json", False),
+            "fixture aliases changed original cycle child results")
+    check_cycle_records(files, originals, rounds["files"], read(record(work, "cycle")))
+    write(record(work, "cycle-proof"), dict(files=files, stdout=read(record(work, "cycle")),
+        preview=read(record(work, "cycle-preview")), observation=observation,
+        source_ready=read(record(work, "cycle-source-ready")), exit_status=exit_status,
+        owner_ended=True, collected_at_ms=time.time_ns() // 1000000))
+
+
+def check_cycle_records(files, assessment_files, round_files, stdout):
+    enrolled, state, status, result = (decode_file(files, name) for name in
+                                      ("enrollment.json", "state.json", "status.json", "result.json"))
+    assessment = decode_file(assessment_files, "result.json", False)
+    original_round = decode_file(round_files, "result.json", False)
+    bundle = decode_file(files, "assessment.bundle", False)
+    require(state["version"] == 1 and state["phase"] == "complete"
+            and state["enrollment_sha256"] == sha(decode_file(files, "enrollment.json", False))
+            and state["deadline_ms"] - state["started_at_ms"] == enrolled["total_seconds"] * 1000 == 3000000
+            and enrolled["worker_seconds"] == enrolled["round_seconds"] == 600
+            and enrolled["portable_receipts"] is True and enrolled["cancellation_cleanup_grace_seconds"] == 30
+            and result["operation"] == "compute_policy_cycle" and result["complete"] is True
+            and result["started_at_ms"] == state["started_at_ms"] and result["deadline_ms"] == state["deadline_ms"]
+            and result["assessment_sha256"] == state["assessment_sha256"] == sha(assessment)
+            and result["round_sha256"] == state["round_sha256"] == sha(original_round)
+            and result["assessment_bundle_sha256"] == state["bundle_sha256"] == sha(bundle)
+            and result["assessment"] == strict_json(assessment) and result["round"] == strict_json(original_round)
+            and result == stdout and result["planned_jobs"] == result["provider_signed_claims_replayed"] == 4
+            and result["portable_receipts"] is True and result["original_jobs_never_replaced"] is True
+            and result["publication_receipts_are_historical"] is True
+            and all(result[name] is False for name in ("current_availability_proven", "network_policy_activation",
+                "local_object_policy_applied", "authority_private_keys_loaded", "private_keys_transferred",
+                "semantic_correctness_proven")) and result["legal_status"] == "not_determined"
+            and status == dict(operation="compute_policy_cycle", complete=True, phase="complete",
+                result_sha256=sha(decode_file(files, "result.json", False)), deadline_ms=state["deadline_ms"]),
+            "cycle did not retain its complete original children, bundle and finite deadline")
+
+
+def check_cycle(proof, originals, rounds, model_observation, follow, result, requester, probe):
+    files = proof["files"]
+    check_cycle_records(files, originals, rounds["files"], proof["stdout"])
+    enrolled, state = decode_file(files, "enrollment.json"), decode_file(files, "state.json")
+    work = Path(rounds["before"]["work"])
+    assessment, round_enrollment = decode_file(originals, "enrollment.json"), decode_file(rounds["files"], "enrollment.json")
+    scope, preview = result["decision"]["scope"], proof["preview"]
+    require(enrolled["directory"] == str(cycle_root(work)) and enrolled["requester_key"] == requester
+            and enrolled["source_publisher_key"] == scope["source_publisher_key"]
+            and enrolled["source_manifest_id"] == scope["source_manifest_id"]
+            and enrolled["source_name"] == "disposable-policy-subject" and enrolled["reuse_cache"] is False
+            and enrolled["cache"] == str(source_path(work) / "policy-source-cache")
+            and enrolled["publication_key"] == assessment["publisher_key"] == round_enrollment["publication_key"]
+            and enrolled["provider_keys"] == assessment["providers"]
+            and enrolled["model_profile"] == "smollm2-360m-v1" and enrolled["license"] == "CC0-1.0"
+            and enrolled["authorities"] == round_enrollment["authorities"]
+            and enrolled["publication_provider_keys"] == round_enrollment["publication_provider_keys"]
+            and enrolled["policy_config"] == round_enrollment["policy_config"]
+            and enrolled["request_name"] == round_enrollment["request_name"]
+            and enrolled["publish_name"] == round_enrollment["publish_name"]
+            and enrolled["decision_revision"] == round_enrollment["decision_revision"] == 1
+            and strict_json(decode_file(files, "assessment.bundle", False)) == bundle_projection(originals, requester),
+            "cycle enrollment or its automatically formed bundle changed original selections")
+    require(preview["operation"] == "compute_policy_cycle" and preview["execute"] is False
+            and preview["requires_prebuilt_assessment_bundle"] is False and preview["planned_jobs"] == 4
+            and preview["framework_sha256"] == scope["framework_sha256"]
+            and preview["worker_seconds"] == preview["round_seconds"] == 600 and preview["total_seconds"] == 3000,
+            "cold follower was not pinned by the original inert cycle preview")
+    observation, early = proof["observation"], proof["source_ready"]
+    window = decode_file(rounds["files"], "window.json")
+    early_state = decode_file({"state": early["state"]}, "state")
+    require(proof["exit_status"] == 0 and proof["owner_ended"] is True
+            and observation == rounds["observation"] and observation["owner"] == model_observation["owner"] == early["owner"]
+            and "policy-cycle" in observation["argv"] and str(cycle_root(work)) in observation["argv"]
+            and "policy-round" not in observation["argv"] and "--assessment-bundle" not in observation["argv"]
+            and rounds["before"]["cycle_absent"] is True and early["round_absent"] is True
+            and rounds["before"]["observed_at_ms"] <= follow["before"]["observed_at_ms"] <= state["started_at_ms"]
+            and early_state["phase"] == "assessment" and early_state["started_at_ms"] == state["started_at_ms"]
+            and early_state["deadline_ms"] == state["deadline_ms"]
+            and state["started_at_ms"] <= early["observed_at_ms"] <= probe["observed_at_ms"] < window["started_at_ms"]
+            and window["deadline_ms"] - window["started_at_ms"] == 600000
+            and window["started_at_ms"] < proof["collected_at_ms"] < state["deadline_ms"],
+            "cycle/four-model owner, cold-first ordering or original deadline was replaced")
+    for name in ("enrollment.json", "subject-download.json"):
+        require(decode_file(early["files"], name, False) == decode_file(originals, name, False),
+                "early source probe did not retain the cycle's original input")
 
 
 def round_request(raw, bundle, proposal):
@@ -599,7 +731,7 @@ def round_unit(node):
 
 def round_process(work, pid, node, command, directory):
     proc = Path(f"/proc/{pid}")
-    owner = root_path(work).parent.stat().st_uid
+    owner = source_path(work).stat().st_uid
     argv = [part.decode() for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
     require(Path(os.readlink(proc / "exe")).name == "volparossa" and command in argv
             and str(directory) in argv and proc.stat().st_uid == owner != 0,
@@ -624,8 +756,8 @@ def round_process(work, pid, node, command, directory):
 
 def round_before(work):
     JOBS["guest_work"](work)
-    source, owner = root_path(work).parent, root_path(work).parent.stat().st_uid
-    require(not os.path.lexists(round_root(work))
+    source, owner = source_path(work), source_path(work).stat().st_uid
+    require(not os.path.lexists(cycle_root(work))
             and not any(source.glob("policy-authority-*")), "Client contains policy signer keys or a previous round")
     authorities = []
     for index in range(3):
@@ -662,7 +794,7 @@ def round_before(work):
     journal = public_file(state / "object-policy/journal.json", owner)
     require(strict_json(journal) == {"version": 1, "entries": []}, "receiver already had a policy decision")
     write(record(work, "round-before"), dict(work=str(work), observed_at_ms=time.time_ns() // 1000000,
-        authorities=authorities, client_authority_keys_absent=True, round_absent=True,
+        authorities=authorities, client_authority_keys_absent=True, round_absent=True, cycle_absent=True,
         receiver=dict(node=node, journal_hex=journal.hex(), custody_directory=[custody.stat().st_dev, custody.stat().st_ino],
             chunks=sorted(path.name for path in custody.iterdir() if re.fullmatch(r"[0-9a-f]{64}", path.name)))))
 
@@ -676,16 +808,16 @@ def round_observe(work, pid):
             try:
                 proc = Path(f"/proc/{member['pid']}")
                 argv = (proc / "cmdline").read_bytes().split(b"\0")
-                if Path(os.readlink(proc / "exe")).name != "volparossa" or b"policy-round" not in argv:
+                if Path(os.readlink(proc / "exe")).name != "volparossa" or b"policy-cycle" not in argv:
                     continue
-                observed = round_process(work, member["pid"], "client", "policy-round", round_root(work))
+                observed = round_process(work, member["pid"], "client", "policy-cycle", cycle_root(work))
                 observed.update(owner=owner, owned_processes=TRAIN["descendants"](pid))
                 write(record(work, "round-observation"), observed)
                 return
             except FileNotFoundError:
                 continue
         time.sleep(.025)
-    raise ValueError("actual original policy-round coordinator was not observed")
+    raise ValueError("actual original policy-cycle coordinator was not observed")
 
 
 def round_collect(work, pid, exit_status):
@@ -694,7 +826,7 @@ def round_collect(work, pid, exit_status):
     require(observation["owner"]["pid"] == pid and exit_status == 0
             and all(not JOBS["alive"](item) for item in [observation["owner"], observation["process"], *observation["owned_processes"]]),
             "coordinator did not finish successfully and reap its original processes")
-    root, owner = round_root(work), root_path(work).parent.stat().st_uid
+    root, owner = round_root(work), source_path(work).stat().st_uid
     names = ["enrollment.json", "window.json", "status.json", "assessment.bundle", "request.bin", "request.manifest",
              "quorum.json", "result.json",
              "proposal/assessment.bundle", "proposal/selection.json", "proposal/proposal.bin",
@@ -814,7 +946,7 @@ def check_round(proof, bundle, proposal_raw, decision_raw, trust, layout, peers)
     expected_selection = decode_file(files, "proposal/selection.json")
     require(enrollment["selection"] == decode_file(files, "combined/selection.json") == expected_selection
             and enrollment["assessment_sha256"] == sha(bundle) and enrollment["decision_revision"] == body[5] == 1
-            and enrollment["assessment_bundle"] == str(source / "policy-bundle-fetch/assessment.bundle")
+            and enrollment["assessment_bundle"] == str(cycle_root(work) / "assessment.bundle")
             and enrollment["policy_config"] == str(work / "config-client.yaml")
             and enrollment["request_name"] == "disposable-policy-request" and enrollment["publish_name"] == "disposable-object-policy"
             and window["deadline_ms"] - window["started_at_ms"] == enrollment["max_seconds"] * 1000
@@ -959,7 +1091,7 @@ def check_object_probe(probe, phase, result):
 def object_probe(work, phase, status):
     JOBS["guest_work"](work)
     require(phase in ("before", "applied", "restarted"), "unknown object probe")
-    source = root_path(work).parent
+    source = source_path(work)
     output = source / f"policy-object-{phase}.txt"
     raw = public_file(output, source.stat().st_uid) if output.exists() else None
     pid = int(JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value",
@@ -970,13 +1102,20 @@ def object_probe(work, phase, status):
         output_bytes=len(raw) if raw is not None else None, output_sha256=sha(raw) if raw is not None else None,
         agent=JOBS["identity"](pid), namespace=os.readlink(f"/proc/{pid}/ns/net"))
     write(record(work, "object-probe-" + phase), observed)
-    check_object_probe(observed, phase, read(record(work, "result")))
+    if phase == "before":
+        # The actual cycle has fetched its source, but no model result or quorum exists yet.
+        enrolled = read(root_path(work) / "enrollment.json")
+        require(not os.path.lexists(round_root(work)), "before probe ran after authority round started")
+        result = {"decision": {"scope": enrolled["scope"]}}
+    else:
+        result = read(record(work, "result"))
+    check_object_probe(observed, phase, result)
 
 
 def object_collect(work, phase):
     JOBS["guest_work"](work)
     require(phase in ("before", "after"), "unknown object collection phase")
-    source = root_path(work).parent
+    source = source_path(work)
     owner = source.stat().st_uid
     require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
             "object authority flow altered original model work")
@@ -1080,7 +1219,7 @@ def object_peer_context(work):
     node = read(work / "agent-jobs-layout.json")["provider_nodes"][0]
     require(node in ("relay3", "relay4", "relay5"), "wrong independent object-policy receiver")
     root = work / f"state-{node}/policy-object-receiver"
-    owner = root_path(work).parent.stat().st_uid
+    owner = source_path(work).stat().st_uid
     info = root.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == owner and stat.S_IMODE(info.st_mode) == 0o700,
             "unsafe object receiver directory")
@@ -1091,7 +1230,7 @@ def object_peer_context(work):
 
 def object_peer_pins(work):
     JOBS["guest_work"](work)
-    source = root_path(work).parent
+    source = source_path(work)
     raw = public_file(round_root(work) / "combined/decision.bin", source.stat().st_uid)
     trust = read(work / "policy-maintainers.json")
     public = {hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(item["public_key_hex"])).digest():
@@ -1111,7 +1250,7 @@ def object_peer_pins(work):
 def object_peer_before(work):
     JOBS["guest_work"](work)
     node, root, owner, agent, namespace = object_peer_context(work)
-    source = root_path(work).parent
+    source = source_path(work)
     raw = public_file(round_root(work) / "publication/decision.bin", owner)
     manifest = public_file(root / "decision.manifest", owner)
     subject = public_file(root / "subject.manifest", owner)
@@ -1136,7 +1275,7 @@ def object_peer_before(work):
 def object_peer_received(work):
     JOBS["guest_work"](work)
     node, root, owner, agent, namespace = object_peer_context(work)
-    source = root_path(work).parent
+    source = source_path(work)
     raw = public_file(root / "decision.bin", owner)
     require(raw == public_file(round_root(work) / "combined/decision.bin", owner)
             == public_file(round_root(work) / "publication/decision.bin", owner),
@@ -1153,14 +1292,14 @@ def object_peer_received(work):
 
 
 def follow_paths(work):
-    source = root_path(work).parent
+    source = source_path(work)
     return source / "policy-object-follow", source / "policy-object-follow-cache", \
         round_root(work) / "publication"
 
 
 def follow_snapshot(work):
     directory, _, _ = follow_paths(work)
-    owner = root_path(work).parent.stat().st_uid
+    owner = source_path(work).stat().st_uid
     files = {name: public_file(directory / name, owner).hex()
              for name in ("enrollment.json", "state.json", "status.json")}
     state, status = (strict_json(bytes.fromhex(files[name])) for name in ("state.json", "status.json"))
@@ -1185,7 +1324,7 @@ def follow_observe(work, pid, applied):
     JOBS["guest_work"](work)
     owner = JOBS["identity"](pid)
     directory, cache, publication = follow_paths(work)
-    node_owner = root_path(work).parent.stat().st_uid
+    node_owner = source_path(work).stat().st_uid
     deadline = time.monotonic() + 150
     while time.monotonic() < deadline:
         require(JOBS["alive"](owner), "original policy follower exited before its required phase")
@@ -1257,7 +1396,7 @@ def object_follow_collect(work, pid, status):
             and final["files"]["enrollment.json"] == before["files"]["enrollment.json"],
             "stopping changed the original applied policy or enrollment")
     _, _, publication = follow_paths(work)
-    owner = root_path(work).parent.stat().st_uid
+    owner = source_path(work).stat().st_uid
     proof = dict(**final, before=before, observed=observed,
         publication_files={name: public_file(publication / name, owner).hex()
                            for name in ("selection.json", "decision.bin", "publication.manifest", "publication.json")},
@@ -1311,7 +1450,7 @@ def check_object_follow(value, raw, result, layout, peers):
                 6: hashlib.sha256(raw).digest()}, "peer wrapper changed content, publisher or original expiry")
     verify_signature(native[1], native[2], native_body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
     publication, custody = value["publication"], value["custody"]
-    work = Path(publication["manifest"]).parents[4]
+    work = Path(publication["manifest"]).parents[5]
     scope = result["decision"]["scope"]
     require(value["enrollment"] == dict(version=1, scope="selected_channel_exact_object",
         policy_config=str(work / "config-client.yaml"),
@@ -1461,7 +1600,7 @@ def check_object_peer(value, local, result, layout, peers):
             provider_signed_claims_replayed=0, model_execution=False, semantic_correctness_proven=False)
         require(all(report.get(key) == item for key, item in expected.items()), "publication/import changed authority or claims")
     imported_selection = strict_json(bytes.fromhex(originals["files"]["selection.json"]))
-    require(imported_selection == dict(version=1, policy_config=str(Path(publication["manifest"]).parents[4] / f"config-{node}.yaml"),
+    require(imported_selection == dict(version=1, policy_config=str(Path(publication["manifest"]).parents[5] / f"config-{node}.yaml"),
             decision_sha256=sha(raw), **pins), "import did not use receiver's own configuration/exact pins")
     require(originals["journal_hex"] == local["originals"]["journal_hex"]
             and strict_json(bytes.fromhex(originals["files"]["apply-receipt.json"]))
@@ -1643,6 +1782,8 @@ def check_evidence(value, revision):
     check_object_activation(value["object_activation"], result, value["transfer"], files, value["layout"], value["peers"])
     follow = value["object_activation"]["originals"]["follow"]
     round_proof = value["object_activation"]["originals"]["round"]
+    check_cycle(value["cycle"], files, round_proof, value["observation"], follow, result, requester,
+                value["object_activation"]["probes"]["before"])
     check_object_follow(follow, decode_file(round_proof["files"], "combined/decision.bin", False),
                         result, value["layout"], value["peers"])
     check_object_peer(value["object_peer"], value["object_activation"], result, value["layout"], value["peers"])
@@ -1674,6 +1815,7 @@ def evidence(work, revision):
         requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
         object_activation=read(record(work, "object-activation"), 40 * 1048576),
         object_peer=read(record(work, "remote-object-proof"), 8 * 1048576),
+        cycle=read(record(work, "cycle-proof"), 8 * 1048576),
         stopped=read(record(work, "stopped")), layout=read(work / "agent-jobs-layout.json"),
         round_cleanup=read(record(work, "round-cleanup")),
         peers=read(work / "a01-expected-peers.json"), cleanup=read(work / "agent-jobs-private-cleanup.json"),
@@ -1698,6 +1840,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         local_object_policy_applied=proof is not None,
         automatic_named_policy_follow_applied=proof is not None,
         automatic_three_node_policy_round_completed=proof is not None,
+        automatic_source_to_quorum_policy_cycle_completed=proof is not None,
         second_node_object_policy_applied=proof is not None,
         object_outcome=proof["result"]["decision"]["outcome"] if proof is not None else None,
         object_access_branch=("allow_exact_cached_access" if proof["result"]["decision"]["outcome"] == "allow"
@@ -1713,6 +1856,7 @@ def check_report(value, revision):
             and value["local_object_policy_applied"] is True
             and value["automatic_named_policy_follow_applied"] is True
             and value["automatic_three_node_policy_round_completed"] is True
+            and value["automatic_source_to_quorum_policy_cycle_completed"] is True
             and value["second_node_object_policy_applied"] is True
             and value["object_outcome"] == value["evidence"]["result"]["decision"]["outcome"]
             and value["object_access_branch"] == ("allow_exact_cached_access" if value["object_outcome"] == "allow"
@@ -1737,6 +1881,40 @@ def self_test():
             checked_rejections += 1
         else:
             raise ValueError("structured inference mutation accepted")
+
+    def retained(value):
+        raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
+
+    # Pure storage-binding example only: it is never submitted as model or authority evidence.
+    cycle_assessment = {"result.json": retained({"synthetic_storage_test": "assessment"})}
+    cycle_round = {"result.json": retained({"synthetic_storage_test": "round"})}
+    cycle_files = {"enrollment.json": retained(dict(total_seconds=3000, worker_seconds=600,
+        round_seconds=600, portable_receipts=True, cancellation_cleanup_grace_seconds=30)),
+        "assessment.bundle": retained({"synthetic_storage_test": "bundle"})}
+    cycle_state = dict(version=1, phase="complete", started_at_ms=1000, deadline_ms=3001000,
+        enrollment_sha256=cycle_files["enrollment.json"]["sha256"],
+        assessment_sha256=cycle_assessment["result.json"]["sha256"],
+        round_sha256=cycle_round["result.json"]["sha256"], bundle_sha256=cycle_files["assessment.bundle"]["sha256"])
+    cycle_result = dict(operation="compute_policy_cycle", complete=True, started_at_ms=1000, deadline_ms=3001000,
+        assessment=decode_file(cycle_assessment, "result.json"), assessment_sha256=cycle_state["assessment_sha256"],
+        round=decode_file(cycle_round, "result.json"), round_sha256=cycle_state["round_sha256"],
+        assessment_bundle_sha256=cycle_state["bundle_sha256"], planned_jobs=4, provider_signed_claims_replayed=4,
+        portable_receipts=True, original_jobs_never_replaced=True, publication_receipts_are_historical=True,
+        current_availability_proven=False, network_policy_activation=False, local_object_policy_applied=False,
+        authority_private_keys_loaded=False, private_keys_transferred=False, semantic_correctness_proven=False,
+        legal_status="not_determined")
+    cycle_files.update({"state.json": retained(cycle_state), "result.json": retained(cycle_result)})
+    cycle_files["status.json"] = retained(dict(operation="compute_policy_cycle", complete=True, phase="complete",
+        deadline_ms=3001000, result_sha256=cycle_files["result.json"]["sha256"]))
+    check_cycle_records(cycle_files, cycle_assessment, cycle_round, cycle_result)
+    for filename, replacement in (("state.json", {**cycle_state, "phase": "round"}),
+                                   ("state.json", {**cycle_state, "deadline_ms": 3601000}),
+                                   ("assessment.bundle", {"synthetic_storage_test": "substituted"}),
+                                   ("result.json", {**cycle_result, "assessment_sha256": "00" * 32}),
+                                   ("status.json", {})):
+        bad = {**cycle_files, filename: retained(replacement)}
+        rejects(check_cycle_records, bad, cycle_assessment, cycle_round, cycle_result)
 
     # Inert numeric/byte controls only; no synthetic outcome is submitted to agents.
     field = protobuf_value
@@ -2007,10 +2185,10 @@ def main():
         globals()[args[0]](Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
-    elif len(args) == 3 and args[0] == "round_observe":
-        round_observe(Path(args[1]), int(args[2]))
-    elif len(args) == 4 and args[0] == "round_collect":
-        round_collect(Path(args[1]), int(args[2]), int(args[3]))
+    elif len(args) == 3 and args[0] in ("round_observe", "cycle_source_ready"):
+        globals()[args[0]](Path(args[1]), int(args[2]))
+    elif len(args) == 4 and args[0] in ("round_collect", "cycle_collect"):
+        globals()[args[0]](Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 4 and args[0] == "object_probe":
         object_probe(Path(args[1]), args[2], int(args[3]))
     elif len(args) == 3 and args[0] == "object_collect":

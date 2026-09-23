@@ -12,14 +12,26 @@ agent_policy_assessment_cli() {
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" "$@"
 }
 
-agent_policy_object_cli() {
-    policy_object_command=$1
-    shift
-    agent_policy_assessment_cli compute peer "$policy_object_command" \
-        --assessment-bundle "$jobs_source/policy-bundle-fetch/assessment.bundle" \
+agent_policy_cycle_cli() {
+    set -- "$@"
+    policy_authority=0
+    for policy_node in relay3 relay4 relay5; do
+        policy_authority_key=$(jq -er '.public_key_hex' "$WORK/agent-policy-assessment-object-authority-$policy_authority.json")
+        policy_transport_key=$(jq -er '.identity_public_key_hex' "$WORK/agent-policy-assessment-authority-$policy_authority-public.json")
+        set -- "$@" --authority "$policy_authority_key:$policy_transport_key:disposable-policy-reply-$policy_authority"
+        policy_authority=$((policy_authority + 1))
+    done
+    agent_policy_assessment_cli compute peer policy-cycle \
         --policy-config "$WORK/config-client.yaml" --requester-key "$policy_requester" \
         --source-publisher-key "$jobs_publisher" --source-manifest-id "$policy_manifest" \
-        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --model-profile smollm2-360m-v1 "$@"
+        --source-name disposable-policy-subject --cache "$jobs_source/policy-source-cache" \
+        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --model-profile smollm2-360m-v1 \
+        --publication-key "$jobs_publisher" --identity "$jobs_source/identity.key" \
+        --passphrase-file "$jobs_source/passphrase" --license CC0-1.0 \
+        --request-name disposable-policy-request --publish-name disposable-object-policy --decision-revision 1 \
+        --publication-provider-key "$jobs_key_a" --directory "$jobs_source/policy-cycle" \
+        --worker-seconds 600 --round-seconds 600 --total-seconds 3000 --poll-seconds 1 \
+        --quota-bytes 16777216 --max-entries 64 --min-free-bytes 268435456 "$@"
 }
 
 agent_policy_object_probe() {
@@ -80,7 +92,7 @@ agent_policy_authorities_start() {
             --property=PrivateMounts=yes --property=PrivateTmp=yes --property=PrivateDevices=yes \
             --property=ProtectSystem=strict --property=ProtectHome=yes \
             --property="ReadWritePaths=$policy_owner_source" --property="InaccessiblePaths=$policy_hidden" \
-            --property=KillMode=control-group --property=TimeoutStopSec=20s --property=RuntimeMaxSec=900s \
+            --property=KillMode=control-group --property=TimeoutStopSec=20s --property=RuntimeMaxSec=3600s \
             --property="StandardOutput=append:$WORK/agent-policy-assessment-authority-$policy_authority-summary.json" \
             --property="StandardError=append:$WORK/agent-policy-assessment-authority-$policy_authority-stderr.err" \
             -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-$policy_node/control/agent.sock" \
@@ -107,6 +119,13 @@ agent_policy_authorities_stop() {
 }
 
 agent_policy_owners_stop() {
+    if [ -n "${policy_model_observer_pid:-}" ]; then
+        if kill -0 "$policy_model_observer_pid" 2>/dev/null; then
+            kill -TERM "$policy_model_observer_pid" || return 1
+        fi
+        wait "$policy_model_observer_pid" || true
+        policy_model_observer_pid=
+    fi
     if [ -n "${policy_follow_pid:-}" ]; then
         if kill -0 "$policy_follow_pid" 2>/dev/null; then
             kill -INT "$policy_follow_pid" || return 1
@@ -117,35 +136,45 @@ agent_policy_owners_stop() {
     agent_policy_authorities_stop
 }
 
-agent_policy_round_run() {
-    PHASE=agent-policy-assessment-automatic-round
-    set --
-    policy_authority=0
-    for policy_node in relay3 relay4 relay5; do
-        policy_authority_key=$(jq -er '.public_key_hex' "$WORK/agent-policy-assessment-object-authority-$policy_authority.json")
-        policy_transport_key=$(jq -er '.identity_public_key_hex' "$WORK/agent-policy-assessment-authority-$policy_authority-public.json")
-        set -- "$@" --authority "$policy_authority_key:$policy_transport_key:disposable-policy-reply-$policy_authority"
-        policy_authority=$((policy_authority + 1))
-    done
-    agent_policy_object_cli policy-round "$@" --publication-key "$jobs_publisher" \
-        --identity "$jobs_source/identity.key" --passphrase-file "$jobs_source/passphrase" \
-        --request-name disposable-policy-request --publish-name disposable-object-policy --decision-revision 1 \
-        --publication-provider-key "$jobs_key_a" --directory "$jobs_source/policy-round" \
-        --max-seconds 600 --poll-seconds 1 --quota-bytes 16777216 --max-entries 64 --min-free-bytes 268435456 --execute \
-        >"$WORK/agent-policy-assessment-round.json" 2>"$WORK/agent-policy-assessment-round.err" &
+agent_policy_cycle_run() {
+    PHASE=agent-policy-assessment-automatic-cycle
+    agent_policy_cycle_cli --execute \
+        >"$WORK/agent-policy-assessment-cycle.json" 2>"$WORK/agent-policy-assessment-cycle.err" &
     jobs_batch_pid=$!
     policy_round_pid=$jobs_batch_pid
+    python3 -B "$policy_script" observe "$WORK" "$policy_round_pid" \
+        >"$WORK/agent-policy-assessment-observer.log" 2>"$WORK/agent-policy-assessment-observer.err" &
+    policy_model_observer_pid=$!
     policy_round_observer=0
     python3 -B "$policy_script" round_observe "$WORK" "$policy_round_pid" || policy_round_observer=$?
+    if [ "$policy_round_observer" -eq 0 ]; then
+        python3 -B "$policy_script" cycle_source_ready "$WORK" "$policy_round_pid" \
+            || fail POLICY_CYCLE_ORIGINAL_SOURCE_NOT_OBSERVED
+        agent_policy_object_probe before
+    fi
     if [ "$policy_round_observer" -ne 0 ] && kill -0 "$policy_round_pid" 2>/dev/null; then
         kill -INT "$policy_round_pid" || true
     fi
+    policy_observer_status=0
+    wait "$policy_model_observer_pid" || policy_observer_status=$?
+    policy_model_observer_pid=
     policy_round_status=0
     wait "$policy_round_pid" || policy_round_status=$?
     jobs_batch_pid=
     agent_policy_authorities_stop || fail POLICY_AUTHORITY_CLEANUP_FAILED
+    python3 -B "$policy_script" collect "$WORK" \
+        2>"$WORK/agent-policy-assessment-collect.err" || fail POLICY_RETAINED_EVIDENCE_INVALID
+    [ "$policy_observer_status" -eq 0 ] || fail POLICY_FOUR_REAL_WORKERS_NOT_OBSERVED
+    [ "$policy_round_status" -eq 0 ] || fail POLICY_AUTOMATIC_CYCLE_INCOMPLETE
+    # Literal original product files, not reconstructed stand-in CLI reports.
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 "$policy_root/result.json" \
+        "$WORK/agent-policy-assessment-result.json"
+    install -o "$AGENT_UID" -g "$AGENT_GID" -m 0600 "$jobs_source/policy-cycle/round/result.json" \
+        "$WORK/agent-policy-assessment-round.json"
     python3 -B "$policy_script" round_collect "$WORK" "$policy_round_pid" "$policy_round_status" \
         || fail POLICY_AUTOMATIC_QUORUM_ORIGINALS_INVALID
+    python3 -B "$policy_script" cycle_collect "$WORK" "$policy_round_pid" "$policy_round_status" \
+        || fail POLICY_AUTOMATIC_CYCLE_ORIGINALS_INVALID
     [ "$policy_round_observer" -eq 0 ] || fail POLICY_AUTHORITY_PROCESSES_NOT_OBSERVED
     [ "$policy_round_status" -eq 0 ] || fail POLICY_AUTOMATIC_QUORUM_INCOMPLETE
 }
@@ -195,7 +224,7 @@ agent_policy_object_peer_transfer() {
     policy_subject_sha256=$(jq -er '.subject_sha256' "$policy_peer_pins")
     policy_decision_hash=$(jq -er '.decision_hash' "$policy_peer_pins")
     policy_evidence_sha256=$(jq -er '.evidence_sha256' "$policy_peer_pins")
-    policy_publication=$jobs_source/policy-round/publication
+    policy_publication=$jobs_source/policy-cycle/round/publication
     policy_peer_root=$WORK/state-$provider_node_a/policy-object-receiver
     if [ -e "$policy_peer_root" ] || [ -L "$policy_peer_root" ]; then
         fail POLICY_OBJECT_PEER_NOT_FRESH
@@ -250,15 +279,15 @@ agent_policy_object_follow_start() {
     [ -z "${jobs_batch_pid:-}" ] || fail POLICY_FOLLOW_OWNER_ALREADY_RUNNING
     policy_follow_directory=$jobs_source/policy-object-follow
     policy_follow_cache=$jobs_source/policy-object-follow-cache
-    policy_follow_publication=$jobs_source/policy-round/publication
+    policy_follow_publication=$jobs_source/policy-cycle/round/publication
     policy_subject_publisher=$jobs_publisher
-    policy_subject_sha256=$(jq -er '.decision.scope.source_sha256' "$WORK/agent-policy-assessment-result.json")
-    policy_framework=$(jq -er '.decision.scope.framework_sha256' "$WORK/agent-policy-assessment-result.json")
+    policy_subject_sha256=$(jq -er '.sha256' "$WORK/agent-policy-assessment-input.json")
+    policy_framework=$(jq -er '.framework_sha256' "$WORK/agent-policy-assessment-cycle-preview.json")
     policy_follow_agent=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
     case $policy_follow_agent in ''|0|*[!0-9]*) fail POLICY_FOLLOW_CLIENT_MISSING ;; esac
     # GNU timeout owns one original unprivileged coordinator, in the real Client's masked
     # mount/network namespaces. The policy cleanup owns this PID separately from the coordinator.
-    timeout --signal=INT --kill-after=15s 900s nsenter --target "$policy_follow_agent" --mount --net \
+    timeout --signal=INT --kill-after=15s 3600s nsenter --target "$policy_follow_agent" --mount --net \
         setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
         --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
         -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
@@ -330,12 +359,13 @@ agent_policy_object_peer_activate() {
 
 agent_policy_assessment_run() {
     policy_script=$source_directory/tests/integration/agent-policy-assessment-smoke.py
-    policy_root=$jobs_source/policy-assessment
+    policy_root=$jobs_source/policy-cycle/assessment
     PHASE=agent-policy-assessment-publication
     printf '%s\n' \
         'Disposable guest only: publish one synthetic CC0 text, fetch its exact chunks through a protected peer route, execute two bounded principle assessments and two cross-reviews with the pinned 360M/JSON runtime, and retain original signed results and actual JSON-boundary/EOS termination.' \
-        'Publish, deposit and fetch their unchanged bundle into a new cache on the same Client. Three separately enrolled authority owners on R3/R4/R5 each hold exactly one existing development policy identity; the Client coordinator has none.' \
-        'Start the enrolled Client follower cold, then one policy-round command delivers the original assessment/proposal through protected custody to all three local inboxes, retrieves their independently replayed endorsements, verifies the original quorum and deposits its original named wrapper on R4.' \
+        'Three separately enrolled authority owners on R3/R4/R5 each hold exactly one existing development policy identity; the Client cycle owner has none.' \
+        'Start the enrolled Client follower cold, then one policy-cycle command fetches the selected source, completes four original model jobs, verifies their portable bundle and automatically delivers the original request through protected custody to three local inboxes, retrieves endorsements, verifies quorum and deposits the original named wrapper on R4.' \
+        'After the cycle completes, publish/deposit/fetch its unchanged assessment bundle as a separate transport check without further model jobs.' \
         'Require automatic follower retrieval/application, stop and reap all authority/follower owners, replay the original four model jobs offline, test cached access and independent Client/provider restart persistence, and clean all owned resources.' \
         'No canned verdicts, additional model tasks, private signing-key transfer, production policy keys, global-policy activation or legal-correctness claim.'
     setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
@@ -362,29 +392,13 @@ agent_policy_assessment_run() {
         --cache "$jobs_source/policy-publication-cache" --provider-key "$jobs_key_a" \
         >"$WORK/agent-policy-assessment-deposit.json" 2>"$WORK/agent-policy-assessment-deposit.err" \
         || fail POLICY_SUBJECT_DEPOSIT_FAILED
-    PHASE=agent-policy-assessment-peer-reasoning
-    agent_policy_assessment_cli compute peer policy-assess --output "$policy_root" \
-        --source-publisher-key "$jobs_publisher" --source-name disposable-policy-subject \
-        --source-manifest-id "$policy_manifest" --cache "$jobs_source/policy-source-cache" \
-        --publisher-key "$jobs_publisher" --identity "$jobs_source/identity.key" \
-        --passphrase-file "$jobs_source/passphrase" --license CC0-1.0 \
-        --provider-key "$jobs_key_a" --provider-key "$jobs_key_b" --max-seconds 600 --portable-receipts --execute \
-        >"$WORK/agent-policy-assessment-result.json" 2>"$WORK/agent-policy-assessment-result.err" &
-    jobs_batch_pid=$!
-    policy_observer_status=0
-    python3 -B "$policy_script" observe "$WORK" "$jobs_batch_pid" \
-        >"$WORK/agent-policy-assessment-observer.log" 2>"$WORK/agent-policy-assessment-observer.err" \
-        || policy_observer_status=$?
-    if [ "$policy_observer_status" -ne 0 ] && kill -0 "$jobs_batch_pid" 2>/dev/null; then
-        kill -INT "$jobs_batch_pid" 2>/dev/null || true
-    fi
-    policy_owner_status=0
-    wait "$jobs_batch_pid" || policy_owner_status=$?
-    jobs_batch_pid=
-    python3 -B "$policy_script" collect "$WORK" \
-        2>"$WORK/agent-policy-assessment-collect.err" || fail POLICY_RETAINED_EVIDENCE_INVALID
-    [ "$policy_observer_status" -eq 0 ] || fail POLICY_FOUR_REAL_WORKERS_NOT_OBSERVED
-    [ "$policy_owner_status" -eq 0 ] || fail POLICY_REASONING_INCOMPLETE
+    agent_policy_authorities_start
+    agent_policy_cycle_cli >"$WORK/agent-policy-assessment-cycle-preview.json" \
+        2>"$WORK/agent-policy-assessment-cycle-preview.err" || fail POLICY_CYCLE_PREVIEW_INVALID
+    agent_policy_object_follow_start
+    agent_policy_cycle_run
+    agent_policy_object_follow_finish
+    agent_policy_object_peer_transfer
     PHASE=agent-policy-assessment-bundle-roundtrip
     policy_pack=$jobs_source/policy-bundle-publication
     agent_policy_assessment_cli compute peer policy-pack --assessment "$policy_root" --output "$policy_pack" \
@@ -409,12 +423,6 @@ agent_policy_assessment_run() {
         >"$WORK/agent-policy-assessment-fetch.json" 2>"$WORK/agent-policy-assessment-fetch.err" \
         || fail POLICY_BUNDLE_FETCH_FAILED
     python3 -B "$policy_script" transfer "$WORK" || fail POLICY_BUNDLE_ROUNDTRIP_INVALID
-    agent_policy_object_probe before
-    agent_policy_authorities_start
-    agent_policy_object_follow_start
-    agent_policy_round_run
-    agent_policy_object_peer_transfer
-    agent_policy_object_follow_finish
     content_custody_phase_finish 4
     benchmark_disconnect_route agent-jobs || fail POLICY_ROUTE_CLEANUP_FAILED
     PHASE=agent-policy-assessment-offline-replay

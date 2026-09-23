@@ -1,5 +1,6 @@
 //! Explicit public concept judgments, not whitelist-signing or enforcement authority.
 
+pub(super) mod cycle;
 mod execution;
 pub(super) mod object_policy;
 mod storage;
@@ -223,12 +224,27 @@ pub(super) async fn run_value(args: &Options, socket: &Path) -> Result<Value> {
         return Ok(planned);
     }
     let cancellation = Cancellation::new()?;
+    run_value_with_activity(args, socket, &cancellation.activity).await
+}
+
+/// A composing owner supplies the same cancellation receiver to every original
+/// stage. Await completion so retained jobs use their Cancel/observe protocol;
+/// cancelling the owner must not merely drop this future and lose those handles.
+pub(super) async fn run_value_with_activity(
+    args: &Options,
+    socket: &Path,
+    cancelled: &watch::Receiver<bool>,
+) -> Result<Value> {
+    let planned = preview(args)?;
+    if !args.execute {
+        return Ok(planned);
+    }
     let _lock = task::open_directory(&args.output, args.resume)?;
     if !args.resume {
-        enroll(args, socket, &cancellation.activity).await?;
+        enroll(args, socket, cancelled).await?;
     }
     let (enrollment, subject) = storage::load(&args.output)?;
-    let result = assess(args, socket, &enrollment, &subject, &cancellation.activity).await?;
+    let result = assess(args, socket, &enrollment, &subject, cancelled).await?;
     storage::retain_result(&args.output.join("result.json"), &result)?;
     if result["complete"] != true {
         return Err(IncompleteAssessment { result }.into());

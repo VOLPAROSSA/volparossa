@@ -35,21 +35,21 @@ const MAX_DECISION_BYTES: u64 = 8192;
 pub(crate) struct Selection {
     /// Existing portable four-transcript assessment package; never a caller-supplied verdict.
     #[arg(long)]
-    assessment_bundle: PathBuf,
+    pub(super) assessment_bundle: PathBuf,
     /// Existing node configuration. Trust and current policy are loaded through its normal loader.
     #[arg(long)]
-    policy_config: PathBuf,
+    pub(super) policy_config: PathBuf,
     #[arg(long, value_parser = parse_key)]
-    requester_key: VerifyingKey,
+    pub(super) requester_key: VerifyingKey,
     #[arg(long, value_parser = parse_key)]
-    source_publisher_key: VerifyingKey,
+    pub(super) source_publisher_key: VerifyingKey,
     #[arg(long, value_parser = parse_manifest)]
-    source_manifest_id: [u8; 32],
+    pub(super) source_manifest_id: [u8; 32],
     /// The two selected assessors, in their original order. Not policy signing authorities.
     #[arg(long, required = true, value_parser = parse_key)]
-    provider_key: Vec<VerifyingKey>,
+    pub(super) provider_key: Vec<VerifyingKey>,
     #[arg(long, default_value = "smollm2-360m-v1")]
-    model_profile: ModelProfile,
+    pub(super) model_profile: ModelProfile,
 }
 
 #[derive(Debug, Args)]

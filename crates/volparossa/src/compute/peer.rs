@@ -75,6 +75,8 @@ pub(crate) enum Command {
     PolicyRound(Box<policy_assessment::object_policy::round::Options>),
     /// Independently replay selected cached requests and offer this authority's endorsement.
     PolicyAuthority(Box<policy_assessment::object_policy::round::authority::Options>),
+    /// Assess one selected public object, cross-review it and publish its verified policy quorum.
+    PolicyCycle(Box<policy_assessment::cycle::Options>),
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +306,9 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         }
         Command::PolicyAuthority(args) => {
             return policy_assessment::object_policy::round::authority::run(&args, socket).await;
+        }
+        Command::PolicyCycle(args) => {
+            return Box::pin(policy_assessment::cycle::run(&args, socket)).await;
         }
     };
     println!("{}", serde_json::to_string(&report)?);

@@ -108,8 +108,38 @@ assessment bundle; automatic initiation of new model assessments is not claimed.
 focused policy, wire, registry, CLI and isolated custody-lifecycle checks pass locally. Strict
 Clippy passes for the five affected crates and the guarded development-identity helper. The
 disposable fixture now exercises three separate authority owners and a genuinely parallel cold
-follower; its inert checker passes with 86 rejection cases. That new network flow is **not yet
-proved by a live run**; the earlier automatic-consumer run proves a different, completed slice.
+follower; its inert checker passes with 86 rejection cases. The source-exact
+[three-authority trial on `75e7ff52`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35907082514)
+**failed overall** at the receiving agent's post-restart cache-access probe: it returned
+`CONTENT_INVALID` instead of the required `CONTENT_POLICY`. Original evidence nevertheless
+records four real model jobs, three separately owned endorsements, verified quorum publication,
+cold follower retrieval of 605 peer bytes with no origin bytes, and Client restart persistence.
+Its 100,994 privacy frames and cleanup/unchanged-host checks pass. The receiving-agent check
+remains failed; the original error does not identify the underlying cache error. The candidate
+fix authenticates a transfer manifest and checks its object policy before opening its cache,
+so a busy cache cannot mask a valid withholding decision. A real locked-cache test covers that
+ordering. Model reasoning errors and an `undetermined` final decision remain visible; this is
+not a claim of reliable semantic judgment or a passing full trial.
+
+A subsequent `compute peer policy-cycle` candidate removes the manual handoff between model
+work and that authority round. It acquires one independently selected public native source,
+executes the original two assessments and two cross-reviews, replays their exact signed bundle,
+and passes it directly to the existing independent-authority round. One durable enrollment
+binds all selections and the original total deadline. Resuming observes existing handles and
+may start previously unstarted subsequent stages, but never replaces ambiguous/submitted work.
+Cancellation reaches the existing job protocol; unconfirmed remote termination stays explicit.
+The current quorum is checked before model work and again by the signing round. No authority
+private key or human-supplied verdict enters the coordinator. The combined cycle's new live
+network proof is pending; earlier assessment/follower proofs do not establish this composition,
+reliable semantic judgment, automatic authority membership or B06 completion.
+The combined fixture requires the original source, four worker receipts, exact bundle, three
+authority owners and one original cycle deadline; its inert checker passes 91 rejection cases.
+All 31 focused assessment/round/cycle CLI tests and strict CLI Clippy pass. Five transfer tests
+pass, including policy refusal while the actual cache is locked. Named retrieval now waits FIFO
+behind an existing retrieval within its unchanged total deadline, rather than rejecting a
+source fetch when a follower is active. Two focused admission tests pass, covering serialization,
+requester disconnect and deadline cleanup; no detached waiting work or extra network jobs are used.
+Strict agent Clippy, scoped Rust formatting, fixture ShellCheck and topology shell syntax pass.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
