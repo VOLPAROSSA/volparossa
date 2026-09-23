@@ -184,7 +184,8 @@ the diagram does not imply that every source must be contacted.*
   receive ciphertext, not the recipient's decryption key.
 - **Shared DNS:** reuse independently validated positive DNSSEC evidence, preserving original
   authority and expiry rather than trusting an arbitrary peer's answer.
-- **Existing HTTPS:** supported cooperative-origin or origin-digest modes authenticate the origin
+- **Existing HTTPS:** supported cooperative-origin, origin-digest or
+  [checksum-file](docs/OPERATIONS.md#https-checksum-file-downloads) modes authenticate the origin
   before using peer content. No interception CA, TLS bypass or automatic sharing of private
   responses is introduced.
 

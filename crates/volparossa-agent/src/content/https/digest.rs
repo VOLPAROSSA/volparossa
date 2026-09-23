@@ -30,13 +30,19 @@ pub(super) async fn retrieve(
     request: HttpsContentFetchRequest,
     context: &ControlContext,
 ) -> Result<PreparedDownload, ContentError> {
-    if !request.origin_digest || !request.metadata_path.is_empty() {
+    let checksum_mode = !request.checksum_path.is_empty();
+    if request.origin_digest == checksum_mode || !request.metadata_path.is_empty() {
         return Err(ContentError::Invalid);
     }
     let strategy = HttpsSourceStrategy::try_from(request.source_strategy)
         .map_err(|_| ContentError::Invalid)?;
     let origin =
         OriginRequest::resource(&request.resource_url).map_err(|_| ContentError::Invalid)?;
+    if !request.checksum_path.is_empty() {
+        origin
+            .validate_checksum_path(&request.checksum_path)
+            .map_err(|_| ContentError::Invalid)?;
+    }
     let cache_limits = limits(request.limits)?;
     let client = OriginClient::new(
         load_roots(&request.ca_certificates_pem).await?,
@@ -66,15 +72,9 @@ pub(super) async fn retrieve(
         .await
         .ok_or(ContentError::Unavailable)?;
     let scope = RecentProviderScope::new(control, *policy.policy_hash(), route);
-    let mut flow = open_origin_stream(context, &origin, &policy).await?;
-    let authenticated = client
-        .authenticate_digest(flow.stream_mut(), &origin, now())
-        .await;
-    if authenticated.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
-        return Err(ContentError::Unavailable);
-    }
-    flow.shutdown();
-    let authority = authenticated.map_err(|_| ContentError::Unavailable)?;
+    let authority =
+        authenticate(context, &client, &origin, &policy, &request.checksum_path).await?;
+    let origin_authority_body_bytes = authority.authority_body_bytes();
     let mut store = download_cache(&request.cache, cache_limits, request.reuse_cache)?;
     if authority.length() > cache_limits.max_bytes
         || authority
@@ -111,6 +111,7 @@ pub(super) async fn retrieve(
         control_relay_peer_id: control.to_string(),
         origin_authenticated: true,
         origin_body_bytes,
+        origin_authority_body_bytes,
         peer_bytes,
         // This mode's fallback is a normal 200 GET, not a Range request.
         origin_range_requests: 0,
@@ -125,6 +126,46 @@ pub(super) async fn retrieve(
         source_limits: cache_limits,
         receipt,
     })
+}
+
+async fn authenticate(
+    context: &ControlContext,
+    client: &OriginClient,
+    origin: &OriginRequest,
+    policy: &VerifiedPolicy,
+    checksum_path: &str,
+) -> Result<OriginAuthorizedDigest, ContentError> {
+    let mut flow = open_origin_stream(context, origin, policy).await?;
+    if checksum_path.is_empty() {
+        let authenticated = client
+            .authenticate_digest(flow.stream_mut(), origin, now())
+            .await;
+        if authenticated.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
+            return Err(ContentError::Unavailable);
+        }
+        flow.shutdown();
+        return authenticated.map_err(|_| ContentError::Unavailable);
+    }
+    let checksum = client
+        .authenticate_checksum(flow.stream_mut(), origin, checksum_path, now())
+        .await;
+    if checksum.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
+        return Err(ContentError::Unavailable);
+    }
+    flow.shutdown();
+    let checksum = checksum.map_err(|_| ContentError::Unavailable)?;
+    // Authenticate resource metadata separately, never promoting a peer index or checksum
+    // source to permission for a new origin. Both requests retain the selected protected route.
+    checked_policy(context, origin, policy).await?;
+    let mut flow = open_origin_stream(context, origin, policy).await?;
+    let authenticated = client
+        .authenticate_checksum_resource(flow.stream_mut(), checksum, now())
+        .await;
+    if authenticated.is_ok() && tls::finish(flow.stream_mut()).await.is_err() {
+        return Err(ContentError::Unavailable);
+    }
+    flow.shutdown();
+    authenticated.map_err(|_| ContentError::Unavailable)
 }
 
 async fn fetch_origin(

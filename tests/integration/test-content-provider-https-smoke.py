@@ -179,17 +179,57 @@ def fixture(control_node="relay2", native_publication=None):
             range_start=None, range_end=None, range_total=None)
         for index in range(3)]
     origin["connections"][4:4] = [copy.deepcopy(origin["connections"][index]) for index in (1, 2, 3, 3)]
+    checksums, mismatch, checksum_records = checksum_fixture(digests)
+    origin["connections"][8:8] = checksum_records
     return dict(success=True, publication=publication, native_publication=original,
         layout=dict(provider_nodes=provider_nodes, control_relay_peer_id=control_peer),
         expected_peers=peers, origin=origin, cases=cases,
         origin_baseline=baseline, comparison=CHECK["measured_comparison"](cases, baseline),
         source_strategy_cases=strategies, source_strategy_comparison=CHECK["strategy_comparison"](strategies),
         origin_digest_cases=digests,
+        origin_checksum_cases=checksums, checksum_mismatch=mismatch,
         limited_uplink=limited_fixture(digests),
         digest_provider_indexes=independent_indexes(original, provider_nodes[1], peers),
         user_cleanup=dict(user_outputs_removed=True, explicit_fixture_ca_removed=True, user_directory_removed=True),
         missing_provider_stop=dict(serving=False, publications=0),
         withdrawal=dict(provider_node=provider_nodes[1], provider_peer_id=peers[provider_nodes[1]]))
+
+
+def checksum_fixture(digests):
+    cases = {}
+    for name in CHECK["CHECKSUM_CASES"]:
+        phase = copy.deepcopy(digests[name.replace("checksum-", "digest-")])
+        phase["fetch"].update(authentication_scope="origin-checksum", origin_digest=False,
+            origin_authority_body_bytes=len(CHECK["CHECKSUM_TEXT"]),
+            local_output=f"/user/{name}.bin", cache=f"/agent/{name}-cache")
+        phase["output"].update(path=f"/user/{name}.bin", agent_cache=f"/agent/{name}-cache")
+        phase["application"].update(final=copy.deepcopy(phase["fetch"]),
+            requested_checksum_path="/SHA256SUMS", requested_origin_digest=False)
+        cases[name] = phase
+    rejected = copy.deepcopy(cases["checksum-origin-only"])
+    del rejected["fetch"]
+    rejected["status"]["publications"] = 0
+    rejected["output"].update(path="/user/checksum-mismatch.bin", agent_cache="/agent/checksum-mismatch-cache",
+        local_output_absent=True)
+    rejected["application"] = dict(consumer=copy.deepcopy(rejected["application"]["consumer"]),
+        cli=copy.deepcopy(rejected["application"]["cli"]), returncode=1, stdout_hex="",
+        stderr="agent rejected request: CONTENT_UNAVAILABLE", control_diagnostic="CONTENT_UNAVAILABLE",
+        requested_checksum_path="/BAD-SHA256SUMS", requested_origin_digest=False,
+        requested_source_strategy="origin-only", local_output_absent=True,
+        started_monotonic_ns=1_000_000_000, completed_monotonic_ns=2_000_000_000,
+        elapsed_ns=1_000_000_000, started_unix_ms=1000, completed_unix_ms=2000)
+    records = []
+    for kind in ("checksum_list", "checksum_head", "checksum_body", "checksum_list", "checksum_head",
+                 "checksum_bad_list", "checksum_head", "checksum_body"):
+        listed = kind in ("checksum_list", "checksum_bad_list")
+        text = CHECK["BAD_CHECKSUM_TEXT"] if kind == "checksum_bad_list" else CHECK["CHECKSUM_TEXT"]
+        records.append(dict(kind=kind, method="HEAD" if kind == "checksum_head" else "GET", status=200,
+            payload_bytes=len(text) if listed else CHECK["BYTES"] if kind == "checksum_body" else 0,
+            content_length=len(text) if listed else CHECK["BYTES"], representation_digest=None,
+            checksum_body_hex=text.hex() if listed else None, object_sha256=None if listed else CHECK["SHA"],
+            tls13=True, alpn_http11=True, source="47.163.4.1:32100",
+            range_start=None, range_end=None, range_total=None))
+    return cases, rejected, records
 
 
 def limited_fixture(digests):
@@ -434,6 +474,38 @@ class ProviderHttpsEvidence(unittest.TestCase):
         self.assertLess(script.index("    content_provider_https_phase digest-peers-first\n"),
                         script.index("    PHASE=content-provider-https-withdraw-one\n"))
 
+    def test_checksum_is_explicit_with_separate_authority_accounting_and_wholehash_rejection(self):
+        value = fixture()
+        CHECK["validate_evidence"](value)
+        for case in (*CHECK["CHECKSUM_CASES"], CHECK["CHECKSUM_BAD_CASE"]):
+            command = CHECK["consumer_command"](case, "/fixture/binary", "/agent/socket",
+                "/agent/cache", Path("/user"), Path("/user/output"))
+            self.assertNotIn("--origin-digest", command)
+            self.assertNotIn("--metadata-path", command)
+            self.assertEqual(command[command.index("--checksum-path") + 1],
+                             "/BAD-SHA256SUMS" if case == CHECK["CHECKSUM_BAD_CASE"] else "/SHA256SUMS")
+            self.assertTrue(command[command.index("--url") + 1].endswith("/checksum-asset.bin"))
+        for path, wrong in (
+            (("origin_checksum_cases", "checksum-origin-only", "fetch", "origin_authority_body_bytes"), 0),
+            (("origin_checksum_cases", "checksum-peers-first", "fetch", "origin_body_bytes"), 1),
+            (("origin_checksum_cases", "checksum-peers-first", "fetch", "authentication_scope"), "origin-repr-digest"),
+            (("origin_checksum_cases", "checksum-peers-first", "application", "requested_checksum_path"), "/OTHER"),
+            (("origin_checksum_cases", "checksum-peers-first", "output", "client_cache_initially_absent"), False),
+            (("origin", "connections", 8, "checksum_body_hex"), CHECK["BAD_CHECKSUM_TEXT"].hex()),
+            (("origin", "connections", 9, "representation_digest"), CHECK["REPR_DIGEST"]),
+            (("origin", "connections", 10, "payload_bytes"), 0),
+            (("origin", "connections", 13, "checksum_body_hex"), CHECK["CHECKSUM_TEXT"].hex()),
+            (("checksum_mismatch", "application", "stdout_hex"), b"{}\n".hex()),
+            (("checksum_mismatch", "application", "returncode"), 0),
+            (("checksum_mismatch", "application", "local_output_absent"), False),
+            (("checksum_mismatch", "application", "control_diagnostic"), "CONTENT_BUSY"),
+            (("checksum_mismatch", "status", "publications"), 1),
+            (("checksum_mismatch", "privacy", "client", "direct_client_exit_packets"), 1),
+            (("checksum_mismatch", "control", "packet_socket_drops"), 1),
+        ):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                CHECK["validate_evidence"](changed(value, path, wrong))
+
     def test_digest_mode_requires_bodyless_heads_original_peer_index_and_distinct_cold_storage(self):
         value = fixture()
         CHECK["validate_evidence"](value)
@@ -516,11 +588,11 @@ class ProviderHttpsEvidence(unittest.TestCase):
         phase["application"]["final"] = copy.deepcopy(phase["fetch"])
         phase["privacy"] = copy.deepcopy(missing["privacy"])
         phase["privacy"]["exit"]["provider_application"]["relay4"]["response_payload_bytes"] = 1050000
-        alternate["origin"]["connections"][18:] = copy.deepcopy(alternate["origin"]["connections"][9:13])
+        alternate["origin"]["connections"][26:] = copy.deepcopy(alternate["origin"]["connections"][17:21])
         alternate["source_strategy_comparison"] = CHECK["strategy_comparison"](alternate["source_strategy_cases"])
         CHECK["validate_evidence"](alternate)
         duplicate = copy.deepcopy(alternate)
-        duplicate["origin"]["connections"][19] = copy.deepcopy(duplicate["origin"]["connections"][18])
+        duplicate["origin"]["connections"][27] = copy.deepcopy(duplicate["origin"]["connections"][26])
         with self.assertRaises(ValueError):
             CHECK["validate_evidence"](duplicate)
 
@@ -553,9 +625,9 @@ class ProviderHttpsEvidence(unittest.TestCase):
                 CHECK["validate_evidence"](changed(value, ("origin_baseline", *path), wrong))
         for path, wrong in (
             (("comparison", "origin_to_browser_command_ratio"), 9),
-            (("origin", "connections", 13, "kind"), "body_range"),
-            (("origin", "connections", 14, "payload_bytes"), 0),
-            (("origin", "connections", 14, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 21, "kind"), "body_range"),
+            (("origin", "connections", 22, "payload_bytes"), 0),
+            (("origin", "connections", 22, "source"), "43.159.1.1:32100"),
         ):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 CHECK["validate_evidence"](changed(value, path, wrong))
@@ -601,7 +673,8 @@ class ProviderHttpsEvidence(unittest.TestCase):
         registration = source.split("start_privacy_observers() {\n", 1)[1].split("    set --\n", 1)[0]
         script = "registered() {\n" + registration + '}\nscenario=$1\nregistered "$2"\n'
         for scenario in ("content-provider", "content-https", "content-message", "dns-cache"):
-            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", *CHECK["DIGEST_CASES"], *CHECK["LIMITED_CASES"], "unregistered"):
+            for suffix in ("complete", "missing", "baseline", "origin-only", "auto", *CHECK["DIGEST_CASES"],
+                           *CHECK["LIMITED_CASES"], *CHECK["CHECKSUM_CASES"], CHECK["CHECKSUM_BAD_CASE"], "unregistered"):
                 with self.subTest(scenario=scenario, suffix=suffix):
                     prefix = f"content-provider-https-{suffix}-privacy"
                     result = subprocess.run(["sh", "-eu", "-c", script, "sh", scenario, prefix],
@@ -636,7 +709,8 @@ class ProviderHttpsEvidence(unittest.TestCase):
             output.mkdir(parents=True, mode=0o700)
             for name in ("origin.pem", "complete-object.bin", "missing-object.bin", "origin-baseline.json",
                          "origin-only-object.bin", "auto-object.bin", "digest-origin-only-object.bin",
-                         "digest-peers-first-object.bin"):
+                         "digest-peers-first-object.bin", "checksum-origin-only-object.bin",
+                         "checksum-peers-first-object.bin", "checksum-mismatch-object.bin"):
                 path = output / name
                 path.write_bytes(b"known public cleanup fixture")
                 path.chmod(0o400 if name == "origin.pem" else 0o600)
@@ -663,12 +737,12 @@ class ProviderHttpsEvidence(unittest.TestCase):
             (("withdrawal", "provider_node"), "relay4"),
             (("missing_provider_stop", "serving"), True),
             (("origin", "connections", 0, "tls13"), False),
-            (("origin", "connections", 8, "source"), "43.159.1.1:32100"),
-            (("origin", "connections", 8, "source"), "46.162.3.1:32100"),
-            (("origin", "connections", 9, "status"), 200),
-            (("origin", "connections", 10, "range_start"), 0),
-            (("origin", "connections", 11, "range_end"), 1572864),
-            (("origin", "connections", 12, "range_total"), CHECK["BYTES"] - 1),
+            (("origin", "connections", 16, "source"), "43.159.1.1:32100"),
+            (("origin", "connections", 16, "source"), "46.162.3.1:32100"),
+            (("origin", "connections", 17, "status"), 200),
+            (("origin", "connections", 18, "range_start"), 0),
+            (("origin", "connections", 19, "range_end"), 1572864),
+            (("origin", "connections", 20, "range_total"), CHECK["BYTES"] - 1),
             (("cases", "complete", "fetch", "origin_authenticated"), False),
             (("cases", "complete", "fetch", "origin_body_bytes"), CHECK["BYTES"]),
             (("cases", "complete", "fetch", "provider_peer_ids"), ["peer-relay4", "peer-relay4"]),

@@ -39,11 +39,14 @@ pub(super) struct VerifiedDownload {
     expires: u64,
     authority_deadline: Instant,
     origin_digest: bool,
+    origin_checksum: bool,
 }
 
 impl VerifiedDownload {
     pub(super) const fn authentication_scope(&self) -> &'static str {
-        if self.origin_digest {
+        if self.origin_checksum {
+            "origin-checksum"
+        } else if self.origin_digest {
             "origin-repr-digest"
         } else {
             "cooperative-origin"
@@ -95,7 +98,12 @@ async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<
     let Some(Payload::HttpsContentTransferReady(ready)) = response.payload else {
         bail!("expected same-operation HTTPS readiness, not a native export");
     };
-    let manifest = verified_ready(&ready, &args.url, args.origin_digest)?;
+    let manifest = verified_ready(
+        &ready,
+        &args.url,
+        args.origin_digest,
+        args.checksum_path.as_deref().unwrap_or_default(),
+    )?;
     let remaining = ready
         .expires_unix_seconds
         .checked_sub(now_seconds()?)
@@ -133,6 +141,7 @@ async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<
         || !receipt.origin_authenticated
         || receipt.bytes != manifest.length()
         || receipt.chunks as usize != manifest.chunks().len()
+        || (args.checksum_path.is_some() != (receipt.origin_authority_body_bytes > 0))
         || progress.bytes != manifest.length()
         || progress.chunks != manifest.chunks().len()
         || progress.missing != 0
@@ -150,6 +159,7 @@ async fn download(args: &FetchHttps, socket: &Path, directory: &Path) -> Result<
         expires: ready.expires_unix_seconds,
         authority_deadline,
         origin_digest: ready.origin_digest,
+        origin_checksum: !ready.checksum_path.is_empty(),
     })
 }
 
@@ -157,11 +167,13 @@ fn verified_ready(
     ready: &HttpsContentTransferReady,
     resource: &str,
     origin_digest: bool,
+    checksum_path: &str,
 ) -> Result<VerifiedManifest> {
     let now = now_seconds()?;
     if ready.resource_url != resource
         || ready.expires_unix_seconds <= now
         || ready.origin_digest != origin_digest
+        || ready.checksum_path != checksum_path
     {
         bail!("local HTTPS readiness names a different resource, mode or expired authority");
     }
@@ -192,6 +204,7 @@ fn report(download: &VerifiedDownload, output: &Path, cache: &Path) -> serde_jso
         "origin_authenticated":true, "origin_authority_persisted":false,
         "authentication_scope":download.authentication_scope(), "origin_digest":download.origin_digest,
         "peer_bytes":receipt.peer_bytes, "origin_body_bytes":receipt.origin_body_bytes,
+        "origin_authority_body_bytes":receipt.origin_authority_body_bytes,
         "origin_range_requests":receipt.origin_range_requests, "providers_used":receipt.providers_used,
         "provider_peer_ids":receipt.provider_peer_ids, "control_relay_peer_id":receipt.control_relay_peer_id,
     })

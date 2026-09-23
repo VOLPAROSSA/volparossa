@@ -13,6 +13,26 @@ The automatic-follow milestone is integrated by
 [PR #153](https://github.com/VOLPAROSSA/volparossa/pull/153), normal merge `54c382c0`.
 Neither integration nor execution proves reliable model reasoning.
 
+The companion HTTPS slice adds explicit `--checksum-path` to `fetch-https` and
+`browser-download`. The consumer authenticates a same-directory SHA-256 document itself,
+then resource HEAD metadata; a peer's hash or signature is not the origin authority. Original
+minimum freshness survives both requests. Full resource bytes must verify before output or
+contribution. Cookies, private/no-store responses, ambiguous names/checksums and conflicting
+digests are refused. The [original `7ca122a3` network trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
+passes its full source-exact provider and HTTPS checkers against 652 original files. The new
+checksum peer case fetches 2,097,275 resource bytes from two peers, with zero origin resource
+bytes; it still obtains an 85-byte checksum document and HEAD metadata from the origin over
+TLS 1.3. No resource `Repr-Digest` is present. The origin-only case verifies the same object;
+a deliberately wrong checksum fails without output, readiness or contribution. Captures,
+complete cleanup and unchanged host state pass. In this fixture the whole peer command takes
+4.138 seconds versus 2.801 seconds for origin-only, so this is an origin-bandwidth saving,
+not a speedup claim. The isolated combined candidate passes strict four-crate Clippy, six
+TLS/parser, six local-control HTTPS, twelve CLI content and five actual HTTPS CLI-process
+checks, plus the real custody CLI-process test and 17 inert HTTPS-fixture checks. Scoped
+formatting and shell checks pass. Its fresh source-exact network trials are pending; neither
+this profile nor the original proof completes C08 or makes arbitrary/private browser HTTPS
+traffic shareable.
+
 The next isolated integration candidate adds automatic public-copy maintenance with
 `content retain`. An owner enrolls one original public object, desired copies and a finite
 lifetime/upload budget, rather than hand-selecting every provider key. Protected discovery

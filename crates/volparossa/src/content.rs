@@ -236,12 +236,16 @@ pub(crate) struct FetchHttps {
     #[arg(long, value_parser = parse_origin_url)]
     url: String,
     /// Explicit canonical metadata path on the same HTTPS origin.
-    #[arg(long, value_parser = parse_metadata_path, required_unless_present = "origin_digest", conflicts_with = "origin_digest")]
+    #[arg(long, value_parser = parse_metadata_path, required_unless_present_any = ["origin_digest", "checksum_path"], conflicts_with_all = ["origin_digest", "checksum_path"])]
     metadata_path: Option<String>,
     /// Use the website's authenticated Repr-Digest instead of a VOLPAROSSA descriptor.
     /// Requires a supported public binary representation; never adopts peer-origin trust.
     #[arg(long)]
     origin_digest: bool,
+    /// Same-directory SHA256SUMS document fetched through the resource's authenticated origin.
+    /// For anonymous public binary downloads; never a checksum received from another peer.
+    #[arg(long, value_parser = parse_metadata_path, conflicts_with_all = ["origin_digest", "metadata_path"])]
+    checksum_path: Option<String>,
     /// New agent-owned cache directory, or an existing owned cache with --reuse-cache.
     #[arg(long)]
     cache: PathBuf,
@@ -583,12 +587,21 @@ fn https_fetch_request(
     args: &FetchHttps,
 ) -> Result<volparossa_local_control::HttpsContentFetchRequest> {
     const MAX_CA_BYTES: u64 = 128 * 1024;
-    match (args.origin_digest, args.metadata_path.as_deref()) {
-        (true, None) => volparossa_content::origin_https::OriginRequest::resource(&args.url),
-        (false, Some(path)) => {
+    match (
+        args.origin_digest,
+        args.metadata_path.as_deref(),
+        args.checksum_path.as_deref(),
+    ) {
+        (true, None, None) => volparossa_content::origin_https::OriginRequest::resource(&args.url),
+        (false, Some(path), None) => {
             volparossa_content::origin_https::OriginRequest::new(&args.url, path)
         }
-        _ => bail!("select exactly one of --metadata-path and --origin-digest"),
+        (false, None, Some(path)) => {
+            let request = volparossa_content::origin_https::OriginRequest::resource(&args.url)?;
+            request.validate_checksum_path(path)?;
+            Ok(request)
+        }
+        _ => bail!("select exactly one of --metadata-path, --origin-digest and --checksum-path"),
     }
     .context("invalid canonical HTTPS resource or same-origin metadata path")?;
     let mut ca_certificates_pem = Vec::new();
@@ -616,6 +629,7 @@ fn https_fetch_request(
         reuse_cache: args.reuse_cache,
         source_strategy: args.source_strategy.wire() as i32,
         origin_digest: args.origin_digest,
+        checksum_path: args.checksum_path.clone().unwrap_or_default(),
     })
 }
 
@@ -1255,6 +1269,64 @@ mod tests {
     }
 
     #[test]
+    fn https_checksum_cli_selects_explicit_same_directory_authority_for_both_consumers() {
+        for command in ["fetch-https", "browser-download"] {
+            let mut base = vec![
+                "volparossa",
+                "content",
+                command,
+                "--url",
+                "https://origin.example/releases/object.bin",
+                "--cache",
+                "/agent/cache",
+            ];
+            if command == "fetch-https" {
+                base.extend(["--local-output", "/user/output"]);
+            }
+            for extra in [
+                vec!["--checksum-path", "/releases/SHA256SUMS"],
+                vec!["--checksum-path", "/different/SHA256SUMS"],
+            ] {
+                let crate::CliCommand::Content { command } =
+                    crate::Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied()))
+                        .unwrap()
+                        .command
+                else {
+                    panic!("content");
+                };
+                let args = match *command {
+                    Command::FetchHttps(args) => args,
+                    Command::BrowserDownload(args) => args.into_fetch(),
+                    _ => panic!("HTTPS command"),
+                };
+                let request = https_fetch_request(&args);
+                if extra[1] == "/releases/SHA256SUMS" {
+                    let request = request.unwrap();
+                    assert_eq!(request.checksum_path, extra[1]);
+                    assert!(!request.origin_digest);
+                    assert!(request.metadata_path.is_empty());
+                } else {
+                    assert!(request.is_err());
+                }
+            }
+            for other_mode in [
+                vec!["--origin-digest"],
+                vec!["--metadata-path", "/metadata"],
+            ] {
+                assert!(
+                    crate::Cli::try_parse_from(
+                        base.iter()
+                            .copied()
+                            .chain(["--checksum-path", "/releases/SHA256SUMS"])
+                            .chain(other_mode)
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn https_source_strategy_cli_maps_explicit_choices_and_defaults_to_auto() {
         use volparossa_local_control::HttpsSourceStrategy;
         let base = [
@@ -1308,6 +1380,7 @@ mod tests {
         let mut args = FetchHttps {
             reuse_cache: false,
             origin_digest: false,
+            checksum_path: None,
             source_strategy: HttpsSourceChoice::Auto,
             url: "https://origin.example/object.bin".into(),
             metadata_path: Some("/metadata".into()),

@@ -373,6 +373,26 @@ verified chunks remain reusable under fresh origin authority. Explicit peers-fir
 is not a latency guarantee; source selection does not make unsupported HTTPS sites shareable.
 The new strategy requires its own integrated measurement.
 
+### Own-origin checksum files without a descriptor or digest header
+
+An additional `--checksum-path` mode extends public binary downloads to origins that
+publish a same-directory SHA-256 file instead of VOLPAROSSA metadata or a `Repr-Digest` header.
+The consumer authenticates that explicit text document itself, then obtains resource length
+and public cache conditions through its own HEAD exchange. Only their original minimum
+expiry is usable; peers cannot supply the trust anchor. Existing whole-object digest lookup,
+protected peer transfer, full verification and full-origin fallback are reused. An ambiguous
+checksum or contradictory resource digest cannot reach local output or contribution.
+
+This is a bounded profile of the [GNU checksum format](https://www.gnu.org/s/coreutils/manual/html_node/cksum-output-modes.html),
+not a generic parser for release pages, a browser interception mechanism, or a replacement
+for authenticated metadata. The resource remains an anonymous public binary object. The
+[original `7ca122a3` network trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35919185330)
+passes origin-only retrieval, a fresh two-provider download and wrong-checksum refusal.
+Checksum-document bytes are reported separately from resource bytes, and elapsed time includes
+both authentication requests. The source-exact integration port still needs its own trial;
+C08 remains open. See [operations](OPERATIONS.md#https-checksum-file-downloads) for selection
+and current compatibility limits.
+
 ### Own-origin representation digests without a custom descriptor
 
 The additional explicit `--origin-digest` application mode implements the origin-metadata option
