@@ -1,37 +1,56 @@
-# VOLPAROSSA
+# Project VOLPAROSSA
 
-## DICN — Decentralized Intelligent Cooperative Network
+**DICN — Decentralized Intelligent Cooperative Network**
 
-**Connectivity, shared content and cooperative intelligence — powered by its participants.**
+### Shared connections. Shared knowledge. Cooperative intelligence.
 
-VOLPAROSSA is an open-source, decentralised user-operated network being built for Debian 13 amd64.
-It brings a protected multipath network, distributed content storage and a developing cooperative
-AI layer together. The ambition is more than a VPN: people contribute connections, storage and
-computation to a network they can also use.
+Project VOLPAROSSA brings protected multipath connectivity, distributed content and cooperative
+AI into one open-source, participant-operated network. The ambition goes beyond a VPN:
+build a network whose members contribute connections, storage and computation—and benefit
+from what they build together. The design also includes a [shared immune system](#a-shared-immune-system)
+for mutual review, content policy and recovery across the network, cache and compute layers.
 
-[Network](#one-network-many-paths) · [Shared content](#content-that-travels-with-the-network) ·
-[Cooperative intelligence](#a-cooperative-brain) · [Principles](#seven-virtues-seven-sins) ·
-[Development status](#development-status) · [Get started](#developing-volparossa)
+[Network-layer](#network-layer-one-network-many-paths) ·
+[Cache-layer](#cache-layer-content-that-travels-with-the-network) ·
+[Compute-layer](#compute-layer-a-cooperative-brain) ·
+[7 Virtues](#governed-by-7-virtues) ·
+[Progress](#development-status) · [Get started](#developing-volparossa)
 
-> **Under active development, not a supported release.** The original v1 A01–A15 acceptance
-> sequence passed on one unchanged build, `482e33d0`, in a disposable Debian 13 topology.
-> Later network, content and AI extensions have their own scoped results and unfinished work.
-> That checkpoint does not certify the current build or a complete decentralized “brain”.
-> [See what is implemented and verified →](docs/IMPLEMENTATION_STATUS.md)
+> **Development preview · Debian 13 amd64 · GPL-3.0-only**
+>
+> Working milestones sit alongside unfinished integrations. This is not a supported release
+> or a completed decentralized “brain”. Explore the vision below; check the
+> [implementation status](docs/IMPLEMENTATION_STATUS.md) for verified results and open work.
 
 ## What makes it a DICN?
 
-| Principle | What it means for VOLPAROSSA |
-| --- | --- |
-| **Decentralized** | The same node software runs on participants' devices. Replaceable peer contacts help discovery; no permanent central network operator or mandatory compute dispatcher is the target. |
-| **Intelligent** | Useful paths and content sources are selected according to conditions. The AI extension adds reusable trained agents, shared computation and, ultimately, automatic policy governance. |
-| **Cooperative** | Participants give as well as take, according to available capabilities. The owner's activity comes first; contributed bandwidth, storage and processing have resource budgets. |
-| **Network** | Internet links and direct local links can carry protected paths. Above them, participants exchange content and work, not just VPN traffic. |
+- **Decentralized by design.** Participants run the same node software. Discovery contacts are
+  replaceable peers, not authorities; the goal is no permanent central operator or mandatory
+  compute dispatcher.
+- **Intelligent through cooperation.** Useful paths and content sources are selected according
+  to conditions. The developing AI layer adds reusable trained agents, shared work and
+  principle-led policy governance.
+- **Cooperative by participation.** Members give as well as take, according to their available
+  capabilities. The device owner's activity comes first; shared resources have budgets.
+- **A network, not just a tunnel.** Direct local links and existing Internet connections form
+  the foundation for exchanging content, knowledge and work.
 
-These describe the design. The [status section](#development-status) separates demonstrated
-functionality from the remaining integrations.
+### Three layers, one shared purpose
 
-## One network, many paths
+The **network-layer** connects participants. The **cache-layer** makes authorized content reusable
+across those connections. The **compute-layer** uses that foundation to exchange models,
+learn and cooperate on suitable tasks. The [seven virtues](#governed-by-7-virtues) provide the
+shared compass for agent behavior and policy decisions throughout the design.
+
+Together, these are the project's direction—not a claim that every integration is finished.
+
+---
+
+<a id="one-network-many-paths"></a>
+
+## Network-layer: One network, many paths
+
+**More useful routes. One protected connection.**
 
 A connection is not limited by design to a pair of paths. Multiple useful paths can operate
 in parallel, each through a different relay peer, towards the same selected exit.
@@ -108,10 +127,17 @@ established by those tests. Owner-priority sharing is implemented in specific sc
 universal spare-capacity detection and “no slowdown on any device” are not claimed.
 [Local links and contribution →](docs/LOCAL_LINK_NETWORK.md)
 
-## Content that travels with the network
+---
 
-Content is divided into verifiable chunks. Useful pieces can come from several holders, be
-reassembled by a requester, and—where sharing is authorized—become available to other participants.
+<a id="content-that-travels-with-the-network"></a>
+
+## Cache-layer: Content that travels with the network
+
+**Retrieve what is missing. Share what is useful.**
+
+On top of those protected connections, content is divided into verifiable chunks. Useful pieces
+can come from several holders, be reassembled by a requester, and—where sharing is authorized—
+become available to other participants.
 
 ```mermaid
 flowchart TB
@@ -134,6 +160,13 @@ flowchart TB
     V --> U
     V -.->|"Only when authorized and configured"| S
     S -.->|"Available for later requests"| P
+
+    classDef source fill:#edf0ff,stroke:#5264ad,color:#252f58;
+    classDef shared fill:#e8f4f2,stroke:#24766c,color:#143d37;
+    classDef verified fill:#fff4df,stroke:#a97724,color:#5b4017;
+    class Q,A,O source;
+    class L,P,S shared;
+    class V,U verified;
 ```
 
 *This is a content-acquisition flow, not a network-route diagram. Remote payload transfers still
@@ -161,15 +194,24 @@ or permission to redistribute everything a user receives.
 [Content design and scope →](docs/CONTENT_NETWORK_PROPOSAL.md) ·
 [Publishing, retrieval and mailboxes →](docs/OPERATIONS.md#offline-content-commands)
 
-## A cooperative brain
+---
 
-The AI layer is intended to make many cooperating agents usable as one decentralized service:
+<a id="a-cooperative-brain"></a>
+
+## Compute-layer: A cooperative brain
+
+**Learn locally. Cooperate across the network.**
+
+Building on protected connectivity and reusable content, the AI layer is intended to make
+many cooperating agents usable as one decentralized service:
 divide suitable tasks among participants, reuse useful models and improve compatible agents
 without starting every training job from scratch.
 
 The development implementation already supports real local adapter training, protected sharing
 and reuse of compatible adapters, and scoped public tasks on separate peer workers. A growing
 public training loop connects selected data, local updates, evaluation and signed sharing.
+Its intended counterpart is the shared immune system: cooperation should include recognizing
+and correcting bad updates or judgments, not just spreading new ones.
 
 ```mermaid
 flowchart TB
@@ -190,6 +232,13 @@ flowchart TB
     D -->|"Yes"| P
     D -->|"No"| K
     P -.->|"A selected update can seed later training"| M
+
+    classDef source fill:#edf0ff,stroke:#5264ad,color:#252f58;
+    classDef learning fill:#e8f4f2,stroke:#24766c,color:#143d37;
+    classDef review fill:#fff4df,stroke:#a97724,color:#5b4017;
+    class S,F,M source;
+    class T,P learning;
+    class V,D,K review;
 ```
 
 *The explicit public-data training pipeline is a development candidate, not autonomous discovery
@@ -199,6 +248,16 @@ network transfer covers compatible adapters and their public datasets.*
 Caching optimizes **how** selected data is acquired, not **which knowledge is allowed to count**.
 Missing eligible data must remain fetchable; an available cache is not automatically a balanced
 training corpus, nor is everything in it authorized for training.
+
+### Working together—and knowing the limits
+
+The working pieces include real training, adapter reuse and public peer execution. Reliable
+reasoning, confidential distributed computation and a complete self-maintaining “brain” remain
+unfinished. More participants offer more potential resources and diversity—not an automatic
+guarantee of smarter answers.
+
+<details>
+<summary><strong>Explore the development milestones: learning, peer tasks and model profiles</strong></summary>
 
 Successor selection has live evidence on a small same-source held-out set and a separately
 pinned validation source. A separate node has fetched a peer update, compared and adopted it,
@@ -276,10 +335,12 @@ instead of silently falling back to the base model. This is local integrity reco
 detection of every poisoned or misleading agent.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
+</details>
+
+### Privacy and the device owner come first
+
 Public work can be split across selected peers, with retained results and bounded recovery
-after worker loss. Private distributed computation, general autonomous planning, defended model
-aggregation and a complete self-maintaining “brain” remain work to do. More participants offer
-more potential resources and diversity—not an automatic guarantee of smarter answers.
+after worker loss. General autonomous planning and defended model aggregation remain work to do.
 
 Ordinary remote inference exposes inputs to the executing device: encrypted transport alone
 does not make private offload safe. Current distributed experiments use explicitly public,
@@ -295,9 +356,13 @@ answer quality. [Usage and limits →](docs/DECENTRALIZED_AGENTS.md#local-only-p
 
 [Agent architecture, training and remaining milestones →](docs/DECENTRALIZED_AGENTS.md)
 
-## Seven virtues, seven sins
+---
 
-**Modern technology, an enduring vocabulary for cooperation.**
+<a id="seven-virtues-seven-sins"></a>
+
+## Governed by 7 Virtues
+
+**Modern intelligence. An enduring human compass.**
 
 VOLPAROSSA uses seven Latin virtues and seven opposing vices as an **overarching ethical
 framework**, not merely as names for a long checklist of rules. An exhaustive list can miss
@@ -314,21 +379,38 @@ the underlying principles remain the basis for interpreting, extending and corre
 The Latin terms connect a modern network with an enduring ethical vocabulary. They are presented
 as broadly understandable principles, not a religious membership test or a score of a person's
 moral worth. The English names below are translations; the practical interpretations are
-examples of their application, not exhaustive definitions.
+examples of their application, not exhaustive definitions. Each pair names **a virtue to
+cultivate / a vice to resist**.
 
-| Virtue — positive principle | Sin / vice — risk to resist | Practical interpretation for agents |
-| --- | --- | --- |
-| **Humilitas — Humility** | **Superbia — Pride** | Acknowledge uncertainty, accept correction and do not claim authority or competence without evidence. |
-| **Humanitas — Humanity / Kindness** | **Invidia — Envy** | Support people's dignity and wellbeing; cooperate rather than undermine others or hoard useful advantages. |
-| **Mansuetudo — Gentleness** | **Ira — Wrath** | Respond proportionately, de-escalate conflict and avoid punitive or retaliatory behavior. |
-| **Diligentia — Diligence** | **Acedia — Sloth / Apathy** | Carry out entrusted work with care, make useful progress and report failures honestly. |
-| **Liberalitas — Generosity** | **Avaritia — Greed** | Contribute fairly within available means; do not exploit participants or consume their resources without restraint. |
-| **Temperantia — Temperance / Moderation** | **Gula — Gluttony** | Respect resource limits and the owner's needs; usefulness matters more than endless consumption or growth. |
-| **Castitas — Chastity** | **Luxuria — Lust** | In the project's broader application: respect consent, dignity and personal boundaries; reject exploitation. |
+- **Humilitas / Superbia** · *Humility / Pride*<br>
+  Acknowledge uncertainty, accept correction and do not claim authority or competence
+  without evidence.
+
+- **Humanitas / Invidia** · *Humanity & Kindness / Envy*<br>
+  Support people's dignity and wellbeing; cooperate rather than undermine others or hoard
+  useful advantages.
+
+- **Mansuetudo / Ira** · *Gentleness / Wrath*<br>
+  Respond proportionately, de-escalate conflict and avoid punitive or retaliatory behavior.
+
+- **Diligentia / Acedia** · *Diligence / Sloth & Apathy*<br>
+  Carry out entrusted work with care, make useful progress and report failures honestly.
+
+- **Liberalitas / Avaritia** · *Generosity / Greed*<br>
+  Contribute fairly within available means; do not exploit participants or consume their
+  resources without restraint.
+
+- **Temperantia / Gula** · *Temperance & Moderation / Gluttony*<br>
+  Respect resource limits and the owner's needs; usefulness matters more than endless
+  consumption or growth.
+
+- **Castitas / Luxuria** · *Chastity / Lust*<br>
+  In the project's broader application: respect consent, dignity and personal boundaries;
+  reject exploitation.
 
 ### Principles first, decisions second
 
-The same principles inform two different layers:
+The same principles serve two complementary purposes:
 
 - **Agent behavior and training:** honesty, care, restraint, cooperation and non-exploitation.
 - **Content policy:** principle-guided assessment translated into concrete, versioned
@@ -344,15 +426,58 @@ replace it. Earlier examples illustrate intended applications; they are neither 
 the principles nor an exhaustive catalogue that agents should memorize and match against.
 New cases and reconsidered decisions must be assessed from the same underlying framework.
 
-The selected baseline is **Netherlands/EU, plus applicable local exit restrictions**. Fully
-automatic assessment, mutual checking, conflict resolution and authorized policy activation
-are the goal. That future governance must also detect and quarantine defective agent artifacts
-without treating disagreement as proof of wrongdoing.
+### A shared immune system
+
+The cooperative brain is intended to learn; its **immune system** is intended to help it
+notice when that learning—or a policy decision—goes wrong. Guided by the same seven virtues,
+agents should examine one another's reasoning, compare evidence and surface conflicting
+whitelist/blacklist decisions. Supported findings should lead to scoped correction, quarantine
+of defective model artifacts or recovery to an accepted version, followed by reassessment.
+
+Its reach is intended to extend across **all three layers**: which agent updates may be used,
+which content may enter or be shared from the cooperative cache, and which Internet access
+the exits may permit. Decisions must keep their defined subject, authority and scope rather
+than turning one questionable result into an indiscriminate network-wide ban.
+
+```mermaid
+flowchart TB
+    P["7 Virtues + agreed legal boundaries"]
+    R["Mutual review<br/>evidence, context and correction"]
+    D["Authorized, scoped decisions"]
+    N["Network-layer<br/>permitted Internet access"]
+    C["Cache-layer<br/>eligible content and sharing"]
+    A["Compute-layer<br/>accepted agents and model updates"]
+
+    P --> R
+    R --> D
+    D --> N
+    D --> C
+    D --> A
+
+    classDef principles fill:#fff4df,stroke:#a97724,color:#5b4017;
+    classDef review fill:#edf0ff,stroke:#5264ad,color:#252f58;
+    classDef layer fill:#e8f4f2,stroke:#24766c,color:#143d37;
+    class P principles;
+    class R,D review;
+    class N,C,A layer;
+```
+
+*Intended cross-layer governance, not a claim that the entire loop is implemented today.*
+
+This is a feedback loop for **agents, artifacts and decisions**, not a moral score for people.
+Disagreement alone is not evidence of wrongdoing, and a popular or signed judgment is not
+automatically correct. The goal is fully automatic mutual review, conflict resolution and
+authorized activation, with the agreed **Netherlands/EU baseline plus local exit restrictions**.
 
 Today, exits enforce a threshold-signed **destination/port whitelist**; this is not an automatic
-classifier for everything behind a hostname. The complete governance and agent “immune system”
-are not yet implemented. Filtering cannot guarantee a perfectly clean cache, eliminate legal
-risk, or justify breaking private encryption.
+classifier for everything behind a hostname, and it does not make encrypted HTTPS payloads
+visible to the network. Individual cross-review and model-recovery mechanisms have scoped
+evidence; the **complete shared immune system remains in development**.
+Filtering cannot guarantee a perfectly clean cache, eliminate legal risk, or justify breaking
+private encryption.
+
+<details>
+<summary><strong>Explore the current assessment workflow and its limits</strong></summary>
 
 The new `compute peer policy-assess` development candidate fetches one exact public text object,
 asks two selected peers for principle-led judgments, and has each peer examine the other's
@@ -361,7 +486,8 @@ reasoning. It retains the original answers, evidence and disagreements; its conc
 assessors but failed to complete the required answers. A later complete four-worker proof now
 passes, including protected cache transfer and offline replay of the original signed judgments.
 The actual reasoning still contains errors and its outcome remains undetermined. Signatures
-identify who signed an answer; they do not establish correctness or legality.
+identify who signed an answer; they do not establish correctness or legality. This assessment
+proof does not by itself activate network policy or establish complete governance.
 
 A new **node-local object-policy candidate** connects those retained judgments to the existing,
 separate policy-signing quorum: propose, independently endorse, then combine and optionally
@@ -371,21 +497,44 @@ after restart. Local checks pass; its extended network proof is still pending. I
 network-wide governance, physical cache erasure or inspection of arbitrary HTTPS content.
 [Public assessment workflow →](docs/DECENTRALIZED_AGENTS.md#public-principle-assessments-and-cross-review)
 
+</details>
+
 [Principle-led governance and illustrative examples →](docs/DECENTRALIZED_AGENTS.md#principles-guide-rules-not-the-other-way-around) ·
 [Current whitelist enforcement →](docs/WHITELIST.md)
+
+---
 
 ## Development status
 
 A passed checkpoint belongs to its recorded source revision and test scope. Results from
 different revisions are not combined into a claim that the current build is fully verified.
 
-| Area | Demonstrated checkpoints | Still to complete or broaden |
-| --- | --- | --- |
-| **Protected v1 transports** | A01–A15 on `482e33d0`: real two-leg WireGuard, MPTCP, protected UDP, MPQUIC, privacy captures and cleanup. Later scoped flows grow to three paths. | Current-build integration and remaining transport/path-growth limits; release hardening. |
-| **Local + Internet links** | Offline-node consumption/contribution, mixed LAN/WAN traffic and simulated-radio operation. | Physical radios, phone support, general mesh reachability and broader capacity detection. |
-| **Content network** | Scoped C01–C07 results: verified chunks, peer retrieval, replication, DNS sharing, static publication and encrypted delivery. | C08 existing-web coverage/benefit, automatic holder selection and ongoing availability. |
-| **Cooperative AI** | Real adapter training/reuse, protected exchange, automatic approved-model publication, cold reuse and scoped integrity recovery. | Remaining B01/B03–B07 scope: reliable reasoning, broader owner priority, general tasks, private offload and defended aggregation. |
-| **Automatic governance** | Signed destination-policy enforcement; four-worker public assessment, cross-review and signed cache replay. | Sound judgments, live proof of the new local exact-object gate, decentralized membership, conflict resolution and the agent immune system. |
+- **Protected v1 transports**<br>
+  Demonstrated: A01–A15 on one unchanged build, `482e33d0`, in a disposable Debian 13 topology:
+  real two-leg WireGuard, MPTCP, protected UDP, MPQUIC, privacy captures and cleanup.
+  Later scoped flows grow to three paths.<br>
+  **Next:** current-build integration, remaining path-growth limits and release hardening.
+
+- **Local + Internet links**<br>
+  Demonstrated: offline-node consumption/contribution, mixed LAN/WAN traffic and simulated radios.<br>
+  **Next:** physical radios, phone support, general mesh reachability and broader capacity detection.
+
+- **Content network**<br>
+  Demonstrated: scoped C01–C07 results for verified chunks, peer retrieval, replication,
+  DNS sharing, static publication and encrypted delivery.<br>
+  **Next:** C08 existing-web coverage/benefit, automatic holder selection and ongoing availability.
+
+- **Cooperative AI**<br>
+  Demonstrated: real adapter training/reuse, protected artifact exchange, public peer-job/recovery,
+  automatic approved-model publication, cold reuse and scoped integrity recovery.<br>
+  **Next:** remaining B01/B03–B07 scope, including reliable reasoning, broader owner priority,
+  general tasks, private offload, autonomous learning and defended aggregation.
+
+- **Automatic governance**<br>
+  Demonstrated: signed destination-policy enforcement, rollback/conflict checks, and a scoped
+  four-worker public assessment with cross-review and signed cache replay.<br>
+  **Next:** sound content judgments, live proof of the new local exact-object gate, decentralized
+  decision membership, conflict resolution and the agent immune system.
 
 The detailed chronology, failed runs, exact measurements and pending proofs live in
 [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), rather than being duplicated here.
