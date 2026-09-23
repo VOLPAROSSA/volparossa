@@ -27,6 +27,7 @@ mod mailbox;
 mod named_download;
 pub(crate) mod peer_update;
 pub(crate) mod policy_bundle;
+pub(crate) mod policy_decision;
 mod private_message;
 pub(crate) mod public_text;
 mod site;

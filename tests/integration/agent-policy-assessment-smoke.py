@@ -30,9 +30,11 @@ SCOPE = ("one exact synthetic public native object fetched through its protected
          "to signed dataset-v4 contracts and original provider-signed JSON-boundary/EOS receipts, "
          "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
          "a new cache and directory on the same client, unchanged completed offline replay, three separately invoked "
-         "existing development authorities replaying and endorsing that actual outcome, exact-object local quorum "
-         "activation with cached-access and Client-restart persistence checks, protected signed-decision custody "
-         "delivery to a second node, its independent quorum verification, exact cached-object export and restart "
+         "existing development authorities replaying and endorsing that actual outcome without local application, "
+         "protected signed-decision custody delivery to a second node, its own signed named publication, "
+         "an explicitly enrolled automatic Client follower started with an empty cache before that publication, "
+         "actual peer retrieval and exact-object quorum activation with cached-access and Client-restart checks, "
+         "the second node's independent import, exact cached-object export and restart "
          "checks, and full owned cleanup; "
          "not classifier quality, legal correctness, independent semantic judgment, global-policy activation or full B06")
 
@@ -603,8 +605,6 @@ def object_collect(work, phase):
                             ("policy-object-combined", "decision.bin")]:
         base = source / directory
         expected = {".task.lock", "assessment.bundle", "selection.json", "proposal.bin", extra}
-        if extra == "decision.bin":
-            expected.add("apply-receipt.json")
         require(set(item.name for item in base.iterdir()) == expected, "unexpected policy output/private file")
         for name in sorted(expected - {".task.lock"}):
             raw = public_file(base / name, owner)
@@ -618,6 +618,7 @@ def object_collect(work, phase):
             "object authority flow altered original model work")
     journal = public_file(work / "state-client/object-policy/journal.json", owner)
     value = {"files": retained, "journal_hex": journal.hex(),
+             "follow": read(record(work, "follow-proof"), 8 * 1048576),
              "epoch_manifest_hex": public_file(work / "development-policy.manifest", owner).hex(),
              "trust": strict_json(public_file(work / "policy-maintainers.json", owner)),
              "authorities": [read(record(work, f"object-authority-{i}")) for i in range(3)],
@@ -707,11 +708,13 @@ def check_object_activation(proof, result, transfer_value, original_files):
                 and report_value["provider_signed_claims_replayed"] == 4
                 and report_value["threshold_verified"] == (name == "combined")
                 and report_value["network_policy_activation"] is False
-                and report_value["local_object_policy_applied"] == (name == "combined")
+                and report_value["local_object_policy_applied"] is False
                 and report_value["semantic_correctness_proven"] is False
                 and report_value["issued_at_ms"] == body[12] and report_value["expires_at_ms"] == body[13],
                 "CLI overclaimed global/model authority or changed actual outcome")
-    receipt = decode_file(files, "policy-object-combined/apply-receipt.json")
+    receipt = original["follow"]["state"]["applied"]["apply_receipt"]
+    require(original["follow"]["state"]["applied"]["epoch_manifest_hex"] == original["epoch_manifest_hex"],
+            "follower accepted a different original authority epoch")
     require(receipt == {"version": 1, "manifest_id": list(body[7]), "decision_hash": list(decision[2]),
         "decision_revision": 1, "policy_hash": list(epoch[2]), "outcome": outcome}, "applied a different object decision")
     require(strict_json(bytes.fromhex(original["journal_hex"])) == {"version": 1, "entries": [
@@ -752,11 +755,10 @@ def object_peer_pins(work):
     envelope, _ = object_envelope(raw, public, 3)
     body = object_fields(envelope[1], 1024)
     scope = read(record(work, "result"))["decision"]["scope"]
-    receipt = read(source / "policy-object-combined/apply-receipt.json")
     require(body[6].hex() == scope["source_publisher_key"] and body[7].hex() == scope["source_manifest_id"]
             and body[8].hex() == scope["source_sha256"] and body[9].hex() == scope["framework_sha256"]
-            and receipt["decision_hash"] == list(envelope[2]) and receipt["manifest_id"] == list(body[7])
-            and receipt["outcome"] == body[11], "remote pins not derived from original applied decision")
+            and body[11] == {"allow": 1, "deny": 2, "undetermined": 3}[read(record(work, "result"))["decision"]["outcome"]],
+            "remote pins not derived from original quorum decision")
     write(record(work, "remote-object-pins"), dict(subject_publisher_key=body[6].hex(),
         subject_manifest_id=body[7].hex(), subject_sha256=body[8].hex(),
         decision_hash=envelope[2].hex(), evidence_sha256=body[10].hex()))
@@ -801,6 +803,208 @@ def object_peer_received(work):
         deposit=read(record(work, "remote-object-deposit")),
         export=read(record(work, "remote-object-export")), assemble=read(record(work, "remote-object-assemble")),
         original_model_files_unchanged=True, new_jobs=0))
+
+
+def follow_paths(work):
+    source = root_path(work).parent
+    node = read(work / "agent-jobs-layout.json")["provider_nodes"][0]
+    return source / "policy-object-follow", source / "policy-object-follow-cache", \
+        work / f"state-{node}/policy-object-receiver/follow-publication"
+
+
+def follow_snapshot(work):
+    directory, _, _ = follow_paths(work)
+    owner = root_path(work).parent.stat().st_uid
+    files = {name: public_file(directory / name, owner).hex()
+             for name in ("enrollment.json", "state.json", "status.json")}
+    state, status = (strict_json(bytes.fromhex(files[name])) for name in ("state.json", "status.json"))
+    if status["state_sha256"] != sha(bytes.fromhex(files["state.json"])):
+        return None  # Two separately atomic checkpoints may straddle this read.
+    return dict(files=files, state=state, status=status,
+                enrollment=strict_json(bytes.fromhex(files["enrollment.json"])))
+
+
+def check_follow_cold(value):
+    state = value["state"]
+    require(state["version"] == 1 and state["completed_polls"] >= 1
+            and state["confirmed_applications"] == 0 and state["latest"] is None and state["applied"] is None
+            and state["last_poll"]["outcome"] == "fetch_failed"
+            and 0 < state["last_poll"]["completed_at_ms"] <= value["observed_at_ms"]
+            and value["provider_publication_absent"] is True and value["cache_payload_absent"] is True
+            and strict_json(bytes.fromhex(value["journal_hex"])) == {"version": 1, "entries": []},
+            "follower was not observed unavailable and unapplied before named publication")
+
+
+def follow_observe(work, pid, applied):
+    JOBS["guest_work"](work)
+    owner = JOBS["identity"](pid)
+    directory, cache, publication = follow_paths(work)
+    node_owner = root_path(work).parent.stat().st_uid
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline:
+        require(JOBS["alive"](owner), "original policy follower exited before its required phase")
+        try:
+            value = follow_snapshot(work)
+        except FileNotFoundError:
+            value = None
+        if value is None:
+            time.sleep(.1)
+            continue
+        state = value["state"]
+        ready = (state["applied"] is not None if applied else
+                 state["completed_polls"] >= 1 and state["last_poll"]["outcome"] == "fetch_failed")
+        if not ready:
+            time.sleep(.1)
+            continue
+        processes = TRAIN["descendants"](pid)
+        children = []
+        for member in processes:
+            proc = Path(f"/proc/{member['pid']}")
+            try:
+                if Path(os.readlink(proc / "exe")).name != "volparossa":
+                    continue
+                argv = (proc / "cmdline").read_bytes().split(b"\0")
+                require(b"policy-follow" in argv and str(directory).encode() in argv
+                        and proc.stat().st_uid == node_owner, "unexpected follower executable/owner/enrollment")
+                children.append(member)
+            except FileNotFoundError:
+                continue
+        require(len(children) == 1, "missing exact live unprivileged policy-follow child")
+        agent_pid = int(JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value",
+            "volparossa-alpha-agent@client.service"], text=True))
+        namespace = os.readlink(f"/proc/{children[0]['pid']}/ns/net")
+        require(namespace == os.readlink(f"/proc/{agent_pid}/ns/net"), "follower bypassed the Client namespace")
+        value.update(owner=owner, child=children[0], owned_processes=processes, namespace=namespace,
+                     agent=JOBS["identity"](agent_pid), observed_at_ms=time.time_ns() // 1000000)
+        if not applied:
+            value.update(provider_publication_absent=not os.path.lexists(publication),
+                cache_payload_absent=not cache.exists() or not any(re.fullmatch(r"[0-9a-f]{64}", item.name)
+                                                                  for item in cache.iterdir()),
+                journal_hex=public_file(work / "state-client/object-policy/journal.json", node_owner).hex())
+            check_follow_cold(value)
+        else:
+            before = read(record(work, "follow-before"))
+            require(value["owner"] == before["owner"] and value["child"] == before["child"]
+                    and state["confirmed_applications"] == 1, "follower was replaced or applied multiple decisions")
+        write(record(work, "follow-observed-applied" if applied else "follow-before"), value)
+        return
+    raise ValueError("actual policy follower did not reach the required bounded phase")
+
+
+def object_follow_before(work, pid):
+    follow_observe(work, pid, False)
+
+
+def object_follow_applied(work, pid):
+    follow_observe(work, pid, True)
+
+
+def object_follow_collect(work, pid, status):
+    JOBS["guest_work"](work)
+    before = read(record(work, "follow-before"))
+    observed = read(record(work, "follow-observed-applied"))
+    require(before["owner"]["pid"] == pid and status == 0
+            and all(not JOBS["alive"](item) for item in [before["owner"], before["child"], *observed["owned_processes"]]),
+            "original follower was not successfully stopped and fully reaped")
+    final = follow_snapshot(work)
+    require(final is not None and final["state"]["applied"] == observed["state"]["applied"]
+            and final["files"]["enrollment.json"] == before["files"]["enrollment.json"],
+            "stopping changed the original applied policy or enrollment")
+    _, _, publication = follow_paths(work)
+    owner = root_path(work).parent.stat().st_uid
+    proof = dict(**final, before=before, observed=observed,
+        publication_files={name: public_file(publication / name, owner).hex()
+                           for name in ("selection.json", "decision.bin", "publication.manifest", "publication.json")},
+        publication=read(record(work, "follow-publication")), contribution=read(record(work, "follow-contribution")),
+        summary=read(record(work, "follow-summary")), exit_status=status, owner_ended=True, child_ended=True)
+    raw = public_file(root_path(work).parent / "policy-object-combined/decision.bin", owner)
+    check_object_follow(proof, raw, read(record(work, "result")), read(work / "agent-jobs-layout.json"),
+                        read(work / "a01-expected-peers.json"))
+    write(record(work, "follow-proof"), proof)
+
+
+def check_object_follow(value, raw, result, layout, peers):
+    before, observed, state = value["before"], value["observed"], value["state"]
+    check_follow_cold(before)
+    envelope = object_fields(raw, 8192, (3,))
+    body = object_fields(envelope[1], 1024)
+    applied = state["applied"]
+    require(state["version"] == 1 and state["confirmed_applications"] == 1 and state["completed_polls"] > before["state"]["completed_polls"]
+            and applied["phase"] == "applied" and applied["decision_hex"] == raw.hex()
+            and applied == observed["state"]["applied"] and state["latest"] == applied
+            and before["owner"] == observed["owner"] and before["child"] == observed["child"]
+            and before["agent"] == observed["agent"] and before["namespace"] == observed["namespace"]
+            and value["exit_status"] == 0 and value["owner_ended"] is True and value["child_ended"] is True,
+            "follower did not retain one original automatic application and complete cleanup")
+    for snapshot in (before, observed, value):
+        require(strict_json(bytes.fromhex(snapshot["files"]["state.json"])) == snapshot["state"]
+                and strict_json(bytes.fromhex(snapshot["files"]["status.json"])) == snapshot["status"]
+                and snapshot["status"]["state_sha256"] == sha(bytes.fromhex(snapshot["files"]["state.json"]))
+                and snapshot["files"]["enrollment.json"] == before["files"]["enrollment.json"]
+                and strict_json(bytes.fromhex(snapshot["files"]["enrollment.json"])) == snapshot["enrollment"],
+                "follower observations do not bind original stable checkpoints")
+        require(snapshot["status"]["version"] == 1 and snapshot["status"]["scope"] == "selected_channel_exact_object"
+                and snapshot["status"]["completed_polls"] == snapshot["state"]["completed_polls"]
+                and snapshot["status"]["confirmed_applications"] == snapshot["state"]["confirmed_applications"]
+                and snapshot["status"]["last_poll"] == snapshot["state"]["last_poll"]
+                and snapshot["status"]["applied"] == (snapshot["state"]["applied"] is not None),
+                "follower status invented a completed poll or application")
+    native_raw = bytes.fromhex(applied["manifest_hex"])
+    native = object_fields(native_raw, 64 * 1024)
+    native_body = object_fields(native[1], 64 * 1024)
+    payload = object_fields(native_body[8], 64 * 1024)
+    node = layout["provider_nodes"][0]
+    publisher = layout["provider_keys"][node]
+    require(native_body[1] == native_body[6] == 1 and native_body[2].hex() == publisher
+            and native_body[7] == hashlib.sha256(native_body[8]).digest()
+            and before["observed_at_ms"] // 1000 <= native_body[3] < native_body[4] == body[13] // 1000
+            and body[12] <= before["observed_at_ms"] <= applied["observed_at_ms"] <= observed["observed_at_ms"] < body[13]
+            and payload == {1: b"disposable-follow-policy", 2: 1,
+                3: b"application/vnd.volparossa.object-policy.v1", 4: len(raw),
+                5: protobuf_value(1, hashlib.sha256(raw).digest()) + protobuf_value(2, len(raw)),
+                6: hashlib.sha256(raw).digest()}, "peer wrapper changed content, publisher or original expiry")
+    verify_signature(native[1], native[2], native_body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
+    publication, contribution = value["publication"], value["contribution"]
+    work = Path(publication["manifest"]).parents[3]
+    scope = result["decision"]["scope"]
+    require(value["enrollment"] == dict(version=1, scope="selected_channel_exact_object",
+        policy_config=str(work / "config-client.yaml"),
+        feed=dict(publisher_key=publisher, name="disposable-follow-policy", min_revision=1),
+        subject=dict(publisher_key=scope["source_publisher_key"], manifest_id=scope["source_manifest_id"],
+                     object_sha256=scope["source_sha256"]), framework_sha256=scope["framework_sha256"],
+        cache=str(work / "state-client/compute-source/policy-object-follow-cache"), poll_seconds=1,
+        limits=dict(quota_bytes=16777216, max_entries=64, min_free_bytes=268435456)),
+        "follower did not enroll the exact independent subject, framework, channel and local policy")
+    require(applied["apply_receipt"] == dict(version=1, manifest_id=list(body[7]), decision_hash=list(envelope[2]),
+            decision_revision=body[5], policy_hash=list(body[3]), outcome=body[11]),
+            "automatic acknowledgement did not apply the original exact-object quorum")
+    require(value["publication_files"]["decision.bin"] == raw.hex()
+            and value["publication_files"]["publication.manifest"] == applied["manifest_hex"]
+            and strict_json(bytes.fromhex(value["publication_files"]["publication.json"])) ==
+                dict(manifest_id=sha(native_raw), manifest_sha256=sha(native_raw), created=native_body[3], expires=native_body[4])
+            and publication["operation"] == "compute_policy_publish" and publication["network_publication"] is False
+            and publication["local_object_policy_applied"] is False and publication["decision_sha256"] == sha(raw)
+            and publication["decision_hash"] == envelope[2].hex() and publication["publisher_key"] == publisher
+            and publication["manifest_id"] == sha(native_raw) and publication["expires_at_ms"] == body[13]
+            and contribution["operation"] == "content_contribute" and contribution["serving"] is True
+            and contribution["network_publication"] is True and contribution["original_signature_reused"] is True
+            and contribution["private_keys_transferred"] is False and contribution["manifest_id"] == sha(native_raw)
+            and contribution["publisher_key_hex"] == publisher and contribution["name"] == "disposable-follow-policy"
+            and contribution["revision"] == 1 and contribution["bytes"] == len(raw)
+            and contribution["expires_unix_seconds"] == native_body[4], "missing actual independent named publication")
+    download = applied["download_receipt"]
+    require(download["operation"] == "named_content_download" and download["cache_only"] is False
+            and download["publisher_key"] == publisher and download["name"] == "disposable-follow-policy"
+            and download["revision"] == 1 and download["manifest_id"] == sha(native_raw)
+            and download["sha256"] == sha(raw) and download["bytes"] == download["peer_bytes"] == len(raw)
+            and download["providers_used"] == 1 and download["provider_peer_ids"] == [peers[node]]
+            and download["control_relay_peer_id"] == layout["control_relay_peer_id"]
+            and download["origin_body_bytes"] == download["origin_range_requests"] == 0,
+            "automatic intake did not actually receive the exact decision from the protected peer")
+    summary = value["summary"]
+    require(summary["operation"] == "compute_policy_follow" and summary["stopped"] is True
+            and summary["model_execution"] is False and summary["network_policy_activation"] is False
+            and summary["status"] == value["status"], "follower terminal summary does not bind the original stopped state")
 
 
 def check_object_peer_probe(probe, phase, outcome, subject, manifest_id):
@@ -919,7 +1123,7 @@ def check_object_peer(value, local, result, layout, peers):
             decision_sha256=sha(raw), **pins), "import did not use receiver's own configuration/exact pins")
     require(originals["journal_hex"] == local["originals"]["journal_hex"]
             and strict_json(bytes.fromhex(originals["files"]["apply-receipt.json"]))
-                == decode_file(local["originals"]["files"], "policy-object-combined/apply-receipt.json"),
+                == local["originals"]["follow"]["state"]["applied"]["apply_receipt"],
             "second node replaced original quorum/epoch/expiry")
     deposit = received["deposit"]
     require(deposit["operation"] == "content_custody_deposit" and deposit["complete"] is True
@@ -1049,8 +1253,12 @@ def check_evidence(value, revision):
     check_transfer(value["transfer"], files, requester, value["layout"], value["peers"], result,
                    value["publication"]["publisher_key_hex"])
     check_object_activation(value["object_activation"], result, value["transfer"], files)
+    follow = value["object_activation"]["originals"]["follow"]
+    check_object_follow(follow, decode_file(value["object_activation"]["originals"]["files"],
+                        "policy-object-combined/decision.bin", False), result, value["layout"], value["peers"])
     check_object_peer(value["object_peer"], value["object_activation"], result, value["layout"], value["peers"])
     response_bytes[value["layout"]["provider_nodes"][0]] += value["transfer"]["download"]["peer_bytes"]
+    response_bytes[value["layout"]["provider_nodes"][0]] += follow["state"]["applied"]["download_receipt"]["peer_bytes"]
     CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
     for node, minimum in response_bytes.items():
         require(value["path"]["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] >= minimum,
@@ -1088,6 +1296,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         runner_exit_status=status, phase=phase, observed_blocker=None if blocker == "NONE" else blocker,
         full_b06_claimed=False, network_policy_activation_claimed=False, evidence=proof,
         local_object_policy_applied=proof is not None,
+        automatic_named_policy_follow_applied=proof is not None,
         second_node_object_policy_applied=proof is not None,
         object_outcome=proof["result"]["decision"]["outcome"] if proof is not None else None,
         object_access_branch=("allow_exact_cached_access" if proof["result"]["decision"]["outcome"] == "allow"
@@ -1101,6 +1310,7 @@ def check_report(value, revision):
             and value["success"] is True and value["runner_exit_status"] == 0
             and value["full_b06_claimed"] is False and value["network_policy_activation_claimed"] is False
             and value["local_object_policy_applied"] is True
+            and value["automatic_named_policy_follow_applied"] is True
             and value["second_node_object_policy_applied"] is True
             and value["object_outcome"] == value["evidence"]["result"]["decision"]["outcome"]
             and value["object_access_branch"] == ("allow_exact_cached_access" if value["object_outcome"] == "allow"
@@ -1152,6 +1362,21 @@ def self_test():
     rejects(check_fixture_epoch_header, {**epoch_header, 3: 1}, epoch_signers, epoch_signers)
     rejects(check_fixture_epoch_header, {**epoch_header, 7: 2}, epoch_signers, epoch_signers)
     rejects(check_fixture_epoch_header, epoch_header, {b"a", b"b"}, epoch_signers)
+
+    # Counter/presence proofs only: no synthetic decision is ever sent to an agent.
+    cold = dict(state=dict(version=1, completed_polls=1, confirmed_applications=0,
+        last_poll=dict(completed_at_ms=10, outcome="fetch_failed"), latest=None, applied=None),
+        observed_at_ms=11, provider_publication_absent=True, cache_payload_absent=True,
+        journal_hex=b'{"version":1,"entries":[]}'.hex())
+    check_follow_cold(cold)
+    for changed in (
+        {**cold, "state": {**cold["state"], "completed_polls": 0}},
+        {**cold, "state": {**cold["state"], "confirmed_applications": 1}},
+        {**cold, "provider_publication_absent": False},
+        {**cold, "cache_payload_absent": False},
+        {**cold, "journal_hex": b'{"version":1,"entries":[{}]}'.hex()},
+    ):
+        rejects(check_follow_cold, changed)
 
     scope = {"source_manifest_id": "21" * 32, "source_publisher_key": "22" * 32,
              "source_sha256": sha(SUBJECT.encode()), "source_bytes": len(SUBJECT.encode())}
@@ -1365,6 +1590,10 @@ def main():
         object_probe(Path(args[1]), args[2], int(args[3]))
     elif len(args) == 3 and args[0] == "object_collect":
         object_collect(Path(args[1]), args[2])
+    elif len(args) == 3 and args[0] in ("object_follow_before", "object_follow_applied"):
+        globals()[args[0]](Path(args[1]), int(args[2]))
+    elif len(args) == 4 and args[0] == "object_follow_collect":
+        object_follow_collect(Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 4 and args[0] == "object_peer_probe":
         object_peer_probe(Path(args[1]), args[2], int(args[3]))
     elif len(args) == 3 and args[0] == "object_peer_collect":

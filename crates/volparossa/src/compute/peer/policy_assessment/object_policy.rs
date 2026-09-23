@@ -2,6 +2,7 @@
 //! Compute peers provide signed judgments; they never become policy maintainers.
 
 pub(in crate::compute::peer) mod distribution;
+pub(in crate::compute::peer) mod follow;
 
 #[cfg(test)]
 mod tests;
@@ -438,6 +439,18 @@ async fn apply_decision(
     output: &Path,
     socket: &Path,
 ) -> Result<()> {
+    let receipt = request_apply_decision(bytes, verified, socket).await?;
+    retain(
+        &output.join("apply-receipt.json"),
+        &serde_json::to_vec(&receipt)?,
+    )
+}
+
+async fn request_apply_decision(
+    bytes: &[u8],
+    verified: &VerifiedObjectDecision,
+    socket: &Path,
+) -> Result<volparossa_local_control::ContentPolicyReceipt> {
     use volparossa_local_control::{
         ContentPolicyApplyRequest, control_request::Operation, control_response::Payload,
     };
@@ -465,8 +478,5 @@ async fn apply_decision(
             && receipt.outcome == body.outcome as i32,
         "compute_object_policy_apply_receipt"
     );
-    retain(
-        &output.join("apply-receipt.json"),
-        &serde_json::to_vec(&receipt)?,
-    )
+    Ok(receipt)
 }

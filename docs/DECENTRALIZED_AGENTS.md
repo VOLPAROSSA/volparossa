@@ -2035,10 +2035,52 @@ epoch before asking its own agent to apply the exact object decision. Omit `--ap
 verified bytes without changing the gate, or omit `--execute` for an inert preview.
 
 This is explicit node-to-node distribution, **not automatic network-wide consensus**. The
-second-node cache-transfer/application/restart fixture is implemented but has no live passing
-run yet. Automatic subscriptions, policy-authority membership and partition/conflict handling
-remain separate work. Publisher signatures authenticate transport objects; they cannot replace
+second-node cache-transfer/application/restart proof on `4d438099` is pending; no passing
+result is claimed. Policy-authority membership and partition/conflict handling remain separate
+work. Publisher signatures authenticate transport objects; they cannot replace
 the receiving node's policy trust or prove the assessors' judgments correct.
+
+#### Automatically following one selected policy channel (new candidate)
+
+`compute peer policy-follow --execute` adds a long-lived, explicitly enrolled consumer. The
+owner selects one `--publisher-key`/`--name` channel, its minimum publication revision, the
+complete exact-object subject (`--subject-publisher-key`, `--subject-manifest-id`,
+`--subject-sha256`), `--framework-sha256` and the node's own `--policy-config`. It is not a
+global policy-feed subscription or discovery of new authorities. A content publisher must
+register its signed wrapper using the existing contribution API: custody of chunks alone
+does **not** create a named publication.
+
+The follower refreshes that channel through the existing protected named-content path,
+accepting only the policy-decision MIME type and at most 8 KiB of original decision bytes.
+It verifies the exact subject/framework and current independently configured quorum, then
+automatically asks its own agent to apply the decision. Individual decision/evidence hashes
+come from the verified quorum envelope, not a new owner prompt for every update. Wrapper
+signatures do not add policy authority. Publication and decision revision floors reject
+rollback and equal-revision conflicts; an unchanged publication does not cause another
+application. Original signed bytes, authority epoch, download receipt and apply acknowledgement
+remain in the bounded private state without changing their original expiry.
+
+The owner chooses `--directory`, `--cache`, cache limits and `--poll-seconds` (default 60).
+There is one serial polling/apply loop, no model execution, training or private-key transfer.
+SIGINT/SIGTERM stops this owner without disconnecting a shared route; an interrupted apply
+retains its original pending bytes for idempotent `--resume`. Resume requires the same
+enrollment and rechecks original authority rather than re-signing or renewing it. Expired or
+superseded-epoch pending decisions are not newly applied. `status.json` binds the current
+state hash and completed polls; an `applied` status is a **historical acknowledgement**, not
+a promise that an Allow is still current. A failed fetch does not prove that a name is absent.
+These bounded operations and explicit stop controls are the current owner-first boundary;
+they are not measured automatic spare-bandwidth scheduling or an interactive-latency guarantee.
+
+The updated four-model-job fixture combines without `--apply`, transfers the original quorum
+to a peer, starts the Client follower before that peer publishes its own wrapper, and requires
+a completed unavailable poll with an empty cache and journal. It then requires a real named
+peer download, unchanged inner signatures/expiry, automatic local application and full follower
+reaping before route teardown. Client cached-access/restart and separate peer import/restart
+checks remain. All 11 focused object-policy CLI tests pass, including four new follower
+checks; strict CLI Clippy, scoped formatting and shell checks also pass. The inert fixture
+self-test passes with 81 rejection cases. This new automatic
+consumer proof has **not** established a live passing run; it does not reinterpret the failed
+`6ac301ee` or pending `4d438099` evidence, and B06 remains open.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

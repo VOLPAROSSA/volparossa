@@ -43,9 +43,33 @@ import and retry; no model or signing key needs to be transferred to the receive
 fixture requires a genuinely cold decision on a separate node, actual custody receipt/export,
 fresh subject-access probes, and unchanged authority after that receiving agent restarts.
 Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass; this
-new peer-distribution VM proof has not run. There is no automatic channel subscription or
+peer-distribution VM proof on `4d438099` is pending, not a live PASS. There is no
 network-wide membership/conflict governance, physical cache erasure, arbitrary HTTPS
 inspection, legal-correctness guarantee or completed B06.
+
+A subsequent `compute peer policy-follow --execute` candidate automatically refreshes one
+owner-enrolled native publisher/name channel and applies only quorum-verified decisions for
+its exact enrolled subject/framework under the node's own current policy configuration.
+The peer must actually contribute its signed named wrapper; custody alone is not a name index.
+The bounded serial loop retains original wrapper/decision/epoch bytes and transport/application
+receipts, enforces publication and decision revision floors, and skips unchanged publications.
+SIGINT/SIGTERM stops its own work without disconnecting shared consumers. `--resume` requires
+the same enrollment and preserves pending handoff and original expiry; it never signs a new
+decision or turns an expired/historical receipt into current authorization. Explicit polling
+and cache limits require no model work or transferred private keys. Automatic spare-bandwidth
+scheduling and measured interactive non-interference are not claimed for this follower.
+
+The new fixture keeps the same four model jobs but combines without direct application. It
+starts the follower with a fresh cache before the receiving peer publishes, requires an actual
+completed unavailable poll and empty Client journal, then binds the real protected named
+download and automatic apply acknowledgement to the unchanged original quorum. Follower
+reaping, cached-access probes and both real agent restarts remain mandatory. All 11 focused
+object-policy CLI tests pass, including four new follower checks, along with strict CLI
+Clippy, scoped formatting and shell checks. Its inert Python self-test
+passes with 81 rejection cases; the new automatic-consumer live proof remains
+unproven. The failed `6ac301ee` and pending `4d438099` retain their separate historical scopes.
+This is selected-channel automation, not a complete global feed, new authority membership,
+independent semantic accuracy or B06 completion.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
