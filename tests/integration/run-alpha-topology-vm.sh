@@ -790,6 +790,7 @@ def collect(home, opt, revision, scenario, guest_status,
             candidates.extend((root / name, f"{label}/{name}") for name in (
                 "agent-reasoning-smoke.json", "agent-reasoning-provision.json", "agent-reasoning-provision.log",
                 "agent-reasoning-isolation.json", "agent-reasoning-cpu.json", "agent-reasoning-worker.json",
+                "agent-reasoning-limits.json",
                 "agent-reasoning-worker.stderr", "agent-reasoning-observer.stderr", "agent-reasoning-source.txt",
                 "agent-reasoning-dataset.json", "agent-reasoning-answer.json", "agent-reasoning-semantic_review.json"))
         if scenario == "agent-private-task":

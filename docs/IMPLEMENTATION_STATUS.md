@@ -21,8 +21,19 @@ two-thread limits, isolation and cancellation remain active. A separate 8-GiB si
 used by the earlier flawed graph, plus its actual answer and execution observations. Content
 review remains distinct from execution/EOS. Ninety focused Rust tests, strict production
 Clippy for the CLI/agent/content library, inert Python profile tests and the inert KVM launch
-contract pass. Its actual fit, speed, correctness and larger-model peer/policy execution remain
-unproved; no model or backend ran on the development host.
+contract pass. The [first exact-source VM trial on `6786bfa4`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35879772476)
+**fails overall** at the address-space observation. Its real BF16 worker completes in 79.776
+seconds, generates 43 tokens and is reaped; the supervisor observes a 3,908,026,368-byte peak
+RSS under the selected 5-GiB sampled limit. The original answer correctly selects Route A
+because it hides the client address from the exit, but omits Route B's violation, the relay's
+destination boundary and all requested performance evidence. Complete correctness is not
+proved. Isolation/input checks, final owned-object cleanup and unchanged host bytes pass.
+The observer's parser incorrectly rejected padded kernel columns, and it did not retain the
+original row: no retrospective claim about the actual 10-GiB limit is possible. A follow-up
+now retains the raw limits, parsed numbers and PID/start-time binding, while preserving exact
+10-GiB soft/hard validation. The failed run remains failed. Larger-model peer/policy execution,
+general answer quality and a complete live execution proof remain open; no model or backend
+ran on the development host.
 
 An owner-enrolled `compute train-loop --aggregate-plan` candidate now connects automatic
 three-publisher discovery, frozen-cohort aggregation and held-out comparison to local adoption,

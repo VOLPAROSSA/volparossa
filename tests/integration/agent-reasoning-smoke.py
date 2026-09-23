@@ -115,13 +115,51 @@ def check_worker(value, revision, raw_dataset):
     require(type(value["elapsed_ms"]) is int and 0 < value["elapsed_ms"] < 600000, "worker original deadline exceeded")
 
 
+def parse_address_space(limit_text):
+    require(type(limit_text) is str and limit_text.isascii() and 0 < len(limit_text) <= 16384
+        and "\0" not in limit_text, "invalid bounded proc limits text")
+    rows = [line for line in limit_text.splitlines()
+        if re.match(r"Max[ \t]+address[ \t]+space(?:[ \t]|$)", line)]
+    require(len(rows) == 1, "missing or duplicate address-space row")
+    # /proc/limits pads the units column too. Permit horizontal whitespace only;
+    # neither another line nor a non-byte/unlimited limit supplies numeric proof.
+    row = re.fullmatch(r"Max[ \t]+address[ \t]+space[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+bytes[ \t]*", rows[0])
+    require(row is not None, "invalid numeric address-space row")
+    return dict(soft_bytes=int(row[1]), hard_bytes=int(row[2]), units="bytes")
+
+
+def check_limits(value, worker):
+    require(value["version"] == 1 and value["worker"] == worker
+        and value["worker_before"] == value["worker_after"] == worker,
+        "address-space observation changed worker identity")
+    raw = value["proc_limits_text"].encode("ascii")
+    require(value["proc_limits"] == digest(raw) and value["parse_error"] is None
+        and value["address_space"] == parse_address_space(value["proc_limits_text"]),
+        "original proc limits differ from parsed evidence")
+    require(value["address_space"] == dict(soft_bytes=10 * 1024**3, hard_bytes=10 * 1024**3, units="bytes"),
+        "actual reasoning address-space limit differs")
+
+
 def observe(pid, output, provision, original, canary):
     TRAIN["observe"](pid, output / f"{NAME}-isolation.json", provision, original, canary)
     worker = read(output / f"{NAME}-isolation.json")["worker"]
-    limit_text = Path(f"/proc/{worker['pid']}/limits").read_text()
-    address = re.search(r"^Max address space\s+(\d+)\s+(\d+)\s+bytes$", limit_text, re.MULTILINE)
-    require(address is not None and int(address[1]) == int(address[2]) == 10 * 1024**3,
-        "actual reasoning address-space limit differs")
+    before = TRAIN["identity"](worker["pid"])
+    raw_limits = Path(f"/proc/{worker['pid']}/limits").read_bytes()
+    after = TRAIN["identity"](worker["pid"])
+    limit_text = raw_limits.decode("ascii")
+    observation = dict(version=1, worker=worker, worker_before=before, worker_after=after,
+        proc_limits_text=limit_text, proc_limits=digest(raw_limits), address_space=None, parse_error=None)
+    try:
+        observation["address_space"] = parse_address_space(limit_text)
+    except ValueError:
+        observation["parse_error"] = "invalid_address_space_row"
+    path = output / f"{NAME}-limits.json"
+    write(path, observation)
+    info = original.stat()
+    os.chown(path, info.st_uid, info.st_gid)
+    # Retain original text and actual parsed values before any mismatch can stop us.
+    check_limits(observation, worker)
+    address = observation["address_space"]
     samples, first, last, peak = 0, None, None, 0
     deadline = time.monotonic() + 610
     while TRAIN["alive"](worker):
@@ -141,7 +179,7 @@ def observe(pid, output, provision, original, canary):
     path = output / f"{NAME}-cpu.json"
     write(path, dict(worker=worker, samples=samples, clock_ticks_per_second=os.sysconf("SC_CLK_TCK"),
         first=first, last=last, sampled_peak_rss_bytes=peak, sample_interval_ms=500,
-        address_space_soft_bytes=int(address[1]), address_space_hard_bytes=int(address[2]),
+        address_space_soft_bytes=address["soft_bytes"], address_space_hard_bytes=address["hard_bytes"],
         complete_lifetime_cpu_claimed=False, worker_lifetime_ended=not TRAIN["alive"](worker)))
     info = original.stat()
     os.chown(path, info.st_uid, info.st_gid)
@@ -158,6 +196,7 @@ def check_report(value, revision):
     check_provision(value["provision"])
     check_worker(value["worker"], revision, raw)
     TRAIN["check_isolation"](value["isolation"])
+    check_limits(value["limits"], value["isolation"]["worker"])
     require(value["semantic_review"] == semantic_review(value["worker"]["outputs"][0]), "semantic review misrepresented")
     cpu = value["cpu"]
     require(cpu["worker"] == value["isolation"]["worker"] and 1 <= cpu["samples"] <= 1221
@@ -177,7 +216,7 @@ def check_report(value, revision):
 def check_bundle(path, revision):
     value = read(path, 1048576)
     check_report(value, revision)
-    for field in ("worker", "provision", "isolation", "cpu", "semantic_review"):
+    for field in ("worker", "provision", "isolation", "limits", "cpu", "semantic_review"):
         require(read(path.parent / f"{NAME}-{field}.json", 1048576) == value[field], "original report differs")
     require((path.parent / f"{NAME}-source.txt").read_bytes() == SOURCE
         and (path.parent / f"{NAME}-dataset.json").read_bytes().hex() == value["dataset_hex"]
@@ -237,6 +276,8 @@ def execute(output, revision):
             write(output / f"{NAME}-answer.json", answer)
             result["semantic_review"] = semantic_review(answer)
             write(output / f"{NAME}-semantic_review.json", result["semantic_review"])
+        if (output / f"{NAME}-limits.json").is_file():
+            result["limits"] = read(output / f"{NAME}-limits.json")
         require(code == 0 and observation_code == 0, "inference or observer did not complete")
         for field in ("isolation", "cpu"):
             result[field] = read(output / f"{NAME}-{field}.json")
@@ -290,6 +331,49 @@ def execute(output, revision):
 
 
 def self_test():
+    expected = dict(soft_bytes=10 * 1024**3, hard_bytes=10 * 1024**3, units="bytes")
+    worker_identity = dict(pid=123, start_ticks=456)  # Pure parser fixture, not a process observation.
+    for raw_row in (
+        "Max address space 10737418240 10737418240 bytes\n",
+        "Max address space         10737418240          10737418240          bytes     \n",
+        "Max\taddress\tspace\t10737418240\t10737418240\tbytes\t \n",
+    ):
+        require(parse_address_space(raw_row) == expected, "padded proc numeric row rejected")
+        limits = dict(version=1, worker=worker_identity, worker_before=worker_identity, worker_after=worker_identity,
+            proc_limits_text=raw_row, proc_limits=digest(raw_row.encode()), address_space=expected, parse_error=None)
+        check_limits(limits, worker_identity)
+    for invalid in (
+        "Max open files 128 128 files\n", "Max address space unlimited unlimited bytes\n",
+        "Max address space 10737418240 10737418240 kbytes\n",
+        "Max address space 10737418240 10737418240 bytes ignored\n",
+        "Max address space 10737418240\n10737418240 bytes\n",
+        raw_row + raw_row,
+    ):
+        try:
+            parse_address_space(invalid)
+        except ValueError:
+            continue
+        raise AssertionError("invalid proc address-space row accepted")
+    for soft, hard in ((0, 10 * 1024**3), (10 * 1024**3, 6 * 1024**3), (11 * 1024**3, 11 * 1024**3)):
+        changed = copy.deepcopy(limits)
+        changed["proc_limits_text"] = f"Max address space {soft} {hard} bytes     \n"
+        changed["proc_limits"] = digest(changed["proc_limits_text"].encode())
+        changed["address_space"] = parse_address_space(changed["proc_limits_text"])
+        try:
+            check_limits(changed, worker_identity)
+        except ValueError:
+            continue
+        raise AssertionError("a non-10GiB actual limit was accepted")
+    for field, value in (("worker_after", dict(pid=123, start_ticks=457)),
+                        ("proc_limits", dict(bytes=1, sha256="0" * 64)),
+                        ("address_space", dict(soft_bytes=1, hard_bytes=1, units="bytes"))):
+        changed = copy.deepcopy(limits)
+        changed[field] = value
+        try:
+            check_limits(changed, worker_identity)
+        except ValueError:
+            continue
+        raise AssertionError("changed original limits or worker identity accepted")
     historical = runpy.run_path(str(HERE / "agent-model-planning-smoke.py"))
     require(historical["GRAPH_SOURCE"] == SOURCE and historical["GRAPH_QUESTION"] == QUESTION and len(SOURCE) == 444,
         "comparison original changed")
@@ -331,7 +415,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("altered inference identity/budget/claim accepted")
-    print("reasoning source/question, separate semantic review, budget and nine evidence mutations PASS; no model executed")
+    print("reasoning strict padded limits/original identity, source/question, separate semantic review, budget and nine evidence mutations PASS; no model executed")
 
 
 def main(args):

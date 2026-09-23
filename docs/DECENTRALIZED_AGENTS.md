@@ -191,10 +191,16 @@ pressure cancellation and owner-priority controls still apply. RSS sampling is n
 cgroup cap or a guarantee that a user never notices load.
 The explicit 360M provision preview downloads 977,655,758 bytes, including the existing runtime
 wheels; no model or runtime is installed on the development host. The later 360M trials prove
-peer execution but retain factual errors. The new 1.7B candidate has a separate single-worker
-8-GiB disposable VM trial pending; its actual fit, speed and source-faithful answers are not yet
-proved. That trial retains the original public source, question and actual answer for content
-review independently of execution completion.
+peer execution but retain factual errors. The first 1.7B single-worker
+[8-GiB disposable VM trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35879772476)
+retains a real BF16 answer: 43 generated tokens in 79.776 seconds of worker execution, with
+3,908,026,368 bytes peak RSS observed by its supervisor. It selects Route A for the correct
+client-address reason, but omits Route B's violation and the requested performance evidence.
+The overall trial fails because its observer rejected the address-space row; the original row
+was not retained, so that run does not prove the actual 10-GiB limit. The observer now accepts
+kernel column padding while retaining original limits and exact PID/start-time identity;
+the numerical requirement is unchanged. A complete execution and generally useful reasoning
+remain unproved. Original source, question and answer remain distinct from quality claims.
 
 `volparossa compute run` is preview-only unless `--execute` is supplied. The current CLI
 supervises one real Python CPU worker in mandatory Bubblewrap network/PID/IPC/mount

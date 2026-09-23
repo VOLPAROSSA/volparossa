@@ -254,8 +254,10 @@ answers still contain privacy errors; retaining evidence is not the same as reas
 An optional `smollm2-1.7b-v1` candidate now connects a larger model to these same task and
 principle-assessment interfaces. It uses explicit CPU BF16 inference, its own memory budget,
 and requires sufficient observed spare memory before accepting work. It neither replaces the
-135M training model nor upgrades existing tasks on resume. Its first source-grounded VM trial
-is pending; more parameters alone are not evidence of better answers.
+135M training model nor upgrades existing tasks on resume. Its first real VM answer selects
+the correct route but omits the requested performance evidence. That run also failed its
+memory-limit observation, which is being corrected; it is not a complete execution or
+reasoning-quality pass. More parameters alone are not evidence of better answers.
 
 An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
 adapters, compare the result with its active model and use an approved combination for serving
