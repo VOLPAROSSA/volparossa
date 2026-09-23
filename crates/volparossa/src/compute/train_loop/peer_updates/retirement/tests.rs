@@ -47,7 +47,7 @@ impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let mut argv = vec![
+        let mut command_line = vec![
             "volparossa".to_owned(),
             "compute".into(),
             "train-loop".into(),
@@ -59,11 +59,11 @@ impl Fixture {
             ("--model-root", "model"),
             ("--cache", "cache"),
         ] {
-            argv.extend([flag.into(), root.path().join(name).to_str().unwrap().into()]);
+            command_line.extend([flag.into(), root.path().join(name).to_str().unwrap().into()]);
         }
         let crate::CliCommand::Compute {
             command: crate::compute::Command::TrainLoop(args),
-        } = crate::Cli::try_parse_from(argv).unwrap().command
+        } = crate::Cli::try_parse_from(command_line).unwrap().command
         else {
             panic!("options")
         };
@@ -267,7 +267,7 @@ impl Fixture {
                 "dataset":{"sha256":identity(&self.dataset).sha256,"bytes":self.dataset.len(),"training_examples":0},"baseline_evaluation":{"loss":loss,"target_tokens":8}});
             if let Some(files) = files {
                 report["input_adapter"] = json!({"applied":true,"model_id":MODEL_ID,"model_revision":MODEL_REVISION,"files":files,
-                "applied_parameters":{"parameters":230400,"sha256":"ab".repeat(32)},"base_parameters_before_apply":{"synthetic":true},"base_parameters_after_apply":{"synthetic":true}});
+                "applied_parameters":{"parameters":230_400,"sha256":"ab".repeat(32)},"base_parameters_before_apply":{"synthetic":true},"base_parameters_after_apply":{"synthetic":true}});
             }
             json_file(
                 &root.join("comparison").join(stage).join("report.json"),
