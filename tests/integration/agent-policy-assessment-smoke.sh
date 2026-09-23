@@ -162,6 +162,12 @@ agent_policy_cycle_run() {
     wait "$policy_round_pid" || policy_round_status=$?
     jobs_batch_pid=
     agent_policy_authorities_stop || fail POLICY_AUTHORITY_CLEANUP_FAILED
+    if [ "$policy_round_status" -ne 0 ]; then
+        # Preserve the original failed handoff before the existing nonzero gate/cleanup.
+        # A diagnostic failure must not replace or excuse the original cycle failure.
+        python3 -B "$policy_script" round_failure_collect "$WORK" "$policy_round_status" \
+            2>"$WORK/agent-policy-assessment-round-failure.err" || true
+    fi
     python3 -B "$policy_script" collect "$WORK" \
         2>"$WORK/agent-policy-assessment-collect.err" || fail POLICY_RETAINED_EVIDENCE_INVALID
     [ "$policy_observer_status" -eq 0 ] || fail POLICY_FOUR_REAL_WORKERS_NOT_OBSERVED

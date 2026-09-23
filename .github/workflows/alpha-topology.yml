@@ -139,6 +139,7 @@ jobs:
           python3 -B tests/integration/agent-reasoning-smoke.py self-test
           sh -n tests/integration/agent-policy-assessment-smoke.sh
           python3 -B tests/integration/agent-policy-assessment-smoke.py self-test
+          python3 -B tests/integration/test-policy-round-failure-diagnostics.py
           python3 -B tests/integration/agent-training-smoke.py self-test
           python3 -B tests/integration/agent-owner-priority-smoke.py self-test
           python3 -B tests/integration/agent-owner-cancel-smoke.py self-test

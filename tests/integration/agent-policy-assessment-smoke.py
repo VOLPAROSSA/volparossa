@@ -570,6 +570,80 @@ def round_file(path, owner):
     return dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
 
 
+def round_failure_snapshot(root, owner):
+    """Only original handoff diagnostics, never assessment text, bundles or keys."""
+    names = ("state.json", "status.json", "round/window.json", "round/status.json")
+    names += tuple(f"round/request-deposit-{index:02}.json" for index in range(64))
+    allowed = {
+        "state.json": {"version", "phase", "enrollment_sha256", "started_at_ms", "deadline_ms",
+                       "assessment_sha256", "bundle_sha256", "round_sha256"},
+        "status.json": {"operation", "complete", "phase", "reason", "started_at_ms", "deadline_ms",
+                        "assessment", "original_jobs_retained", "remote_cancellation_confirmed",
+                        "network_policy_activation", "authority_private_keys_loaded",
+                        "semantic_correctness_proven", "cancellation_cleanup_grace_seconds"},
+        "round/window.json": {"started_at_ms", "deadline_ms"},
+        "round/status.json": {"operation", "phase", "verified_endorsements", "complete",
+                              "model_execution", "assessment_started", "authority_private_keys_loaded",
+                              "network_policy_activation"},
+    }
+    files, missing, rejected, total = {}, [], {}, 0
+    for name in names:
+        path = root / name
+        try:
+            for parent in (root.parent, root, *([root / "round"] if name.startswith("round/") else [])):
+                info = parent.lstat()
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == owner
+                        and stat.S_IMODE(info.st_mode) == 0o700, "unsafe diagnostic directory")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1
+                        and stat.S_IMODE(info.st_mode) == 0o600 and 0 < info.st_size <= 65536,
+                        "unsafe diagnostic file")
+                raw = stream.read(65537)
+                require(len(raw) == info.st_size and total + len(raw) <= 1048576,
+                        "diagnostic bytes exceed bound or changed")
+            value = strict_json(raw)
+            require(isinstance(value, dict), "diagnostic JSON object required")
+            if name in allowed:
+                require(set(value) == allowed[name], "unexpected round diagnostic fields")
+                require(all(not isinstance(item, (dict, list)) for item in value.values())
+                        and (name != "status.json" or value["assessment"] is None),
+                        "cycle diagnostics must not contain model/source output")
+            elif name.startswith("round/request-deposit-"):
+                require(set(value) == {"operation", "manifest_id", "publisher_key_hex", "object_bytes",
+                    "original_expiry_unix_seconds", "requested_providers", "confirmed_complete_providers",
+                    "failed_providers", "complete", "observations", "private_keys_transferred",
+                    "direct_provider_dial", "origin_authenticated", "future_availability_guaranteed"}
+                    and value["operation"] == "content_custody_deposit"
+                    and isinstance(value["observations"], list) and len(value["observations"]) <= 3
+                    and value["private_keys_transferred"] is False
+                    and all(isinstance(item, dict) and set(item) == {"provider_key_hex",
+                        "agent_handoff_complete", "state", "signed_receipt_hex", "original_expiry_unix_seconds",
+                        "object_bytes", "unique_chunks", "error"} for item in value["observations"]),
+                    "unexpected request custody diagnostic")
+            files[name] = dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
+            total += len(raw)
+        except FileNotFoundError:
+            missing.append(name)
+        except (OSError, ValueError, TypeError):
+            # Fixed labels: do not accidentally print rejected file contents into public logs.
+            rejected[name] = "unsafe_or_malformed_original"
+    return dict(files=files, missing=missing, rejected=rejected, original_bytes=total,
+                original_request_receipts=sum(name.startswith("round/request-deposit-") for name in files))
+
+
+def round_failure_collect(work, exit_status):
+    JOBS["guest_work"](work)
+    require(0 < exit_status <= 255, "failure collector requires original nonzero exit")
+    owner = source_path(work).stat().st_uid
+    require(owner != 0, "diagnostics must belong to the unprivileged cycle owner")
+    diagnostics = round_failure_snapshot(cycle_root(work), owner)
+    write(record(work, "round-failure"), dict(version=1, diagnostic_only=True, success=False,
+        cycle_complete=False, cycle_exit_status=exit_status, collected_at_ms=time.time_ns() // 1000000,
+        **diagnostics))
+
+
 def cycle_source_ready(work, pid):
     JOBS["guest_work"](work)
     owner = JOBS["identity"](pid)
@@ -2187,6 +2261,8 @@ def main():
         observe(Path(args[1]), int(args[2]))
     elif len(args) == 3 and args[0] in ("round_observe", "cycle_source_ready"):
         globals()[args[0]](Path(args[1]), int(args[2]))
+    elif len(args) == 3 and args[0] == "round_failure_collect":
+        round_failure_collect(Path(args[1]), int(args[2]))
     elif len(args) == 4 and args[0] in ("round_collect", "cycle_collect"):
         globals()[args[0]](Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 4 and args[0] == "object_probe":
