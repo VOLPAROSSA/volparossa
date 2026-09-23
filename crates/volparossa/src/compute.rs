@@ -405,7 +405,7 @@ fn validate_profile_dataset(
         }
         if public["version"] == 4 {
             ensure!(
-                profile == ModelProfile::Smol360 && !has_adapter,
+                profile.supports_rich_inference() && !has_adapter,
                 "compute_principle_model_profile"
             );
         }

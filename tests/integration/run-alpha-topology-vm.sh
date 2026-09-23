@@ -809,7 +809,11 @@ def collect(home, opt, revision, scenario, guest_status,
                 "agent-reasoning-isolation.json", "agent-reasoning-cpu.json", "agent-reasoning-worker.json",
                 "agent-reasoning-limits.json",
                 "agent-reasoning-worker.stderr", "agent-reasoning-observer.stderr", "agent-reasoning-source.txt",
-                "agent-reasoning-dataset.json", "agent-reasoning-answer.json", "agent-reasoning-semantic_review.json"))
+                "agent-reasoning-dataset.json", "agent-reasoning-answer.json", "agent-reasoning-semantic_review.json",
+                "agent-reasoning-framework.json", "agent-reasoning-context.txt", "agent-reasoning-context.manifest",
+                "agent-reasoning-dataset.manifest", "agent-reasoning-context-publication.json",
+                "agent-reasoning-dataset-publication.json", "agent-reasoning-source.manifest",
+                "agent-reasoning-source-publication.json"))
         if scenario == "agent-private-task":
             # Exact synthetic-fixture proof only, never arbitrary private input,
             # model reports or a prefix glob over the owner's work area.

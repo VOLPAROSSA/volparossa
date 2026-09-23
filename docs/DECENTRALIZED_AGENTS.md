@@ -1942,6 +1942,21 @@ The fixed question no longer asks the model to imitate a schema-placeholder stri
 grounding and opposite-peer review still apply; well-formed JSON does not prove sound judgment.
 Original enrollment-version-1 workflows remain bound to their original inputs and outputs.
 
+The public dataset-v4 admission gate now accepts both existing rich-inference profiles,
+`smollm2-360m-v1` and explicitly selected `smollm2-1.7b-v1`, without an adapter. It still rejects
+training, private inference, 135M and arbitrary schemas for these inputs. The 1.7B worker,
+BF16 execution and resource limits already existed; this fixes the narrower input gate rather
+than adding a model or changing defaults. The standalone `agent-reasoning` fixture now signs
+its original public source, complete framework/context and v4 dataset and provisions the pinned
+decoder for one actual 1.7B assessment, without selecting an outcome.
+The [original `44eec3b9` trial](https://github.com/VOLPAROSSA/volparossa/actions/runs/35912302153)
+passes its complete source-exact execution checker: 293 tokens end at a valid JSON boundary
+after 62.132 seconds; original signatures, resource/isolation evidence and cleanup pass.
+Its `allow` judgment also records material uncertainty and infers motives absent from the source.
+That is not semantic accuracy, cross-review, a quorum decision, automatic policy activation or
+a distributed cycle. The isolated main-line port retains this historical provenance; its fresh
+VM execution verification remains pending.
+
 The [first structured run](https://github.com/VOLPAROSSA/volparossa/actions/runs/35667596187)
 still fails: both real peers quote the framework instead of the subject, repeat a principle and
 hit the old 256-token cap before completing JSON. No cross-review or portable judgment is proved.
