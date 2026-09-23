@@ -85,6 +85,44 @@ struct Activity {
     listener: tokio::task::JoinHandle<()>,
 }
 
+/// Content-free context retained when a coordinator catches a cycle failure.
+#[derive(Debug, Clone, Copy)]
+enum CycleStage {
+    Admission,
+    Fetch,
+    SourceValidation,
+    WorkerAdmission,
+    Supervisor,
+    Completion,
+}
+
+impl CycleStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::Fetch => "fetch",
+            Self::SourceValidation => "source_validation",
+            Self::WorkerAdmission => "worker_admission",
+            Self::Supervisor => "supervisor",
+            Self::Completion => "completion",
+        }
+    }
+}
+
+impl std::fmt::Display for CycleStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl std::error::Error for CycleStage {}
+
+pub(super) fn failure_stage(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<CycleStage>()
+        .map_or("unknown", |stage| stage.label())
+}
+
 impl Activity {
     fn new() -> Result<Self> {
         let mut interrupt =
@@ -146,6 +184,8 @@ pub(super) async fn execute_cycle_guarded(
     mut activity: watch::Receiver<bool>,
     validation: Option<&[u8]>,
 ) -> Result<Value> {
+    let mut stage = CycleStage::Admission;
+    let result = async {
     ensure!(args.execute, "train_cycle_execute_required");
     ensure_active(&activity, "train_cycle_cancelled_before_output")?;
     let selection = selection(args)?;
@@ -177,12 +217,14 @@ pub(super) async fn execute_cycle_guarded(
         reuse_cache: args.reuse_cache,
         limits: args.limits.clone(),
     };
+    stage = CycleStage::Fetch;
     ensure_active(&activity, "train_cycle_cancelled_before_fetch")?;
     let download = tokio::select! {
         biased;
         () = cancelled(&mut activity) => bail!("train_cycle_cancelled_during_fetch_verified_cache_may_remain"),
         result = agent_artifact::fetch_training_source(&selected, socket, &args.output) => result?,
     };
+    stage = CycleStage::SourceValidation;
     let verified = validate_source(args, &download, now()?)?;
     if let Some(validation) = validation {
         guard_overlap(&download.dataset, validation)?;
@@ -192,16 +234,22 @@ pub(super) async fn execute_cycle_guarded(
     let authority_expires = catalog_expiry(args, now()?)?.map_or(verified.expires(), |expires| {
         expires.min(verified.expires())
     });
+    stage = CycleStage::WorkerAdmission;
     let options = worker_options(args, authority_expires, now()?)?;
     options.validate()?;
     // Await the real supervisor through cancellation. Dropping its future would not be a
     // valid claim that a running training worker had been killed and reaped.
+    stage = CycleStage::Supervisor;
     let report = execute(&options, activity.clone()).await?;
+    stage = CycleStage::Completion;
     ensure_active(
         &activity,
         "train_cycle_cancelled_after_training_outputs_retained",
     )?;
     complete(args, &download, &source, &report)
+    }
+    .await;
+    result.map_err(|error: anyhow::Error| error.context(stage))
 }
 
 #[derive(Deserialize)]
@@ -909,21 +957,48 @@ mod tests {
         let error = execute_cycle(&args, &socket, activity.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_execute_required");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_execute_required"
+        );
+        assert_eq!(failure_stage(&error), "admission");
         args.execute = true;
         sender.send(false).unwrap();
         let error = execute_cycle(&args, &socket, activity.clone())
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_cancelled_before_output"
+        );
         sender.send(true).unwrap();
         drop(sender);
         let error = execute_cycle(&args, &socket, activity).await.unwrap_err();
-        assert_eq!(error.to_string(), "train_cycle_cancelled_before_output");
+        assert_eq!(
+            error.root_cause().to_string(),
+            "train_cycle_cancelled_before_output"
+        );
         assert!(!args.output.exists());
         assert!(!args.runtime_root.exists());
         assert!(!args.cache.exists());
         assert!(!socket.exists());
+    }
+
+    #[test]
+    fn failure_stage_uses_only_typed_context_and_preserves_underlying_error() {
+        for stage in [
+            CycleStage::Admission,
+            CycleStage::Fetch,
+            CycleStage::SourceValidation,
+            CycleStage::WorkerAdmission,
+            CycleStage::Supervisor,
+            CycleStage::Completion,
+        ] {
+            let error = anyhow::anyhow!("PRIVATE SOURCE AND PATH").context(stage);
+            assert_eq!(failure_stage(&error), stage.label());
+            assert_eq!(error.root_cause().to_string(), "PRIVATE SOURCE AND PATH");
+        }
+        assert_eq!(failure_stage(&anyhow::anyhow!("fetch")), "unknown");
     }
 
     #[tokio::test]

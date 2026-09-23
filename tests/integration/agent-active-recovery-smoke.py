@@ -301,6 +301,40 @@ def worker_observation(work, node, identity, dataset, output, expected_adapter):
     return None
 
 
+def early_cycle_snapshot(work, node, sequence):
+    # Exact synthetic-public fixture paths only, before private teardown. Never
+    # traverse runtime/model/identity files or retain the dataset's plaintext.
+    require(type(sequence) is int and 1 <= sequence <= 2, "unexpected recovery cycle")
+    root = private(work, node) / "loop"
+    cycle = root / f"cycle-{sequence:016x}"
+    files = {}
+    for name, path, maximum, retain in (
+            ("state.json", root / "state.json", 4 * 1024 * 1024, True),
+            ("selection.json", cycle / "selection.json", 256 * 1024, True),
+            ("source-provenance.json", cycle / "source-provenance.json", 64 * 1024, True),
+            ("dataset.json", cycle / "dataset.json", 1024 * 1024, False)):
+        if not os.path.lexists(path):
+            files[name] = dict(present=False)
+            continue
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= maximum
+                and info.st_uid == private(work, node).stat().st_uid,
+                "unexpected recovery diagnostic file")
+        raw = path.read_bytes()
+        require(len(raw) <= maximum, "recovery diagnostic changed size")
+        files[name] = dict(present=True, **digest(raw), original_retained=retain and len(raw) <= 16384)
+        if files[name]["original_retained"]:
+            files[name]["hex"] = raw.hex()
+    training = cycle / "training"
+    training_exists = os.path.lexists(training)
+    require(not training_exists or stat.S_ISDIR(training.lstat().st_mode), "unexpected recovery training path")
+    result = dict(version=1, node=node, sequence=sequence, files=files,
+                  training_directory_present=training_exists, captured_before_private_cleanup=True,
+                  synthetic_public_fixture_only=True, training_or_recovery_success_claimed=False)
+    require(len(json.dumps(result, indent=2)) < 128 * 1024, "early cycle diagnostic exceeds artifact limit")
+    return result
+
+
 def observe_training(work, label, node, sequence, pid):
     identity = TRAIN["identity"](pid)
     loop = private(work, node) / "loop"
@@ -309,7 +343,10 @@ def observe_training(work, label, node, sequence, pid):
                                           else loop / "cycle-0000000000000001/training/adapter")
     deadline = time.monotonic() + 900
     while time.monotonic() < deadline:
-        require(TRAIN["alive"](identity), "original training coordinator ended before observation")
+        if not TRAIN["alive"](identity):
+            require(label in ("p", "q", "continued"), "unknown training observation")
+            write(record(work, f"{label}-cycle-failure"), early_cycle_snapshot(work, node, sequence))
+            raise ValueError("original training coordinator ended before observation")
         found = worker_observation(work, node, identity, cycle / "dataset.json", cycle / "training", adapter)
         if found is not None:
             write(record(work, f"{label}-training-observation"), found)
@@ -761,6 +798,29 @@ def self_test():
         dataset = source_training_dataset(Path("/fixture"), "a" * 40)
         staged.assert_called_once_with(Path("/fixture/bin/agent-jobs-README.md"))
         assert dataset["train"] and dataset["heldout"]
+    from tempfile import TemporaryDirectory
+    with TemporaryDirectory() as temporary:
+        work = Path(temporary)
+        root = private(work, "relay4") / "loop"
+        cycle = root / "cycle-0000000000000001"
+        cycle.mkdir(parents=True)
+        original = dict(version=1, cycles=[dict(sequence=1, phase="failed")])
+        write(root / "state.json", original)
+        write(cycle / "selection.json", dict(version=1, private_data_supported=False))
+        write(cycle / "source-provenance.json", dict(source_receipt=dict(peer_bytes=123)))
+        write(cycle / "dataset.json", dict(visibility="public", synthetic_test_data=True))
+        # A nearby file is deliberately outside the retention allowlist.
+        write(cycle / "not-an-approved-diagnostic.json", dict(do_not_export="fixture canary"))
+        captured = early_cycle_snapshot(work, "relay4", 1)
+        assert json.loads(bytes.fromhex(captured["files"]["state.json"]["hex"])) == original
+        assert set(captured["files"]) == {"state.json", "selection.json", "source-provenance.json", "dataset.json"}
+        assert "hex" not in captured["files"]["dataset.json"]
+        assert captured["files"]["dataset.json"]["sha256"] == file_hash(cycle / "dataset.json", 1024)["sha256"]
+        assert captured["training_directory_present"] is False
+        (cycle / "training").mkdir()
+        assert early_cycle_snapshot(work, "relay4", 1)["training_directory_present"] is True
+        assert early_cycle_snapshot(work, "relay4", 2)["files"]["selection.json"] == dict(present=False)
+        assert "fixture canary" not in json.dumps(captured)
     receipt = dict(manifest_id=digest(b"signed")["sha256"], sha256=digest(b"payload")["sha256"],
                    bytes=7, peer_bytes=7, provider_peer_ids=["R5"], providers_used=1,
                    origin_body_bytes=0, origin_range_requests=0, cache_only=False)

@@ -697,6 +697,26 @@ struct StartupDiagnostics {
     bytes: usize,
 }
 
+#[derive(Debug)]
+pub(super) struct StartupFailure {
+    pub(super) exit_code: i32,
+    pub(super) signal: i32,
+    pub(super) stderr_class: &'static str,
+    pub(super) stderr_bytes: usize,
+}
+
+impl fmt::Display for StartupFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "compute_result_missing exit_code={} signal={} stderr_class={} stderr_bytes={}",
+            self.exit_code, self.signal, self.stderr_class, self.stderr_bytes
+        )
+    }
+}
+
+impl std::error::Error for StartupFailure {}
+
 fn startup_class(prefix: &[u8]) -> StartupClass {
     if prefix.is_empty() {
         StartupClass::None
@@ -734,14 +754,14 @@ fn required_result(
     status: ExitStatus,
     diagnostics: StartupDiagnostics,
 ) -> Result<Value> {
-    result.with_context(|| {
-        format!(
-            "compute_result_missing exit_code={} signal={} stderr_class={} stderr_bytes={}",
-            status.code().unwrap_or(-1),
-            status.signal().unwrap_or(0),
-            diagnostics.class.label(),
-            diagnostics.bytes,
-        )
+    result.ok_or_else(|| {
+        StartupFailure {
+            exit_code: status.code().unwrap_or(-1),
+            signal: status.signal().unwrap_or(0),
+            stderr_class: diagnostics.class.label(),
+            stderr_bytes: diagnostics.bytes,
+        }
+        .into()
     })
 }
 
@@ -1197,15 +1217,27 @@ mod tests {
             let diagnostics = drain_stderr(raw.as_bytes()).await.unwrap();
             assert_eq!(diagnostics.class, expected);
             assert_eq!(diagnostics.bytes, raw.len());
-            let error = required_result(None, ExitStatus::from_raw(256), diagnostics)
-                .unwrap_err()
-                .to_string();
+            let failure =
+                required_result(None, ExitStatus::from_raw(256), diagnostics).unwrap_err();
+            let typed = failure.downcast_ref::<StartupFailure>().unwrap();
+            assert_eq!(typed.exit_code, 1);
+            assert_eq!(typed.signal, 0);
+            assert_eq!(typed.stderr_class, expected.label());
+            assert_eq!(typed.stderr_bytes, raw.len());
+            let error = failure.to_string();
             assert!(error.starts_with("compute_result_missing exit_code=1 signal=0 stderr_class="));
             assert!(
                 !error.contains("owner-secret-name")
                     && !error.contains("payload-sensitive-sentinel")
             );
             assert!(!format!("{diagnostics:?}").contains("private"));
+            assert!(!format!("{typed:?}").contains("private"));
+            assert!(
+                failure
+                    .context("compute_cycle_supervisor")
+                    .downcast_ref::<StartupFailure>()
+                    .is_some()
+            );
         }
         let too_large = vec![b'x'; MAX_STREAM_BYTES + 1];
         assert!(drain_stderr(too_large.as_slice()).await.is_err());

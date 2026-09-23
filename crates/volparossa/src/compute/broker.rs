@@ -687,7 +687,7 @@ fn retained_job_bytes(job: &Job) -> Result<u64> {
 
 // Diagnostic-only literals: neither an arbitrary error string nor a merely
 // uppercase worker-provided code is safe to write to the local service log.
-fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &'static str) {
+pub(super) fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &'static str) {
     if let Some(worker) = error.downcast_ref::<super::supervise::WorkerFailure>() {
         let code = [
             "BACKEND_NOT_INSTALLED",

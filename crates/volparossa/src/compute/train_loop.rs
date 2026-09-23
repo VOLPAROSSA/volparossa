@@ -763,14 +763,41 @@ async fn attempt(
         validation_data.as_deref(),
     )
     .await;
-    if result.is_err() {
+    if let Err(error) = &result {
         state
             .cycles
             .last_mut()
             .context("train_loop_cycle_missing")?
             .phase = Phase::Failed;
-        // Model/network errors can contain source text. Record a fixed phase only.
-        eprintln!("compute loop_event=cycle_failed");
+        // Never format the arbitrary error chain: it may contain source text or
+        // paths. The stage is compiled context, not extracted from error text.
+        eprintln!(
+            "compute loop_event=cycle_failed stage={}",
+            train_cycle::failure_stage(error)
+        );
+        if error
+            .downcast_ref::<super::supervise::WorkerFailure>()
+            .is_some()
+        {
+            let (_, code) = super::broker::execution_failure_class(error);
+            eprintln!("compute loop_worker_failure={code}");
+        }
+        if let Some(startup) = error.downcast_ref::<super::supervise::StartupFailure>() {
+            eprintln!(
+                "compute loop_startup_failure exit_code={} signal={} stderr_class={} stderr_bytes={}",
+                startup.exit_code, startup.signal, startup.stderr_class, startup.stderr_bytes
+            );
+        }
+        if let Some(io) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        {
+            eprintln!(
+                "compute loop_io_failure kind={:?} errno={}",
+                io.kind(),
+                io.raw_os_error().unwrap_or(-1)
+            );
+        }
     } else {
         let training = store.snapshot_training(sequence)?;
         let cycle = state

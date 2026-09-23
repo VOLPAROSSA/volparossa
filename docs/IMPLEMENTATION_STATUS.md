@@ -50,6 +50,15 @@ remaining owned network objects, ended recorded processes, removed private store
 host bytes. These distinct results are retained, not treated as successful lifecycle execution.
 All 134 original files remain preserved. Active recovery and full B07 are still incomplete.
 
+The follow-up retains six fixed, typed cycle-failure stages and existing typed startup/worker
+diagnostics, never arbitrary source/error text. On early coordinator exit the disposable fixture
+preserves a bounded allowlist of its own original state/selection/provenance; dataset plaintext
+is excluded. This makes the missing failure distinguishable without changing training, cache
+admission, privacy boundaries, retry policy or execution deadlines. It is diagnostic coverage,
+not a claim to have repaired the unobserved underlying failure.
+The twelve focused cycle tests, typed startup/EOF checks, existing diagnostic-redaction checks
+and inert recovery-fixture self-test pass; no model runs on the development host.
+
 The [graph run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849837032)
 also **fails at `compute_deadline`** after the actual owner reaches baseline. Its original
 acknowledgments show 35.913 seconds of cooperative pauses, but no generation count, output
@@ -70,6 +79,15 @@ prompts, outputs or token identities, so a supervisor deadline need not erase al
 Eighty-eight pure worker/principle checks, the focused Rust diagnostic check and scoped strict
 CLI Clippy pass. The original 600-second/384-token graph budget remains unchanged; real completion
 is still unproven.
+
+The [follow-up on `6b44bf20`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35853354349)
+now reaches genuine generation: attempt 1 records at least 368 tokens, with its last progress
+at 399.494 seconds. It fails at `TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS`, **not** the old
+600-second deadline. The original failure binds the 949-byte planning input and reaped child;
+its incomplete-attempt record contains no generated prefix or exact final token count. All 112
+original files and cleanup checks pass their independent review, but no graph or peer task was
+enrolled. Whether syntax-prefix exhaustion or complete-output rejection caused the decoder
+failure cannot be established from the retained artifact. B03 remains incomplete.
 
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
