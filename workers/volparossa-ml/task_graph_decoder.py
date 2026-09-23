@@ -6,7 +6,7 @@ must still validate the complete original output independently. Opt-in graph
 rules constrain question form and prior dependencies, never question meaning.
 No generated text is returned, rewritten, logged or saved by this module.
 
-The tokenizer adaptation and two TokenEnforcer overrides derive from:
+The tokenizer adaptation and TokenEnforcer overrides derive from:
 https://github.com/noamgat/lm-format-enforcer/tree/v0.11.3/lmformatenforcer
 (tokenenforcer.py and integrations/transformers.py). Unlike upstream's generic
 batch adapter, parser errors never log a prefix or become a forced EOS.
@@ -535,8 +535,25 @@ class _GraphJsonParser:
 
 def _strict_enforcer(base, token_list):
     class StrictEnforcer(base):
-        # These overrides deliberately do NOT call the upstream implementations:
-        # they catch parser errors by logging plaintext and/or forcing EOS.
+        def _collect_allowed_tokens(self, parser, tree_node, allowed, shortcut_key):
+            if not isinstance(parser, _GraphJsonParser):
+                return super()._collect_allowed_tokens(parser, tree_node, allowed, shortcut_key)
+            # Same traversal as pinned LMFE, but intersect the available trie
+            # edges before applying graph rules. Filtering the whole tokenizer
+            # alphabet at every node repeats work for characters absent from
+            # that node (including every terminal leaf). Graph has no freetext
+            # shortcut: quotes, escapes and byte boundaries still use the
+            # authoritative parser transition on every explored edge.
+            allowed.extend(tree_node.tokens)
+            if not tree_node.children:
+                return
+            syntax = parser.inner.get_allowed_characters()
+            for character, child in tree_node.children.items():
+                if character in syntax and parser.rules.allows(character):
+                    self._collect_allowed_tokens(parser.add_character(character), child, allowed, None)
+
+        # These error-handling overrides deliberately do NOT call the upstream
+        # implementations, which log parser plaintext and/or force EOS.
         def _compute_allowed_tokens(self, _state_tokens, state):
             try:
                 key = state.parser.cache_key()

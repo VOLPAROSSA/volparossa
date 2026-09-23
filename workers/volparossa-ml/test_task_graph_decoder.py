@@ -6,6 +6,7 @@ import contextlib
 import copy
 import importlib.util
 import io
+import itertools
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -421,6 +422,97 @@ class DecoderTests(unittest.TestCase):
             self.assertIn('x', allowed)
             self.assertNotIn('"', allowed)
             self.assertEqual(parser.get_allowed_characters(), allowed)
+
+    @staticmethod
+    def token_trie(pieces):
+        root = SimpleNamespace(tokens=[], children={})
+        for token, piece in enumerate(pieces):
+            node = root
+            for character in piece:
+                node = node.children.setdefault(character, SimpleNamespace(tokens=[], children={}))
+            node.tokens.append(token)
+        return root
+
+    @staticmethod
+    def reference_graph_collect(parser, node, allowed):
+        # Pinned LMFE traversal with no shortcut (the graph contract always
+        # disables it). This is a pure interface double, not backend execution.
+        allowed.extend(node.tokens)
+        for character in set(node.children).intersection(parser.get_allowed_characters()):
+            DecoderTests.reference_graph_collect(parser.add_character(character), node.children[character], allowed)
+
+    def test_graph_child_first_traversal_preserves_all_token_branches_and_eos(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        first = opening + 'First question?","depends_on":[]}'
+        prefixes = ('', '{"version":', opening, opening + 'Main goal?', opening + 'Valid question?',
+                    opening + 'x' * 510, opening + 'x' * 511, opening + 'x' * 511 + '?',
+                    opening + '\\', opening + '\\u00', opening + '\\ud83d', opening + '\\ud83d\\ude',
+                    first + ',{"question":"First question?',
+                    first + ',{"question":"Next question?","depends_on":[',
+                    first + ',{"question":"Next question?","depends_on":[0',
+                    first + ',{"question":"Next question?","depends_on":[0]}]}')
+        pieces = ('', '3', ' ', 'word', '?', '"', '\\', '\\u003f', 'u003f', '3f', '42?', '\\ude42?',
+                  'é', '🙂', '\ud800', '\0', '\n', '?","depends_on":[]}', '","depends_on":[0]}]}',
+                  '0', '1', '2', '0,0', ',0', ']}', ']}]}', '"}]}')
+        root = self.token_trie(pieces)
+        strict = DECODER._strict_enforcer(Core, TokenList)
+        for prefix in prefixes:
+            rules = DECODER._GraphRules('Main goal?', 'dependent_analysis_v1')
+            for character in prefix:
+                rules = rules.advance(character)
+                self.assertIsNotNone(rules, repr(prefix))
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(prefix), rules)
+            expected, actual = [], TokenList(False, len(pieces) + 1)
+            self.reference_graph_collect(parser, root, expected)
+            enforcer = strict(SimpleNamespace(), parser)
+            enforcer._collect_allowed_tokens(parser, root, actual, None)
+            self.assertEqual(set(actual.allowed_tokens), set(expected), repr(prefix))
+            self.assertEqual(len(actual.allowed_tokens), len(expected))
+            # The existing EOS gate remains a complete-parser check, not a
+            # synthetic close or a choice among model-generated questions.
+            enforcer.use_bitmask, enforcer.vocab_size, enforcer.eos_token_id = False, len(pieces) + 1, len(pieces)
+            enforcer.tokenizer_tree = SimpleNamespace(root=root)
+            state = Core.OutputTensorState(parser)
+            enforcer._compute_allowed_tokens((), state)
+            self.assertEqual(enforcer.eos_token_id in state.allowed_tokens.allowed_tokens, rules.phase == 'done')
+
+    def test_graph_child_first_checks_edges_not_whole_alphabet_at_every_node(self):
+        pieces = tuple(''.join(chars) for chars in itertools.product('abcdefgh', repeat=3))
+        root = self.token_trie(pieces)
+        original = DECODER._GraphRules.allows
+        observations = []
+        for reference in (True, False):
+            rules = DECODER._GraphRules('Main goal?', None)
+            for character in '{"version":3,"tasks":[{"question":"Which ':
+                rules = rules.advance(character)
+            parser = DECODER._GraphJsonParser(GraphSyntaxDouble(), rules)
+            calls = [0]
+
+            def counted(state, character):
+                calls[0] += 1
+                return original(state, character)
+
+            with mock.patch.object(DECODER._GraphRules, 'allows', counted):
+                if reference:
+                    allowed = []
+                    self.reference_graph_collect(parser, root, allowed)
+                else:
+                    result = TokenList(False, len(pieces))
+                    DECODER._strict_enforcer(Core, TokenList)(SimpleNamespace(), parser)._collect_allowed_tokens(
+                        parser, root, result, None)
+                    allowed = result.allowed_tokens
+            self.assertEqual(set(allowed), set(range(len(pieces))))
+            observations.append(calls[0])
+        self.assertEqual(observations[1], 8 + 8 ** 2 + 8 ** 3)
+        self.assertGreater(observations[0], observations[1] * 50)
+
+    def test_graph_traversal_does_not_replace_non_graph_shortcuts(self):
+        parser, node, shortcut = Parser({}), object(), ('json_freetext', 2, 1, 512)
+        allowed = TokenList(False, 12)
+        enforcer = DECODER._strict_enforcer(Core, TokenList)(SimpleNamespace(), parser)
+        with mock.patch.object(Core, '_collect_allowed_tokens') as upstream:
+            enforcer._collect_allowed_tokens(parser, node, allowed, shortcut)
+        upstream.assert_called_once_with(parser, node, allowed, shortcut)
 
     def test_explicit_ordered_principle_budget_does_not_change_graph_defaults(self):
         module = SimpleNamespace(CharacterLevelParserConfig=mock.Mock(return_value=object()), StringParsingState=StringState)

@@ -26,6 +26,18 @@ or peer execution is proved. The source-level performance correction alone has t
 not established successful planning; neither those pauses nor the separately corrected
 Unicode dead prefixes can be identified as the complete cause from this artifact.
 
+The next graph candidate addresses another concrete source-level cost: the token traversal
+now checks only existing trie edges against syntax and graph rules, rather than applying graph
+predicates to the entire tokenizer alphabet at every visited node. Terminal tokens, EOS,
+escaping, question/dependency constraints and all model choices remain unchanged. Thirty-two
+pure decoder checks pass, including exact token-set comparisons and a synthetic operation-count
+test with over fifty times fewer graph-predicate calls; that is not a measured model/VM speedup.
+Public planning also emits fixed stage labels, attempt/token counts and elapsed time, without
+prompts, outputs or token identities, so a supervisor deadline need not erase all progress.
+Eighty-eight pure worker/principle checks, the focused Rust diagnostic check and scoped strict
+CLI Clippy pass. The original 600-second/384-token graph budget remains unchanged; real completion
+is still unproven.
+
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
 Both reached a parsed response but no accepted judgment, cross-review or portable bundle;

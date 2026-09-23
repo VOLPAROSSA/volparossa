@@ -564,6 +564,11 @@ async fn collect_stdout(
             }
             result = Some(value);
         } else {
+            if let Some((stage, attempt, tokens, elapsed)) = planner_progress(&value)? {
+                eprintln!(
+                    "compute planner stage={stage} attempt={attempt} generated_tokens={tokens} elapsed_ms={elapsed}"
+                );
+            }
             if matches!(value["phase"].as_str(), Some("paused" | "resumed")) {
                 controls
                     .context("compute_unrequested_control_ack")?
@@ -597,6 +602,46 @@ async fn collect_stdout(
         }
     }
     Ok(result)
+}
+
+fn planner_progress(value: &Value) -> Result<Option<(&str, u64, u64, u64)>> {
+    let Some(planner) = value.get("planner") else {
+        return Ok(None);
+    };
+    ensure!(
+        value["phase"] == "baseline"
+            && value["step"].as_u64() == Some(0)
+            && value.get("control_sequence").is_none()
+            && planner.as_object().is_some_and(|fields| fields.len() == 3),
+        "compute_planner_progress"
+    );
+    let stage = planner["stage"]
+        .as_str()
+        .filter(|stage| {
+            matches!(
+                *stage,
+                "hash_before"
+                    | "decoder_setup"
+                    | "generation"
+                    | "token_filter"
+                    | "validation"
+                    | "hash_after"
+            )
+        })
+        .context("compute_planner_progress")?;
+    let attempt = planner["attempt"]
+        .as_u64()
+        .filter(|n| *n <= 4)
+        .context("compute_planner_progress")?;
+    let tokens = planner["generated_tokens"]
+        .as_u64()
+        .filter(|n| *n <= 384)
+        .context("compute_planner_progress")?;
+    let elapsed = value["elapsed_ms"]
+        .as_u64()
+        .filter(|n| *n < 600_000)
+        .context("compute_planner_progress")?;
+    Ok(Some((stage, attempt, tokens, elapsed)))
 }
 
 async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> Result<Option<Vec<u8>>> {
@@ -1238,6 +1283,53 @@ mod tests {
                 .await
                 .expect("line"),
             Some(b"{}".to_vec())
+        );
+    }
+
+    #[test]
+    fn planner_progress_accepts_only_content_free_fixed_stages_and_counts() {
+        let mut value = serde_json::json!({"kind":"progress", "phase":"baseline", "step":0,
+            "elapsed_ms":4321, "planner":{"stage":"generation", "attempt":2, "generated_tokens":16}});
+        for stage in [
+            "hash_before",
+            "decoder_setup",
+            "generation",
+            "token_filter",
+            "validation",
+            "hash_after",
+        ] {
+            value["planner"]["stage"] = stage.into();
+            assert_eq!(
+                planner_progress(&value).unwrap(),
+                Some((stage, 2, 16, 4321))
+            );
+        }
+        for (pointer, replacement) in [
+            ("/planner/stage", serde_json::json!("PRIVATE MODEL TEXT")),
+            ("/planner/attempt", serde_json::json!(5)),
+            ("/planner/generated_tokens", serde_json::json!(385)),
+            ("/planner/generated_tokens", serde_json::json!(-1)),
+            ("/planner/attempt", serde_json::json!(true)),
+            ("/phase", serde_json::json!("paused")),
+            ("/step", serde_json::json!(1)),
+            ("/elapsed_ms", serde_json::json!(600_000)),
+        ] {
+            let mut invalid = value.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert_eq!(
+                planner_progress(&invalid).unwrap_err().to_string(),
+                "compute_planner_progress"
+            );
+        }
+        let mut extra = value.clone();
+        extra["planner"]["text"] = "PRIVATE MODEL TEXT".into();
+        assert!(planner_progress(&extra).is_err());
+        value["control_sequence"] = 1.into();
+        assert!(planner_progress(&value).is_err());
+        assert!(
+            planner_progress(&serde_json::json!({"phase":"baseline"}))
+                .unwrap()
+                .is_none()
         );
     }
 

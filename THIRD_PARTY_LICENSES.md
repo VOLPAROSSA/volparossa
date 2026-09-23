@@ -59,6 +59,10 @@ source/UTF-8 validation; constrained syntax does not establish sound model reaso
 Graph strategy v3 also wraps the pinned parser with per-prefix question/dependency constraints
 and ordered compact JSON. This remains separate source-bundled adapter code; no original wheel,
 notice or model asset is changed.
+Its graph-only traversal adapts the same pinned `TokenEnforcer._collect_allowed_tokens` to
+intersect existing tokenizer-trie edges before checking graph predicates. It retains terminal
+tokens and authoritative per-character transitions; non-graph shortcuts still delegate upstream.
+The original MIT notice remains in the separate adapter.
 
 | Optional decoder component | Exact source / original distribution | License and notice provenance |
 | --- | --- | --- |

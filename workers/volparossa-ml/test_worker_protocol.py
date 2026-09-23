@@ -341,6 +341,27 @@ class ModelProfileTests(unittest.TestCase):
 
 
 class WorkerProtocolTests(unittest.TestCase):
+    def test_public_planner_progress_contains_only_fixed_stages_and_bounded_counts(self):
+        session = WORKER.Session(WORKER.validate_request(dict(request(), mode="plan_tasks")))
+        stages = ("hash_before", "decoder_setup", "generation", "token_filter", "validation", "hash_after")
+        with mock.patch.object(WORKER, "WIRE_OUTPUT", io.StringIO()) as output:
+            for stage in stages:
+                session.planner_progress(stage, 2, 16)
+            records = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual([record["planner"] for record in records],
+                             [dict(stage=stage, attempt=2, generated_tokens=16) for stage in stages])
+            self.assertTrue(all(set(record) == {"version", "id", "kind", "phase", "step", "elapsed_ms", "planner"}
+                                and record["phase"] == "baseline" and record["step"] == 0 for record in records))
+            saved = output.getvalue()
+            for args in (("PRIVATE MODEL TEXT", 1, 0), ("generation", 5, 1), ("generation", 1, 385),
+                         ("generation", True, 0), ("generation", 0, -1)):
+                with self.assertRaisesRegex(WORKER.JobError, "^INTERNAL_PLANNER_PROGRESS$"):
+                    session.planner_progress(*args)
+            session.request["mode"] = "private_infer"
+            with self.assertRaisesRegex(WORKER.JobError, "^INTERNAL_PLANNER_PROGRESS$"):
+                session.planner_progress("generation")
+            self.assertEqual(output.getvalue(), saved)
+
     def test_private_input_is_exact_local_only_and_rejected_by_all_public_modes(self):
         source = dict(version=1, visibility="private_local", question="Where is my café note?", context="In my desk.")
         for profile in WORKER.MODEL_PROFILES:
@@ -1247,8 +1268,14 @@ class WorkerProtocolTests(unittest.TestCase):
                     self.assertIsNone(record["rejection_code"])
                     model.generate.assert_called_once()
                     self.assertFalse(model.generate.call_args.kwargs["do_sample"])
-                    self.assertIs(model.generate.call_args.kwargs["prefix_allowed_tokens_fn"],
-                                  decoder_factory.return_value.new_attempt.return_value)
+                    callback = model.generate.call_args.kwargs["prefix_allowed_tokens_fn"]
+                    delegate = decoder_factory.return_value.new_attempt.return_value
+                    prefix = mock.Mock()
+                    prefix.tolist.return_value = [11, 12, 13]
+                    self.assertIs(callback(0, prefix), delegate.return_value)
+                    delegate.assert_called_with(0, prefix)
+                    session.planner_progress.assert_any_call("token_filter", 1, 0)
+                    session.planner_progress.assert_any_call("validation", 1, 3 if stop == "eos" else 2)
                     decoder_factory.return_value.new_attempt.assert_called_with([11, 12, 13], 384)
                     self.assertEqual(session.planner_diagnostic["planner_decoder"], WORKER.TASK_GRAPH_DECODER)
 

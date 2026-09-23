@@ -912,6 +912,18 @@ class Session:
         emit({"version": VERSION, "id": self.request["id"], "kind": "progress",
               "phase": phase, "step": step, "elapsed_ms": self.elapsed()})
 
+    def planner_progress(self, stage, attempt=0, generated_tokens=0):
+        # Public planning only. Preserve bounded progress before a supervisor
+        # deadline without exporting prompts, generated text or token identities.
+        require(self.request["mode"] == "plan_tasks"
+                and stage in ("hash_before", "decoder_setup", "generation", "token_filter", "validation", "hash_after")
+                and bounded_integer(attempt, 0, TASK_PLAN_MAX_ATTEMPTS)
+                and bounded_integer(generated_tokens, 0, TASK_PLAN_NEW_TOKENS), "INTERNAL_PLANNER_PROGRESS")
+        self.check()
+        emit({"version": VERSION, "id": self.request["id"], "kind": "progress",
+              "phase": "baseline", "step": 0, "elapsed_ms": self.elapsed(),
+              "planner": {"stage": stage, "attempt": attempt, "generated_tokens": generated_tokens}})
+
 
 def emit(record):
     raw = json.dumps(record, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
@@ -1354,11 +1366,23 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
     input_ids = torch.tensor([prompt], dtype=torch.long, device="cpu")
     complete_tokens = None
 
+    def observed_allowed_tokens(batch_id, current_ids):
+        count = len(current_ids.tolist()) - len(prompt)
+        checkpoint = count % 16 == 0
+        if checkpoint:
+            session.planner_progress("token_filter", attempt, count)
+        allowed = allowed_tokens(batch_id, current_ids)
+        if checkpoint:
+            session.planner_progress("generation", attempt, count)
+        return allowed
+
     class OwnerBudget(transformers.StoppingCriteria):
         def __call__(self, current_ids, _scores, **_kwargs):
             nonlocal complete_tokens
             session.check()
             tokens = current_ids[0, len(prompt):].tolist()
+            if len(tokens) == 1 or len(tokens) % 16 == 0:
+                session.planner_progress("generation", attempt, len(tokens))
             if not 1 <= len(tokens) <= limit or tokenizer.eos_token_id in tokens:
                 return False
             text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
@@ -1375,11 +1399,12 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
             return True
 
     session.check()
+    session.planner_progress("generation", attempt)
     with torch.inference_mode():
         diagnostic["incomplete_attempt"] = True
         output = model.generate(input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
             max_new_tokens=limit, do_sample=False, num_beams=1, num_return_sequences=1, use_cache=True,
-            prefix_allowed_tokens_fn=allowed_tokens,
+            prefix_allowed_tokens_fn=observed_allowed_tokens,
             stopping_criteria=transformers.StoppingCriteriaList([OwnerBudget()]),
             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
     session.check()
@@ -1388,6 +1413,7 @@ def plan_task_graph_attempt(model, tokenizer, torch, transformers, dataset, sess
     require(output[0, :len(prompt)].tolist() == prompt, code + "PROMPT_CHANGED")
     generated = output[0, len(prompt):].tolist()
     require(1 <= len(generated) <= limit, code + "INVALID_GENERATION_SHAPE")
+    session.planner_progress("validation", attempt, len(generated))
     require(tokenizer.eos_token_id not in generated[:-1], code + "INCOMPLETE_GENERATION")
     if complete_tokens is not None:
         require(tuple(generated) == complete_tokens, code + "COMPLETION_TOKENS_CHANGED")
@@ -1416,6 +1442,7 @@ def plan_task_graph(model, tokenizer, torch, transformers, dataset, session, pro
             and diagnostic["incomplete_attempt"] is False, "TASK_PLAN_ALREADY_STARTED")
     session.planner_started = True
     model.eval()
+    session.planner_progress("decoder_setup")
     decoder = create_task_graph_decoder(tokenizer, dataset, session)
     total, feedback = 0, None
     for attempt in range(1, TASK_PLAN_MAX_ATTEMPTS + 1):
@@ -1438,6 +1465,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
     model = load_model(transformers, torch, model_root, profile_name)
     session.check()
     session.progress("baseline")
+    session.planner_progress("hash_before")
     base_before = parameter_hash(model, False, session)
     if graph:
         plan, raw, prompt_count, generated_count = plan_task_graph(model, tokenizer, torch, transformers, dataset, session, profile_name)
@@ -1450,6 +1478,7 @@ def execute_task_plan(request, session, tokenizer, torch, transformers, versions
         raw = json.dumps(plan, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("ascii")
         planning = {"planner_stop_reason": "two_questions", "planner_strategy": TASK_PLAN_STRATEGY,
                     "planner_structure_generated_by": "local_schema", "planner_question_stats": stats}
+    session.planner_progress("hash_after")
     base_after = parameter_hash(model, False, session)
     require(base_before == base_after, "BASE_WEIGHTS_CHANGED")
     require(file_hash(model_root / "model.safetensors", profile["files"]["model.safetensors"])["sha256"]
