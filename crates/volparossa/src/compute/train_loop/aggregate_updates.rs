@@ -24,6 +24,8 @@ const RETAINED: usize = 8;
 const MAX_TREE_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_ENTRIES: usize = 256;
 
+pub(super) mod publication;
+
 #[cfg(test)]
 #[path = "aggregate_updates/tests.rs"]
 mod lifecycle_tests;
@@ -89,6 +91,8 @@ struct Round {
     baseline_expires: Option<u64>,
     approval: Option<Value>,
     snapshot: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<publication::Record>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -110,6 +114,10 @@ pub(super) fn active_sequence(registry: &Registry) -> Option<u64> {
 }
 pub(super) fn clear_active(registry: &mut Registry) {
     registry.active = None;
+}
+
+pub(super) fn retained_sequences(registry: &Registry) -> impl Iterator<Item = u64> + '_ {
+    registry.rounds.iter().map(|round| round.sequence)
 }
 
 fn root(args: &Options, sequence: u64) -> Result<PathBuf> {
@@ -157,6 +165,13 @@ fn validate(registry: &Registry, selection: &Value) -> Result<()> {
                     && round.sequence.checked_add(1) == Some(registry.next_sequence),
                 "aggregate_updates_pending_cohort"
             );
+        }
+        if let Some(publication) = &round.publication {
+            ensure!(
+                round.phase == Phase::Approved,
+                "aggregate_publication_unapproved_round"
+            );
+            publication.validate()?;
         }
     }
     ensure!(pending <= 1, "aggregate_updates_pending_count");
@@ -397,6 +412,7 @@ pub(super) async fn tick(
         baseline_expires: current.authority_expires,
         approval: None,
         snapshot: None,
+        publication: None,
     });
     checkpoint(&registry, store, state)?;
     // Do not drop a running worker future. Its existing supervisor must reap on cancellation.
@@ -476,6 +492,9 @@ fn finish(args: &Options, registry: &mut Registry, index: usize, local: Option<u
             round.approval = Some(approved.identity);
             round.phase = Phase::Approved;
             registry.active = Some(round.sequence);
+            if args.publish_name.is_some() && round.publication.is_none() {
+                round.publication = Some(publication::Record::pending());
+            }
         } else if now()? >= round.expires {
             round.phase = Phase::Expired;
         } else {
@@ -499,11 +518,14 @@ fn make_room(
     if registry.rounds.len() < RETAINED {
         return Ok(true);
     }
-    let Some(index) = registry
-        .rounds
-        .iter()
-        .position(|round| Some(round.sequence) != registry.active && round.phase != Phase::Running)
-    else {
+    let Some(index) = registry.rounds.iter().position(|round| {
+        Some(round.sequence) != registry.active
+            && round.phase != Phase::Running
+            && round
+                .publication
+                .as_ref()
+                .is_none_or(publication::Record::settled)
+    }) else {
         return Ok(false);
     };
     let obsolete = registry.rounds.remove(index);
@@ -587,6 +609,7 @@ fn allowed(path: &Path, directory: bool) -> bool {
                 | "candidate/comparison/candidate"
                 | "job"
                 | "job/adapter"
+                | "publication"
         ) || (0..3).any(|index| {
             name == format!("cohort/{index}")
                 || name == format!("peers/{index}")
@@ -607,6 +630,10 @@ fn allowed(path: &Path, directory: bool) -> bool {
             | "job/report.json"
             | "candidate/import/dataset.json"
             | "candidate/import/provenance.json"
+            | "publication/request.json"
+            | "publication/publication.pb"
+            | "publication/manifest.json"
+            | "publication/contribution.json"
     ) {
         return true;
     }
@@ -678,7 +705,7 @@ fn allowed(path: &Path, directory: bool) -> bool {
 fn snapshot(root: &Path) -> Result<Snapshot> {
     let mut result = Snapshot::new();
     for (path, directory) in tree(root)? {
-        if !directory {
+        if !directory && !path.starts_with("publication") {
             let raw = read_file(&root.join(&path), 4 * 1024 * 1024)?;
             result.insert(
                 path.to_str()
@@ -768,6 +795,7 @@ mod tests {
                 baseline_expires: None,
                 approval: None,
                 snapshot: None,
+                publication: None,
             }],
         };
         validate(&registry, &selection).unwrap();

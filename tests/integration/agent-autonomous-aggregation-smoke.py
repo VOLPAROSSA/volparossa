@@ -23,14 +23,17 @@ read, write, require, digest = (A[key] for key in ("read", "write", "require", "
 PREFIX = "agent-autonomous-aggregation"
 ROUND = "aggregate-update-0000000000000001"
 CYCLE = "cycle-0000000000000001"
+CHANNEL = "disposable-autonomous-adapter"
 MAX_PROOF = A["MAX_PROOF"]
 KIND = "volparossa-owner-opt-in-autonomous-aggregation-warmstart-serving"
 SCOPE = ("Three real 8/9/10-step public publisher trainings and explicit unchanged R5 custody. "
     "One owner-opted-in train-loop cold-discovers their exact cohort, really aggregates and compares it, "
     "adopts only an approved candidate and performs one eight-step local warmstart with inherited expiry. "
     "The actual selected approved aggregate or approved local successor is served in a protected peer job. "
-    "Restart restores original completed files and observes the unchanged cohort without recomputing it. "
-    "No automatic publication, peer-upload, independent-party, general-quality, Byzantine robustness, "
+    "The same owner-enrolled channel automatically publishes the aggregate as revision 1 and an approved local successor, if any, as revision 2. "
+    "Another node cold-fetches the last approved signed publication and really infers with its exact weights. "
+    "Restart retains original signatures, revisions and expiry without recomputing or republishing. "
+    "No peer-upload, independent-party, general-quality, Byzantine robustness, "
     "full B05 or complete-alpha claim.")
 
 
@@ -51,7 +54,8 @@ def setup(work):
     require(not root(work).exists() and (private / "serving").is_dir(), "wrong fresh loop/serving setup")
     write(record(work, "enrolled-inputs"), dict(source_plan=read(private / "source-plan.json"),
         aggregate_plan=read(private / "plan.json"), validation_source=read(private / "validation-source.json"),
-        private_loop_absent=True, explicit_owner_opt_in=True, max_cycles=1, steps=8))
+        private_loop_absent=True, explicit_owner_opt_in=True, max_cycles=1, steps=8,
+        publication=dict(name=CHANNEL, publisher_key=read(A["record"](work, "layout"))["keys"]["relay4"], first_revision=1)))
 
 
 def observe_loop(work, pid):
@@ -93,10 +97,14 @@ def capture(work, resumed=False):
             serving_hex=(A["private"](work, "relay4") / "serving/current.json").read_bytes().hex(),
             original_owner=first["owner"], owner=read(record(work, "resume-owner"))))
     else:
-        files = A["snapshot"](loop, (f"{ROUND}/adapter.bundle",))
+        files = A["snapshot"](loop, (f"{ROUND}/adapter.bundle", f"{CYCLE}/adapter.bundle"))
+        output = (work / f"{PREFIX}-first.jsonl").read_bytes()
+        require(len(output) <= 262144, "original coordinator output bound")
+        summary = json.loads(output.splitlines()[-1])
+        require(summary["operation"] == "compute_train_loop", "coordinator final summary missing")
         write(record(work, "first"), dict(files=files, state=read(loop / "state.json"),
             serving_hex=(A["private"](work, "relay4") / "serving/current.json").read_bytes().hex(),
-            owner=read(record(work, "loop-owner"))))
+            owner=read(record(work, "loop-owner")), summary=summary))
 
 
 def observe_resume(work, pid):
@@ -161,6 +169,40 @@ def capture_job(work):
             "original publisher adapter changed")
 
 
+def receiver_prepare(work):
+    receiver = A["private"](work, "client")
+    first = read(record(work, "first"), MAX_PROOF)
+    local = first["state"]["latest"] == 1
+    name = f"{CYCLE}/publication.pb" if local else f"{ROUND}/publication/publication.pb"
+    signed = bytes.fromhex(first["files"][name]["hex"])
+    require(not (receiver / "autonomous-cache").exists() and not (receiver / "autonomous-received").exists(),
+        "return receiver is not cold")
+    write(record(work, "receiver-cold"), dict(cache_absent=True, import_absent=True, no_body_provisioned=True,
+        expected_revision=2 if local else 1, expected_manifest_id=digest(signed)["sha256"]))
+
+
+def observe_receiver(work, pid):
+    owner = TRAIN["identity"](pid)
+    write(record(work, "receiver-owner"), owner)
+    receiver = A["private"](work, "client")
+    deadline = time.monotonic() + 650
+    while time.monotonic() < deadline and TRAIN["alive"](owner):
+        found = A["worker_observation"](work, "client", owner, receiver / "autonomous-received/dataset.json",
+            receiver / "autonomous-inference", receiver / "autonomous-received/adapter")
+        if found:
+            write(record(work, "receiver-observation"), found)
+            return
+        time.sleep(0.02)
+    require(False, "actual returned-adapter inference was not observed")
+
+
+def capture_return(work):
+    receiver = A["private"](work, "client")
+    write(record(work, "receiver-files"), A["snapshot"](receiver / "autonomous-received"))
+    write(record(work, "receiver-inference-files"), A["snapshot"](receiver / "autonomous-inference"))
+    write(record(work, "receiver-model-after"), A["file_hash"](A["model"](work, "client") / "model.safetensors", 300 * 1024 * 1024))
+
+
 def cleanup_workers(work):
     processes = [read(path) for path in work.glob(f"{PREFIX}-*-owner.json")]
     for path in work.glob(f"{PREFIX}-*-observation.json"):
@@ -204,6 +246,93 @@ def local_approval(training, validation, evaluation):
         and [evaluation[name] for name in ("baseline", "adapted", "reloaded")] == source,
         "approval differs from actual original two-source gate")
     return approved
+
+
+def publication_identity(signed, bundle, publisher, revision, authority, receipt):
+    expires = R["signed_content"](signed, bundle, publisher, CHANNEL, R["ADAPTER_TYPE"], revision)
+    envelope = R["CUSTODY"]["fields"](signed, 65536)
+    body = R["CUSTODY"]["fields"](envelope[1], 65536)
+    require(expires <= authority and expires - body[3] <= 3600, "returned publication renewed original authority")
+    identity = dict(manifest_id=digest(signed)["sha256"], manifest_sha256=digest(signed)["sha256"],
+        created=body[3], expires=expires)
+    require(receipt["operation"] == "content_contribute" and receipt["network_publication"] is True
+        and receipt["serving"] is True and receipt["publications"] > 0
+        and receipt["manifest_id"] == identity["manifest_id"] and receipt["publisher_key_hex"] == publisher
+        and receipt["name"] == CHANNEL and receipt["revision"] == revision
+        and receipt["content_type"] == R["ADAPTER_TYPE"] and receipt["bytes"] == len(bundle)
+        and receipt["chunks"] == (len(bundle) + 256 * 1024 - 1) // (256 * 1024)
+        and receipt["expires_unix_seconds"] == expires and receipt["original_signature_reused"] is True
+        and all(receipt[key] is False for key in ("private_keys_transferred", "ownership_changed", "origin_authenticated"))
+        and body[3] <= receipt["coordinator_verified_at_unix_seconds"] < expires,
+        "automatic publication receipt does not bind the original signature/revision")
+    return identity
+
+
+def check_publication_order(order, local_approved):
+    entries = [dict(target=dict(kind="aggregate", sequence=1), revision=1)]
+    if local_approved:
+        entries.append(dict(target=dict(kind="local", sequence=1), revision=2))
+    require(order == dict(version=1, first=1, next_revision=len(entries) + 1, entries=entries),
+        "aggregate/local channel revisions collided or were reallocated")
+
+
+def check_return(value, core, cycle, state, selected, chosen, expiry, enrollment):
+    publisher = value["layout"]["keys"]["relay4"]
+    require(value["enrolled-inputs"]["publication"] == dict(name=CHANNEL, publisher_key=publisher, first_revision=1)
+        and enrollment["publish_name"] == CHANNEL and enrollment["publication_key"] == publisher
+        and enrollment["first_publication_revision"] == 1
+        and enrollment["aggregate_publication"] == dict(version=1, ordering="shared-local-and-aggregate-revisions",
+            first_revision=1, original_authority_required=True), "automatic return was not owner-enrolled")
+    local = state["latest"] == 1
+    check_publication_order(state["publication_order"], local)
+    files = core["files"]
+    aggregate_signed, aggregate_bundle = files["publication/publication.pb"], files["adapter.bundle"]
+    aggregate_identity = publication_identity(aggregate_signed, aggregate_bundle, publisher, 1, expiry,
+        json.loads(files["publication/contribution.json"]))
+    require(selected["publication"]["phase"] == "complete"
+        and selected["publication"]["manifest"] == json.loads(files["publication/manifest.json"]) == aggregate_identity,
+        "original aggregate revision 1 was not really published")
+    authorization = json.loads(files["publication/request.json"])
+    require(authorization["approval"] == selected["approval"] and authorization["name"] == CHANNEL
+        and authorization["revision"] == 1 and authorization["publisher_key"] == publisher
+        and authorization["bundle"] == digest(aggregate_bundle) and authorization["expires_not_after"] == expiry,
+        "aggregate signature used a different approved object or owner channel")
+    chosen_signed, chosen_bundle, chosen_identity = aggregate_signed, aggregate_bundle, aggregate_identity
+    if local:
+        chosen_signed, chosen_bundle = cycle["publication.pb"], cycle["adapter.bundle"]
+        result = json.loads(cycle["result.json"])
+        chosen_identity = publication_identity(chosen_signed, chosen_bundle, publisher, 2,
+            min(expiry, result["authority_expires_unix_seconds"]), json.loads(cycle["contribution.json"]))
+        require(state["cycles"][0]["phase"] == "complete" and state["cycles"][0]["publication"] == dict(
+            manifest_id=chosen_identity["manifest_id"], expires=chosen_identity["expires"]), "local revision 2 was not published")
+    else:
+        require(state["cycles"][0]["phase"] == "rejected" and state["cycles"][0]["publication"] is None
+            and "publication.pb" not in cycle and "contribution.json" not in cycle, "rejected local model entered public channel")
+    R["check_bundle"](chosen_bundle, chosen, digest(core["dataset_signed"])["sha256"])
+    cold = value["receiver-cold"]
+    require(cold == dict(cache_absent=True, import_absent=True, no_body_provisioned=True,
+        expected_revision=2 if local else 1, expected_manifest_id=chosen_identity["manifest_id"]), "return receiver not cold/exactly selected")
+    received = R["raw_files"](value["receiver-files"])
+    require(received["dataset.json"] == core["dataset"], "returned adapter used different training source")
+    provenance = json.loads(received["provenance.json"])
+    require(value["import"] == provenance and provenance["publisher"] == publisher
+        and provenance["dataset_publisher"] == value["layout"]["keys"]["relay5"]
+        and provenance["adapter_manifest_id"] == chosen_identity["manifest_id"]
+        and provenance["expires_unix_seconds"] <= chosen_identity["expires"], "receiver did not retrieve exact original signed publication")
+    for name, body, manifest in (("adapter", chosen_bundle, chosen_signed), ("dataset", core["dataset"], core["dataset_signed"])):
+        R["check_cold_receipt"](provenance[name + "_receipt"], manifest, body, value["peers"]["relay4"])
+    for name in A["FILES"]:
+        require({key: value["receiver-files"][f"adapter/{name}"][key] for key in ("bytes", "sha256")} == chosen[name],
+            "receiver mounted different returned weights")
+    inference = value["receiver-inference"]
+    A["check_supervisor"](inference, "infer", core["dataset"])
+    A["check_original_report"](inference, R["raw_files"](value["receiver-inference-files"])["report.json"])
+    require(inference["updates_completed"] == 0 and inference["input_adapter"]["applied"] is True
+        and inference["input_adapter"]["files"] == chosen and inference["outputs"], "cold receiver did not really use returned weights")
+    require(value["receiver-model-after"] == value["sources"]["model_before"], "receiver base model changed")
+    summary = value["first"]["summary"]
+    require(summary["completed_cycles"] == 1 and summary["attempts_this_invocation"] == 1
+        and summary["pending_publications"] == 0 and summary["publication_drain"] == "complete", "automatic return queue did not drain")
 
 
 def check(value, revision):
@@ -284,6 +413,7 @@ def check(value, revision):
         and serving["provenance"]["approved"] is True and serving["expires_unix_seconds"] <= expiry,
         "serving snapshot does not match actual approved selection")
     require(registry["active"] == (None if state["latest"] == 1 else 1), "aggregate not superseded/retained correctly")
+    check_return(value, core, cycle, state, selected, chosen, expiry, enrollment)
     handle, status, caps = value["handle"], value["status"], value["capabilities"]
     require(S["capability_ready"](caps, chosen), "broker did not activate selected adapter")
     derived = JOBS["derive"](value["job-source"]["dataset"], [0]).encode()
@@ -298,7 +428,7 @@ def check(value, revision):
     require(report_["updates_completed"] == 0 and report_["input_adapter"]["files"] == chosen and report_["outputs"],
         "protected serving job did not use chosen weights")
     observations = value["observations"]
-    require(set(observations) == {"aggregate", "aggregate-baseline", "aggregate-candidate", "local-training", "local-baseline", "local-candidate", "serving"},
+    require(set(observations) == {"aggregate", "aggregate-baseline", "aggregate-candidate", "local-training", "local-baseline", "local-candidate", "serving", "receiver"},
         "actual loop/serving worker missing")
     originals = value["original-training-observations"]
     require(set(originals) == {f"{node}-train-{node}-train" for node in A["NODES"]}, "missing original training observation")
@@ -314,7 +444,9 @@ def check(value, revision):
     require(observations["local-training"]["adapter_files"] == aggregate["candidate_files"]
         and observations["local-training"]["dataset"] == digest(dataset)
         and observations["serving"]["adapter_files"] == chosen
-        and observations["serving"]["dataset_json"].encode() == derived, "actual mounted warmstart/serving bytes differ")
+        and observations["serving"]["dataset_json"].encode() == derived
+        and observations["receiver"]["adapter_files"] == chosen
+        and observations["receiver"]["dataset"] == digest(dataset), "actual mounted warmstart/serving/receiver bytes differ")
     for label in ("uptake", "receiver"):
         R["check_network_path"](value["network"][label], "uptake" if label == "uptake" else "reserve-fetch", value["peers"])
     require(value["sources"]["model_before"] == value["model-after"] and all(value["cleanup"].values())
@@ -328,7 +460,8 @@ def check(value, revision):
 
 
 def evidence(work, revision):
-    value = {name: read(record(work, name), MAX_PROOF) for name in ("enrolled-inputs", "first", "resumed", "handle", "status", "capabilities", "model-after", "process-cleanup")}
+    value = {name: read(record(work, name), MAX_PROOF) for name in ("enrolled-inputs", "first", "resumed", "handle", "status", "capabilities", "model-after", "process-cleanup",
+        "receiver-cold", "receiver-files", "receiver-inference-files", "receiver-inference", "receiver-model-after", "import")}
     value.update({name: read(A["record"](work, name), MAX_PROOF) for name in ("layout", "sources")})
     value.update(source_revision=revision, originals={node: read(A["record"](work, f"{node}-original"), MAX_PROOF) for node in A["NODES"]},
         peers=read(work / "a01-expected-peers.json"), **{"job-source": read(work / "agent-jobs-source.json"),
@@ -358,7 +491,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         success=status == 0 and complete and remaining == 0 and host.get("unchanged") is True and proof is not None,
         evidence=proof, phase=phase, observed_blocker=None if blocker == "NONE" else blocker,
         cleanup=dict(complete=complete, remaining_owned_objects=remaining), host_state=host,
-        general_quality_proven=False, automatic_publication=False, full_b05_claimed=False, full_alpha_claimed=False)
+        general_quality_proven=False, automatic_publication=True, full_b05_claimed=False, full_alpha_claimed=False)
     require(len(json.dumps(value, indent=2)) + 1 < MAX_PROOF, "automatic final report bound")
     write(record(work, "smoke"), value)
 
@@ -369,7 +502,8 @@ def report(value, revision):
         and value["cleanup"] == dict(complete=True, remaining_owned_objects=0)
         and value["host_state"]["unchanged"] is True
         and value["host_state"]["before_sha256"] == value["host_state"]["after_sha256"]
-        and all(value[k] is False for k in ("general_quality_proven", "automatic_publication", "full_b05_claimed", "full_alpha_claimed")),
+        and value["automatic_publication"] is True
+        and all(value[k] is False for k in ("general_quality_proven", "full_b05_claimed", "full_alpha_claimed")),
         "autonomous aggregation proof/cleanup/scope incomplete")
     check(value["evidence"], revision)
 
@@ -410,6 +544,20 @@ def self_test():
         pass
     else:
         raise AssertionError("fabricated local approval accepted")
+    for local in (False, True):
+        entries = [dict(target=dict(kind="aggregate", sequence=1), revision=1)]
+        if local:
+            entries.append(dict(target=dict(kind="local", sequence=1), revision=2))
+        order = dict(version=1, first=1, next_revision=len(entries) + 1, entries=entries)
+        check_publication_order(order, local)
+        invalid = copy.deepcopy(order)
+        invalid["entries"][-1]["revision"] = 1 if local else 2
+        try:
+            check_publication_order(invalid, local)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("colliding or reassigned return publication revision accepted")
     print("autonomous aggregation inert restart/provenance controls PASS; no model/network executed")
 
 
@@ -426,6 +574,9 @@ def main(args):
     elif command == "ready": ready(work)
     elif command == "observe-job": observe_job(work)
     elif command == "capture-job": capture_job(work)
+    elif command == "receiver-prepare": receiver_prepare(work)
+    elif command == "observe-receiver": observe_receiver(work, int(args[1]))
+    elif command == "capture-return": capture_return(work)
     elif command == "cleanup-workers": cleanup_workers(work)
     elif command == "evidence": evidence(work, args[1])
     elif command == "finalize": finalize(work, args[1], int(args[2]), S["cleanup_flag"](args[3]), int(args[4]), args[5], args[6])

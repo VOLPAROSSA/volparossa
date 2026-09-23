@@ -253,7 +253,10 @@ answers still contain privacy errors; retaining evidence is not the same as reas
 
 An owner-enrolled automatic training-loop candidate can combine three trusted publishers'
 adapters, compare the result with its active model and use an approved combination for serving
-and further local training. Its dedicated real-model integration proof is still pending.
+and further local training. With the owner's existing publishing configuration, approved
+combinations and local successors can now return to the shared cache through one ordered,
+signed publication channel. Automatic combination, further training, approved serving and
+restart have passed a real VM proof; the extended return-sharing proof is still pending.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

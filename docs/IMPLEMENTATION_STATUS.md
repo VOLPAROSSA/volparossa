@@ -12,13 +12,26 @@ baseline. Original authority deadlines propagate through aggregation and local s
 Interrupted rounds retain their inputs and do not silently restart; completed results can be
 reopened after coordinator restart. Storage is bounded and only exact owned round files may
 be reclaimed. The mode requires independent pinned validation and excludes individual-peer
-adoption in the same enrollment. Compilation, 82 focused training checks and strict CLI Clippy
-pass; the dedicated `agent-autonomous-aggregation` real-model scenario is implemented but
-its execution result remains pending. It retains the three original training contributions,
-the automatic combination and local successor, protected serving and a completed-cohort
-restart without recomputation. Network
-publication of combined results remains explicit through `compute publish-aggregate`, and
-general quality, robust corruption rollback for aggregate selections and full B05 remain open.
+adoption in the same enrollment. Compilation, 97 focused training checks and strict CLI Clippy
+pass. The [complete automatic run on `aa2eb344`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35874130419)
+passes exact-source checking: three real 8/9/10-step contributions, cold automatic intake,
+genuine aggregation and eight further local warmstart updates. Both local approval metrics
+improve in this tiny fixture: four-token source loss 1.114049 to 0.605543 and seven-token
+second-source loss 1.937618 to 1.462681. The exact approved local successor serves a protected
+peer job; ten original worker observations, both captures and all cleanup/host-state checks
+pass. Restart retains completed bytes and original expiry, verifies the unchanged cohort once
+and performs no new training. This does not establish general answer quality or independence
+of the contributors. Automatic publication is not part of that run.
+
+A further executable candidate now connects approved aggregate
+publication to the loop's existing owner-authorized publish settings. Combined and local
+updates share a durable revision order; retries reuse original signed bytes, completed receipts
+can settle interrupted checkpoints, and neither retry nor resume renews authority. Pending
+publications survive reclamation and share the existing bounded drain. The disposable scenario
+is being extended through automatic return-publication and cold exact-weight receiver inference;
+this extended live result is not yet available. Standalone `compute publish-aggregate` remains
+available. General quality, robust corruption rollback for aggregate selections and full B05
+remain open.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain

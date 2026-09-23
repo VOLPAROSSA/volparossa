@@ -718,16 +718,31 @@ it and inherits the original authority expiry; fresh training data cannot renew 
 The same three manifest IDs are processed once, not on every poll. Revision rollback and
 same-revision equivocation are refused. A completed result can be reopened after restart;
 an interrupted incomplete round is retained as failed rather than silently rerunning the model.
-The journal retains at most eight rounds and protects the active round from reclamation.
+The journal retains at most eight rounds and protects the active round and pending publications
+from reclamation.
 Expired selections are no longer used; ambiguous/corrupted retained evidence fails closed,
 not as an accusation or automatic ban of the three publishers. Automatic rollback after
 aggregate corruption remains to extend beyond the existing individual-peer recovery path.
 
 This opt-in mode is mutually exclusive with `--peer-updates`; resume cannot grant an old
-enrollment new publishers or adoption authority. Sharing a combined result still uses the
-explicit `compute publish-aggregate` command. Compilation and focused checks pass; the new
-`agent-autonomous-aggregation` disposable proof is pending. No general intelligence gain,
-poisoning resistance or complete B05 is claimed.
+enrollment new publishers or adoption authority. Add the existing `--publish-name`,
+`--publication-key`, `--identity`, `--passphrase-file` and `--publish-cache` settings to a **new**
+enrollment to return approved combinations automatically. Aggregates and local successors use
+one durable revision order, beginning at `--first-publication-revision`. A pending older
+revision is settled or expired before handing off a later one. Retrying preserves the original
+manifest and its expiry; it does not infer a new revision from another writer's channel.
+Publication failure does not undo local approval. This is the owner's signature on the object,
+not independent verification that its contributors are honest or its answers are correct.
+
+Standalone combinations can still use `compute publish-aggregate`. The [real automatic
+combination run on `aa2eb344`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35874130419)
+passes: three original trainings, automatic combination/adoption, eight further local updates,
+the actual two-source approval gate, protected serving with the approved successor's exact
+weights, and restart without recomputation. Original bytes, authority deadlines, packet paths
+and complete cleanup are retained. This is a tiny owner-selected evaluation, not a general
+quality benchmark. Compilation and focused checks also pass for the next extension through
+automatic return-publication and cold receiver inference; that extended live proof is pending.
+No general intelligence gain, poisoning resistance or complete B05 is claimed.
 
 ### Using approved successors for new peer jobs
 

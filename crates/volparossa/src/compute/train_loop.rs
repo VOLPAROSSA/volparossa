@@ -9,6 +9,7 @@ mod evaluation;
 mod peer_evaluation;
 mod peer_updates;
 mod publication;
+mod publication_order;
 mod seed;
 mod serving;
 mod storage;
@@ -210,6 +211,8 @@ struct State {
     peer_updates: Option<peer_updates::Registry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     aggregate_updates: Option<aggregate_updates::Registry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_order: Option<publication_order::Ledger>,
 }
 
 impl State {
@@ -230,6 +233,7 @@ impl State {
             catalog: None,
             peer_updates: None,
             aggregate_updates: None,
+            publication_order: None,
         }
     }
     fn select(&self, plan: &Plan, repeat: bool, time: u64) -> Option<usize> {
@@ -380,6 +384,12 @@ fn enrollment(args: &Options) -> Result<(Plan, Value)> {
             "train_loop_conflicting_adoption_modes"
         );
         selection["aggregate_updates"] = aggregate;
+        if args.publish_name.is_some() {
+            selection["aggregate_publication"] = json!({"version":1,
+                "ordering":"shared-local-and-aggregate-revisions",
+                "first_revision":args.first_publication_revision,
+                "original_authority_required":true});
+        }
     }
     if let Some(validation) = validation::selection(args)? {
         for source in &plan.sources {
@@ -448,6 +458,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         }
         return Err(error);
     }
+    publication::restore_order(args, &store, &mut state, &selection)?;
     if let Some(sequence) = state
         .cycles
         .iter()
@@ -524,7 +535,8 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
         "peer_update_channels_enabled":state.peer_updates.is_some(),
         "aggregate_updates_enabled":state.aggregate_updates.is_some(),
         "active_aggregate_sequence":state.aggregate_updates.as_ref().and_then(aggregate_updates::active_sequence),
-        "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count(),
+        "pending_publications":state.cycles.iter().filter(|cycle|matches!(cycle.phase,Phase::Trained|Phase::PublishPending)).count()
+            + state.aggregate_updates.as_ref().map_or(0, |registry|aggregate_updates::publication::pending_sequences(registry).len()),
         "publication_drain":publication_drain,"publication_drain_seconds":publication_drain.map(|_|args.max_seconds),
         "private_data_supported":false,"full_b05_claimed":false})
     );

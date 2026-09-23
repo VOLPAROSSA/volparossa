@@ -15,12 +15,13 @@ use ed25519_dalek::VerifyingKey;
 use nix::fcntl::{Flock, FlockArg};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use tokio::{sync::watch, time::Instant};
 use volparossa_content::{SignedManifest, VerifiedManifest, agent_artifact::ADAPTER_CONTENT_TYPE};
 
 use super::{Activity, active, aggregate, now, private_directory, read_file};
 use crate::content::{self, Limits};
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub(crate) struct Options {
     /// Completed aggregate-adapters directory; original inputs/approval must remain live.
     #[arg(long)]
@@ -171,46 +172,152 @@ fn validate_receipt(receipt: &Value, verified: &VerifiedManifest) -> Result<()> 
     Ok(())
 }
 
+/// Frozen original publication, held exclusively until the caller checkpoints
+/// its queue identity and either hands it off or recovers its original receipt.
+pub(super) struct Prepared {
+    args: Options,
+    approved: aggregate::Approved,
+    authorization: Value,
+    verified: VerifiedManifest,
+    signed_bytes: Vec<u8>,
+    record: Value,
+    original_receipt: Option<Value>,
+    reused: bool,
+    _lock: Flock<File>,
+}
+
+impl Prepared {
+    pub(super) fn record(&self) -> &Value {
+        &self.record
+    }
+
+    pub(super) fn original_receipt(&self) -> Option<&Value> {
+        self.original_receipt.as_ref()
+    }
+
+    pub(super) fn expires(&self) -> u64 {
+        self.verified.validity().expires
+    }
+
+    pub(super) fn approved_identity(&self) -> &Value {
+        &self.approved.identity
+    }
+}
+
+fn receipt_time(receipt: &Value, current: u64) -> Result<u64> {
+    let observed = receipt["coordinator_verified_at_unix_seconds"]
+        .as_u64()
+        .context("aggregate_publication_original_receipt_time")?;
+    ensure!(
+        observed > 0 && observed <= current,
+        "aggregate_publication_original_receipt_time"
+    );
+    Ok(observed)
+}
+
+fn approval_time(receipt: Option<&Value>, recover_terminal: bool, current: u64) -> Result<u64> {
+    if recover_terminal {
+        receipt.map_or(Ok(current), |value| receipt_time(value, current))
+    } else {
+        Ok(current)
+    }
+}
+
+/// Uses only the loop's already enrolled publication authority. This function
+/// never contributes to the network and never owns a separate signal listener.
+pub(super) async fn prepare_loop(
+    args: &super::Options,
+    directory: &Path,
+    revision: u64,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+) -> Result<Prepared> {
+    let publication = Options {
+        directory: directory.to_path_buf(),
+        publish_name: args
+            .publish_name
+            .clone()
+            .context("train_loop_publish_name")?,
+        publication_key: args.publication_key.context("train_loop_publication_key")?,
+        revision,
+        identity: args.identity.clone().context("train_loop_identity")?,
+        passphrase_file: args
+            .passphrase_file
+            .clone()
+            .context("train_loop_passphrase_file")?,
+        publish_cache: args
+            .publish_cache
+            .clone()
+            .context("train_loop_publish_cache")?,
+        execute: true,
+        limits: args.limits.clone(),
+    };
+    prepare(&publication, socket, activity, true).await
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "One explicit original-object sign/retain/handoff transaction"
+    reason = "One original approval/signature preparation, with historical receipt recovery before signing"
 )]
-pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()> {
-    let approved = aggregate::reopen_approved(&args.directory, &args.limits, now()?)?;
-    let authorization = request(args, &approved)?;
+async fn prepare(
+    args: &Options,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+    recover_terminal: bool,
+) -> Result<Prepared> {
     let root = args.directory.join("publication");
-    if present(&root)? {
-        private_directory(&root)?;
-        if present(&root.join("request.json"))? {
-            ensure!(
-                read_json(&root.join("request.json"))? == authorization,
-                "aggregate_publication_authorization_changed"
-            );
-        }
-    }
-    if !args.execute {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({"operation":"compute_publish_aggregate",
-            "execute":false,"authorization":authorization,"network_publication":false,"model_activated":false}))?
-        );
-        return Ok(());
-    }
-    let activity = Activity::new()?;
+    let receipt_path = root.join("contribution.json");
+    let original_receipt = if present(&receipt_path)? {
+        Some(read_json(&receipt_path)?)
+    } else {
+        None
+    };
+    let current = now()?;
+    let at = approval_time(original_receipt.as_ref(), recover_terminal, current)?;
+    let approved = aggregate::reopen_approved(&args.directory, &args.limits, at)?;
+    let authorization = request(args, &approved)?;
     if !present(&root)? {
         fs::DirBuilder::new().mode(0o700).create(&root)?;
         File::open(&args.directory)?.sync_all()?;
     }
     private_directory(&root)?;
-    // A directory flock serializes only this explicit publication, not a scheduler.
-    let _lock = Flock::lock(File::open(&root)?, FlockArg::LockExclusiveNonblock)
+    let lock = Flock::lock(File::open(&root)?, FlockArg::LockExclusiveNonblock)
         .map_err(|_| anyhow::anyhow!("aggregate_publication_busy"))?;
+    let path = root.join("publication.pb");
+    if let Some(receipt) = &original_receipt {
+        // A handoff may have been fsynced immediately before the queue checkpoint.
+        // Verify that historical event without renewing or writing any object.
+        ensure!(
+            read_json(&receipt_path)? == *receipt
+                && read_json(&root.join("request.json"))? == authorization,
+            "aggregate_publication_original_receipt_changed"
+        );
+        let observed = receipt_time(receipt, current)?;
+        let verified = manifest(&path, args, &approved, observed)?;
+        validate_receipt(receipt, &verified)?;
+        let signed_bytes = read_file(&path, 64 * 1024)?;
+        let record = publication_record(&verified, &signed_bytes);
+        ensure!(
+            read_json(&root.join("manifest.json"))? == record,
+            "aggregate_publication_original_manifest_changed"
+        );
+        return Ok(Prepared {
+            args: args.clone(),
+            approved,
+            authorization,
+            verified,
+            signed_bytes,
+            record,
+            original_receipt,
+            reused: true,
+            _lock: lock,
+        });
+    }
     retain(&root.join("request.json"), &authorization)?;
     ensure!(
-        active(&activity.receiver) && now()? < approved.expires,
+        active(activity) && now()? < approved.expires,
         "aggregate_publication_cancelled_or_expired"
     );
-    let path = root.join("publication.pb");
     let reused = present(&path)?;
     if !reused {
         // Check expected signer before writing a manifest/cache object. The content
@@ -241,10 +348,45 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     let signed_bytes = read_file(&path, 64 * 1024)?;
     let record = publication_record(&verified, &signed_bytes);
     retain(&root.join("manifest.json"), &record)?;
+    Ok(Prepared {
+        args: args.clone(),
+        approved,
+        authorization,
+        verified,
+        signed_bytes,
+        record,
+        original_receipt: None,
+        reused,
+        _lock: lock,
+    })
+}
+
+/// The queue checkpoints `Prepared::record` before calling this affine handoff.
+/// A retry may reconfirm custody, but retains the first receipt byte-for-byte.
+pub(super) async fn handoff_loop(
+    prepared: Prepared,
+    socket: &Path,
+    activity: &watch::Receiver<bool>,
+    deadline: Instant,
+) -> Result<Value> {
+    let Prepared {
+        args,
+        approved,
+        authorization,
+        verified,
+        signed_bytes,
+        _lock,
+        ..
+    } = prepared;
+    let root = args.directory.join("publication");
+    let path = root.join("publication.pb");
     // Retrying after a crash or failed handoff reuses the frozen original bytes.
     let current = aggregate::reopen_approved(&args.directory, &args.limits, now()?)?;
     ensure!(
-        current.identity == approved.identity && current.bundle == approved.bundle,
+        current.identity == approved.identity
+            && current.bundle == approved.bundle
+            && read_json(&root.join("request.json"))? == authorization
+            && read_file(&path, 64 * 1024)? == signed_bytes,
         "aggregate_publication_approval_changed"
     );
     let contribution = content::Contribute::existing(
@@ -256,13 +398,14 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     .expect_manifest_id(*verified.manifest_id());
     let seconds = verified.validity().expires.saturating_sub(now()?).min(60);
     ensure!(
-        seconds > 0 && active(&activity.receiver),
+        seconds > 0 && active(activity) && Instant::now() < deadline,
         "aggregate_publication_cancelled_or_expired"
     );
-    let mut changed = activity.receiver.clone();
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(seconds));
+    let mut changed = activity.clone();
     let mut receipt = tokio::select! { biased;
         _ = changed.changed() => anyhow::bail!("aggregate_publication_cancelled_original_retained"),
-        result = tokio::time::timeout(Duration::from_secs(seconds), content::contribute_existing(&contribution, socket)) =>
+        result = tokio::time::timeout_at(deadline, content::contribute_existing(&contribution, socket)) =>
             result.context("aggregate_publication_handoff_deadline_original_retained")??,
     };
     validate_receipt(&receipt, &verified)?;
@@ -291,6 +434,44 @@ pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()>
     } else {
         retain(&receipt_path, &receipt)?;
     }
+    Ok(receipt)
+}
+
+pub(in crate::compute) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    // Explicit CLI retries still require live approval and reconfirm custody;
+    // only the loop may restore a completed historical receipt after expiry.
+    let approved = aggregate::reopen_approved(&args.directory, &args.limits, now()?)?;
+    let authorization = request(args, &approved)?;
+    let root = args.directory.join("publication");
+    if present(&root)? {
+        private_directory(&root)?;
+        if present(&root.join("request.json"))? {
+            ensure!(
+                read_json(&root.join("request.json"))? == authorization,
+                "aggregate_publication_authorization_changed"
+            );
+        }
+    }
+    if !args.execute {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"operation":"compute_publish_aggregate",
+            "execute":false,"authorization":authorization,"network_publication":false,"model_activated":false}))?
+        );
+        return Ok(());
+    }
+    let activity = Activity::new()?;
+    let prepared = prepare(args, socket, &activity.receiver, false).await?;
+    let record = prepared.record().clone();
+    let reused = prepared.reused;
+    let receipt = handoff_loop(
+        prepared,
+        socket,
+        &activity.receiver,
+        Instant::now() + Duration::from_secs(60),
+    )
+    .await?;
+    let receipt_path = root.join("contribution.json");
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({"version":1,"operation":"compute_publish_aggregate",
@@ -360,6 +541,22 @@ mod tests {
     }
 
     #[test]
+    fn only_retained_terminal_receipts_allow_historical_approval_time() {
+        let receipt = json!({"coordinator_verified_at_unix_seconds":1001});
+        assert_eq!(approval_time(Some(&receipt), true, 1300).unwrap(), 1001);
+        assert_eq!(approval_time(Some(&receipt), false, 1300).unwrap(), 1300);
+        assert_eq!(approval_time(None, true, 1300).unwrap(), 1300);
+        for changed in [
+            json!({}),
+            json!({"coordinator_verified_at_unix_seconds":0}),
+            json!({"coordinator_verified_at_unix_seconds":1301}),
+            json!({"coordinator_verified_at_unix_seconds":"1001"}),
+        ] {
+            assert!(approval_time(Some(&changed), true, 1300).is_err());
+        }
+    }
+
+    #[test]
     fn one_original_signature_binds_key_name_revision_bundle_and_absolute_expiry() {
         let root = tempfile::tempdir().unwrap();
         let key = SigningKey::from_bytes(&[119; 32]);
@@ -405,6 +602,25 @@ mod tests {
         assert_eq!(first.manifest_id(), retry.manifest_id());
         assert_eq!(retry.validity().expires, 1250);
         assert!(manifest(&path, &args, &approved, 1250).is_err());
+        // Recovery checks the original signed event, not a renewed lease or a
+        // portable execution attestation. No model/backend is used by this test.
+        let receipt = json!({"coordinator_verified_at_unix_seconds":1001});
+        let historical = approval_time(Some(&receipt), true, 1300).unwrap();
+        assert_eq!(
+            manifest(&path, &args, &approved, historical)
+                .unwrap()
+                .manifest_id(),
+            first.manifest_id()
+        );
+        assert!(
+            manifest(
+                &path,
+                &args,
+                &approved,
+                approval_time(Some(&receipt), false, 1300).unwrap()
+            )
+            .is_err()
+        );
         approved.expires = 1240;
         assert!(manifest(&path, &args, &approved, 1001).is_err());
         approved.expires = 1300;

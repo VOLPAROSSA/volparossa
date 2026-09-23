@@ -24,6 +24,9 @@ agent_autonomous_aggregation_loop() {
         --validation-source "$aa_r4/validation-source.json" --directory "$aa_r4/autonomous-loop" \
         --runtime-root "$aa_r4/runtime" --model-root "$jobs_root/provision/model" --cache "$aa_r4/source-cache" \
         --serving-directory "$aa_r4/serving" --max-cycles 1 --steps 8 --threads 2 --max-seconds 600 \
+        --publish-name disposable-autonomous-adapter --publication-key "$jobs_key_a" \
+        --identity "$WORK/state-relay4/identity.key" --passphrase-file "$WORK/credential-relay4/identity-passphrase" \
+        --publish-cache "$aa_r4/publish-cache" --first-publication-revision 1 \
         --poll-seconds 2 --execute "$@" \
         >"$WORK/agent-autonomous-aggregation-$auto_label.jsonl" \
         2>"$WORK/agent-autonomous-aggregation-$auto_label.err" &
@@ -85,6 +88,38 @@ agent_autonomous_aggregation_job() {
     fail AUTONOMOUS_PEER_JOB_INCOMPLETE
 }
 
+agent_autonomous_aggregation_receiver() {
+    agent_autonomous_aggregation_python receiver-prepare "$WORK" || fail AUTONOMOUS_RECEIVER_NOT_COLD
+    auto_revision=$(jq -er '.expected_revision' "$WORK/agent-autonomous-aggregation-receiver-cold.json")
+    agent_jobs_cli client content agent fetch --publisher-key "$jobs_key_a" --dataset-publisher-key "$jobs_key_b" \
+        --name disposable-autonomous-adapter --dataset-name disposable-aggregate-data --min-revision "$auto_revision" \
+        --cache "$aa_client/autonomous-cache" --output "$aa_client/autonomous-received" \
+        >"$WORK/agent-autonomous-aggregation-import.json" 2>"$WORK/agent-autonomous-aggregation-import.err" \
+        || fail AUTONOMOUS_RETURN_COLD_IMPORT_FAILED
+}
+
+agent_autonomous_aggregation_receiver_inference() {
+    auto_client=$(systemctl show --property=MainPID --value volparossa-alpha-agent@client.service)
+    case $auto_client in ''|0|*[!0-9]*) fail AUTONOMOUS_RECEIVER_NOT_RUNNING ;; esac
+    PHASE=agent-autonomous-aggregation-receiver-inference
+    timeout --signal=INT --kill-after=15s 650s nsenter --target "$auto_client" --mount --net \
+        unshare --mount --propagation private --mount-proc=/proc \
+        setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs \
+        -- "$binary_directory/volparossa" --control-socket "$WORK/runtime-client/control/agent.sock" \
+        compute run --mode infer --runtime-root "$aa_client/runtime" --model-root "$aa_client/model" \
+        --adapter-root "$aa_client/autonomous-received/adapter" --dataset "$aa_client/autonomous-received/dataset.json" \
+        --output "$aa_client/autonomous-inference" --steps 1 --threads 2 --max-seconds 600 --spare-capacity --execute \
+        >"$WORK/agent-autonomous-aggregation-receiver-inference.json" \
+        2>"$WORK/agent-autonomous-aggregation-receiver-inference.err" &
+    jobs_batch_pid=$!
+    agent_autonomous_aggregation_python observe-receiver "$WORK" "$jobs_batch_pid" \
+        || fail AUTONOMOUS_RECEIVER_WORKER_MISSING
+    wait "$jobs_batch_pid" || fail AUTONOMOUS_RECEIVER_INFERENCE_FAILED
+    jobs_batch_pid=
+    agent_autonomous_aggregation_python capture-return "$WORK" || fail AUTONOMOUS_RETURN_CAPTURE_FAILED
+}
+
 agent_autonomous_aggregation_run() {
     agent_adapter_aggregation_prepare
     agent_autonomous_aggregation_python setup "$WORK" || fail AUTONOMOUS_SETUP_FAILED
@@ -96,12 +131,25 @@ agent_autonomous_aggregation_run() {
     agent_autonomous_aggregation_loop resume --resume
     agent_autonomous_aggregation_python capture-resume "$WORK" || fail AUTONOMOUS_RESTART_CAPTURE_FAILED
     agent_adapter_aggregation_network_finish
+    # The source is the exact signed public object really received by R4.
+    # Explicit fixture custody makes it available after the original supplier stops;
+    # no dataset body or adapter body is copied into the receiving Client cache.
+    auto_dataset_manifest=$aa_r4/autonomous-loop/aggregate-update-0000000000000001/peers/0/import/dataset.manifest
+    agent_jobs_cli relay4 content export --manifest "$auto_dataset_manifest" --publisher-key "$jobs_key_b" \
+        --agent-cache "$aa_r4/source-cache" --cache "$aa_r4/autonomous-dataset-serving-cache" --public-content \
+        >"$WORK/agent-autonomous-aggregation-dataset-export.json" || fail AUTONOMOUS_DATASET_EXPORT_FAILED
+    agent_jobs_cli relay4 content contribute --manifest "$auto_dataset_manifest" --publisher-key "$jobs_key_b" \
+        --cache "$aa_r4/autonomous-dataset-serving-cache" \
+        >"$WORK/agent-autonomous-aggregation-dataset-contribute.json" || fail AUTONOMOUS_DATASET_CONTRIBUTION_FAILED
     agent_adapter_aggregation_stop_supplier relay5
     agent_adapter_aggregation_network_start receiver
     PHASE=agent-autonomous-aggregation-serving
     agent_autonomous_aggregation_job
     agent_autonomous_aggregation_python capture-job "$WORK" || fail AUTONOMOUS_SERVING_CAPTURE_FAILED
+    PHASE=agent-autonomous-aggregation-return-cold-fetch
+    agent_autonomous_aggregation_receiver
     agent_adapter_aggregation_network_finish
+    agent_autonomous_aggregation_receiver_inference
     agent_jobs_cleanup || fail AUTONOMOUS_PRIVATE_CLEANUP_FAILED
     agent_autonomous_aggregation_python evidence "$WORK" "$expected_commit" || fail AUTONOMOUS_EVIDENCE_INVALID
     OBSERVED_BLOCKER=NONE

@@ -56,6 +56,7 @@ fn round(sequence: u64, phase: Phase, at: u64, expires: u64) -> Round {
         baseline_expires: None,
         approval: None,
         snapshot: None,
+        publication: None,
     }
 }
 
@@ -200,6 +201,63 @@ fn bounded_retention_preserves_active_round_and_unrelated_owned_files() {
         store.load_state().unwrap().unwrap(),
         serde_json::to_value(&state).unwrap()
     );
+}
+
+#[test]
+fn publication_records_do_not_rewrite_approval_snapshot_and_remain_owned_cleanup() {
+    let (_temporary, args, _store, _state, _enrollment) = setup();
+    let directory = directory(&args, 1);
+    let original = snapshot(&directory).unwrap();
+    let publication = directory.join("publication");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&publication)
+        .unwrap();
+    for name in [
+        "request.json",
+        "publication.pb",
+        "manifest.json",
+        "contribution.json",
+    ] {
+        write(
+            &publication.join(name),
+            b"inert publication bytes, not a signature",
+        );
+    }
+    assert_eq!(snapshot(&directory).unwrap(), original);
+    write(
+        &publication.join("contribution.json"),
+        b"inert later receipt",
+    );
+    assert_eq!(snapshot(&directory).unwrap(), original);
+    write(&publication.join("unrelated-owner-data"), b"not disposable");
+    assert!(prune(&directory).is_err());
+    assert!(directory.join("cohort.json").is_file());
+    fs::remove_file(publication.join("unrelated-owner-data")).unwrap();
+    prune(&directory).unwrap();
+    assert!(!directory.exists());
+}
+
+#[test]
+fn unpublished_combination_is_retained_even_after_local_successor_replaces_it() {
+    let (_temporary, args, store, mut state, _enrollment) = setup();
+    let at = now().unwrap();
+    let mut rounds = Vec::new();
+    for sequence in 1..=RETAINED as u64 {
+        let directory = directory(&args, sequence);
+        let mut round = round(sequence, Phase::Failed, at, at + 600);
+        round.snapshot = Some(snapshot(&directory).unwrap());
+        rounds.push(round);
+    }
+    // Retention bookkeeping only: no invented proof of model approval.
+    rounds[0].phase = Phase::Approved;
+    rounds[0].publication = Some(publication::Record::pending());
+    let mut registry = registry(rounds);
+    assert!(registry.active.is_none());
+    assert!(make_room(&args, &store, &mut state, &mut registry).unwrap());
+    assert!(root(&args, 1).unwrap().is_dir());
+    assert!(!root(&args, 2).unwrap().exists());
+    assert_eq!(publication::pending_sequences(&registry), vec![1]);
 }
 
 #[test]
