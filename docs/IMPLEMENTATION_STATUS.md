@@ -7,8 +7,10 @@ Last updated: 2026-09-23
 The completed development milestone is integrated into `main` by
 [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
 unchanged normal Quality/CodeQL checks and source-exact provider/recovery audits passed.
-The new exact-object policy work below is a subsequent development candidate, not part of
-that merged checkpoint. Neither integration nor execution proves reliable model reasoning.
+The exact-object policy and explicit peer-distribution milestone below is now also integrated
+by [PR #151](https://github.com/VOLPAROSSA/volparossa/pull/151), normal merge `2761b9da`.
+Automatic-follow and authority-round work are subsequent slices. Neither integration nor
+execution proves reliable model reasoning.
 
 A new node-local policy candidate connects the original four signed assessment/review
 transcripts to `compute peer policy-propose`, `policy-endorse` and `policy-combine --execute --apply`.
@@ -61,7 +63,9 @@ completion remain open. The earlier `6ac301ee` failure is not relabelled.
 A subsequent `compute peer policy-follow --execute` candidate automatically refreshes one
 owner-enrolled native publisher/name channel and applies only quorum-verified decisions for
 its exact enrolled subject/framework under the node's own current policy configuration.
-The peer must actually contribute its signed named wrapper; custody alone is not a name index.
+The selected signed wrapper must be registered in the serving peer's live name-enabled registry;
+raw cached chunks alone are not a named publication. Complete custody admission can register
+the original publisher's wrapper; it does not create a wrapper under a different peer's name.
 The bounded serial loop retains original wrapper/decision/epoch bytes and transport/application
 receipts, enforces publication and decision revision floors, and skips unchanged publications.
 SIGINT/SIGTERM stops its own work without disconnecting shared consumers. `--resume` requires
@@ -79,10 +83,33 @@ object-policy CLI tests pass, including four new follower checks, along with str
 Clippy, scoped formatting and shell checks. Its inert Python self-test
 passes with 81 rejection cases. The separate
 [automatic-consumer proof on `3f30a5f9`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35899595361)
-is pending. Neither the failed `6ac301ee` nor the passing manual-import `4d438099` proves that
-new automatic flow.
+passes its complete committed checker against 208 unchanged original files. Before publication,
+the same live follower records an actual failed poll with an empty cache and no applied decision.
+It subsequently fetches 605 original quorum bytes through protected peer transport with no
+origin bytes and applies once; combination itself did not apply. Actual Client and receiving
+agent restarts retain the original decision, epoch and expiry, and cached subject access remains
+withheld. The 101,947 privacy frames, follower reaping, complete cleanup and unchanged host
+state pass. The model reasoning errors remain visible. Neither the failed `6ac301ee` nor the
+passing manual-import `4d438099` is substituted for this separate automatic proof.
 This is selected-channel automation, not a complete global feed, new authority membership,
 independent semantic accuracy or B06 completion.
+
+The next development candidate adds `compute peer policy-round` and `policy-authority`.
+A finite coordinator packages the original assessment bundle and unchanged proposal, delivers
+them through protected public custody, collects separately selected single-authority replies,
+and publishes only after verifying the node's existing full quorum. Each authority independently
+replays the four original signed transcripts and keeps its signing identity local; the coordinator
+has only its content-publisher identity. A typed local inbox reads the active contribution registry
+without opening agent-owned storage in the CLI or requiring a service-only node to become a
+consumer. A durable per-identity reservation rejects same-revision conflicts and rollback before
+signing. The result can be contributed locally or deposited at explicitly enrolled publication
+peers, preserving the original wrapper, decision and expiry. This starts from a completed original
+assessment bundle; automatic initiation of new model assessments is not claimed. Thirty-five
+focused policy, wire, registry, CLI and isolated custody-lifecycle checks pass locally. Strict
+Clippy passes for the five affected crates and the guarded development-identity helper. The
+disposable fixture now exercises three separate authority owners and a genuinely parallel cold
+follower; its inert checker passes with 86 rejection cases. That new network flow is **not yet
+proved by a live run**; the earlier automatic-consumer run proves a different, completed slice.
 
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original

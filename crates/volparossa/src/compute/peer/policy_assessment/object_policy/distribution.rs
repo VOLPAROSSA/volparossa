@@ -19,49 +19,49 @@ use super::{
 use crate::{content, doctor::PolicyContext};
 
 #[derive(Clone, Debug, Args)]
-struct Selection {
+pub(super) struct Selection {
     /// Exact quorum envelope, received through explicitly selected public content or retained locally.
     #[arg(long)]
-    decision: PathBuf,
+    pub(super) decision: PathBuf,
     /// This node's independently configured current authority; never supplied by the content wrapper.
     #[arg(long)]
-    policy_config: PathBuf,
+    pub(super) policy_config: PathBuf,
     #[arg(long, value_parser = parse_key)]
-    subject_publisher_key: VerifyingKey,
+    pub(super) subject_publisher_key: VerifyingKey,
     #[arg(long, value_parser = parse_manifest)]
-    subject_manifest_id: [u8; 32],
+    pub(super) subject_manifest_id: [u8; 32],
     #[arg(long, value_parser = parse_manifest)]
-    subject_sha256: [u8; 32],
+    pub(super) subject_sha256: [u8; 32],
     /// Independently selected original canonical decision-body hash.
     #[arg(long, value_parser = parse_manifest)]
-    decision_hash: [u8; 32],
+    pub(super) decision_hash: [u8; 32],
     #[arg(long, value_parser = parse_manifest)]
-    evidence_sha256: [u8; 32],
+    pub(super) evidence_sha256: [u8; 32],
 }
 
 #[derive(Debug, Args)]
 pub(crate) struct Publish {
     #[command(flatten)]
-    selection: Selection,
+    pub(super) selection: Selection,
     /// Native content publisher only, never an additional policy maintainer.
     #[arg(long, value_parser = parse_key)]
-    publication_key: VerifyingKey,
+    pub(super) publication_key: VerifyingKey,
     #[arg(long, value_parser = content::parse_content_name)]
-    name: String,
+    pub(super) name: String,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    revision: u64,
+    pub(super) revision: u64,
     #[arg(long)]
-    identity: PathBuf,
+    pub(super) identity: PathBuf,
     #[arg(long)]
-    passphrase_file: PathBuf,
+    pub(super) passphrase_file: PathBuf,
     /// Private directory containing original decision.bin, publication.manifest and cache/.
     #[arg(long)]
-    output: PathBuf,
+    pub(super) output: PathBuf,
     /// Publish locally only. Existing content custody/contribute operations perform explicit sharing.
     #[arg(long)]
-    execute: bool,
+    pub(super) execute: bool,
     #[command(flatten)]
-    limits: content::Limits,
+    pub(super) limits: content::Limits,
 }
 
 #[derive(Debug, Args)]
@@ -77,20 +77,24 @@ pub(crate) struct Import {
     apply: bool,
 }
 
-fn preview(args: &Selection, output: &Path, operation: &str, execute: bool) -> Result<bool> {
+fn preview(
+    args: &Selection,
+    output: &Path,
+    operation: &str,
+    execute: bool,
+) -> Result<Option<Value>> {
     ensure!(
         args.decision.is_absolute() && args.policy_config.is_absolute() && output.is_absolute(),
         "compute_policy_distribution_absolute_paths"
     );
     if !execute {
-        println!(
-            "{}",
+        return Ok(Some(
             json!({"operation":operation,"execute":false,"model_execution":false,
             "network_policy_activation":false,"local_object_policy_applied":false,
-            "wrapper_publisher_is_policy_authority":false})
-        );
+            "wrapper_publisher_is_policy_authority":false}),
+        ));
     }
-    Ok(!execute)
+    Ok(None)
 }
 
 fn context(args: &Selection, at: u64) -> Result<PolicyContext> {
@@ -182,13 +186,21 @@ fn publication_binding(
 }
 
 pub(in crate::compute::peer) async fn publish(args: &Publish, socket: &Path) -> Result<()> {
+    println!("{}", publish_value(args, socket).await?);
+    Ok(())
+}
+
+pub(in crate::compute::peer) async fn publish_value(
+    args: &Publish,
+    socket: &Path,
+) -> Result<Value> {
     const OP: &str = "compute_policy_publish";
     ensure!(
         args.identity.is_absolute() && args.passphrase_file.is_absolute(),
         "compute_policy_distribution_identity_paths"
     );
-    if preview(&args.selection, &args.output, OP, args.execute)? {
-        return Ok(());
+    if let Some(planned) = preview(&args.selection, &args.output, OP, args.execute)? {
+        return Ok(planned);
     }
     let (bytes, approved) = reopen(&args.selection)?;
     let _lock = open_output(&args.output)?;
@@ -246,8 +258,7 @@ pub(in crate::compute::peer) async fn publish(args: &Publish, socket: &Path) -> 
     output["content_type"] = content::POLICY_DECISION_CONTENT_TYPE.into();
     output["publication_expires_unix_seconds"] = manifest.validity().expires.into();
     output["network_publication"] = false.into();
-    println!("{output}");
-    Ok(())
+    Ok(output)
 }
 
 pub(in crate::compute::peer) async fn import(args: &Import, socket: &Path) -> Result<()> {
@@ -256,7 +267,8 @@ pub(in crate::compute::peer) async fn import(args: &Import, socket: &Path) -> Re
         !args.apply || args.execute,
         "compute_object_policy_apply_requires_execute"
     );
-    if preview(&args.selection, &args.output, OP, args.execute)? {
+    if let Some(planned) = preview(&args.selection, &args.output, OP, args.execute)? {
+        println!("{planned}");
         return Ok(());
     }
     let (bytes, _) = reopen(&args.selection)?;

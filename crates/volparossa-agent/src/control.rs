@@ -160,6 +160,10 @@ pub async fn serve_control(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "One typed stream handoff dispatch preserves readiness and final-error ordering"
+)]
 async fn process_connection(
     mut stream: UnixStream,
     context: ControlContext,
@@ -173,6 +177,7 @@ async fn process_connection(
         Some(
             control_request::Operation::ContentDownloadHttps(_)
                 | control_request::Operation::ContentFetchName(_)
+                | control_request::Operation::ContentLocalFetchName(_)
                 | control_request::Operation::MailboxRemote(_)
                 | control_request::Operation::ContentCustody(_)
                 | control_request::Operation::ComputeRemote(_)
@@ -192,6 +197,16 @@ async fn process_connection(
             }
             Some(control_request::Operation::ContentFetchName(download)) => {
                 Box::pin(context.content.fetch_name(
+                    download.clone(),
+                    &context,
+                    &mut stream,
+                    &request.request_id,
+                    &mut ready_sent,
+                ))
+                .await
+            }
+            Some(control_request::Operation::ContentLocalFetchName(download)) => {
+                Box::pin(context.content.fetch_local_name(
                     download.clone(),
                     &context,
                     &mut stream,
@@ -281,6 +296,7 @@ async fn handle_request(request: ControlRequest, context: &ControlContext) -> Co
         control_request::Operation::ContentImport(_)
         | control_request::Operation::ContentExport(_)
         | control_request::Operation::ContentFetchName(_)
+        | control_request::Operation::ContentLocalFetchName(_)
         | control_request::Operation::MailboxRemote(_)
         | control_request::Operation::ContentCustody(_)
         | control_request::Operation::ComputeRemote(_)

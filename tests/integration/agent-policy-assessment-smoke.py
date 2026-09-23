@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import stat
 import sys
 import tempfile
@@ -29,9 +30,9 @@ SCOPE = ("one exact synthetic public native object fetched through its protected
          "360M peer assessments and opposite-peer cross-reviews under the seven virtues/vices, bound "
          "to signed dataset-v4 contracts and original provider-signed JSON-boundary/EOS receipts, "
          "using the explicitly provisioned pinned decoder without fixed verdicts, publish and fetch their exact native bundle into "
-         "a new cache and directory on the same client, unchanged completed offline replay, three separately invoked "
-         "existing development authorities replaying and endorsing that actual outcome without local application, "
-         "protected signed-decision custody delivery to a second node, its own signed named publication, "
+         "a new cache and directory on the same client, unchanged completed offline replay, an automatic finite "
+         "round and three node-local development authority owners replaying and separately endorsing its original "
+         "canonical request without policy private keys on the Client, protected original-quorum custody publication, "
          "an explicitly enrolled automatic Client follower started with an empty cache before that publication, "
          "actual peer retrieval and exact-object quorum activation with cached-access and Client-restart checks, "
          "the second node's independent import, exact cached-object export and restart "
@@ -551,6 +552,385 @@ def object_envelope(raw, public_keys, expected_signers, policy_epoch=False):
     return envelope, observed
 
 
+def round_root(work):
+    return root_path(work).parent / "policy-round"
+
+
+def round_file(path, owner):
+    raw = public_file(path, owner)
+    return dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
+
+
+def round_request(raw, bundle, proposal):
+    fields = object_fields(raw, 2 * 1048576 + 8192 + 32)
+    require(fields == {1: 1, 2: bundle, 3: proposal}, "request replaced the original evidence or unsigned proposal")
+    unsigned = object_fields(proposal, 8192)
+    body = object_fields(unsigned[1], 1024)
+    require(set(unsigned) == {1, 2} and unsigned[2] == hashlib.sha256(unsigned[1]).digest()
+            and body[10] == hashlib.sha256(bundle).digest(), "request was signed early or changed evidence hash")
+
+
+def round_native(raw, payload, publisher, name, content_type, expires):
+    envelope = object_fields(raw, 64 * 1024)
+    body = object_fields(envelope[1], 64 * 1024)
+    value = object_fields(body[8], 64 * 1024, (5,))
+    require(set(envelope) == {1, 2} and set(body) == set(range(1, 9))
+            and body[1] == body[6] == 1 and body[2] == bytes.fromhex(publisher)
+            and len(body[5]) == 32 and body[5] != bytes(32)
+            and 0 < body[3] < body[4] == expires and body[7] == hashlib.sha256(body[8]).digest()
+            and set(value) == set(range(1, 7)) and value[1] == name.encode() and value[2] == 1
+            and value[3] == content_type.encode() and value[4] == len(payload)
+            and value[6] == hashlib.sha256(payload).digest(), "round native wrapper changed signed original")
+    offset = 0
+    for chunk in value[5]:
+        descriptor = object_fields(chunk, 128)
+        require(set(descriptor) == {1, 2} and len(descriptor[1]) == 32 and 0 < descriptor[2] <= 262144
+                and descriptor[1] == hashlib.sha256(payload[offset:offset + descriptor[2]]).digest(),
+                "round wrapper chunk does not bind original bytes")
+        offset += descriptor[2]
+    require(offset == len(payload), "round wrapper omitted bytes")
+    verify_signature(envelope[1], envelope[2], body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
+    return body
+
+
+def round_unit(node):
+    return f"volparossa-alpha-policy-authority@{node}.service"
+
+
+def round_process(work, pid, node, command, directory):
+    proc = Path(f"/proc/{pid}")
+    owner = root_path(work).parent.stat().st_uid
+    argv = [part.decode() for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
+    require(Path(os.readlink(proc / "exe")).name == "volparossa" and command in argv
+            and str(directory) in argv and proc.stat().st_uid == owner != 0,
+            "wrong original policy owner executable/UID/enrollment")
+    agent_pid = int(JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value",
+        f"volparossa-alpha-agent@{node}.service"], text=True))
+    namespace = os.readlink(proc / "ns/net")
+    require(namespace == os.readlink(f"/proc/{agent_pid}/ns/net"), "policy owner bypasses its node namespace")
+    keys = []
+    for index in range(3):
+        key = work / f"state-relay{index + 3}/compute-source/policy-authority-{index}/identity.key"
+        visible = Path(f"/proc/{pid}/root") / key.relative_to("/")
+        expected = node == f"relay{index + 3}"
+        require(visible.exists() == expected, "policy owner can access another node's authority key")
+        keys.append(dict(index=index, path=str(key), accessible=expected))
+    require(("--authority-identity" in argv) == (command == "policy-authority"),
+            "coordinator received an authority identity")
+    return dict(process=JOBS["identity"](pid), node=node, argv=argv, uid=owner, namespace=namespace,
+                mount_namespace=os.readlink(proc / "ns/mnt"), agent=JOBS["identity"](agent_pid),
+                authority_keys=keys, observed_at_ms=time.time_ns() // 1000000)
+
+
+def round_before(work):
+    JOBS["guest_work"](work)
+    source, owner = root_path(work).parent, root_path(work).parent.stat().st_uid
+    require(not os.path.lexists(round_root(work))
+            and not any(source.glob("policy-authority-*")), "Client contains policy signer keys or a previous round")
+    authorities = []
+    for index in range(3):
+        node = f"relay{index + 3}"
+        root = work / f"state-{node}/compute-source"
+        key = root / f"policy-authority-{index}/identity.key"
+        for path in (key, key.with_name("passphrase")):
+            info = path.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == owner and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600, "unsafe node-local authority secret metadata")
+        deadline, observed = time.monotonic() + 20, None
+        while time.monotonic() < deadline:
+            raw_pid = JOBS["subprocess"].check_output(["systemctl", "show", "--property=MainPID", "--value", round_unit(node)], text=True).strip()
+            pid = int(raw_pid or "0")
+            try:
+                ready = pid > 0 and (root / "policy-owner/enrollment.json").is_file() and (root / "policy-owner/status.json").is_file()
+                if ready:
+                    observed = round_process(work, pid, node, "policy-authority", root / "policy-owner")
+                    break
+            except FileNotFoundError:
+                pass
+            time.sleep(.05)
+        require(observed is not None, "actual node-local authority did not become ready")
+        observed.update(index=index, identity_metadata=dict(uid=key.stat().st_uid, mode=stat.S_IMODE(key.stat().st_mode),
+            inode=[key.stat().st_dev, key.stat().st_ino]), identity=read(record(work, f"object-authority-{index}")),
+            cgroup=JOBS["subprocess"].check_output(["systemctl", "show", "--property=ControlGroup", "--value", round_unit(node)], text=True).strip())
+        require(not any((root / "policy-owner").glob("round-*"))
+                and not key.with_name("identity.key.policy-round-journal").exists(), "authority had already signed a request")
+        authorities.append(observed)
+    node = read(work / "agent-jobs-layout.json")["provider_nodes"][0]
+    state = work / f"state-{node}"
+    custody = state / "custody-cache"
+    require(public_file(custody / sha(SUBJECT.encode()), owner) == SUBJECT.encode(), "receiver lacks original subject")
+    journal = public_file(state / "object-policy/journal.json", owner)
+    require(strict_json(journal) == {"version": 1, "entries": []}, "receiver already had a policy decision")
+    write(record(work, "round-before"), dict(work=str(work), observed_at_ms=time.time_ns() // 1000000,
+        authorities=authorities, client_authority_keys_absent=True, round_absent=True,
+        receiver=dict(node=node, journal_hex=journal.hex(), custody_directory=[custody.stat().st_dev, custody.stat().st_ino],
+            chunks=sorted(path.name for path in custody.iterdir() if re.fullmatch(r"[0-9a-f]{64}", path.name)))))
+
+
+def round_observe(work, pid):
+    JOBS["guest_work"](work)
+    owner = JOBS["identity"](pid)
+    deadline = time.monotonic() + 30
+    while JOBS["alive"](owner) and time.monotonic() < deadline:
+        for member in TRAIN["descendants"](pid):
+            try:
+                proc = Path(f"/proc/{member['pid']}")
+                argv = (proc / "cmdline").read_bytes().split(b"\0")
+                if Path(os.readlink(proc / "exe")).name != "volparossa" or b"policy-round" not in argv:
+                    continue
+                observed = round_process(work, member["pid"], "client", "policy-round", round_root(work))
+                observed.update(owner=owner, owned_processes=TRAIN["descendants"](pid))
+                write(record(work, "round-observation"), observed)
+                return
+            except FileNotFoundError:
+                continue
+        time.sleep(.025)
+    raise ValueError("actual original policy-round coordinator was not observed")
+
+
+def round_collect(work, pid, exit_status):
+    JOBS["guest_work"](work)
+    before, observation = read(record(work, "round-before")), read(record(work, "round-observation"))
+    require(observation["owner"]["pid"] == pid and exit_status == 0
+            and all(not JOBS["alive"](item) for item in [observation["owner"], observation["process"], *observation["owned_processes"]]),
+            "coordinator did not finish successfully and reap its original processes")
+    root, owner = round_root(work), root_path(work).parent.stat().st_uid
+    names = ["enrollment.json", "window.json", "status.json", "assessment.bundle", "request.bin", "request.manifest",
+             "quorum.json", "result.json",
+             "proposal/assessment.bundle", "proposal/selection.json", "proposal/proposal.bin",
+             "combined/assessment.bundle", "combined/selection.json", "combined/proposal.bin", "combined/decision.bin",
+             "publication/selection.json", "publication/decision.bin", "publication/publication.manifest", "publication/publication.json"]
+    for prefix in ("request", "publication"):
+        names += sorted(path.name for path in root.glob(prefix + "-deposit-*.json"))
+    authorities = []
+    for original in before["authorities"]:
+        index, node = original["index"], original["node"]
+        require(not JOBS["alive"](original["process"]), "authority owner still alive after stop")
+        group = Path("/sys/fs/cgroup") / original["cgroup"].lstrip("/")
+        require(not group.exists() or not any(path.read_text().strip() for path in group.rglob("cgroup.procs")),
+                "authority cgroup still owns processes")
+        base = work / f"state-{node}/compute-source/policy-owner"
+        rounds = list(base.glob("round-*"))
+        require(len(rounds) == 1 and rounds[0].name == "round-" + sha(public_file(root / "request.bin", owner)),
+                "authority signed another request or more than one round")
+        retained = {name: round_file(base / name, owner) for name in ("enrollment.json", "status.json")}
+        for name in ("request.bin", "request.manifest", "assessment.bundle", "proposal.bin", "endorsement.bin",
+                     "publication.manifest", "transport.json"):
+            retained["round/" + name] = round_file(rounds[0] / name, owner)
+        keyroot = base.parent / f"policy-authority-{index}"
+        retained["journal.json"] = round_file(keyroot / "identity.key.policy-round-journal/journal.json", owner)
+        authorities.append(dict(original=original, files=retained,
+            summary=read(record(work, f"authority-{index}-summary")), process_ended=True, cgroup_empty=True))
+        key = original["identity"]["public_key_hex"]
+        names += [f"reply-{key}.json", f"endorsement-{key}.bin"]
+    files = {name: round_file(root / name, owner) for name in names}
+    require(sum(item["bytes"] for item in files.values()) + sum(item["bytes"] for authority in authorities
+            for item in authority["files"].values()) <= 12 * 1048576, "unbounded round originals")
+    require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576), "round changed original model work")
+    proof = dict(before=before, observation=observation, files=files, authorities=authorities,
+        result=read(record(work, "round")), exit_status=exit_status, coordinator_ended=True, new_model_jobs=0,
+        model_files_unchanged=True, collected_at_ms=time.time_ns() // 1000000)
+    write(record(work, "round-proof"), proof)
+
+
+def round_cleanup(work):
+    JOBS["guest_work"](work)
+    record_path = record(work, "round-cleanup")
+    if record_path.exists():
+        return
+    for index in range(3):
+        node = f"relay{index + 3}"
+        result = JOBS["subprocess"].run(["systemctl", "show", "--property=MainPID", "--value", round_unit(node)],
+                                       text=True, capture_output=True, check=False)
+        require(result.stdout.strip() in ("", "0"), "refusing private cleanup with a live authority owner")
+        root = work / f"state-{node}/compute-source"
+        if root.exists():
+            info = root.lstat()
+            require(stat.S_ISDIR(info.st_mode) and not root.is_symlink() and info.st_uid != 0
+                    and stat.S_IMODE(info.st_mode) == 0o700
+                    and set(path.name for path in root.iterdir()) <= {f"policy-authority-{index}", "policy-owner"},
+                    "refusing cleanup outside exact disposable authority state")
+            shutil.rmtree(root)
+    write(record_path, dict(authority_processes_ended=True, private_authority_stores_removed=True,
+                            authority_private_keys_exported=False))
+
+
+def check_round_deposit(receipt, wrapper, raw, providers, expires):
+    native = object_fields(object_fields(wrapper, 64 * 1024)[1], 64 * 1024)
+    payload = object_fields(native[8], 64 * 1024, (5,))
+    require(receipt["operation"] == "content_custody_deposit" and receipt["complete"] is True
+            and receipt["manifest_id"] == sha(wrapper) and receipt["publisher_key_hex"] == native[2].hex()
+            and receipt["object_bytes"] == len(raw) and receipt["original_expiry_unix_seconds"] == expires
+            and receipt["requested_providers"] == receipt["confirmed_complete_providers"] == len(providers)
+            and receipt["failed_providers"] == 0 and receipt["direct_provider_dial"] is False
+            and receipt["private_keys_transferred"] is False and len(receipt["observations"]) == len(providers)
+            and {item["provider_key_hex"] for item in receipt["observations"]} == set(providers),
+            "round original publication did not reach its selected custody owners")
+    for item in receipt["observations"]:
+        provider = item["provider_key_hex"]
+        require(item["agent_handoff_complete"] is True and item["state"] == "complete" and item["error"] is None,
+                "round custody handoff did not complete")
+        signed = object_fields(bytes.fromhex(item["signed_receipt_hex"]), 2048)
+        body = object_fields(signed[1], 2048)
+        claim = object_fields(body[8], 1024)
+        require(set(signed) == {1, 2} and body[1] == 1 and body[2].hex() == provider and body[6] == 3
+                and body[7] == hashlib.sha256(body[8]).digest() and 0 < body[4] - body[3] <= 900 and body[4] <= expires
+                and claim.get(5, 1) == 1 and claim.get(6) == 2 and claim[3].hex() == provider and claim[4] == native[2]
+                and claim[7] == hashlib.sha256(wrapper).digest() and claim[8] == hashlib.sha256(raw).digest()
+                and claim[9] == len(raw) and claim[10] == len(payload[5]) and claim[11] == expires,
+                "round signed custody receipt changed exact object or original expiry")
+        verify_signature(signed[1], signed[2], body[2], b"VOLPAROSSA/public-custody/v1\0")
+
+
+def round_completed_deposit(files, prefix):
+    names = sorted(name for name in files if name.startswith(prefix + "-deposit-"))
+    require(0 < len(names) <= 64 and names == [f"{prefix}-deposit-{index:02}.json" for index in range(len(names))],
+            "round custody retry history is missing or unbounded")
+    originals = [decode_file(files, name) for name in names]
+    require(all(item["complete"] is False for item in originals[:-1]) and originals[-1]["complete"] is True,
+            "round custody did not retain its first completed original handoff")
+    return originals[-1]
+
+
+def check_round(proof, bundle, proposal_raw, decision_raw, trust, layout, peers):
+    before, files = proof["before"], proof["files"]
+    work, source = Path(before["work"]), Path(before["work"]) / "state-client/compute-source"
+    public = {hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(item["public_key_hex"])).digest():
+              bytes.fromhex(item["public_key_hex"]) for item in trust["maintainers"]}
+    proposal, _ = object_envelope(proposal_raw, public, 0)
+    decision, signers = object_envelope(decision_raw, public, 3)
+    body = object_fields(proposal[1], 1024)
+    require(decision[1] == proposal[1] and signers == set(public), "automatic quorum changed unsigned body")
+    request = decode_file(files, "request.bin", False)
+    round_request(request, bundle, proposal_raw)
+    require(decode_file(files, "assessment.bundle", False) == bundle
+            and decode_file(files, "proposal/assessment.bundle", False) == bundle
+            and decode_file(files, "combined/assessment.bundle", False) == bundle
+            and decode_file(files, "combined/proposal.bin", False) == proposal_raw
+            and decode_file(files, "publication/decision.bin", False) == decision_raw,
+            "coordinator replaced original inputs or quorum bytes")
+    enrollment, window = decode_file(files, "enrollment.json"), decode_file(files, "window.json")
+    publisher = enrollment["publication_key"]
+    expected_selection = decode_file(files, "proposal/selection.json")
+    require(enrollment["selection"] == decode_file(files, "combined/selection.json") == expected_selection
+            and enrollment["assessment_sha256"] == sha(bundle) and enrollment["decision_revision"] == body[5] == 1
+            and enrollment["assessment_bundle"] == str(source / "policy-bundle-fetch/assessment.bundle")
+            and enrollment["policy_config"] == str(work / "config-client.yaml")
+            and enrollment["request_name"] == "disposable-policy-request" and enrollment["publish_name"] == "disposable-object-policy"
+            and window["deadline_ms"] - window["started_at_ms"] == enrollment["max_seconds"] * 1000
+            and before["observed_at_ms"] <= window["started_at_ms"] <= body[12]
+            and proof["collected_at_ms"] < min(window["deadline_ms"], body[13]),
+            "round enrollment or original finite lease changed")
+    request_manifest = decode_file(files, "request.manifest", False)
+    round_native(request_manifest, request, publisher, "disposable-policy-request",
+                 "application/vnd.volparossa.object-policy-request.v1", body[13] // 1000)
+    require(len(proof["authorities"]) == len(before["authorities"]) == 3 and before["client_authority_keys_absent"] is True
+            and before["round_absent"] is True and proof["model_files_unchanged"] is True and proof["new_model_jobs"] == 0,
+            "round did not preserve separate authorities and the original four jobs")
+    require(before["receiver"]["node"] == layout["provider_nodes"][0]
+            and sha(decision_raw) not in before["receiver"]["chunks"]
+            and strict_json(bytes.fromhex(before["receiver"]["journal_hex"])) == {"version": 1, "entries": []},
+            "original receiver inventory already contained the final decision")
+    verified_keys, transport_keys = [], []
+    for index, authority in enumerate(proof["authorities"]):
+        original, kept = authority["original"], authority["files"]
+        node, expected_key = f"relay{index + 3}", trust["maintainers"][index]["public_key_hex"]
+        provider = CUSTODY["peer_key"](peers[node])
+        transport_keys.append(provider)
+        require(original == before["authorities"][index] and original["index"] == index and original["node"] == node
+                and original["identity"] == dict(index=index, public_key_hex=expected_key, development_only=True, identities_created=1)
+                and original["uid"] == original["identity_metadata"]["uid"] != 0 and original["identity_metadata"]["mode"] == 0o600
+                and authority["process_ended"] is True and authority["cgroup_empty"] is True
+                and [entry["accessible"] for entry in original["authority_keys"]] == [i == index for i in range(3)],
+                "authority key was not confined to its own original node owner")
+        selection = decode_file(kept, "enrollment.json")
+        keyroot = work / f"state-{node}/compute-source/policy-authority-{index}"
+        require(selection["authority_key"] == expected_key and selection["publication_key"] == provider
+                and selection["authority_identity"] == str(keyroot / "identity.key")
+                and selection["authority_passphrase_file"] == str(keyroot / "passphrase")
+                and selection["policy_config"] == str(work / f"config-{node}.yaml")
+                and selection["request_publisher_key"] == publisher and selection["request_name"] == "disposable-policy-request"
+                and selection["reply_name"] == f"disposable-policy-reply-{index}" and selection["min_revision"] == 1
+                and all(selection[key] == expected_selection[key] for key in
+                        ("requester_key", "source_publisher_key", "source_manifest_id", "providers", "model_profile")),
+                "authority did not independently enroll the exact subject, peers and request channel")
+        require(decode_file(kept, "round/request.bin", False) == request
+                and decode_file(kept, "round/request.manifest", False) == request_manifest
+                and decode_file(kept, "round/assessment.bundle", False) == bundle
+                and decode_file(kept, "round/proposal.bin", False) == proposal_raw,
+                "authority did not replay the original canonical request")
+        raw = decode_file(kept, "round/endorsement.bin", False)
+        endorsed, by = object_envelope(raw, public, 1)
+        require(endorsed[1] == proposal[1] and by == {hashlib.sha256(
+            b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(expected_key)).digest()},
+            "authority endorsed a different body or signer")
+        reply = decode_file(files, f"reply-{expected_key}.json")
+        require(reply["endorsement_hex"] == raw.hex() and decode_file(files, f"endorsement-{expected_key}.bin", False) == raw
+                and reply["manifest_hex"] == decode_file(kept, "round/publication.manifest", False).hex(),
+                "coordinator did not retain the same original individual endorsement")
+        wrapper = bytes.fromhex(reply["manifest_hex"])
+        round_native(wrapper, raw, provider, selection["reply_name"],
+                     "application/vnd.volparossa.object-policy-endorsement.v1", body[13] // 1000)
+        downloaded = reply["download_receipt"]
+        require(downloaded["operation"] == "named_content_download" and downloaded["cache_only"] is False
+                and downloaded["publisher_key"] == provider and downloaded["name"] == selection["reply_name"]
+                and downloaded["manifest_id"] == sha(wrapper) and downloaded["sha256"] == sha(raw)
+                and downloaded["bytes"] == downloaded["peer_bytes"] == len(raw)
+                and downloaded["providers_used"] == 1 and downloaded["provider_peer_ids"] == [peers[node]]
+                and downloaded["control_relay_peer_id"] == layout["control_relay_peer_id"]
+                and downloaded["origin_body_bytes"] == downloaded["origin_range_requests"] == 0,
+                "coordinator did not cold-receive the original endorsement through protected peer transport")
+        transport = decode_file(kept, "round/transport.json")
+        local, contribution = transport["local_inbox"], transport["contribution"]
+        require(local["cache_only"] is True and local["manifest_id"] == sha(request_manifest)
+                and local["bytes"] == len(request) and local["sha256"] == sha(request)
+                and local["peer_bytes"] == local["providers_used"] == local["origin_body_bytes"] == 0
+                and contribution["manifest_id"] == sha(wrapper) and contribution["serving"] is True
+                and contribution["original_signature_reused"] is True and transport["quorum_verified"] is False,
+                "authority did not read its actual local custody inbox or publish its original reply")
+        journal = decode_file(kept, "journal.json")
+        require(journal == dict(version=1, authority_key=expected_key, records=[dict(epoch=body[3].hex(),
+            subject=sha(body[6] + body[7] + body[8]), revision=1, proposal_sha256=sha(proposal_raw),
+            expires_at_ms=body[13], retire_after_ms=body[13])]), "authority journal changed original revision reservation")
+        status = decode_file(kept, "status.json")
+        # A subsequent inbox poll may be busy after the retained successful sign/publish.
+        # Its fixed waiting status cannot invalidate or substitute the original signed artifacts.
+        completed = (status.get("ready") is True and status.get("request_sha256") == sha(request)
+            and status.get("endorsements") == 1 and status.get("provider_signed_claims_replayed") == 4
+            and status.get("threshold_verified") is False and status.get("model_execution") is False)
+        waiting = status == dict(operation="compute_policy_authority", ready=False,
+            state="awaiting_valid_request_or_transport", network_policy_activation=False)
+        require((completed or waiting) and authority["summary"] == dict(operation="compute_policy_authority",
+                    stopped=True, network_policy_activation=False, shared_routes_disconnected=False),
+                "authority did not finish the actual replay/sign/publish owner loop")
+        verified_keys.append(expected_key)
+    require(decode_file(files, "quorum.json") == verified_keys
+            and enrollment["authorities"] == [dict(policy_key=key, transport_publisher=transport_keys[index],
+                reply_name=f"disposable-policy-reply-{index}") for index, key in enumerate(verified_keys)],
+            "coordinator changed selected transport/authority mapping or quorum")
+    check_round_deposit(round_completed_deposit(files, "request"), request_manifest, request, transport_keys, body[13] // 1000)
+    final_manifest = decode_file(files, "publication/publication.manifest", False)
+    round_native(final_manifest, decision_raw, publisher, "disposable-object-policy",
+                 "application/vnd.volparossa.object-policy.v1", body[13] // 1000)
+    receiver = CUSTODY["peer_key"](peers[layout["provider_nodes"][0]])
+    require(enrollment["publication_provider_keys"] == [receiver], "round published to a different enrolled final provider")
+    final_custody = round_completed_deposit(files, "publication")
+    check_round_deposit(final_custody, final_manifest, decision_raw, [receiver], body[13] // 1000)
+    report = proof["result"]
+    require(report == decode_file(files, "result.json") and report["operation"] == "compute_policy_round"
+            and report["complete"] is True and report["required_endorsements"] == report["verified_endorsements"] == 3
+            and report["decision_hash"] == decision[2].hex() and report["request_manifest_id"] == sha(request_manifest)
+            and report["custody"] == final_custody and report["contribution"] is None
+            and report["assessment_started"] is False and report["model_execution"] is False
+            and report["authority_private_keys_loaded"] is False and report["network_policy_activation"] is False
+            and report["local_object_policy_applied"] is False and report["semantic_correctness_proven"] is False
+            and report["combined"]["outcome"] == {1:"allow",2:"deny",3:"undetermined"}[body[11]]
+            and proof["exit_status"] == 0 and proof["coordinator_ended"] is True
+            and proof["observation"]["node"] == "client"
+            and all(not entry["accessible"] for entry in proof["observation"]["authority_keys"]),
+            "coordinator did not finish one genuine automatic quorum/publication without authority private keys")
+
+
 def check_object_probe(probe, phase, result):
     require(probe["phase"] == phase and type(probe["exit_code"]) is int
             and probe["observed_at_ms"] > 0 and probe["agent"]["pid"] > 0,
@@ -598,35 +978,16 @@ def object_collect(work, phase):
     require(phase in ("before", "after"), "unknown object collection phase")
     source = root_path(work).parent
     owner = source.stat().st_uid
-    bundle = public_file(source / "policy-bundle-fetch/assessment.bundle", owner)
-    retained = {}
-    for directory, extra in [("policy-object-proposal", "proposal.bin"),
-                            *[(f"policy-object-endorsement-{i}", "endorsement.bin") for i in range(3)],
-                            ("policy-object-combined", "decision.bin")]:
-        base = source / directory
-        expected = {".task.lock", "assessment.bundle", "selection.json", "proposal.bin", extra}
-        require(set(item.name for item in base.iterdir()) == expected, "unexpected policy output/private file")
-        for name in sorted(expected - {".task.lock"}):
-            raw = public_file(base / name, owner)
-            item = {"bytes": len(raw), "sha256": sha(raw)}
-            if name == "assessment.bundle":
-                require(raw == bundle, "authority silently replaced original assessment bundle")
-            else:
-                item["raw_hex"] = raw.hex()
-            retained[directory + "/" + name] = item
     require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
             "object authority flow altered original model work")
     journal = public_file(work / "state-client/object-policy/journal.json", owner)
-    value = {"files": retained, "journal_hex": journal.hex(),
+    value = {"round": read(record(work, "round-proof"), 32 * 1048576), "journal_hex": journal.hex(),
              "follow": read(record(work, "follow-proof"), 8 * 1048576),
              "epoch_manifest_hex": public_file(work / "development-policy.manifest", owner).hex(),
-             "trust": strict_json(public_file(work / "policy-maintainers.json", owner)),
-             "authorities": [read(record(work, f"object-authority-{i}")) for i in range(3)],
-             "reports": {name: read(record(work, "object-" + name)) for name in
-                         ("proposal", "endorsement-0", "endorsement-1", "endorsement-2", "combined")}}
+             "trust": strict_json(public_file(work / "policy-maintainers.json", owner))}
     write(record(work, "object-originals-" + phase), value)
     if phase == "after":
-        require(value == read(record(work, "object-originals-before"), 8 * 1048576),
+        require(value == read(record(work, "object-originals-before"), 40 * 1048576),
                 "restart changed original decision, authority or durable journal")
         probes = {name: read(record(work, "object-probe-" + name)) for name in ("before", "applied", "restarted")}
         require(not JOBS["alive"](probes["applied"]["agent"]) and JOBS["alive"](probes["restarted"]["agent"]),
@@ -635,7 +996,8 @@ def object_collect(work, phase):
                  "old_agent_ended": True, "new_agent_alive": True}
         check_object_activation(proof, read(record(work, "result")),
                                 read(record(work, "transfer"), 8 * 1048576),
-                                read(record(work, "files"), 32 * 1048576))
+                                read(record(work, "files"), 32 * 1048576),
+                                read(work / "agent-jobs-layout.json"), read(work / "a01-expected-peers.json"))
         write(record(work, "object-activation"), proof)
 
 
@@ -646,7 +1008,7 @@ def check_fixture_epoch_header(epoch_body, epoch_signers, public):
             "different fixture authority epoch")
 
 
-def check_object_activation(proof, result, transfer_value, original_files):
+def check_object_activation(proof, result, transfer_value, original_files, layout, peers):
     original = proof["originals"]
     trust = original["trust"]
     require(trust["schema_version"] == 1 and len(trust["maintainers"]) == 3
@@ -662,11 +1024,12 @@ def check_object_activation(proof, result, transfer_value, original_files):
     require(len(epoch_members) == 3 and {member[1] for member in epoch_members} == set(public)
             and all(set(member) == {1, 2, 3} and member[2] == public[member[1]] and member[3] == 2
                     for member in epoch_members), "original policy assigned a different development trust set")
-    files = original["files"]
+    files = original["round"]["files"]
     raw_bundle = bytes.fromhex(transfer_value["bundle_hex"])
     enrolled = decode_file(original_files, "enrollment.json")
     scope = result["decision"]["scope"]
-    proposal, _ = object_envelope(decode_file(files, "policy-object-proposal/proposal.bin", False), public, 0)
+    proposal_raw = decode_file(files, "proposal/proposal.bin", False)
+    proposal, _ = object_envelope(proposal_raw, public, 0)
     body = object_fields(proposal[1], 1024)
     outcome = {"allow": 1, "deny": 2, "undetermined": 3}[result["decision"]["outcome"]]
     require(set(body) == set(range(1, 15)) and body[1] == body[2] == body[5] == 1
@@ -684,34 +1047,15 @@ def check_object_activation(proof, result, transfer_value, original_files):
         "source_publisher_key": scope["source_publisher_key"],
         "source_manifest_id": scope["source_manifest_id"], "providers": enrolled["providers"],
         "model_profile": "smollm2-360m-v1"}
-    signed_by = set()
-    for index, authority in enumerate(original["authorities"]):
-        require(authority == {"index": index, "public_key_hex": trust["maintainers"][index]["public_key_hex"],
-                             "development_only": True, "identities_created": 1}, "authority was replaced")
-        endorsement, signers = object_envelope(decode_file(files,
-            f"policy-object-endorsement-{index}/endorsement.bin", False), public, 1)
-        expected_key = hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(authority["public_key_hex"])).digest()
-        require(endorsement[1] == proposal[1] and signers == {expected_key} and not signed_by.intersection(signers),
-                "authority did not sign the same original body separately")
-        signed_by.update(signers)
-    decision_raw = decode_file(files, "policy-object-combined/decision.bin", False)
+    decision_raw = decode_file(files, "combined/decision.bin", False)
     decision, signers = object_envelope(decision_raw, public, 3)
-    require(decision[1] == proposal[1] and signers == signed_by == set(public), "quorum changed the original body")
-    for directory in ("policy-object-proposal", "policy-object-combined",
-                      *(f"policy-object-endorsement-{i}" for i in range(3))):
-        require(files[directory + "/assessment.bundle"] == {"bytes": len(raw_bundle), "sha256": sha(raw_bundle)}
+    require(decision[1] == proposal[1] and signers == set(public), "quorum changed the original body")
+    for directory in ("proposal", "combined"):
+        require(decode_file(files, directory + "/assessment.bundle", False) == raw_bundle
                 and decode_file(files, directory + "/selection.json") == expected_selection
-                and decode_file(files, directory + "/proposal.bin", False)
-                    == decode_file(files, "policy-object-proposal/proposal.bin", False), "independent selection/evidence changed")
-    for name, report_value in original["reports"].items():
-        require(report_value["complete"] is True and report_value["outcome"] == result["decision"]["outcome"]
-                and report_value["provider_signed_claims_replayed"] == 4
-                and report_value["threshold_verified"] == (name == "combined")
-                and report_value["network_policy_activation"] is False
-                and report_value["local_object_policy_applied"] is False
-                and report_value["semantic_correctness_proven"] is False
-                and report_value["issued_at_ms"] == body[12] and report_value["expires_at_ms"] == body[13],
-                "CLI overclaimed global/model authority or changed actual outcome")
+                and decode_file(files, directory + "/proposal.bin", False) == proposal_raw,
+                "independent selection/evidence changed")
+    check_round(original["round"], raw_bundle, proposal_raw, decision_raw, trust, layout, peers)
     receipt = original["follow"]["state"]["applied"]["apply_receipt"]
     require(original["follow"]["state"]["applied"]["epoch_manifest_hex"] == original["epoch_manifest_hex"],
             "follower accepted a different original authority epoch")
@@ -748,7 +1092,7 @@ def object_peer_context(work):
 def object_peer_pins(work):
     JOBS["guest_work"](work)
     source = root_path(work).parent
-    raw = public_file(source / "policy-object-combined/decision.bin", source.stat().st_uid)
+    raw = public_file(round_root(work) / "combined/decision.bin", source.stat().st_uid)
     trust = read(work / "policy-maintainers.json")
     public = {hashlib.sha256(b"volparossa/whitelist-maintainer/id/v1\0" + bytes.fromhex(item["public_key_hex"])).digest():
               bytes.fromhex(item["public_key_hex"]) for item in trust["maintainers"]}
@@ -768,20 +1112,23 @@ def object_peer_before(work):
     JOBS["guest_work"](work)
     node, root, owner, agent, namespace = object_peer_context(work)
     source = root_path(work).parent
-    raw = public_file(source / "policy-object-publication/decision.bin", owner)
+    raw = public_file(round_root(work) / "publication/decision.bin", owner)
     manifest = public_file(root / "decision.manifest", owner)
     subject = public_file(root / "subject.manifest", owner)
     require(set(path.name for path in root.iterdir()) == {"subject.manifest", "decision.manifest"}
-            and manifest == public_file(source / "policy-object-publication/publication.manifest", owner)
+            and manifest == public_file(round_root(work) / "publication/publication.manifest", owner)
             and subject == public_file(source / "policy-subject.pb", owner), "receiver seeded data instead of public metadata")
     custody = root.parent / "custody-cache"
-    require(not os.path.lexists(custody / sha(raw)), "decision payload was not cold before custody deposit")
+    before = read(record(work, "round-before"))
+    require(before["receiver"]["node"] == node and sha(raw) not in before["receiver"]["chunks"]
+            and before["receiver"]["custody_directory"] == [custody.stat().st_dev, custody.stat().st_ino],
+            "decision payload was not cold before automatic custody deposit")
     require(public_file(custody / sha(SUBJECT.encode()), owner) == SUBJECT.encode(),
             "receiver does not hold the original deposited subject")
     journal = public_file(root.parent / "object-policy/journal.json", owner)
     require(strict_json(journal) == {"version": 1, "entries": []}, "receiver already had an object-policy decision")
     write(record(work, "remote-object-cold"), dict(node=node, agent=agent, namespace=namespace,
-        observed_at_ms=time.time_ns() // 1000000, decision_chunk_absent=True, local_decision_absent=True,
+        observed_at_ms=before["observed_at_ms"], decision_chunk_absent=True, local_decision_absent=True,
         metadata_only=True, subject_manifest_hex=subject.hex(), manifest_hex=manifest.hex(),
         journal_hex=journal.hex(), custody_directory=[custody.stat().st_dev, custody.stat().st_ino]))
 
@@ -791,25 +1138,24 @@ def object_peer_received(work):
     node, root, owner, agent, namespace = object_peer_context(work)
     source = root_path(work).parent
     raw = public_file(root / "decision.bin", owner)
-    require(raw == public_file(source / "policy-object-combined/decision.bin", owner)
-            == public_file(source / "policy-object-publication/decision.bin", owner),
+    require(raw == public_file(round_root(work) / "combined/decision.bin", owner)
+            == public_file(round_root(work) / "publication/decision.bin", owner),
             "remote custody transport replaced original quorum bytes")
     require(snapshot(root_path(work)) == read(record(work, "files"), 32 * 1048576),
             "policy distribution changed original model work")
     write(record(work, "remote-object-received"), dict(node=node, agent=agent, namespace=namespace,
         observed_at_ms=time.time_ns() // 1000000, decision_hex=raw.hex(),
         before=read(record(work, "remote-object-cold")), pins=read(record(work, "remote-object-pins")),
-        publication=read(record(work, "remote-object-publication")),
-        deposit=read(record(work, "remote-object-deposit")),
+        publication=read(record(work, "round"))["publication"],
+        deposit=read(record(work, "round"))["custody"],
         export=read(record(work, "remote-object-export")), assemble=read(record(work, "remote-object-assemble")),
         original_model_files_unchanged=True, new_jobs=0))
 
 
 def follow_paths(work):
     source = root_path(work).parent
-    node = read(work / "agent-jobs-layout.json")["provider_nodes"][0]
     return source / "policy-object-follow", source / "policy-object-follow-cache", \
-        work / f"state-{node}/policy-object-receiver/follow-publication"
+        round_root(work) / "publication"
 
 
 def follow_snapshot(work):
@@ -915,9 +1261,9 @@ def object_follow_collect(work, pid, status):
     proof = dict(**final, before=before, observed=observed,
         publication_files={name: public_file(publication / name, owner).hex()
                            for name in ("selection.json", "decision.bin", "publication.manifest", "publication.json")},
-        publication=read(record(work, "follow-publication")), contribution=read(record(work, "follow-contribution")),
+        publication=read(record(work, "round"))["publication"], custody=read(record(work, "round"))["custody"],
         summary=read(record(work, "follow-summary")), exit_status=status, owner_ended=True, child_ended=True)
-    raw = public_file(root_path(work).parent / "policy-object-combined/decision.bin", owner)
+    raw = public_file(round_root(work) / "combined/decision.bin", owner)
     check_object_follow(proof, raw, read(record(work, "result")), read(work / "agent-jobs-layout.json"),
                         read(work / "a01-expected-peers.json"))
     write(record(work, "follow-proof"), proof)
@@ -954,22 +1300,22 @@ def check_object_follow(value, raw, result, layout, peers):
     native_body = object_fields(native[1], 64 * 1024)
     payload = object_fields(native_body[8], 64 * 1024)
     node = layout["provider_nodes"][0]
-    publisher = layout["provider_keys"][node]
+    publisher = result["decision"]["scope"]["source_publisher_key"]
     require(native_body[1] == native_body[6] == 1 and native_body[2].hex() == publisher
             and native_body[7] == hashlib.sha256(native_body[8]).digest()
             and before["observed_at_ms"] // 1000 <= native_body[3] < native_body[4] == body[13] // 1000
-            and body[12] <= before["observed_at_ms"] <= applied["observed_at_ms"] <= observed["observed_at_ms"] < body[13]
-            and payload == {1: b"disposable-follow-policy", 2: 1,
+            and before["observed_at_ms"] <= body[12] <= applied["observed_at_ms"] <= observed["observed_at_ms"] < body[13]
+            and payload == {1: b"disposable-object-policy", 2: 1,
                 3: b"application/vnd.volparossa.object-policy.v1", 4: len(raw),
                 5: protobuf_value(1, hashlib.sha256(raw).digest()) + protobuf_value(2, len(raw)),
                 6: hashlib.sha256(raw).digest()}, "peer wrapper changed content, publisher or original expiry")
     verify_signature(native[1], native[2], native_body[2], b"VOLPAROSSA/native-content-manifest/v1\0")
-    publication, contribution = value["publication"], value["contribution"]
-    work = Path(publication["manifest"]).parents[3]
+    publication, custody = value["publication"], value["custody"]
+    work = Path(publication["manifest"]).parents[4]
     scope = result["decision"]["scope"]
     require(value["enrollment"] == dict(version=1, scope="selected_channel_exact_object",
         policy_config=str(work / "config-client.yaml"),
-        feed=dict(publisher_key=publisher, name="disposable-follow-policy", min_revision=1),
+        feed=dict(publisher_key=publisher, name="disposable-object-policy", min_revision=1),
         subject=dict(publisher_key=scope["source_publisher_key"], manifest_id=scope["source_manifest_id"],
                      object_sha256=scope["source_sha256"]), framework_sha256=scope["framework_sha256"],
         cache=str(work / "state-client/compute-source/policy-object-follow-cache"), poll_seconds=1,
@@ -985,16 +1331,12 @@ def check_object_follow(value, raw, result, layout, peers):
             and publication["operation"] == "compute_policy_publish" and publication["network_publication"] is False
             and publication["local_object_policy_applied"] is False and publication["decision_sha256"] == sha(raw)
             and publication["decision_hash"] == envelope[2].hex() and publication["publisher_key"] == publisher
-            and publication["manifest_id"] == sha(native_raw) and publication["expires_at_ms"] == body[13]
-            and contribution["operation"] == "content_contribute" and contribution["serving"] is True
-            and contribution["network_publication"] is True and contribution["original_signature_reused"] is True
-            and contribution["private_keys_transferred"] is False and contribution["manifest_id"] == sha(native_raw)
-            and contribution["publisher_key_hex"] == publisher and contribution["name"] == "disposable-follow-policy"
-            and contribution["revision"] == 1 and contribution["bytes"] == len(raw)
-            and contribution["expires_unix_seconds"] == native_body[4], "missing actual independent named publication")
+            and publication["manifest_id"] == sha(native_raw) and publication["expires_at_ms"] == body[13],
+            "missing actual automatically published original quorum")
+    check_round_deposit(custody, native_raw, raw, [layout["provider_keys"][node]], native_body[4])
     download = applied["download_receipt"]
     require(download["operation"] == "named_content_download" and download["cache_only"] is False
-            and download["publisher_key"] == publisher and download["name"] == "disposable-follow-policy"
+            and download["publisher_key"] == publisher and download["name"] == "disposable-object-policy"
             and download["revision"] == 1 and download["manifest_id"] == sha(native_raw)
             and download["sha256"] == sha(raw) and download["bytes"] == download["peer_bytes"] == len(raw)
             and download["providers_used"] == 1 and download["provider_peer_ids"] == [peers[node]]
@@ -1069,14 +1411,14 @@ def object_peer_collect(work, phase):
         proof = dict(originals=originals, probes=probes, received=read(record(work, "remote-object-received")),
             original_model_files_unchanged=True, new_jobs=0, original_decision_unchanged_after_restart=True,
             old_agent_ended=True, new_agent_alive=True, node=node, namespace=namespace)
-        check_object_peer(proof, read(record(work, "object-activation")), read(record(work, "result")),
+        check_object_peer(proof, read(record(work, "object-activation"), 40 * 1048576), read(record(work, "result")),
             read(work / "agent-jobs-layout.json"), read(work / "a01-expected-peers.json"))
         write(record(work, "remote-object-proof"), proof)
 
 
 def check_object_peer(value, local, result, layout, peers):
     received, before, originals = value["received"], value["received"]["before"], value["originals"]
-    raw = decode_file(local["originals"]["files"], "policy-object-combined/decision.bin", False)
+    raw = decode_file(local["originals"]["round"]["files"], "combined/decision.bin", False)
     envelope = object_fields(raw, 8192, (3,))
     body = object_fields(envelope[1], 1024)
     node = layout["provider_nodes"][0]
@@ -1119,7 +1461,7 @@ def check_object_peer(value, local, result, layout, peers):
             provider_signed_claims_replayed=0, model_execution=False, semantic_correctness_proven=False)
         require(all(report.get(key) == item for key, item in expected.items()), "publication/import changed authority or claims")
     imported_selection = strict_json(bytes.fromhex(originals["files"]["selection.json"]))
-    require(imported_selection == dict(version=1, policy_config=str(Path(publication["manifest"]).parents[3] / f"config-{node}.yaml"),
+    require(imported_selection == dict(version=1, policy_config=str(Path(publication["manifest"]).parents[4] / f"config-{node}.yaml"),
             decision_sha256=sha(raw), **pins), "import did not use receiver's own configuration/exact pins")
     require(originals["journal_hex"] == local["originals"]["journal_hex"]
             and strict_json(bytes.fromhex(originals["files"]["apply-receipt.json"]))
@@ -1169,6 +1511,52 @@ def check_object_peer(value, local, result, layout, peers):
             and value["new_jobs"] == received["new_jobs"] == 0, "second-node restart changed evidence or reran models")
 
 
+def check_round_path(phase, peers, layout, minimum):
+    """Original five-role data boundary, with the exact existing three-link control topology."""
+    shared = CUSTODY["SHARED"]
+    selected, captures = phase["selected_route"], phase["privacy"]
+    paths, slots = selected["paths"], selected["benchmark_slots"]
+    nodes = [slot["relay_node"] for slot in slots]
+    require(selected["transport"] == "mptcp" and len(paths) == len(slots) == len(set(nodes)) == 2
+            and selected["route_context_id"] == layout["route_context_id"]
+            and re.fullmatch(r"[0-9a-f]{32}", selected["route_context_id"])
+            and not {peers[node] for node in ("relay3", "relay4", "relay5")}.intersection(
+                {peers[node] for node in CUSTODY["ROLES"]})
+            and {path["exit_peer_id"] for path in paths} == {peers["exit"]}
+            and all(path["route_context_id"] == selected["route_context_id"] for path in paths)
+            and [slot["relay_peer_id"] for slot in slots] == [path["relay_peer_id"] for path in paths]
+            and all(node in CUSTODY["ROLES"][1:4] and peers[node] == slot["relay_peer_id"] for node, slot in zip(nodes, slots))
+            and set(captures) == set(CUSTODY["ROLES"]), "round lost the original two protected MPTCP paths")
+    for role, capture in captures.items():
+        require(capture["capture_role"] == role and capture["content_provider_mode"] is True
+                and capture["unexpected_outer_packets"] == capture["expected_link_down_notifications"] == 0
+                and capture["unexpected_provider_application_packets"] == 0
+                and set(capture["provider_application"]) == {"relay3", "relay4", "relay5"},
+                "round physical provider coverage or allowlist changed")
+        shared["validate_drained"](capture, allow_empty=role in CUSTODY["ROLES"][1:4] and role not in nodes)
+        if role != "exit":
+            require(all(count == 0 for counters in capture["provider_application"].values() for count in counters.values()),
+                    "round provider data bypassed its protected path")
+    require(captures["client"]["direct_client_exit_packets"] == captures["client"]["internet_destination_outer_packets"] == 0
+            and captures["exit"]["direct_client_exit_packets"] == captures["exit"]["client_public_packets"] == 0
+            and captures["exit"]["outbound_client_discovery_attempt_packets"] == 0
+            and all(captures[node]["internet_destination_outer_packets"] == 0 for node in CUSTODY["ROLES"][1:4]),
+            "round violated Client/Relay/Exit privacy")
+    for node in nodes:
+        require(captures[node]["client_leg_wireguard_data_datagrams"] > 16
+                and captures[node]["exit_leg_wireguard_data_datagrams"] > 16, "round did not use both real WireGuard legs")
+    for node, count in minimum.items():
+        captured = captures["exit"]["provider_application"][node]
+        require(count > 0 and captured["response_payload_bytes"] >= count
+                and captured["request_packets"] > 0 and captured["response_packets"] > 0,
+                "round original bytes did not cross the selected physical provider path")
+    control = next(node for node in ("relay0", "relay1", "relay2") if peers[node] == layout["control_relay_peer_id"])
+    adaptive = runpy.run_path(str(HERE / "content-provider-adaptive-smoke.py"))
+    adaptive["validate_control"](dict(control_underlay=dict(capture=phase["control_privacy"], routes=phase["control_routes"])), control)
+    require(phase["gates"]["event_baseline_unix_ms"] > 0 and phase["gates"]["exit_mptcp_tls_completed"] >= 2,
+            "round lacks fresh production MPTCP/TLS completions")
+
+
 def check_evidence(value, revision):
     require(value["source_revision"] == revision and value["scope"] == SCOPE, "wrong source/scope")
     check_provision(value["provision"])
@@ -1203,7 +1591,7 @@ def check_evidence(value, revision):
                 "cross-review targets a different original assessment")
     observed = value["observation"]["stages"]
     require(set(observed) == set(STAGES), "missing live worker proof")
-    response_bytes = {node: 0 for node in value["layout"]["provider_nodes"]}
+    response_bytes = {node: 0 for node in ("relay3", "relay4", "relay5")}
     for stage, assessment in zip(STAGES, records):
         handle = decode_file(files, stage + "/work/job-0.json")
         bind = handle["binding"]
@@ -1252,17 +1640,26 @@ def check_evidence(value, revision):
         response_bytes[observation["node"]] += len(report_json.encode())
     check_transfer(value["transfer"], files, requester, value["layout"], value["peers"], result,
                    value["publication"]["publisher_key_hex"])
-    check_object_activation(value["object_activation"], result, value["transfer"], files)
+    check_object_activation(value["object_activation"], result, value["transfer"], files, value["layout"], value["peers"])
     follow = value["object_activation"]["originals"]["follow"]
-    check_object_follow(follow, decode_file(value["object_activation"]["originals"]["files"],
-                        "policy-object-combined/decision.bin", False), result, value["layout"], value["peers"])
+    round_proof = value["object_activation"]["originals"]["round"]
+    check_object_follow(follow, decode_file(round_proof["files"], "combined/decision.bin", False),
+                        result, value["layout"], value["peers"])
     check_object_peer(value["object_peer"], value["object_activation"], result, value["layout"], value["peers"])
+    final_wrapper = decode_file(round_proof["files"], "publication/publication.manifest", False).hex()
+    require(follow["publication_files"]["publication.manifest"] == final_wrapper
+            == value["object_peer"]["received"]["before"]["manifest_hex"]
+            and follow["custody"] == round_proof["result"]["custody"] == value["object_peer"]["received"]["deposit"]
+            and follow["publication"] == round_proof["result"]["publication"] == value["object_peer"]["received"]["publication"],
+            "automatic follower or independent receiver replaced the round's original publication")
     response_bytes[value["layout"]["provider_nodes"][0]] += value["transfer"]["download"]["peer_bytes"]
     response_bytes[value["layout"]["provider_nodes"][0]] += follow["state"]["applied"]["download_receipt"]["peer_bytes"]
-    CUSTODY["validate_path"](value["path"], value["peers"], value["layout"], "inspect")
-    for node, minimum in response_bytes.items():
-        require(value["path"]["privacy"]["exit"]["provider_application"][node]["response_payload_bytes"] >= minimum,
-                "protected selected provider did not carry the result bytes")
+    for authority in round_proof["authorities"]:
+        key = authority["original"]["identity"]["public_key_hex"]
+        response_bytes[authority["original"]["node"]] += decode_file(round_proof["files"], f"reply-{key}.json")["download_receipt"]["peer_bytes"]
+    check_round_path(value["path"], value["peers"], value["layout"], response_bytes)
+    require(value["round_cleanup"] == dict(authority_processes_ended=True, private_authority_stores_removed=True,
+            authority_private_keys_exported=False), "automatic authority private cleanup is incomplete")
     require(value["replay"] == {"original_files_unchanged": True, "new_jobs": 0, "identical_result": True,
                                 "brokers_stopped": True} and value["stopped"]["observed_processes_ended"] is True
             and all(value["cleanup"].values()), "offline replay/private cleanup incomplete")
@@ -1275,13 +1672,16 @@ def evidence(work, revision):
         files=read(record(work, "files"), 32 * 1048576), observation=read(record(work, "observation")),
         publication=read(record(work, "publication")), replay=read(record(work, "replay")),
         requester=read(record(work, "requester")), transfer=read(record(work, "transfer"), 8 * 1048576),
-        object_activation=read(record(work, "object-activation"), 8 * 1048576),
+        object_activation=read(record(work, "object-activation"), 40 * 1048576),
         object_peer=read(record(work, "remote-object-proof"), 8 * 1048576),
         stopped=read(record(work, "stopped")), layout=read(work / "agent-jobs-layout.json"),
+        round_cleanup=read(record(work, "round-cleanup")),
         peers=read(work / "a01-expected-peers.json"), cleanup=read(work / "agent-jobs-private-cleanup.json"),
         path=dict(selected_route=read(work / "content-custody-fetch-live-selection.json"),
             privacy={role: read(work / f"content-custody-fetch-privacy-{role}.json") for role in CUSTODY["ROLES"]},
-            control_privacy=read(work / "content-provider-custody-fetch-control.json"),
+            control_privacy=read(work / "content-provider-adaptive-policy-fetch-control.json"),
+            control_routes={node: {direction: read(work / f"content-provider-adaptive-control-{node}-{direction}.json")
+                for direction in ("out", "back")} for node in ("relay3", "relay4", "relay5")},
             gates=read(work / "content-custody-fetch-gates.json")))
     check_evidence(value, revision)
     write(record(work, "evidence"), value)
@@ -1297,6 +1697,7 @@ def finalize(work, revision, status, complete, remaining, phase, blocker):
         full_b06_claimed=False, network_policy_activation_claimed=False, evidence=proof,
         local_object_policy_applied=proof is not None,
         automatic_named_policy_follow_applied=proof is not None,
+        automatic_three_node_policy_round_completed=proof is not None,
         second_node_object_policy_applied=proof is not None,
         object_outcome=proof["result"]["decision"]["outcome"] if proof is not None else None,
         object_access_branch=("allow_exact_cached_access" if proof["result"]["decision"]["outcome"] == "allow"
@@ -1311,6 +1712,7 @@ def check_report(value, revision):
             and value["full_b06_claimed"] is False and value["network_policy_activation_claimed"] is False
             and value["local_object_policy_applied"] is True
             and value["automatic_named_policy_follow_applied"] is True
+            and value["automatic_three_node_policy_round_completed"] is True
             and value["second_node_object_policy_applied"] is True
             and value["object_outcome"] == value["evidence"]["result"]["decision"]["outcome"]
             and value["object_access_branch"] == ("allow_exact_cached_access" if value["object_outcome"] == "allow"
@@ -1362,6 +1764,25 @@ def self_test():
     rejects(check_fixture_epoch_header, {**epoch_header, 3: 1}, epoch_signers, epoch_signers)
     rejects(check_fixture_epoch_header, {**epoch_header, 7: 2}, epoch_signers, epoch_signers)
     rejects(check_fixture_epoch_header, epoch_header, {b"a", b"b"}, epoch_signers)
+
+    # Inert exchange/progress bindings, not fabricated model judgments or authority signatures.
+    bundle = b"original public assessment bundle"
+    proposal_body = field(10, hashlib.sha256(bundle).digest())
+    proposal = field(1, proposal_body) + field(2, hashlib.sha256(proposal_body).digest())
+    request = field(1, 1) + field(2, bundle) + field(3, proposal)
+    round_request(request, bundle, proposal)
+    rejects(round_request, request, bundle + b"changed", proposal)
+    rejects(round_request, request + field(4, b"unselected"), bundle, proposal)
+    endorsed = proposal + field(3, b"premature endorsement")
+    rejects(round_request, field(1, 1) + field(2, bundle) + field(3, endorsed), bundle, endorsed)
+    def retained_json(value):
+        raw = json.dumps(value).encode()
+        return dict(bytes=len(raw), sha256=sha(raw), raw_hex=raw.hex())
+    attempts = {"request-deposit-00.json": retained_json(dict(complete=False)),
+                "request-deposit-01.json": retained_json(dict(complete=True))}
+    require(round_completed_deposit(attempts, "request") == dict(complete=True), "original retry completion lost")
+    rejects(round_completed_deposit, {"request-deposit-01.json": attempts["request-deposit-01.json"]}, "request")
+    rejects(round_completed_deposit, {**attempts, "request-deposit-00.json": retained_json(dict(complete=True))}, "request")
 
     # Counter/presence proofs only: no synthetic decision is ever sent to an agent.
     cold = dict(state=dict(version=1, completed_polls=1, confirmed_applications=0,
@@ -1582,10 +2003,14 @@ def main():
     if args == ["self-test"]:
         self_test()
     elif len(args) == 2 and args[0] in ("prepare", "collect", "stopped", "replay", "bundle_before", "transfer",
-                                       "object_peer_pins", "object_peer_before", "object_peer_received"):
+                                       "object_peer_pins", "object_peer_before", "object_peer_received", "round_before", "round_cleanup"):
         globals()[args[0]](Path(args[1]))
     elif len(args) == 3 and args[0] == "observe":
         observe(Path(args[1]), int(args[2]))
+    elif len(args) == 3 and args[0] == "round_observe":
+        round_observe(Path(args[1]), int(args[2]))
+    elif len(args) == 4 and args[0] == "round_collect":
+        round_collect(Path(args[1]), int(args[2]), int(args[3]))
     elif len(args) == 4 and args[0] == "object_probe":
         object_probe(Path(args[1]), args[2], int(args[3]))
     elif len(args) == 3 and args[0] == "object_collect":

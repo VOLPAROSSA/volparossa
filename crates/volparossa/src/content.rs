@@ -28,6 +28,7 @@ mod named_download;
 pub(crate) mod peer_update;
 pub(crate) mod policy_bundle;
 pub(crate) mod policy_decision;
+pub(crate) mod policy_exchange;
 mod private_message;
 pub(crate) mod public_text;
 mod site;
@@ -347,6 +348,13 @@ pub(crate) const POLICY_DECISION_CONTENT_TYPE: &str = "application/vnd.volpaross
 
 impl Publish {
     pub(crate) fn policy_decision(args: PolicyDecisionPublication) -> Self {
+        Self::policy_object(args, POLICY_DECISION_CONTENT_TYPE)
+    }
+
+    pub(super) fn policy_object(
+        args: PolicyDecisionPublication,
+        content_type: &'static str,
+    ) -> Self {
         Self {
             input: args.input,
             cache: args.cache,
@@ -355,7 +363,7 @@ impl Publish {
             manifest: args.manifest,
             name: args.name,
             revision: args.revision,
-            content_type: POLICY_DECISION_CONTENT_TYPE.to_owned(),
+            content_type: content_type.to_owned(),
             lifetime_seconds: MAX_VALIDITY_SECONDS,
             expires_not_after: Some(args.expires_not_after),
             identity: Some(args.identity),

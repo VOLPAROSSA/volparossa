@@ -4,6 +4,8 @@
 //! prove legal or semantic correctness. Activation and durable revision floors
 //! remain the caller's responsibility; verification always checks current time.
 
+pub mod exchange;
+
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use prost::Message;
 use sha2::{Digest as _, Sha256};
@@ -248,6 +250,99 @@ pub fn verify_object_decision(
     policy: VerificationPolicy,
     current: &VerifiedManifest,
 ) -> Result<VerifiedObjectDecision, PolicyError> {
+    let signed = verify_signed_at(bytes, now_ms, trust, policy, current)?;
+    let required = policy
+        .minimum_signatures()
+        .max(current.required_signatures());
+    if signed.signatures.len() < required {
+        return Err(PolicyError::InsufficientSignatures {
+            required,
+            valid: signed.signatures.len(),
+        });
+    }
+    let decision_hash = object_body_hash(&signed.body)?;
+    Ok(VerifiedObjectDecision {
+        body: signed.body,
+        decision_hash,
+    })
+}
+
+/// One selected authority's verified endorsement, explicitly not a verified quorum.
+///
+/// This type cannot activate a decision. Merge original endorsements and use
+/// [`verify_object_decision`] before claiming threshold authorization.
+#[derive(Clone, Debug)]
+pub struct VerifiedObjectEndorsement {
+    body: ObjectDecision,
+    decision_hash: [u8; 32],
+    signer: VerifyingKey,
+}
+
+impl VerifiedObjectEndorsement {
+    /// Original endorsed body; no evidence replay or semantic correctness is implied.
+    #[must_use]
+    pub const fn body(&self) -> &ObjectDecision {
+        &self.body
+    }
+
+    /// Digest of that original canonical body, independent of its endorsement.
+    #[must_use]
+    pub const fn decision_hash(&self) -> &[u8; 32] {
+        &self.decision_hash
+    }
+
+    /// The exact independently selected existing maintainer that signed this body.
+    #[must_use]
+    pub const fn signer(&self) -> &VerifyingKey {
+        &self.signer
+    }
+}
+
+/// Verify exactly one selected maintainer's endorsement under the current authority.
+///
+/// All existing epoch, trust-mode, lifetime and signature checks still apply.
+/// This does not lower the quorum policy or produce a [`VerifiedObjectDecision`].
+/// The caller must compare the body with its exact request and replay the evidence.
+///
+/// # Errors
+/// Rejects zero/multiple endorsements, a different/untrusted signer, noncanonical
+/// bytes, wrong epoch, invalid signatures, expiry or attempted lease extension.
+pub fn verify_object_endorsement(
+    bytes: &[u8],
+    now_ms: u64,
+    expected_signer: &VerifyingKey,
+    trust: &TrustStore,
+    policy: VerificationPolicy,
+    current: &VerifiedManifest,
+) -> Result<VerifiedObjectEndorsement, PolicyError> {
+    let signed = verify_signed_at(bytes, now_ms, trust, policy, current)?;
+    let [endorsement] = signed.signatures.as_slice() else {
+        return Err(PolicyError::InvalidField("exactly one object endorsement"));
+    };
+    if endorsement.key_id != maintainer_id(&expected_signer.to_bytes()) {
+        return Err(PolicyError::UntrustedSigner);
+    }
+    let decision_hash = object_body_hash(&signed.body)?;
+    Ok(VerifiedObjectEndorsement {
+        body: signed.body,
+        decision_hash,
+        signer: *expected_signer,
+    })
+}
+
+fn object_body_hash(body: &ObjectDecision) -> Result<[u8; 32], PolicyError> {
+    Ok(Sha256::digest(encode_canonical(&wire_body(body), MAX_BODY_BYTES)?).into())
+}
+
+// Shared checks deliberately do not mint either authorization result type.
+// The public entry points independently enforce full quorum or exactly one selected signer.
+fn verify_signed_at(
+    bytes: &[u8],
+    now_ms: u64,
+    trust: &TrustStore,
+    policy: VerificationPolicy,
+    current: &VerifiedManifest,
+) -> Result<SignedObjectDecision, PolicyError> {
     validate_verification_context(trust, policy)?;
     current.ensure_active_at(now_ms)?;
     verify_current_authority(current, trust)?;
@@ -289,20 +384,7 @@ pub fn verify_object_decision(
             )
             .map_err(|_| PolicyError::InvalidSignature)?;
     }
-    let required = policy
-        .minimum_signatures()
-        .max(current.required_signatures());
-    if signed.signatures.len() < required {
-        return Err(PolicyError::InsufficientSignatures {
-            required,
-            valid: signed.signatures.len(),
-        });
-    }
-    let decision_hash = Sha256::digest(encode_canonical(&wire_body(body), MAX_BODY_BYTES)?).into();
-    Ok(VerifiedObjectDecision {
-        body: signed.body,
-        decision_hash,
-    })
+    Ok(signed)
 }
 
 fn verify_current_authority(

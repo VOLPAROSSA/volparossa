@@ -71,6 +71,40 @@ struct Prepared {
 }
 
 pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
+    let report = run_report(&command, socket).await?;
+    println!("{}", serde_json::to_string(&report)?);
+    ensure!(
+        report["complete"] == true,
+        "public custody incomplete; signed observations above and original local content are retained"
+    );
+    Ok(())
+}
+
+/// Composition preserves incomplete signed observations for the enrolling owner.
+pub(super) async fn deposit_existing(
+    publication: &super::PolicyDecisionPublication,
+    providers: Vec<VerifyingKey>,
+    socket: &Path,
+) -> Result<serde_json::Value> {
+    run_report(
+        &Command::Deposit(Deposit {
+            options: Options {
+                manifest: publication.manifest.clone(),
+                provider_key: providers,
+                unlock: Unlock::explicit(
+                    publication.identity.clone(),
+                    publication.passphrase_file.clone(),
+                ),
+            },
+            cache: publication.cache.clone(),
+            limits: publication.limits.clone(),
+        }),
+        socket,
+    )
+    .await
+}
+
+async fn run_report(command: &Command, socket: &Path) -> Result<serde_json::Value> {
     let (options, operation, source) = match &command {
         Command::Deposit(args) => (
             &args.options,
@@ -127,13 +161,7 @@ pub(super) async fn run(command: Command, socket: &Path) -> Result<()> {
         "origin_authenticated": false,
         "future_availability_guaranteed": false,
     });
-    println!("{}", serde_json::to_string(&report)?);
-    ensure!(
-        complete == options.provider_key.len(),
-        "public custody incomplete: {complete} of {} providers confirmed complete; signed observations above and original local content are retained",
-        options.provider_key.len()
-    );
-    Ok(())
+    Ok(report)
 }
 
 fn validate_providers(providers: &[VerifyingKey], publisher: Option<&VerifyingKey>) -> Result<()> {

@@ -296,3 +296,200 @@ fn zero_identity_nonce_revision_and_unknown_types_are_rejected() {
         assert!(semantic(&wire).is_err());
     }
 }
+
+#[test]
+fn decision_request_retains_original_opaque_evidence_and_unsigned_proposal() {
+    use super::exchange::DecisionRequest;
+    let (keys, _, _, mut body) = fixture();
+    let bundle = b"original opaque bytes; the caller still needs to replay them".to_vec();
+    body.evidence_sha256 = Sha256::digest(&bundle).into();
+    let proposal = SignedObjectDecision::new(body.clone())
+        .unwrap()
+        .encode()
+        .unwrap();
+    let request = DecisionRequest::new(bundle.clone(), proposal.clone()).unwrap();
+    let wire = request.encode().unwrap();
+    let decoded = DecisionRequest::decode(&wire).unwrap();
+    assert_eq!(decoded.assessment_bundle(), bundle);
+    assert_eq!(decoded.proposal(), proposal);
+    assert_eq!(decoded.encode().unwrap(), wire);
+    let mut changed = bundle.clone();
+    changed[0] ^= 1;
+    assert!(matches!(
+        DecisionRequest::new(changed, proposal),
+        Err(PolicyError::ManifestHashMismatch)
+    ));
+    assert!(matches!(
+        DecisionRequest::new(bundle, signed(&body, &keys[..1]).encode().unwrap()),
+        Err(PolicyError::InvalidField(
+            "unsigned object proposal required"
+        ))
+    ));
+}
+
+#[test]
+fn decision_request_bounds_version_and_canonical_wire_precede_acceptance() {
+    use super::exchange::{
+        DecisionRequest, MAX_ASSESSMENT_BUNDLE_BYTES, MAX_DECISION_REQUEST_BYTES,
+    };
+    let (_, _, _, mut body) = fixture();
+    let bundle = vec![42; MAX_ASSESSMENT_BUNDLE_BYTES];
+    body.evidence_sha256 = Sha256::digest(&bundle).into();
+    let proposal = SignedObjectDecision::new(body).unwrap().encode().unwrap();
+    let encoded = DecisionRequest::new(bundle, proposal.clone())
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert!(encoded.len() <= MAX_DECISION_REQUEST_BYTES);
+    assert_eq!(
+        DecisionRequest::decode(&encoded)
+            .unwrap()
+            .assessment_bundle()
+            .len(),
+        MAX_ASSESSMENT_BUNDLE_BYTES
+    );
+    assert!(
+        DecisionRequest::new(vec![42; MAX_ASSESSMENT_BUNDLE_BYTES + 1], proposal.clone()).is_err()
+    );
+    assert!(DecisionRequest::new(Vec::new(), proposal).is_err());
+    assert!(matches!(
+        DecisionRequest::decode(&vec![0; MAX_DECISION_REQUEST_BYTES + 1]),
+        Err(PolicyError::Oversized {
+            maximum: MAX_DECISION_REQUEST_BYTES,
+            ..
+        })
+    ));
+    let mut version = encoded.clone();
+    assert_eq!(&version[..2], &[8, 1]);
+    version[1] = 2;
+    assert!(matches!(
+        DecisionRequest::decode(&version),
+        Err(PolicyError::UnsupportedSchemaVersion(2))
+    ));
+    for additional in [&[0x20, 0x01][..], &[0x08, 0x01][..]] {
+        let mut noncanonical = encoded.clone();
+        noncanonical.extend_from_slice(additional);
+        assert!(matches!(
+            DecisionRequest::decode(&noncanonical),
+            Err(PolicyError::NonCanonicalProtobuf)
+        ));
+    }
+}
+
+#[test]
+fn selected_single_endorsement_never_lowers_the_full_quorum_requirement() {
+    let (keys, trust, current, body) = fixture();
+    let original = signed(&body, &keys[..1]);
+    let bytes = original.encode().unwrap();
+    let endorsement = verify_object_endorsement(
+        &bytes,
+        3000,
+        &keys[0].verifying_key(),
+        &trust,
+        VerificationPolicy::default(),
+        &current,
+    )
+    .unwrap();
+    assert_eq!(endorsement.body(), &body);
+    assert_eq!(endorsement.signer(), &keys[0].verifying_key());
+    assert!(matches!(
+        verify(&original, &trust, &current),
+        Err(PolicyError::InsufficientSignatures {
+            required: 3,
+            valid: 1
+        })
+    ));
+    let quorum = verify(&signed(&body, &keys[..3]), &trust, &current).unwrap();
+    assert_eq!(endorsement.decision_hash(), quorum.decision_hash());
+}
+
+#[test]
+fn single_endorsement_keeps_selected_signer_authority_epoch_and_expiry_checks() {
+    let (keys, trust, current, body) = fixture();
+    let policy = VerificationPolicy::default();
+    let expected = keys[0].verifying_key();
+    let original = signed(&body, &keys[..1]);
+    let bytes = original.encode().unwrap();
+    assert!(matches!(
+        verify_object_endorsement(
+            &bytes,
+            3000,
+            &keys[1].verifying_key(),
+            &trust,
+            policy,
+            &current
+        ),
+        Err(PolicyError::UntrustedSigner)
+    ));
+    for invalid_count in [
+        SignedObjectDecision::new(body.clone()).unwrap(),
+        signed(&body, &keys[..2]),
+    ] {
+        assert!(
+            verify_object_endorsement(
+                &invalid_count.encode().unwrap(),
+                3000,
+                &expected,
+                &trust,
+                policy,
+                &current
+            )
+            .is_err()
+        );
+    }
+    assert!(matches!(
+        verify_object_endorsement(&bytes, 10_000, &expected, &trust, policy, &current),
+        Err(PolicyError::Expired)
+    ));
+    assert!(matches!(
+        verify_object_endorsement(&bytes, 1999, &expected, &trust, policy, &current),
+        Err(PolicyError::NotYetValid)
+    ));
+    let mut invalid = original;
+    invalid.signatures[0].signature[0] ^= 1;
+    assert!(matches!(
+        verify_object_endorsement(
+            &invalid.encode().unwrap(),
+            3000,
+            &expected,
+            &trust,
+            policy,
+            &current
+        ),
+        Err(PolicyError::InvalidSignature)
+    ));
+    let mut different = body.clone();
+    different.policy_hash = [31; 32];
+    assert!(
+        verify_object_endorsement(
+            &signed(&different, &keys[..1]).encode().unwrap(),
+            3000,
+            &expected,
+            &trust,
+            policy,
+            &current
+        )
+        .is_err()
+    );
+    let unknown = SigningKey::from_bytes(&[80; 32]);
+    assert!(matches!(
+        verify_object_endorsement(
+            &signed(&body, std::slice::from_ref(&unknown))
+                .encode()
+                .unwrap(),
+            3000,
+            &unknown.verifying_key(),
+            &trust,
+            policy,
+            &current
+        ),
+        Err(PolicyError::UntrustedSigner)
+    ));
+    let other: Vec<_> = (20_u8..25)
+        .map(|byte| SigningKey::from_bytes(&[byte; 32]))
+        .collect();
+    assert!(matches!(
+        verify_object_endorsement(&bytes, 3000, &expected, &store(&other), policy, &current),
+        Err(PolicyError::TrustRootMismatch)
+    ));
+}

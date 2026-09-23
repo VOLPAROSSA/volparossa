@@ -10,19 +10,19 @@ use volparossa_content::{CacheLimits, ChunkStore, Metadata, Publication, Validit
 pub(crate) struct Pack {
     /// Existing complete workflow enrolled with --portable-receipts.
     #[arg(long)]
-    assessment: PathBuf,
+    pub(super) assessment: PathBuf,
     /// New private package directory. No serving, advertising or uploading is automatic.
     #[arg(long)]
-    output: PathBuf,
+    pub(super) output: PathBuf,
     #[arg(long)]
-    identity: Option<PathBuf>,
+    pub(super) identity: Option<PathBuf>,
     #[arg(long)]
-    passphrase_file: Option<PathBuf>,
+    pub(super) passphrase_file: Option<PathBuf>,
     /// Independently selected original requester identity, not the bundle publisher key.
     #[arg(long, value_parser = parse_key)]
-    requester_key: VerifyingKey,
+    pub(super) requester_key: VerifyingKey,
     #[arg(long)]
-    execute: bool,
+    pub(super) execute: bool,
 }
 
 #[derive(Debug, Args)]
@@ -57,17 +57,18 @@ pub(crate) struct Fetch {
 }
 
 pub(in crate::compute::peer) fn pack(args: &Pack) -> Result<()> {
+    println!("{}", pack_value(args)?);
+    Ok(())
+}
+
+pub(in crate::compute::peer) fn pack_value(args: &Pack) -> Result<Value> {
     ensure!(
         args.assessment.is_absolute() && args.output.is_absolute(),
         "compute_policy_paths_absolute"
     );
     if !args.execute {
-        println!(
-            "{}",
-            json!({"operation":"compute_policy_pack","execute":false,
-            "network_policy_activation":false,"automatic_publication":false})
-        );
-        return Ok(());
+        return Ok(json!({"operation":"compute_policy_pack","execute":false,
+            "network_policy_activation":false,"automatic_publication":false}));
     }
     let _original = task::open_directory(&args.assessment, true)?;
     let requester = hex::encode(args.requester_key.as_bytes());
@@ -132,14 +133,12 @@ pub(in crate::compute::peer) fn pack(args: &Pack) -> Result<()> {
             .verify(&signer.verifying_key(), now()?)?
             .manifest_id(),
     );
-    println!(
-        "{}",
+    Ok(
         json!({"operation":"compute_policy_pack","complete":true,"name":name,
         "manifest_id":id,"publisher_key":hex::encode(signer.verifying_key().as_bytes()),
         "expires":enrolled.expires,"network_policy_activation":false,
-        "provider_signed_claims_verified":true,"independent_execution_proven":false})
-    );
-    Ok(())
+        "provider_signed_claims_verified":true,"independent_execution_proven":false}),
+    )
 }
 
 pub(in crate::compute::peer) async fn fetch(args: &Fetch, socket: &Path) -> Result<()> {

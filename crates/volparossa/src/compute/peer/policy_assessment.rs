@@ -26,48 +26,48 @@ use crate::compute::policy_assessment as assessment;
 pub(crate) struct Options {
     /// Private retained workflow directory; new unless --resume is selected.
     #[arg(long)]
-    output: PathBuf,
+    pub(super) output: PathBuf,
     /// Replay exact original handles. Never resubmit or replace a leased job.
     #[arg(long)]
-    resume: bool,
+    pub(super) resume: bool,
     /// Retain original signed provider Poll replies so this public result can be shared.
     #[arg(long, conflicts_with = "resume")]
-    portable_receipts: bool,
+    pub(super) portable_receipts: bool,
     /// Select an explicitly public native text/plain object, not a cache-selected subject.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_key)]
-    source_publisher_key: Option<VerifyingKey>,
+    pub(super) source_publisher_key: Option<VerifyingKey>,
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
-    source_name: Option<String>,
+    pub(super) source_name: Option<String>,
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_manifest)]
-    source_manifest_id: Option<[u8; 32]>,
+    pub(super) source_manifest_id: Option<[u8; 32]>,
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume")]
-    cache: Option<PathBuf>,
+    pub(super) cache: Option<PathBuf>,
     #[arg(long, requires = "cache")]
-    reuse_cache: bool,
+    pub(super) reuse_cache: bool,
     /// Owner authorized to publish the assessment context, not the original subject publisher.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_key)]
-    publisher_key: Option<VerifyingKey>,
+    pub(super) publisher_key: Option<VerifyingKey>,
     #[arg(long)]
-    identity: Option<PathBuf>,
+    pub(super) identity: Option<PathBuf>,
     #[arg(long)]
-    passphrase_file: Option<PathBuf>,
+    pub(super) passphrase_file: Option<PathBuf>,
     /// Exactly two independently selected distinct public compute providers.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume", value_parser = parse_key)]
-    provider_key: Vec<VerifyingKey>,
+    pub(super) provider_key: Vec<VerifyingKey>,
     /// Exact inference profile for both assessors; resume uses the original enrollment.
     #[arg(long, conflicts_with = "resume")]
-    model_profile: Option<ModelProfile>,
+    pub(super) model_profile: Option<ModelProfile>,
     /// Explicit authorization to republish the complete selected public subject in these tasks.
     #[arg(long, required_unless_present = "resume", conflicts_with = "resume",
         value_parser = ["GPL-3.0-only", "CC0-1.0", "CC-BY-4.0", "CC-BY-SA-4.0"])]
-    license: Option<String>,
+    pub(super) license: Option<String>,
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u16).range(1..=600))]
-    max_seconds: u16,
+    pub(super) max_seconds: u16,
     #[command(flatten)]
-    limits: crate::content::Limits,
+    pub(super) limits: crate::content::Limits,
     /// Without this flag there is no source acquisition, publication, directory creation or RPC.
     #[arg(long)]
-    execute: bool,
+    pub(super) execute: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -188,10 +188,39 @@ fn preview(args: &Options) -> Result<Value> {
 }
 
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
+    match run_value(args, socket).await {
+        Ok(result) => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(incomplete) = error.downcast_ref::<IncompleteAssessment>() {
+                println!("{}", serde_json::to_string_pretty(&incomplete.result)?);
+            }
+            Err(error)
+        }
+    }
+}
+
+// Keep the retained incomplete receipt available to a composing caller without
+// turning it into a successful operation or requiring stdout/file-error parsing.
+#[derive(Debug)]
+pub(super) struct IncompleteAssessment {
+    pub(super) result: Value,
+}
+
+impl std::fmt::Display for IncompleteAssessment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("compute_policy_assessment_incomplete_retained")
+    }
+}
+
+impl std::error::Error for IncompleteAssessment {}
+
+pub(super) async fn run_value(args: &Options, socket: &Path) -> Result<Value> {
     let planned = preview(args)?;
     if !args.execute {
-        println!("{}", serde_json::to_string_pretty(&planned)?);
-        return Ok(());
+        return Ok(planned);
     }
     let cancellation = Cancellation::new()?;
     let _lock = task::open_directory(&args.output, args.resume)?;
@@ -201,12 +230,10 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     let (enrollment, subject) = storage::load(&args.output)?;
     let result = assess(args, socket, &enrollment, &subject, &cancellation.activity).await?;
     storage::retain_result(&args.output.join("result.json"), &result)?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    ensure!(
-        result["complete"] == true,
-        "compute_policy_assessment_incomplete_retained"
-    );
-    Ok(())
+    if result["complete"] != true {
+        return Err(IncompleteAssessment { result }.into());
+    }
+    Ok(result)
 }
 
 async fn enroll(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool>) -> Result<()> {
