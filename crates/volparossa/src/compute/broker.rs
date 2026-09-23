@@ -486,7 +486,7 @@ impl Broker {
         }
         if !self.capabilities.derived_inference_v3
             && serde_json::from_str::<Value>(&submit.dataset_json)
-                .is_ok_and(|value| value["version"] == 3)
+                .is_ok_and(|value| matches!(value["version"].as_u64(), Some(3 | 5)))
         {
             return false;
         }

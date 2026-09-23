@@ -150,6 +150,7 @@ fn retained(root: &Path) -> (Authority, plan::Plan, Input) {
         document: document.into(),
         question: questions.questions[0].clone(),
         synthesis: false,
+        original_source: None,
     };
     (authority, plan, source)
 }
@@ -291,6 +292,7 @@ fn model_graph_replay_uses_the_original_artifact_and_never_replans() {
         document: document.into(),
         question: plan.nodes[0].question.clone(),
         synthesis: false,
+        original_source: None,
     };
     verify(root.path(), &authority, &plan, &source).unwrap();
     assert_eq!(
@@ -389,6 +391,7 @@ fn grounded_authority_binds_literal_prefix_and_reports_partial_coverage() {
         document: format!("{}é末", "a".repeat(1023)),
         question: "A source task?".into(),
         synthesis: false,
+        original_source: None,
     };
     let mut input = input(&source.document);
     input.version = 2;
@@ -491,6 +494,23 @@ async fn model_planning_preview_is_inert_and_enrollment_only() {
         .await
         .unwrap();
     assert!(!directory.exists());
+    let mut grounded_words = graph_words.clone();
+    grounded_words.push("--grounded-synthesis");
+    let unsupported = Command::try_parse_from(&grounded_words).unwrap().options;
+    assert!(
+        super::super::super::run(&unsupported, &root.path().join("absent.sock"))
+            .await
+            .is_err()
+    );
+    grounded_words.extend(["--model-profile", "smollm2-360m-v1"]);
+    let grounded = Command::try_parse_from(&grounded_words).unwrap().options;
+    assert!(grounded.grounded_synthesis);
+    super::super::super::run(&grounded, &root.path().join("absent.sock"))
+        .await
+        .unwrap();
+    assert!(!directory.exists());
+    grounded_words.push("--resume");
+    assert!(Command::try_parse_from(&grounded_words).is_err());
     for conflict in [
         "--plan-tasks",
         "--resume",

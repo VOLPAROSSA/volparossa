@@ -1421,6 +1421,22 @@ An absent option preserves the historical one-to-four-task contract. `--resume` 
 the requirement or replan. Fixed dependency feedback uses the same four-attempt/384-token budget.
 Structural dependency alone is not proof of useful reasoning or correct answers.
 
+For a new 360M model graph, `--grounded-synthesis` keeps the **complete original source**
+alongside generated answers in each dependent/synthesis prompt. This first explicit mode
+accepts original documents up to 4096 UTF-8 bytes; the full source, question and prompt must
+also fit the unchanged 1024-token input budget before any parent-answer splitting. There is
+no source truncation or increase to the 256-token answer budget. Oversized sources fail with
+an explicit bound error; this is not yet retrieval-backed grounding for arbitrarily long texts.
+
+New v5 derived publications separate `original_source` from parent `context`/lineage. Each
+receiver checks the complete original bytes, object/chunk hashes and original expiry against
+the independently trusted signed source manifest. Planning and execution use the same prompt,
+which treats parent answers and their assumptions as fallible analysis, not source facts.
+The original document remains data, not permission to execute embedded instructions. The
+enrolled mode survives `--resume`; historical graphs keep their original v3 bytes and prompts.
+Participating workers need this v5 implementation; older workers may reject it, and there is
+no silent downgrade. Focused checks pass, but live source-grounded answer quality is pending.
+
 Strategy `model_task_graph_constrained_v3` generates the whole JSON under one original owner/deadline:
 512 prompt tokens, 384 generated tokens shared across at most four attempts. Each attempt can
 use the remaining total; rejected JSON/schema output consumes its real cost. Only an observed

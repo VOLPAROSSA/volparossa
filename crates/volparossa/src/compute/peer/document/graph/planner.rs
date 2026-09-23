@@ -148,6 +148,7 @@ fn checked_input(args: &Options, document: &str) -> Result<task_plan::Input> {
         version: 1,
         model_profile: args.model_profile,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
         question: args

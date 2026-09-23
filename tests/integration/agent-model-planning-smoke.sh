@@ -66,7 +66,7 @@ agent_model_planning_run() {
     planning_script=$source_directory/tests/integration/agent-model-planning-smoke.py
     PHASE=${planning_prefix}-owner-inputs
     if [ "${agent_model_task_graph:-no}" = yes ]; then
-        printf '%s\n' 'Disposable guest only: use the complete synthetic public routing case with explicit privacy facts and missing performance measurements. Request dependent_analysis_v1; the actual pinned model chooses task count, questions and dependencies under unchanged limits. Preserve raw task-graph.json and prove at least two tasks, one internal edge, exact parent-text consumption, original-question terminal join, protected peer receipts and unchanged offline resume. No prescribed graph/answer, semantic-quality or simultaneous-worker claim; historical failed probes stay failed.'
+        printf '%s\n' 'Disposable guest only: use the complete synthetic public routing case with explicit privacy facts and missing performance measurements. Request dependent_analysis_v1 plus explicit grounded synthesis; the actual pinned model chooses task count, questions and dependencies under unchanged limits. Preserve raw task-graph.json and prove at least two tasks, one internal edge, exact parent-text consumption, original-question terminal join, protected peer receipts and unchanged offline resume. Every dependent/final v5 synthesis also retains the full original 444-byte signed source separately from generated answers, with the existing 1024-input/256-output token limits. No prescribed graph/answer, semantic-quality or simultaneous-worker claim; historical passes and failures retain their original contracts.'
     else
     printf '%s\n' 'Disposable guest only: stage the complete literal public README introduction before its navigation and the same original question, copy pinned owner assets, observe one real isolated model reading the source prefix and proposing two question-form subquestions with at most four charged attempts within the shared 384-token bound, enroll those exact questions without peer work, execute all real tokenized protected peer source/join tasks, remove the owned original input and prove unchanged completed offline resume after broker/route teardown. Exhausted recovery fails with bounded text-free diagnostics; there is no canned-plan fallback or claim of semantic relevance from source metadata.'
     fi
@@ -88,7 +88,7 @@ agent_model_planning_run() {
         >"$WORK/${planning_prefix}-input.json" || fail MODEL_PLANNING_PUBLIC_INPUT_FAILED
     PHASE=${planning_prefix}-real-model-enrollment
     set -- "$planning_option"
-    [ "${agent_model_task_graph:-no}" != yes ] || set -- "$@" --plan-structure dependent
+    [ "${agent_model_task_graph:-no}" != yes ] || set -- "$@" --plan-structure dependent --grounded-synthesis
     agent_model_planning_cli compute peer document "$@" \
         --model-profile smollm2-360m-v1 \
         --input "$jobs_source/model-planning-input.txt" --public-content --license GPL-3.0-only \

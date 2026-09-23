@@ -27,6 +27,7 @@ DECODER = {"implementation": "lm-format-enforcer", "version": "0.11.3", "adapter
            "schema_version": 3, "dependencies": {"interegular": "0.3.3", "pydantic": "1.10.24"}}
 QUESTION = "What requirements and risks does this project describe?"
 PLAN_REQUIREMENT = "dependent_analysis_v1"
+GROUNDED_PROFILE = "application/vnd.volparossa.agent-derived.v5+json"
 GRAPH_QUESTION = "Which route meets the stated privacy constraints, why, and what further evidence is needed before comparing performance?"
 GRAPH_SOURCE = (b"Synthetic public routing case.\n"
     b"Required path: client -> one relay -> exit -> destination.\n"
@@ -62,8 +63,11 @@ def select_task_graph():
         "192-UTF8-byte generation limit per question (full admission remains 512 bytes). "
         "Local translation adds only stable IDs and an exact "
         "original-question terminal join over model-selected sinks. Actual protected peer jobs consume EOS-complete "
-        "parents bound byte-for-byte to their original receipts; original-free completed offline resume preserves planner and receipts. "
-        "This is a new fixture contract, not a reinterpretation of historical failed runs. No required parallel shape, "
+        "parents bound byte-for-byte to their original receipts. Every dependent/final synthesis uses explicit v5 "
+        "grounding: the complete original signed 444-byte source remains separate from generated answers in "
+        "each tokenizer input and peer dataset, with unchanged 1024-input/256-output token limits. "
+        "Original-free completed offline resume preserves the enrolled grounding, planner and receipts. "
+        "This is a new grounded fixture contract, not a reinterpretation of historical passes or failures. No required parallel shape, "
         "simultaneous-worker claim, task repair, canned fallback, semantic quality, private offload, model-selected tools, "
         "open-ended autonomy, full B03 or full alpha.")
 
@@ -621,7 +625,19 @@ def checked_parent_sha256(original,parents):
     return sha(original)
 
 
-def reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,node_index,force):
+def derived_dataset(source_manifest,number,rows,original_source=None):
+    # Match the real Rust DerivedDataset field order; preserve original rows.
+    data=dict(version=5 if original_source is not None else 3,visibility="public",license="GPL-3.0-only",
+        source_manifest_hex=source_manifest.hex())
+    if original_source is not None:
+        GRAPH["original_source_identity"](original_source)
+        data["original_source"]=original_source.decode()
+    data.update(level=number,claim_scope=SYNTH["CLAIM"],model_profile=MODEL_PROFILE,inference=rows)
+    return data
+
+
+def reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,node_index,force,
+              original_source=None):
     load=lambda name:json.loads(raw[name]);result=load(prefix+"/result.json");levels=result["synthesis"]["levels"]
     require((1 if force or len(parents)>1 else 0)<=len(levels)<=16,"derived instruction or reduction was omitted")
     rounds=0
@@ -639,17 +655,18 @@ def reduction(raw,prefix,parents,question,authority,source_manifest,layout,execu
                 and saved["parents_sha256"]==original_parent_sha256 and saved["source_manifest_id"]==authority["source_manifest_id"]
                 and authority["selected_at_unix_seconds"]<=saved["created_at_unix_seconds"]<authority["expires_at_unix_seconds"],"model-derived publication renewed source authority")
             combined,rows=SYNTH["expected_rows"](previous,load(group_prefix+"/document-plan.json")["parts"],question,group_index*64)
-            GRAPH["planner"](raw,group_prefix+"/",combined,question,True,model_profile=MODEL_PROFILE)
+            GRAPH["planner"](raw,group_prefix+"/",combined,question,True,model_profile=MODEL_PROFILE,
+                original_source=original_source)
             require(group==dict(group=group_index,parents=len(previous),complete=True,parts=len(rows),input_sha256=sha(combined)),"derived group accounting changed")
             for p in range((len(rows)+3)//4):
                 package=group_prefix+f"/package-{p:04d}"
-                data=dict(version=3,visibility="public",license="GPL-3.0-only",source_manifest_hex=source_manifest.hex(),
-                    level=number,claim_scope=SYNTH["CLAIM"],model_profile=MODEL_PROFILE,inference=rows[p*4:p*4+4])
+                data=derived_dataset(source_manifest,number,rows[p*4:p*4+4],original_source)
                 original=dict(authority,selected_at_unix_seconds=saved["created_at_unix_seconds"])
                 identity=GRAPH["manifest"](raw[package+"/dataset.manifest"],raw[package+"/dataset.json"],original,
-                    f"derived-l{number:02d}-g{group_index:04d}-p{p:04d}",SYNTH["PROFILE"])
+                    f"derived-l{number:02d}-g{group_index:04d}-p{p:04d}",
+                    GROUNDED_PROFILE if original_source is not None else SYNTH["PROFILE"])
                 following.extend(GRAPH["package"](raw,package,data,identity,authority,question,layout,executed,response_bytes,node_index,number,len(rows)>4,
-                    model_profile=MODEL_PROFILE))
+                    model_profile=MODEL_PROFILE,original_source=original_source))
                 rounds+=1
         require(level["outputs"]==len(following) and ((force and number==1) or len(following)<len(parents))
             and level["answers"]==following and level["generation_limit_reached"] is any(SYNTH["generation_limited"](a,model_profile=MODEL_PROFILE) for a in following)
@@ -709,6 +726,7 @@ def check(value,revision):
     graph=load("graph.json")
     require(graph["version"]==1 and graph["plan_sha256"]==sha(encoded(plan)) and graph["leaves"]==[
         dict(node=i,enrollment_sha256=sha(raw[f"node-{i:04d}/document.json"])) for i in source_indices],"model-plan leaf pins changed")
+    if TASK_GRAPH:require(graph.get("grounded_synthesis") is True,"graph did not enroll original-source grounding")
     observed=value["planner-observation"];TRAIN["check_isolation"](observed["isolation"])
     require(observed["node_lineage"]["node"]=="client" and observed["node_lineage"]["cli"]==observed["isolation"]["cli"]
         and observed["node_lineage"]["cli_namespace"]==observed["node_lineage"]["service_namespace"]
@@ -740,6 +758,7 @@ def check(value,revision):
         and enrollment["nodes"]==count+1 and enrollment["source_tasks"]==len(source_indices) and enrollment["plan_sha256"]==sha(encoded(plan))
         and enrollment["source_manifest_id"]==source_id and enrollment["provider_keys"]==authority["provider_keys"]
         and enrollment["planning"]==planning,"enrollment did not distinguish real planning from pending peer work")
+    if TASK_GRAPH:require(enrollment.get("grounded_synthesis") is True,"enrollment did not retain grounded synthesis")
     executed,response_bytes,answers,rounds={},dict.fromkeys(workers,0),{},0
     for index,node in enumerate(plan["nodes"]):
         prefix=f"node-{index:04d}";question=node["question"]
@@ -749,7 +768,7 @@ def check(value,revision):
                 and joined["public_question"]==question and joined["source_manifest_id"]==source_id
                 and joined["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"dependency substituted original instruction/source")
             answer,used=reduction(raw,prefix,[answers[n] for n in node["depends_on"]],question,authority,
-                source_manifest,layout,executed,response_bytes,index,True)
+                source_manifest,layout,executed,response_bytes,index,True,source if TASK_GRAPH else None)
             rounds+=used;answers[node["id"]]=answer
             continue
         enrolled=load(prefix+"/document.json")
@@ -770,7 +789,8 @@ def check(value,revision):
             require(selection==dict(manifest_id=identity,dataset_sha256=sha(encoded(data)),first_part=p*4,rows=len(parts)),"leaf package mapping changed")
             parents.extend(GRAPH["package"](raw,package,data,identity,enrolled,question,layout,executed,response_bytes,index,0,True,
                 model_profile=MODEL_PROFILE));rounds+=1
-        answer,used=reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,index,False)
+        answer,used=reduction(raw,prefix,parents,question,authority,source_manifest,layout,executed,response_bytes,index,False,
+            source if TASK_GRAPH else None)
         rounds+=used;answers[node["id"]]=answer
         require(load(prefix+"/result.json")["graph_node"]==dict(node,plan_sha256=sha(encoded(plan))),"leaf graph identity changed")
     require(count+1<=rounds<=16 and len({a["job_id"] for a in answers.values()})==count+1,"model join reused a source task")
@@ -785,6 +805,10 @@ def check(value,revision):
             and result["automatic_task_planning"] is True and result["output"]==answers["answer"] and len(result["nodes"])==count+1
             and all(result[k] is False for k in ("private_data_supported","external_actions_supported","model_answer_correctness_proven","full_b03_claimed")),"planned graph completion/scope changed")
         require(result["nodes"]==[dict(n,complete=True,execution_complete=True,status="complete",answer_status="eos",answer=answers[n["id"]]) for n in plan["nodes"]],"planned graph answers changed")
+        if TASK_GRAPH:
+            require(result.get("grounded_synthesis") is True
+                and result.get("synthesis_original_source_sha256")==sha(source)
+                and result.get("synthesis_original_source_bytes")==len(source),"completed/resumed graph lost original-source grounding")
     require(load("result.json")==value["result"] and {n for n in raw if HANDLE.fullmatch(n)}=={v["path"] for v in executed.values()},"extra/unverified planned jobs or replaced completed summary")
     seen,processes=set(),[observed["isolation"]["worker"]]
     require(value["observation"]["owner_reaped"] is True,"peer owner not reaped")
@@ -834,12 +858,12 @@ def finalize(work,revision,status,complete,remaining,phase,blocker):
         success=status==0 and complete and remaining==0 and value is not None,runner_exit_status=status,phase=phase,
         observed_blocker=None if blocker=="NONE" else blocker,evidence=value,cleanup=dict(complete=complete,remaining_owned_objects=remaining),
         host_state=host,decomposition_quality_proven=False,model_answer_correctness_proven=False,full_b03_claimed=False,full_alpha_claimed=False)
-    if TASK_GRAPH:result["fixture_contract"]=PLAN_REQUIREMENT
+    if TASK_GRAPH:result.update(fixture_contract=PLAN_REQUIREMENT,grounded_synthesis=True,synthesis_dataset_profile=GROUNDED_PROFILE)
     write(record(work,"smoke"),result)
 
 
 def report(value,revision):
-    if TASK_GRAPH:require(value.get("fixture_contract")==PLAN_REQUIREMENT,"historical fixture is not dependent-analysis proof")
+    if TASK_GRAPH:check_grounded_report_scope(value)
     require(value["report_kind"]==KIND and value["source_revision"]==revision and value["scope"]==SCOPE
         and value["success"] is True and value["runner_exit_status"]==0 and value["observed_blocker"] is None
         and value["cleanup"]==dict(complete=True,remaining_owned_objects=0) and value["host_state"]["unchanged"] is True
@@ -847,6 +871,78 @@ def report(value,revision):
         and all(value[k] is False for k in ("decomposition_quality_proven","model_answer_correctness_proven","full_b03_claimed","full_alpha_claimed")),
         "model planning/host cleanup proof incomplete")
     check(value["evidence"],revision)
+
+
+def check_grounded_report_scope(value):
+    require(value.get("fixture_contract")==PLAN_REQUIREMENT and value.get("grounded_synthesis") is True
+        and value.get("synthesis_dataset_profile")==GROUNDED_PROFILE,
+        "historical or answers-only fixture is not grounded dependent-analysis proof")
+
+
+def grounded_synthesis_self_test():
+    # Inert byte/identity contracts only, never tokenizer/model execution.
+    source=GRAPH_SOURCE
+    assert len(source)==444
+    parents=b"Inert model-generated analysis, not original evidence.\n"
+    question="Which facts support this analysis?"
+    identity=GRAPH["original_source_identity"](source)
+    assert identity==dict(original_source_sha256=sha(source),original_source_bytes=444)
+    rows=[dict(question=question,context=parents.decode(),inputs=[dict(text=parents.decode())])]
+    unchanged=copy.deepcopy(rows)
+    legacy=derived_dataset(b"inert-manifest",1,rows)
+    assert legacy==dict(version=3,visibility="public",license="GPL-3.0-only",source_manifest_hex=b"inert-manifest".hex(),
+        level=1,claim_scope=SYNTH["CLAIM"],model_profile=MODEL_PROFILE,inference=rows)
+    grounded=derived_dataset(b"inert-manifest",1,rows,source)
+    assert list(grounded)==["version","visibility","license","source_manifest_hex","original_source",
+        "level","claim_scope","model_profile","inference"]
+    assert grounded["version"]==5 and grounded["original_source"].encode()==source
+    assert grounded["inference"]==rows==unchanged and encoded(grounded)!=encoded(legacy)
+
+    def tokenizer_records(original=source,planned=identity,reported=identity):
+        inp=dict(version=1,model_profile=MODEL_PROFILE,visibility="public",license="GPL-3.0-only",
+            document=parents.decode(),question=question,synthesis=True,original_source=original.decode())
+        plan=dict(version=1,source_bytes=len(parents),source_sha256=sha(parents),question_sha256=sha(question.encode()),
+            model_id=MODEL_ID["model_id"],model_revision=MODEL_ID["model_revision"],tokenizer_sha256=DOC["TOKENIZER"],
+            prompt_limit=1024,synthesis=True,parts=[dict(start=0,end=len(parents),prompt_tokens=500)],**planned)
+        report=dict(mode="plan_document",status="ok",device="cpu",model_weights_loaded=False,updates_completed=0,
+            dataset=dict(version=1,sha256=sha(encoded(inp)),synthesis=True,**reported),
+            supervisor=dict(child_reaped=True,network_access=False,gpu_access=False,max_observed_rss_bytes=1,rss_limit_bytes=3*1024**3),
+            artifacts=[dict(relative_path="document-plan.json",bytes=len(encoded(plan)),sha256=sha(encoded(plan)))])
+        return {"planner-input.json":encoded(inp),"document-plan.json":encoded(plan),"tokenizer/document-plan.json":encoded(plan),
+            "tokenizer-report.json":encoded(report),"tokenizer/report.json":encoded(report)}
+
+    raw=tokenizer_records()
+    result=GRAPH["planner"](raw,"",parents,question,True,model_profile=MODEL_PROFILE,original_source=source)
+    assert result["original_source_sha256"]==sha(source) and result["source_sha256"]==sha(parents)
+    variants=[tokenizer_records(original=source[:-1]),tokenizer_records(original=parents)]
+    for field,value in (("original_source_sha256",sha(parents)),("original_source_bytes",443)):
+        changed=dict(identity);changed[field]=value
+        variants.extend((tokenizer_records(planned=changed),tokenizer_records(reported=changed)))
+    variants.extend((tokenizer_records(planned={}),tokenizer_records(reported={})))
+    for invalid in variants:
+        try:GRAPH["planner"](invalid,"",parents,question,True,model_profile=MODEL_PROFILE,original_source=source)
+        except ValueError:pass
+        else:raise AssertionError("partial/replaced/undocumented original synthesis source accepted")
+    try:GRAPH["planner"](raw,"",parents,question,True,model_profile=MODEL_PROFILE)
+    except ValueError:pass
+    else:raise AssertionError("grounded input silently reinterpreted as legacy synthesis")
+    for original in (b"",b"x"*4097,b"a\0b",b"\xff"):
+        try:GRAPH["original_source_identity"](original)
+        except ValueError:pass
+        else:raise AssertionError("invalid source accepted by grounded checker")
+    # The same exact identity check is applied to every original v5 worker report.
+    GRAPH["check_original_source_identity"](dict(version=5,**identity),source)
+    for invalid in ({},dict(identity,original_source_bytes=443),dict(identity,original_source_sha256=sha(parents))):
+        try:GRAPH["check_original_source_identity"](invalid,source)
+        except ValueError:pass
+        else:raise AssertionError("v5 report detached from original source accepted")
+    scope=dict(fixture_contract=PLAN_REQUIREMENT,grounded_synthesis=True,synthesis_dataset_profile=GROUNDED_PROFILE)
+    check_grounded_report_scope(scope)
+    for invalid in (dict(fixture_contract=PLAN_REQUIREMENT),dict(scope,grounded_synthesis=False),
+        dict(scope,synthesis_dataset_profile=SYNTH["PROFILE"])):
+        try:check_grounded_report_scope(invalid)
+        except ValueError:pass
+        else:raise AssertionError("historical answers-only report upgraded to grounded proof")
 
 
 def profile_self_test():
@@ -939,6 +1035,7 @@ def parent_bytes_self_test():
 def self_test():
     # Inert schema/graph reconstruction only, not fabricated model or peer execution.
     profile_self_test()
+    grounded_synthesis_self_test()
     parent_bytes_self_test()
     intro=b"# VOLPAROSSA\n\nPublic introduction.\n\n"
     assert public_intro(intro+b"[Network](#network)\n")==intro
@@ -1135,6 +1232,7 @@ def graph_self_test():
     # Pure schema, exact-byte retention and accounting. No generated task is
     # supplied to the live planner by this test or the execution helper.
     profile_self_test()
+    grounded_synthesis_self_test()
     peer_observation_self_test()
     source=GRAPH_SOURCE
     selected=planning_input(source)
@@ -1237,7 +1335,7 @@ def graph_self_test():
     try:validate_failure(failure,input_raw,source)
     except ValueError:pass
     else:raise AssertionError("extra generation after original budget accepted")
-    print("dependent_analysis_v1 synthetic public routing case, exact graph/input/parent-contract controls PASS; no model/network executed")
+    print("dependent_analysis_v1 and grounded-v5 source/graph/input/parent-contract pure controls PASS; no model/network executed")
 
 
 def main(args):

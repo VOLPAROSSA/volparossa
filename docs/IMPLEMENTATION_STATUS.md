@@ -4,6 +4,30 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+A source-grounded synthesis candidate now addresses the observed loss of original evidence
+between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
+the complete original document (at most 4096 UTF-8 bytes) separately from generated parent
+answers. V5 derived packages authenticate those bytes against the original signed source;
+tokenization and actual inference share one prompt under the unchanged 1024/256-token budgets.
+Historical v3 workflows keep their exact source-free synthesis contract on resume. Three
+tokenizer-plan checks, 59 focused document/graph/replay checks, nine derived-source checks and
+seven inert worker checks pass. This fixes an information-loss path, not proven answer quality
+or complete B03. Genuine execution of the new grounded mode is still pending.
+
+The [recovery follow-up on `b6984851`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35865224745)
+proves further scoped progress but **fails overall**: both nodes actually train; Q warm-starts
+from signed P, and the learner independently approves Q after protected cold acquisition.
+Corrupting only Q's local extraction retires it and restores the original unexpired P; a new
+coordinator preserves that state. Exact-weight P/Q/restored inference and five network capture
+phases pass. Continued training stops at `CONNECT_ALREADY_IN_PROGRESS`; its final retained
+receipt replay and the separate numeric aggregation probe are not reached. The original logs
+also retain a relay4 `SHUTDOWN_CLEANUP_FAILED` event, although final owned-object cleanup and
+unchanged host bytes pass. This is not a full recovery/B07 or model-quality pass.
+The fixture now selects a real route before each short recovery/restart observation and
+confirms disconnection after reaping its coordinator. This removes the observed overlapping
+bootstrap, not the separate product limitation: closing a CLI socket does not cancel an
+agent-side fetch, and aborting a bootstrap during agent shutdown still needs owned cleanup.
+
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out
 comparison gate. Original bundles/dataset signatures are retained; all three inputs must bind

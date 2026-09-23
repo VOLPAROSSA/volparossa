@@ -247,6 +247,8 @@ completed answers, followed by offline resume with no new jobs after the brokers
 the original planner input is removed. The original signed results stay unchanged. The generated
 questions and answers still contain factual routing errors. This proves executable cooperation,
 **not yet useful, source-faithful reasoning** or evidence that a larger model is always better.
+An opt-in source-grounded follow-up now keeps the complete original short document beside
+generated answers in dependent tasks; its effect on real answer quality is not yet verified.
 [How cooperating tasks fit together →](docs/DECENTRALIZED_AGENTS.md#cooperating-public-tasks)
 
 Public work can be split across selected peers, with retained results and bounded recovery

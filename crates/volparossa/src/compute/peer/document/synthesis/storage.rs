@@ -8,8 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use volparossa_content::provider::compute::dataset::{
-    DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
-    verify_source,
+    DERIVED_CLAIM_SCOPE, DerivedDataset, DerivedInput, DerivedQuestion, verify_source,
 };
 use volparossa_content::{CacheLimits, ChunkStore, MAX_MANIFEST_BYTES, SignedManifest, Validity};
 
@@ -225,7 +224,7 @@ pub(super) async fn prepare(
     directory(root)?;
     let group = group(root, enrollment, parents, offset, level)?;
     retain_json(root, "parents.json", &parents)?;
-    let input = reduction_input(original, parents)?;
+    let input = reduction_input(original, parents, args.grounded_synthesis)?;
     retain_json(root, "planner-input.json", &input)?;
     let plan: Plan = if root.join("document-plan.json").try_exists()? {
         serde_json::from_slice(&read(&root.join("document-plan.json"), MAX_SAVED_BYTES)?)?
@@ -247,7 +246,7 @@ pub(super) async fn prepare(
     Ok(prepared)
 }
 
-fn reduction_input(original: &Input, parents: &[Answer]) -> Result<Input> {
+fn reduction_input(original: &Input, parents: &[Answer], grounded: bool) -> Result<Input> {
     let input = Input {
         version: 1,
         model_profile: original.model_profile,
@@ -256,6 +255,7 @@ fn reduction_input(original: &Input, parents: &[Answer]) -> Result<Input> {
         document: combined(parents),
         question: original.question.clone(),
         synthesis: true,
+        original_source: grounded.then(|| original.document.clone()),
     };
     input.validate()?;
     Ok(input)
@@ -287,7 +287,7 @@ pub(super) fn restore(
     let Some(group) = saved_group(root, enrollment, parents, offset, level)? else {
         return Ok(None);
     };
-    let input = reduction_input(original, parents)?;
+    let input = reduction_input(original, parents, args.grounded_synthesis)?;
     for (name, expected) in [
         ("parents.json", serde_json::to_vec(parents)?),
         ("planner-input.json", serde_json::to_vec(&input)?),
@@ -335,7 +335,12 @@ fn from_plan(
         .map(|rows| {
             let dataset = DerivedDataset {
                 model_profile: input.model_profile,
-                version: 3,
+                version: if input.original_source.is_some() {
+                    5
+                } else {
+                    3
+                },
+                original_source: input.original_source.clone(),
                 visibility: "public".into(),
                 license: input.license.clone(),
                 source_manifest_hex: hex::encode(&source),
@@ -436,7 +441,7 @@ fn publications(
         let manifest = document_storage::publish_object(
             &bytes,
             publication_name(prepared, index),
-            DERIVED_CONTENT_TYPE,
+            dataset.content_type()?,
             Validity {
                 created: prepared.group.created_at_unix_seconds,
                 expires: enrollment.expires_at_unix_seconds,

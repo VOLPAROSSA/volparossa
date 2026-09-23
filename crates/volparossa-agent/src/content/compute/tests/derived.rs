@@ -54,6 +54,7 @@ fn derived_request(root: &Path, publisher: &SigningKey, requester: &SigningKey) 
         visibility: "public".into(),
         license: "GPL-3.0-only".into(),
         source_manifest_hex: hex::encode(original),
+        original_source: None,
         level: 1,
         claim_scope: dataset::DERIVED_CLAIM_SCOPE.into(),
         model_profile: ModelProfile::default(),

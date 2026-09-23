@@ -238,7 +238,18 @@ def manifest(raw, data, authority, name, profile):
     return result
 
 
-def planner(raw, prefix, source, question, synthesis=False, model_profile="smollm2-135m-v1"):
+def original_source_identity(source):
+    require(type(source) is bytes and 0<len(source)<=4096 and b"\0" not in source
+        and source.decode("utf-8").encode("utf-8")==source,"invalid complete original synthesis source")
+    return dict(original_source_sha256=sha(source),original_source_bytes=len(source))
+
+
+def check_original_source_identity(value,source):
+    require(all(value.get(key)==expected for key,expected in original_source_identity(source).items()),
+        "original synthesis source identity changed")
+
+
+def planner(raw, prefix, source, question, synthesis=False, model_profile="smollm2-135m-v1",original_source=None):
     selected=JOBS["TRAIN"]["inference_profile"](model_profile)
     model=selected["model"];limit=selected["prompt_tokens"]
     load=lambda name:json.loads(raw[prefix+name])
@@ -259,6 +270,10 @@ def planner(raw, prefix, source, question, synthesis=False, model_profile="smoll
     if model_profile!="smollm2-135m-v1":expected["model_profile"]=model_profile
     expected.update(visibility="public",license="GPL-3.0-only",document=source.decode(),question=question)
     if synthesis:expected["synthesis"]=True
+    if original_source is not None:
+        require(synthesis and model_profile=="smollm2-360m-v1","grounded tokenizer profile changed")
+        check_original_source_identity(plan,original_source)
+        expected["original_source"]=original_source.decode()
     require(load("planner-input.json")==expected and raw[prefix+"planner-input.json"]==encoded(expected),
         "tokenizer got another instruction/context/profile")
     report=load("tokenizer-report.json")
@@ -270,6 +285,10 @@ def planner(raw, prefix, source, question, synthesis=False, model_profile="smoll
         and report["artifacts"]==[dict(relative_path="document-plan.json",bytes=len(raw[prefix+"tokenizer/document-plan.json"]),
             sha256=sha(raw[prefix+"tokenizer/document-plan.json"]))],"tokenizer artifact is not bound to actual worker report")
     DOC["check_supervisor"](report)
+    if original_source is not None:
+        require(report["dataset"].get("version")==1 and report["dataset"].get("synthesis") is True,
+            "grounded tokenizer dataset mode changed")
+        check_original_source_identity(report["dataset"],original_source)
     return plan
 
 
@@ -284,11 +303,16 @@ def shared_queue(batch, required):
 
 
 def package(raw,prefix,data,manifest_id,authority,question,layout,executed,response_bytes,node_index,level,shared,
-            model_profile="smollm2-135m-v1"):
+            model_profile="smollm2-135m-v1",original_source=None):
     selected=JOBS["TRAIN"]["inference_profile"](model_profile)
     model,fingerprint=selected["model"],selected["fingerprint"]
     load=lambda name:json.loads(raw[prefix+"/"+name])
     task=dict(kind="answer_public_question_v1",question=question)
+    if original_source is not None or data["version"]==5:
+        require(original_source is not None and level>0 and model_profile=="smollm2-360m-v1"
+            and data["version"]==5 and data.get("original_source")==original_source.decode(),
+            "grounded peer dataset omitted or changed the complete original source")
+        original_source_identity(original_source)
     require(load("dataset.json")==data and raw[prefix+"/dataset.json"]==encoded(data),"signed task rows changed")
     require(raw[prefix+"/work/package-0000/dataset.json"]==raw[prefix+"/dataset.json"]
         and raw[prefix+"/work/package-0000/manifest.bin"]==raw[prefix+"/dataset.manifest"],"workflow source changed")
@@ -334,6 +358,8 @@ def package(raw,prefix,data,manifest_id,authority,question,layout,executed,respo
             and actual["model"]["id"]==model["model_id"] and actual["model"]["revision"]==model["model_revision"]
             and actual["model"]["files"]["model.safetensors"]==model["base_weights"],"real inference result missing")
         DOC["check_supervisor"](actual)
+        if original_source is not None:
+            check_original_source_identity(actual["dataset"],original_source)
         if model_profile!="smollm2-135m-v1":
             require(caps["max_job_seconds"]==600 and actual["supervisor"]["rss_limit_bytes"]==3*1024**3,
                 "selected profile changed the existing worker resource bounds")

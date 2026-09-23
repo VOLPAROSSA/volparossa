@@ -92,6 +92,19 @@ impl Generation {
 pub(super) fn check_dataset_contract(report: &Value, dataset: &[u8]) -> Result<()> {
     use sha2::{Digest as _, Sha256};
     let input: Value = serde_json::from_slice(dataset)?;
+    if input["version"] == 5 {
+        let source = input["original_source"]
+            .as_str()
+            .context("compute_grounded_original_source")?;
+        ensure!(
+            report["dataset"]["sha256"] == hex::encode(Sha256::digest(dataset))
+                && report["dataset"]["version"] == 5
+                && report["dataset"]["original_source_sha256"]
+                    == hex::encode(Sha256::digest(source.as_bytes()))
+                && report["dataset"]["original_source_bytes"] == source.len(),
+            "compute_grounded_generation_input_binding"
+        );
+    }
     let expected = if input["version"] == 4 {
         let input: volparossa_content::provider::compute::dataset::PrincipleDataset =
             serde_json::from_slice(dataset)?;

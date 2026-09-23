@@ -29,6 +29,8 @@ struct Enrollment {
     leaves: Vec<Leaf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     planner: Option<planner::Authority>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    grounded_synthesis: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -90,6 +92,13 @@ fn load(root: &Path) -> Result<Loaded> {
         .context("compute_graph_no_source_tasks")?;
     let anchor_root = node_root(root, anchor.node);
     let (authority, input, _) = storage::load(&anchor_root)?;
+    ensure!(
+        !enrollment.grounded_synthesis
+            || (input.model_profile == crate::compute::ModelProfile::Smol360
+                && input.document.len() <= 4096
+                && !input.document.trim().is_empty()),
+        "compute_graph_grounded_original_source_bound"
+    );
     let source = read_file(
         &anchor_root.join("source.manifest"),
         volparossa_content::MAX_MANIFEST_BYTES,
@@ -155,6 +164,10 @@ pub(super) async fn run(
             )?)
         };
         let selected = super::selected_input(args, socket, cancelled).await?;
+        ensure!(
+            !args.grounded_synthesis || selected.0.len() <= 4096,
+            "compute_graph_grounded_original_source_too_large"
+        );
         let (plan, authority) = if let Some(plan) = manual {
             (plan, None)
         } else {
@@ -169,6 +182,9 @@ pub(super) async fn run(
             "task_complete":false,"plan_sha256":loaded.enrollment.plan_sha256,"nodes":loaded.plan.nodes.len(),
             "source_tasks":loaded.enrollment.leaves.len(),"source_manifest_id":loaded.authority.source_manifest_id,
             "provider_keys":loaded.authority.provider_keys,"private_data_supported":false});
+        if loaded.enrollment.grounded_synthesis {
+            result["grounded_synthesis"] = true.into();
+        }
         if loaded.enrollment.planner.is_some() {
             result["execution_started"] = true.into();
             result["automatic_task_planning"] = true.into();
@@ -265,6 +281,12 @@ fn summarize(
     if loaded.enrollment.planner.is_some() {
         result["automatic_task_planning"] = true.into();
         result["planning"] = planner::summary(loaded.enrollment.planner.as_ref());
+    }
+    if loaded.enrollment.grounded_synthesis {
+        result["grounded_synthesis"] = true.into();
+        result["synthesis_original_source_bytes"] = loaded.input.document.len().into();
+        result["synthesis_original_source_sha256"] =
+            digest(loaded.input.document.as_bytes()).into();
     }
     attach_provenance(&args.directory, loaded, output, &mut result)?;
     Ok(result)

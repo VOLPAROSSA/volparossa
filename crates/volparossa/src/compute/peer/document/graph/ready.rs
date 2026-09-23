@@ -127,6 +127,7 @@ async fn dependent(
         version: 1,
         model_profile: loaded.input.model_profile,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: loaded.input.license.clone(),
         document: loaded.input.document.clone(),
@@ -158,6 +159,8 @@ async fn scan(
     for index in loaded.plan.topological()? {
         let node = &loaded.plan.nodes[index];
         let mut options = node_options(args, index);
+        // Replay the enrolled contract; absence means historical answers-only synthesis.
+        options.grounded_synthesis = loaded.enrollment.grounded_synthesis;
         options.max_batches = available;
         options.follow.follow = false;
         let (mut result, ready) = if node.depends_on.is_empty() {

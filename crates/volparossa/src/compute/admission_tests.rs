@@ -138,3 +138,35 @@ fn principle_input_requires_explicit_fixed_contract_inference_profile() {
         );
     }
 }
+
+#[test]
+fn grounded_inference_admission_and_report_bind_original_source_without_training_fallback() {
+    use sha2::{Digest as _, Sha256};
+    let mut dataset = derived();
+    dataset["version"] = 5.into();
+    dataset["model_profile"] = "smollm2-360m-v1".into();
+    dataset["original_source"] = "An explicitly public source.".into();
+    let bytes = serde_json::to_vec(&dataset).unwrap();
+    assert!(validate_profile_dataset(Mode::Infer, false, &bytes, ModelProfile::Smol360).is_ok());
+    for (mode, adapter, profile) in [
+        (Mode::Train, false, ModelProfile::Smol360),
+        (Mode::Infer, true, ModelProfile::Smol360),
+        (Mode::Infer, false, ModelProfile::default()),
+    ] {
+        assert!(validate_profile_dataset(mode, adapter, &bytes, profile).is_err());
+    }
+    let source = dataset["original_source"].as_str().unwrap();
+    // Only this report's source-binding seam is exercised, not model execution.
+    let report = json!({"dataset":{"sha256":hex::encode(Sha256::digest(&bytes)),"version":5,
+        "original_source_sha256":hex::encode(Sha256::digest(source.as_bytes())),"original_source_bytes":source.len()},"outputs":[]});
+    inference_output::check_dataset_contract(&report, &bytes).unwrap();
+    for (field, bad) in [
+        ("version", json!(3)),
+        ("original_source_sha256", json!("0".repeat(64))),
+        ("original_source_bytes", json!(1)),
+    ] {
+        let mut changed = report.clone();
+        changed["dataset"][field] = bad;
+        assert!(inference_output::check_dataset_contract(&changed, &bytes).is_err());
+    }
+}

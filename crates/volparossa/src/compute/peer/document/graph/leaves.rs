@@ -76,6 +76,10 @@ pub(super) async fn prepare(
         "compute_document_independent_peers"
     );
     let (document, collection, network) = source_input;
+    ensure!(
+        !args.grounded_synthesis || document.len() <= 4096,
+        "compute_graph_grounded_original_source_too_large"
+    );
     save(&args.directory, "graph-plan.json", plan, false)?;
     let mut prepared = Vec::new();
     // Finish the real tokenization first. No unlocked publication key crosses an await.
@@ -91,6 +95,7 @@ pub(super) async fn prepare(
             version: 1,
             model_profile: args.model_profile,
             synthesis: false,
+            original_source: None,
             visibility: "public".into(),
             license: args.license.clone().context("compute_document_license")?,
             document: document.clone(),
@@ -185,6 +190,7 @@ pub(super) async fn prepare(
             plan_sha256: plan.fingerprint()?,
             leaves,
             planner,
+            grounded_synthesis: args.grounded_synthesis,
         },
         false,
     )

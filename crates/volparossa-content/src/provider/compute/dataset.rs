@@ -11,7 +11,7 @@ mod document;
 mod principle;
 pub use derived::{
     DERIVED_CLAIM_SCOPE, DERIVED_CONTENT_TYPE, DerivedDataset, DerivedInput, DerivedQuestion,
-    validate_derived_json,
+    GROUNDED_DERIVED_CONTENT_TYPE, validate_derived_json,
 };
 pub use document::{
     DOCUMENT_CONTENT_TYPE, DocumentDataset, DocumentQuestion, validate_document_json,
@@ -200,7 +200,11 @@ pub fn verify_source(
         .map_err(|_| ComputeError::Authentication)?;
     if !matches!(
         manifest.metadata().content_type.as_str(),
-        CONTENT_TYPE | DOCUMENT_CONTENT_TYPE | DERIVED_CONTENT_TYPE | PRINCIPLE_CONTENT_TYPE
+        CONTENT_TYPE
+            | DOCUMENT_CONTENT_TYPE
+            | DERIVED_CONTENT_TYPE
+            | GROUNDED_DERIVED_CONTENT_TYPE
+            | PRINCIPLE_CONTENT_TYPE
     ) || manifest.length() != original_json.len() as u64
         || manifest.object_sha256() != &<[u8; 32]>::from(Sha256::digest(original_json.as_bytes()))
     {
@@ -223,9 +227,15 @@ pub fn verify_source(
             serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
         principle.verify_source(publisher, now, manifest.validity().expires)?;
         Profile::Principle(principle)
-    } else if manifest.metadata().content_type == DERIVED_CONTENT_TYPE {
+    } else if matches!(
+        manifest.metadata().content_type.as_str(),
+        DERIVED_CONTENT_TYPE | GROUNDED_DERIVED_CONTENT_TYPE
+    ) {
         let derived: DerivedDataset =
             serde_json::from_str(original_json).map_err(|_| ComputeError::Invalid)?;
+        if derived.content_type()? != manifest.metadata().content_type {
+            return Err(ComputeError::Authentication);
+        }
         derived.verify_source(publisher, now, manifest.validity().expires)?;
         Profile::Derived(derived)
     } else if manifest.metadata().content_type == DOCUMENT_CONTENT_TYPE {

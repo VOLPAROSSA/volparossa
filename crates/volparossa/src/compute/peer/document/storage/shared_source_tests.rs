@@ -26,6 +26,7 @@ fn prepare(document: &str, question: &str) -> Prepared {
         document: document.into(),
         question: question.into(),
         synthesis: false,
+        original_source: None,
     };
     let mut offset = 0;
     let parts: Vec<_> = document
@@ -340,6 +341,7 @@ fn shared_source_validation_covers_real_chunk_boundary_and_cancellation_still_st
         document: document.clone(),
         question: "What does this public text say?".into(),
         synthesis: false,
+        original_source: None,
     };
     let source = publication(
         &document,

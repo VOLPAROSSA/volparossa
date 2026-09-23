@@ -42,7 +42,7 @@ pub(super) fn validate(json: &str, rows: usize) -> Result<()> {
         volparossa_content::provider::compute::dataset::validate_document_json(json, rows)?;
         return Ok(());
     }
-    if header["version"] == 3 {
+    if matches!(header["version"].as_u64(), Some(3 | 5)) {
         volparossa_content::provider::compute::dataset::validate_derived_json(json, rows)?;
         return Ok(());
     }

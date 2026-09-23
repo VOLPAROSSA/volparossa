@@ -320,7 +320,7 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
     if mode == Mode::PlanDocument {
         ensure!(!has_adapter, "compute_document_plan_adapter");
         document_plan::validate_input(&public)?;
-    } else if matches!(public["version"].as_u64(), Some(2..=4)) {
+    } else if matches!(public["version"].as_u64(), Some(2..=5)) {
         ensure!(
             mode == Mode::Infer,
             "compute_document_training_not_supported"
@@ -332,7 +332,7 @@ fn validate_dataset(mode: Mode, has_adapter: bool, dataset: &[u8]) -> Result<()>
         let text = std::str::from_utf8(dataset)?;
         if public["version"] == 4 {
             volparossa_content::provider::compute::dataset::validate_principle_json(text, rows)?;
-        } else if public["version"] == 3 {
+        } else if matches!(public["version"].as_u64(), Some(3 | 5)) {
             volparossa_content::provider::compute::dataset::validate_derived_json(text, rows)?;
         } else {
             volparossa_content::provider::compute::dataset::validate_document_json(text, rows)?;
@@ -393,7 +393,7 @@ fn validate_profile_dataset(
             (1..=usize::from(profile.spec().max_rows)).contains(&rows.len()),
             "compute_profile_row_limit"
         );
-        if public["version"] == 3 {
+        if matches!(public["version"].as_u64(), Some(3 | 5)) {
             let selected: ModelProfile = public
                 .get("model_profile")
                 .map(|value| serde_json::from_value(value.clone()))

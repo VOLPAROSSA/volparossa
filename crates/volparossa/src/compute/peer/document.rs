@@ -58,6 +58,9 @@ pub(crate) struct Options {
     /// Let the pinned model choose bounded public subtasks and dependencies; keeps the exact final question.
     #[arg(long, requires = "public_question", conflicts_with_all = ["resume", "task_plan", "plan_tasks", "synthesize", "batch_barrier"])]
     plan_task_graph: bool,
+    /// Keep the complete original public source in each model-graph synthesis prompt (360M, at most 4096 bytes).
+    #[arg(long, requires = "plan_task_graph", conflicts_with = "resume")]
+    grounded_synthesis: bool,
     /// Require a model-selected dependent analysis, not just independent source questions.
     #[arg(
         long,
@@ -146,6 +149,13 @@ pub(super) fn save(
 
 pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
     ensure!(
+        !args.grounded_synthesis
+            || (args.plan_task_graph
+                && !args.resume
+                && args.model_profile == ModelProfile::Smol360),
+        "compute_graph_grounded_synthesis_requires_new_360m_model_graph"
+    );
+    ensure!(
         args.plan_structure.is_none()
             || (args.plan_task_graph
                 && !args.plan_tasks
@@ -164,6 +174,7 @@ pub(super) async fn run(args: &Options, socket: &Path) -> Result<()> {
             "synthesize":args.synthesize,
             "task_plan":args.task_plan,"plan_tasks":args.plan_tasks,"plan_task_graph":args.plan_task_graph,"model_profile":args.model_profile,
             "plan_structure":args.plan_structure,
+            "grounded_synthesis":args.grounded_synthesis,
             "discover_peers":args.discovery.discover_peers,
             "replace_peers":args.discovery.replace_peers,
             "max_batches":args.max_batches,"maximum_seconds_per_worker":args.max_seconds,"follow":args.follow.follow,
@@ -253,6 +264,7 @@ async fn prepare(args: &Options, socket: &Path, cancelled: &watch::Receiver<bool
         version: 1,
         model_profile: args.model_profile,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: args.license.clone().context("compute_document_license")?,
         document,

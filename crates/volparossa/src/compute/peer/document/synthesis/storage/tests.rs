@@ -3,6 +3,7 @@ use crate::compute::ModelProfile;
 use crate::compute::document_plan::Part;
 use crate::compute::inference_output::Generation;
 use std::os::unix::fs::PermissionsExt as _;
+use volparossa_content::provider::compute::dataset::DERIVED_CONTENT_TYPE;
 
 #[test]
 fn retained_file_presence_distinguishes_missing_files_and_rejects_other_types() {
@@ -134,6 +135,7 @@ fn every_virtual_parent_byte_survives_unicode_and_cross_answer_tokenizer_cuts() 
         question: "Combine the answers.".into(),
         document: combined(&parents),
         synthesis: true,
+        original_source: None,
     };
     let mut contexts = String::new();
     // Includes a cut on the newline between answers and a cut inside ASCII text.
@@ -262,6 +264,59 @@ fn parser_only_plan(input: &Input) -> Plan {
     .unwrap()
 }
 
+#[test]
+fn grounded_reduction_retains_full_signed_source_and_unmodified_generated_parents() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let (_owner, cancelled) = watch::channel(false);
+    let (enrollment, original) =
+        historical_original_profile(temp.path(), &signer, &cancelled, ModelProfile::Smol360);
+    let parents = vec![parent("A potentially wrong generated statement.", 0)];
+    let input = reduction_input(&original, &parents, true).unwrap();
+    assert_eq!(input.document, combined(&parents));
+    assert_eq!(input.original_source.as_ref(), Some(&original.document));
+    let mut plan = parser_only_plan(&input);
+    assert!(plan.validate(&input).is_err());
+    plan.original_source_sha256 = Some(sha(original.document.as_bytes()));
+    plan.original_source_bytes = Some(original.document.len() as u64);
+    let group = Group {
+        version: 1,
+        level: 1,
+        parent_offset: 0,
+        parents_sha256: sha(&serde_json::to_vec(&parents).unwrap()),
+        source_manifest_id: enrollment.source_manifest_id.clone(),
+        created_at_unix_seconds: enrollment.selected_at_unix_seconds,
+    };
+    let prepared = from_plan(
+        &replay_options(temp.path()),
+        &enrollment,
+        &input,
+        &parents,
+        group,
+        plan,
+    )
+    .unwrap();
+    assert_eq!(prepared.datasets.len(), 1);
+    let dataset = &prepared.datasets[0];
+    assert_eq!(dataset.version, 5);
+    assert_eq!(dataset.original_source.as_ref(), Some(&original.document));
+    assert_eq!(dataset.inference[0].inputs[0].text, parents[0].text);
+    assert_eq!(dataset.inference[0].context, combined(&parents));
+    assert_eq!(
+        dataset.content_type().unwrap(),
+        volparossa_content::provider::compute::dataset::GROUNDED_DERIVED_CONTENT_TYPE
+    );
+    let legacy = reduction_input(&original, &parents, false).unwrap();
+    assert!(legacy.original_source.is_none());
+    assert!(
+        serde_json::to_value(legacy)
+            .unwrap()
+            .get("original_source")
+            .is_none()
+    );
+}
+
 fn replay_options(root: &Path) -> Options {
     #[derive(clap::Parser)]
     struct Defaults {
@@ -278,6 +333,7 @@ fn replay_options(root: &Path) -> Options {
         task_plan: None,
         plan_tasks: false,
         plan_task_graph: false,
+        grounded_synthesis: false,
         plan_structure: None,
         input: None,
         source_plan: None,
@@ -325,6 +381,7 @@ fn historical_original_profile(
         document: "Original public source. ".repeat(20),
         question: "Combine these public answers.".into(),
         synthesis: false,
+        original_source: None,
     };
     task::write_bytes(&root.join("source.txt"), input.document.as_bytes(), false).unwrap();
     retain_json(root, "planner-input.json", &input).unwrap();
@@ -387,6 +444,7 @@ fn historical_reduction_at(
         document: combined(parents),
         question: original.question.clone(),
         synthesis: true,
+        original_source: None,
     };
     let plan = parser_only_plan(&input);
     plan.validate(&input).unwrap();
@@ -403,6 +461,7 @@ fn historical_reduction_at(
     let dataset = DerivedDataset {
         model_profile: original.model_profile,
         version: 3,
+        original_source: None,
         visibility: "public".into(),
         license: input.license.clone(),
         source_manifest_hex: hex::encode(

@@ -33,6 +33,7 @@ fn fixture_document(
         model_profile: ModelProfile::default(),
         version: 1,
         synthesis: false,
+        original_source: None,
         visibility: "public".into(),
         license: "CC0-1.0".into(),
         document,
