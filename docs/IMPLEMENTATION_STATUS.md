@@ -89,6 +89,16 @@ original files and cleanup checks pass their independent review, but no graph or
 enrolled. Whether syntax-prefix exhaustion or complete-output rejection caused the decoder
 failure cannot be established from the retained artifact. B03 remains incomplete.
 
+A separate pure reproduction finds a real dead prefix: at 511 UTF-8 bytes a question can
+have only one possible ending, `?`, which would duplicate the goal or an earlier question.
+The decoder now rejects the character that would enter that state, preserving the existing
+512-byte boundary, model-selected alternatives and exact original text. ASCII, Unicode,
+JSON escapes and sibling-state regressions pass. A distinct fixed `TASK_GRAPH_DECODER_REJECTED_EOS`
+code also separates complete-syntax EOS rejection from an empty parser-prefix set, without
+retaining generated text. All 111 pure decoder/worker checks and three focused Rust diagnostic
+checks pass. This repairs the reproduced source bug; only a new real run can establish its
+effect on planning. No original failed run is relabeled as successful.
+
 The [policy run on `b80f0b02`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35849851694)
 now preserves the strict `PRINCIPLE_OUTPUT_REASONING` failure from both actual assessors.
 Both reached a parsed response but no accepted judgment, cross-review or portable bundle;

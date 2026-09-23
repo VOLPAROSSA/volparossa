@@ -1235,6 +1235,8 @@ class WorkerProtocolTests(unittest.TestCase):
             for failure, code in ((DecoderFailure("PRIVATE PREFIX"), "TASK_GRAPH_DECODER_PARSER_FAILED"),
                                   (DecoderFailure("TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS"),
                                    "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS"),
+                                  (DecoderFailure("TASK_GRAPH_DECODER_REJECTED_EOS"),
+                                   "TASK_GRAPH_DECODER_REJECTED_EOS"),
                                   (WORKER.JobError("JOB_CANCELLED"), "JOB_CANCELLED")):
                 core_callback.side_effect = failure
                 with self.assertRaisesRegex(WORKER.JobError, "^" + code + "$"):

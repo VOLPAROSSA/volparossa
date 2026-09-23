@@ -335,6 +335,17 @@ class _GraphRules:
         return (bool(value) and value.endswith("?") and value != self.goal
                 and value not in self.questions and self.escape == "" and self.high_surrogate is None)
 
+    def _text_can_finish(self, text, size):
+        if size < 511:
+            return True
+        value = text.strip()
+        if value and value.endswith("?") and value != self.goal and value not in self.questions:
+            return True
+        # With one byte left, '?' is the only possible non-whitespace ending.
+        # Do not admit a prefix whose only completion copies a forbidden question.
+        value = (text + "?").strip()
+        return size == 511 and value != self.goal and value not in self.questions
+
     def _append_text(self, character):
         if character == "\0" or 0xD800 <= ord(character) <= 0xDFFF:
             return False
@@ -343,8 +354,8 @@ class _GraphRules:
             return False
         self.text += character
         self.text_bytes = size
-        # Do not enter an irreversibly overfull/non-question scalar.
-        return size < 512 or self._question_complete()
+        # Do not enter an irreversibly overfull/non-question/duplicate scalar.
+        return self._text_can_finish(self.text, size)
 
     def _scalar_range_can_finish(self, low, high):
         remaining = 512 - self.text_bytes
@@ -352,8 +363,16 @@ class _GraphRules:
         # Split the BMP around surrogate code units; NUL is never admissible.
         for first, last, width in ((1, 0x7f, 1), (0x80, 0x7ff, 2), (0x800, 0xd7ff, 3),
                                    (0xe000, 0xffff, 3), (0x10000, 0x10ffff, 4)):
-            if width < remaining and max(low, first) <= min(high, last):
-                return True
+            start, end = max(low, first), min(high, last)
+            if width < remaining and start <= end:
+                if width + 1 < remaining:
+                    return True
+                # One byte would remain: check that '?' can still finish the
+                # question. At most the few forbidden questions and leading
+                # whitespace can reject distinct scalars before a viable one.
+                if any(self._text_can_finish(self.text + chr(scalar), self.text_bytes + width)
+                       for scalar in range(start, end + 1)):
+                    return True
         # Exactly filling the byte budget is viable only with '?' or trailing
         # whitespace after an already complete, distinct question. This bounded
         # set covers Python's Unicode whitespace without scanning 65,536 values
@@ -361,8 +380,7 @@ class _GraphRules:
         endings = "?\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
         for character in endings:
             if low <= ord(character) <= high and len(character.encode("utf-8")) == remaining:
-                value = (self.text + character).strip()
-                if value and value.endswith("?") and value != self.goal and value not in self.questions:
+                if self._text_can_finish(self.text + character, 512):
                     return True
         return False
 
@@ -484,13 +502,10 @@ class _GraphRules:
         codepoint = ord(character)
         if codepoint < 0x20 or 0xD800 <= codepoint <= 0xDFFF:
             return False
-        if self.text_bytes <= 507:
-            return True  # Even a four-byte scalar remains below the 512-byte edge.
+        if self.text_bytes <= 506:
+            return True  # Even a four-byte scalar leaves two bytes for completion.
         size = self.text_bytes + len(character.encode("utf-8"))
-        if size != 512:
-            return size < 512
-        value = (self.text + character).strip()
-        return bool(value) and value.endswith("?") and value != self.goal and value not in self.questions
+        return size <= 512 and self._text_can_finish(self.text + character, size)
 
 
 class _GraphJsonParser:
@@ -774,7 +789,9 @@ class _Attempt:
                 if not accepted:
                     allowed = [token for token in allowed if token != decoder.eos]
             if not allowed:
-                raise DecoderError("TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS")
+                # Distinguish complete-syntax EOS rejection from an empty
+                # parser prefix, without retaining the generated text.
+                raise DecoderError("TASK_GRAPH_DECODER_REJECTED_EOS")
         except DecoderError:
             raise
         except Exception:

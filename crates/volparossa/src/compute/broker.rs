@@ -710,6 +710,7 @@ pub(super) fn execution_failure_class(error: &anyhow::Error) -> (&'static str, &
             "TASK_GRAPH_DECODER_UNAVAILABLE",
             "TASK_GRAPH_DECODER_VERSION_MISMATCH",
             "TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS",
+            "TASK_GRAPH_DECODER_REJECTED_EOS",
             "TASK_GRAPH_DECODER_PARSER_FAILED",
             "TASK_GRAPH_DECODER_TOKENIZATION_CHANGED",
             "TASK_GRAPH_DECODER_TOKENIZER_INVALID",

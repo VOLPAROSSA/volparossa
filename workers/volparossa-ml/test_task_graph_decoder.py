@@ -396,6 +396,49 @@ class DecoderTests(unittest.TestCase):
             self.assertEqual(rules.phase, "done")
             self.assertEqual(rules.questions, (json.loads('"' + content + '"').strip(),))
 
+    def test_question_byte_edge_rejects_prefix_whose_only_completion_is_forbidden(self):
+        opening = '{"version":3,"tasks":[{"question":"'
+        cases = [("x" * 510, "x", ("x", "\\u0078")),
+                 ("x" * 510, "\n", ("\\n", "\\u000a")),
+                 ("x" * 510, '"', ('\\"', "\\u0022")),
+                 ("x" * 509, "é", ("é", "\\u00e9")),
+                 ("x" * 508, "漢", ("漢", "\\u6f22")),
+                 ("x" * 507, "🙂", ("🙂", "\\ud83d\\ude42"))]
+        for kind in ("goal", "previous"):
+            for head, last, spellings in cases:
+                forbidden = head + last + "?"
+                self.assertEqual(len(forbidden.encode()), 512)
+                rules = DECODER._GraphRules(forbidden if kind == "goal" else "Main goal?", None)
+                prefix = opening
+                if kind == "previous":
+                    prefix += json.dumps(forbidden, ensure_ascii=False)[1:-1]
+                    prefix += '","depends_on":[]},{"question":"'
+                for character in prefix + head:
+                    rules = rules.advance(character)
+                    self.assertIsNotNone(rules)
+                before = (rules.text, rules.text_bytes, rules.questions)
+                for spelling in spellings:
+                    with self.subTest(kind=kind, last=last, spelling=spelling):
+                        branch = rules
+                        for character in spelling:
+                            following = branch.advance(character)
+                            self.assertEqual(branch.allows(character), following is not None)
+                            if following is None:
+                                break
+                            branch = following
+                        else:
+                            self.fail("admitted a prefix with only a forbidden question completion")
+                        self.assertEqual((rules.text, rules.text_bytes, rules.questions), before)
+                # A different model-selected ending stays available from the
+                # same original state; no question is inserted or rewritten.
+                sibling = rules
+                for character in 'z?","depends_on":[]}]}':
+                    self.assertTrue(sibling.allows(character))
+                    sibling = sibling.advance(character)
+                    self.assertIsNotNone(sibling)
+                self.assertEqual(sibling.phase, "done")
+                self.assertEqual(sibling.questions[-1], head + "z?")
+
     def test_graph_alphabet_probe_matches_transitions_without_cloning_ordinary_text(self):
         alphabet = ''.join(chr(code) for code in range(128)) + 'é漢🙂\ud800\udfff'
         prefixes = [
@@ -814,6 +857,16 @@ class DecoderTests(unittest.TestCase):
         callback.enforcer._collect_allowed_tokens = lambda *_args: None
         with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_NO_ALLOWED_TOKENS$"):
             callback(0, Tensor(0))
+
+    def test_rejected_eos_only_set_has_distinct_content_free_failure(self):
+        callback = decoder(accepts=lambda _raw: False).new_attempt([0], 384)
+        callback(0, Tensor(0))
+        callback.enforcer.get_allowed_tokens = mock.Mock(return_value=SimpleNamespace(allowed_tokens=[2]))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaisesRegex(DECODER.DecoderError, "^TASK_GRAPH_DECODER_REJECTED_EOS$"):
+                callback(0, Tensor(0, 7))
+        self.assertEqual(output.getvalue(), "")
 
     def test_prefix_budget_and_special_tokens_stay_exact(self):
         for tokens, batch in (([0, 7], 0), ([1], 0), ([0], 1), ([0, 2], 0)):
