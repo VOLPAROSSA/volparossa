@@ -44,6 +44,7 @@ impl ContentRuntime {
         signed: SignedManifest,
         manifest: VerifiedManifest,
     ) -> Result<PublicationAdmission, ContentError> {
+        self.check_object_policy(&manifest)?;
         if !context.config.content_contribution.enabled
             || manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
         {
@@ -95,6 +96,7 @@ impl PublicationAdmission {
         mut self,
         context: &ControlContext,
     ) -> Result<ContentReceipt, ContentError> {
+        context.content.check_object_policy(&self.manifest)?;
         let current = context
             .content
             .service
@@ -109,6 +111,7 @@ impl PublicationAdmission {
         }
         check_endpoint(context, &self.endpoint).await?;
         self.commit().await?;
+        context.content.check_object_policy(&self.manifest)?;
         check_endpoint(context, &self.endpoint).await?;
         let mut receipt = serving_receipt(&*self.registry.lock().await)?;
         self.runtime.replication.receipt(&mut receipt).await?;

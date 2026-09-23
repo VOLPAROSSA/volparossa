@@ -49,6 +49,7 @@ struct Backend {
     foreground: Arc<Foreground>,
     config: ContentContributionConfig,
     endpoint: ProviderEndpoint,
+    object_policy: volparossa_content::object_policy::ObjectPolicyGate,
 }
 
 pub(super) async fn attach(
@@ -65,15 +66,12 @@ pub(super) async fn attach(
         foreground: Arc::clone(&owner.foreground),
         config: runtime.config.clone(),
         endpoint: active.endpoint.clone(),
+        object_policy: owner.object_policy_gate(),
     };
-    active
-        .registry
-        .lock()
-        .await
-        .set_custody(Arc::new(CustodyService::new(
-            Arc::clone(&owner.signer),
-            Arc::new(backend),
-        )));
+    active.registry.lock().await.set_custody(Arc::new(
+        CustodyService::new(Arc::clone(&owner.signer), Arc::new(backend))
+            .with_object_policy_gate(owner.object_policy_gate()),
+    ));
 }
 
 impl Backend {
@@ -120,7 +118,11 @@ impl Backend {
         .map_err(|_| CustodyError::Store)
     }
 
-    fn manifest(signed: &SignedManifest, manifest: &VerifiedManifest) -> Result<(), CustodyError> {
+    fn manifest(
+        &self,
+        signed: &SignedManifest,
+        manifest: &VerifiedManifest,
+    ) -> Result<(), CustodyError> {
         let key = ed25519_dalek::VerifyingKey::from_bytes(manifest.publisher())
             .map_err(|_| CustodyError::Invalid)?;
         let checked = signed
@@ -128,6 +130,7 @@ impl Backend {
             .map_err(|_| CustodyError::Invalid)?;
         if checked.manifest_id() != manifest.manifest_id()
             || checked.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
+            || !self.object_policy.allows_now(manifest)
         {
             return Err(CustodyError::Unauthorized);
         }
@@ -152,7 +155,7 @@ impl CustodyBackend for Backend {
         manifest: VerifiedManifest,
     ) -> CustodyFuture<'_, Box<dyn CustodyAdmission>> {
         Box::pin(async move {
-            Self::manifest(&signed, &manifest)?;
+            self.manifest(&signed, &manifest)?;
             self.policy().await?;
             let foreground = self.foreground.enter();
             let slot = self
@@ -163,6 +166,7 @@ impl CustodyBackend for Backend {
             let service = self.service.upgrade().ok_or(CustodyError::Store)?;
             let current = service.try_lock().map_err(|_| CustodyError::Store)?;
             self.active(current.as_ref())?;
+            self.manifest(&signed, &manifest)?;
             let (source, staging) =
                 stage(&self.config, &manifest).map_err(|_| CustodyError::Store)?;
             Ok(Box::new(Admission {
@@ -183,7 +187,7 @@ impl CustodyBackend for Backend {
         manifest: VerifiedManifest,
     ) -> CustodyFuture<'_, CustodyState> {
         Box::pin(async move {
-            Self::manifest(&signed, &manifest)?;
+            self.manifest(&signed, &manifest)?;
             self.policy().await?;
             let _foreground = self.foreground.enter();
             let _slot = self
@@ -216,6 +220,7 @@ impl CustodyBackend for Backend {
             }
             drop(registry);
             self.policy().await?;
+            self.manifest(&signed, &manifest)?;
             crate::content::check_publication_time(&manifest).map_err(|_| CustodyError::Expired)?;
             Ok(CustodyState::Complete)
         })
@@ -229,7 +234,7 @@ impl CustodyAdmission for Admission {
 
     fn commit(mut self: Box<Self>) -> CustodyFuture<'static, ()> {
         Box::pin(async move {
-            Backend::manifest(&self.signed, &self.manifest)?;
+            self.backend.manifest(&self.signed, &self.manifest)?;
             self.backend.policy().await?;
             let service = self.backend.service.upgrade().ok_or(CustodyError::Store)?;
             let current = service.try_lock().map_err(|_| CustodyError::Store)?;
@@ -240,6 +245,7 @@ impl CustodyAdmission for Admission {
                 .reclaim(&active.registry, now())
                 .await
                 .map_err(|_| CustodyError::Store)?;
+            self.backend.manifest(&self.signed, &self.manifest)?;
             self.backend
                 .storage()?
                 .admit(&self.signed, &self.manifest, &mut self.source, now())
@@ -262,6 +268,7 @@ impl CustodyAdmission for Admission {
             }
             drop(registry);
             self.backend.policy().await?;
+            self.backend.manifest(&self.signed, &self.manifest)?;
             crate::content::check_publication_time(&self.manifest)
                 .map_err(|_| CustodyError::Expired)?;
             drop(self.source);

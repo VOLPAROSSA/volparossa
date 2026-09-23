@@ -4840,11 +4840,13 @@ name = "volparossa-policy"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "libp2p-identity",
  "prost",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.19",
  "url",
+ "volparossa-identity",
 ]
 
 [[package]]

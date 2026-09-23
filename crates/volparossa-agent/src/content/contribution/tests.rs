@@ -32,6 +32,7 @@ pub(super) fn fixture(
         Arc::new(ContributionRuntime {
             config,
             replication,
+            object_policy: volparossa_content::object_policy::ObjectPolicyGate::default(),
             queue: Mutex::new(VecDeque::new()),
             wake: Notify::new(),
             worker: Mutex::new(None),
@@ -66,6 +67,57 @@ pub(super) fn publication(
         store,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn queued_contribution_rechecks_later_object_denial_before_copy() {
+    use volparossa_content::object_policy::{ObjectRule, ObjectSubject};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("contribution");
+    let (contributor, _, limits) = fixture(&root);
+    let source_root = temporary.path().join("download");
+    let mut source = ChunkStore::create(&source_root, limits).unwrap();
+    let key = SigningKey::generate(&mut rand_core::OsRng);
+    let signed = publication(
+        &mut source,
+        &key,
+        b"public denied after queue",
+        "text/plain",
+    );
+    let manifest = signed.verify(&key.verifying_key(), now()).unwrap();
+    drop(source);
+    let runtime = ContentRuntime::new(&Identity::generate()).unwrap();
+    *runtime.contribution.lock().await = Some(Arc::clone(&contributor));
+    runtime
+        .contribute_native(
+            signed.clone(),
+            manifest.clone(),
+            source_root.clone(),
+            limits,
+        )
+        .await;
+    let pending = contributor.queue.lock().await.pop_front().unwrap();
+    let rule = ObjectRule {
+        subject: ObjectSubject::from_manifest(&manifest),
+        policy_hash: [1; 32],
+        allow: false,
+        expires_at_ms: manifest.validity().expires * 1000,
+    };
+    contributor.object_policy.install(rule).unwrap();
+    assert_eq!(contributor.copy_one(&pending, 1024 * 1024).unwrap(), None);
+    let mut destination = ChunkStore::open(&root, limits).unwrap();
+    assert_eq!(destination.usage().entries, 0);
+    assert!(
+        volparossa_content::provider::replication::restore_public_replicas(&mut destination, now())
+            .unwrap()
+            .is_empty()
+    );
+    drop(destination);
+    runtime.object_policy.install(rule).unwrap();
+    runtime
+        .contribute_native(signed, manifest, source_root, limits)
+        .await;
+    assert!(contributor.queue.lock().await.is_empty());
 }
 
 #[tokio::test]

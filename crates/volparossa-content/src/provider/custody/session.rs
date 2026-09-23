@@ -41,7 +41,7 @@ impl CustodyService {
                 return Err(CustodyError::Expired);
             }
             let deadline = deadline.min(Instant::now() + Duration::from_secs(remaining));
-            timeout_at(deadline, async {
+            let operation = timeout_at(deadline, async {
                 let (state, progress) = match auth.operation() {
                     CustodyOperation::Deposit => {
                         let mut admission = self
@@ -73,9 +73,12 @@ impl CustodyService {
                 let receipt = CustodyReceipt::new(&self.signer, &auth, state, now()?)?;
                 write_frame(stream, &receipt.encode(), SMALL_FRAME).await?;
                 Ok(progress)
-            })
-            .await
-            .map_err(|_| CustodyError::Timeout)?
+            });
+            tokio::select! {
+                biased;
+                () = self.object_policy.wait_until_withheld(auth.manifest()) => Err(CustodyError::Unauthorized),
+                result = operation => result.map_err(|_| CustodyError::Timeout)?,
+            }
         })
         .await
         .map_err(|_| CustodyError::Timeout)?

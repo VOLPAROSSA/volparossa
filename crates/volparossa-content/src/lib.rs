@@ -10,6 +10,7 @@ pub mod agent_artifact;
 pub mod mailbox;
 mod manifest;
 pub mod model_profile;
+pub mod object_policy;
 pub mod origin_https;
 pub mod private_message;
 pub mod provider;

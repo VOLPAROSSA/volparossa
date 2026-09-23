@@ -28,7 +28,17 @@ const ACCEPTANCE_POLICY_LIFETIME_MS: u64 = 60 * 60 * 1_000;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os().skip(1);
     let directory = arguments.next().ok_or("missing fixture directory")?;
-    let (content_providers, dns_cache) = fixture_flags(arguments)?;
+    let remaining: Vec<_> = arguments.collect();
+    if remaining
+        .first()
+        .is_some_and(|flag| flag == "--authority-identity")
+    {
+        let [_, index] = remaining.as_slice() else {
+            return Err("authority identity requires exactly one index".into());
+        };
+        return authority_identity(Path::new(&directory), index);
+    }
+    let (content_providers, dns_cache) = fixture_flags(remaining.into_iter())?;
     if !Path::new(&directory).is_absolute() {
         return Err("fixture directory must be absolute".into());
     }
@@ -125,6 +135,63 @@ fn fixture_flags(
         }
     }
     Ok((content, dns))
+}
+
+// A separate invocation handles exactly one existing public development seed.
+// This does not import keys into production, alter policy trust, or sign a verdict.
+fn authority_identity(
+    root: &Path,
+    index: &std::ffi::OsStr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use volparossa_identity::{Identity, IdentityStore, Passphrase};
+
+    let index = match index.to_str() {
+        Some("0") => 0_u8,
+        Some("1") => 1,
+        Some("2") => 2,
+        _ => return Err("unknown development authority".into()),
+    };
+    let uid = fs::metadata("/proc/self")?.uid();
+    let expected_name = format!("policy-authority-{index}");
+    let source = root.parent().ok_or("missing source owner")?;
+    let client = source.parent().ok_or("missing client owner")?;
+    let work = client.parent().ok_or("missing disposable root")?;
+    if uid == 0
+        || root.file_name() != Some(std::ffi::OsStr::new(&expected_name))
+        || source.file_name() != Some(std::ffi::OsStr::new("compute-source"))
+        || client.file_name() != Some(std::ffi::OsStr::new("state-client"))
+        || work.parent() != Some(Path::new("/opt"))
+        || !work
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("va."))
+        || fs::read_to_string("/proc/sys/kernel/hostname")?.trim() != "volparossa-alpha"
+        || !std::process::Command::new("systemd-detect-virt")
+            .output()?
+            .stdout
+            .eq(b"kvm\n")
+        || root.canonicalize()? != root
+    {
+        return Err("authority fixture requires unprivileged disposable KVM owner".into());
+    }
+    let info = fs::symlink_metadata(root)?;
+    if !info.is_dir() || info.uid() != uid || info.permissions().mode() & 0o777 != 0o700 {
+        return Err("unsafe authority fixture directory".into());
+    }
+    let passphrase_bytes = b"disposable public development authority fixture";
+    let passphrase = Passphrase::new(passphrase_bytes)?;
+    let mut seed = [0x41 + index; 32];
+    let keypair = libp2p_identity::Keypair::ed25519_from_bytes(&mut seed)?;
+    let identity = Identity::from_keypair(keypair)?;
+    IdentityStore::new(root.join("identity.key")).store_new(&identity, &passphrase)?;
+    write_private(root.join("passphrase"), passphrase_bytes)?;
+    let public = identity.keypair().public().try_into_ed25519()?.to_bytes();
+    println!(
+        "{{\"index\":{index},\"public_key_hex\":\"{}\",\"development_only\":true,\"identities_created\":1}}",
+        encode_hex(&public)
+    );
+    Ok(())
 }
 
 fn write_private(path: impl AsRef<Path>, bytes: &[u8]) -> std::io::Result<()> {

@@ -328,7 +328,40 @@ pub(crate) struct AdapterPublication {
 /// Existing training callers retain their name; publication itself claims no training.
 pub(crate) type TrainingPublication = AdapterPublication;
 
+/// Immutable quorum decision as inert native content; the publisher gains no policy authority.
+pub(crate) struct PolicyDecisionPublication {
+    pub(crate) input: PathBuf,
+    pub(crate) cache: PathBuf,
+    pub(crate) reuse_cache: bool,
+    pub(crate) manifest: PathBuf,
+    pub(crate) name: String,
+    pub(crate) revision: u64,
+    pub(crate) expires_not_after: u64,
+    pub(crate) identity: PathBuf,
+    pub(crate) passphrase_file: PathBuf,
+    pub(crate) limits: Limits,
+}
+
+pub(crate) const POLICY_DECISION_CONTENT_TYPE: &str = "application/vnd.volparossa.object-policy.v1";
+
 impl Publish {
+    pub(crate) fn policy_decision(args: PolicyDecisionPublication) -> Self {
+        Self {
+            input: args.input,
+            cache: args.cache,
+            reuse_cache: args.reuse_cache,
+            contribute: false,
+            manifest: args.manifest,
+            name: args.name,
+            revision: args.revision,
+            content_type: POLICY_DECISION_CONTENT_TYPE.to_owned(),
+            lifetime_seconds: MAX_VALIDITY_SECONDS,
+            expires_not_after: Some(args.expires_not_after),
+            identity: Some(args.identity),
+            passphrase_file: Some(args.passphrase_file),
+            limits: args.limits,
+        }
+    }
     pub(crate) fn training_bundle(args: TrainingPublication) -> Self {
         Self::adapter_bundle(args)
     }
@@ -444,7 +477,7 @@ impl Limits {
                           "min_free_bytes":self.min_free_bytes})
     }
 
-    fn cache_limits(&self) -> Result<CacheLimits> {
+    pub(crate) fn cache_limits(&self) -> Result<CacheLimits> {
         Ok(CacheLimits {
             max_bytes: self.quota_bytes,
             max_entries: usize::try_from(self.max_entries)

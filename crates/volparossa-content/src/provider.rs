@@ -268,6 +268,7 @@ impl VerifiedProviderOffer {
 #[derive(Clone, Default)]
 pub struct PublicationRegistry {
     entries: BTreeMap<[u8; 32], RegisteredPublication>,
+    object_policy: crate::object_policy::ObjectPolicyGate,
     name_lookup: bool,
     mailbox: Option<Arc<crate::mailbox::wire::MailboxService>>,
     custody: Option<Arc<custody::CustodyService>>,
@@ -286,6 +287,12 @@ impl PublicationRegistry {
     /// Construct an empty registry; nothing is served until explicitly registered.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Share the owner's live exact-object decisions with every cloned registry/session.
+    /// The owner must independently verify and durably install policy before exposing it here.
+    pub fn set_object_policy_gate(&mut self, gate: crate::object_policy::ObjectPolicyGate) {
+        self.object_policy = gate;
     }
 
     /// Explicitly enable public publisher/name queries for this service snapshot.
@@ -369,6 +376,9 @@ impl PublicationRegistry {
         now_unix: u64,
     ) -> Result<(), ProviderError> {
         manifest.check_time(now_unix)?;
+        if !self.object_policy.allows_now(&manifest) {
+            return Err(ProviderError::Unavailable);
+        }
         if !root.is_absolute() || root.as_os_str().len() > 4096 {
             return Err(ProviderError::Registry);
         }
@@ -413,6 +423,7 @@ impl PublicationRegistry {
     pub fn has_live_publications(&self, now_unix: u64) -> bool {
         self.entries.values().any(|entry| {
             entry.manifest.check_time(now_unix).is_ok()
+                && self.object_policy.allows_now(&entry.manifest)
                 && (!entry.manifest.chunks().is_empty()
                     || (entry.manifest.length() == 0
                         && entry.manifest.metadata().content_type
@@ -655,7 +666,8 @@ where
         let entry = registry
             .entries
             .get(&id)
-            .filter(|entry| entry.manifest.check_time(current_time).is_ok());
+            .filter(|entry| entry.manifest.check_time(current_time).is_ok()
+                && registry.object_policy.allows_now(&entry.manifest));
         let Some(entry) = entry else {
             reply(stream, &id, MISSING, session.selector_deadline).await?;
             return Err(ProviderError::Missing);
@@ -669,13 +681,13 @@ where
         };
         session.check_deadline()?;
         reply(stream, &id, ACCEPTED, session.selector_deadline).await?;
-        let result = serve_peer(
-            stream,
-            &entry.manifest,
-            &mut store,
-            session.remaining(limits)?,
-        )
-        .await?;
+        let result = tokio::select! {
+            biased;
+            () = registry.object_policy.wait_until_withheld(&entry.manifest) => {
+                return Err(ProviderError::Unavailable);
+            }
+            result = serve_peer(stream, &entry.manifest, &mut store, session.remaining(limits)?) => result?,
+        };
         session.check_deadline()?;
         Ok(result)
     })

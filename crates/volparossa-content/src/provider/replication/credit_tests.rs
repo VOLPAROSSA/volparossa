@@ -76,6 +76,88 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn receiver_object_policy_rejects_denied_frames_before_cache_admission() {
+    use crate::object_policy::{ObjectPolicyGate, ObjectRule, ObjectSubject};
+    let fixture = Fixture::new(2);
+    let gate = ObjectPolicyGate::default();
+    gate.install(ObjectRule {
+        subject: ObjectSubject::from_manifest(&fixture.verified),
+        policy_hash: [1; 32],
+        allow: false,
+        expires_at_ms: fixture.verified.validity().expires * 1000,
+    })
+    .unwrap();
+    for public_only in [false, true] {
+        let mut store = fixture.store(if public_only {
+            "public-denied"
+        } else {
+            "denied"
+        });
+        let (mut client, mut server) = duplex(4096);
+        let exclusions = ReplicationExclusions::default();
+        let (received, transmitted) = tokio::join!(
+            async {
+                let result = pull_replicas_with_policy(
+                    &mut client,
+                    &mut store,
+                    ReplicationLimits::default(),
+                    &exclusions,
+                    public_only,
+                    &gate,
+                    || std::future::ready(true),
+                )
+                .await;
+                drop(client);
+                result
+            },
+            super::super::serve_publication(
+                &mut server,
+                &fixture.registry,
+                TransferLimits::default()
+            ),
+        );
+        assert!(matches!(received, Err(ProviderError::Registry)));
+        assert!(transmitted.is_err());
+        assert_eq!(store.usage().entries, 0);
+        assert!(
+            restore_replicas(&mut store, now().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // A previously retained partial replica cannot use repair to reacquire denied chunks.
+    let mut partial = fixture.store("partial-denied");
+    let mut source = ChunkStore::open(&fixture.source_root, cache_limits()).unwrap();
+    let initial = admit_public_replica(
+        &fixture.signed,
+        &fixture.verified,
+        &mut source,
+        &mut partial,
+        LocalReplicaLimits {
+            max_chunks: 1,
+            max_bytes: CHUNK_BYTES as u64,
+        },
+        now().unwrap(),
+    )
+    .unwrap();
+    let target = &initial.replicas[0];
+    let (mut client, _server) = duplex(64);
+    assert!(matches!(
+        pull_public_repair_with_policy(
+            &mut client,
+            &mut partial,
+            target,
+            ReplicationLimits::default(),
+            &gate,
+            || std::future::ready(true),
+        )
+        .await,
+        Err(ProviderError::Registry)
+    ));
+    assert_eq!(partial.usage().entries, 1);
+}
+
+#[tokio::test]
 async fn exact_public_repair_reopens_partial_journal_without_publisher_key() {
     let fixture = Fixture::new(3);
     let mut store = fixture.store("repair");

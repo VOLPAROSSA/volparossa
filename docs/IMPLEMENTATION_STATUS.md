@@ -4,6 +4,60 @@ This is the repository's source of truth for implementation progress. A checked 
 
 Last updated: 2026-09-23
 
+The completed development milestone is integrated into `main` by
+[PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150), merge `322c45b9`, after the
+unchanged normal Quality/CodeQL checks and source-exact provider/recovery audits passed.
+The new exact-object policy work below is a subsequent development candidate, not part of
+that merged checkpoint. Neither integration nor execution proves reliable model reasoning.
+
+A new node-local policy candidate connects the original four signed assessment/review
+transcripts to `compute peer policy-propose`, `policy-endorse` and `policy-combine --execute --apply`.
+Each command uses explicit `--policy-config` and independently reopens the selected evidence;
+compute-provider keys never become policy signers. The existing separately configured authority
+quorum signs an exact native subject (publisher, manifest ID and complete-object digest), bound
+to the current policy epoch, original evidence, decision revision and expiry. The agent verifies
+and durably retains the original quorum bytes before updating one shared live gate. Restart
+revalidates them; lower revisions and same-revision conflicts cannot replace the retained floor.
+Known denied, undetermined, expired or old-epoch objects are withheld. Unassessed objects still
+need their existing publication authorization; absence of a decision is not a new approval.
+The gate connects native acquisition/serving, queued contribution, custody and replication
+intake rather than copying rules into stale registry snapshots. Twenty-three focused Rust
+checks and scoped strict Clippy pass locally, including actual in-flight withdrawal, denied
+intake/queued copies, mixed-publication restart/reclaim and an isolated custody-service lifecycle.
+The [first extended disposable proof on `6ac301ee`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35893332294)
+**failed** in its restart-evidence checker: it confused manifest schema/version 1 with the
+existing minimum policy protocol version 2. The 170 retained originals contain the actual
+three-authority `undetermined` decision, successful local application, unchanged original
+journal/authority bytes across restart, and `CONTENT_POLICY` cache refusals before and after
+restart. All four model jobs still contain reasoning errors. A prospective check changing only
+that protocol expectation passes the retained evidence, including captures and cleanup;
+the original run remains failed and emitted no final activation report. The fixture now
+distinguishes the fields and has a focused schema regression.
+
+The next candidate adds `compute peer policy-publish` and `policy-import --execute --apply`:
+original quorum bytes travel as an inert signed native object through existing protected
+custody transport. A receiver verifies the exact subject, decision and evidence pins under its
+own configured current authority, then uses the same durable local gate. The content publisher
+does not become a policy signer. Original decision bytes and expiry survive publication,
+import and retry; no model or signing key needs to be transferred to the receiver. The extended
+fixture requires a genuinely cold decision on a separate node, actual custody receipt/export,
+fresh subject-access probes, and unchanged authority after that receiving agent restarts.
+Seven focused CLI checks, strict CLI/agent Clippy, and inert fixture/shell checks pass. The
+[source-exact peer-distribution VM proof on `4d438099`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35896887925)
+now passes its full committed checker against 199 unchanged original files. Four real model
+jobs produce an `undetermined` / `review_disagreement` result. The separately configured
+three-authority quorum authorizes that same result; its 605 original signed bytes reach a
+previously cold second node through protected custody transfer. That receiver verifies its
+own authority and applies the exact-object decision without new model work or signing keys.
+Both nodes serve the original cached subject before application and refuse it with
+`CONTENT_POLICY` after application and after their actual agent restarts. Original decision,
+epoch, expiry and journal records remain unchanged. Five capture records contain 96,199 frames;
+full cleanup and unchanged host state pass. The original model responses still confuse
+principle meanings and contain unfinished prose: correct transport/enforcement is not sound
+judgment, independent reasoning or legality. Automatic channel subscription, network-wide
+membership/conflict governance, physical cache erasure, arbitrary HTTPS inspection and B06
+completion remain open. The earlier `6ac301ee` failure is not relabelled.
+
 An explicitly selected `smollm2-1.7b-v1` inference candidate now addresses the observed
 reasoning limitation without replacing the lightweight training model. It pins the original
 SmolLM2-1.7B files, reuses the existing CPU runtime and verifies actual CPU BF16 parameter
@@ -87,8 +141,8 @@ are retained. The receiver's actual eleven-token EOS answer, however, says "Ther
 in each parallel path." That is factually wrong: each path must have exactly one relay. Local
 serving answered "One path uses 1 relay." These different retained answers do not invalidate the
 weight-transfer evidence, but neither EOS nor improved tiny heldout losses prove sound reasoning.
-Standalone `compute publish-aggregate` remains available. General quality, robust corruption
-rollback for aggregate selections and full B05 remain open.
+Standalone `compute publish-aggregate` remains available. General quality, broader corruption
+recovery and full B05 remain open; the narrower aggregate recovery proof follows below.
 
 An integrity-recovery candidate now handles a damaged selected aggregate or approved local
 successor before restart validation, serving de-duplication and subsequent warmstarts. Only
@@ -100,16 +154,23 @@ baseline, preserves historical counters, pins direct predecessors within bounded
 and removes retired selections from publication retries without recycling revisions. All 97
 focused train-loop tests and strict CLI Clippy pass. These include a complete inert local-to-local
 rollback/withdrawal and historical second-source verification, not real model execution.
-Aggregate recovery still needs the full runtime proof; no completed B05/B07 claim is made.
 The existing disposable `agent-autonomous-aggregation` scenario now includes that candidate's
 local-successor-to-aggregate case after retaining the original training/publication evidence.
 It requires a genuinely approved successor C, damages only its extracted weights, resumes the
 original approved aggregate A twice and submits a protected peer job using exact A weights.
 It then damages A's extraction and requires blocked resume plus withdrawn broker admission:
 the pinned base is not an approved predecessor. Original approval, expiry and counters must
-remain unchanged; one additional bounded inference reuses the existing guest runtime. The new
-phase has not yet passed a live VM run and does not cover successful aggregate-to-aggregate
-rollback or establish general model quality.
+remain unchanged; one additional bounded inference reuses the existing guest runtime.
+The [complete run on `3acc5dd8`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35888432967)
+now passes the exact-source checker over all 247 unchanged original files. It restores approved
+A after the controlled one-byte C extraction fault, preserves A's original approval and expiry
+across restart, and observes a protected inference worker using exact A weights. Damaging A
+with no approved predecessor then stops resume with `aggregate_retirement_no_verified_predecessor`
+and withdraws broker admission. Original model/publication records, three capture sets, zero
+remaining owned objects and identical host bytes pass. The cold C answer still claims two relays
+per path, and restored A's answer contradicts itself about whether the source gives a relay count.
+This proves the scoped recovery/withdrawal mechanics, not successful aggregate-to-aggregate
+rollback, independent remote training attestation, reliable reasoning or completed B05/B07.
 
 A source-grounded synthesis candidate now addresses the observed loss of original evidence
 between model-graph tasks. New 360M `--plan-task-graph --grounded-synthesis` workflows retain
@@ -159,10 +220,10 @@ and strict agent library/test Clippy pass. The disposable `content-provider` tri
 pauses only the exact guest helper, cancels a real named download, requires an independent
 cache-only delivery, then stops the original agent during pending bootstrap and resumes the
 same helper before cleanup. It retains original process identities, receipts and the systemd
-wait result. Sixteen provider checks, including ten inert cancellation cases, pass. Actual
-blocked-helper execution remains pending KVM, not claimed from those inert checks. The legacy
-direct-to-agent-file fetch operations, mailbox and compute request cancellation are outside
-this change.
+wait result. Sixteen provider checks, including ten inert cancellation cases, pass. The actual
+blocked-helper result is the complete `c2a601ed` proof below, not inferred from inert checks.
+The legacy direct-to-agent-file fetch operations, mailbox and compute request cancellation
+are outside this change.
 
 The [provider run on `3d57f418`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35883871060)
 fails before reaching that cancellation phase: all three providers deliver the original
@@ -174,7 +235,17 @@ The adaptive-only fixture now supplies 60 unique chunks (15 MiB), twenty per pro
 Its kernel-timestamp milestones scale by the same factor, preserving the original 5%-75%
 interior-bulk fractions and the strict three-provider overlap requirement. Ordinary two-provider
 vectors, production admission, pacing and timeouts are unchanged. This gives the deliberately
-cold, late-admitted third connection more real payload to overlap; a new live run must prove it.
+cold, late-admitted third connection more real payload to overlap; the follow-up below proves it.
+The [exact-source follow-up on `c2a601ed`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35887694327)
+now passes the complete provider checker, including reconstruction from all 589 original files.
+The three providers' interior bulk windows overlap for 4.822 seconds on native content and
+4.713 seconds on HTTPS content, with all 15 MiB/60 chunks verified. The named-download
+cancellation phase also passes: after cancelling the original CLI while its exact helper is
+paused, an independent cache-only request delivers 2,097,275 bytes in 164 ms without network
+payload; control EOF arrives in 12 ms while the helper remains paused. The helper is resumed,
+the original agent stops completely, cleanup leaves zero owned objects and host bytes match.
+This proves that named pre-ready cancellation case, not every HTTPS cancellation, a speed gain
+over origin retrieval or completed alpha acceptance. The earlier failed run remains failed.
 
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out

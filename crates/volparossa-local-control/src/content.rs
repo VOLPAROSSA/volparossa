@@ -140,6 +140,89 @@ pub struct ContentReplicationConfig {
     pub reuse_replica_cache: bool,
 }
 
+/// Apply one exact-object decision under the agent's existing independently configured quorum.
+/// Caller-selected keys, paths, outcomes or new trust roots are not accepted by this operation.
+#[derive(Clone, PartialEq, Message)]
+pub struct ContentPolicyApplyRequest {
+    /// Original canonical threshold-signed object-decision envelope, verified by the agent.
+    #[prost(bytes = "vec", tag = "1")]
+    pub envelope: Vec<u8>,
+}
+
+impl ContentPolicyApplyRequest {
+    /// Check the fixed message bound; the agent independently verifies all policy authority.
+    ///
+    /// # Errors
+    /// Rejects an empty or oversized decision before dispatch.
+    pub fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.envelope.is_empty() || self.envelope.len() > 8192 {
+            return Err(ControlProtocolError::Invalid("object policy envelope"));
+        }
+        Ok(())
+    }
+}
+
+/// Exact outcome of a quorum decision, not a determination of lawfulness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, prost::Enumeration)]
+#[repr(i32)]
+pub enum ContentPolicyOutcome {
+    /// Invalid for an applied decision.
+    Unspecified = 0,
+    /// Access is allowed only within the original object and epoch lifetime.
+    Allow = 1,
+    /// Access is withheld by the signed decision.
+    Deny = 2,
+    /// Assessment remains contested/uncertain, so this managed object is withheld.
+    Undetermined = 3,
+}
+
+/// Correlated local acknowledgement after durable quorum verification and live gate update.
+#[derive(Clone, PartialEq, Message, serde::Serialize)]
+pub struct ContentPolicyReceipt {
+    /// Receipt version, exactly one.
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    /// Exact native object selected by the decision.
+    #[prost(bytes = "vec", tag = "2")]
+    pub manifest_id: Vec<u8>,
+    /// Original canonical decision body hash, not a newly signed result.
+    #[prost(bytes = "vec", tag = "3")]
+    pub decision_hash: Vec<u8>,
+    /// Durable monotone revision for this exact object.
+    #[prost(uint64, tag = "4")]
+    pub decision_revision: u64,
+    /// Independently configured current policy epoch.
+    #[prost(bytes = "vec", tag = "5")]
+    pub policy_hash: Vec<u8>,
+    /// Exact signed outcome; no user-supplied replacement.
+    #[prost(enumeration = "ContentPolicyOutcome", tag = "6")]
+    pub outcome: i32,
+}
+
+impl ContentPolicyReceipt {
+    /// Validate receipt shape; consumers separately bind it to their original decision.
+    ///
+    /// # Errors
+    /// Rejects missing identities, revisions, unknown versions or outcomes.
+    pub fn validate(&self) -> Result<(), ControlProtocolError> {
+        if self.version != 1
+            || self.decision_revision == 0
+            || [&self.manifest_id, &self.decision_hash, &self.policy_hash]
+                .iter()
+                .any(|id| id.len() != 32 || id.iter().all(|byte| *byte == 0))
+            || !matches!(
+                ContentPolicyOutcome::try_from(self.outcome),
+                Ok(ContentPolicyOutcome::Allow
+                    | ContentPolicyOutcome::Deny
+                    | ContentPolicyOutcome::Undetermined)
+            )
+        {
+            return Err(ControlProtocolError::Invalid("object policy receipt"));
+        }
+        Ok(())
+    }
+}
+
 /// Register one explicit publication and start/reuse the agent's bounded public content service.
 #[derive(Clone, PartialEq, Message)]
 pub struct ContentServeRequest {
@@ -566,6 +649,65 @@ mod tests {
         control_request::Operation, control_response::Payload, decode_request, decode_response,
         encode_request, encode_response,
     };
+
+    #[test]
+    fn object_policy_application_and_receipt_use_bounded_typed_control_frames() {
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![3; 16],
+            operation: Some(Operation::ContentPolicyApply(ContentPolicyApplyRequest {
+                envelope: vec![4; 8192],
+            })),
+        };
+        assert_eq!(
+            decode_request(&encode_request(&request).unwrap()).unwrap(),
+            request
+        );
+        for envelope in [Vec::new(), vec![4; 8193]] {
+            let invalid = ControlRequest {
+                operation: Some(Operation::ContentPolicyApply(ContentPolicyApplyRequest {
+                    envelope,
+                })),
+                ..request.clone()
+            };
+            assert!(encode_request(&invalid).is_err());
+        }
+        let receipt = ContentPolicyReceipt {
+            version: 1,
+            manifest_id: vec![4; 32],
+            decision_hash: vec![5; 32],
+            decision_revision: 7,
+            policy_hash: vec![6; 32],
+            outcome: ContentPolicyOutcome::Deny as i32,
+        };
+        let response = ControlResponse {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: vec![3; 16],
+            result: ControlResult::Ok as i32,
+            diagnostic_code: "CONTENT_POLICY_APPLIED".into(),
+            payload: Some(Payload::ContentPolicy(receipt.clone())),
+        };
+        assert_eq!(
+            decode_response(&encode_response(&response).unwrap()).unwrap(),
+            response
+        );
+        assert!(
+            ContentPolicyReceipt {
+                outcome: 0,
+                ..receipt.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ContentPolicyReceipt {
+                decision_revision: 0,
+                ..receipt
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     #[test]
     fn named_content_request_and_ready_are_bounded_and_opt_in() {

@@ -12,6 +12,7 @@ mod custody;
 mod https;
 mod mailbox;
 mod named;
+mod object_policy;
 mod parallel;
 mod recent;
 mod replication;
@@ -98,6 +99,8 @@ pub(crate) struct ContentRuntime {
     worker_budget: worker_budget::WorkerBudget,
     contribution: Arc<Mutex<Option<Arc<contribution::ContributionRuntime>>>>,
     compute: Arc<Mutex<Option<Arc<compute::Attachment>>>>,
+    object_policy: volparossa_content::object_policy::ObjectPolicyGate,
+    object_policy_owner: Arc<std::sync::OnceLock<object_policy::ObjectPolicyOwner>>,
 }
 
 struct Service {
@@ -149,6 +152,76 @@ impl ContentRuntime {
             worker_budget: worker_budget::WorkerBudget::default(),
             contribution: Arc::new(Mutex::new(None)),
             compute: Arc::new(Mutex::new(None)),
+            object_policy: volparossa_content::object_policy::ObjectPolicyGate::default(),
+            object_policy_owner: Arc::new(std::sync::OnceLock::new()),
+        })
+    }
+
+    pub(crate) fn configure_object_policy(
+        &self,
+        config: &volparossa_config::Config,
+        trust: &std::path::Path,
+        state: &std::path::Path,
+        current: Option<&volparossa_policy::VerifiedManifest>,
+    ) -> Result<(), ContentError> {
+        let owner = object_policy::ObjectPolicyOwner::load(
+            config,
+            trust,
+            state,
+            current,
+            self.object_policy.clone(),
+        )?;
+        self.object_policy_owner
+            .set(owner)
+            .map_err(|_| ContentError::Invalid)
+    }
+
+    pub(crate) fn object_policy_gate(&self) -> volparossa_content::object_policy::ObjectPolicyGate {
+        self.object_policy.clone()
+    }
+
+    pub(crate) fn check_object_policy(
+        &self,
+        manifest: &VerifiedManifest,
+    ) -> Result<(), ContentError> {
+        if self.object_policy.allows_now(manifest) {
+            Ok(())
+        } else {
+            Err(ContentError::Policy)
+        }
+    }
+
+    pub(crate) async fn apply_object_policy(
+        &self,
+        request: volparossa_local_control::ContentPolicyApplyRequest,
+        context: &ControlContext,
+    ) -> Result<volparossa_local_control::ContentPolicyReceipt, ContentError> {
+        use volparossa_local_control::{ContentPolicyOutcome, ContentPolicyReceipt};
+        use volparossa_policy::object::ObjectOutcome;
+        request.validate().map_err(|_| ContentError::Invalid)?;
+        let current = context
+            .state
+            .read()
+            .await
+            .active_policy(unix_millis())
+            .ok_or(ContentError::Policy)?;
+        let verified = self
+            .object_policy_owner
+            .get()
+            .ok_or(ContentError::Unavailable)?
+            .apply(&request.envelope, &current)?;
+        let body = verified.body();
+        Ok(ContentPolicyReceipt {
+            version: 1,
+            manifest_id: body.subject.manifest_id.to_vec(),
+            decision_hash: verified.decision_hash().to_vec(),
+            decision_revision: body.decision_revision,
+            policy_hash: body.policy_hash.to_vec(),
+            outcome: match body.outcome {
+                ObjectOutcome::Allow => ContentPolicyOutcome::Allow,
+                ObjectOutcome::Deny => ContentPolicyOutcome::Deny,
+                ObjectOutcome::Undetermined => ContentPolicyOutcome::Undetermined,
+            } as i32,
         })
     }
 
@@ -159,7 +232,7 @@ impl ContentRuntime {
     ) -> Result<ContentReceipt, ContentError> {
         let mut service = self.service.try_lock().map_err(|_| ContentError::Busy)?;
         let policy = serving_policy(context).await?;
-        verified(&request.manifest, &request.publisher_key)?;
+        self.check_object_policy(&verified(&request.manifest, &request.publisher_key)?)?;
         let bind: SocketAddr = request
             .bind_address
             .parse()
@@ -202,6 +275,7 @@ impl ContentRuntime {
             return Ok(receipt);
         }
         let mut registry = PublicationRegistry::new();
+        registry.set_object_policy_gate(self.object_policy.clone());
         register(&mut registry, &request, cache_limits)?;
         let replication = request
             .replication
@@ -234,9 +308,10 @@ impl ContentRuntime {
         context: &ControlContext,
         bind: SocketAddr,
         endpoint: ProviderEndpoint,
-        registry: PublicationRegistry,
+        mut registry: PublicationRegistry,
         options: ServiceOptions,
     ) -> Result<Service, ContentError> {
+        registry.set_object_policy_gate(self.object_policy.clone());
         let tls = tls::ContentTlsServer::new(&self.tls_identity, endpoint.hostname())
             .map_err(|_| ContentError::Unavailable)?;
         let listener = TcpListener::bind(bind)
@@ -447,11 +522,15 @@ impl ContentRuntime {
         request: ContentFetchRequest,
         context: &ControlContext,
     ) -> Result<ContentReceipt, ContentError> {
+        let manifest = verified(&request.manifest, &request.publisher_key)?;
+        self.check_object_policy(&manifest)?;
         let foreground = self.foreground.enter();
         let retrieval = self.retrieval.try_lock().map_err(|_| ContentError::Busy)?;
-        let result = timeout(OPERATION_TIMEOUT, Self::fetch_inner(request, context))
-            .await
-            .map_err(|_| ContentError::Unavailable)?;
+        let result = tokio::select! {
+            biased;
+            () = self.object_policy.wait_until_withheld(&manifest) => Err(ContentError::Policy),
+            result = timeout(OPERATION_TIMEOUT, Self::fetch_inner(request, context)) => result.map_err(|_| ContentError::Unavailable)?,
+        };
         drop(retrieval);
         drop(foreground);
         if result.is_ok() {

@@ -194,6 +194,7 @@ where
                 && entry.manifest.length() == query.length()
                 && entry.manifest.metadata().content_type != PRIVATE_MESSAGE_CONTENT_TYPE
                 && entry.manifest.check_time(at).is_ok()
+                && registry.object_policy.allows_now(&entry.manifest)
             {
                 if let Some(signed) = entry.signed.as_ref() {
                     selected = Some((signed.encode(), entry.manifest.validity().expires));

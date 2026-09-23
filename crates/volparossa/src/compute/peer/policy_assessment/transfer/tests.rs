@@ -444,6 +444,14 @@ fn change_json(encoded: &mut Value, change: impl FnOnce(&mut Value)) {
     *encoded = hex::encode(serde_json::to_vec(&value).unwrap()).into();
 }
 
+pub(in crate::compute::peer::policy_assessment) async fn fixture_bundle(
+    root: &Path,
+    requester: &SigningKey,
+) -> Vec<u8> {
+    fixture(root, requester, 2).await;
+    serde_json::to_vec(&bundle::collect(root, &key(requester)).unwrap()).unwrap()
+}
+
 fn projected(value: &Value, requester: &str) -> Result<Value> {
     let package = bundle::decode(&serde_json::to_vec(value)?)?;
     let parent = private_root();

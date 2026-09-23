@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use volparossa_content::{
     CHUNK_BYTES, CacheLimits, ChunkStore, Error, Metadata, Publication, SignedManifest, Validity,
     VerifiedManifest,
+    object_policy::{ObjectPolicyGate, ObjectRule, ObjectSubject},
     provider::{
         MAX_PROVIDER_OFFER_BYTES, MAX_REGISTERED_PUBLICATIONS, ProviderEndpoint, ProviderError,
         PublicationRegistry, SignedProviderOffer, pull_publication, serve_publication,
@@ -18,6 +19,124 @@ use volparossa_content::{
     publish, reassemble_to_file,
     transfer::{TransferError, TransferLimits},
 };
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One actual transfer, live withdrawal and retained-snapshot probe.
+async fn object_policy_withholds_a_live_payload_and_preexisting_registry_snapshot() {
+    let root = tempfile::tempdir().expect("root");
+    let cache_root = root.path().join("provider");
+    let mut source = ChunkStore::create(&cache_root, cache_limits()).expect("source");
+    let sender = SigningKey::generate(&mut rand_core::OsRng);
+    let bytes = vec![0x53; CHUNK_BYTES];
+    let manifest = publication(&bytes, &sender, &mut source)
+        .verify(&sender.verifying_key(), now())
+        .expect("manifest");
+    drop(source);
+    let gate = ObjectPolicyGate::default();
+    gate.set_epoch(Some([0x71; 32]));
+    let rule = ObjectRule {
+        subject: ObjectSubject::from_manifest(&manifest),
+        policy_hash: [0x71; 32],
+        allow: true,
+        expires_at_ms: (now() + 60) * 1000,
+    };
+    gate.install(rule).expect("verified caller rule");
+    let mut registry = PublicationRegistry::new();
+    registry.set_object_policy_gate(gate.clone());
+    registry
+        .register(manifest.clone(), cache_root.clone(), cache_limits(), now())
+        .expect("registered while allowed");
+    let old_snapshot = registry.clone();
+    let mut consumer =
+        ChunkStore::create(&root.path().join("consumer"), cache_limits()).expect("consumer");
+
+    // A bounded duplex relay observes the actual data stream before changing policy.
+    // No timing assumption, mocked transfer, or production delay triggers withdrawal.
+    let (mut client, bridge_client) = duplex(4096);
+    let (bridge_server, mut server) = duplex(4096);
+    let (mut requests_in, mut responses_out) = tokio::io::split(bridge_client);
+    let (mut responses_in, mut requests_out) = tokio::io::split(bridge_server);
+    let receiving = async {
+        let result = pull_publication(
+            &mut client,
+            &manifest,
+            &mut consumer,
+            TransferLimits::default(),
+        )
+        .await;
+        drop(client);
+        result
+    };
+    let sending = async {
+        let result = serve_publication(&mut server, &old_snapshot, TransferLimits::default()).await;
+        drop(server);
+        result
+    };
+    let requests = async {
+        let result = tokio::io::copy(&mut requests_in, &mut requests_out).await;
+        let _ = requests_out.shutdown().await;
+        result
+    };
+    let responses = async {
+        let mut wire_bytes = 0;
+        let mut buffer = [0; 4096];
+        loop {
+            let count = responses_in
+                .read(&mut buffer)
+                .await
+                .expect("actual response");
+            if count == 0 {
+                break;
+            }
+            responses_out
+                .write_all(&buffer[..count])
+                .await
+                .expect("forward response");
+            wire_bytes += count;
+            if wire_bytes >= 64 * 1024 && gate.allows_now(&manifest) {
+                gate.install(ObjectRule {
+                    allow: false,
+                    ..rule
+                })
+                .expect("withdraw now");
+            }
+        }
+        responses_out.shutdown().await.expect("propagate close");
+        wire_bytes
+    };
+    let (received, sent, _, wire_bytes) =
+        Box::pin(tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(receiving, sending, requests, responses)
+        }))
+        .await
+        .expect("withdrawal closes the live stream promptly");
+    assert!(received.is_err());
+    assert!(matches!(sent, Err(ProviderError::Unavailable)));
+    assert!(wire_bytes >= 64 * 1024, "real payload preceded withdrawal");
+    assert!(
+        wire_bytes < CHUNK_BYTES,
+        "withdrawal interrupted this chunk"
+    );
+    assert_eq!(
+        consumer.usage().entries,
+        0,
+        "partial bytes were not admitted"
+    );
+    assert!(!old_snapshot.has_live_publications(now()));
+    let (received, sent) = transfer(&manifest, &mut consumer, &old_snapshot).await;
+    assert!(matches!(received, Err(ProviderError::Missing)));
+    assert!(matches!(sent, Err(ProviderError::Missing)));
+    assert!(matches!(
+        registry.register(manifest.clone(), cache_root.clone(), cache_limits(), now()),
+        Err(ProviderError::Unavailable)
+    ));
+    // Withholding is not destructive removal of potentially shared cache chunks.
+    let mut retained = ChunkStore::open(&cache_root, cache_limits()).expect("source released");
+    assert_eq!(
+        retained.get(manifest.chunks()[0].id()).unwrap().unwrap(),
+        bytes
+    );
+}
 
 #[tokio::test]
 async fn two_registered_disjoint_replicas_fill_exact_manifest_after_publisher_disappears() {

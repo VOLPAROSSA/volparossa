@@ -56,6 +56,26 @@ pub fn load_active_policy(
     if config.policy.manifest_path.trim().is_empty() {
         return Ok(None);
     }
+    let (trust_store, verification) = load_authority(config, trust_path)?;
+    let manifest_path = Path::new(&config.policy.manifest_path);
+    if !manifest_path.is_absolute() {
+        return Err(PolicyLoadError::ManifestPath);
+    }
+    let manifest = read_integrity_file(
+        manifest_path,
+        u64::try_from(MAX_SIGNED_MANIFEST_BYTES).expect("small bound"),
+    )?;
+    let verified = verify_manifest(&manifest, now_ms, &trust_store, verification)
+        .map_err(PolicyLoadError::Policy)?;
+    floor::accept(state_directory, &trust_store, &verified).map_err(PolicyLoadError::Floor)?;
+    Ok(Some(verified))
+}
+
+/// Reuse the exact bounded configured authority parser without activating a manifest.
+pub(crate) fn load_authority(
+    config: &Config,
+    trust_path: &Path,
+) -> Result<(TrustStore, VerificationPolicy), PolicyLoadError> {
     let trust_bytes = read_integrity_file(trust_path, MAX_TRUST_FILE_BYTES)?;
     let trust_file: TrustFile =
         serde_json::from_slice(&trust_bytes).map_err(|_| PolicyLoadError::TrustSyntax)?;
@@ -83,18 +103,7 @@ pub fn load_active_policy(
         DEFAULT_MAXIMUM_CLOCK_SKEW_MS,
     )
     .map_err(PolicyLoadError::Policy)?;
-    let manifest_path = Path::new(&config.policy.manifest_path);
-    if !manifest_path.is_absolute() {
-        return Err(PolicyLoadError::ManifestPath);
-    }
-    let manifest = read_integrity_file(
-        manifest_path,
-        u64::try_from(MAX_SIGNED_MANIFEST_BYTES).expect("small bound"),
-    )?;
-    let verified = verify_manifest(&manifest, now_ms, &trust_store, verification)
-        .map_err(PolicyLoadError::Policy)?;
-    floor::accept(state_directory, &trust_store, &verified).map_err(PolicyLoadError::Floor)?;
-    Ok(Some(verified))
+    Ok((trust_store, verification))
 }
 
 fn trusted_maintainer(
@@ -117,7 +126,7 @@ fn trusted_maintainer(
     Ok(TrustedMaintainer::new(key, environment))
 }
 
-fn read_integrity_file(path: &Path, maximum: u64) -> Result<Vec<u8>, PolicyLoadError> {
+pub(crate) fn read_integrity_file(path: &Path, maximum: u64) -> Result<Vec<u8>, PolicyLoadError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| PolicyLoadError::Io {
         path: path.to_owned(),
         source,

@@ -646,7 +646,7 @@ not averaging/merging weights, private offload, poisoning-resistant aggregation,
 planning or a complete continuously self-improving brain. Reusing a small validation set also
 does not establish general quality, diversity, or immunity to malicious updates.
 
-### Combining three public adapter contributions (runtime proof pending)
+### Combining three public adapter contributions
 
 `compute aggregate-adapters` implements an explicit, bounded next step beyond choosing one
 peer's adapter. Its owner-selected plan names one exact signed training dataset and three
@@ -765,9 +765,17 @@ returning to its exact still-approved, unexpired predecessor; no valid predecess
 base-model fallback. Interrupted comparisons against the retired version are not reinterpreted.
 Original authority deadlines and training counters remain unchanged; retired versions cannot
 retry publication or recycle an allocated revision. Ambiguous evidence still fails closed,
-not as an accusation or automatic ban of publishers. Focused tests cover inert local rollback,
-withdrawal and historical validation, but real aggregate/successor recovery remains to be
-proved in the disposable VM.
+not as an accusation or automatic ban of publishers. The
+[complete `3acc5dd8` disposable proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35888432967)
+now passes source-exact checking: damaging the approved local successor C restores its original
+approved aggregate A, preserves original approval/expiry across restart, and serves a protected
+job with exact A weights. Damaging A without an approved predecessor stops resume and withdraws
+new broker admissions; it does not invent a base-model approval. All original training/publication
+records, three packet-capture sets, cleanup and unchanged host state pass. The retained cold C
+answer is wrong about relay count, and restored A's answer is internally inconsistent. This is
+local integrity recovery, not sound reasoning, successful aggregate-to-aggregate rollback or
+complete B05/B07. The milestone is integrated through [PR #150](https://github.com/VOLPAROSSA/volparossa/pull/150)
+in `main` at `322c45b9`.
 
 This opt-in mode is mutually exclusive with `--peer-updates`; resume cannot grant an old
 enrollment new publishers or adoption authority. Add the existing `--publish-name`,
@@ -1910,8 +1918,9 @@ real-model/cache roundtrip; the disposable fixture now exercises that additional
 four model outputs actually complete.
 
 This does not complete B06: these concepts are not authorized network-wide policy decisions,
-legal determinations, authority membership/quorum, conflict resolution across partitions or
-automatic cache/exit enforcement. The existing threshold-signed destination policy is unchanged.
+legal determinations, decentralized authority membership or conflict resolution across partitions.
+Packing or fetching a judgment does not activate it. The separate node-local exact-object
+activation candidate below retains the existing authority quorum and destination-policy scope.
 
 Default-360M assessment workflows use enrollment version 2; explicitly selected larger models
 use enrollment version 3 with their retained profile. Both use signed
@@ -1959,6 +1968,89 @@ cross-review or portable roundtrip does. The identical assessment texts contain 
 mistakes and unfinished prose; these observations explicitly do not establish useful independent
 reasoning. Correcting the response envelope addresses that separate execution blocker, not
 semantic quality or legal correctness. B06 and automatic network-policy activation stay open.
+
+The later [complete run on `fb574fdb`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35855257313)
+passes all four real model stages, original provider-signed transcripts, protected transfer of
+the 225,132-byte package and offline replay with no new model work. Captures, cleanup and
+unchanged host state pass. Both assessments and reviews still contain incorrect principle
+meanings and unfinished prose; the concept is `undetermined` / `review_disagreement`. Earlier
+failed runs stay failed. This establishes execution and provenance, not sound independent
+reasoning, legal authority or automatic global governance.
+
+#### Applying an exact-object decision locally (new candidate)
+
+The new local vertical connects those judgments to the existing **separate policy
+authority quorum**. Compute providers remain assessors, not policy maintainers. It adds:
+
+1. `compute peer policy-propose`: reopen the selected portable bundle, verify all four original
+   signed transcripts and derive the outcome; bind the exact publisher, native manifest ID,
+   complete-object digest, framework/evidence hashes, current policy epoch, revision and expiry.
+2. `compute peer policy-endorse`: each configured authority independently reopens the same
+   evidence and signs the unchanged proposal using its own identity.
+3. `compute peer policy-combine`: verify the configured threshold over identical decisions and
+   retain `decision.bin`. Add `--execute --apply` to send it through the node's protected local
+   control API; without `--apply`, combination does not activate it.
+
+These commands use explicit `--policy-config /absolute/path/config.yaml`, not the global
+`--config` option as an authority selector. They require explicit source/requester/provider
+identities and the original assessment bundle. Omit `--execute` for an inert preview. No model
+is rerun, no human moral verdict is substituted, and no compute peer supplies new trust keys.
+Original source/policy expiry bounds the decision; copying, retrying or restarting cannot renew it.
+
+The agent verifies the current authority and epoch, then durably records the original signed
+decision before installing it in a shared live gate. Its retained per-object revision floor
+rejects rollback and same-revision conflicts across restart. Registries, active transfers and
+new native-content work share the gate; contribution/custody and replication intake use
+the same checks. `deny` and `undetermined` withhold the exact object, as do expiry
+or a changed epoch for a previously decided object. An absent rule grants no new permission:
+existing signature, publication and source-eligibility checks still apply. Allowing one object
+does not authorize its publisher, hostname or other revisions wholesale.
+
+Focused CLI/owner and real-duplex gate checks pass locally. The first extended
+[`agent-policy-assessment` VM proof](https://github.com/VOLPAROSSA/volparossa/actions/runs/35893332294)
+**failed** because its checker expected policy protocol 1 instead of the existing protocol 2.
+Original records retain actual local quorum application and cache refusal across restart;
+the checker correction is not a retroactive passing run. A successful local receipt intentionally keeps
+`network_policy_activation=false` and reports `local_object_policy_applied=true`: only this
+node's exact-object gate changes. Automatic network-wide distribution, authority membership,
+partition/conflict governance, physical cache deletion, arbitrary HTTPS inspection and legal
+correctness remain outside this candidate. It does not complete B06 or make uncertain model
+judgments trustworthy.
+
+#### Distributing an original decision through the cache (new candidate)
+
+`compute peer policy-publish` wraps the original `decision.bin` in a signed native publication
+with MIME type `application/vnd.volparossa.object-policy.v1`. Its private output contains
+`decision.bin`, `publication.manifest`, `cache/` and immutable selection metadata. The wrapper
+uses a content publisher identity, not a new policy authority, and never outlives the original
+decision. Publication is local; existing explicit `content custody deposit` or contribution
+operations provide protected sharing. Retrying retains the original bytes and lease.
+
+After fetching or exporting and assembling that object from its own cache, a receiving node
+can run `compute peer policy-import --execute --apply`. Both commands require independently
+selected `--subject-publisher-key`, `--subject-manifest-id`, `--subject-sha256`, `--decision-hash`
+and `--evidence-sha256`, plus the node's own `--policy-config`. Import needs no publication
+identity, private policy keys or model worker. It verifies the original quorum and current
+epoch before asking its own agent to apply the exact object decision. Omit `--apply` to retain
+verified bytes without changing the gate, or omit `--execute` for an inert preview.
+
+This is explicit node-to-node distribution, **not automatic network-wide consensus**. The
+second-node cache-transfer/application/restart
+[proof on `4d438099`](https://github.com/VOLPAROSSA/volparossa/actions/runs/35896887925) now passes
+the complete committed checker against 199 unchanged originals. Four real model jobs yield
+`undetermined`; the existing three-authority quorum signs that actual result, and its 605
+original bytes travel through protected custody to a previously cold second node. Both nodes
+serve the cached subject before application and withhold it afterwards, including after actual
+agent restarts with unchanged original authority/decision records. Five capture records
+(96,199 frames), cleanup and unchanged host state pass. No alternate Allow/Deny outcome was
+substituted. The model's incorrect principle meanings and unfinished prose remain visible;
+successful enforcement does not make its reasoning correct.
+
+Automatic subscriptions, policy-authority membership and partition/conflict handling remain
+separate work. Publisher signatures authenticate transport objects; they cannot replace the
+receiving node's policy trust or prove the assessors' judgments correct. This proves a selected
+two-node development path, not complete B06 or global governance; the earlier failed run stays
+failed.
 
 Bind observations to specific agent/model artifacts, task contracts and observed failures.
 Use independently checked outcomes, regression/poisoning checks and diverse assessors; copied

@@ -100,8 +100,11 @@ async fn restarted_runtime_repairs_exact_missing_public_chunks_and_serves_after_
     let target = runtime.repair_candidate().await.unwrap().unwrap();
     assert_eq!(target.chunk_ids().len(), 1);
     let (mut receiver, mut sender) = tokio::io::duplex(4096);
+    let object_policy = volparossa_content::object_policy::ObjectPolicyGate::default();
     let (uptake, transmitted) = tokio::join!(
-        runtime.repair_from_stream(&mut receiver, &target, || std::future::ready(true)),
+        runtime.repair_from_stream(&mut receiver, &target, &object_policy, || {
+            std::future::ready(true)
+        }),
         serve_publication(&mut sender, &source_registry, TransferLimits::default()),
     );
     assert_eq!(uptake.unwrap().chunks, 2);

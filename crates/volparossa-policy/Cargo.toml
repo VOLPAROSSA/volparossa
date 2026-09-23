@@ -17,5 +17,9 @@ subtle.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+libp2p-identity.workspace = true
+volparossa-identity = { path = "../volparossa-identity", version = "=0.1.0" }
+
 [lints]
 workspace = true

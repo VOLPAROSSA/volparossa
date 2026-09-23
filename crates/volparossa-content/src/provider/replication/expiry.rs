@@ -20,6 +20,12 @@ pub struct ReplicaReclamation {
 }
 
 impl PublicationRegistry {
+    /// Whether this exact retained replica is not withheld by the receiver's object gate.
+    /// This is not consumer authorization and does not alter its original signed lifetime.
+    pub fn allows_replica(&self, replica: &Replica) -> bool {
+        self.object_policy.allows_now(&replica.checked)
+    }
+
     /// Reclaim only expired journaled replicas in this exact caller-selected owned cache.
     ///
     /// Live journal references and every explicit foreground registration retain their chunks.

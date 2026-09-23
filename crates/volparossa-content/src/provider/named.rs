@@ -271,6 +271,7 @@ fn select<'a>(
             || manifest.metadata().revision < query.min_revision
             || manifest.metadata().content_type == PRIVATE_MESSAGE_CONTENT_TYPE
             || manifest.check_time(now_unix).is_err()
+            || !registry.object_policy.allows_now(manifest)
         {
             continue;
         }
