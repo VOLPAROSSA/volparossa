@@ -1052,6 +1052,44 @@ the stated time, not future reachability, a global latest revision or permanent 
 This explicit workflow does not yet choose holders automatically or repair a lost replica.
 Private messages use the separate encrypted mailbox workflow, not public custody.
 
+### Automatically maintaining public copies
+
+The development `content retain` candidate adds owner-enrolled holder discovery and repair.
+It retains an existing public publication; it does not publish private browsing responses or
+renew the publisher's original expiry. No provider keys need to be chosen manually. Receivers
+must run the contribution service above, and both the sender's `sharing` and
+`download_sharing` budgets must be enabled with the actual accounting interfaces configured.
+Unknown/busy accounting defers background work; configured capacity is not measured spare
+ISP capacity or a guarantee of zero slowdown.
+
+```sh
+volparossa content retain \
+  --manifest /private/publishing/notes.v1.pb \
+  --cache /private/publishing/content-cache \
+  --identity /private/publishing/identity.key \
+  --passphrase-file /private/publishing/passphrase \
+  --copies 2 --directory /private/publishing/notes-retention \
+  --max-seconds 3600 --poll-seconds 30 --max-upload-bytes 67108864
+```
+
+Without `--execute`, this only prints the enrollment preview: no files, key unlock or network
+requests. The state directory must be new under a private owned `0700` parent and separate
+from the source cache. Add `--execute` to maintain copies for the stated lifetime, capped by
+the original publication expiry. To resume, repeat the exact original arguments with
+`--execute --resume`; neither the deadline nor spent upload budget resets. Every deposit
+reserves the full logical object size before attempting upload, including failed/interrupted
+attempts. This conservative budget is not a count of actual wire bytes.
+
+The private `status.json` reports the last poll, observed holders and remaining enrollment
+state. Signed offers are only discovery hints, not storage-capacity promises. A counted copy
+requires the fresh original signed custody exchange and successful local handoff. Historical
+receipts are retained for verification, never treated as fresh availability after restart.
+SIGINT/SIGTERM ends the owner loop and closes its in-flight exchange; the original stored
+copies may still be served until their original expiry while holders remain available.
+Maintenance does not continue while the owner is offline. Network loss/replacement evidence
+for this new combined controller is still pending; it does not promise globally fair placement
+or permanent site availability.
+
 The configured contribution service now also schedules bounded idle repair of **healthy partial
 public journal records** after restart. This is separate from the explicit publisher Deposit/
 Inspect commands. A receiving node must have client and relay roles, active policy and the

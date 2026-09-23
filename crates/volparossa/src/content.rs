@@ -31,6 +31,7 @@ pub(crate) mod policy_decision;
 pub(crate) mod policy_exchange;
 mod private_message;
 pub(crate) mod public_text;
+mod retain;
 mod site;
 pub(crate) mod source_catalog;
 
@@ -48,6 +49,8 @@ pub(crate) enum Command {
     /// Deposit or inspect original public publications at independently selected providers.
     #[command(subcommand)]
     Custody(custody::Command),
+    /// Maintain owner-authorized public copies using discovered providers and fresh custody receipts.
+    Retain(Box<retain::Options>),
     /// Chunk and sign a local file; optionally contribute it through the configured agent.
     Publish(Publish),
     /// Re-offer an existing signed public manifest and owned cache without signing again.
@@ -506,6 +509,7 @@ pub(crate) async fn run(command: Command, socket: &Path) -> Result<()> {
         Command::BrowserDownload(args) => return browser_download::run(args, socket).await,
         Command::Mailbox(args) => return mailbox::run(args, socket).await,
         Command::Custody(args) => return custody::run(args, socket).await,
+        Command::Retain(args) => return Box::pin(retain::run(&args, socket)).await,
         Command::Publish(args) => publish_command(&args, socket).await?,
         Command::Contribute(args) => contribute_existing(&args, socket).await?,
         Command::RecipientKey(args) => private_message::recipient_key(&args)?,

@@ -189,6 +189,26 @@ async fn exchange(
     Result<CustodyReceipt, CustodyError>,
     Result<TransferProgress, super::super::ProviderError>,
 ) {
+    exchange_admitted(fixture, operation, TransferLimits::default(), |_| async {
+        true
+    })
+    .await
+}
+
+async fn exchange_admitted<F, Fut>(
+    fixture: &mut Fixture,
+    operation: CustodyOperation,
+    limits: TransferLimits,
+    admit: F,
+) -> (
+    Result<CustodyReceipt, CustodyError>,
+    Result<CustodyReceipt, CustodyError>,
+    Result<TransferProgress, super::super::ProviderError>,
+)
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = bool>,
+{
     let (mut application, mut local) = duplex(1024);
     let (mut remote, mut server) = duplex(1024);
     let registry = fixture.registry.lock().await.clone();
@@ -206,7 +226,7 @@ async fn exchange(
             &challenge,
             &authorization,
             (operation == CustodyOperation::Deposit).then_some(source),
-            TransferLimits::default(),
+            limits,
         )
         .await
     };
@@ -215,19 +235,105 @@ async fn exchange(
         let challenge = begin(&mut remote, &provider).await?;
         send.send(challenge.clone())
             .map_err(|_| CustodyError::Invalid)?;
-        bridge(
+        bridge_with_admission(
             &mut local,
             &mut remote,
             &challenge,
             &signed,
             operation,
-            TransferLimits::default(),
+            limits,
+            admit,
         )
         .await
     };
-    let provider =
-        async move { serve_publication(&mut server, &registry, TransferLimits::default()).await };
+    let provider = async move { serve_publication(&mut server, &registry, limits).await };
     tokio::join!(client, agent, provider)
+}
+
+#[tokio::test]
+async fn custody_chunk_admission_charges_actual_unique_requests_and_can_withhold() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let mut fixture = fixture(16, "application/octet-stream").await;
+    let admitted = AtomicU64::new(0);
+    let (client, agent, provider) = exchange_admitted(
+        &mut fixture,
+        CustodyOperation::Deposit,
+        TransferLimits::default(),
+        |bytes| {
+            admitted.fetch_add(bytes, Ordering::SeqCst);
+            async { false }
+        },
+    )
+    .await;
+    assert!(client.is_err() && agent.is_err() && provider.is_err());
+    assert_eq!(admitted.load(Ordering::SeqCst), CHUNK_BYTES as u64);
+    assert!(
+        !fixture
+            .registry
+            .lock()
+            .await
+            .contains(fixture.manifest.manifest_id())
+    );
+    assert!(
+        fixture
+            .backend
+            .storage
+            .inspect_complete(fixture.manifest.manifest_id(), protocol::now().unwrap())
+            .unwrap()
+            .is_none()
+    );
+
+    admitted.store(0, Ordering::SeqCst);
+    let (client, agent, provider) = exchange_admitted(
+        &mut fixture,
+        CustodyOperation::Deposit,
+        TransferLimits::default(),
+        |bytes| {
+            admitted.fetch_add(bytes, Ordering::SeqCst);
+            async { true }
+        },
+    )
+    .await;
+    assert_eq!(client.unwrap().encode(), agent.unwrap().encode());
+    assert!(provider.is_ok());
+    assert_eq!(
+        admitted.load(Ordering::SeqCst),
+        (2 * CHUNK_BYTES + 123) as u64
+    );
+}
+
+#[tokio::test]
+async fn custody_waiting_chunk_admission_keeps_original_deadline() {
+    use std::{
+        future::pending,
+        sync::atomic::{AtomicBool, Ordering},
+        time::Duration,
+    };
+    let mut fixture = fixture(16, "application/octet-stream").await;
+    let called = AtomicBool::new(false);
+    let limits = TransferLimits {
+        exchange_timeout: Duration::from_millis(150),
+        session_timeout: Duration::from_secs(1),
+        ..TransferLimits::default()
+    };
+    let (client, agent, provider) = tokio::time::timeout(
+        Duration::from_secs(3),
+        exchange_admitted(&mut fixture, CustodyOperation::Deposit, limits, |_| {
+            called.store(true, Ordering::SeqCst);
+            pending::<bool>()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(called.load(Ordering::SeqCst));
+    assert!(client.is_err() && agent.is_err() && provider.is_err());
+    assert!(
+        !fixture
+            .registry
+            .lock()
+            .await
+            .contains(fixture.manifest.manifest_id())
+    );
 }
 
 #[tokio::test]

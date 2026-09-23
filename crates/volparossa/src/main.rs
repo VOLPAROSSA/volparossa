@@ -667,6 +667,9 @@ fn print_response(response: ControlResponse) -> Result<()> {
         Payload::ComputeDiscovered(_) => {
             anyhow::bail!("unexpected executor selection outside an explicit compute workflow")
         }
+        Payload::ContentCustodyDiscovered(_) => {
+            anyhow::bail!("unexpected custody selection outside an explicit retention workflow")
+        }
         Payload::Content(receipt) => println!(
             "{}",
             serde_json::json!({

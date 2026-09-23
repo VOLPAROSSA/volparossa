@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -173,6 +173,37 @@ where
     L: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + AsyncWrite + Unpin,
 {
+    bridge_with_admission(
+        local,
+        remote,
+        challenge,
+        signed,
+        operation,
+        limits,
+        |_| async { true },
+    )
+    .await
+}
+
+/// Bridge with caller-owned chunk admission; waiting never extends transfer or signature TTL.
+///
+/// # Errors
+/// Same checks as [`bridge`], additionally refusing a withheld chunk before source transfer.
+pub async fn bridge_with_admission<L, R, F, Fut>(
+    local: &mut L,
+    remote: &mut R,
+    challenge: &CustodyChallenge,
+    signed: &crate::SignedManifest,
+    operation: CustodyOperation,
+    limits: TransferLimits,
+    admit: F,
+) -> Result<CustodyReceipt, CustodyError>
+where
+    L: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = bool>,
+{
     validate_limits(limits)?;
     let started = Instant::now();
     timeout_at(started + limits.session_timeout, async {
@@ -190,11 +221,12 @@ where
         timeout_at(deadline, async {
             write_frame(remote, &bytes, AUTH_FRAME).await?;
             if operation == CustodyOperation::Deposit {
-                crate::transfer::bridge_peer(
+                crate::transfer::bridge_peer_with_admission(
                     remote,
                     local,
                     auth.manifest(),
                     remaining_limits(limits, deadline)?,
+                    admit,
                 )
                 .await?;
             }

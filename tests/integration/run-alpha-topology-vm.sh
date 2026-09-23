@@ -262,9 +262,10 @@ print_plan() {
             '  cooperative-origin HTTPS same-object complete/missing-ranges cases; no general NAT/browser HTTPS/full-C02 claim.'
     elif [ "$scenario" = content-custody ]; then
         printf '%s\n' \
-            'Content-custody scenario: ordinary public publication to real remote provider custody;' \
-            '  signed bounded receipts and retrieval after original source removal over protected relay paths;' \
-            '  complete boundary captures and cleanup; no guaranteed future availability or full-alpha claim.'
+            'Content-custody scenario: automatic discovery selects two holders from three independent providers;' \
+            '  stop one holder service, restore redundancy on the third, retain original signed observations;' \
+            '  TERM/reap the owner app, remove original source, then fresh protected name-based retrieval;' \
+            '  complete boundary captures/cleanup; Client node stays online, no future availability/full-alpha claim.'
     elif [ "$scenario" = content-repair ]; then
         printf '%s\n' \
             'Content-repair scenario: restart with a healthy partial public replica journal and no route;' \
@@ -604,6 +605,11 @@ SAFE_NAMES = {"runner.stdout", "runner.stderr", "guest-exit-status", "current-ph
               "reciprocity-smoke.json", "mixed-link-smoke.json", "mpquic-growth-smoke.json", "mptcp-growth-smoke.json", "sharing-smoke.json", "download-sharing-smoke.json",
               "uplink-link-smoke.json", "crash-recovery.json", "content-network-smoke.json", "content-message-smoke.json", "content-https-smoke.json", "content-provider-smoke.json", "content-replication-smoke.json", "content-mailbox-smoke.json", "dns-cache-smoke.json",
               "content-custody-smoke.json", "content-custody-evidence.json",
+              "content-custody-initial.json", "content-custody-replacement.json", "content-custody-final-state.json",
+              "content-custody-process-start.json", "content-custody-process.json", "content-custody-stopped.json",
+              "content-custody-owner.err", "content-custody-withdrawal.json", "content-custody-withdrawn-service.json",
+              "content-custody-source-removed.json", "content-custody-fetch-start.json", "content-custody-fetch.json",
+              "content-custody-fetch.err", "content-custody-layout.json", "content-custody-publish.json",
               "content-repair-smoke.json", "content-repair-evidence.json",
               "agent-training-smoke.json", "agent-training-evidence.json",
               "agent-owner-priority-smoke.json", "agent-owner-priority-pressure.json",
@@ -745,6 +751,13 @@ def collect(home, opt, revision, scenario, guest_status,
             continue
         for name in sorted(SAFE_NAMES):
             candidates.append((root / name, f"{label}/{name}"))
+        if scenario == "content-custody":
+            custody_phases = [path for path in sorted(root.glob("content-custody-*.json"))
+                              if re.fullmatch(r"content-custody-(initial|replacement|fetch)-(privacy-(client|relay0|relay1|relay2|exit)|live-selection|gates)\.json", path.name)]
+            candidates.extend((path, f"{label}/{path.name}") for path in custody_phases[:21])
+            custody_control = [path for path in sorted(root.glob("content-provider-adaptive-*.json"))
+                               if re.fullmatch(r"content-provider-adaptive-(custody-(initial|replacement|fetch)-control|control-(filter|relay[345]-(out|back)))\.json", path.name)]
+            candidates.extend((path, f"{label}/{path.name}") for path in custody_control[:10])
         if scenario == "agent-jobs-peer-recovery":
             candidates.extend((path, f"{label}/{path.name}") for path in sorted(root.glob("agent-jobs-peer-recovery-*"))[:32]
                               if re.fullmatch(r"agent-jobs-peer-recovery-[a-z0-9-]+\.(json|jsonl|err|log)", path.name))
