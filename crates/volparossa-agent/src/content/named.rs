@@ -412,7 +412,7 @@ pub(super) async fn download(
         source_root,
         source_limits,
         receipt,
-    } = retrieve(request, context).await?;
+    } = super::cancellation::until_requester_closed(stream, retrieve(request, context)).await?;
     let verified = &selected.manifest;
     let remaining = verified
         .validity()

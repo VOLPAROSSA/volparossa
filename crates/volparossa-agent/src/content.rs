@@ -3,6 +3,7 @@
 //! Neither browsing capture nor a default listener is enabled. Provider offers are only
 //! discovery hints: every destination still passes the existing signed Exit policy.
 
+mod cancellation;
 mod compute;
 mod compute_discovery;
 mod compute_remote;

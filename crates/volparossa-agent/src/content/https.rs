@@ -294,7 +294,8 @@ pub(super) async fn download(
         return Err(ContentError::Invalid);
     }
     let resource_url = request.resource_url.clone();
-    let mut download = retrieve(request, context).await?;
+    let mut download =
+        super::cancellation::until_requester_closed(stream, retrieve(request, context)).await?;
     download.receipt.bytes = download
         .authorized
         .verify_cached(&mut download.store, now())

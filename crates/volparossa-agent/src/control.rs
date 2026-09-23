@@ -751,6 +751,22 @@ pub(crate) async fn disconnect_client_routes(
         routes.disconnect_confirmed(),
         dns_routes.disconnect_confirmed()
     );
+    client_cleanup_result(main, dns)
+}
+
+/// Only daemon shutdown permanently closes admission and drains requester-independent setup.
+pub(crate) async fn shutdown_client_routes(
+    routes: &ClientRouteControl,
+    dns_routes: &ClientRouteControl,
+) -> Result<(), ClientRouteDisconnectError> {
+    let (main, dns) = tokio::join!(routes.shutdown_confirmed(), dns_routes.shutdown_confirmed());
+    client_cleanup_result(main, dns)
+}
+
+fn client_cleanup_result(
+    main: Result<(), ClientRouteDisconnectError>,
+    dns: Result<(), ClientRouteDisconnectError>,
+) -> Result<(), ClientRouteDisconnectError> {
     match (main, dns) {
         (Err(ClientRouteDisconnectError::CleanupPending), _)
         | (_, Err(ClientRouteDisconnectError::CleanupPending)) => {

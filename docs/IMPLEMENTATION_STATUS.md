@@ -108,8 +108,18 @@ also retain a relay4 `SHUTDOWN_CLEANUP_FAILED` event, although final owned-objec
 unchanged host bytes pass. This is not a full recovery/B07 or model-quality pass.
 The fixture now selects a real route before each short recovery/restart observation and
 confirms disconnection after reaping its coordinator. This removes the observed overlapping
-bootstrap, not the separate product limitation: closing a CLI socket does not cancel an
-agent-side fetch, and aborting a bootstrap during agent shutdown still needs owned cleanup.
+bootstrap, not the product limitation observed at that revision.
+
+A product follow-up now cancels named/HTTPS download preparation when its local requester
+closes the socket or sends premature transfer data. Request-owned streams and foreground/cache
+guards are released; verified cache chunks remain available for resume. Shared route bootstrap
+now belongs to a retained controller task, not to the cancelled RPC. Daemon shutdown drains
+both main/DNS bootstrap owners before exact retirement while discovery remains available.
+Expired-route retirement also retains its cleanup owner across requester cancellation, and a
+later request can observe its completion. Fifteen focused socket/bootstrap/retirement tests
+and strict agent library/test Clippy pass. This is not yet live evidence for the blocked-helper
+shutdown case; that disposable `content-provider` trial is being added. The legacy direct-to-
+agent-file fetch operations, mailbox and compute request cancellation are outside this change.
 
 A new explicit `compute aggregate-adapters` candidate now connects three independently
 authorized public publisher channels to a real worker implementation and the existing held-out
